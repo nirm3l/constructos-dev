@@ -1,0 +1,450 @@
+:root {
+  --bg: #f2f6ff;
+  --surface: #ffffff;
+  --surface-alt: #edf3ff;
+  --line: #d2dced;
+  --text: #12213a;
+  --muted: #5e708f;
+  --brand: #1f6feb;
+  --brand-strong: #1552af;
+  --ok: #188a48;
+  --shadow: 0 10px 30px rgba(17, 37, 68, 0.12);
+}
+
+[data-theme="dark"] {
+  --bg: #0b1220;
+  --surface: #111b31;
+  --surface-alt: #162540;
+  --line: #2a3e67;
+  --text: #ebf2ff;
+  --muted: #9cb0d6;
+  --brand: #5b94ff;
+  --brand-strong: #3b79ed;
+  --ok: #42c777;
+  --shadow: 0 12px 34px rgba(2, 8, 20, 0.62);
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: "Avenir Next", "Trebuchet MS", "Gill Sans", sans-serif;
+  background:
+    radial-gradient(circle at 5% 5%, rgba(31,111,235,0.16), transparent 25%),
+    radial-gradient(circle at 90% 10%, rgba(21,82,175,0.12), transparent 30%),
+    var(--bg);
+  color: var(--text);
+}
+
+[data-theme="dark"] body {
+  background:
+    radial-gradient(circle at 6% 4%, rgba(79, 140, 255, 0.26), transparent 28%),
+    radial-gradient(circle at 88% 8%, rgba(47, 111, 232, 0.2), transparent 32%),
+    linear-gradient(180deg, #0b1220 0%, #0a1020 100%);
+}
+
+.page {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 18px 18px 98px;
+}
+
+.header {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 28px;
+  letter-spacing: 0.02em;
+  margin: 0;
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: 1.2fr 0.8fr;
+  gap: 12px;
+}
+
+.card {
+  background: linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--surface-alt), white 45%));
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 12px;
+  box-shadow: var(--shadow);
+}
+
+[data-theme="dark"] .card {
+  background: linear-gradient(180deg, var(--surface), var(--surface-alt));
+}
+
+[data-theme="dark"] input,
+[data-theme="dark"] select,
+[data-theme="dark"] textarea {
+  background: #0f1930;
+  border-color: #2d4472;
+  color: var(--text);
+}
+
+[data-theme="dark"] input::placeholder,
+[data-theme="dark"] textarea::placeholder {
+  color: #8ea4cf;
+}
+
+[data-theme="dark"] button {
+  background: #1a2a49;
+  border-color: #325084;
+  color: var(--text);
+}
+
+[data-theme="dark"] button.primary {
+  background: linear-gradient(160deg, var(--brand), var(--brand-strong));
+  color: #f7faff;
+  border-color: transparent;
+}
+
+.card h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.row.wrap {
+  flex-wrap: wrap;
+}
+
+input, select, button {
+  font: inherit;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  padding: 9px 11px;
+  min-height: 40px;
+}
+
+input, select {
+  background: var(--surface);
+  color: var(--text);
+  min-width: 0;
+}
+
+button {
+  cursor: pointer;
+  background: var(--surface-alt);
+  color: var(--text);
+}
+
+button.primary {
+  background: linear-gradient(160deg, var(--brand), var(--brand-strong));
+  color: white;
+  border-color: transparent;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.task-list {
+  display: grid;
+  gap: 8px;
+}
+
+.kanban {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(220px, 1fr));
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.kanban-col {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 30%);
+  min-height: 220px;
+  display: grid;
+  grid-template-rows: auto 1fr;
+}
+
+.kanban-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.kanban-list {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  align-content: start;
+}
+
+.kanban-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 9px;
+  display: grid;
+  gap: 7px;
+  cursor: pointer;
+}
+
+.kanban-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.status-chip {
+  min-height: 28px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: var(--surface-alt);
+}
+
+.task-item {
+  border: 1px solid color-mix(in srgb, var(--line), transparent 5%);
+  border-radius: 14px;
+  padding: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 25%);
+}
+
+.task-main {
+  display: grid;
+  gap: 4px;
+}
+
+.meta {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+.badge.done {
+  border-color: color-mix(in srgb, var(--ok), white 55%);
+  color: var(--ok);
+}
+
+.notice {
+  border: 1px solid #f0d2d2;
+  background: #fff5f5;
+  color: #8d1f1f;
+  border-radius: 12px;
+  padding: 10px;
+}
+
+.skeleton {
+  min-height: 72px;
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+}
+
+.note-list {
+  display: grid;
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.note {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.icon {
+  width: 18px;
+  height: 18px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.drawer {
+  position: fixed;
+  inset: 0;
+  display: none;
+  background: rgba(4, 16, 36, 0.45);
+  z-index: 30;
+  align-items: flex-end;
+}
+
+.drawer.open {
+  display: flex;
+}
+
+.drawer-body {
+  width: 100%;
+  max-height: 86vh;
+  overflow: auto;
+  background: var(--surface);
+  border-top-left-radius: 20px;
+  border-top-right-radius: 20px;
+  border: 1px solid var(--line);
+  padding: 14px;
+}
+
+.bottom-tabs {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+  padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: 0 -8px 20px rgba(8, 18, 35, 0.2);
+  z-index: 25;
+}
+
+[data-theme="dark"] .bottom-tabs {
+  background: #0f1a2f;
+  box-shadow: 0 -10px 24px rgba(2, 8, 20, 0.6);
+}
+
+[data-theme="dark"] .task-item,
+[data-theme="dark"] .kanban-col,
+[data-theme="dark"] .kanban-card,
+[data-theme="dark"] .note,
+[data-theme="dark"] .drawer-body {
+  border-color: #2c426d;
+}
+
+[data-theme="dark"] .task-item,
+[data-theme="dark"] .kanban-col,
+[data-theme="dark"] .note {
+  background: #13213b;
+}
+
+[data-theme="dark"] .kanban-card {
+  background: #0f1c34;
+}
+
+[data-theme="dark"] .status-chip {
+  background: #1b2f54;
+  border-color: #35558d;
+}
+
+[data-theme="dark"] .action-icon {
+  background: #1a2d4f;
+}
+
+.bottom-tabs button {
+  min-height: 52px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 4px;
+}
+
+.bottom-tabs .icon {
+  width: 20px;
+  height: 20px;
+  stroke-width: 2.2;
+}
+
+.tab-label {
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.01em;
+}
+
+.action-icon {
+  width: 38px;
+  min-width: 38px;
+  height: 38px;
+  padding: 0;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+textarea {
+  font: inherit;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  padding: 8px 10px;
+}
+
+.due-input {
+  width: 176px;
+  max-width: 100%;
+}
+
+.archived-toggle {
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.archived-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin: 0;
+  padding: 0;
+}
+
+@media (max-width: 900px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+
+  .kanban {
+    grid-template-columns: repeat(3, minmax(200px, 78vw));
+  }
+
+  .due-input {
+    width: 150px;
+  }
+}

@@ -1,0 +1,14 @@
+.idea/
+.venv/
+.uv-cache/
+data/
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+app/__pycache__/
+app/**/__pycache__/
+app/.pytest_cache/

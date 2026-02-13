@@ -1,0 +1,33 @@
+services:
+  kurrentdb:
+    image: eventstore/eventstore:24.10.0-jammy
+    container_name: kurrentdb
+    environment:
+      EVENTSTORE_CLUSTER_SIZE: 1
+      EVENTSTORE_RUN_PROJECTIONS: All
+      EVENTSTORE_START_STANDARD_PROJECTIONS: "true"
+      EVENTSTORE_INSECURE: "true"
+      EVENTSTORE_ENABLE_ATOM_PUB_OVER_HTTP: "true"
+      EVENTSTORE_EXT_IP: 0.0.0.0
+      EVENTSTORE_INT_IP: 0.0.0.0
+    ports:
+      - "2113:2113"
+    volumes:
+      - kurrent-data:/var/lib/eventstore
+    restart: unless-stopped
+
+  task-app:
+    build: ./app
+    container_name: task-app
+    depends_on:
+      - kurrentdb
+    environment:
+      EVENTSTORE_URI: esdb://kurrentdb:2113?tls=false
+    ports:
+      - "8080:8000"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+
+volumes:
+  kurrent-data:

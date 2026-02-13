@@ -1,0 +1,18 @@
+from __future__ import annotations
+
+import logging
+import os
+
+DB_PATH = os.getenv("DB_PATH", "/data/app.db")
+DATABASE_URL = f"sqlite:///{DB_PATH}"
+SNAPSHOT_EVERY = int(os.getenv("SNAPSHOT_EVERY", "20"))
+EVENTSTORE_URI = os.getenv("EVENTSTORE_URI", "").strip()
+DEFAULT_STATUSES = ["To do", "In progress", "Done"]
+DEFAULT_USER_ID = "00000000-0000-0000-0000-000000000001"
+BOOTSTRAP_USERNAME = "m4tr1x"
+BOOTSTRAP_FULL_NAME = "m4tr1x"
+BOOTSTRAP_WORKSPACE_ID = "10000000-0000-0000-0000-000000000001"
+BOOTSTRAP_PROJECT_ID = "20000000-0000-0000-0000-000000000001"
+BOOTSTRAP_TASK_ID = "30000000-0000-0000-0000-000000000001"
+
+logger = logging.getLogger(__name__)

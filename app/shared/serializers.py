@@ -1,0 +1,200 @@
+from __future__ import annotations
+
+import csv
+import io
+import json
+from dataclasses import asdict
+from datetime import datetime, timezone
+from typing import Any
+from zoneinfo import ZoneInfo
+
+from fastapi.responses import JSONResponse, StreamingResponse
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from .contracts import NotificationDTO, TaskCommandState, TaskDTO
+from .models import Notification, Project, SavedView, Task
+from .settings import DEFAULT_STATUSES
+
+
+def to_iso_utc(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def get_user_zoneinfo(user) -> ZoneInfo:
+    try:
+        return ZoneInfo(user.timezone or "UTC")
+    except Exception:
+        return ZoneInfo("UTC")
+
+
+def normalize_datetime_to_utc(value: datetime | None, user_tz: ZoneInfo) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=user_tz)
+    return value.astimezone(timezone.utc)
+
+
+def serialize_task(task: Task) -> dict[str, Any]:
+    dto = TaskDTO(
+        id=task.id,
+        workspace_id=task.workspace_id,
+        project_id=task.project_id,
+        title=task.title,
+        description=task.description,
+        status=task.status,
+        priority=task.priority,
+        due_date=to_iso_utc(task.due_date),
+        assignee_id=task.assignee_id,
+        labels=json.loads(task.labels or "[]"),
+        subtasks=json.loads(task.subtasks or "[]"),
+        attachments=json.loads(task.attachments or "[]"),
+        recurring_rule=task.recurring_rule,
+        archived=task.archived,
+        completed_at=to_iso_utc(task.completed_at),
+        created_at=to_iso_utc(task.created_at),
+        updated_at=to_iso_utc(task.updated_at),
+        order_index=task.order_index,
+    )
+    return asdict(dto)
+
+
+def serialize_notification(notification: Notification) -> dict[str, Any]:
+    dto = NotificationDTO(
+        id=notification.id,
+        message=notification.message,
+        is_read=notification.is_read,
+        created_at=to_iso_utc(notification.created_at),
+    )
+    return asdict(dto)
+
+
+def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
+    from .eventing import get_kurrent_client, rebuild_state
+
+    if get_kurrent_client() is not None:
+        state, _ = rebuild_state(db, "Task", task_id)
+        if not state or state.get("is_deleted"):
+            return None
+        return {
+            "id": task_id,
+            "workspace_id": state.get("workspace_id"),
+            "project_id": state.get("project_id"),
+            "title": state.get("title"),
+            "description": state.get("description", ""),
+            "status": state.get("status", "To do"),
+            "priority": state.get("priority", "Med"),
+            "due_date": state.get("due_date"),
+            "assignee_id": state.get("assignee_id"),
+            "labels": state.get("labels", []),
+            "subtasks": state.get("subtasks", []),
+            "attachments": state.get("attachments", []),
+            "recurring_rule": state.get("recurring_rule"),
+            "archived": bool(state.get("archived", False)),
+            "completed_at": state.get("completed_at"),
+            "created_at": None,
+            "updated_at": None,
+            "order_index": int(state.get("order_index", 0)),
+        }
+
+    task = db.get(Task, task_id)
+    if task and not task.is_deleted:
+        return serialize_task(task)
+    return None
+
+
+def load_task_command_state(db: Session, task_id: str) -> TaskCommandState | None:
+    from .eventing import get_kurrent_client, rebuild_state
+
+    if get_kurrent_client() is None:
+        task = db.get(Task, task_id)
+        if not task:
+            return None
+        return TaskCommandState(
+            id=task.id,
+            workspace_id=task.workspace_id,
+            project_id=task.project_id,
+            status=task.status,
+            archived=task.archived,
+            is_deleted=task.is_deleted,
+        )
+
+    state, _ = rebuild_state(db, "Task", task_id)
+    if not state:
+        return None
+    return TaskCommandState(
+        id=task_id,
+        workspace_id=state.get("workspace_id", ""),
+        project_id=state.get("project_id"),
+        status=state.get("status", "To do"),
+        archived=bool(state.get("archived", False)),
+        is_deleted=bool(state.get("is_deleted", False)),
+    )
+
+
+def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
+    project = db.get(Project, project_id)
+    if project and not project.is_deleted:
+        return {
+            "id": project.id,
+            "workspace_id": project.workspace_id,
+            "name": project.name,
+            "description": project.description,
+            "status": project.status,
+            "custom_statuses": json.loads(project.custom_statuses or "[]"),
+        }
+
+    from .eventing import get_kurrent_client, rebuild_state
+
+    if get_kurrent_client() is None:
+        return None
+    state, _ = rebuild_state(db, "Project", project_id)
+    if not state or state.get("is_deleted"):
+        return None
+    return {
+        "id": project_id,
+        "workspace_id": state.get("workspace_id"),
+        "name": state.get("name"),
+        "description": state.get("description", ""),
+        "status": state.get("status", "Active"),
+        "custom_statuses": state.get("custom_statuses", DEFAULT_STATUSES),
+    }
+
+
+def load_saved_view(db: Session, saved_view_id: str) -> dict[str, Any] | None:
+    saved_view = db.get(SavedView, saved_view_id)
+    if saved_view:
+        return {
+            "id": saved_view.id,
+            "name": saved_view.name,
+            "shared": saved_view.shared,
+            "filters": json.loads(saved_view.filters or "{}"),
+        }
+    return None
+
+
+def export_tasks_response(db: Session, workspace_id: str, format: str):
+    tasks = db.execute(select(Task).where(Task.workspace_id == workspace_id, Task.is_deleted == False)).scalars().all()
+    if format == "csv":
+        buff = io.StringIO()
+        writer = csv.DictWriter(buff, fieldnames=["id", "title", "status", "priority", "due_date", "assignee_id", "project_id"])
+        writer.writeheader()
+        for t in tasks:
+            writer.writerow(
+                {
+                    "id": t.id,
+                    "title": t.title,
+                    "status": t.status,
+                    "priority": t.priority,
+                    "due_date": to_iso_utc(t.due_date) or "",
+                    "assignee_id": t.assignee_id,
+                    "project_id": t.project_id,
+                }
+            )
+        return StreamingResponse(iter([buff.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=tasks.csv"})
+    return JSONResponse({"items": [serialize_task(t) for t in tasks]})
