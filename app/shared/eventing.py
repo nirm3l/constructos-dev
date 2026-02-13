@@ -78,7 +78,8 @@ def append_event(
             )
         )
         project_event(db, env)
-        maybe_snapshot(db, aggregate_type, aggregate_id, version)
+
+    maybe_snapshot(db, aggregate_type, aggregate_id, version)
 
     return env
 

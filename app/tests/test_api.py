@@ -192,3 +192,56 @@ def test_metrics_endpoint_available(tmp_path):
     payload = res.json()
     assert 'commands_total' in payload
     assert 'command_conflicts' in payload
+
+
+def test_local_snapshot_payload_has_schema_version(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    task = client.post('/api/tasks', json={'title': 'Snapshot schema test', 'workspace_id': ws_id}).json()
+
+    for i in range(1, 22):
+        res = client.patch(f"/api/tasks/{task['id']}", json={'description': f'v{i}'})
+        assert res.status_code == 200
+
+    from shared.models import AggregateSnapshot, SessionLocal
+    import json as _json
+    with SessionLocal() as db:
+        snap = (
+            db.query(AggregateSnapshot)
+            .filter(
+                AggregateSnapshot.aggregate_type == 'Task',
+                AggregateSnapshot.aggregate_id == task['id'],
+            )
+            .order_by(AggregateSnapshot.version.desc())
+            .first()
+        )
+        assert snap is not None
+        payload = _json.loads(snap.state or '{}')
+        assert payload.get('snapshot_schema_version') == 2
+        assert payload.get('version') == snap.version
+        assert isinstance(payload.get('state'), dict)
+
+
+def test_legacy_snapshot_is_upcasted(tmp_path):
+    _ = build_client(tmp_path)
+
+    from shared.eventing_rebuild import load_snapshot
+    from shared.models import AggregateSnapshot, SessionLocal
+    import json as _json
+
+    with SessionLocal() as db:
+        db.add(
+            AggregateSnapshot(
+                aggregate_type='Task',
+                aggregate_id='legacy-task',
+                version=7,
+                state=_json.dumps({'id': 'legacy-task', 'projectId': 'p-1', 'title': 'Legacy'}),
+            )
+        )
+        db.commit()
+
+        state, version = load_snapshot(db, 'Task', 'legacy-task')
+        assert version == 7
+        assert state['id'] == 'legacy-task'
+        assert state['project_id'] == 'p-1'

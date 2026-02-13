@@ -74,6 +74,21 @@ def serialize_envelope(env: EventEnvelope) -> NewEvent:
     )
 
 
+def serialize_snapshot_event(aggregate_type: str, aggregate_id: str, state: dict[str, Any], version: int) -> NewEvent:
+    return NewEvent(
+        id=uuid.uuid4(),
+        type="Snapshot",
+        data=json.dumps({"snapshot_schema_version": 2, "state": state, "version": version}).encode("utf-8"),
+        metadata=json.dumps(
+            {
+                "aggregate_type": aggregate_type,
+                "aggregate_id": aggregate_id,
+                "schema_version": 2,
+            }
+        ).encode("utf-8"),
+    )
+
+
 def kurrent_read_stream(stream: str, *, backwards: bool = False, limit: int | None = None, from_position: int | None = None) -> tuple[Any, ...]:
     client = get_kurrent_client()
     if client is None:

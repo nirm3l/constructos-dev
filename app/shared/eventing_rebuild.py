@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -47,8 +48,10 @@ from .models import (
     User,
 )
 from .settings import DEFAULT_STATUSES, SNAPSHOT_EVERY
-from .event_upcasters import upcast_event
-from .eventing_store import get_kurrent_client, kurrent_read_stream, snapshot_stream_id, stream_id, NotFoundError
+from .event_upcasters import upcast_event, upcast_snapshot
+from .eventing_store import StreamState, get_kurrent_client, kurrent_read_stream, snapshot_stream_id, stream_id, NotFoundError, serialize_snapshot_event
+
+logger = logging.getLogger(__name__)
 
 
 def load_snapshot(db: Session, aggregate_type: str, aggregate_id: str) -> tuple[dict[str, Any], int]:
@@ -62,7 +65,7 @@ def load_snapshot(db: Session, aggregate_type: str, aggregate_id: str) -> tuple[
             raise HTTPException(status_code=503, detail=f"Kurrent snapshot read failed: {exc}") from exc
         if snaps:
             payload = json.loads((snaps[0].data or b"{}").decode("utf-8"))
-            return payload.get("state", {}), int(payload.get("version", 0))
+            return upcast_snapshot(payload, fallback_version=int(payload.get("version", 0)))
         return {}, 0
     snap = (
         db.execute(
@@ -78,7 +81,8 @@ def load_snapshot(db: Session, aggregate_type: str, aggregate_id: str) -> tuple[
     )
     if not snap:
         return {}, 0
-    return json.loads(snap.state or "{}"), snap.version
+    raw_payload = json.loads(snap.state or "{}")
+    return upcast_snapshot(raw_payload, fallback_version=snap.version)
 
 
 def load_events_after(db: Session, aggregate_type: str, aggregate_id: str, version: int) -> list[EventEnvelope]:
@@ -219,15 +223,30 @@ def rebuild_state(db: Session, aggregate_type: str, aggregate_id: str) -> tuple[
 def maybe_snapshot(db: Session, aggregate_type: str, aggregate_id: str, version: int):
     if version % SNAPSHOT_EVERY != 0:
         return
-    if get_kurrent_client() is not None:
-        return
     state, cur_version = rebuild_state(db, aggregate_type, aggregate_id)
+    client = get_kurrent_client()
+    if client is not None:
+        try:
+            snap_stream = snapshot_stream_id(aggregate_type, aggregate_id)
+            try:
+                latest = kurrent_read_stream(snap_stream, backwards=True, limit=1)
+                expected = StreamState.NO_STREAM if not latest else int(latest[0].stream_position)
+            except NotFoundError:
+                expected = StreamState.NO_STREAM
+            client.append_to_stream(
+                stream_name=snap_stream,
+                current_version=expected,
+                events=[serialize_snapshot_event(aggregate_type, aggregate_id, state, cur_version)],
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning("snapshot.append_failed aggregate=%s id=%s version=%s err=%s", aggregate_type, aggregate_id, cur_version, exc)
+        return
     db.add(
         AggregateSnapshot(
             aggregate_type=aggregate_type,
             aggregate_id=aggregate_id,
             version=cur_version,
-            state=json.dumps(state),
+            state=json.dumps({"snapshot_schema_version": 2, "state": state, "version": cur_version}),
         )
     )
 
