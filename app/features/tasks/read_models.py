@@ -3,10 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from fastapi import HTTPException
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from shared.core import Task, get_user_zoneinfo, normalize_datetime_to_utc, serialize_task
+from shared.core import Task, ensure_role, get_user_zoneinfo, load_task_command_state, normalize_datetime_to_utc, rebuild_state, serialize_task
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,3 +66,27 @@ def list_tasks_read_model(db: Session, user, query: TaskListQuery) -> dict:
     total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one()
     tasks = db.execute(stmt.order_by(Task.order_index.asc(), Task.created_at.desc()).limit(query.limit).offset(query.offset)).scalars().all()
     return {"items": [serialize_task(t) for t in tasks], "total": total, "limit": query.limit, "offset": query.offset}
+
+
+def get_task_automation_status_read_model(db: Session, user, task_id: str) -> dict:
+    command_state = load_task_command_state(db, task_id)
+    if not command_state or command_state.is_deleted:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    ensure_role(db, command_state.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+
+    state, _ = rebuild_state(db, "Task", task_id)
+    return {
+        "task_id": task_id,
+        "automation_state": state.get("automation_state", "idle"),
+        "last_agent_run_at": state.get("last_agent_run_at"),
+        "last_agent_error": state.get("last_agent_error"),
+        "last_agent_comment": state.get("last_agent_comment"),
+        "last_requested_instruction": state.get("last_requested_instruction"),
+        "task_type": state.get("task_type", "manual"),
+        "schedule_state": state.get("schedule_state", "idle"),
+        "scheduled_at_utc": state.get("scheduled_at_utc"),
+        "scheduled_instruction": state.get("scheduled_instruction"),
+        "last_schedule_run_at": state.get("last_schedule_run_at"),
+        "last_schedule_error": state.get("last_schedule_error"),
+    }

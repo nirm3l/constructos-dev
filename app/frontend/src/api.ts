@@ -1,4 +1,15 @@
-import type { BootstrapPayload, Notification, Project, ProjectBoard, Task, TaskActivity, TaskComment, TasksPage } from './types'
+import type {
+  BootstrapPayload,
+  AgentChatResponse,
+  Notification,
+  Project,
+  ProjectBoard,
+  Task,
+  TaskActivity,
+  TaskAutomationStatus,
+  TaskComment,
+  TasksPage
+} from './types'
 
 function queryString(params: Record<string, string | number | boolean | undefined | null>): string {
   const q = new URLSearchParams()
@@ -77,13 +88,51 @@ export const restoreTask = (userId: string, taskId: string) =>
 export const patchTask = (
   userId: string,
   taskId: string,
-  payload: Partial<Pick<Task, 'description' | 'status' | 'due_date' | 'project_id' | 'title' | 'priority'>>
+  payload: Partial<
+    Pick<
+      Task,
+      | 'description'
+      | 'status'
+      | 'due_date'
+      | 'project_id'
+      | 'title'
+      | 'priority'
+      | 'task_type'
+      | 'scheduled_instruction'
+      | 'scheduled_at_utc'
+      | 'schedule_timezone'
+    >
+  >
 ) => api<Task>(`/api/tasks/${taskId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })
 
 export const listComments = (userId: string, taskId: string) => api<TaskComment[]>(`/api/tasks/${taskId}/comments`, userId)
 export const addComment = (userId: string, taskId: string, body: string) =>
   api<TaskComment>(`/api/tasks/${taskId}/comments`, userId, { method: 'POST', body: JSON.stringify({ body }) })
 export const listActivity = (userId: string, taskId: string) => api<TaskActivity[]>(`/api/tasks/${taskId}/activity`, userId)
+export const runTaskWithCodex = (userId: string, taskId: string, instruction: string) =>
+  api<{ ok: boolean; task_id: string; automation_state: string; requested_at: string }>(
+    `/api/tasks/${taskId}/automation/run`,
+    userId,
+    { method: 'POST', body: JSON.stringify({ instruction }) }
+  )
+export const getTaskAutomationStatus = (userId: string, taskId: string) =>
+  api<TaskAutomationStatus>(`/api/tasks/${taskId}/automation`, userId)
+
+export const runAgentChat = (
+  userId: string,
+  payload: {
+    workspace_id: string
+    instruction: string
+    project_id?: string | null
+    session_id?: string | null
+    history?: Array<{ role: 'user' | 'assistant'; content: string }>
+    allow_mutations?: boolean
+  }
+) =>
+  api<AgentChatResponse>('/api/agents/chat', userId, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  })
 
 export const getNotifications = (userId: string) => api<Notification[]>('/api/notifications', userId)
 

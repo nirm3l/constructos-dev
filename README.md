@@ -76,6 +76,63 @@ SSE sends:
 - `event: notification` with serialized notification data
 - periodic `event: ping`
 
+## Codex MCP (FastMCP)
+- MCP server entrypoint: `app/features/agents/mcp_server.py`
+- Exposed tools:
+  - `list_tasks`
+  - `get_task`
+  - `create_task`
+  - `send_email`
+  - `update_task`
+  - `complete_task`
+  - `add_task_comment`
+  - `run_task_with_codex`
+  - `get_task_automation_status`
+- Run server (example):
+```bash
+cd app
+python -m features.agents.mcp_server
+```
+- Docker endpoint (current compose): `http://localhost:8091/mcp`
+- Example JSON-RPC call:
+```bash
+curl -sS http://localhost:8091/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"auth_token":"dev-mcp-token"}}'
+```
+- Example tool execution:
+```bash
+curl -sS http://localhost:8091/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_tasks","arguments":{"workspace_id":"10000000-0000-0000-0000-000000000001","auth_token":"dev-mcp-token","limit":5}}}'
+```
+- MCP security environment variables:
+  - `MCP_AUTH_TOKEN`: if set, every MCP tool call must include matching `auth_token`
+  - `MCP_ACTOR_USER_ID`: fixed app user used for MCP actions (default is bootstrap user)
+  - `MCP_DEFAULT_WORKSPACE_ID`: fallback workspace for MCP `create_task` when `workspace_id` is omitted
+  - `MCP_ALLOWED_WORKSPACE_IDS`: comma-separated workspace allowlist
+  - `MCP_ALLOWED_PROJECT_IDS`: comma-separated project allowlist
+  - `create_task` workspace resolution order: `project_id` -> explicit `workspace_id` -> `MCP_DEFAULT_WORKSPACE_ID` -> single value from `MCP_ALLOWED_WORKSPACE_IDS`
+- MCP email tool environment variables (optional; used by `send_email`):
+  - `MCP_EMAIL_SMTP_HOST`, `MCP_EMAIL_SMTP_PORT`
+  - `MCP_EMAIL_SMTP_USERNAME`, `MCP_EMAIL_SMTP_PASSWORD`
+  - `MCP_EMAIL_SMTP_STARTTLS` (default `true`), `MCP_EMAIL_SMTP_SSL` (default `false`)
+  - `MCP_EMAIL_FROM`
+  - allowlist (recommended): `MCP_EMAIL_ALLOWED_RECIPIENTS` (comma-separated) and/or `MCP_EMAIL_ALLOWED_DOMAINS` (comma-separated)
+- Optional local automation runner:
+  - worker module: `app/features/agents/runner.py`
+  - enable via env: `AGENT_RUNNER_ENABLED=true`
+  - polling interval: `AGENT_RUNNER_INTERVAL_SECONDS` (default `5`)
+  - executor mode: `AGENT_EXECUTOR_MODE=placeholder|command` (default `placeholder`)
+  - command mode input: `AGENT_CODEX_COMMAND` (command reads JSON context from stdin and outputs JSON result to stdout)
+  - executor timeout: `AGENT_EXECUTOR_TIMEOUT_SECONDS` (default `45`)
+  - expected command output JSON:
+    - `{"action":"complete","summary":"...","comment":"optional"}`
+    - or `{"action":"comment","summary":"...","comment":"..."}`
+  - local adapter example: `python -m features.agents.command_adapter`
+
 ## Metrics and Debug
 - `GET /api/metrics`
   - `commands_total`

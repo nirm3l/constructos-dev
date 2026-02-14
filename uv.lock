@@ -34,15 +34,6 @@ wheels = [
 ]
 
 [[package]]
-name = "braq"
-version = "0.0.12"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/54/3b/1b918c408e11ca33f9b9dcecc8e08eac7762887dd42b584f0efb6fe26c55/braq-0.0.12.tar.gz", hash = "sha256:51dae51b863cbba2cd37da163df06b7dc5124904d2c26b92bda54c1bde66d74b", size = 15272, upload-time = "2024-12-10T20:48:53.856Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f3/53/ed5082619966b1d15b5c039ac722ba99956d92d4b08a9bd5eb4c3535cc1f/braq-0.0.12-py3-none-any.whl", hash = "sha256:41b7bdd0d004faef693751615fbb11c53ac0b886c772b83aea61ea6dc2f6e518", size = 26392, upload-time = "2024-12-10T20:48:50.813Z" },
-]
-
-[[package]]
 name = "certifi"
 version = "2026.1.4"
 source = { registry = "https://pypi.org/simple" }
@@ -70,6 +61,31 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d8/53/6f443c9a4a8358a93a6792e2acffb9d9d5cb0a5cfd8802644b7b1c9a02e4/colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44", size = 27697, upload-time = "2022-10-25T02:36:22.414Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335, upload-time = "2022-10-25T02:36:20.889Z" },
+]
+
+[[package]]
+name = "eventsourcing"
+version = "9.5.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/70/5c/6479de5a743a30aabaefdab0a83a4011859caa63373bb1a1e2caf0ec268f/eventsourcing-9.5.3.tar.gz", hash = "sha256:cd75b22959ab766fffafd5c409771bd8d93c516fdcc414a5b797c81b17dc83d1", size = 109337, upload-time = "2026-02-06T21:11:27.284Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6d/18/82967355bf5d7f16b6f4c1d5649834e62cec3b07ab377539f8af4a89830e/eventsourcing-9.5.3-py3-none-any.whl", hash = "sha256:1f2c85dc6e8d39bdabc7735bd6450a77042e3a4054f3af6c7360b8f06ddc457e", size = 121182, upload-time = "2026-02-06T21:11:26.099Z" },
+]
+
+[[package]]
+name = "eventsourcing-kurrentdb"
+version = "1.2.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "eventsourcing" },
+    { name = "kurrentdbclient" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c0/b8/6a2ea5e81485641a95b70104a1aaf5bae68c9a9935241f71d207ba3114a6/eventsourcing_kurrentdb-1.2.2.tar.gz", hash = "sha256:6914767eede0ecb13f4c6993dc4f09ecf537b742b1c7c978b72381d595d22b43", size = 15524, upload-time = "2025-05-14T22:55:50.046Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9d/76/4c2ffc36b45f616a69819edf4876ede6ec47dc3835b2c31d78e7991eece1/eventsourcing_kurrentdb-1.2.2-py3-none-any.whl", hash = "sha256:62a77219e25b64f782f9d55470700e7005028f97493d72641a98fbfacfc4113b", size = 11266, upload-time = "2025-05-14T22:55:48.992Z" },
 ]
 
 [[package]]
@@ -313,34 +329,12 @@ wheels = [
 ]
 
 [[package]]
-name = "kvf"
-version = "0.0.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "braq" },
-    { name = "paradict" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/9c/f8/e1826c156d4f97cf4662a6110cbbcfd91b5e5570c8a88bf0a8270718621e/kvf-0.0.3.tar.gz", hash = "sha256:f4885b1bbe66c8c20fdabe5cedeb3c0e5d12a54ac495f9e5fcf6fed0e0c51b73", size = 4938, upload-time = "2024-12-10T20:49:13.171Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a8/db/4a8d3b1fef45cabcadf36f9a2231b2cde3dddd3a58ab1723119c7fbce34f/kvf-0.0.3-py3-none-any.whl", hash = "sha256:9d666e51cae512e3f95c55b77524e34d0095b278c81f96f7bbc7d37b5bd545c6", size = 4716, upload-time = "2024-12-10T20:49:11.815Z" },
-]
-
-[[package]]
 name = "packaging"
 version = "26.0"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/65/ee/299d360cdc32edc7d2cf530f3accf79c4fca01e96ffc950d8a52213bd8e4/packaging-26.0.tar.gz", hash = "sha256:00243ae351a257117b6a241061796684b084ed1c516a08c48a3f7e147a9d80b4", size = 143416, upload-time = "2026-01-21T20:50:39.064Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/b9/c538f279a4e237a006a2c98387d081e9eb060d203d8ed34467cc0f0b9b53/packaging-26.0-py3-none-any.whl", hash = "sha256:b36f1fef9334a5588b4166f8bcd26a14e521f2b55e6b9de3aaa80d3ff7a37529", size = 74366, upload-time = "2026-01-21T20:50:37.788Z" },
-]
-
-[[package]]
-name = "paradict"
-version = "0.0.16"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/40/83/8cf8d94be55ab9ea783e1f8ece06059cd986bb482ad69f7be549839b9e07/paradict-0.0.16.tar.gz", hash = "sha256:d909d122bf47028a45334eb2280d1e1bcb401fda89986af42c39fd2fadf9de4d", size = 61471, upload-time = "2024-12-10T21:23:49.007Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/1d/f9/a9807d307ba1837bb8799e1337f41edcdbb92ef6090668dc50f483a168bf/paradict-0.0.16-py3-none-any.whl", hash = "sha256:28df79f0dc0e68c8f8a3e9b7c75e67a85305ef7298653fc7a369a1bf4f58cb20", size = 61735, upload-time = "2024-12-10T21:23:45.408Z" },
 ]
 
 [[package]]
@@ -497,19 +491,6 @@ wheels = [
 ]
 
 [[package]]
-name = "shared"
-version = "0.0.32"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "kvf" },
-    { name = "paradict" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/3f/39/f39c2560ac971efbf437f7ffa1d82a12fa77f50b0127e6e5ec5cc8d377df/shared-0.0.32.tar.gz", hash = "sha256:7308adc95c0dab14d0c99635cd8049d1f004cc7fef7396d3fe47323c34ec58c6", size = 7793, upload-time = "2024-12-10T20:49:22.469Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f9/03/da58e40386d8ebcdfa3617070a95ca1deb5a5e6aa3d4e15ea2045173d5ac/shared-0.0.32-py3-none-any.whl", hash = "sha256:f17962c0f0fe6a23015accc7cac029e1c24c4b14578094e1f7033a7a7ef16140", size = 29304, upload-time = "2024-12-10T20:49:19.763Z" },
-]
-
-[[package]]
 name = "sqlalchemy"
 version = "2.0.46"
 source = { registry = "https://pypi.org/simple" }
@@ -568,26 +549,28 @@ name = "task-management"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "eventsourcing" },
+    { name = "eventsourcing-kurrentdb" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "kurrentdbclient" },
     { name = "pydantic" },
     { name = "pytest" },
     { name = "python-multipart" },
-    { name = "shared" },
     { name = "sqlalchemy" },
     { name = "uvicorn" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "eventsourcing", specifier = "==9.5.3" },
+    { name = "eventsourcing-kurrentdb", specifier = "==1.2.2" },
     { name = "fastapi", specifier = "==0.128.5" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "kurrentdbclient", specifier = "==1.2.1" },
     { name = "pydantic", specifier = "==2.12.5" },
     { name = "pytest", specifier = "==9.0.2" },
     { name = "python-multipart", specifier = "==0.0.22" },
-    { name = "shared", specifier = ">=0.0.32" },
     { name = "sqlalchemy", specifier = "==2.0.46" },
     { name = "uvicorn", specifier = "==0.38.0" },
 ]

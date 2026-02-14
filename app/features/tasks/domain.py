@@ -25,6 +25,11 @@ class TaskAggregate(Aggregate):
         attachments: list[dict[str, Any]],
         recurring_rule: str | None,
         order_index: int,
+        task_type: str = "manual",
+        scheduled_instruction: str | None = None,
+        scheduled_at_utc: str | None = None,
+        schedule_timezone: str | None = None,
+        schedule_state: str = "idle",
     ) -> None:
         self.workspace_id = workspace_id
         self.project_id = project_id
@@ -38,6 +43,13 @@ class TaskAggregate(Aggregate):
         self.subtasks = subtasks
         self.attachments = attachments
         self.recurring_rule = recurring_rule
+        self.task_type = task_type
+        self.scheduled_instruction = scheduled_instruction
+        self.scheduled_at_utc = scheduled_at_utc
+        self.schedule_timezone = schedule_timezone
+        self.schedule_state = schedule_state
+        self.last_schedule_run_at = None
+        self.last_schedule_error = None
         self.order_index = order_index
         self.archived = False
         self.is_deleted = False
@@ -101,6 +113,16 @@ EVENT_DELETED = "TaskDeleted"
 EVENT_MOVED_TO_INBOX = "TaskMovedToInbox"
 EVENT_COMMENT_ADDED = "TaskCommentAdded"
 EVENT_WATCH_TOGGLED = "TaskWatchToggled"
+EVENT_AUTOMATION_REQUESTED = "TaskAutomationRequested"
+EVENT_AUTOMATION_STARTED = "TaskAutomationStarted"
+EVENT_AUTOMATION_COMPLETED = "TaskAutomationCompleted"
+EVENT_AUTOMATION_FAILED = "TaskAutomationFailed"
+EVENT_SCHEDULE_CONFIGURED = "TaskScheduleConfigured"
+EVENT_SCHEDULE_QUEUED = "TaskScheduleQueued"
+EVENT_SCHEDULE_STARTED = "TaskScheduleStarted"
+EVENT_SCHEDULE_COMPLETED = "TaskScheduleCompleted"
+EVENT_SCHEDULE_FAILED = "TaskScheduleFailed"
+EVENT_SCHEDULE_DISABLED = "TaskScheduleDisabled"
 
 MUTATION_EVENTS = {
     EVENT_UPDATED,
@@ -111,4 +133,10 @@ MUTATION_EVENTS = {
     EVENT_RESTORED,
     EVENT_DELETED,
     EVENT_MOVED_TO_INBOX,
+    EVENT_SCHEDULE_CONFIGURED,
+    EVENT_SCHEDULE_QUEUED,
+    EVENT_SCHEDULE_STARTED,
+    EVENT_SCHEDULE_COMPLETED,
+    EVENT_SCHEDULE_FAILED,
+    EVENT_SCHEDULE_DISABLED,
 }

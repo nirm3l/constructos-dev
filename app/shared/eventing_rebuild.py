@@ -21,6 +21,10 @@ from features.projects.domain import (
 )
 from features.tasks.domain import (
     EVENT_ARCHIVED as TASK_EVENT_ARCHIVED,
+    EVENT_AUTOMATION_COMPLETED as TASK_EVENT_AUTOMATION_COMPLETED,
+    EVENT_AUTOMATION_FAILED as TASK_EVENT_AUTOMATION_FAILED,
+    EVENT_AUTOMATION_REQUESTED as TASK_EVENT_AUTOMATION_REQUESTED,
+    EVENT_AUTOMATION_STARTED as TASK_EVENT_AUTOMATION_STARTED,
     EVENT_COMMENT_ADDED as TASK_EVENT_COMMENT_ADDED,
     EVENT_COMPLETED as TASK_EVENT_COMPLETED,
     EVENT_CREATED as TASK_EVENT_CREATED,
@@ -29,6 +33,12 @@ from features.tasks.domain import (
     EVENT_REOPENED as TASK_EVENT_REOPENED,
     EVENT_REORDERED as TASK_EVENT_REORDERED,
     EVENT_RESTORED as TASK_EVENT_RESTORED,
+    EVENT_SCHEDULE_COMPLETED as TASK_EVENT_SCHEDULE_COMPLETED,
+    EVENT_SCHEDULE_CONFIGURED as TASK_EVENT_SCHEDULE_CONFIGURED,
+    EVENT_SCHEDULE_DISABLED as TASK_EVENT_SCHEDULE_DISABLED,
+    EVENT_SCHEDULE_FAILED as TASK_EVENT_SCHEDULE_FAILED,
+    EVENT_SCHEDULE_QUEUED as TASK_EVENT_SCHEDULE_QUEUED,
+    EVENT_SCHEDULE_STARTED as TASK_EVENT_SCHEDULE_STARTED,
     EVENT_UPDATED as TASK_EVENT_UPDATED,
     EVENT_WATCH_TOGGLED as TASK_EVENT_WATCH_TOGGLED,
     MUTATION_EVENTS as TASK_MUTATION_EVENTS,
@@ -167,10 +177,22 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "subtasks": p.get("subtasks", []),
             "attachments": p.get("attachments", []),
             "recurring_rule": p.get("recurring_rule"),
+            "task_type": p.get("task_type", "manual"),
+            "scheduled_instruction": p.get("scheduled_instruction"),
+            "scheduled_at_utc": p.get("scheduled_at_utc"),
+            "schedule_timezone": p.get("schedule_timezone"),
+            "schedule_state": p.get("schedule_state", "idle"),
+            "last_schedule_run_at": None,
+            "last_schedule_error": None,
             "archived": False,
             "is_deleted": False,
             "completed_at": None,
             "order_index": p.get("order_index", 0),
+            "automation_state": "idle",
+            "last_agent_run_at": None,
+            "last_agent_error": None,
+            "last_agent_comment": None,
+            "last_requested_instruction": None,
         }
     elif event.event_type in {TASK_EVENT_UPDATED, TASK_EVENT_REORDERED}:
         s.update(p)
@@ -188,6 +210,53 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
         s["is_deleted"] = True
     elif event.event_type == TASK_EVENT_MOVED_TO_INBOX:
         s["project_id"] = None
+    elif event.event_type == TASK_EVENT_AUTOMATION_REQUESTED:
+        s["automation_state"] = "queued"
+        s["last_agent_error"] = None
+        s["last_requested_instruction"] = p.get("instruction")
+    elif event.event_type == TASK_EVENT_AUTOMATION_STARTED:
+        s["automation_state"] = "running"
+        s["last_agent_error"] = None
+        s["last_agent_run_at"] = p.get("started_at")
+    elif event.event_type == TASK_EVENT_AUTOMATION_COMPLETED:
+        s["automation_state"] = "completed"
+        s["last_agent_run_at"] = p.get("completed_at")
+        s["last_agent_error"] = None
+        s["last_agent_comment"] = p.get("summary")
+    elif event.event_type == TASK_EVENT_AUTOMATION_FAILED:
+        s["automation_state"] = "failed"
+        s["last_agent_run_at"] = p.get("failed_at")
+        s["last_agent_error"] = p.get("error")
+        s["last_agent_comment"] = p.get("summary")
+    elif event.event_type == TASK_EVENT_SCHEDULE_CONFIGURED:
+        s["task_type"] = "scheduled_instruction"
+        s["scheduled_instruction"] = p.get("scheduled_instruction")
+        s["scheduled_at_utc"] = p.get("scheduled_at_utc")
+        s["schedule_timezone"] = p.get("schedule_timezone")
+        s["schedule_state"] = p.get("schedule_state", "idle")
+        s["last_schedule_error"] = None
+    elif event.event_type == TASK_EVENT_SCHEDULE_QUEUED:
+        s["schedule_state"] = "queued"
+        s["last_schedule_error"] = None
+    elif event.event_type == TASK_EVENT_SCHEDULE_STARTED:
+        s["schedule_state"] = "running"
+        s["last_schedule_error"] = None
+        s["last_schedule_run_at"] = p.get("started_at")
+    elif event.event_type == TASK_EVENT_SCHEDULE_COMPLETED:
+        s["schedule_state"] = "done"
+        s["last_schedule_error"] = None
+        s["last_schedule_run_at"] = p.get("completed_at")
+    elif event.event_type == TASK_EVENT_SCHEDULE_FAILED:
+        s["schedule_state"] = "failed"
+        s["last_schedule_error"] = p.get("error")
+        s["last_schedule_run_at"] = p.get("failed_at")
+    elif event.event_type == TASK_EVENT_SCHEDULE_DISABLED:
+        s["task_type"] = "manual"
+        s["scheduled_instruction"] = None
+        s["scheduled_at_utc"] = None
+        s["schedule_timezone"] = None
+        s["schedule_state"] = "idle"
+        s["last_schedule_error"] = None
     return s
 
 
@@ -286,6 +355,13 @@ def project_event(db: Session, ev: EventEnvelope):
                 subtasks=json.dumps(p.get("subtasks", [])),
                 attachments=json.dumps(p.get("attachments", [])),
                 recurring_rule=p.get("recurring_rule"),
+                task_type=p.get("task_type", "manual"),
+                scheduled_instruction=p.get("scheduled_instruction"),
+                scheduled_at_utc=datetime.fromisoformat(p["scheduled_at_utc"]) if p.get("scheduled_at_utc") else None,
+                schedule_timezone=p.get("schedule_timezone"),
+                schedule_state=p.get("schedule_state", "idle"),
+                last_schedule_run_at=None,
+                last_schedule_error=None,
                 order_index=p.get("order_index", 0),
             )
         )
@@ -298,6 +374,8 @@ def project_event(db: Session, ev: EventEnvelope):
                         setattr(task, k, json.dumps(v))
                     elif k == "due_date":
                         task.due_date = datetime.fromisoformat(v) if v else None
+                    elif k in {"scheduled_at_utc", "last_schedule_run_at"}:
+                        setattr(task, k, datetime.fromisoformat(v) if v else None)
                     else:
                         setattr(task, k, v)
                 if p.get("status") == "Done" and not task.completed_at:
@@ -325,6 +403,35 @@ def project_event(db: Session, ev: EventEnvelope):
                 task.is_deleted = True
             elif ev.event_type == TASK_EVENT_MOVED_TO_INBOX:
                 task.project_id = None
+            elif ev.event_type == TASK_EVENT_SCHEDULE_CONFIGURED:
+                task.task_type = "scheduled_instruction"
+                task.scheduled_instruction = p.get("scheduled_instruction")
+                task.scheduled_at_utc = datetime.fromisoformat(p["scheduled_at_utc"]) if p.get("scheduled_at_utc") else None
+                task.schedule_timezone = p.get("schedule_timezone")
+                task.schedule_state = p.get("schedule_state", "idle")
+                task.last_schedule_error = None
+            elif ev.event_type == TASK_EVENT_SCHEDULE_QUEUED:
+                task.schedule_state = "queued"
+                task.last_schedule_error = None
+            elif ev.event_type == TASK_EVENT_SCHEDULE_STARTED:
+                task.schedule_state = "running"
+                task.last_schedule_run_at = datetime.fromisoformat(p["started_at"]) if p.get("started_at") else None
+                task.last_schedule_error = None
+            elif ev.event_type == TASK_EVENT_SCHEDULE_COMPLETED:
+                task.schedule_state = "done"
+                task.last_schedule_run_at = datetime.fromisoformat(p["completed_at"]) if p.get("completed_at") else None
+                task.last_schedule_error = None
+            elif ev.event_type == TASK_EVENT_SCHEDULE_FAILED:
+                task.schedule_state = "failed"
+                task.last_schedule_run_at = datetime.fromisoformat(p["failed_at"]) if p.get("failed_at") else None
+                task.last_schedule_error = p.get("error")
+            elif ev.event_type == TASK_EVENT_SCHEDULE_DISABLED:
+                task.task_type = "manual"
+                task.scheduled_instruction = None
+                task.scheduled_at_utc = None
+                task.schedule_timezone = None
+                task.schedule_state = "idle"
+                task.last_schedule_error = None
     elif ev.event_type == TASK_EVENT_COMMENT_ADDED:
         db.add(TaskComment(task_id=p["task_id"], user_id=p["user_id"], body=p["body"]))
         mentions = re.findall(r"@([A-Za-z0-9_\-]+)", p["body"])

@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from shared.commanding import execute_command
-from shared.core import BulkAction, CommentCreate, ReorderPayload, TaskCreate, TaskPatch, User, ensure_role
+from shared.core import BulkAction, CommentCreate, ReorderPayload, TaskAutomationRun, TaskCreate, TaskPatch, User, ensure_role
 
 from .command_handlers import (
     AddCommentHandler,
@@ -15,6 +15,7 @@ from .command_handlers import (
     PatchTaskHandler,
     ReopenTaskHandler,
     ReorderTasksHandler,
+    RequestAutomationRunHandler,
     RestoreTaskHandler,
     ToggleWatchHandler,
 )
@@ -124,4 +125,13 @@ class TaskApplicationService:
             user_id=self.user.id,
             command_id=self.command_id,
             handler=ToggleWatchHandler(self.ctx, task_id),
+        )
+
+    def request_automation_run(self, task_id: str, payload: TaskAutomationRun) -> dict:
+        return execute_command(
+            self.db,
+            command_name="Task.Automation.RequestRun",
+            user_id=self.user.id,
+            command_id=self.command_id,
+            handler=RequestAutomationRunHandler(self.ctx, task_id, payload.instruction),
         )

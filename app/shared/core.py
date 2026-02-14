@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .bootstrap import bootstrap_data, bootstrap_payload, startup_bootstrap
 from .contracts import (
+    AgentChatRun,
     BulkAction,
     CommentCreate,
     ConcurrencyConflictError,
@@ -10,6 +11,7 @@ from .contracts import (
     ProjectCreate,
     ReorderPayload,
     SavedViewCreate,
+    TaskAutomationRun,
     TaskCommandState,
     TaskCreate,
     TaskDTO,

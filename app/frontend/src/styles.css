@@ -238,6 +238,11 @@ button:disabled {
   background: color-mix(in srgb, var(--surface), var(--surface-alt) 25%);
 }
 
+.task-item.scheduled {
+  border-color: #7b9be0;
+  background: color-mix(in srgb, #edf3ff, var(--surface) 70%);
+}
+
 .task-main {
   display: grid;
   gap: 4px;
@@ -285,6 +290,57 @@ button:disabled {
   overflow: auto;
 }
 
+.automation-box {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 24%);
+}
+
+.codex-progress {
+  font-weight: 600;
+  animation: codex-pulse 1s ease-in-out infinite;
+}
+
+.codex-chat-history {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px;
+  max-height: 42vh;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 18%);
+}
+
+.codex-chat-bubble {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.codex-chat-bubble.user {
+  background: color-mix(in srgb, var(--primary), white 88%);
+}
+
+.codex-chat-bubble.assistant {
+  background: color-mix(in srgb, var(--surface-alt), white 24%);
+}
+
+.codex-chat-role {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+@keyframes codex-pulse {
+  0% { opacity: 0.55; }
+  50% { opacity: 1; }
+  100% { opacity: 0.55; }
+}
+
 .note {
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -293,6 +349,31 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.activity-note.ok {
+  border-color: color-mix(in srgb, var(--ok), white 55%);
+}
+
+.activity-note.warn {
+  border-color: #e3c27a;
+  background: #fff8ea;
+}
+
+.activity-note.error {
+  border-color: #f0b8b8;
+  background: #fff3f3;
+}
+
+.activity-raw-json {
+  margin: 8px 0 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface-alt), white 28%);
+  padding: 8px;
+  font-size: 12px;
+  overflow: auto;
+  max-height: 160px;
 }
 
 .icon {
@@ -361,6 +442,21 @@ button:disabled {
 [data-theme="dark"] .kanban-col,
 [data-theme="dark"] .note {
   background: #13213b;
+}
+
+[data-theme="dark"] .task-item.scheduled {
+  border-color: #5a7fc3;
+  background: #122745;
+}
+
+[data-theme="dark"] .activity-note.warn {
+  background: #2a2414;
+  border-color: #8d7431;
+}
+
+[data-theme="dark"] .activity-note.error {
+  background: #32191f;
+  border-color: #8a3a4f;
 }
 
 [data-theme="dark"] .kanban-card {

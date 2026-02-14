@@ -7,6 +7,7 @@ import {
   completeTask,
   createProject,
   createTask,
+  getTaskAutomationStatus,
   getBootstrap,
   getNotifications,
   getProjectBoard,
@@ -17,16 +18,23 @@ import {
   patchMyPreferences,
   patchTask,
   restoreTask,
-  reopenTask
+  reopenTask,
+  runAgentChat,
+  runTaskWithCodex
 } from './api'
-import type { Notification, Task } from './types'
+import type { Notification, Task, TaskAutomationStatus } from './types'
 import './styles.css'
 
 const DEFAULT_USER_ID = '00000000-0000-0000-0000-000000000001'
 
-type Tab = 'inbox' | 'today' | 'projects' | 'search' | 'profile'
+type Tab = 'inbox' | 'today' | 'projects' | 'search' | 'mario' | 'profile'
+type ChatRole = 'user' | 'assistant'
+type ChatTurn = { id: string; role: ChatRole; content: string; createdAt: number }
 
-const TAB_ORDER: Tab[] = ['inbox', 'today', 'projects', 'search', 'profile']
+const TAB_ORDER: Tab[] = ['inbox', 'today', 'projects', 'search', 'mario', 'profile']
+
+// Lazy import: keep main bundle small for non-Mario usage.
+const MarioView = React.lazy(() => import('./mario/MarioView').then((m) => ({ default: m.MarioView })))
 
 function normalizeStoredUserId(raw: string | null): string {
   if (!raw || raw === '1' || raw === '2') return DEFAULT_USER_ID
@@ -47,6 +55,109 @@ function toLocalDateTimeInput(iso: string | null): string {
   const hh = String(d.getHours()).padStart(2, '0')
   const mm = String(d.getMinutes()).padStart(2, '0')
   return `${y}-${m}-${day}T${hh}:${mm}`
+}
+
+function toReadableDate(iso: unknown): string {
+  if (typeof iso !== 'string' || !iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleString()
+}
+
+function formatActivitySummary(
+  action: string,
+  details: Record<string, unknown>,
+  actorName: string
+): { title: string; detail: string } {
+  const keys = Object.keys(details)
+  switch (action) {
+    case 'TaskCreated':
+      return {
+        title: `${actorName} created the task`,
+        detail: `Title: ${String(details.title ?? '') || '(none)'}`,
+      }
+    case 'TaskUpdated':
+      return {
+        title: `${actorName} updated the task`,
+        detail: `Changed: ${keys.join(', ') || 'fields'}`,
+      }
+    case 'TaskCompleted':
+      return {
+        title: `${actorName} completed the task`,
+        detail: `Completed at: ${toReadableDate(details.completed_at) || 'n/a'}`,
+      }
+    case 'TaskReopened':
+      return {
+        title: `${actorName} reopened the task`,
+        detail: `Status: ${String(details.status ?? 'To do')}`,
+      }
+    case 'TaskArchived':
+      return { title: `${actorName} archived the task`, detail: 'Task moved to archive' }
+    case 'TaskRestored':
+      return { title: `${actorName} restored the task`, detail: 'Task restored from archive' }
+    case 'TaskCommentAdded':
+      return {
+        title: `${actorName} added a comment`,
+        detail: String(details.body ?? '').slice(0, 180) || '(empty comment)',
+      }
+    case 'TaskAutomationRequested':
+      return {
+        title: `${actorName} requested Codex run`,
+        detail: String(details.instruction ?? '(no instruction)'),
+      }
+    case 'TaskAutomationStarted':
+      return {
+        title: 'Codex run started',
+        detail: `Started at: ${toReadableDate(details.started_at) || 'n/a'}`,
+      }
+    case 'TaskAutomationCompleted':
+      return {
+        title: 'Codex run completed',
+        detail: String(details.summary ?? 'Completed'),
+      }
+    case 'TaskAutomationFailed':
+      return {
+        title: 'Codex run failed',
+        detail: String(details.error ?? details.summary ?? 'Unknown error'),
+      }
+    case 'TaskScheduleConfigured':
+      return {
+        title: `${actorName} configured schedule`,
+        detail: `At: ${toReadableDate(details.scheduled_at_utc)} | TZ: ${String(details.schedule_timezone ?? 'UTC')}`,
+      }
+    case 'TaskScheduleQueued':
+      return {
+        title: 'Scheduled run queued',
+        detail: `Queued at: ${toReadableDate(details.queued_at) || 'n/a'}`,
+      }
+    case 'TaskScheduleStarted':
+      return {
+        title: 'Scheduled run started',
+        detail: `Started at: ${toReadableDate(details.started_at) || 'n/a'}`,
+      }
+    case 'TaskScheduleCompleted':
+      return {
+        title: 'Scheduled run completed',
+        detail: String(details.summary ?? `Completed at ${toReadableDate(details.completed_at)}`),
+      }
+    case 'TaskScheduleFailed':
+      return {
+        title: 'Scheduled run failed',
+        detail: String(details.error ?? 'Unknown error'),
+      }
+    default:
+      return {
+        title: `${actorName} triggered ${action}`,
+        detail: keys.length ? `Details: ${keys.join(', ')}` : 'No details',
+      }
+  }
+}
+
+function activityTone(action: string): 'ok' | 'warn' | 'error' | 'neutral' {
+  if (action.includes('Failed')) return 'error'
+  if (action.includes('Completed')) return 'ok'
+  if (action.includes('Queued') || action.includes('Started') || action.includes('Requested')) return 'warn'
+  return 'neutral'
 }
 
 function Icon({ path }: { path: string }) {
@@ -74,13 +185,31 @@ function App() {
   const [searchPriority, setSearchPriority] = React.useState('')
   const [searchArchived, setSearchArchived] = React.useState(false)
   const [commentBody, setCommentBody] = React.useState('')
+  const [automationInstruction, setAutomationInstruction] = React.useState('')
+  const [showCodexChat, setShowCodexChat] = React.useState(false)
+  const [codexChatInstruction, setCodexChatInstruction] = React.useState('')
+  const [codexChatTurns, setCodexChatTurns] = React.useState<ChatTurn[]>([])
+  const [codexChatSessionId] = React.useState<string>(() => globalThis.crypto?.randomUUID?.() ?? `chat-${Date.now()}`)
+  const [codexChatAllowMutations, setCodexChatAllowMutations] = React.useState(false)
+  const [isCodexChatRunning, setIsCodexChatRunning] = React.useState(false)
+  const [codexChatRunStartedAt, setCodexChatRunStartedAt] = React.useState<number | null>(null)
+  const [codexChatElapsedSeconds, setCodexChatElapsedSeconds] = React.useState(0)
+  const [codexChatLastTaskEventAt, setCodexChatLastTaskEventAt] = React.useState<number | null>(null)
   const [editStatus, setEditStatus] = React.useState('To do')
   const [editDescription, setEditDescription] = React.useState('')
   const [editPriority, setEditPriority] = React.useState('Med')
   const [editDueDate, setEditDueDate] = React.useState('')
   const [editProjectId, setEditProjectId] = React.useState('')
+  const [editTaskType, setEditTaskType] = React.useState<'manual' | 'scheduled_instruction'>('manual')
+  const [editScheduledAtUtc, setEditScheduledAtUtc] = React.useState('')
+  const [editScheduleTimezone, setEditScheduleTimezone] = React.useState('')
+  const [editScheduledInstruction, setEditScheduledInstruction] = React.useState('')
+  const [activityExpandedIds, setActivityExpandedIds] = React.useState<Set<number>>(new Set())
+  const [activityShowRawDetails, setActivityShowRawDetails] = React.useState(false)
   const [uiError, setUiError] = React.useState<string | null>(null)
   const qc = useQueryClient()
+  const realtimeRefreshTimerRef = React.useRef<number | null>(null)
+  const codexChatHistoryRef = React.useRef<HTMLDivElement | null>(null)
 
   React.useEffect(() => {
     localStorage.setItem('ui_tab', tab)
@@ -106,8 +235,12 @@ function App() {
   React.useEffect(() => {
     const firstProjectId = bootstrap.data?.projects[0]?.id ?? ''
     if (!selectedProjectId && firstProjectId) setSelectedProjectId(firstProjectId)
+    if (tab === 'inbox') {
+      if (quickProjectId !== '') setQuickProjectId('')
+      return
+    }
     if (!quickProjectId && firstProjectId) setQuickProjectId(firstProjectId)
-  }, [bootstrap.data, selectedProjectId])
+  }, [bootstrap.data, quickProjectId, selectedProjectId, tab])
 
   const taskParams = React.useMemo(() => {
     if (tab === 'today') return { view: 'today' }
@@ -128,9 +261,34 @@ function App() {
     enabled: Boolean(userId)
   })
 
+  const scheduleRealtimeRefresh = React.useCallback(() => {
+    if (realtimeRefreshTimerRef.current !== null) {
+      window.clearTimeout(realtimeRefreshTimerRef.current)
+    }
+    realtimeRefreshTimerRef.current = window.setTimeout(() => {
+      qc.invalidateQueries({ queryKey: ['tasks'] })
+      qc.invalidateQueries({ queryKey: ['board'] })
+      qc.invalidateQueries({ queryKey: ['bootstrap'] })
+      if (selectedTaskId) {
+        qc.invalidateQueries({ queryKey: ['comments', userId, selectedTaskId] })
+        qc.invalidateQueries({ queryKey: ['activity', userId, selectedTaskId] })
+        qc.invalidateQueries({ queryKey: ['automation-status', userId, selectedTaskId] })
+      }
+      realtimeRefreshTimerRef.current = null
+    }, 250)
+  }, [qc, selectedTaskId, userId])
+
+  React.useEffect(() => {
+    return () => {
+      if (realtimeRefreshTimerRef.current !== null) {
+        window.clearTimeout(realtimeRefreshTimerRef.current)
+      }
+    }
+  }, [])
+
   React.useEffect(() => {
     if (!userId) return
-    const streamUrl = `/api/notifications/stream?user_id=${encodeURIComponent(userId)}`
+    const streamUrl = `/api/notifications/stream?user_id=${encodeURIComponent(userId)}&workspace_id=${encodeURIComponent(workspaceId || '')}`
     const es = new EventSource(streamUrl)
 
     const onNotification = (evt: MessageEvent) => {
@@ -146,18 +304,46 @@ function App() {
           }
           return [incoming, ...base]
         })
+        scheduleRealtimeRefresh()
       } catch {
         qc.invalidateQueries({ queryKey: ['notifications', userId] })
+        scheduleRealtimeRefresh()
       }
+    }
+    const onTaskEvent = (evt: MessageEvent) => {
+      if (showCodexChat) {
+        try {
+          const payload = JSON.parse(evt.data) as { created_at?: string }
+          setCodexChatLastTaskEventAt(payload.created_at ? Date.parse(payload.created_at) : Date.now())
+        } catch {
+          setCodexChatLastTaskEventAt(Date.now())
+        }
+      }
+      scheduleRealtimeRefresh()
     }
 
     es.addEventListener('notification', onNotification as EventListener)
+    es.addEventListener('task_event', onTaskEvent as EventListener)
 
     return () => {
       es.removeEventListener('notification', onNotification as EventListener)
+      es.removeEventListener('task_event', onTaskEvent as EventListener)
       es.close()
     }
-  }, [qc, userId])
+  }, [qc, scheduleRealtimeRefresh, showCodexChat, userId, workspaceId])
+
+  React.useEffect(() => {
+    if (!isCodexChatRunning || !codexChatRunStartedAt) return
+    const id = window.setInterval(() => {
+      setCodexChatElapsedSeconds(Math.max(0, Math.floor((Date.now() - codexChatRunStartedAt) / 1000)))
+    }, 1000)
+    return () => window.clearInterval(id)
+  }, [isCodexChatRunning, codexChatRunStartedAt])
+
+  React.useEffect(() => {
+    if (!showCodexChat || !codexChatHistoryRef.current) return
+    codexChatHistoryRef.current.scrollTop = codexChatHistoryRef.current.scrollHeight
+  }, [codexChatTurns, showCodexChat, isCodexChatRunning])
 
   const board = useQuery({
     queryKey: ['board', userId, selectedProjectId],
@@ -174,7 +360,12 @@ function App() {
     setEditPriority(selectedTask.priority)
     setEditDueDate(toLocalDateTimeInput(selectedTask.due_date))
     setEditProjectId(selectedTask.project_id ?? '')
-  }, [selectedTask])
+    setEditTaskType((selectedTask.task_type ?? 'manual') as 'manual' | 'scheduled_instruction')
+    setEditScheduledAtUtc(toLocalDateTimeInput(selectedTask.scheduled_at_utc))
+    setEditScheduleTimezone(selectedTask.schedule_timezone ?? (bootstrap.data?.current_user?.timezone ?? 'UTC'))
+    setEditScheduledInstruction(selectedTask.scheduled_instruction ?? '')
+    setAutomationInstruction('')
+  }, [bootstrap.data?.current_user?.timezone, selectedTask])
 
   const comments = useQuery({
     queryKey: ['comments', userId, selectedTaskId],
@@ -186,6 +377,17 @@ function App() {
     queryKey: ['activity', userId, selectedTaskId],
     queryFn: () => listActivity(userId, selectedTaskId as string),
     enabled: Boolean(selectedTaskId)
+  })
+
+  const automationStatus = useQuery({
+    queryKey: ['automation-status', userId, selectedTaskId],
+    queryFn: () => getTaskAutomationStatus(userId, selectedTaskId as string),
+    enabled: Boolean(selectedTaskId),
+    refetchInterval: (q) => {
+      const state = (q.state.data as TaskAutomationStatus | undefined)?.automation_state
+      if (state === 'queued' || state === 'running') return 2000
+      return false
+    }
   })
 
   const invalidateAll = async () => {
@@ -254,7 +456,11 @@ function App() {
         status: editStatus,
         priority: editPriority,
         project_id: editProjectId || null,
-        due_date: editDueDate ? new Date(editDueDate).toISOString() : null
+        due_date: editDueDate ? new Date(editDueDate).toISOString() : null,
+        task_type: editTaskType,
+        scheduled_at_utc: editTaskType === 'scheduled_instruction' && editScheduledAtUtc ? new Date(editScheduledAtUtc).toISOString() : null,
+        schedule_timezone: editTaskType === 'scheduled_instruction' ? (editScheduleTimezone || null) : null,
+        scheduled_instruction: editTaskType === 'scheduled_instruction' ? (editScheduledInstruction.trim() || null) : null
       }),
     onSuccess: async () => {
       setUiError(null)
@@ -303,17 +509,71 @@ function App() {
     onError: (err) => setUiError(err instanceof Error ? err.message : 'Comment failed')
   })
 
+  const runAutomationMutation = useMutation({
+    mutationFn: () => runTaskWithCodex(userId, selectedTaskId as string, automationInstruction.trim()),
+    onSuccess: async () => {
+      setUiError(null)
+      setAutomationInstruction('')
+      await qc.invalidateQueries({ queryKey: ['automation-status', userId, selectedTaskId] })
+      await qc.invalidateQueries({ queryKey: ['activity', userId, selectedTaskId] })
+      await qc.invalidateQueries({ queryKey: ['tasks'] })
+    },
+    onError: (err) => setUiError(err instanceof Error ? err.message : 'Codex run failed')
+  })
+
+  const runAgentChatMutation = useMutation({
+    mutationFn: (payload: { instruction: string; history: Array<{ role: 'user' | 'assistant'; content: string }> }) =>
+      runAgentChat(userId, {
+        workspace_id: workspaceId,
+        project_id: selectedProjectId || null,
+        session_id: codexChatSessionId,
+        instruction: payload.instruction,
+        history: payload.history,
+        allow_mutations: codexChatAllowMutations
+      }),
+    onSuccess: async (payload) => {
+      setUiError(null)
+      const reply = [payload.summary, payload.comment].filter(Boolean).join('\n\n').trim()
+      if (reply) {
+        setCodexChatTurns((prev) => [
+          ...prev,
+          {
+            id: globalThis.crypto?.randomUUID?.() ?? `a-${Date.now()}`,
+            role: 'assistant',
+            content: reply,
+            createdAt: Date.now()
+          }
+        ])
+      }
+      setIsCodexChatRunning(false)
+      setCodexChatRunStartedAt(null)
+      setCodexChatElapsedSeconds(0)
+      setCodexChatInstruction('')
+      await invalidateAll()
+    },
+    onError: (err) => {
+      setIsCodexChatRunning(false)
+      setCodexChatRunStartedAt(null)
+      setCodexChatElapsedSeconds(0)
+      setUiError(err instanceof Error ? err.message : 'Codex chat failed')
+    }
+  })
+
   if (bootstrap.isLoading) return <div className="page"><div className="card skeleton">Loading workspace...</div></div>
   if (bootstrap.isError || !bootstrap.data) return <div className="page"><div className="notice">Unable to load bootstrap data.</div></div>
 
   const unreadCount = (notifications.data ?? []).filter((n) => !n.is_read).length
+  const actorNames = Object.fromEntries((bootstrap.data.users ?? []).map((u) => [u.id, u.username]))
 
   return (
     <div className="page">
       <header className="header card">
         <div className="title-row">
           <h1 className="title">Task Management</h1>
-          <span className="badge">Unread: {unreadCount}</span>
+          <div className="row">
+            <span className="badge">Unread: {unreadCount}</span>
+            <button className="primary" onClick={() => setShowCodexChat(true)}>Codex Chat</button>
+          </div>
         </div>
         <div className="meta">User: <strong>{bootstrap.data.current_user.username}</strong> | Workspace: <strong>{bootstrap.data.workspaces[0]?.name}</strong></div>
       </header>
@@ -430,15 +690,33 @@ function App() {
             ))}
           </div>
         </section>
+      ) : tab === 'mario' ? (
+        <section className="card">
+          <h2>Super Mario (Canvas)</h2>
+          <React.Suspense fallback={<div className="notice">Loading Mario...</div>}>
+            <MarioView />
+          </React.Suspense>
+        </section>
       ) : (
         <section className="card">
           <h2>Tasks ({tasks.data?.total ?? 0})</h2>
           <div className="task-list">
             {tasks.data?.items.map((task: Task) => (
-              <div key={task.id} className="task-item">
+              <div key={task.id} className={`task-item ${task.task_type === 'scheduled_instruction' ? 'scheduled' : ''}`}>
                 <div className="task-main" role="button" onClick={() => setSelectedTaskId(task.id)}>
                   <strong>{task.title}</strong>
                   <span className="meta">{task.status} | {task.priority} | {task.due_date ? new Date(task.due_date).toLocaleString() : 'No due date'}</span>
+                  {task.task_type === 'scheduled_instruction' && (
+                    <span className="meta">
+                      <span className={`badge ${task.schedule_state === 'done' ? 'done' : ''}`}>
+                        Scheduled
+                      </span>
+                      {' '}
+                      {task.scheduled_at_utc ? `for ${new Date(task.scheduled_at_utc).toLocaleString()}` : 'time not set'}
+                      {' '}
+                      ({task.schedule_state})
+                    </span>
+                  )}
                 </div>
                 {task.archived ? (
                   <button className="action-icon" onClick={() => restoreTaskMutation.mutate(task.id)} title="Restore" aria-label="Restore">
@@ -475,6 +753,10 @@ function App() {
         <button className={tab === 'search' ? 'primary' : ''} onClick={() => setTab('search')} title="Search" aria-label="Search">
           <Icon path="M20 20l-3.5-3.5M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14z" />
           <span className="tab-label">Search</span>
+        </button>
+        <button className={tab === 'mario' ? 'primary' : ''} onClick={() => setTab('mario')} title="Mario" aria-label="Mario">
+          <Icon path="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z" />
+          <span className="tab-label">Mario</span>
         </button>
         <button className={tab === 'profile' ? 'primary' : ''} onClick={() => setTab('profile')} title="Profile" aria-label="Profile">
           <Icon path="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8M4 20a8 8 0 0 1 16 0" />
@@ -522,6 +804,40 @@ function App() {
                 </button>
               )}
             </div>
+            <div className="row wrap" style={{ marginBottom: 8 }}>
+              <select value={editTaskType} onChange={(e) => setEditTaskType(e.target.value as 'manual' | 'scheduled_instruction')}>
+                <option value="manual">Manual</option>
+                <option value="scheduled_instruction">Scheduled instruction</option>
+              </select>
+              <input
+                className="due-input"
+                type="datetime-local"
+                value={editScheduledAtUtc}
+                onChange={(e) => setEditScheduledAtUtc(e.target.value)}
+                disabled={editTaskType !== 'scheduled_instruction'}
+              />
+              <input
+                value={editScheduleTimezone}
+                onChange={(e) => setEditScheduleTimezone(e.target.value)}
+                placeholder="Timezone (e.g. Europe/Sarajevo)"
+                disabled={editTaskType !== 'scheduled_instruction'}
+              />
+            </div>
+            <textarea
+              value={editScheduledInstruction}
+              onChange={(e) => setEditScheduledInstruction(e.target.value)}
+              rows={3}
+              style={{ width: '100%', marginBottom: 8 }}
+              placeholder='Scheduled instruction (executed automatically when due)'
+              disabled={editTaskType !== 'scheduled_instruction'}
+            />
+            {selectedTask.schedule_state && editTaskType === 'scheduled_instruction' && (
+              <div className="row wrap" style={{ marginBottom: 8 }}>
+                <span className="badge">Schedule: {selectedTask.schedule_state}</span>
+                {selectedTask.scheduled_at_utc && <span className="meta">Scheduled for: {new Date(selectedTask.scheduled_at_utc).toLocaleString()}</span>}
+                {selectedTask.last_schedule_error && <span className="meta">Last error: {selectedTask.last_schedule_error}</span>}
+              </div>
+            )}
             <textarea value={editDescription} onChange={(e) => setEditDescription(e.target.value)} rows={4} style={{ width: '100%' }} />
             <h4>Comments</h4>
             <div className="note-list">
@@ -531,11 +847,163 @@ function App() {
               <input value={commentBody} onChange={(e) => setCommentBody(e.target.value)} placeholder="Add comment" />
               <button onClick={() => addCommentMutation.mutate()} disabled={!commentBody.trim()}>Send</button>
             </div>
+            <h4>Codex Automation</h4>
+            <div className="automation-box">
+              <div className="row wrap" style={{ marginBottom: 8 }}>
+                <span className={`badge ${automationStatus.data?.automation_state === 'completed' ? 'done' : ''}`}>
+                  State: {automationStatus.data?.automation_state ?? 'idle'}
+                </span>
+                {automationStatus.data?.last_agent_run_at && (
+                  <span className="meta">Last run: {new Date(automationStatus.data.last_agent_run_at).toLocaleString()}</span>
+                )}
+              </div>
+              {automationStatus.data?.last_agent_comment && <div className="note">{automationStatus.data.last_agent_comment}</div>}
+              {automationStatus.data?.last_agent_error && <div className="notice">Runner error: {automationStatus.data.last_agent_error}</div>}
+              <div className="row wrap" style={{ marginTop: 8 }}>
+                <textarea
+                  value={automationInstruction}
+                  onChange={(e) => setAutomationInstruction(e.target.value)}
+                  placeholder='Instruction (e.g. "#complete", "update due date", "create related task")'
+                  rows={4}
+                  style={{ width: '100%' }}
+                />
+                <button
+                  className="primary"
+                  onClick={() => runAutomationMutation.mutate()}
+                  disabled={runAutomationMutation.isPending || !selectedTaskId}
+                >
+                  Run with Codex
+                </button>
+              </div>
+            </div>
             <h4>Activity</h4>
+            <div className="row wrap" style={{ marginBottom: 8 }}>
+              <label className="row archived-toggle">
+                <input
+                  type="checkbox"
+                  checked={activityShowRawDetails}
+                  onChange={(e) => setActivityShowRawDetails(e.target.checked)}
+                />
+                Show raw details JSON
+              </label>
+            </div>
             <div className="note-list">
-              {activity.data?.slice(0, 20).map((a) => (
-                <div key={a.id} className="note"><span className="meta">{a.action}</span></div>
+              {activity.data?.slice(0, 20).map((a) => {
+                const summary = formatActivitySummary(a.action, a.details, actorNames[a.actor_id] || 'Someone')
+                const fullDetail = summary.detail || ''
+                const isLong = fullDetail.length > 180
+                const expanded = activityExpandedIds.has(a.id)
+                const visibleDetail = isLong && !expanded ? `${fullDetail.slice(0, 180)}...` : fullDetail
+                const tone = activityTone(a.action)
+                return (
+                  <div key={a.id} className={`note activity-note ${tone}`}>
+                    <div>
+                      <strong>{summary.title}</strong>
+                      <div className="meta">{visibleDetail}</div>
+                      {isLong && (
+                        <button
+                          className="status-chip"
+                          onClick={() =>
+                            setActivityExpandedIds((prev) => {
+                              const next = new Set(prev)
+                              if (next.has(a.id)) next.delete(a.id)
+                              else next.add(a.id)
+                              return next
+                            })
+                          }
+                        >
+                          {expanded ? 'Show less' : 'Show more'}
+                        </button>
+                      )}
+                      {activityShowRawDetails && (
+                        <pre className="activity-raw-json">{JSON.stringify(a.details, null, 2)}</pre>
+                      )}
+                      <div className="meta">{toReadableDate(a.created_at)}</div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showCodexChat && (
+        <div className="drawer open" onClick={() => setShowCodexChat(false)}>
+          <div className="drawer-body" onClick={(e) => e.stopPropagation()}>
+            <h3>Codex Chat</h3>
+            <p className="meta">General instruction mode. Session: <code>{codexChatSessionId}</code></p>
+            <div className="codex-chat-history" ref={codexChatHistoryRef}>
+              {codexChatTurns.length === 0 && (
+                <div className="meta">Chat je prazan. Pošalji prvu instrukciju.</div>
+              )}
+              {codexChatTurns.map((turn) => (
+                <div key={turn.id} className={`codex-chat-bubble ${turn.role}`}>
+                  <div className="codex-chat-role">{turn.role === 'user' ? 'Ti' : 'Codex'}</div>
+                  <div>{turn.content}</div>
+                </div>
               ))}
+            </div>
+            <textarea
+              value={codexChatInstruction}
+              onChange={(e) => setCodexChatInstruction(e.target.value)}
+              rows={5}
+              style={{ width: '100%', marginTop: 8 }}
+              placeholder='Example: "Create 3 tasks for tomorrow in project Test2 with High priority"'
+            />
+            <label className="row archived-toggle" style={{ marginTop: 8 }}>
+              <input
+                type="checkbox"
+                checked={codexChatAllowMutations}
+                onChange={(e) => setCodexChatAllowMutations(e.target.checked)}
+                disabled={runAgentChatMutation.isPending}
+              />
+              Allow task/project changes
+            </label>
+            <div className="row" style={{ marginTop: 8 }}>
+              <button
+                className="primary"
+                onClick={() => {
+                  const instruction = codexChatInstruction.trim()
+                  if (!instruction) return
+                  const nextUserTurn: ChatTurn = {
+                    id: globalThis.crypto?.randomUUID?.() ?? `u-${Date.now()}`,
+                    role: 'user',
+                    content: instruction,
+                    createdAt: Date.now()
+                  }
+                  const history = [...codexChatTurns, nextUserTurn]
+                    .slice(-16)
+                    .map((t) => ({ role: t.role, content: t.content }))
+                  setCodexChatTurns((prev) => [...prev, nextUserTurn])
+                  setIsCodexChatRunning(true)
+                  setCodexChatRunStartedAt(Date.now())
+                  setCodexChatElapsedSeconds(0)
+                  runAgentChatMutation.mutate({ instruction, history })
+                }}
+                disabled={runAgentChatMutation.isPending || !codexChatInstruction.trim() || !workspaceId}
+              >
+                Send to Codex
+              </button>
+              <button
+                onClick={() => setCodexChatTurns([])}
+                disabled={runAgentChatMutation.isPending || codexChatTurns.length === 0}
+              >
+                Clear chat
+              </button>
+              <button onClick={() => setShowCodexChat(false)}>Close</button>
+            </div>
+            <div className="row wrap" style={{ marginTop: 8 }}>
+              <span className={`badge ${runAgentChatMutation.isPending ? '' : 'done'}`}>
+                {isCodexChatRunning ? 'Codex running' : 'Idle'}
+              </span>
+              <span className="meta">Mode: {codexChatAllowMutations ? 'Write enabled' : 'Read-only'}</span>
+              {isCodexChatRunning && (
+                <span className="meta codex-progress">Executing tools... {codexChatElapsedSeconds}s</span>
+              )}
+              {codexChatLastTaskEventAt && (
+                <span className="meta">Last task event: {new Date(codexChatLastTaskEventAt).toLocaleTimeString()}</span>
+              )}
             </div>
           </div>
         </div>

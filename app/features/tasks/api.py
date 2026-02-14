@@ -12,6 +12,7 @@ from shared.core import (
     CommentCreate,
     ReorderPayload,
     Task,
+    TaskAutomationRun,
     TaskComment,
     TaskCreate,
     TaskPatch,
@@ -27,7 +28,7 @@ from shared.core import (
     to_iso_utc,
 )
 from .application import TaskApplicationService
-from .read_models import TaskListQuery, list_tasks_read_model
+from .read_models import TaskListQuery, get_task_automation_status_read_model, list_tasks_read_model
 
 router = APIRouter()
 
@@ -209,3 +210,19 @@ def task_activity(task_id: str, db: Session = Depends(get_db), user: User = Depe
 def export_tasks(workspace_id: str, format: str = "json", db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member"})
     return export_tasks_response(db, workspace_id, format)
+
+
+@router.post("/api/tasks/{task_id}/automation/run")
+def request_automation_run(
+    task_id: str,
+    payload: TaskAutomationRun,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    command_id: str | None = Depends(get_command_id),
+):
+    return TaskApplicationService(db, user, command_id=command_id).request_automation_run(task_id, payload)
+
+
+@router.get("/api/tasks/{task_id}/automation")
+def task_automation_status(task_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return get_task_automation_status_read_model(db, user, task_id)

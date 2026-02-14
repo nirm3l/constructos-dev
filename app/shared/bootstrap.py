@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from features.bootstrap.read_models import bootstrap_payload_read_model
@@ -16,6 +16,9 @@ from features.tasks.domain import EVENT_CREATED as TASK_EVENT_CREATED
 from .models import Base, SessionLocal, User, Workspace, WorkspaceMember, engine
 from .serializers import to_iso_utc
 from .settings import (
+    AGENT_SYSTEM_FULL_NAME,
+    AGENT_SYSTEM_USER_ID,
+    AGENT_SYSTEM_USERNAME,
     BOOTSTRAP_PROJECT_ID,
     BOOTSTRAP_TASK_ID,
     BOOTSTRAP_FULL_NAME,
@@ -27,10 +30,57 @@ from .settings import (
 )
 
 
+def ensure_system_users(db: Session):
+    if not db.get(User, AGENT_SYSTEM_USER_ID):
+        db.add(
+            User(
+                id=AGENT_SYSTEM_USER_ID,
+                username=AGENT_SYSTEM_USERNAME,
+                full_name=AGENT_SYSTEM_FULL_NAME,
+                timezone="UTC",
+                theme="dark",
+            )
+        )
+    workspace = db.get(Workspace, BOOTSTRAP_WORKSPACE_ID)
+    if workspace:
+        membership = db.execute(
+            select(WorkspaceMember).where(
+                WorkspaceMember.workspace_id == BOOTSTRAP_WORKSPACE_ID,
+                WorkspaceMember.user_id == AGENT_SYSTEM_USER_ID,
+            )
+        ).scalar_one_or_none()
+        if not membership:
+            db.add(WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=AGENT_SYSTEM_USER_ID, role="Member"))
+    db.commit()
+
+
+def ensure_task_table_columns(db: Session):
+    # Lightweight SQLite migration path for new task scheduling fields.
+    existing = {
+        row[1]
+        for row in db.execute(text("PRAGMA table_info(tasks)")).fetchall()
+    }
+    required_columns = {
+        "task_type": "ALTER TABLE tasks ADD COLUMN task_type VARCHAR(32) DEFAULT 'manual'",
+        "scheduled_instruction": "ALTER TABLE tasks ADD COLUMN scheduled_instruction TEXT",
+        "scheduled_at_utc": "ALTER TABLE tasks ADD COLUMN scheduled_at_utc DATETIME",
+        "schedule_timezone": "ALTER TABLE tasks ADD COLUMN schedule_timezone VARCHAR(64)",
+        "schedule_state": "ALTER TABLE tasks ADD COLUMN schedule_state VARCHAR(16) DEFAULT 'idle'",
+        "last_schedule_run_at": "ALTER TABLE tasks ADD COLUMN last_schedule_run_at DATETIME",
+        "last_schedule_error": "ALTER TABLE tasks ADD COLUMN last_schedule_error TEXT",
+    }
+    for column, ddl in required_columns.items():
+        if column not in existing:
+            db.execute(text(ddl))
+    db.commit()
+
+
 def bootstrap_data():
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
-        if db.execute(select(func.count(User.id))).scalar_one() > 0:
+        ensure_task_table_columns(db)
+        ensure_system_users(db)
+        if db.get(User, DEFAULT_USER_ID):
             return
 
         db.add_all(
@@ -42,6 +92,7 @@ def bootstrap_data():
         db.add_all(
             [
                 WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=DEFAULT_USER_ID, role="Owner"),
+                WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=AGENT_SYSTEM_USER_ID, role="Member"),
             ]
         )
         db.commit()

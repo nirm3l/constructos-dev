@@ -13,7 +13,10 @@ from features.projects.api import router as projects_router
 from features.tasks.api import router as tasks_router
 from features.users.api import router as users_router
 from features.views.api import router as views_router
+from features.agents.api import router as agents_router
+from features.agents.runner import start_automation_runner, stop_automation_runner
 from shared.core import bootstrap_data, project_kurrent_events_once, start_projection_worker, startup_bootstrap, stop_projection_worker
+from shared.settings import AGENT_RUNNER_ENABLED
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -25,7 +28,11 @@ async def lifespan(_app: FastAPI):
     startup_bootstrap()
     project_kurrent_events_once(limit=5000)
     start_projection_worker()
+    if AGENT_RUNNER_ENABLED:
+        start_automation_runner()
     yield
+    if AGENT_RUNNER_ENABLED:
+        stop_automation_runner()
     stop_projection_worker()
 
 
@@ -47,4 +54,5 @@ app.include_router(projects_router)
 app.include_router(tasks_router)
 app.include_router(notifications_router)
 app.include_router(views_router)
+app.include_router(agents_router)
 app.include_router(debug_router)

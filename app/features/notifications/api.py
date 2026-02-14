@@ -5,11 +5,16 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from shared.core import emit_system_notifications, get_command_id, get_current_user, get_db, serialize_notification
+from shared.core import emit_system_notifications, ensure_role, get_command_id, get_current_user, get_db, serialize_notification
 from shared.observability import incr
 
 from .application import NotificationApplicationService
-from .read_models import list_notifications_after_cursor_read_model, list_notifications_read_model
+from .read_models import (
+    latest_workspace_activity_id_read_model,
+    list_notifications_after_cursor_read_model,
+    list_notifications_read_model,
+    list_workspace_activity_after_id_read_model,
+)
 
 router = APIRouter()
 
@@ -33,11 +38,24 @@ def mark_notification(
 
 
 @router.get("/api/notifications/stream")
-async def notifications_stream(request: Request, last_id: str | None = None, db: Session = Depends(get_db), user=Depends(get_current_user)):
+async def notifications_stream(
+    request: Request,
+    last_id: str | None = None,
+    workspace_id: str | None = None,
+    last_activity_id: int = 0,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
     incr("sse_connections", 1)
+    if workspace_id:
+        ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
 
     async def event_generator():
-        cursor = last_id or ""
+        notification_cursor = last_id or ""
+        activity_cursor = max(last_activity_id, 0)
+        if workspace_id and activity_cursor == 0:
+            # Tail mode by default: only stream new activity generated after this connection starts.
+            activity_cursor = latest_workspace_activity_id_read_model(db, workspace_id)
         while True:
             if await request.is_disconnected():
                 break
@@ -45,12 +63,23 @@ async def notifications_stream(request: Request, last_id: str | None = None, db:
             created = emit_system_notifications(db, user)
             if created:
                 incr("notifications_emitted", created)
-            items = list_notifications_after_cursor_read_model(db, user.id, cursor, limit=50)
+            items = list_notifications_after_cursor_read_model(db, user.id, notification_cursor, limit=50)
 
             for n in items:
                 payload = serialize_notification(n)
                 yield f"id: {n.id}\nevent: notification\ndata: {json.dumps(payload)}\n\n"
-                cursor = n.id
+                notification_cursor = n.id
+
+            if workspace_id:
+                activity_items = list_workspace_activity_after_id_read_model(
+                    db,
+                    workspace_id,
+                    activity_cursor,
+                    limit=100,
+                )
+                for item in activity_items:
+                    yield f"event: task_event\ndata: {json.dumps(item)}\n\n"
+                    activity_cursor = int(item["id"])
 
             yield "event: ping\ndata: {}\n\n"
             await asyncio.sleep(2)

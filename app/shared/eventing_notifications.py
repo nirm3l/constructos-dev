@@ -27,7 +27,7 @@ def _maybe_append_system_notification_event(
             Notification.message == message,
             Notification.created_at >= since,
         )
-    ).scalar_one_or_none()
+    ).first()
     if existing:
         return False
 

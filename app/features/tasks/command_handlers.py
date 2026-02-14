@@ -28,6 +28,7 @@ from shared.core import (
 )
 from .domain import (
     EVENT_ARCHIVED,
+    EVENT_AUTOMATION_REQUESTED,
     EVENT_COMMENT_ADDED,
     EVENT_COMPLETED,
     EVENT_CREATED,
@@ -35,9 +36,25 @@ from .domain import (
     EVENT_REOPENED,
     EVENT_REORDERED,
     EVENT_RESTORED,
+    EVENT_SCHEDULE_CONFIGURED,
     EVENT_UPDATED,
     EVENT_WATCH_TOGGLED,
 )
+
+
+def _validate_schedule_fields(
+    *,
+    task_type: str,
+    scheduled_instruction: str | None,
+    scheduled_at_utc: str | None,
+) -> None:
+    if task_type not in {"manual", "scheduled_instruction"}:
+        raise HTTPException(status_code=422, detail='task_type must be "manual" or "scheduled_instruction"')
+    if task_type == "scheduled_instruction":
+        if not (scheduled_instruction or "").strip():
+            raise HTTPException(status_code=422, detail="scheduled_instruction is required for scheduled_instruction tasks")
+        if not scheduled_at_utc:
+            raise HTTPException(status_code=422, detail="scheduled_at_utc is required for scheduled_instruction tasks")
 
 
 def require_task_command_state(db: Session, user: User, task_id: str, *, allowed: set[str]) -> tuple[str, str | None, str, bool]:
@@ -62,6 +79,14 @@ class CreateTaskHandler:
     def __call__(self) -> dict:
         ensure_role(self.ctx.db, self.payload.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
         user_tz = get_user_zoneinfo(self.ctx.user)
+        task_type = (self.payload.task_type or "manual").strip() or "manual"
+        scheduled_at = normalize_datetime_to_utc(self.payload.scheduled_at_utc, user_tz)
+        scheduled_instruction = (self.payload.scheduled_instruction or "").strip() or None
+        _validate_schedule_fields(
+            task_type=task_type,
+            scheduled_instruction=scheduled_instruction,
+            scheduled_at_utc=to_iso_utc(scheduled_at),
+        )
         tid = allocate_id(self.ctx.db)
         max_order = self.ctx.db.execute(select(func.max(Task.order_index)).where(Task.workspace_id == self.payload.workspace_id)).scalar() or 0
         append_event(
@@ -82,6 +107,11 @@ class CreateTaskHandler:
                 "subtasks": self.payload.subtasks,
                 "attachments": self.payload.attachments,
                 "recurring_rule": self.payload.recurring_rule,
+                "task_type": task_type,
+                "scheduled_instruction": scheduled_instruction if task_type == "scheduled_instruction" else None,
+                "scheduled_at_utc": to_iso_utc(scheduled_at) if task_type == "scheduled_instruction" else None,
+                "schedule_timezone": self.payload.schedule_timezone if task_type == "scheduled_instruction" else None,
+                "schedule_state": "idle",
                 "order_index": max_order + 1,
             },
             metadata={
@@ -92,6 +122,25 @@ class CreateTaskHandler:
             },
             expected_version=0,
         )
+        if task_type == "scheduled_instruction":
+            append_event(
+                self.ctx.db,
+                aggregate_type="Task",
+                aggregate_id=tid,
+                event_type=EVENT_SCHEDULE_CONFIGURED,
+                payload={
+                    "scheduled_instruction": scheduled_instruction,
+                    "scheduled_at_utc": to_iso_utc(scheduled_at),
+                    "schedule_timezone": self.payload.schedule_timezone,
+                    "schedule_state": "idle",
+                },
+                metadata={
+                    "actor_id": self.ctx.user.id,
+                    "workspace_id": self.payload.workspace_id,
+                    "project_id": self.payload.project_id,
+                    "task_id": tid,
+                },
+            )
         self.ctx.db.commit()
         task_view = load_task_view(self.ctx.db, tid)
         if task_view is None:
@@ -109,9 +158,31 @@ class PatchTaskHandler:
         user_tz = get_user_zoneinfo(self.ctx.user)
         data = self.payload.model_dump(exclude_unset=True)
         workspace_id, project_id, _, _ = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member"})
+        current = self.ctx.db.get(Task, self.task_id)
+        if not current:
+            raise HTTPException(status_code=404, detail="Task not found")
         event_payload = dict(data)
         if "due_date" in event_payload:
             event_payload["due_date"] = to_iso_utc(normalize_datetime_to_utc(event_payload["due_date"], user_tz))
+        if "scheduled_at_utc" in event_payload:
+            event_payload["scheduled_at_utc"] = to_iso_utc(normalize_datetime_to_utc(event_payload["scheduled_at_utc"], user_tz))
+        if "scheduled_instruction" in event_payload and event_payload["scheduled_instruction"] is not None:
+            event_payload["scheduled_instruction"] = str(event_payload["scheduled_instruction"]).strip() or None
+
+        effective_task_type = str(event_payload.get("task_type", current.task_type or "manual"))
+        effective_scheduled_instruction = event_payload.get("scheduled_instruction", current.scheduled_instruction)
+        effective_scheduled_at_utc = event_payload.get("scheduled_at_utc", to_iso_utc(current.scheduled_at_utc))
+        _validate_schedule_fields(
+            task_type=effective_task_type,
+            scheduled_instruction=effective_scheduled_instruction,
+            scheduled_at_utc=effective_scheduled_at_utc,
+        )
+        if effective_task_type == "manual":
+            event_payload["scheduled_instruction"] = None
+            event_payload["scheduled_at_utc"] = None
+            event_payload["schedule_timezone"] = None
+            event_payload["schedule_state"] = "idle"
+            event_payload["last_schedule_error"] = None
         append_event(
             self.ctx.db,
             aggregate_type="Task",
@@ -120,6 +191,20 @@ class PatchTaskHandler:
             payload=event_payload,
             metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": self.task_id},
         )
+        if effective_task_type == "scheduled_instruction":
+            append_event(
+                self.ctx.db,
+                aggregate_type="Task",
+                aggregate_id=self.task_id,
+                event_type=EVENT_SCHEDULE_CONFIGURED,
+                payload={
+                    "scheduled_instruction": effective_scheduled_instruction,
+                    "scheduled_at_utc": effective_scheduled_at_utc,
+                    "schedule_timezone": event_payload.get("schedule_timezone", current.schedule_timezone),
+                    "schedule_state": event_payload.get("schedule_state", "idle"),
+                },
+                metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": self.task_id},
+            )
         self.ctx.db.commit()
         task_view = load_task_view(self.ctx.db, self.task_id)
         if task_view is None:
@@ -320,3 +405,24 @@ class ToggleWatchHandler:
             select(TaskWatcher).where(TaskWatcher.task_id == self.task_id, TaskWatcher.user_id == self.ctx.user.id)
         ).scalar_one_or_none() is not None
         return {"watched": watched}
+
+
+@dataclass(frozen=True, slots=True)
+class RequestAutomationRunHandler:
+    ctx: CommandContext
+    task_id: str
+    instruction: str | None = None
+
+    def __call__(self) -> dict:
+        workspace_id, project_id, _, _ = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member"})
+        requested_at = to_iso_utc(datetime.now(timezone.utc))
+        append_event(
+            self.ctx.db,
+            aggregate_type="Task",
+            aggregate_id=self.task_id,
+            event_type=EVENT_AUTOMATION_REQUESTED,
+            payload={"requested_at": requested_at, "instruction": self.instruction},
+            metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": self.task_id},
+        )
+        self.ctx.db.commit()
+        return {"ok": True, "task_id": self.task_id, "automation_state": "queued", "requested_at": requested_at}

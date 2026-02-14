@@ -35,6 +35,13 @@ export type Task = {
   subtasks: Array<Record<string, unknown>>
   attachments: Array<Record<string, unknown>>
   recurring_rule: string | null
+  task_type: 'manual' | 'scheduled_instruction'
+  scheduled_instruction: string | null
+  scheduled_at_utc: string | null
+  schedule_timezone: string | null
+  schedule_state: 'idle' | 'queued' | 'running' | 'done' | 'failed'
+  last_schedule_run_at: string | null
+  last_schedule_error: string | null
   archived: boolean
   completed_at: string | null
   created_at: string | null
@@ -89,8 +96,31 @@ export type TaskActivity = {
   created_at: string
 }
 
+export type TaskAutomationStatus = {
+  task_id: string
+  automation_state: 'idle' | 'queued' | 'running' | 'completed' | 'failed'
+  last_agent_run_at: string | null
+  last_agent_error: string | null
+  last_agent_comment: string | null
+  last_requested_instruction: string | null
+  task_type: 'manual' | 'scheduled_instruction'
+  schedule_state: 'idle' | 'queued' | 'running' | 'done' | 'failed'
+  scheduled_at_utc: string | null
+  scheduled_instruction: string | null
+  last_schedule_run_at: string | null
+  last_schedule_error: string | null
+}
+
 export type ProjectBoard = {
   project_id: string
   statuses: string[]
   lanes: Record<string, Task[]>
+}
+
+export type AgentChatResponse = {
+  ok: boolean
+  action: 'complete' | 'comment'
+  summary: string
+  comment: string | null
+  session_id?: string | null
 }

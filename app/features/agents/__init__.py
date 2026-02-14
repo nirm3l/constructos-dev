@@ -1,0 +1,2 @@
+"""Agent integrations (MCP/FastMCP)."""
+

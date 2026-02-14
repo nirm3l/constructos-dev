@@ -19,6 +19,10 @@ class TaskCreate(BaseModel):
     subtasks: list[dict[str, Any]] = Field(default_factory=list)
     attachments: list[dict[str, Any]] = Field(default_factory=list)
     recurring_rule: str | None = None
+    task_type: str = "manual"
+    scheduled_instruction: str | None = None
+    scheduled_at_utc: datetime | None = None
+    schedule_timezone: str | None = None
 
 
 class TaskPatch(BaseModel):
@@ -34,6 +38,10 @@ class TaskPatch(BaseModel):
     archived: bool | None = None
     project_id: str | None = None
     recurring_rule: str | None = None
+    task_type: str | None = None
+    scheduled_instruction: str | None = None
+    scheduled_at_utc: datetime | None = None
+    schedule_timezone: str | None = None
 
 
 class BulkAction(BaseModel):
@@ -44,6 +52,19 @@ class BulkAction(BaseModel):
 
 class CommentCreate(BaseModel):
     body: str = Field(min_length=1)
+
+
+class TaskAutomationRun(BaseModel):
+    instruction: str | None = Field(default=None, max_length=2000)
+
+
+class AgentChatRun(BaseModel):
+    workspace_id: str
+    instruction: str = Field(min_length=1, max_length=4000)
+    project_id: str | None = None
+    session_id: str | None = None
+    history: list[dict[str, str]] = Field(default_factory=list)
+    allow_mutations: bool = False
 
 
 class SavedViewCreate(BaseModel):
@@ -96,6 +117,13 @@ class TaskDTO:
     subtasks: list[dict[str, Any]]
     attachments: list[dict[str, Any]]
     recurring_rule: str | None
+    task_type: str
+    scheduled_instruction: str | None
+    scheduled_at_utc: str | None
+    schedule_timezone: str | None
+    schedule_state: str
+    last_schedule_run_at: str | None
+    last_schedule_error: str | None
     archived: bool
     completed_at: str | None
     created_at: str | None
