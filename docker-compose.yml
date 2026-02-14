@@ -26,8 +26,9 @@ services:
       EVENTSTORE_URI: esdb://kurrentdb:2113?tls=false
       AGENT_RUNNER_ENABLED: "true"
       AGENT_RUNNER_INTERVAL_SECONDS: "3"
-      AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS: "false"
+      AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS: "true"
       AGENT_EXECUTOR_MODE: "command"
+      AGENT_EXECUTOR_TIMEOUT_SECONDS: "180"
       AGENT_CODEX_COMMAND: "python -m features.agents.codex_mcp_adapter"
       AGENT_CODEX_MCP_URL: "http://mcp-tools:8090/mcp"
       AGENT_CODEX_MCP_READONLY_URL: "http://mcp-tools-ro:8090/mcp"
@@ -54,6 +55,7 @@ services:
       MCP_SERVER_PORT: "8090"
       MCP_SERVER_PATH: /mcp
       MCP_SERVER_STATELESS_HTTP: "true"
+      AGENT_EXECUTOR_TIMEOUT_SECONDS: "180"
       MCP_AUTH_TOKEN: "dev-mcp-token"
       MCP_TOOL_AUTH_TOKEN: "dev-mcp-token"
       MCP_ACTOR_USER_ID: "00000000-0000-0000-0000-000000000099"
@@ -88,6 +90,7 @@ services:
       MCP_SERVER_PORT: "8090"
       MCP_SERVER_PATH: /mcp
       MCP_SERVER_STATELESS_HTTP: "true"
+      AGENT_EXECUTOR_TIMEOUT_SECONDS: "180"
       MCP_SERVER_READ_ONLY: "true"
       MCP_AUTH_TOKEN: "dev-mcp-token"
       MCP_TOOL_AUTH_TOKEN: "dev-mcp-token"

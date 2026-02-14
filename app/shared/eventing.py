@@ -65,6 +65,9 @@ def append_event(
             raise ConcurrencyConflictError(str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=503, detail=f"Kurrent append failed: {exc}") from exc
+        # Write-through projection to keep the SQLite read-model consistent even if the
+        # background projection checkpoint is stale (e.g. EventStore reset).
+        project_event(db, env)
     else:
         db.add(
             StoredEvent(

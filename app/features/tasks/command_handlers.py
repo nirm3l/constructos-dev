@@ -20,10 +20,12 @@ from shared.core import (
     append_event,
     allocate_id,
     ensure_role,
+    get_kurrent_client,
     get_user_zoneinfo,
     load_task_command_state,
     load_task_view,
     normalize_datetime_to_utc,
+    rebuild_state,
     to_iso_utc,
 )
 from .domain import (
@@ -158,9 +160,29 @@ class PatchTaskHandler:
         user_tz = get_user_zoneinfo(self.ctx.user)
         data = self.payload.model_dump(exclude_unset=True)
         workspace_id, project_id, _, _ = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member"})
-        current = self.ctx.db.get(Task, self.task_id)
-        if not current:
+        current_row = self.ctx.db.get(Task, self.task_id)
+        current_state = None
+        if current_row is None and get_kurrent_client() is not None:
+            current_state, _ = rebuild_state(self.ctx.db, "Task", self.task_id)
+        if current_row is None and not current_state:
             raise HTTPException(status_code=404, detail="Task not found")
+
+        current_task_type = (
+            (current_row.task_type if current_row is not None else None)
+            or (str(current_state.get("task_type")) if current_state else None)
+            or "manual"
+        )
+        current_scheduled_instruction = (
+            current_row.scheduled_instruction if current_row is not None else (current_state.get("scheduled_instruction") if current_state else None)
+        )
+        current_scheduled_at_utc = (
+            to_iso_utc(current_row.scheduled_at_utc)
+            if current_row is not None
+            else (current_state.get("scheduled_at_utc") if current_state else None)
+        )
+        current_schedule_timezone = (
+            current_row.schedule_timezone if current_row is not None else (current_state.get("schedule_timezone") if current_state else None)
+        )
         event_payload = dict(data)
         if "due_date" in event_payload:
             event_payload["due_date"] = to_iso_utc(normalize_datetime_to_utc(event_payload["due_date"], user_tz))
@@ -169,9 +191,9 @@ class PatchTaskHandler:
         if "scheduled_instruction" in event_payload and event_payload["scheduled_instruction"] is not None:
             event_payload["scheduled_instruction"] = str(event_payload["scheduled_instruction"]).strip() or None
 
-        effective_task_type = str(event_payload.get("task_type", current.task_type or "manual"))
-        effective_scheduled_instruction = event_payload.get("scheduled_instruction", current.scheduled_instruction)
-        effective_scheduled_at_utc = event_payload.get("scheduled_at_utc", to_iso_utc(current.scheduled_at_utc))
+        effective_task_type = str(event_payload.get("task_type", current_task_type))
+        effective_scheduled_instruction = event_payload.get("scheduled_instruction", current_scheduled_instruction)
+        effective_scheduled_at_utc = event_payload.get("scheduled_at_utc", current_scheduled_at_utc)
         _validate_schedule_fields(
             task_type=effective_task_type,
             scheduled_instruction=effective_scheduled_instruction,
@@ -183,6 +205,7 @@ class PatchTaskHandler:
             event_payload["schedule_timezone"] = None
             event_payload["schedule_state"] = "idle"
             event_payload["last_schedule_error"] = None
+            event_payload["recurring_rule"] = None
         append_event(
             self.ctx.db,
             aggregate_type="Task",
@@ -200,7 +223,7 @@ class PatchTaskHandler:
                 payload={
                     "scheduled_instruction": effective_scheduled_instruction,
                     "scheduled_at_utc": effective_scheduled_at_utc,
-                    "schedule_timezone": event_payload.get("schedule_timezone", current.schedule_timezone),
+                    "schedule_timezone": event_payload.get("schedule_timezone", current_schedule_timezone),
                     "schedule_state": event_payload.get("schedule_state", "idle"),
                 },
                 metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": self.task_id},

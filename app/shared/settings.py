@@ -47,7 +47,7 @@ AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS = os.getenv("AGENT_RUNNER_APPLY_OUTCOME_MUT
     "on",
 }
 AGENT_EXECUTOR_MODE = os.getenv("AGENT_EXECUTOR_MODE", "placeholder").strip().lower() or "placeholder"
-AGENT_EXECUTOR_TIMEOUT_SECONDS = float(os.getenv("AGENT_EXECUTOR_TIMEOUT_SECONDS", "45"))
+AGENT_EXECUTOR_TIMEOUT_SECONDS = float(os.getenv("AGENT_EXECUTOR_TIMEOUT_SECONDS", "180"))
 AGENT_CODEX_COMMAND = os.getenv("AGENT_CODEX_COMMAND", "").strip()
 AGENT_CODEX_MCP_URL = os.getenv("AGENT_CODEX_MCP_URL", "http://mcp-tools:8090/mcp").strip()
 AGENT_CODEX_MCP_READONLY_URL = os.getenv("AGENT_CODEX_MCP_READONLY_URL", "http://mcp-tools-ro:8090/mcp").strip()

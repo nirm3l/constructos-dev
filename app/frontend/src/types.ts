@@ -124,3 +124,26 @@ export type AgentChatResponse = {
   comment: string | null
   session_id?: string | null
 }
+
+export type Note = {
+  id: string
+  workspace_id: string
+  project_id: string | null
+  task_id: string | null
+  title: string
+  body: string
+  tags: string[]
+  pinned: boolean
+  archived: boolean
+  created_by: string
+  updated_by: string
+  created_at: string | null
+  updated_at: string | null
+}
+
+export type NotesPage = {
+  items: Note[]
+  total: number
+  limit: number
+  offset: number
+}

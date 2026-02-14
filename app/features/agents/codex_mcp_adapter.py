@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 
-from shared.settings import AGENT_CODEX_MCP_READONLY_URL, AGENT_CODEX_MCP_URL, AGENT_CODEX_MODEL, AGENT_EXECUTOR_TIMEOUT_SECONDS
+from shared.settings import AGENT_CODEX_MCP_URL, AGENT_CODEX_MODEL, AGENT_EXECUTOR_TIMEOUT_SECONDS
 
 
 def _build_prompt(ctx: dict) -> str:
@@ -17,12 +17,6 @@ def _build_prompt(ctx: dict) -> str:
     instruction = ctx.get("instruction", "")
     workspace_id = ctx.get("workspace_id") or ""
     project_id = ctx.get("project_id") or ""
-    allow_mutations = bool(ctx.get("allow_mutations", True))
-    mutation_guidance = (
-        "- Mutating tools are allowed for this request.\n"
-        if allow_mutations
-        else "- This request is read-only. Do not call mutating tools.\n"
-    )
     has_task_context = bool(str(task_id or "").strip())
     context_guidance = (
         "- First call MCP tool get_task(task_id) to validate current task data.\n"
@@ -43,7 +37,12 @@ def _build_prompt(ctx: dict) -> str:
         "Guidance:\n"
         f"{context_guidance}"
         "- You may call task-management MCP tools relevant to the request.\n"
-        f"{mutation_guidance}"
+        "- Prefer bulk tools when operating on many tasks (avoid per-task loops when possible).\n"
+        "- Prefer archive_all_notes/archive_all_tasks for 'archive everything' requests.\n"
+        "- If the user asks for a plan/spec/design doc, prefer creating a Note (Markdown) via MCP tools so it is visible in the UI.\n"
+        "- When creating a plan note: use a clear title starting with 'Plan:' and include actionable steps.\n"
+        "- If you are in task context, link the note to the task by setting task_id when creating the note.\n"
+        "- Mutating tools are allowed for this request.\n"
         "- Apply requested changes via MCP tools directly when possible.\n"
         "- Return action=complete only if this task should be completed; otherwise return action=comment.\n"
         "- summary must state what was actually done.\n"
@@ -59,8 +58,7 @@ def main() -> int:
 
     ctx = json.loads(raw)
     prompt = _build_prompt(ctx)
-    allow_mutations = bool(ctx.get("allow_mutations", True))
-    mcp_url = AGENT_CODEX_MCP_URL if allow_mutations else AGENT_CODEX_MCP_READONLY_URL
+    mcp_url = AGENT_CODEX_MCP_URL
     schema = {
         "type": "object",
         "properties": {

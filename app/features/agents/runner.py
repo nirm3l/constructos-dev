@@ -21,6 +21,7 @@ from features.tasks.domain import (
 )
 from shared.eventing import append_event, rebuild_state
 from shared.models import SessionLocal, Task
+from shared.schedule import next_scheduled_at_utc, parse_recurring_rule
 from shared.serializers import to_iso_utc
 from shared.settings import AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS, AGENT_RUNNER_INTERVAL_SECONDS, AGENT_SYSTEM_USER_ID
 from shared.settings import AGENT_EXECUTOR_TIMEOUT_SECONDS
@@ -49,6 +50,8 @@ def run_queued_automation_once(limit: int = 10) -> int:
             instruction = (state.get("last_requested_instruction") or "").strip()
             is_scheduled = state.get("task_type") == "scheduled_instruction"
             schedule_state = state.get("schedule_state", "idle")
+            recurring_rule_raw = (state.get("recurring_rule") or "").strip() or None
+            scheduled_at_raw = state.get("scheduled_at_utc")
 
             try:
                 append_event(
@@ -129,6 +132,32 @@ def run_queued_automation_once(limit: int = 10) -> int:
                             "task_id": task_id,
                         },
                     )
+                    # Recurring schedules: re-arm the task for the next run.
+                    interval = parse_recurring_rule(recurring_rule_raw)
+                    if interval and scheduled_at_raw:
+                        try:
+                            base_scheduled_at = datetime.fromisoformat(str(scheduled_at_raw))
+                            next_at = next_scheduled_at_utc(
+                                base_scheduled_at_utc=base_scheduled_at,
+                                now_utc=datetime.now(timezone.utc),
+                                interval=interval,
+                            )
+                            append_event(
+                                db,
+                                aggregate_type="Task",
+                                aggregate_id=task_id,
+                                event_type="TaskUpdated",
+                                payload={"scheduled_at_utc": to_iso_utc(next_at), "schedule_state": "idle"},
+                                metadata={
+                                    "actor_id": AGENT_SYSTEM_USER_ID,
+                                    "workspace_id": workspace_id,
+                                    "project_id": project_id,
+                                    "task_id": task_id,
+                                },
+                            )
+                        except Exception:
+                            # If the rule/time is malformed, keep the schedule as-is (one-shot behavior).
+                            pass
                 db.commit()
             except Exception as exc:
                 db.rollback()
@@ -155,6 +184,31 @@ def run_queued_automation_once(limit: int = 10) -> int:
                             "task_id": task_id,
                         },
                     )
+                    # If it's recurring, keep the cadence going even after failures.
+                    interval = parse_recurring_rule(recurring_rule_raw)
+                    if interval and scheduled_at_raw:
+                        try:
+                            base_scheduled_at = datetime.fromisoformat(str(scheduled_at_raw))
+                            next_at = next_scheduled_at_utc(
+                                base_scheduled_at_utc=base_scheduled_at,
+                                now_utc=datetime.now(timezone.utc),
+                                interval=interval,
+                            )
+                            append_event(
+                                db,
+                                aggregate_type="Task",
+                                aggregate_id=task_id,
+                                event_type="TaskUpdated",
+                                payload={"scheduled_at_utc": to_iso_utc(next_at), "schedule_state": "idle"},
+                                metadata={
+                                    "actor_id": AGENT_SYSTEM_USER_ID,
+                                    "workspace_id": workspace_id,
+                                    "project_id": project_id,
+                                    "task_id": task_id,
+                                },
+                            )
+                        except Exception:
+                            pass
                 db.commit()
             processed += 1
             if processed >= limit:

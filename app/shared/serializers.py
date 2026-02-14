@@ -12,8 +12,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .contracts import NotificationDTO, TaskCommandState, TaskDTO
-from .models import Notification, Project, SavedView, Task
+from .contracts import NoteCommandState, NoteDTO, NotificationDTO, TaskCommandState, TaskDTO
+from .models import Note, Notification, Project, SavedView, Task
 from .settings import DEFAULT_STATUSES
 
 
@@ -71,6 +71,25 @@ def serialize_task(task: Task) -> dict[str, Any]:
     return asdict(dto)
 
 
+def serialize_note(note: Note) -> dict[str, Any]:
+    dto = NoteDTO(
+        id=note.id,
+        workspace_id=note.workspace_id,
+        project_id=note.project_id,
+        task_id=note.task_id,
+        title=note.title,
+        body=note.body or "",
+        tags=json.loads(note.tags or "[]"),
+        pinned=bool(note.pinned),
+        archived=bool(note.archived),
+        created_by=note.created_by,
+        updated_by=note.updated_by,
+        created_at=to_iso_utc(note.created_at),
+        updated_at=to_iso_utc(note.updated_at),
+    )
+    return asdict(dto)
+
+
 def serialize_notification(notification: Notification) -> dict[str, Any]:
     dto = NotificationDTO(
         id=notification.id,
@@ -122,6 +141,35 @@ def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
     return None
 
 
+def load_note_view(db: Session, note_id: str) -> dict[str, Any] | None:
+    from .eventing import get_kurrent_client, rebuild_state
+
+    if get_kurrent_client() is not None:
+        state, _ = rebuild_state(db, "Note", note_id)
+        if not state or state.get("is_deleted"):
+            return None
+        return {
+            "id": note_id,
+            "workspace_id": state.get("workspace_id"),
+            "project_id": state.get("project_id"),
+            "task_id": state.get("task_id"),
+            "title": state.get("title") or "",
+            "body": state.get("body", ""),
+            "tags": state.get("tags", []),
+            "pinned": bool(state.get("pinned", False)),
+            "archived": bool(state.get("archived", False)),
+            "created_by": state.get("created_by") or "",
+            "updated_by": state.get("updated_by") or "",
+            "created_at": None,
+            "updated_at": None,
+        }
+
+    note = db.get(Note, note_id)
+    if note and not note.is_deleted:
+        return serialize_note(note)
+    return None
+
+
 def load_task_command_state(db: Session, task_id: str) -> TaskCommandState | None:
     from .eventing import get_kurrent_client, rebuild_state
 
@@ -146,6 +194,37 @@ def load_task_command_state(db: Session, task_id: str) -> TaskCommandState | Non
         workspace_id=state.get("workspace_id", ""),
         project_id=state.get("project_id"),
         status=state.get("status", "To do"),
+        archived=bool(state.get("archived", False)),
+        is_deleted=bool(state.get("is_deleted", False)),
+    )
+
+
+def load_note_command_state(db: Session, note_id: str) -> NoteCommandState | None:
+    from .eventing import get_kurrent_client, rebuild_state
+
+    if get_kurrent_client() is None:
+        note = db.get(Note, note_id)
+        if not note:
+            return None
+        return NoteCommandState(
+            id=note.id,
+            workspace_id=note.workspace_id,
+            project_id=note.project_id,
+            task_id=note.task_id,
+            pinned=bool(note.pinned),
+            archived=bool(note.archived),
+            is_deleted=bool(note.is_deleted),
+        )
+
+    state, _ = rebuild_state(db, "Note", note_id)
+    if not state:
+        return None
+    return NoteCommandState(
+        id=note_id,
+        workspace_id=state.get("workspace_id", ""),
+        project_id=state.get("project_id"),
+        task_id=state.get("task_id"),
+        pinned=bool(state.get("pinned", False)),
         archived=bool(state.get("archived", False)),
         is_deleted=bool(state.get("is_deleted", False)),
     )

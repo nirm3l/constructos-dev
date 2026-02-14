@@ -558,3 +558,38 @@ def test_scheduled_instruction_task_is_queued_and_processed(tmp_path):
     assert final_status['automation_state'] == 'completed'
     assert final_status['schedule_state'] == 'done'
     assert final_status['last_schedule_run_at'] is not None
+
+
+def test_recurring_scheduled_instruction_rearms_next_run(tmp_path):
+    client = build_client(tmp_path)
+    ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
+    due_at = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Recurring scheduled run',
+            'workspace_id': ws_id,
+            'task_type': 'scheduled_instruction',
+            'scheduled_instruction': 'Leave progress note',
+            'scheduled_at_utc': due_at,
+            'schedule_timezone': 'UTC',
+            'recurring_rule': 'every:5m',
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()['id']
+
+    from features.agents.runner import queue_due_scheduled_tasks_once, run_queued_automation_once
+
+    queued = queue_due_scheduled_tasks_once(limit=10)
+    assert queued >= 1
+
+    processed = run_queued_automation_once(limit=10)
+    assert processed >= 1
+
+    status = client.get(f'/api/tasks/{task_id}/automation').json()
+    assert status['automation_state'] == 'completed'
+    assert status['schedule_state'] == 'idle'
+    assert status['scheduled_at_utc'] is not None
+    assert datetime.fromisoformat(status['scheduled_at_utc']) > datetime.now(timezone.utc)

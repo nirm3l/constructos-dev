@@ -64,7 +64,27 @@ class AgentChatRun(BaseModel):
     project_id: str | None = None
     session_id: str | None = None
     history: list[dict[str, str]] = Field(default_factory=list)
-    allow_mutations: bool = False
+    allow_mutations: bool = True
+
+
+class NoteCreate(BaseModel):
+    title: str = Field(min_length=1)
+    workspace_id: str
+    project_id: str | None = None
+    task_id: str | None = None
+    body: str = ""
+    tags: list[str] = Field(default_factory=list)
+    pinned: bool = False
+
+
+class NotePatch(BaseModel):
+    title: str | None = None
+    body: str | None = None
+    tags: list[str] | None = None
+    pinned: bool | None = None
+    archived: bool | None = None
+    project_id: str | None = None
+    task_id: str | None = None
 
 
 class SavedViewCreate(BaseModel):
@@ -151,3 +171,31 @@ class TaskCommandState:
 
 class ConcurrencyConflictError(Exception):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class NoteDTO:
+    id: str
+    workspace_id: str
+    project_id: str | None
+    task_id: str | None
+    title: str
+    body: str
+    tags: list[str]
+    pinned: bool
+    archived: bool
+    created_by: str
+    updated_by: str
+    created_at: str | None
+    updated_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class NoteCommandState:
+    id: str
+    workspace_id: str
+    project_id: str | None
+    task_id: str | None
+    pinned: bool
+    archived: bool
+    is_deleted: bool

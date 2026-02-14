@@ -9,7 +9,10 @@ from sqlalchemy import select
 from features.projects.application import ProjectApplicationService
 from features.tasks.application import TaskApplicationService
 from features.tasks.read_models import TaskListQuery, get_task_automation_status_read_model, list_tasks_read_model
-from shared.core import CommentCreate, Project, ProjectCreate, SessionLocal, TaskAutomationRun, TaskCreate, TaskPatch, User, load_task_command_state, load_task_view
+from features.notes.application import NoteApplicationService
+from features.notes.read_models import NoteListQuery, list_notes_read_model
+from shared.core import BulkAction, CommentCreate, Project, ProjectCreate, SessionLocal, TaskAutomationRun, TaskCreate, TaskPatch, User, load_task_command_state, load_task_view
+from shared.core import NoteCreate, NotePatch, load_note_command_state, load_note_view
 from shared.deps import ensure_role
 from shared.models import User as UserModel
 from shared.settings import (
@@ -39,6 +42,16 @@ class AgentTaskService:
             return
         if MCP_ALLOWED_PROJECT_IDS and project_id not in MCP_ALLOWED_PROJECT_IDS:
             raise HTTPException(status_code=403, detail="Project is outside MCP allowlist")
+
+    def _assert_task_allowed(self, *, db, task_id: str | None):
+        if not task_id:
+            return None
+        state = load_task_command_state(db, task_id)
+        if not state or state.is_deleted:
+            raise HTTPException(status_code=404, detail="Task not found")
+        self._assert_workspace_allowed(state.workspace_id)
+        self._assert_project_allowed(state.project_id)
+        return state
 
     def _resolve_actor_user(self) -> UserModel:
         with SessionLocal() as db:
@@ -90,6 +103,28 @@ class AgentTaskService:
             detail="workspace_id is required for project creation when MCP default workspace is not configured",
         )
 
+    def _resolve_workspace_for_note_create(
+        self,
+        *,
+        db,
+        explicit_workspace_id: str | None,
+        project_id: str | None,
+        task_id: str | None,
+    ) -> tuple[str, str | None, str | None]:
+        # task_id is the strongest scope anchor: it implies workspace/project.
+        if task_id:
+            task_state = self._assert_task_allowed(db=db, task_id=task_id)
+            assert task_state is not None
+            if explicit_workspace_id and explicit_workspace_id != task_state.workspace_id:
+                raise HTTPException(status_code=400, detail="task_id does not belong to workspace_id")
+            if project_id and project_id != task_state.project_id:
+                raise HTTPException(status_code=400, detail="task_id does not belong to project_id")
+            return task_state.workspace_id, task_state.project_id, task_id
+
+        # Else: same logic as tasks/projects.
+        ws_id, proj_id = self._resolve_workspace_for_create(db=db, explicit_workspace_id=explicit_workspace_id, project_id=project_id)
+        return ws_id, proj_id, None
+
     def list_tasks(
         self,
         *,
@@ -129,6 +164,59 @@ class AgentTaskService:
                     offset=offset,
                 ),
             )
+
+    def list_notes(
+        self,
+        *,
+        workspace_id: str,
+        auth_token: str | None = None,
+        project_id: str | None = None,
+        task_id: str | None = None,
+        q: str | None = None,
+        archived: bool = False,
+        pinned: bool | None = None,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> dict:
+        self._require_token(auth_token)
+        self._assert_workspace_allowed(workspace_id)
+        self._assert_project_allowed(project_id)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            if task_id:
+                self._assert_task_allowed(db=db, task_id=task_id)
+            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            return list_notes_read_model(
+                db,
+                user,
+                NoteListQuery(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    task_id=task_id,
+                    q=q,
+                    archived=archived,
+                    pinned=pinned,
+                    limit=limit,
+                    offset=offset,
+                ),
+            )
+
+    def get_note(self, *, note_id: str, auth_token: str | None = None) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            state = load_note_command_state(db, note_id)
+            if not state or state.is_deleted:
+                raise HTTPException(status_code=404, detail="Note not found")
+            self._assert_workspace_allowed(state.workspace_id)
+            self._assert_project_allowed(state.project_id)
+            if state.task_id:
+                self._assert_task_allowed(db=db, task_id=state.task_id)
+            ensure_role(db, state.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            note = load_note_view(db, note_id)
+            if not note:
+                raise HTTPException(status_code=404, detail="Note not found")
+            return note
 
     def get_task(self, *, task_id: str, auth_token: str | None = None) -> dict:
         self._require_token(auth_token)
@@ -198,6 +286,39 @@ class AgentTaskService:
             )
             return TaskApplicationService(db, user, command_id=command_id or f"mcp-create-{uuid.uuid4()}").create_task(payload)
 
+    def create_note(
+        self,
+        *,
+        title: str,
+        body: str = "",
+        workspace_id: str | None = None,
+        auth_token: str | None = None,
+        project_id: str | None = None,
+        task_id: str | None = None,
+        tags: list[str] | None = None,
+        pinned: bool = False,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            ws_id, proj_id, resolved_task_id = self._resolve_workspace_for_note_create(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+                task_id=task_id,
+            )
+            payload = NoteCreate(
+                workspace_id=ws_id,
+                project_id=proj_id,
+                task_id=resolved_task_id,
+                title=title,
+                body=body or "",
+                tags=tags or [],
+                pinned=bool(pinned),
+            )
+            return NoteApplicationService(db, user, command_id=command_id or f"mcp-note-create-{uuid.uuid4()}").create_note(payload)
+
     def create_project(
         self,
         *,
@@ -219,6 +340,73 @@ class AgentTaskService:
                 custom_statuses=custom_statuses,
             )
             return ProjectApplicationService(db, user, command_id=command_id or f"mcp-project-create-{uuid.uuid4()}").create_project(payload)
+
+    def update_note(self, *, note_id: str, patch: dict, auth_token: str | None = None, command_id: str | None = None) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            state = load_note_command_state(db, note_id)
+            if not state or state.is_deleted:
+                raise HTTPException(status_code=404, detail="Note not found")
+            self._assert_workspace_allowed(state.workspace_id)
+            self._assert_project_allowed(state.project_id)
+            payload = NotePatch(**patch)
+            return NoteApplicationService(db, user, command_id=command_id or f"mcp-note-patch-{uuid.uuid4()}").patch_note(note_id, payload)
+
+    def archive_note(self, *, note_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            state = load_note_command_state(db, note_id)
+            if not state or state.is_deleted:
+                raise HTTPException(status_code=404, detail="Note not found")
+            self._assert_workspace_allowed(state.workspace_id)
+            self._assert_project_allowed(state.project_id)
+            return NoteApplicationService(db, user, command_id=command_id or f"mcp-note-archive-{uuid.uuid4()}").archive_note(note_id)
+
+    def restore_note(self, *, note_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            state = load_note_command_state(db, note_id)
+            if not state or state.is_deleted:
+                raise HTTPException(status_code=404, detail="Note not found")
+            self._assert_workspace_allowed(state.workspace_id)
+            self._assert_project_allowed(state.project_id)
+            return NoteApplicationService(db, user, command_id=command_id or f"mcp-note-restore-{uuid.uuid4()}").restore_note(note_id)
+
+    def pin_note(self, *, note_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            state = load_note_command_state(db, note_id)
+            if not state or state.is_deleted:
+                raise HTTPException(status_code=404, detail="Note not found")
+            self._assert_workspace_allowed(state.workspace_id)
+            self._assert_project_allowed(state.project_id)
+            return NoteApplicationService(db, user, command_id=command_id or f"mcp-note-pin-{uuid.uuid4()}").pin_note(note_id)
+
+    def unpin_note(self, *, note_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            state = load_note_command_state(db, note_id)
+            if not state or state.is_deleted:
+                raise HTTPException(status_code=404, detail="Note not found")
+            self._assert_workspace_allowed(state.workspace_id)
+            self._assert_project_allowed(state.project_id)
+            return NoteApplicationService(db, user, command_id=command_id or f"mcp-note-unpin-{uuid.uuid4()}").unpin_note(note_id)
+
+    def delete_note(self, *, note_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            state = load_note_command_state(db, note_id)
+            if not state or state.is_deleted:
+                raise HTTPException(status_code=404, detail="Note not found")
+            self._assert_workspace_allowed(state.workspace_id)
+            self._assert_project_allowed(state.project_id)
+            return NoteApplicationService(db, user, command_id=command_id or f"mcp-note-delete-{uuid.uuid4()}").delete_note(note_id)
 
     def update_task(self, *, task_id: str, patch: dict, auth_token: str | None = None, command_id: str | None = None) -> dict:
         self._require_token(auth_token)
@@ -280,3 +468,107 @@ class AgentTaskService:
             self._assert_project_allowed(state.project_id)
             payload = TaskAutomationRun(instruction=instruction)
             return TaskApplicationService(db, user, command_id=command_id or f"mcp-run-{uuid.uuid4()}").request_automation_run(task_id, payload)
+
+    def bulk_task_action(
+        self,
+        *,
+        task_ids: list[str],
+        action: str,
+        payload: dict | None = None,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        payload = payload or {}
+        cleaned: list[str] = []
+        with SessionLocal() as db:
+            for task_id in task_ids:
+                try:
+                    state = load_task_command_state(db, task_id)
+                except Exception:
+                    state = None
+                if not state or state.is_deleted:
+                    continue
+                self._assert_workspace_allowed(state.workspace_id)
+                self._assert_project_allowed(state.project_id)
+                cleaned.append(task_id)
+            if not cleaned:
+                return {"updated": 0}
+            bulk = BulkAction(task_ids=cleaned, action=str(action), payload=payload)
+            return TaskApplicationService(db, user, command_id=command_id or f"mcp-bulk-{uuid.uuid4()}").bulk_action(bulk)
+
+    def archive_all_tasks(
+        self,
+        *,
+        workspace_id: str,
+        auth_token: str | None = None,
+        project_id: str | None = None,
+        q: str | None = None,
+        limit: int = 200,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        self._assert_workspace_allowed(workspace_id)
+        self._assert_project_allowed(project_id)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member"})
+            page = list_tasks_read_model(
+                db,
+                user,
+                TaskListQuery(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    q=q,
+                    archived=False,
+                    limit=min(int(limit or 200), 200),
+                    offset=0,
+                ),
+            )
+            ids = [t["id"] for t in (page.get("items") or []) if t.get("id")]
+            if not ids:
+                return {"updated": 0}
+            bulk = BulkAction(task_ids=ids, action="archive", payload={})
+            return TaskApplicationService(db, user, command_id=command_id or f"mcp-archive-all-{uuid.uuid4()}").bulk_action(bulk)
+
+    def archive_all_notes(
+        self,
+        *,
+        workspace_id: str,
+        auth_token: str | None = None,
+        project_id: str | None = None,
+        q: str | None = None,
+        limit: int = 200,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        self._assert_workspace_allowed(workspace_id)
+        self._assert_project_allowed(project_id)
+        user = self._resolve_actor_user()
+        updated = 0
+        with SessionLocal() as db:
+            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member"})
+            page = list_notes_read_model(
+                db,
+                user,
+                NoteListQuery(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    q=q,
+                    archived=False,
+                    limit=min(int(limit or 200), 200),
+                    offset=0,
+                ),
+            )
+            ids = [n["id"] for n in (page.get("items") or []) if n.get("id")]
+            for note_id in ids:
+                # Re-validate scope per note to be safe.
+                state = load_note_command_state(db, note_id)
+                if not state or state.is_deleted or state.archived:
+                    continue
+                self._assert_workspace_allowed(state.workspace_id)
+                self._assert_project_allowed(state.project_id)
+                NoteApplicationService(db, user, command_id=(command_id or f"mcp-archive-notes-{uuid.uuid4()}") + f":{note_id}").archive_note(note_id)
+                updated += 1
+            return {"updated": updated}

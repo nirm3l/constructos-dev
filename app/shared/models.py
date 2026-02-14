@@ -106,6 +106,22 @@ class TaskComment(Base, TimeMixin):
     body: Mapped[str] = mapped_column(Text)
 
 
+class Note(Base, TimeMixin):
+    __tablename__ = "notes"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), nullable=True, index=True)
+    task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id"), nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(256))
+    body: Mapped[str] = mapped_column(Text, default="")
+    tags: Mapped[str] = mapped_column(Text, default="[]")
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False)
+    archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    updated_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+
 class Notification(Base, TimeMixin):
     __tablename__ = "notifications"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)

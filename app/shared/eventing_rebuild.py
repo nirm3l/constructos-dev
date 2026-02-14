@@ -43,11 +43,22 @@ from features.tasks.domain import (
     EVENT_WATCH_TOGGLED as TASK_EVENT_WATCH_TOGGLED,
     MUTATION_EVENTS as TASK_MUTATION_EVENTS,
 )
+from features.notes.domain import (
+    EVENT_ARCHIVED as NOTE_EVENT_ARCHIVED,
+    EVENT_CREATED as NOTE_EVENT_CREATED,
+    EVENT_DELETED as NOTE_EVENT_DELETED,
+    EVENT_PINNED as NOTE_EVENT_PINNED,
+    EVENT_RESTORED as NOTE_EVENT_RESTORED,
+    EVENT_UNPINNED as NOTE_EVENT_UNPINNED,
+    EVENT_UPDATED as NOTE_EVENT_UPDATED,
+    MUTATION_EVENTS as NOTE_MUTATION_EVENTS,
+)
 from features.users.domain import EVENT_PREFERENCES_UPDATED as USER_EVENT_PREFERENCES_UPDATED
 from features.views.domain import EVENT_CREATED as SAVED_VIEW_EVENT_CREATED
 from .models import (
     ActivityLog,
     AggregateSnapshot,
+    Note,
     Notification,
     Project,
     SavedView,
@@ -278,6 +289,49 @@ def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str
     return s
 
 
+def apply_note_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, Any]:
+    s = dict(state)
+    p = event.payload
+    if event.event_type == NOTE_EVENT_CREATED:
+        s = {
+            "id": event.aggregate_id,
+            "workspace_id": p["workspace_id"],
+            "project_id": p.get("project_id"),
+            "task_id": p.get("task_id"),
+            "title": p.get("title", ""),
+            "body": p.get("body", ""),
+            "tags": p.get("tags", []),
+            "pinned": bool(p.get("pinned", False)),
+            "archived": bool(p.get("archived", False)),
+            "is_deleted": bool(p.get("is_deleted", False)),
+            "created_by": p.get("created_by"),
+            "updated_by": p.get("updated_by"),
+        }
+    elif event.event_type == NOTE_EVENT_UPDATED:
+        s.update(p)
+    elif event.event_type == NOTE_EVENT_ARCHIVED:
+        s["archived"] = True
+        if "updated_by" in p:
+            s["updated_by"] = p.get("updated_by")
+    elif event.event_type == NOTE_EVENT_RESTORED:
+        s["archived"] = False
+        if "updated_by" in p:
+            s["updated_by"] = p.get("updated_by")
+    elif event.event_type == NOTE_EVENT_PINNED:
+        s["pinned"] = True
+        if "updated_by" in p:
+            s["updated_by"] = p.get("updated_by")
+    elif event.event_type == NOTE_EVENT_UNPINNED:
+        s["pinned"] = False
+        if "updated_by" in p:
+            s["updated_by"] = p.get("updated_by")
+    elif event.event_type == NOTE_EVENT_DELETED:
+        s["is_deleted"] = True
+        if "updated_by" in p:
+            s["updated_by"] = p.get("updated_by")
+    return s
+
+
 def rebuild_state(db: Session, aggregate_type: str, aggregate_id: str) -> tuple[dict[str, Any], int]:
     state, version = load_snapshot(db, aggregate_type, aggregate_id)
     for ev in load_events_after(db, aggregate_type, aggregate_id, version):
@@ -285,6 +339,8 @@ def rebuild_state(db: Session, aggregate_type: str, aggregate_id: str) -> tuple[
             state = apply_task_event(state, ev)
         elif aggregate_type == "Project":
             state = apply_project_event(state, ev)
+        elif aggregate_type == "Note":
+            state = apply_note_event(state, ev)
         version = ev.version
     return state, version
 
@@ -325,46 +381,89 @@ def project_event(db: Session, ev: EventEnvelope):
     m = ev.metadata
 
     if ev.event_type == PROJECT_EVENT_CREATED:
-        db.add(
-            Project(
-                id=ev.aggregate_id,
-                workspace_id=p["workspace_id"],
-                name=p["name"],
-                description=p.get("description", ""),
-                status=p.get("status", "Active"),
-                custom_statuses=json.dumps(p.get("custom_statuses", DEFAULT_STATUSES)),
-            )
-        )
+        project = db.get(Project, ev.aggregate_id)
+        if project is None:
+            project = Project(id=ev.aggregate_id, workspace_id=p["workspace_id"], name=p["name"])
+            db.add(project)
+        project.workspace_id = p["workspace_id"]
+        project.name = p["name"]
+        project.description = p.get("description", "") or ""
+        project.status = p.get("status", "Active")
+        project.custom_statuses = json.dumps(p.get("custom_statuses", DEFAULT_STATUSES))
     elif ev.event_type == PROJECT_EVENT_DELETED:
         project = db.get(Project, ev.aggregate_id)
         if project:
             project.is_deleted = True
+    elif ev.event_type == NOTE_EVENT_CREATED:
+        note = db.get(Note, ev.aggregate_id)
+        if note is None:
+            note = Note(id=ev.aggregate_id, workspace_id=p["workspace_id"], title=p.get("title", ""))
+            db.add(note)
+        note.workspace_id = p["workspace_id"]
+        note.project_id = p.get("project_id")
+        note.task_id = p.get("task_id")
+        note.title = p.get("title", "") or ""
+        note.body = p.get("body", "") or ""
+        note.tags = json.dumps(p.get("tags", []))
+        note.pinned = bool(p.get("pinned", False))
+        note.archived = bool(p.get("archived", False))
+        note.is_deleted = bool(p.get("is_deleted", False))
+        note.created_by = p.get("created_by") or m.get("actor_id") or ""
+        note.updated_by = p.get("updated_by") or m.get("actor_id") or ""
     elif ev.event_type == TASK_EVENT_CREATED:
-        db.add(
-            Task(
-                id=ev.aggregate_id,
-                workspace_id=p["workspace_id"],
-                project_id=p.get("project_id"),
-                title=p["title"],
-                description=p.get("description", ""),
-                status=p.get("status", "To do"),
-                priority=p.get("priority", "Med"),
-                due_date=datetime.fromisoformat(p["due_date"]) if p.get("due_date") else None,
-                assignee_id=p.get("assignee_id"),
-                labels=json.dumps(p.get("labels", [])),
-                subtasks=json.dumps(p.get("subtasks", [])),
-                attachments=json.dumps(p.get("attachments", [])),
-                recurring_rule=p.get("recurring_rule"),
-                task_type=p.get("task_type", "manual"),
-                scheduled_instruction=p.get("scheduled_instruction"),
-                scheduled_at_utc=datetime.fromisoformat(p["scheduled_at_utc"]) if p.get("scheduled_at_utc") else None,
-                schedule_timezone=p.get("schedule_timezone"),
-                schedule_state=p.get("schedule_state", "idle"),
-                last_schedule_run_at=None,
-                last_schedule_error=None,
-                order_index=p.get("order_index", 0),
-            )
-        )
+        task = db.get(Task, ev.aggregate_id)
+        if task is None:
+            task = Task(id=ev.aggregate_id, workspace_id=p["workspace_id"], title=p["title"])
+            db.add(task)
+        task.workspace_id = p["workspace_id"]
+        task.project_id = p.get("project_id")
+        task.title = p["title"]
+        task.description = p.get("description", "") or ""
+        task.status = p.get("status", "To do")
+        task.priority = p.get("priority", "Med")
+        task.due_date = datetime.fromisoformat(p["due_date"]) if p.get("due_date") else None
+        task.assignee_id = p.get("assignee_id")
+        task.labels = json.dumps(p.get("labels", []))
+        task.subtasks = json.dumps(p.get("subtasks", []))
+        task.attachments = json.dumps(p.get("attachments", []))
+        task.recurring_rule = p.get("recurring_rule")
+        task.task_type = p.get("task_type", "manual")
+        task.scheduled_instruction = p.get("scheduled_instruction")
+        task.scheduled_at_utc = datetime.fromisoformat(p["scheduled_at_utc"]) if p.get("scheduled_at_utc") else None
+        task.schedule_timezone = p.get("schedule_timezone")
+        task.schedule_state = p.get("schedule_state", "idle")
+        task.last_schedule_run_at = None
+        task.last_schedule_error = None
+        task.order_index = p.get("order_index", 0)
+    elif ev.event_type in NOTE_MUTATION_EVENTS:
+        note = db.get(Note, ev.aggregate_id)
+        if note:
+            if ev.event_type == NOTE_EVENT_UPDATED:
+                for k, v in p.items():
+                    if k == "tags" and v is not None:
+                        note.tags = json.dumps(v)
+                    else:
+                        setattr(note, k, v)
+            elif ev.event_type == NOTE_EVENT_ARCHIVED:
+                note.archived = True
+                if p.get("updated_by"):
+                    note.updated_by = p["updated_by"]
+            elif ev.event_type == NOTE_EVENT_RESTORED:
+                note.archived = False
+                if p.get("updated_by"):
+                    note.updated_by = p["updated_by"]
+            elif ev.event_type == NOTE_EVENT_PINNED:
+                note.pinned = True
+                if p.get("updated_by"):
+                    note.updated_by = p["updated_by"]
+            elif ev.event_type == NOTE_EVENT_UNPINNED:
+                note.pinned = False
+                if p.get("updated_by"):
+                    note.updated_by = p["updated_by"]
+            elif ev.event_type == NOTE_EVENT_DELETED:
+                note.is_deleted = True
+                if p.get("updated_by"):
+                    note.updated_by = p["updated_by"]
     elif ev.event_type in TASK_MUTATION_EVENTS:
         task = db.get(Task, ev.aggregate_id)
         if task:
@@ -457,7 +556,18 @@ def project_event(db: Session, ev: EventEnvelope):
         if n and n.user_id == p["user_id"]:
             n.is_read = True
     elif ev.event_type == NOTIFICATION_EVENT_CREATED:
-        db.add(Notification(id=ev.aggregate_id, user_id=p["user_id"], message=p["message"], is_read=False))
+        # Idempotent projection: in EventStore mode we can project the same event
+        # via write-through append + later catch-up, so inserts must be safe.
+        n = db.get(Notification, ev.aggregate_id)
+        if n is None:
+            n = Notification(id=ev.aggregate_id, user_id=p["user_id"], message=p["message"], is_read=False)
+            db.add(n)
+        else:
+            n.user_id = p["user_id"]
+            n.message = p["message"]
+            # Preserve any existing read state; newly created events are unread.
+            if n.is_read is None:
+                n.is_read = False
     elif ev.event_type == SAVED_VIEW_EVENT_CREATED:
         db.add(
             SavedView(

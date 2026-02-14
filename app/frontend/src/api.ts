@@ -2,13 +2,15 @@ import type {
   BootstrapPayload,
   AgentChatResponse,
   Notification,
+  Note,
+  NotesPage,
   Project,
   ProjectBoard,
   Task,
   TaskActivity,
   TaskAutomationStatus,
   TaskComment,
-  TasksPage
+  TasksPage,
 } from './types'
 
 function queryString(params: Record<string, string | number | boolean | undefined | null>): string {
@@ -70,7 +72,7 @@ export const getTasks = (
 
 export const createTask = (
   userId: string,
-  payload: { title: string; workspace_id: string; project_id: string | null; due_date?: string | null }
+  payload: { title: string; workspace_id: string; project_id: string | null; due_date?: string | null; labels?: string[] }
 ) => api<Task>('/api/tasks', userId, { method: 'POST', body: JSON.stringify(payload) })
 
 export const completeTask = (userId: string, taskId: string) =>
@@ -97,6 +99,8 @@ export const patchTask = (
       | 'project_id'
       | 'title'
       | 'priority'
+      | 'labels'
+      | 'recurring_rule'
       | 'task_type'
       | 'scheduled_instruction'
       | 'scheduled_at_utc'
@@ -142,6 +146,9 @@ export const markNotificationRead = (userId: string, id: string) =>
 export const createProject = (userId: string, payload: { workspace_id: string; name: string }) =>
   api<Project>('/api/projects', userId, { method: 'POST', body: JSON.stringify(payload) })
 
+export const deleteProject = (userId: string, projectId: string) =>
+  api<{ ok: true }>(`/api/projects/${projectId}`, userId, { method: 'DELETE' })
+
 export const getProjectBoard = (userId: string, projectId: string) =>
   api<ProjectBoard>(`/api/projects/${projectId}/board`, userId)
 
@@ -149,3 +156,50 @@ export const patchMyPreferences = (
   userId: string,
   payload: { theme?: 'light' | 'dark'; timezone?: string; notifications_enabled?: boolean }
 ) => api<{ id: string; theme: string; timezone: string; notifications_enabled: boolean }>('/api/me/preferences', userId, { method: 'PATCH', body: JSON.stringify(payload) })
+
+export const getNotes = (
+  userId: string,
+  workspaceId: string,
+  params?: {
+    project_id?: string | null
+    task_id?: string | null
+    q?: string
+    archived?: boolean
+    pinned?: boolean | null
+  }
+) =>
+  api<NotesPage>(
+    `/api/notes${queryString({
+      workspace_id: workspaceId,
+      project_id: params?.project_id ?? undefined,
+      task_id: params?.task_id ?? undefined,
+      q: params?.q,
+      archived: params?.archived ?? false,
+      pinned: params?.pinned ?? undefined,
+      limit: 100,
+      offset: 0
+    })}`,
+    userId
+  )
+
+export const createNote = (
+  userId: string,
+  payload: { title: string; workspace_id: string; project_id?: string | null; task_id?: string | null; body?: string; tags?: string[]; pinned?: boolean }
+) => api<Note>('/api/notes', userId, { method: 'POST', body: JSON.stringify(payload) })
+
+export const patchNote = (
+  userId: string,
+  noteId: string,
+  payload: Partial<Pick<Note, 'title' | 'body' | 'tags' | 'pinned' | 'archived' | 'project_id' | 'task_id'>>
+) => api<Note>(`/api/notes/${noteId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })
+
+export const archiveNote = (userId: string, noteId: string) =>
+  api<{ ok: true }>(`/api/notes/${noteId}/archive`, userId, { method: 'POST' })
+export const restoreNote = (userId: string, noteId: string) =>
+  api<{ ok: true }>(`/api/notes/${noteId}/restore`, userId, { method: 'POST' })
+export const pinNote = (userId: string, noteId: string) =>
+  api<{ ok: true }>(`/api/notes/${noteId}/pin`, userId, { method: 'POST' })
+export const unpinNote = (userId: string, noteId: string) =>
+  api<{ ok: true }>(`/api/notes/${noteId}/unpin`, userId, { method: 'POST' })
+export const deleteNote = (userId: string, noteId: string) =>
+  api<{ ok: true }>(`/api/notes/${noteId}/delete`, userId, { method: 'POST' })

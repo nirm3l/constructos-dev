@@ -518,7 +518,7 @@
   function renderInbox() {
     const el = document.getElementById('view-inbox');
     const items = state.tasks.filter(t => !t.archived && !t.project_id);
-    el.innerHTML = `<h3>Inbox</h3>${items.map(renderTaskCard).join('') || '<p class="meta">Inbox je prazan.</p>'}`;
+    el.innerHTML = `<h3>Inbox</h3>${items.map(renderTaskCard).join('') || '<p class="meta">Inbox is empty.</p>'}`;
   }
 
   function renderToday() {
@@ -533,7 +533,7 @@
     const overdue = state.tasks.filter(t => t.due_date && new Date(t.due_date) < now && t.status !== 'Done');
     el.innerHTML = `
       <h3>Today (${tz})</h3>
-      ${today.map(renderTaskCard).join('') || '<p class="meta">Nema taskova za danas.</p>'}
+      ${today.map(renderTaskCard).join('') || '<p class="meta">No tasks due today.</p>'}
       <h3>Overdue</h3>
       ${overdue.map(renderTaskCard).join('') || '<p class="meta">Nema overdue taskova.</p>'}
     `;
@@ -755,7 +755,7 @@
     } catch (e) {
       state.tasks = state.tasks.filter(t => t.id !== optimistic.id);
       rerender();
-      alert('Greška pri dodavanju taska');
+      alert('Failed to add task.');
     }
   }
 

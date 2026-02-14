@@ -58,6 +58,13 @@ def execute_task_automation(
     project_id: str | None = None,
     allow_mutations: bool = True,
 ) -> AutomationOutcome:
+    # Deterministic shortcut: users can explicitly complete a task via "#complete".
+    # This should work regardless of executor mode, and avoids reliance on the LLM for a simple directive.
+    lower_instruction = (instruction or "").lower()
+    should_complete = any(token in lower_instruction for token in ("#complete", "complete task", "mark done"))
+    if str(task_id or "").strip() and should_complete and status != "Done" and allow_mutations:
+        return AutomationOutcome(action="complete", summary="Automation runner marked task as completed.")
+
     if AGENT_EXECUTOR_MODE != "command":
         return _placeholder_outcome(instruction=instruction, current_status=status)
     if not AGENT_CODEX_COMMAND:

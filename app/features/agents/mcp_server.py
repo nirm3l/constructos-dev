@@ -63,7 +63,86 @@ def create_mcp(*, read_only: bool = False):
         auth_token = auth_token or default_tool_token
         return service.get_task(task_id=task_id, auth_token=auth_token)
 
+    @mcp.tool(description="List notes in a workspace with optional filters.")
+    def list_notes(
+        workspace_id: str,
+        auth_token: str | None = None,
+        project_id: str | None = None,
+        task_id: str | None = None,
+        q: str | None = None,
+        archived: bool = False,
+        pinned: bool | None = None,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.list_notes(
+            workspace_id=workspace_id,
+            auth_token=auth_token,
+            project_id=project_id,
+            task_id=task_id,
+            q=q,
+            archived=archived,
+            pinned=pinned,
+            limit=limit,
+            offset=offset,
+        )
+
+    @mcp.tool(description="Get one note by id.")
+    def get_note(note_id: str, auth_token: str | None = None) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.get_note(note_id=note_id, auth_token=auth_token)
+
     if not read_only:
+        @mcp.tool(description="Apply a bulk action to multiple tasks (e.g. archive, complete, delete).")
+        def bulk_task_action(
+            task_ids: list[str],
+            action: str,
+            payload: dict[str, Any] | None = None,
+            auth_token: str | None = None,
+            command_id: str | None = None,
+        ) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.bulk_task_action(task_ids=task_ids, action=action, payload=payload or {}, auth_token=auth_token, command_id=command_id)
+
+        @mcp.tool(description="Archive all non-archived tasks in a workspace (optionally filtered by project or query).")
+        def archive_all_tasks(
+            workspace_id: str,
+            project_id: str | None = None,
+            q: str | None = None,
+            limit: int = 200,
+            auth_token: str | None = None,
+            command_id: str | None = None,
+        ) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.archive_all_tasks(
+                workspace_id=workspace_id,
+                project_id=project_id,
+                q=q,
+                limit=limit,
+                auth_token=auth_token,
+                command_id=command_id,
+            )
+
+        @mcp.tool(description="Archive all non-archived notes in a workspace (optionally filtered by project or query).")
+        def archive_all_notes(
+            workspace_id: str,
+            project_id: str | None = None,
+            q: str | None = None,
+            limit: int = 200,
+            auth_token: str | None = None,
+            command_id: str | None = None,
+        ) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.archive_all_notes(
+                workspace_id=workspace_id,
+                project_id=project_id,
+                q=q,
+                limit=limit,
+                auth_token=auth_token,
+                command_id=command_id,
+            )
+
         @mcp.tool(description="Create a task in a workspace/project.")
         def create_task(
             title: str,
@@ -98,6 +177,66 @@ def create_mcp(*, read_only: bool = False):
                 labels=labels,
                 command_id=command_id,
             )
+
+        @mcp.tool(description="Create a note in a workspace/project (Markdown body).")
+        def create_note(
+            title: str,
+            body: str = "",
+            workspace_id: str | None = None,
+            auth_token: str | None = None,
+            project_id: str | None = None,
+            task_id: str | None = None,
+            tags: list[str] | None = None,
+            pinned: bool = False,
+            command_id: str | None = None,
+        ) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.create_note(
+                title=title,
+                body=body,
+                workspace_id=workspace_id,
+                auth_token=auth_token,
+                project_id=project_id,
+                task_id=task_id,
+                tags=tags,
+                pinned=pinned,
+                command_id=command_id,
+            )
+
+        @mcp.tool(description="Patch a note. Accepts the same fields as NotePatch.")
+        def update_note(
+            note_id: str,
+            patch: dict[str, Any],
+            auth_token: str | None = None,
+            command_id: str | None = None,
+        ) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.update_note(note_id=note_id, patch=patch, auth_token=auth_token, command_id=command_id)
+
+        @mcp.tool(description="Archive a note.")
+        def archive_note(note_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.archive_note(note_id=note_id, auth_token=auth_token, command_id=command_id)
+
+        @mcp.tool(description="Restore an archived note.")
+        def restore_note(note_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.restore_note(note_id=note_id, auth_token=auth_token, command_id=command_id)
+
+        @mcp.tool(description="Pin a note.")
+        def pin_note(note_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.pin_note(note_id=note_id, auth_token=auth_token, command_id=command_id)
+
+        @mcp.tool(description="Unpin a note.")
+        def unpin_note(note_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.unpin_note(note_id=note_id, auth_token=auth_token, command_id=command_id)
+
+        @mcp.tool(description="Soft-delete a note.")
+        def delete_note(note_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.delete_note(note_id=note_id, auth_token=auth_token, command_id=command_id)
 
         @mcp.tool(description="Send an email via SMTP (requires MCP email env configuration).")
         def send_email(
