@@ -41,6 +41,8 @@ def run_queued_automation_once(limit: int = 10) -> int:
             state, _ = rebuild_state(db, "Task", task_id)
             if state.get("automation_state", "idle") != "queued":
                 continue
+            if state.get("status") == "Done":
+                continue
             workspace_id = state.get("workspace_id")
             if not workspace_id:
                 continue
@@ -295,6 +297,7 @@ def queue_due_scheduled_tasks_once(limit: int = 20) -> int:
                 Task.is_deleted == False,
                 Task.task_type == "scheduled_instruction",
                 Task.schedule_state == "idle",
+                Task.status != "Done",
                 Task.scheduled_at_utc.is_not(None),
                 Task.scheduled_at_utc <= now,
             )
@@ -318,6 +321,9 @@ def queue_due_scheduled_tasks_once(limit: int = 20) -> int:
             if not instruction:
                 continue
             now_iso = to_iso_utc(datetime.now(timezone.utc))
+            # Guard in-memory record so the same task is not re-queued while handling this batch.
+            task.schedule_state = "queued"
+            db.flush()
             append_event(
                 db,
                 aggregate_type="Task",
