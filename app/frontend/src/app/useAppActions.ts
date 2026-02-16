@@ -19,6 +19,7 @@ export function useAppActions(c: any) {
     await c.qc.invalidateQueries({ queryKey: ['bootstrap'] })
     await c.qc.invalidateQueries({ queryKey: ['notifications'] })
     await c.qc.invalidateQueries({ queryKey: ['project-rules'] })
+    await c.qc.invalidateQueries({ queryKey: ['specifications'] })
   }, [c.qc])
 
   const moveTaskToStatus = React.useCallback(

@@ -18,10 +18,12 @@ from .contracts import (
     NotificationDTO,
     ProjectRuleCommandState,
     ProjectRuleDTO,
+    SpecificationCommandState,
+    SpecificationDTO,
     TaskCommandState,
     TaskDTO,
 )
-from .models import Note, Notification, Project, ProjectRule, SavedView, StoredEvent, Task
+from .models import Note, Notification, Project, ProjectRule, SavedView, Specification, StoredEvent, Task
 from .settings import DEFAULT_STATUSES
 
 
@@ -91,6 +93,7 @@ def serialize_task(task: Task, created_by: str = "") -> dict[str, Any]:
         id=task.id,
         workspace_id=task.workspace_id,
         project_id=task.project_id,
+        specification_id=task.specification_id,
         title=task.title,
         description=task.description,
         status=task.status,
@@ -126,6 +129,7 @@ def serialize_note(note: Note) -> dict[str, Any]:
         workspace_id=note.workspace_id,
         project_id=note.project_id,
         task_id=note.task_id,
+        specification_id=note.specification_id,
         title=note.title,
         body=note.body or "",
         tags=json.loads(note.tags or "[]"),
@@ -166,6 +170,25 @@ def serialize_project_rule(rule: ProjectRule) -> dict[str, Any]:
     return asdict(dto)
 
 
+def serialize_specification(specification: Specification) -> dict[str, Any]:
+    dto = SpecificationDTO(
+        id=specification.id,
+        workspace_id=specification.workspace_id,
+        project_id=specification.project_id,
+        title=specification.title,
+        body=specification.body or "",
+        status=specification.status or "Draft",
+        external_refs=json.loads(specification.external_refs or "[]"),
+        attachment_refs=json.loads(specification.attachment_refs or "[]"),
+        archived=bool(specification.archived),
+        created_by=specification.created_by,
+        updated_by=specification.updated_by,
+        created_at=to_iso_utc(specification.created_at),
+        updated_at=to_iso_utc(specification.updated_at),
+    )
+    return asdict(dto)
+
+
 def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
     from .eventing import get_kurrent_client, rebuild_state
 
@@ -178,6 +201,7 @@ def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
             "id": task_id,
             "workspace_id": state.get("workspace_id"),
             "project_id": state.get("project_id"),
+            "specification_id": state.get("specification_id"),
             "title": state.get("title"),
             "description": state.get("description", ""),
             "status": state.get("status", "To do"),
@@ -223,6 +247,7 @@ def load_note_view(db: Session, note_id: str) -> dict[str, Any] | None:
             "workspace_id": state.get("workspace_id"),
             "project_id": state.get("project_id"),
             "task_id": state.get("task_id"),
+            "specification_id": state.get("specification_id"),
             "title": state.get("title") or "",
             "body": state.get("body", ""),
             "tags": state.get("tags", []),
@@ -253,6 +278,7 @@ def load_task_command_state(db: Session, task_id: str) -> TaskCommandState | Non
             id=task.id,
             workspace_id=task.workspace_id,
             project_id=task.project_id,
+            specification_id=task.specification_id,
             status=task.status,
             archived=task.archived,
             is_deleted=task.is_deleted,
@@ -265,6 +291,7 @@ def load_task_command_state(db: Session, task_id: str) -> TaskCommandState | Non
         id=task_id,
         workspace_id=state.get("workspace_id", ""),
         project_id=state.get("project_id"),
+        specification_id=state.get("specification_id"),
         status=state.get("status", "To do"),
         archived=bool(state.get("archived", False)),
         is_deleted=bool(state.get("is_deleted", False)),
@@ -283,6 +310,7 @@ def load_note_command_state(db: Session, note_id: str) -> NoteCommandState | Non
             workspace_id=note.workspace_id,
             project_id=note.project_id,
             task_id=note.task_id,
+            specification_id=note.specification_id,
             pinned=bool(note.pinned),
             archived=bool(note.archived),
             is_deleted=bool(note.is_deleted),
@@ -296,6 +324,7 @@ def load_note_command_state(db: Session, note_id: str) -> NoteCommandState | Non
         workspace_id=state.get("workspace_id", ""),
         project_id=state.get("project_id"),
         task_id=state.get("task_id"),
+        specification_id=state.get("specification_id"),
         pinned=bool(state.get("pinned", False)),
         archived=bool(state.get("archived", False)),
         is_deleted=bool(state.get("is_deleted", False)),
@@ -402,6 +431,64 @@ def load_project_rule_command_state(db: Session, rule_id: str) -> ProjectRuleCom
         id=rule_id,
         workspace_id=state.get("workspace_id", ""),
         project_id=state.get("project_id", ""),
+        is_deleted=bool(state.get("is_deleted", False)),
+    )
+
+
+def load_specification_view(db: Session, specification_id: str) -> dict[str, Any] | None:
+    from .eventing import get_kurrent_client, rebuild_state
+
+    if get_kurrent_client() is not None:
+        state, _ = rebuild_state(db, "Specification", specification_id)
+        if not state or state.get("is_deleted"):
+            return None
+        return {
+            "id": specification_id,
+            "workspace_id": state.get("workspace_id"),
+            "project_id": state.get("project_id"),
+            "title": state.get("title", ""),
+            "body": state.get("body", ""),
+            "status": state.get("status", "Draft"),
+            "external_refs": state.get("external_refs", []),
+            "attachment_refs": state.get("attachment_refs", []),
+            "archived": bool(state.get("archived", False)),
+            "created_by": state.get("created_by") or "",
+            "updated_by": state.get("updated_by") or "",
+            "created_at": None,
+            "updated_at": None,
+        }
+
+    specification = db.get(Specification, specification_id)
+    if specification and not specification.is_deleted:
+        return serialize_specification(specification)
+    return None
+
+
+def load_specification_command_state(db: Session, specification_id: str) -> SpecificationCommandState | None:
+    from .eventing import get_kurrent_client, rebuild_state
+
+    if get_kurrent_client() is None:
+        specification = db.get(Specification, specification_id)
+        if not specification:
+            return None
+        return SpecificationCommandState(
+            id=specification.id,
+            workspace_id=specification.workspace_id,
+            project_id=specification.project_id,
+            status=specification.status,
+            archived=bool(specification.archived),
+            is_deleted=bool(specification.is_deleted),
+        )
+
+    state, _ = rebuild_state(db, "Specification", specification_id)
+    if not state:
+        return None
+    return SpecificationCommandState(
+        id=specification_id,
+        workspace_id=state.get("workspace_id", ""),
+        project_id=state.get("project_id", ""),
+        status=state.get("status", "Draft"),
+        archived=bool(state.get("archived", False)),
         is_deleted=bool(state.get("is_deleted", False)),
     )
 

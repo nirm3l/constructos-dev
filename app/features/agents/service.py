@@ -9,6 +9,8 @@ from sqlalchemy import select
 from features.projects.application import ProjectApplicationService
 from features.rules.application import ProjectRuleApplicationService
 from features.rules.read_models import ProjectRuleListQuery, list_project_rules_read_model
+from features.specifications.application import SpecificationApplicationService
+from features.specifications.read_models import SpecificationListQuery, list_specifications_read_model
 from features.tasks.application import TaskApplicationService
 from features.tasks.read_models import TaskListQuery, get_task_automation_status_read_model, list_tasks_read_model
 from features.notes.application import NoteApplicationService
@@ -16,6 +18,12 @@ from features.notes.read_models import NoteListQuery, list_notes_read_model
 from shared.core import BulkAction, CommentCreate, Project, ProjectCreate, ProjectRuleCreate, ProjectRulePatch, SessionLocal, TaskAutomationRun, TaskCreate, TaskPatch, User, load_task_command_state, load_task_view
 from shared.core import NoteCreate, NotePatch, load_note_command_state, load_note_view
 from shared.core import load_project_rule_command_state, load_project_rule_view
+from shared.core import (
+    SpecificationCreate,
+    SpecificationPatch,
+    load_specification_command_state,
+    load_specification_view,
+)
 from shared.deps import ensure_role
 from shared.models import User as UserModel
 from shared.settings import (
@@ -62,6 +70,16 @@ class AgentTaskService:
         state = load_project_rule_command_state(db, rule_id)
         if not state or state.is_deleted:
             raise HTTPException(status_code=404, detail="Project rule not found")
+        self._assert_workspace_allowed(state.workspace_id)
+        self._assert_project_allowed(state.project_id)
+        return state
+
+    def _assert_specification_allowed(self, *, db, specification_id: str | None):
+        if not specification_id:
+            return None
+        state = load_specification_command_state(db, specification_id)
+        if not state or state.is_deleted:
+            raise HTTPException(status_code=404, detail="Specification not found")
         self._assert_workspace_allowed(state.workspace_id)
         self._assert_project_allowed(state.project_id)
         return state
@@ -131,6 +149,7 @@ class AgentTaskService:
         q: str | None = None,
         status: str | None = None,
         project_id: str | None = None,
+        specification_id: str | None = None,
         label: str | None = None,
         assignee_id: str | None = None,
         priority: str | None = None,
@@ -145,6 +164,8 @@ class AgentTaskService:
         self._assert_project_allowed(project_id)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
+            if specification_id:
+                self._assert_specification_allowed(db=db, specification_id=specification_id)
             ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
             return list_tasks_read_model(
                 db,
@@ -155,6 +176,7 @@ class AgentTaskService:
                     q=q,
                     status=status,
                     project_id=project_id,
+                    specification_id=specification_id,
                     label=label,
                     assignee_id=assignee_id,
                     priority=priority,
@@ -171,6 +193,7 @@ class AgentTaskService:
         auth_token: str | None = None,
         project_id: str | None = None,
         task_id: str | None = None,
+        specification_id: str | None = None,
         q: str | None = None,
         archived: bool = False,
         pinned: bool | None = None,
@@ -186,6 +209,8 @@ class AgentTaskService:
         with SessionLocal() as db:
             if task_id:
                 self._assert_task_allowed(db=db, task_id=task_id)
+            if specification_id:
+                self._assert_specification_allowed(db=db, specification_id=specification_id)
             ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
             return list_notes_read_model(
                 db,
@@ -194,6 +219,7 @@ class AgentTaskService:
                     workspace_id=workspace_id,
                     project_id=project_id,
                     task_id=task_id,
+                    specification_id=specification_id,
                     q=q,
                     archived=archived,
                     pinned=pinned,
@@ -227,6 +253,40 @@ class AgentTaskService:
                     workspace_id=workspace_id,
                     project_id=project_id,
                     q=q,
+                    limit=limit,
+                    offset=offset,
+                ),
+            )
+
+    def list_specifications(
+        self,
+        *,
+        workspace_id: str,
+        auth_token: str | None = None,
+        project_id: str | None = None,
+        q: str | None = None,
+        status: str | None = None,
+        archived: bool = False,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> dict:
+        self._require_token(auth_token)
+        self._assert_workspace_allowed(workspace_id)
+        if not project_id:
+            raise HTTPException(status_code=400, detail="project_id is required")
+        self._assert_project_allowed(project_id)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            return list_specifications_read_model(
+                db,
+                user,
+                SpecificationListQuery(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    q=q,
+                    status=status,
+                    archived=archived,
                     limit=limit,
                     offset=offset,
                 ),
@@ -276,6 +336,18 @@ class AgentTaskService:
                 raise HTTPException(status_code=404, detail="Project rule not found")
             return rule
 
+    def get_specification(self, *, specification_id: str, auth_token: str | None = None) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            state = self._assert_specification_allowed(db=db, specification_id=specification_id)
+            assert state is not None
+            ensure_role(db, state.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            specification = load_specification_view(db, specification_id)
+            if not specification:
+                raise HTTPException(status_code=404, detail="Specification not found")
+            return specification
+
     def get_task_automation_status(self, *, task_id: str, auth_token: str | None = None) -> dict:
         self._require_token(auth_token)
         user = self._resolve_actor_user()
@@ -298,6 +370,7 @@ class AgentTaskService:
         priority: str = "Med",
         due_date: str | None = None,
         recurring_rule: str | None = None,
+        specification_id: str | None = None,
         task_type: str = "manual",
         scheduled_instruction: str | None = None,
         scheduled_at_utc: str | None = None,
@@ -322,6 +395,7 @@ class AgentTaskService:
                 priority=priority,
                 due_date=due_date,
                 recurring_rule=recurring_rule,
+                specification_id=specification_id,
                 task_type=task_type,
                 scheduled_instruction=scheduled_instruction,
                 scheduled_at_utc=scheduled_at_utc,
@@ -340,6 +414,7 @@ class AgentTaskService:
         auth_token: str | None = None,
         project_id: str | None = None,
         task_id: str | None = None,
+        specification_id: str | None = None,
         tags: list[str] | None = None,
         pinned: bool = False,
         command_id: str | None = None,
@@ -357,6 +432,7 @@ class AgentTaskService:
                 workspace_id=ws_id,
                 project_id=proj_id,
                 task_id=resolved_task_id,
+                specification_id=specification_id,
                 title=title,
                 body=body or "",
                 tags=tags or [],
@@ -414,6 +490,36 @@ class AgentTaskService:
                 db, user, command_id=command_id or f"mcp-project-rule-create-{uuid.uuid4()}"
             ).create_project_rule(payload)
 
+    def create_specification(
+        self,
+        *,
+        title: str,
+        project_id: str,
+        workspace_id: str | None = None,
+        body: str = "",
+        status: str = "Draft",
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_create(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            payload = SpecificationCreate(
+                workspace_id=resolved_workspace_id,
+                project_id=resolved_project_id,
+                title=title,
+                body=body or "",
+                status=status,
+            )
+            return SpecificationApplicationService(
+                db, user, command_id=command_id or f"mcp-specification-create-{uuid.uuid4()}"
+            ).create_specification(payload)
+
     def update_project_rule(self, *, rule_id: str, patch: dict, auth_token: str | None = None, command_id: str | None = None) -> dict:
         self._require_token(auth_token)
         user = self._resolve_actor_user()
@@ -432,6 +538,51 @@ class AgentTaskService:
             return ProjectRuleApplicationService(
                 db, user, command_id=command_id or f"mcp-project-rule-delete-{uuid.uuid4()}"
             ).delete_project_rule(rule_id)
+
+    def update_specification(
+        self, *, specification_id: str, patch: dict, auth_token: str | None = None, command_id: str | None = None
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            self._assert_specification_allowed(db=db, specification_id=specification_id)
+            payload = SpecificationPatch(**patch)
+            return SpecificationApplicationService(
+                db, user, command_id=command_id or f"mcp-specification-patch-{uuid.uuid4()}"
+            ).patch_specification(specification_id, payload)
+
+    def archive_specification(
+        self, *, specification_id: str, auth_token: str | None = None, command_id: str | None = None
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            self._assert_specification_allowed(db=db, specification_id=specification_id)
+            return SpecificationApplicationService(
+                db, user, command_id=command_id or f"mcp-specification-archive-{uuid.uuid4()}"
+            ).archive_specification(specification_id)
+
+    def restore_specification(
+        self, *, specification_id: str, auth_token: str | None = None, command_id: str | None = None
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            self._assert_specification_allowed(db=db, specification_id=specification_id)
+            return SpecificationApplicationService(
+                db, user, command_id=command_id or f"mcp-specification-restore-{uuid.uuid4()}"
+            ).restore_specification(specification_id)
+
+    def delete_specification(
+        self, *, specification_id: str, auth_token: str | None = None, command_id: str | None = None
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            self._assert_specification_allowed(db=db, specification_id=specification_id)
+            return SpecificationApplicationService(
+                db, user, command_id=command_id or f"mcp-specification-delete-{uuid.uuid4()}"
+            ).delete_specification(specification_id)
 
     def update_note(self, *, note_id: str, patch: dict, auth_token: str | None = None, command_id: str | None = None) -> dict:
         self._require_token(auth_token)

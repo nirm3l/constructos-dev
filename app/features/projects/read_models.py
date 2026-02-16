@@ -29,7 +29,13 @@ def get_project_activity_read_model(db: Session, user, project_id: str) -> list[
         raise HTTPException(status_code=404, detail="Project not found")
     ensure_role(db, project.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     logs = db.execute(select(ActivityLog).where(ActivityLog.project_id == project_id).order_by(ActivityLog.created_at.desc()).limit(200)).scalars().all()
-    return [{"id": l.id, "task_id": l.task_id, "action": l.action, "actor_id": l.actor_id, "details": json.loads(l.details or "{}"), "created_at": to_iso_utc(l.created_at)} for l in logs]
+    out: list[dict] = []
+    for l in logs:
+        details = json.loads(l.details or "{}")
+        if isinstance(details, dict):
+            details.pop("_event_key", None)
+        out.append({"id": l.id, "task_id": l.task_id, "action": l.action, "actor_id": l.actor_id, "details": details, "created_at": to_iso_utc(l.created_at)})
+    return out
 
 
 def get_project_tags_read_model(db: Session, user, project_id: str) -> dict:

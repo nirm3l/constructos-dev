@@ -23,7 +23,12 @@ export function useUiPersistenceEffects(c: any) {
       c.setSelectedNoteId(noteId)
       c.setTab('notes')
     }
-  }, [c.setSelectedNoteId, c.setSelectedProjectId, c.setSelectedTaskId, c.setTab])
+    const specificationId = params.get('specification')
+    if (specificationId) {
+      c.setSelectedSpecificationId(specificationId)
+      c.setTab('specifications')
+    }
+  }, [c.setSelectedNoteId, c.setSelectedProjectId, c.setSelectedSpecificationId, c.setSelectedTaskId, c.setTab])
 
   React.useEffect(() => {
     localStorage.setItem('ui_selected_project_id', c.selectedProjectId)
@@ -53,7 +58,11 @@ export function useUiPersistenceEffects(c: any) {
 
   React.useEffect(() => {
     if (c.tab === 'notes') c.setSelectedTaskId(null)
-  }, [c.tab, c.setSelectedTaskId])
+    if (c.tab === 'specifications') {
+      c.setSelectedTaskId(null)
+      c.setSelectedNoteId(null)
+    }
+  }, [c.tab, c.setSelectedNoteId, c.setSelectedTaskId])
 
   React.useEffect(() => {
     if (c.tab !== 'projects') {
@@ -80,7 +89,9 @@ export function useUiPersistenceEffects(c: any) {
     else params.delete('task')
     if (c.selectedNoteId) params.set('note', c.selectedNoteId)
     else params.delete('note')
+    if (c.selectedSpecificationId) params.set('specification', c.selectedSpecificationId)
+    else params.delete('specification')
     const next = params.toString()
     window.history.replaceState(null, '', next ? `?${next}` : window.location.pathname)
-  }, [c.tab, c.selectedProjectId, c.selectedTaskId, c.selectedNoteId])
+  }, [c.tab, c.selectedProjectId, c.selectedTaskId, c.selectedNoteId, c.selectedSpecificationId])
 }

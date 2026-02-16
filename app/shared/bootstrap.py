@@ -14,8 +14,9 @@ from features.bootstrap.read_models import bootstrap_payload_read_model
 from .eventing import append_event, current_version, emit_system_notifications, get_kurrent_client
 from features.projects.domain import EVENT_CREATED as PROJECT_EVENT_CREATED
 from features.rules.domain import EVENT_CREATED as PROJECT_RULE_EVENT_CREATED
+from features.specifications.domain import EVENT_CREATED as SPECIFICATION_EVENT_CREATED
 from features.tasks.domain import EVENT_CREATED as TASK_EVENT_CREATED
-from .models import Base, Note, Project, ProjectMember, ProjectRule, ProjectTagIndex, SessionLocal, Task, User, Workspace, WorkspaceMember, engine
+from .models import Base, Note, Project, ProjectMember, ProjectRule, ProjectTagIndex, SessionLocal, Specification, Task, User, Workspace, WorkspaceMember, engine
 from .serializers import to_iso_utc
 from .settings import (
     AGENT_SYSTEM_FULL_NAME,
@@ -83,6 +84,7 @@ def ensure_task_table_columns(db: Session):
         "last_schedule_error": "ALTER TABLE tasks ADD COLUMN last_schedule_error TEXT",
         "external_refs": "ALTER TABLE tasks ADD COLUMN external_refs TEXT DEFAULT '[]'",
         "attachment_refs": "ALTER TABLE tasks ADD COLUMN attachment_refs TEXT DEFAULT '[]'",
+        "specification_id": "ALTER TABLE tasks ADD COLUMN specification_id VARCHAR(36)",
     }
     for column, ddl in required_columns.items():
         if column not in existing:
@@ -112,6 +114,8 @@ def ensure_note_table_columns(db: Session):
         db.execute(text("ALTER TABLE notes ADD COLUMN external_refs TEXT DEFAULT '[]'"))
     if "attachment_refs" not in existing:
         db.execute(text("ALTER TABLE notes ADD COLUMN attachment_refs TEXT DEFAULT '[]'"))
+    if "specification_id" not in existing:
+        db.execute(text("ALTER TABLE notes ADD COLUMN specification_id VARCHAR(36)"))
     db.commit()
 
 
@@ -231,6 +235,7 @@ def bootstrap_data():
         # Repair drift: if Kurrent was reset but app.db persisted, backfill streams.
         _backfill_project_streams_from_read_model(db)
         _backfill_project_rule_streams_from_read_model(db)
+        _backfill_specification_streams_from_read_model(db)
         _backfill_task_streams_from_read_model(db)
         _rebuild_project_tag_index(db)
         _backfill_project_members_for_existing_projects(db)
@@ -338,6 +343,7 @@ def _backfill_task_streams_from_read_model(db: Session) -> None:
             payload={
                 "workspace_id": t.workspace_id,
                 "project_id": t.project_id,
+                "specification_id": t.specification_id,
                 "title": t.title,
                 "description": t.description or "",
                 "status": t.status or "To do",
@@ -394,6 +400,50 @@ def _backfill_project_rule_streams_from_read_model(db: Session) -> None:
                 "workspace_id": rule.workspace_id,
                 "project_id": rule.project_id,
                 "project_rule_id": rule.id,
+            },
+            expected_version=0,
+        )
+
+
+def _backfill_specification_streams_from_read_model(db: Session) -> None:
+    if get_kurrent_client() is None:
+        return
+
+    specifications = db.execute(select(Specification).where(Specification.is_deleted == False)).scalars().all()
+    for specification in specifications:
+        if current_version(db, "Specification", specification.id) != 0:
+            continue
+        try:
+            external_refs = json.loads(specification.external_refs or "[]")
+        except Exception:
+            external_refs = []
+        try:
+            attachment_refs = json.loads(specification.attachment_refs or "[]")
+        except Exception:
+            attachment_refs = []
+        append_event(
+            db,
+            aggregate_type="Specification",
+            aggregate_id=specification.id,
+            event_type=SPECIFICATION_EVENT_CREATED,
+            payload={
+                "workspace_id": specification.workspace_id,
+                "project_id": specification.project_id,
+                "title": specification.title,
+                "body": specification.body or "",
+                "status": specification.status or "Draft",
+                "external_refs": external_refs,
+                "attachment_refs": attachment_refs,
+                "created_by": specification.created_by,
+                "updated_by": specification.updated_by,
+                "archived": bool(specification.archived),
+                "is_deleted": False,
+            },
+            metadata={
+                "actor_id": specification.created_by or DEFAULT_USER_ID,
+                "workspace_id": specification.workspace_id,
+                "project_id": specification.project_id,
+                "specification_id": specification.id,
             },
             expected_version=0,
         )

@@ -15,6 +15,7 @@ from shared.core import (
     ProjectMember,
     ProjectPatch,
     ProjectRule,
+    Specification,
     SavedView,
     Task,
     User,
@@ -26,6 +27,7 @@ from shared.core import (
 )
 from ..notes.domain import EVENT_DELETED as NOTE_EVENT_DELETED
 from ..rules.domain import EVENT_DELETED as PROJECT_RULE_EVENT_DELETED
+from ..specifications.domain import EVENT_DELETED as SPECIFICATION_EVENT_DELETED
 from ..tasks.domain import EVENT_DELETED as TASK_EVENT_DELETED
 from .domain import EVENT_CREATED as PROJECT_EVENT_CREATED
 from .domain import EVENT_DELETED as PROJECT_EVENT_DELETED
@@ -183,6 +185,23 @@ class DeleteProjectHandler:
                 event_type=PROJECT_RULE_EVENT_DELETED,
                 payload={"updated_by": self.ctx.user.id},
                 metadata={"actor_id": self.ctx.user.id, "workspace_id": project.workspace_id, "project_id": self.project_id, "project_rule_id": r.id},
+            )
+        specifications = self.ctx.db.execute(
+            select(Specification).where(Specification.project_id == self.project_id, Specification.is_deleted == False)
+        ).scalars().all()
+        for specification in specifications:
+            append_event(
+                self.ctx.db,
+                aggregate_type="Specification",
+                aggregate_id=specification.id,
+                event_type=SPECIFICATION_EVENT_DELETED,
+                payload={"updated_by": self.ctx.user.id},
+                metadata={
+                    "actor_id": self.ctx.user.id,
+                    "workspace_id": project.workspace_id,
+                    "project_id": self.project_id,
+                    "specification_id": specification.id,
+                },
             )
         for view in self.ctx.db.execute(select(SavedView).where(SavedView.project_id == self.project_id)).scalars().all():
             self.ctx.db.delete(view)

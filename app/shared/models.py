@@ -82,6 +82,7 @@ class Task(Base, TimeMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
     project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), nullable=True)
+    specification_id: Mapped[str | None] = mapped_column(ForeignKey("specifications.id"), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(256))
     description: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(32), default="To do")
@@ -129,6 +130,7 @@ class Note(Base, TimeMixin):
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), nullable=True, index=True)
     task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id"), nullable=True, index=True)
+    specification_id: Mapped[str | None] = mapped_column(ForeignKey("specifications.id"), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(256))
     body: Mapped[str] = mapped_column(Text, default="")
     tags: Mapped[str] = mapped_column(Text, default="[]")
@@ -161,6 +163,22 @@ class ProjectRule(Base, TimeMixin):
     body: Mapped[str] = mapped_column(Text, default="")
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     updated_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class Specification(Base, TimeMixin):
+    __tablename__ = "specifications"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    title: Mapped[str] = mapped_column(String(256))
+    body: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(32), default="Draft")
+    external_refs: Mapped[str] = mapped_column(Text, default="[]")
+    attachment_refs: Mapped[str] = mapped_column(Text, default="[]")
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    updated_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    archived: Mapped[bool] = mapped_column(Boolean, default=False)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
 
 

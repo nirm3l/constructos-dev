@@ -103,6 +103,10 @@ export function BottomTabs({
         <Icon path="M6 2h9l3 3v17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm8 1v3h3" />
         <span className="tab-label">Notes</span>
       </button>
+      <button className={tab === 'specifications' ? 'primary' : ''} onClick={() => onSelectTab('specifications')} title="Specifications" aria-label="Specifications">
+        <Icon path="M6 2h12a2 2 0 0 1 2 2v16l-4 2-4-2-4 2-4-2V4a2 2 0 0 1 2-2zm3 5h6m-6 4h6m-6 4h4" />
+        <span className="tab-label">Specs</span>
+      </button>
     </nav>
   )
 }

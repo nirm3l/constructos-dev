@@ -24,6 +24,7 @@ class TaskCreate(BaseModel):
     title: str = Field(min_length=1)
     workspace_id: str
     project_id: str
+    specification_id: str | None = None
     description: str = ""
     priority: str = "Med"
     due_date: datetime | None = None
@@ -54,6 +55,7 @@ class TaskPatch(BaseModel):
     attachment_refs: list[AttachmentRef] | None = None
     archived: bool | None = None
     project_id: str | None = None
+    specification_id: str | None = None
     recurring_rule: str | None = None
     task_type: str | None = None
     scheduled_instruction: str | None = None
@@ -89,6 +91,7 @@ class NoteCreate(BaseModel):
     workspace_id: str
     project_id: str
     task_id: str | None = None
+    specification_id: str | None = None
     body: str = ""
     tags: list[str] = Field(default_factory=list)
     external_refs: list[ExternalRef] = Field(default_factory=list)
@@ -106,6 +109,7 @@ class NotePatch(BaseModel):
     archived: bool | None = None
     project_id: str | None = None
     task_id: str | None = None
+    specification_id: str | None = None
 
 
 class SavedViewCreate(BaseModel):
@@ -150,6 +154,25 @@ class ProjectRulePatch(BaseModel):
     body: str | None = None
 
 
+class SpecificationCreate(BaseModel):
+    workspace_id: str
+    project_id: str
+    title: str = Field(min_length=1)
+    body: str = ""
+    status: str = "Draft"
+    external_refs: list[ExternalRef] = Field(default_factory=list)
+    attachment_refs: list[AttachmentRef] = Field(default_factory=list)
+
+
+class SpecificationPatch(BaseModel):
+    title: str | None = None
+    body: str | None = None
+    status: str | None = None
+    external_refs: list[ExternalRef] | None = None
+    attachment_refs: list[AttachmentRef] | None = None
+    archived: bool | None = None
+
+
 class ReorderPayload(BaseModel):
     ordered_ids: list[str]
     status: str | None = None
@@ -176,6 +199,7 @@ class TaskDTO:
     id: str
     workspace_id: str
     project_id: str | None
+    specification_id: str | None
     title: str
     description: str
     status: str
@@ -216,6 +240,7 @@ class TaskCommandState:
     id: str
     workspace_id: str
     project_id: str | None
+    specification_id: str | None
     status: str
     archived: bool
     is_deleted: bool
@@ -231,6 +256,7 @@ class NoteDTO:
     workspace_id: str
     project_id: str | None
     task_id: str | None
+    specification_id: str | None
     title: str
     body: str
     tags: list[str]
@@ -250,6 +276,7 @@ class NoteCommandState:
     workspace_id: str
     project_id: str | None
     task_id: str | None
+    specification_id: str | None
     pinned: bool
     archived: bool
     is_deleted: bool
@@ -273,4 +300,31 @@ class ProjectRuleCommandState:
     id: str
     workspace_id: str
     project_id: str
+    is_deleted: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SpecificationDTO:
+    id: str
+    workspace_id: str
+    project_id: str
+    title: str
+    body: str
+    status: str
+    external_refs: list[dict[str, Any]]
+    attachment_refs: list[dict[str, Any]]
+    archived: bool
+    created_by: str
+    updated_by: str
+    created_at: str | None
+    updated_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SpecificationCommandState:
+    id: str
+    workspace_id: str
+    project_id: str
+    status: str
+    archived: bool
     is_deleted: bool

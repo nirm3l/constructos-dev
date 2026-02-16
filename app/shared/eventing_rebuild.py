@@ -61,6 +61,14 @@ from features.rules.domain import (
     EVENT_UPDATED as PROJECT_RULE_EVENT_UPDATED,
     MUTATION_EVENTS as PROJECT_RULE_MUTATION_EVENTS,
 )
+from features.specifications.domain import (
+    EVENT_ARCHIVED as SPECIFICATION_EVENT_ARCHIVED,
+    EVENT_CREATED as SPECIFICATION_EVENT_CREATED,
+    EVENT_DELETED as SPECIFICATION_EVENT_DELETED,
+    EVENT_RESTORED as SPECIFICATION_EVENT_RESTORED,
+    EVENT_UPDATED as SPECIFICATION_EVENT_UPDATED,
+    MUTATION_EVENTS as SPECIFICATION_MUTATION_EVENTS,
+)
 from features.users.domain import EVENT_PREFERENCES_UPDATED as USER_EVENT_PREFERENCES_UPDATED
 from features.views.domain import EVENT_CREATED as SAVED_VIEW_EVENT_CREATED
 from .models import (
@@ -72,6 +80,7 @@ from .models import (
     ProjectTagIndex,
     ProjectRule,
     SavedView,
+    Specification,
     StoredEvent,
     Task,
     TaskComment,
@@ -250,6 +259,7 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "id": event.aggregate_id,
             "workspace_id": p["workspace_id"],
             "project_id": p.get("project_id"),
+            "specification_id": p.get("specification_id"),
             "title": p["title"],
             "description": p.get("description", ""),
             "status": p.get("status", "To do"),
@@ -383,6 +393,7 @@ def apply_note_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "workspace_id": p["workspace_id"],
             "project_id": p.get("project_id"),
             "task_id": p.get("task_id"),
+            "specification_id": p.get("specification_id"),
             "title": p.get("title", ""),
             "body": p.get("body", ""),
             "tags": p.get("tags", []),
@@ -442,6 +453,44 @@ def apply_project_rule_event(state: dict[str, Any], event: EventEnvelope) -> dic
     return s
 
 
+def apply_specification_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, Any]:
+    s = dict(state)
+    p = event.payload
+    if event.event_type == SPECIFICATION_EVENT_CREATED:
+        s = {
+            "id": event.aggregate_id,
+            "workspace_id": p["workspace_id"],
+            "project_id": p["project_id"],
+            "title": p.get("title", ""),
+            "body": p.get("body", ""),
+            "status": p.get("status", "Draft"),
+            "external_refs": p.get("external_refs", []),
+            "attachment_refs": p.get("attachment_refs", []),
+            "created_by": p.get("created_by"),
+            "updated_by": p.get("updated_by"),
+            "archived": bool(p.get("archived", False)),
+            "is_deleted": bool(p.get("is_deleted", False)),
+        }
+    elif event.event_type == SPECIFICATION_EVENT_UPDATED:
+        s.update(p)
+    elif event.event_type == SPECIFICATION_EVENT_ARCHIVED:
+        s["archived"] = True
+        s["status"] = "Archived"
+        if "updated_by" in p:
+            s["updated_by"] = p.get("updated_by")
+    elif event.event_type == SPECIFICATION_EVENT_RESTORED:
+        s["archived"] = False
+        if s.get("status") == "Archived":
+            s["status"] = "Ready"
+        if "updated_by" in p:
+            s["updated_by"] = p.get("updated_by")
+    elif event.event_type == SPECIFICATION_EVENT_DELETED:
+        s["is_deleted"] = True
+        if "updated_by" in p:
+            s["updated_by"] = p.get("updated_by")
+    return s
+
+
 def rebuild_state(db: Session, aggregate_type: str, aggregate_id: str) -> tuple[dict[str, Any], int]:
     state, version = load_snapshot(db, aggregate_type, aggregate_id)
     for ev in load_events_after(db, aggregate_type, aggregate_id, version):
@@ -453,6 +502,8 @@ def rebuild_state(db: Session, aggregate_type: str, aggregate_id: str) -> tuple[
             state = apply_note_event(state, ev)
         elif aggregate_type == "ProjectRule":
             state = apply_project_rule_event(state, ev)
+        elif aggregate_type == "Specification":
+            state = apply_specification_event(state, ev)
         version = ev.version
     return state, version
 
@@ -528,6 +579,7 @@ def project_event(db: Session, ev: EventEnvelope):
         note.workspace_id = p["workspace_id"]
         note.project_id = p.get("project_id")
         note.task_id = p.get("task_id")
+        note.specification_id = p.get("specification_id")
         note.title = p.get("title", "") or ""
         note.body = p.get("body", "") or ""
         note.tags = json.dumps(p.get("tags", []))
@@ -551,6 +603,27 @@ def project_event(db: Session, ev: EventEnvelope):
         rule.created_by = p.get("created_by") or m.get("actor_id") or ""
         rule.updated_by = p.get("updated_by") or m.get("actor_id") or ""
         rule.is_deleted = bool(p.get("is_deleted", False))
+    elif ev.event_type == SPECIFICATION_EVENT_CREATED:
+        specification = db.get(Specification, ev.aggregate_id)
+        if specification is None:
+            specification = Specification(
+                id=ev.aggregate_id,
+                workspace_id=p["workspace_id"],
+                project_id=p["project_id"],
+                title=p.get("title", ""),
+            )
+            db.add(specification)
+        specification.workspace_id = p["workspace_id"]
+        specification.project_id = p["project_id"]
+        specification.title = p.get("title", "") or ""
+        specification.body = p.get("body", "") or ""
+        specification.status = p.get("status", "Draft")
+        specification.external_refs = json.dumps(p.get("external_refs", []))
+        specification.attachment_refs = json.dumps(p.get("attachment_refs", []))
+        specification.created_by = p.get("created_by") or m.get("actor_id") or ""
+        specification.updated_by = p.get("updated_by") or m.get("actor_id") or ""
+        specification.archived = bool(p.get("archived", False))
+        specification.is_deleted = bool(p.get("is_deleted", False))
     elif ev.event_type == TASK_EVENT_CREATED:
         task = db.get(Task, ev.aggregate_id)
         if task is None:
@@ -558,6 +631,7 @@ def project_event(db: Session, ev: EventEnvelope):
             db.add(task)
         task.workspace_id = p["workspace_id"]
         task.project_id = p.get("project_id")
+        task.specification_id = p.get("specification_id")
         task.title = p["title"]
         task.description = p.get("description", "") or ""
         task.status = p.get("status", "To do")
@@ -625,6 +699,32 @@ def project_event(db: Session, ev: EventEnvelope):
                 rule.is_deleted = True
                 if p.get("updated_by"):
                     rule.updated_by = p["updated_by"]
+    elif ev.event_type in SPECIFICATION_MUTATION_EVENTS:
+        specification = db.get(Specification, ev.aggregate_id)
+        if specification:
+            if ev.event_type == SPECIFICATION_EVENT_UPDATED:
+                for k, v in p.items():
+                    if k == "external_refs" and v is not None:
+                        specification.external_refs = json.dumps(v)
+                    elif k == "attachment_refs" and v is not None:
+                        specification.attachment_refs = json.dumps(v)
+                    else:
+                        setattr(specification, k, v)
+            elif ev.event_type == SPECIFICATION_EVENT_ARCHIVED:
+                specification.archived = True
+                specification.status = "Archived"
+                if p.get("updated_by"):
+                    specification.updated_by = p["updated_by"]
+            elif ev.event_type == SPECIFICATION_EVENT_RESTORED:
+                specification.archived = False
+                if specification.status == "Archived":
+                    specification.status = "Ready"
+                if p.get("updated_by"):
+                    specification.updated_by = p["updated_by"]
+            elif ev.event_type == SPECIFICATION_EVENT_DELETED:
+                specification.is_deleted = True
+                if p.get("updated_by"):
+                    specification.updated_by = p["updated_by"]
     elif ev.event_type in TASK_MUTATION_EVENTS:
         task = db.get(Task, ev.aggregate_id)
         if task:
@@ -790,6 +890,22 @@ def project_event(db: Session, ev: EventEnvelope):
             project_id = None
         if task_id and db.get(Task, task_id) is None:
             task_id = None
+        event_key = f"{ev.aggregate_type}:{ev.aggregate_id}:{ev.version}:{ev.event_type}"
+        details_payload = dict(p)
+        details_payload["_event_key"] = event_key
+        details_json = json.dumps(details_payload, sort_keys=True)
+        existing_activity = db.execute(
+            select(ActivityLog.id).where(
+                ActivityLog.workspace_id == workspace_id,
+                ActivityLog.project_id == project_id,
+                ActivityLog.task_id == task_id,
+                ActivityLog.actor_id == actor_id,
+                ActivityLog.action == ev.event_type,
+                ActivityLog.details == details_json,
+            )
+        ).first()
+        if existing_activity:
+            return
         db.add(
             ActivityLog(
                 workspace_id=workspace_id,
@@ -797,6 +913,6 @@ def project_event(db: Session, ev: EventEnvelope):
                 task_id=task_id,
                 actor_id=actor_id,
                 action=ev.event_type,
-                details=json.dumps(p),
+                details=details_json,
             )
         )

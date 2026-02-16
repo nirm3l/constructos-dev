@@ -2,9 +2,9 @@ import type { AttachmentRef, ExternalRef } from '../types'
 
 const DEFAULT_USER_ID = '00000000-0000-0000-0000-000000000001'
 
-export type Tab = 'today' | 'tasks' | 'notes' | 'projects' | 'search' | 'profile'
+export type Tab = 'today' | 'tasks' | 'notes' | 'specifications' | 'projects' | 'search' | 'profile'
 
-export const TAB_ORDER: Tab[] = ['today', 'tasks', 'notes', 'projects', 'search', 'profile']
+export const TAB_ORDER: Tab[] = ['today', 'tasks', 'notes', 'specifications', 'projects', 'search', 'profile']
 
 export function normalizeStoredUserId(raw: string | null): string {
   if (!raw || raw === '1' || raw === '2') return DEFAULT_USER_ID

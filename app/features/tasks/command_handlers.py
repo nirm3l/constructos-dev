@@ -14,6 +14,7 @@ from shared.core import (
     CommentCreate,
     DEFAULT_STATUSES,
     Project,
+    Specification,
     ReorderPayload,
     Task,
     TaskComment,
@@ -117,6 +118,19 @@ def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -
     return project
 
 
+def _require_specification_scope(db: Session, *, workspace_id: str, project_id: str, specification_id: str) -> Specification:
+    specification = db.get(Specification, specification_id)
+    if not specification or specification.is_deleted:
+        raise HTTPException(status_code=404, detail="Specification not found")
+    if specification.workspace_id != workspace_id:
+        raise HTTPException(status_code=400, detail="Specification does not belong to workspace")
+    if specification.project_id != project_id:
+        raise HTTPException(status_code=400, detail="Specification does not belong to project")
+    if specification.archived:
+        raise HTTPException(status_code=409, detail="Specification is archived")
+    return specification
+
+
 def _validate_schedule_fields(
     *,
     task_type: str,
@@ -154,6 +168,13 @@ class CreateTaskHandler:
     def __call__(self) -> dict:
         ensure_role(self.ctx.db, self.payload.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
         project = _require_project_scope(self.ctx.db, workspace_id=self.payload.workspace_id, project_id=self.payload.project_id)
+        if self.payload.specification_id:
+            _require_specification_scope(
+                self.ctx.db,
+                workspace_id=self.payload.workspace_id,
+                project_id=self.payload.project_id,
+                specification_id=self.payload.specification_id,
+            )
         try:
             statuses = json.loads(project.custom_statuses or "[]")
         except Exception:
@@ -184,6 +205,7 @@ class CreateTaskHandler:
             payload={
                 "workspace_id": self.payload.workspace_id,
                 "project_id": self.payload.project_id,
+                "specification_id": self.payload.specification_id,
                 "title": self.payload.title.strip(),
                 "description": self.payload.description,
                 "status": initial_status,
@@ -290,6 +312,25 @@ class PatchTaskHandler:
         current_schedule_timezone = (
             current_row.schedule_timezone if current_row is not None else (current_state.get("schedule_timezone") if current_state else None)
         )
+        current_specification_id = (
+            current_row.specification_id if current_row is not None else (current_state.get("specification_id") if current_state else None)
+        )
+        effective_project_id = str(data.get("project_id", project_id) or "")
+        if not effective_project_id:
+            raise HTTPException(status_code=422, detail="project_id is required")
+        if "project_id" in data and current_specification_id and "specification_id" not in data:
+            raise HTTPException(status_code=409, detail="Cannot change project while task is linked to specification")
+        if "specification_id" in data:
+            specification_id = data.get("specification_id")
+            if specification_id:
+                _require_specification_scope(
+                    self.ctx.db,
+                    workspace_id=workspace_id,
+                    project_id=effective_project_id,
+                    specification_id=str(specification_id),
+                )
+            else:
+                data["specification_id"] = None
         event_payload = dict(data)
         if "due_date" in event_payload:
             event_payload["due_date"] = to_iso_utc(normalize_datetime_to_utc(event_payload["due_date"], user_tz))

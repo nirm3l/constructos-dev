@@ -12,6 +12,8 @@ import type {
   ProjectMembersPage,
   ProjectRule,
   ProjectRulesPage,
+  Specification,
+  SpecificationsPage,
   ProjectTags,
   Task,
   TaskActivity,
@@ -114,6 +116,7 @@ export const getTasks = (
     q?: string
     status?: string
     priority?: string
+    specification_id?: string
     tags?: string[]
     archived?: boolean
     limit?: number
@@ -129,6 +132,7 @@ export const getTasks = (
       q: params?.q,
       status: params?.status,
       priority: params?.priority,
+      specification_id: params?.specification_id,
       tags: params?.tags?.join(',') || undefined,
       limit: params?.limit ?? 100,
       offset: params?.offset ?? 0
@@ -142,6 +146,7 @@ export const createTask = (
     title: string
     workspace_id: string
     project_id: string
+    specification_id?: string | null
     due_date?: string | null
     labels?: string[]
     external_refs?: ExternalRef[]
@@ -179,6 +184,7 @@ export const patchTask = (
       | 'scheduled_instruction'
       | 'scheduled_at_utc'
       | 'schedule_timezone'
+      | 'specification_id'
       | 'external_refs'
       | 'attachment_refs'
     >
@@ -302,6 +308,7 @@ export const getNotes = (
   params?: {
     project_id: string
     task_id?: string | null
+    specification_id?: string | null
     q?: string
     tags?: string[]
     archived?: boolean
@@ -315,6 +322,7 @@ export const getNotes = (
       workspace_id: workspaceId,
       project_id: params?.project_id,
       task_id: params?.task_id ?? undefined,
+      specification_id: params?.specification_id ?? undefined,
       q: params?.q,
       tags: params?.tags?.join(',') || undefined,
       archived: params?.archived ?? false,
@@ -332,6 +340,7 @@ export const createNote = (
     workspace_id: string
     project_id: string
     task_id?: string | null
+    specification_id?: string | null
     body?: string
     tags?: string[]
     pinned?: boolean
@@ -343,8 +352,61 @@ export const createNote = (
 export const patchNote = (
   userId: string,
   noteId: string,
-  payload: Partial<Pick<Note, 'title' | 'body' | 'tags' | 'pinned' | 'archived' | 'project_id' | 'task_id' | 'external_refs' | 'attachment_refs'>>
+  payload: Partial<
+    Pick<Note, 'title' | 'body' | 'tags' | 'pinned' | 'archived' | 'project_id' | 'task_id' | 'specification_id' | 'external_refs' | 'attachment_refs'>
+  >
 ) => api<Note>(`/api/notes/${noteId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })
+
+export const getSpecifications = (
+  userId: string,
+  workspaceId: string,
+  params: {
+    project_id: string
+    q?: string
+    status?: string
+    archived?: boolean
+    limit?: number
+    offset?: number
+  }
+) =>
+  api<SpecificationsPage>(
+    `/api/specifications${queryString({
+      workspace_id: workspaceId,
+      project_id: params.project_id,
+      q: params.q,
+      status: params.status,
+      archived: params.archived ?? false,
+      limit: params.limit ?? 100,
+      offset: params.offset ?? 0,
+    })}`,
+    userId
+  )
+
+export const createSpecification = (
+  userId: string,
+  payload: {
+    workspace_id: string
+    project_id: string
+    title: string
+    body?: string
+    status?: Specification['status']
+    external_refs?: ExternalRef[]
+    attachment_refs?: AttachmentRef[]
+  }
+) => api<Specification>('/api/specifications', userId, { method: 'POST', body: JSON.stringify(payload) })
+
+export const patchSpecification = (
+  userId: string,
+  specificationId: string,
+  payload: Partial<Pick<Specification, 'title' | 'body' | 'status' | 'external_refs' | 'attachment_refs' | 'archived'>>
+) => api<Specification>(`/api/specifications/${specificationId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })
+
+export const archiveSpecification = (userId: string, specificationId: string) =>
+  api<{ ok: true }>(`/api/specifications/${specificationId}/archive`, userId, { method: 'POST' })
+export const restoreSpecification = (userId: string, specificationId: string) =>
+  api<{ ok: true }>(`/api/specifications/${specificationId}/restore`, userId, { method: 'POST' })
+export const deleteSpecification = (userId: string, specificationId: string) =>
+  api<{ ok: true }>(`/api/specifications/${specificationId}/delete`, userId, { method: 'POST' })
 
 export const archiveNote = (userId: string, noteId: string) =>
   api<{ ok: true }>(`/api/notes/${noteId}/archive`, userId, { method: 'POST' })

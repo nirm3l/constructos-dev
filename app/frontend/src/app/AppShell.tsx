@@ -77,6 +77,16 @@ function App() {
   const [noteQ, setNoteQ] = React.useState('')
   const [noteTags, setNoteTags] = React.useState<string[]>([])
   const [noteArchived, setNoteArchived] = React.useState(false)
+  const [specificationQ, setSpecificationQ] = React.useState('')
+  const [specificationStatus, setSpecificationStatus] = React.useState('')
+  const [specificationArchived, setSpecificationArchived] = React.useState(false)
+  const [selectedSpecificationId, setSelectedSpecificationId] = React.useState<string | null>(null)
+  const [editSpecificationTitle, setEditSpecificationTitle] = React.useState('')
+  const [editSpecificationBody, setEditSpecificationBody] = React.useState('')
+  const [editSpecificationStatus, setEditSpecificationStatus] = React.useState('Draft')
+  const [editSpecificationExternalRefsText, setEditSpecificationExternalRefsText] = React.useState('')
+  const [editSpecificationAttachmentRefsText, setEditSpecificationAttachmentRefsText] = React.useState('')
+  const [specificationEditorView, setSpecificationEditorView] = React.useState<'write' | 'preview'>('preview')
   const [editNoteTitle, setEditNoteTitle] = React.useState('')
   const [editNoteBody, setEditNoteBody] = React.useState('')
   const [editNoteTags, setEditNoteTags] = React.useState('')
@@ -111,6 +121,7 @@ function App() {
   const commentsListRef = React.useRef<HTMLDivElement | null>(null)
   const taskFileInputRef = React.useRef<HTMLInputElement | null>(null)
   const noteFileInputRef = React.useRef<HTMLInputElement | null>(null)
+  const specFileInputRef = React.useRef<HTMLInputElement | null>(null)
   const editProjectFileInputRef = React.useRef<HTMLInputElement | null>(null)
   const fabIdleTimerRef = React.useRef<number | null>(null)
   const openNextSelectedNoteInWriteRef = React.useRef(false)
@@ -137,6 +148,8 @@ function App() {
     setSelectedTaskId,
     selectedNoteId,
     setSelectedNoteId,
+    selectedSpecificationId,
+    setSelectedSpecificationId,
     setFabHidden,
     fabIdleTimerRef,
     projectsMode,
@@ -181,6 +194,7 @@ function App() {
   const {
     tasks,
     notes,
+    specifications,
     projectTags,
     projectRules,
     projectTaskCountQueries,
@@ -202,6 +216,9 @@ function App() {
     noteQ,
     noteArchived,
     noteTags,
+    specificationQ,
+    specificationStatus,
+    specificationArchived,
     projects: bootstrap.data?.projects ?? [],
     projectsMode,
   })
@@ -223,6 +240,10 @@ function App() {
 
   const selectedTask = React.useMemo(() => tasks.data?.items.find((t) => t.id === selectedTaskId) ?? null, [tasks.data?.items, selectedTaskId])
   const selectedNote = React.useMemo(() => notes.data?.items.find((n) => n.id === selectedNoteId) ?? null, [notes.data?.items, selectedNoteId])
+  const selectedSpecification = React.useMemo(
+    () => specifications.data?.items.find((s: any) => s.id === selectedSpecificationId) ?? null,
+    [specifications.data?.items, selectedSpecificationId]
+  )
   const selectedProjectRule = React.useMemo(
     () => projectRules.data?.items.find((r) => r.id === selectedProjectRuleId) ?? null,
     [projectRules.data?.items, selectedProjectRuleId]
@@ -278,6 +299,7 @@ function App() {
     closeTaskEditor,
     openTaskEditor,
     toggleNoteEditor,
+    toggleSpecificationEditor,
     toggleProjectEditor,
   } = useEditorGuards({
     setCreateProjectMemberIds,
@@ -299,6 +321,12 @@ function App() {
     editNoteTags,
     editNoteExternalRefsText,
     editNoteAttachmentRefsText,
+    selectedSpecification,
+    editSpecificationTitle,
+    editSpecificationBody,
+    editSpecificationStatus,
+    editSpecificationExternalRefsText,
+    editSpecificationAttachmentRefsText,
     selectedTask,
     editTitle,
     editDescription,
@@ -320,6 +348,8 @@ function App() {
     selectedTaskId,
     selectedNoteId,
     setSelectedNoteId,
+    selectedSpecificationId,
+    setSelectedSpecificationId,
     setShowProjectCreateForm,
     setShowProjectEditForm,
     setSelectedProjectId,
@@ -447,6 +477,11 @@ function App() {
     archiveNoteMutation,
     restoreNoteMutation,
     deleteNoteMutation,
+    saveSpecificationMutation,
+    createSpecificationMutation,
+    archiveSpecificationMutation,
+    restoreSpecificationMutation,
+    deleteSpecificationMutation,
     markReadMutation,
     themeMutation,
     addCommentMutation,
@@ -523,6 +558,13 @@ function App() {
     setCodexChatRunStartedAt,
     setCodexChatElapsedSeconds,
     setCodexChatInstruction,
+    selectedSpecificationId,
+    setSelectedSpecificationId,
+    editSpecificationTitle,
+    editSpecificationBody,
+    editSpecificationStatus,
+    editSpecificationExternalRefsText,
+    editSpecificationAttachmentRefsText,
   })
 
   useProjectEditorEffects({
@@ -554,6 +596,55 @@ function App() {
     editProjectDescriptionView,
     editProjectDescription,
   })
+
+  React.useEffect(() => {
+    const items = specifications.data?.items ?? []
+    if (items.length === 0) {
+      setSelectedSpecificationId(null)
+      return
+    }
+    if (selectedSpecificationId && !items.some((item: any) => item.id === selectedSpecificationId)) {
+      const first = items[0]
+      if (first?.id) setSelectedSpecificationId(first.id)
+    }
+  }, [selectedSpecificationId, specifications.data?.items])
+
+  React.useEffect(() => {
+    if (!selectedSpecification) {
+      setEditSpecificationTitle('')
+      setEditSpecificationBody('')
+      setEditSpecificationStatus('Draft')
+      setEditSpecificationExternalRefsText('')
+      setEditSpecificationAttachmentRefsText('')
+      setSpecificationEditorView('preview')
+      return
+    }
+    setEditSpecificationTitle(selectedSpecification.title || '')
+    setEditSpecificationBody(selectedSpecification.body || '')
+    setEditSpecificationStatus(selectedSpecification.status || 'Draft')
+    setEditSpecificationExternalRefsText(externalRefsToText(selectedSpecification.external_refs))
+    setEditSpecificationAttachmentRefsText(attachmentRefsToText(selectedSpecification.attachment_refs))
+    const hasBody = Boolean((selectedSpecification.body || '').trim())
+    setSpecificationEditorView(hasBody ? 'preview' : 'write')
+  }, [selectedSpecification])
+
+  const specificationIsDirty = React.useMemo(() => {
+    if (!selectedSpecification) return false
+    return (
+      (editSpecificationTitle || '').trim() !== (selectedSpecification.title || '').trim() ||
+      (editSpecificationBody || '') !== (selectedSpecification.body || '') ||
+      (editSpecificationStatus || 'Draft') !== (selectedSpecification.status || 'Draft') ||
+      editSpecificationExternalRefsText.trim() !== externalRefsToText(selectedSpecification.external_refs).trim() ||
+      editSpecificationAttachmentRefsText.trim() !== attachmentRefsToText(selectedSpecification.attachment_refs).trim()
+    )
+  }, [
+    editSpecificationAttachmentRefsText,
+    editSpecificationBody,
+    editSpecificationExternalRefsText,
+    editSpecificationStatus,
+    editSpecificationTitle,
+    selectedSpecification,
+  ])
 
   if (bootstrap.isLoading) return <div className="page"><div className="card skeleton">Loading workspace...</div></div>
   if (bootstrap.isError || !bootstrap.data) return <div className="page"><div className="notice">Unable to load bootstrap data.</div></div>
@@ -697,6 +788,7 @@ function App() {
       selectedProjectTimeMeta,
       noteQ,
       notes,
+      specifications,
       setNoteQ,
       createNoteMutation,
       noteArchived,
@@ -729,6 +821,7 @@ function App() {
       removeExternalRefByIndex,
       externalRefsToText,
       noteFileInputRef,
+      specFileInputRef,
       setEditNoteAttachmentRefsText,
       attachmentRefsToText,
       parseAttachmentRefsText,
@@ -744,6 +837,33 @@ function App() {
       toggleNoteTag,
       canCreateTag,
       addNoteTag,
+      specificationQ,
+      setSpecificationQ,
+      specificationStatus,
+      setSpecificationStatus,
+      specificationArchived,
+      setSpecificationArchived,
+      selectedSpecificationId,
+      setSelectedSpecificationId,
+      toggleSpecificationEditor,
+      editSpecificationTitle,
+      setEditSpecificationTitle,
+      editSpecificationBody,
+      setEditSpecificationBody,
+      editSpecificationStatus,
+      setEditSpecificationStatus,
+      editSpecificationExternalRefsText,
+      setEditSpecificationExternalRefsText,
+      editSpecificationAttachmentRefsText,
+      setEditSpecificationAttachmentRefsText,
+      specificationEditorView,
+      setSpecificationEditorView,
+      specificationIsDirty,
+      saveSpecificationMutation,
+      createSpecificationMutation,
+      archiveSpecificationMutation,
+      restoreSpecificationMutation,
+      deleteSpecificationMutation,
       searchStatus,
       setSearchStatus,
       searchPriority,

@@ -4,6 +4,7 @@ import {
   getNotes,
   getProjectBoard,
   getProjectRules,
+  getSpecifications,
   getProjectTags,
   getTasks,
 } from '../api'
@@ -40,6 +41,26 @@ export function useCoreQueries(c: any) {
         project_id: c.selectedProjectId,
       }),
     enabled: Boolean(c.workspaceId && c.selectedProjectId) && c.tab === 'projects'
+  })
+
+  const specifications = useQuery({
+    queryKey: [
+      'specifications',
+      c.userId,
+      c.workspaceId,
+      c.selectedProjectId,
+      c.specificationQ,
+      c.specificationStatus,
+      c.specificationArchived,
+    ],
+    queryFn: () =>
+      getSpecifications(c.userId, c.workspaceId, {
+        project_id: c.selectedProjectId,
+        q: c.specificationQ || undefined,
+        status: c.specificationStatus || undefined,
+        archived: c.specificationArchived,
+      }),
+    enabled: Boolean(c.workspaceId && c.selectedProjectId) && c.tab === 'specifications',
   })
 
   const projectTaskCountQueries = useQueries({
@@ -83,6 +104,7 @@ export function useCoreQueries(c: any) {
     notes,
     projectTags,
     projectRules,
+    specifications,
     projectTaskCountQueries,
     projectNoteCountQueries,
     projectRuleCountQueries,

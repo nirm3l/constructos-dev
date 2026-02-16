@@ -1,5 +1,6 @@
 import React from 'react'
 import { ProjectsPanel } from '../projects/ProjectsPanel'
+import { SpecificationsPanel } from '../specifications/SpecificationsPanel'
 import { NotesPanel } from '../notes/NotesPanel'
 import { QuickAddDrawer } from '../tasks/QuickAddDrawer'
 import { TasksPanel } from '../tasks/TasksPanel'
@@ -133,6 +134,52 @@ export function AppPrimaryPanels({ state }: { state: any }) {
         />
       )}
 
+      {state.tab === 'specifications' && (
+        <SpecificationsPanel
+          state={{
+            specifications: state.specifications,
+            specificationQ: state.specificationQ,
+            setSpecificationQ: state.setSpecificationQ,
+            specificationStatus: state.specificationStatus,
+            setSpecificationStatus: state.setSpecificationStatus,
+            specificationArchived: state.specificationArchived,
+            setSpecificationArchived: state.setSpecificationArchived,
+            createSpecificationMutation: state.createSpecificationMutation,
+            selectedSpecificationId: state.selectedSpecificationId,
+            toggleSpecificationEditor: state.toggleSpecificationEditor,
+            editSpecificationTitle: state.editSpecificationTitle,
+            setEditSpecificationTitle: state.setEditSpecificationTitle,
+            editSpecificationBody: state.editSpecificationBody,
+            setEditSpecificationBody: state.setEditSpecificationBody,
+            editSpecificationStatus: state.editSpecificationStatus,
+            setEditSpecificationStatus: state.setEditSpecificationStatus,
+            editSpecificationExternalRefsText: state.editSpecificationExternalRefsText,
+            setEditSpecificationExternalRefsText: state.setEditSpecificationExternalRefsText,
+            editSpecificationAttachmentRefsText: state.editSpecificationAttachmentRefsText,
+            setEditSpecificationAttachmentRefsText: state.setEditSpecificationAttachmentRefsText,
+            specificationEditorView: state.specificationEditorView,
+            setSpecificationEditorView: state.setSpecificationEditorView,
+            specificationIsDirty: state.specificationIsDirty,
+            saveSpecificationMutation: state.saveSpecificationMutation,
+            archiveSpecificationMutation: state.archiveSpecificationMutation,
+            restoreSpecificationMutation: state.restoreSpecificationMutation,
+            deleteSpecificationMutation: state.deleteSpecificationMutation,
+            parseExternalRefsText: state.parseExternalRefsText,
+            removeExternalRefByIndex: state.removeExternalRefByIndex,
+            externalRefsToText: state.externalRefsToText,
+            parseAttachmentRefsText: state.parseAttachmentRefsText,
+            removeAttachmentByPath: state.removeAttachmentByPath,
+            attachmentRefsToText: state.attachmentRefsToText,
+            workspaceId: state.workspaceId,
+            userId: state.userId,
+            specFileInputRef: state.specFileInputRef,
+            uploadAttachmentRef: state.uploadAttachmentRef,
+            toErrorMessage: state.toErrorMessage,
+            setUiError: state.setUiError,
+          }}
+        />
+      )}
+
       {state.tab === 'notes' && (
         <NotesPanel
           state={{
@@ -230,7 +277,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             state.themeMutation.mutate(next)
           }}
         />
-      ) : state.tab !== 'tasks' && state.tab !== 'projects' && state.tab !== 'notes' ? (
+      ) : state.tab !== 'tasks' && state.tab !== 'projects' && state.tab !== 'notes' && state.tab !== 'specifications' ? (
         <TaskResultsPanel
           tasks={state.tasks.data?.items ?? []}
           total={state.tasks.data?.total ?? 0}

@@ -44,7 +44,7 @@ export function useRealtimeEffects(c: any) {
   }, [realtimeRefreshTimerRef])
 
   React.useEffect(() => {
-    if (!userId) return
+    if (!userId || !workspaceId) return
     const streamUrl = `/api/notifications/stream?user_id=${encodeURIComponent(userId)}&workspace_id=${encodeURIComponent(workspaceId || '')}`
     const es = new EventSource(streamUrl)
 

@@ -38,7 +38,7 @@ export function ProjectsCreateForm({
 }: {
   projectName: string
   setProjectName: React.Dispatch<React.SetStateAction<string>>
-  createProjectMutation: { mutate: () => void }
+  createProjectMutation: { mutate: () => void; isPending: boolean }
   projectDescriptionView: 'write' | 'preview'
   setProjectDescriptionView: React.Dispatch<React.SetStateAction<'write' | 'preview'>>
   projectDescriptionRef: React.RefObject<HTMLTextAreaElement | null>
@@ -70,13 +70,17 @@ export function ProjectsCreateForm({
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
               const name = projectName.trim()
-              if (!name) return
+              if (!name || createProjectMutation.isPending) return
               createProjectMutation.mutate()
             }
           }}
           placeholder="New project"
         />
-        <button className="primary" disabled={!projectName.trim()} onClick={() => createProjectMutation.mutate()}>
+        <button
+          className="primary"
+          disabled={!projectName.trim() || createProjectMutation.isPending}
+          onClick={() => createProjectMutation.mutate()}
+        >
           <Icon path="M12 5v14M5 12h14" />
         </button>
       </div>

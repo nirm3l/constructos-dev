@@ -13,6 +13,7 @@ from shared.core import (
     NoteCreate,
     NotePatch,
     Project,
+    Specification,
     Task,
     User,
     append_event,
@@ -33,12 +34,14 @@ from .domain import (
 )
 
 
-def require_note_command_state(db: Session, user: User, note_id: str, *, allowed: set[str]) -> tuple[str, str | None, str | None, bool, bool]:
+def require_note_command_state(
+    db: Session, user: User, note_id: str, *, allowed: set[str]
+) -> tuple[str, str | None, str | None, str | None, bool, bool]:
     state = load_note_command_state(db, note_id)
     if not state or state.is_deleted:
         raise HTTPException(status_code=404, detail="Note not found")
     ensure_role(db, state.workspace_id, user.id, allowed)
-    return state.workspace_id, state.project_id, state.task_id, bool(state.archived), bool(state.pinned)
+    return state.workspace_id, state.project_id, state.task_id, state.specification_id, bool(state.archived), bool(state.pinned)
 
 
 def _normalize_tags(values: list[str] | None) -> list[str]:
@@ -120,6 +123,19 @@ def _require_task_scope(db: Session, *, workspace_id: str, project_id: str, task
     return task
 
 
+def _require_specification_scope(db: Session, *, workspace_id: str, project_id: str, specification_id: str) -> Specification:
+    specification = db.get(Specification, specification_id)
+    if not specification or specification.is_deleted:
+        raise HTTPException(status_code=404, detail="Specification not found")
+    if specification.workspace_id != workspace_id:
+        raise HTTPException(status_code=400, detail="Specification does not belong to workspace")
+    if specification.project_id != project_id:
+        raise HTTPException(status_code=400, detail="Specification does not belong to project")
+    if specification.archived:
+        raise HTTPException(status_code=409, detail="Specification is archived")
+    return specification
+
+
 @dataclass(frozen=True, slots=True)
 class CommandContext:
     db: Session
@@ -134,6 +150,13 @@ class CreateNoteHandler:
     def __call__(self) -> dict:
         ensure_role(self.ctx.db, self.payload.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
         _require_project_scope(self.ctx.db, workspace_id=self.payload.workspace_id, project_id=self.payload.project_id)
+        if self.payload.specification_id:
+            _require_specification_scope(
+                self.ctx.db,
+                workspace_id=self.payload.workspace_id,
+                project_id=self.payload.project_id,
+                specification_id=self.payload.specification_id,
+            )
         if self.payload.task_id:
             _require_task_scope(
                 self.ctx.db,
@@ -151,6 +174,7 @@ class CreateNoteHandler:
                 "workspace_id": self.payload.workspace_id,
                 "project_id": self.payload.project_id,
                 "task_id": self.payload.task_id,
+                "specification_id": self.payload.specification_id,
                 "title": self.payload.title.strip(),
                 "body": self.payload.body or "",
                 "tags": _normalize_tags(self.payload.tags),
@@ -186,7 +210,7 @@ class PatchNoteHandler:
     payload: NotePatch
 
     def __call__(self) -> dict:
-        workspace_id, project_id, task_id, _, _ = require_note_command_state(
+        workspace_id, project_id, task_id, specification_id, _, _ = require_note_command_state(
             self.ctx.db, self.ctx.user, self.note_id, allowed={"Owner", "Admin", "Member"}
         )
         data = self.payload.model_dump(exclude_unset=True)
@@ -196,10 +220,24 @@ class PatchNoteHandler:
                 raise HTTPException(status_code=422, detail="project_id cannot be null")
             _require_project_scope(self.ctx.db, workspace_id=workspace_id, project_id=str(data["project_id"]))
             effective_project_id = str(data["project_id"])
+            if specification_id and "specification_id" not in data:
+                raise HTTPException(status_code=409, detail="Cannot change project while note is linked to specification")
         if "task_id" in data and data["task_id"]:
             if not effective_project_id:
                 raise HTTPException(status_code=400, detail="project_id is required when task_id is set")
             _require_task_scope(self.ctx.db, workspace_id=workspace_id, project_id=effective_project_id or "", task_id=str(data["task_id"]))
+        if "specification_id" in data:
+            if data["specification_id"]:
+                if not effective_project_id:
+                    raise HTTPException(status_code=400, detail="project_id is required when specification_id is set")
+                _require_specification_scope(
+                    self.ctx.db,
+                    workspace_id=workspace_id,
+                    project_id=effective_project_id,
+                    specification_id=str(data["specification_id"]),
+                )
+            else:
+                data["specification_id"] = None
         if "title" in data and data["title"] is not None:
             data["title"] = str(data["title"]).strip()
             if not data["title"]:
@@ -239,7 +277,7 @@ class ArchiveNoteHandler:
     note_id: str
 
     def __call__(self) -> dict:
-        workspace_id, project_id, task_id, archived, _ = require_note_command_state(
+        workspace_id, project_id, task_id, _, archived, _ = require_note_command_state(
             self.ctx.db, self.ctx.user, self.note_id, allowed={"Owner", "Admin", "Member"}
         )
         if archived:
@@ -262,7 +300,7 @@ class RestoreNoteHandler:
     note_id: str
 
     def __call__(self) -> dict:
-        workspace_id, project_id, task_id, archived, _ = require_note_command_state(
+        workspace_id, project_id, task_id, _, archived, _ = require_note_command_state(
             self.ctx.db, self.ctx.user, self.note_id, allowed={"Owner", "Admin", "Member"}
         )
         if not archived:
@@ -285,7 +323,7 @@ class PinNoteHandler:
     note_id: str
 
     def __call__(self) -> dict:
-        workspace_id, project_id, task_id, _, pinned = require_note_command_state(
+        workspace_id, project_id, task_id, _, _, pinned = require_note_command_state(
             self.ctx.db, self.ctx.user, self.note_id, allowed={"Owner", "Admin", "Member"}
         )
         if pinned:
@@ -308,7 +346,7 @@ class UnpinNoteHandler:
     note_id: str
 
     def __call__(self) -> dict:
-        workspace_id, project_id, task_id, _, pinned = require_note_command_state(
+        workspace_id, project_id, task_id, _, _, pinned = require_note_command_state(
             self.ctx.db, self.ctx.user, self.note_id, allowed={"Owner", "Admin", "Member"}
         )
         if not pinned:
@@ -331,7 +369,7 @@ class DeleteNoteHandler:
     note_id: str
 
     def __call__(self) -> dict:
-        workspace_id, project_id, task_id, _, _ = require_note_command_state(
+        workspace_id, project_id, task_id, _, _, _ = require_note_command_state(
             self.ctx.db, self.ctx.user, self.note_id, allowed={"Owner", "Admin", "Member"}
         )
         append_event(

@@ -35,6 +35,7 @@ def create_mcp(*, read_only: bool = False):
         q: str | None = None,
         status: str | None = None,
         project_id: str | None = None,
+        specification_id: str | None = None,
         label: str | None = None,
         assignee_id: str | None = None,
         priority: str | None = None,
@@ -50,6 +51,7 @@ def create_mcp(*, read_only: bool = False):
             q=q,
             status=status,
             project_id=project_id,
+            specification_id=specification_id,
             label=label,
             assignee_id=assignee_id,
             priority=priority,
@@ -69,6 +71,7 @@ def create_mcp(*, read_only: bool = False):
         auth_token: str | None = None,
         project_id: str | None = None,
         task_id: str | None = None,
+        specification_id: str | None = None,
         q: str | None = None,
         archived: bool = False,
         pinned: bool | None = None,
@@ -81,6 +84,7 @@ def create_mcp(*, read_only: bool = False):
             auth_token=auth_token,
             project_id=project_id,
             task_id=task_id,
+            specification_id=specification_id,
             q=q,
             archived=archived,
             pinned=pinned,
@@ -112,10 +116,38 @@ def create_mcp(*, read_only: bool = False):
             offset=offset,
         )
 
+    @mcp.tool(description="List specifications in a workspace/project.")
+    def list_specifications(
+        workspace_id: str,
+        project_id: str,
+        auth_token: str | None = None,
+        q: str | None = None,
+        status: str | None = None,
+        archived: bool = False,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.list_specifications(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            auth_token=auth_token,
+            q=q,
+            status=status,
+            archived=archived,
+            limit=limit,
+            offset=offset,
+        )
+
     @mcp.tool(description="Get one project rule by id.")
     def get_project_rule(rule_id: str, auth_token: str | None = None) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
         return service.get_project_rule(rule_id=rule_id, auth_token=auth_token)
+
+    @mcp.tool(description="Get one specification by id.")
+    def get_specification(specification_id: str, auth_token: str | None = None) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.get_specification(specification_id=specification_id, auth_token=auth_token)
 
     if not read_only:
         @mcp.tool(description="Apply a bulk action to multiple tasks (e.g. archive, complete, delete).")
@@ -177,6 +209,7 @@ def create_mcp(*, read_only: bool = False):
             priority: str = "Med",
             due_date: str | None = None,
             recurring_rule: str | None = None,
+            specification_id: str | None = None,
             task_type: str = "manual",
             scheduled_instruction: str | None = None,
             scheduled_at_utc: str | None = None,
@@ -195,6 +228,7 @@ def create_mcp(*, read_only: bool = False):
                 priority=priority,
                 due_date=due_date,
                 recurring_rule=recurring_rule,
+                specification_id=specification_id,
                 task_type=task_type,
                 scheduled_instruction=scheduled_instruction,
                 scheduled_at_utc=scheduled_at_utc,
@@ -212,6 +246,7 @@ def create_mcp(*, read_only: bool = False):
             auth_token: str | None = None,
             project_id: str | None = None,
             task_id: str | None = None,
+            specification_id: str | None = None,
             tags: list[str] | None = None,
             pinned: bool = False,
             command_id: str | None = None,
@@ -224,6 +259,7 @@ def create_mcp(*, read_only: bool = False):
                 auth_token=auth_token,
                 project_id=project_id,
                 task_id=task_id,
+                specification_id=specification_id,
                 tags=tags,
                 pinned=pinned,
                 command_id=command_id,
@@ -323,6 +359,81 @@ def create_mcp(*, read_only: bool = False):
                 project_id=project_id,
                 workspace_id=workspace_id,
                 body=body,
+                auth_token=auth_token,
+                command_id=command_id,
+            )
+
+        @mcp.tool(description="Create a specification in a workspace/project.")
+        def create_specification(
+            title: str,
+            project_id: str,
+            workspace_id: str | None = None,
+            body: str = "",
+            status: str = "Draft",
+            auth_token: str | None = None,
+            command_id: str | None = None,
+        ) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.create_specification(
+                title=title,
+                project_id=project_id,
+                workspace_id=workspace_id,
+                body=body,
+                status=status,
+                auth_token=auth_token,
+                command_id=command_id,
+            )
+
+        @mcp.tool(description="Patch a specification. Accepts the same fields as SpecificationPatch.")
+        def update_specification(
+            specification_id: str,
+            patch: dict[str, Any],
+            auth_token: str | None = None,
+            command_id: str | None = None,
+        ) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.update_specification(
+                specification_id=specification_id,
+                patch=patch,
+                auth_token=auth_token,
+                command_id=command_id,
+            )
+
+        @mcp.tool(description="Archive a specification.")
+        def archive_specification(
+            specification_id: str,
+            auth_token: str | None = None,
+            command_id: str | None = None,
+        ) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.archive_specification(
+                specification_id=specification_id,
+                auth_token=auth_token,
+                command_id=command_id,
+            )
+
+        @mcp.tool(description="Restore an archived specification.")
+        def restore_specification(
+            specification_id: str,
+            auth_token: str | None = None,
+            command_id: str | None = None,
+        ) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.restore_specification(
+                specification_id=specification_id,
+                auth_token=auth_token,
+                command_id=command_id,
+            )
+
+        @mcp.tool(description="Soft-delete a specification.")
+        def delete_specification(
+            specification_id: str,
+            auth_token: str | None = None,
+            command_id: str | None = None,
+        ) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.delete_specification(
+                specification_id=specification_id,
                 auth_token=auth_token,
                 command_id=command_id,
             )

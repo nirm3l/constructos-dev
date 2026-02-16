@@ -44,6 +44,7 @@ export type Task = {
   id: string
   workspace_id: string
   project_id: string
+  specification_id: string | null
   title: string
   description: string
   status: string
@@ -202,6 +203,7 @@ export type Note = {
   workspace_id: string
   project_id: string
   task_id: string | null
+  specification_id: string | null
   title: string
   body: string
   tags: string[]
@@ -217,6 +219,29 @@ export type Note = {
 
 export type NotesPage = {
   items: Note[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export type Specification = {
+  id: string
+  workspace_id: string
+  project_id: string
+  title: string
+  body: string
+  status: 'Draft' | 'Ready' | 'In progress' | 'Implemented' | 'Archived'
+  external_refs: ExternalRef[]
+  attachment_refs: AttachmentRef[]
+  archived: boolean
+  created_by: string
+  updated_by: string
+  created_at: string | null
+  updated_at: string | null
+}
+
+export type SpecificationsPage = {
+  items: Specification[]
   total: number
   limit: number
   offset: number

@@ -37,6 +37,7 @@ router = APIRouter()
 def list_tasks(
     workspace_id: str,
     project_id: str,
+    specification_id: str | None = None,
     view: str | None = None,
     q: str | None = None,
     status: str | None = None,
@@ -59,6 +60,7 @@ def list_tasks(
         TaskListQuery(
             workspace_id=workspace_id,
             project_id=project_id,
+            specification_id=specification_id,
             view=view,
             q=q,
             status=status,
@@ -232,7 +234,13 @@ def task_activity(task_id: str, db: Session = Depends(get_db), user: User = Depe
         raise HTTPException(status_code=404, detail="Task not found")
     ensure_role(db, task.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     logs = db.execute(select(ActivityLog).where(ActivityLog.task_id == task_id).order_by(ActivityLog.created_at.desc()).limit(200)).scalars().all()
-    return [{"id": l.id, "action": l.action, "actor_id": l.actor_id, "details": json.loads(l.details or "{}"), "created_at": to_iso_utc(l.created_at)} for l in logs]
+    out = []
+    for l in logs:
+        details = json.loads(l.details or "{}")
+        if isinstance(details, dict):
+            details.pop("_event_key", None)
+        out.append({"id": l.id, "action": l.action, "actor_id": l.actor_id, "details": details, "created_at": to_iso_utc(l.created_at)})
+    return out
 
 
 @router.get("/api/export")

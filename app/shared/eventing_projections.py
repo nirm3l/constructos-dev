@@ -5,6 +5,7 @@ import threading
 import time
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .contracts import EventEnvelope
@@ -59,6 +60,11 @@ def _project_recorded_event(db: Session, event: Any):
     project_event(db, env)
 
 
+def _is_duplicate_projection_error(exc: IntegrityError) -> bool:
+    message = str(exc).lower()
+    return "duplicate key value violates unique constraint" in message or "unique constraint failed" in message
+
+
 def project_kurrent_events_once(limit: int = 500) -> int:
     client = get_kurrent_client()
     if client is None:
@@ -77,12 +83,20 @@ def project_kurrent_events_once(limit: int = 500) -> int:
             commit_position = int(getattr(event, "commit_position", -1))
             if commit_position <= checkpoint.commit_position:
                 continue
-            _project_recorded_event(db, event)
+            try:
+                _project_recorded_event(db, event)
+            except IntegrityError as exc:
+                if not _is_duplicate_projection_error(exc):
+                    raise
+                db.rollback()
+                checkpoint = _get_projection_checkpoint(db)
+                checkpoint.commit_position = commit_position
+                db.commit()
+                processed += 1
+                continue
             checkpoint.commit_position = commit_position
-            processed += 1
-
-        if processed:
             db.commit()
+            processed += 1
         return processed
 
 
@@ -106,7 +120,16 @@ def _projection_worker_loop():
                     checkpoint = _get_projection_checkpoint(db)
                     if commit_position <= checkpoint.commit_position:
                         continue
-                    _project_recorded_event(db, event)
+                    try:
+                        _project_recorded_event(db, event)
+                    except IntegrityError as exc:
+                        if not _is_duplicate_projection_error(exc):
+                            raise
+                        db.rollback()
+                        checkpoint = _get_projection_checkpoint(db)
+                        checkpoint.commit_position = commit_position
+                        db.commit()
+                        continue
                     checkpoint.commit_position = commit_position
                     db.commit()
         except Exception as exc:

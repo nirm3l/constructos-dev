@@ -68,6 +68,26 @@ export function useEditorGuards(c: any) {
     c.selectedNote,
   ])
 
+  const specificationIsDirty = React.useMemo(() => {
+    if (!c.selectedSpecification) return false
+    return (
+      (c.editSpecificationTitle || '').trim() !== (c.selectedSpecification.title || '').trim() ||
+      (c.editSpecificationBody || '') !== (c.selectedSpecification.body || '') ||
+      (c.editSpecificationStatus || 'Draft') !== (c.selectedSpecification.status || 'Draft') ||
+      stableJson(c.parseExternalRefsText(c.editSpecificationExternalRefsText)) !== stableJson(c.selectedSpecification.external_refs ?? []) ||
+      stableJson(c.parseAttachmentRefsText(c.editSpecificationAttachmentRefsText)) !== stableJson(c.selectedSpecification.attachment_refs ?? [])
+    )
+  }, [
+    c.editSpecificationAttachmentRefsText,
+    c.editSpecificationBody,
+    c.editSpecificationExternalRefsText,
+    c.editSpecificationStatus,
+    c.editSpecificationTitle,
+    c.parseAttachmentRefsText,
+    c.parseExternalRefsText,
+    c.selectedSpecification,
+  ])
+
   const taskIsDirty = React.useMemo(() => {
     if (!c.selectedTask) return false
     const current = {
@@ -161,6 +181,22 @@ export function useEditorGuards(c: any) {
     return true
   }, [c.selectedNoteId, c.setSelectedNoteId, confirmDiscardChanges, noteIsDirty])
 
+  const toggleSpecificationEditor = React.useCallback((specificationId: string) => {
+    if (c.selectedSpecificationId === specificationId) {
+      if (specificationIsDirty && !confirmDiscardChanges()) return false
+      c.setSelectedSpecificationId(null)
+      return true
+    }
+    if (c.selectedSpecificationId && specificationIsDirty && !confirmDiscardChanges()) return false
+    c.setSelectedSpecificationId(specificationId)
+    return true
+  }, [
+    c.selectedSpecificationId,
+    c.setSelectedSpecificationId,
+    specificationIsDirty,
+    confirmDiscardChanges,
+  ])
+
   const toggleProjectEditor = React.useCallback((projectId: string) => {
     if (c.selectedProjectId === projectId) {
       if (c.showProjectEditForm) {
@@ -188,6 +224,7 @@ export function useEditorGuards(c: any) {
     closeTaskEditor,
     openTaskEditor,
     toggleNoteEditor,
+    toggleSpecificationEditor,
     toggleProjectEditor,
   }
 }

@@ -18,7 +18,13 @@ export function NotesPanel({
           <div className="notes-search">
             <input value={state.noteQ} onChange={(e) => state.setNoteQ(e.target.value)} placeholder="Search notes" />
           </div>
-          <button className="action-icon primary" onClick={() => state.createNoteMutation.mutate()} title="New note" aria-label="New note">
+          <button
+            className="action-icon primary"
+            onClick={() => state.createNoteMutation.mutate()}
+            disabled={state.createNoteMutation.isPending}
+            title="New note"
+            aria-label="New note"
+          >
             <Icon path="M12 5v14M5 12h14" />
           </button>
         </div>
@@ -121,25 +127,55 @@ export function NotesPanel({
                         </button>
                         <span className="action-separator" aria-hidden="true" />
                         {state.selectedNote.pinned ? (
-                          <button className="action-icon" onClick={() => state.unpinNoteMutation.mutate(state.selectedNote.id)} title="Unpin" aria-label="Unpin">
+                          <button
+                            className="action-icon"
+                            onClick={() => state.unpinNoteMutation.mutate(state.selectedNote.id)}
+                            disabled={state.unpinNoteMutation.isPending}
+                            title="Unpin"
+                            aria-label="Unpin"
+                          >
                             <Icon path="M6 2h12v20l-6-4-6 4V2z" />
                           </button>
                         ) : (
-                          <button className="action-icon" onClick={() => state.pinNoteMutation.mutate(state.selectedNote.id)} title="Pin" aria-label="Pin">
+                          <button
+                            className="action-icon"
+                            onClick={() => state.pinNoteMutation.mutate(state.selectedNote.id)}
+                            disabled={state.pinNoteMutation.isPending}
+                            title="Pin"
+                            aria-label="Pin"
+                          >
                             <Icon path="M6 2h12v20l-6-4-6 4V2z" />
                           </button>
                         )}
                         {state.selectedNote.archived ? (
-                          <button className="action-icon" onClick={() => state.restoreNoteMutation.mutate(state.selectedNote.id)} title="Restore" aria-label="Restore">
+                          <button
+                            className="action-icon"
+                            onClick={() => state.restoreNoteMutation.mutate(state.selectedNote.id)}
+                            disabled={state.restoreNoteMutation.isPending}
+                            title="Restore"
+                            aria-label="Restore"
+                          >
                             <Icon path="M20 16v5H4v-5M12 3v12M7 8l5-5 5 5" />
                           </button>
                         ) : (
-                          <button className="action-icon" onClick={() => state.archiveNoteMutation.mutate(state.selectedNote.id)} title="Archive" aria-label="Archive">
+                          <button
+                            className="action-icon"
+                            onClick={() => state.archiveNoteMutation.mutate(state.selectedNote.id)}
+                            disabled={state.archiveNoteMutation.isPending}
+                            title="Archive"
+                            aria-label="Archive"
+                          >
                             <Icon path="M20 8H4m2-3h12l2 3v13H4V8l2-3zm3 7h6" />
                           </button>
                         )}
                         <span className="action-separator" aria-hidden="true" />
-                        <button className="action-icon danger-ghost" onClick={() => state.deleteNoteMutation.mutate(state.selectedNote.id)} title="Delete" aria-label="Delete">
+                        <button
+                          className="action-icon danger-ghost"
+                          onClick={() => state.deleteNoteMutation.mutate(state.selectedNote.id)}
+                          disabled={state.deleteNoteMutation.isPending}
+                          title="Delete"
+                          aria-label="Delete"
+                        >
                           <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
                         </button>
                       </div>

@@ -14,6 +14,7 @@ class NoteListQuery:
     workspace_id: str
     project_id: str
     task_id: str | None = None
+    specification_id: str | None = None
     q: str | None = None
     tags: list[str] | None = None
     archived: bool = False
@@ -31,6 +32,8 @@ def list_notes_read_model(db: Session, user: User, query: NoteListQuery) -> dict
     )
     if query.task_id:
         stmt = stmt.where(Note.task_id == query.task_id)
+    if query.specification_id is not None:
+        stmt = stmt.where(Note.specification_id == query.specification_id)
     if query.archived:
         stmt = stmt.where(Note.archived == True)
     else:
@@ -69,6 +72,7 @@ def list_notes_read_model(db: Session, user: User, query: NoteListQuery) -> dict
                     "workspace_id": query.workspace_id,
                     "project_id": query.project_id,
                     "task_id": query.task_id,
+                    "specification_id": query.specification_id,
                     "q": query.q,
                     "archived": query.archived,
                     "pinned": query.pinned,
