@@ -1,0 +1,105 @@
+import React from 'react'
+import type { Notification } from '../types'
+
+export function useRealtimeEffects(c: any) {
+  const {
+    qc,
+    realtimeRefreshTimerRef,
+    selectedTaskId,
+    userId,
+    workspaceId,
+    showCodexChat,
+    setCodexChatLastTaskEventAt,
+    isCodexChatRunning,
+    codexChatRunStartedAt,
+    setCodexChatElapsedSeconds,
+    codexChatHistoryRef,
+    codexChatTurns,
+  } = c
+
+  const scheduleRealtimeRefresh = React.useCallback(() => {
+    if (realtimeRefreshTimerRef.current !== null) {
+      window.clearTimeout(realtimeRefreshTimerRef.current)
+    }
+    realtimeRefreshTimerRef.current = window.setTimeout(() => {
+      qc.invalidateQueries({ queryKey: ['tasks'] })
+      qc.invalidateQueries({ queryKey: ['project-tags'] })
+      qc.invalidateQueries({ queryKey: ['board'] })
+      qc.invalidateQueries({ queryKey: ['bootstrap'] })
+      if (selectedTaskId) {
+        qc.invalidateQueries({ queryKey: ['comments', userId, selectedTaskId] })
+        qc.invalidateQueries({ queryKey: ['activity', userId, selectedTaskId] })
+        qc.invalidateQueries({ queryKey: ['automation-status', userId, selectedTaskId] })
+      }
+      realtimeRefreshTimerRef.current = null
+    }, 250)
+  }, [qc, realtimeRefreshTimerRef, selectedTaskId, userId])
+
+  React.useEffect(() => {
+    return () => {
+      if (realtimeRefreshTimerRef.current !== null) {
+        window.clearTimeout(realtimeRefreshTimerRef.current)
+      }
+    }
+  }, [realtimeRefreshTimerRef])
+
+  React.useEffect(() => {
+    if (!userId) return
+    const streamUrl = `/api/notifications/stream?user_id=${encodeURIComponent(userId)}&workspace_id=${encodeURIComponent(workspaceId || '')}`
+    const es = new EventSource(streamUrl)
+
+    const onNotification = (evt: MessageEvent) => {
+      try {
+        const incoming = JSON.parse(evt.data) as Notification
+        qc.setQueryData(['notifications', userId], (current: Notification[] | undefined) => {
+          const base = current ?? []
+          const idx = base.findIndex((n: Notification) => n.id === incoming.id)
+          if (idx >= 0) {
+            const next = [...base]
+            next[idx] = incoming
+            return next
+          }
+          return [incoming, ...base]
+        })
+        scheduleRealtimeRefresh()
+      } catch {
+        qc.invalidateQueries({ queryKey: ['notifications', userId] })
+        scheduleRealtimeRefresh()
+      }
+    }
+
+    const onTaskEvent = (evt: MessageEvent) => {
+      if (showCodexChat) {
+        try {
+          const payload = JSON.parse(evt.data) as { created_at?: string }
+          setCodexChatLastTaskEventAt(payload.created_at ? Date.parse(payload.created_at) : Date.now())
+        } catch {
+          setCodexChatLastTaskEventAt(Date.now())
+        }
+      }
+      scheduleRealtimeRefresh()
+    }
+
+    es.addEventListener('notification', onNotification as EventListener)
+    es.addEventListener('task_event', onTaskEvent as EventListener)
+
+    return () => {
+      es.removeEventListener('notification', onNotification as EventListener)
+      es.removeEventListener('task_event', onTaskEvent as EventListener)
+      es.close()
+    }
+  }, [qc, scheduleRealtimeRefresh, setCodexChatLastTaskEventAt, showCodexChat, userId, workspaceId])
+
+  React.useEffect(() => {
+    if (!isCodexChatRunning || !codexChatRunStartedAt) return
+    const id = window.setInterval(() => {
+      setCodexChatElapsedSeconds(Math.max(0, Math.floor((Date.now() - codexChatRunStartedAt) / 1000)))
+    }, 1000)
+    return () => window.clearInterval(id)
+  }, [codexChatRunStartedAt, isCodexChatRunning, setCodexChatElapsedSeconds])
+
+  React.useEffect(() => {
+    if (!showCodexChat || !codexChatHistoryRef.current) return
+    codexChatHistoryRef.current.scrollTop = codexChatHistoryRef.current.scrollHeight
+  }, [codexChatHistoryRef, codexChatTurns, isCodexChatRunning, showCodexChat])
+}

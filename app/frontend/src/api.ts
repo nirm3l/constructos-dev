@@ -5,6 +5,7 @@ import type {
   Note,
   NotesPage,
   AttachmentRef,
+  AppVersionPayload,
   ExternalRef,
   Project,
   ProjectBoard,
@@ -94,6 +95,15 @@ async function uploadApi<T>(path: string, userId: string, body: FormData): Promi
 }
 
 export const getBootstrap = (userId: string) => api<BootstrapPayload>('/api/bootstrap', userId)
+
+export async function getAppVersion(): Promise<AppVersionPayload> {
+  const res = await fetch('/api/version')
+  if (!res.ok) {
+    const raw = await res.text()
+    throw new Error(formatApiError(raw, res.status))
+  }
+  return (await res.json()) as AppVersionPayload
+}
 
 export const getTasks = (
   userId: string,

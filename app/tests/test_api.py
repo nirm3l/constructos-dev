@@ -29,6 +29,23 @@ def test_health(tmp_path):
     assert res.json()['ok'] is True
 
 
+def test_version_endpoint_is_stable_per_deploy(tmp_path):
+    os.environ["APP_VERSION"] = "test-1.2.3"
+    os.environ["APP_BUILD"] = "build-test"
+    os.environ["APP_DEPLOYED_AT_UTC"] = "2026-02-16T20:00:00Z"
+    client = build_client(tmp_path)
+
+    first = client.get('/api/version')
+    second = client.get('/api/version')
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json() == second.json()
+    assert first.json()["backend_version"] == "test-1.2.3"
+    assert first.json()["backend_build"] == "build-test"
+    assert first.json()["deployed_at_utc"] == "2026-02-16T20:00:00Z"
+
+
 def test_create_and_complete_task(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()

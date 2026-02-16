@@ -145,8 +145,10 @@ curl -sS http://localhost:8091/mcp \
 
 ## Local Run
 ```bash
-docker compose up -d --build
+./scripts/deploy.sh
 ```
+
+`./scripts/deploy.sh` auto-increments app version (`VERSION` + frontend `package.json`), writes deploy metadata to `.deploy.env`, then rebuilds and restarts Docker Compose services.
 
 App URLs:
 - Backend/API: `http://localhost:8080`

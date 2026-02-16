@@ -1,0 +1,259 @@
+import React from 'react'
+import { MarkdownView } from '../../markdown/MarkdownView'
+import { ExternalRefEditor, Icon, MarkdownModeToggle } from '../shared/uiHelpers'
+import { externalRefsToText, parseExternalRefsText, removeExternalRefByIndex } from '../../utils/ui'
+
+export type DraftProjectRule = { id: string; title: string; body: string }
+
+type WorkspaceUser = {
+  id: string
+  full_name: string
+  user_type: string
+}
+
+export function ProjectsCreateForm({
+  projectName,
+  setProjectName,
+  createProjectMutation,
+  projectDescriptionView,
+  setProjectDescriptionView,
+  projectDescriptionRef,
+  projectDescription,
+  setProjectDescription,
+  draftProjectRules,
+  setDraftProjectRules,
+  selectedDraftProjectRuleId,
+  setSelectedDraftProjectRuleId,
+  draftProjectRuleTitle,
+  setDraftProjectRuleTitle,
+  draftProjectRuleBody,
+  setDraftProjectRuleBody,
+  draftProjectRuleView,
+  setDraftProjectRuleView,
+  projectExternalRefsText,
+  setProjectExternalRefsText,
+  workspaceUsers,
+  createProjectMemberIds,
+  toggleCreateProjectMember,
+}: {
+  projectName: string
+  setProjectName: React.Dispatch<React.SetStateAction<string>>
+  createProjectMutation: { mutate: () => void }
+  projectDescriptionView: 'write' | 'preview'
+  setProjectDescriptionView: React.Dispatch<React.SetStateAction<'write' | 'preview'>>
+  projectDescriptionRef: React.RefObject<HTMLTextAreaElement | null>
+  projectDescription: string
+  setProjectDescription: React.Dispatch<React.SetStateAction<string>>
+  draftProjectRules: DraftProjectRule[]
+  setDraftProjectRules: React.Dispatch<React.SetStateAction<DraftProjectRule[]>>
+  selectedDraftProjectRuleId: string | null
+  setSelectedDraftProjectRuleId: React.Dispatch<React.SetStateAction<string | null>>
+  draftProjectRuleTitle: string
+  setDraftProjectRuleTitle: React.Dispatch<React.SetStateAction<string>>
+  draftProjectRuleBody: string
+  setDraftProjectRuleBody: React.Dispatch<React.SetStateAction<string>>
+  draftProjectRuleView: 'write' | 'preview'
+  setDraftProjectRuleView: React.Dispatch<React.SetStateAction<'write' | 'preview'>>
+  projectExternalRefsText: string
+  setProjectExternalRefsText: React.Dispatch<React.SetStateAction<string>>
+  workspaceUsers: WorkspaceUser[]
+  createProjectMemberIds: string[]
+  toggleCreateProjectMember: (userIdToToggle: string) => void
+}) {
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <h3 style={{ margin: '0 0 8px 0' }}>Create project</h3>
+      <div className="row" style={{ marginBottom: 10 }}>
+        <input
+          value={projectName}
+          onChange={(e) => setProjectName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              const name = projectName.trim()
+              if (!name) return
+              createProjectMutation.mutate()
+            }
+          }}
+          placeholder="New project"
+        />
+        <button className="primary" disabled={!projectName.trim()} onClick={() => createProjectMutation.mutate()}>
+          <Icon path="M12 5v14M5 12h14" />
+        </button>
+      </div>
+      <div className="md-editor-surface">
+        <MarkdownModeToggle
+          view={projectDescriptionView}
+          onChange={setProjectDescriptionView}
+          ariaLabel="Project description editor view"
+        />
+        <div className="md-editor-content">
+          {projectDescriptionView === 'write' ? (
+            <textarea
+              className="md-textarea"
+              ref={projectDescriptionRef}
+              value={projectDescription}
+              onChange={(e) => setProjectDescription(e.target.value)}
+              placeholder="Project description (Markdown)"
+              style={{ width: '100%', minHeight: 96, maxHeight: 280, resize: 'none', overflowY: 'hidden' }}
+            />
+          ) : (
+            <MarkdownView value={projectDescription} />
+          )}
+        </div>
+      </div>
+      <div className="rules-studio" style={{ marginTop: 10, marginBottom: 14 }}>
+        <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+          <h3 style={{ margin: 0 }}>Project Rules (Draft: {draftProjectRules.length})</h3>
+          <div className="meta">These rules are created with the new project.</div>
+        </div>
+        <div className="rules-layout">
+          <div className="rules-list">
+            {draftProjectRules.length === 0 ? (
+              <div className="notice">No draft rules yet.</div>
+            ) : (
+              draftProjectRules.map((rule) => {
+                const isSelected = selectedDraftProjectRuleId === rule.id
+                return (
+                  <div
+                    key={rule.id}
+                    className={`task-item rule-item ${isSelected ? 'selected' : ''}`}
+                    onClick={() => setSelectedDraftProjectRuleId(rule.id)}
+                    role="button"
+                  >
+                    <div className="task-main">
+                      <div className="task-title">
+                        <strong>{rule.title || 'Untitled rule'}</strong>
+                        <div className="row" style={{ gap: 6 }}>
+                          {isSelected && <span className="badge">Editing</span>}
+                          <button
+                            className="action-icon danger-ghost"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setDraftProjectRules((prev) => prev.filter((item) => item.id !== rule.id))
+                              if (selectedDraftProjectRuleId === rule.id) {
+                                setSelectedDraftProjectRuleId(null)
+                                setDraftProjectRuleTitle('')
+                                setDraftProjectRuleBody('')
+                              }
+                            }}
+                            title="Delete draft rule"
+                            aria-label="Delete draft rule"
+                          >
+                            <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="meta">{(rule.body || '').replace(/\s+/g, ' ').slice(0, 120) || '(empty)'}</div>
+                    </div>
+                  </div>
+                )
+              })
+            )}
+            <div
+              className="task-item rule-item add-new-rule-item"
+              role="button"
+              onClick={() => {
+                setSelectedDraftProjectRuleId(null)
+                setDraftProjectRuleTitle('')
+                setDraftProjectRuleBody('')
+                setDraftProjectRuleView('write')
+              }}
+            >
+              <div className="task-main">
+                <div className="task-title">
+                  <strong>Add new rule</strong>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="rules-editor">
+            <div className="row rule-title-row" style={{ marginBottom: 8, justifyContent: 'space-between', gap: 8 }}>
+              <input
+                className="rule-title-input"
+                value={draftProjectRuleTitle}
+                onChange={(e) => setDraftProjectRuleTitle(e.target.value)}
+                placeholder="Rule title"
+              />
+              <button
+                className="action-icon primary"
+                disabled={!draftProjectRuleTitle.trim()}
+                onClick={() => {
+                  const title = draftProjectRuleTitle.trim()
+                  if (!title) return
+                  if (selectedDraftProjectRuleId) {
+                    setDraftProjectRules((prev) =>
+                      prev.map((item) =>
+                        item.id === selectedDraftProjectRuleId
+                          ? { ...item, title, body: draftProjectRuleBody }
+                          : item
+                      )
+                    )
+                  } else {
+                    const newId = globalThis.crypto?.randomUUID?.() ?? `draft-rule-${Date.now()}`
+                    setDraftProjectRules((prev) => [...prev, { id: newId, title, body: draftProjectRuleBody }])
+                    setSelectedDraftProjectRuleId(newId)
+                  }
+                }}
+                title={selectedDraftProjectRuleId ? 'Update draft rule' : 'Add draft rule'}
+                aria-label={selectedDraftProjectRuleId ? 'Update draft rule' : 'Add draft rule'}
+              >
+                <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+              </button>
+            </div>
+            <div className="md-editor-surface">
+              <MarkdownModeToggle
+                view={draftProjectRuleView}
+                onChange={setDraftProjectRuleView}
+                ariaLabel="Draft project rule editor view"
+              />
+              <div className="md-editor-content">
+                {draftProjectRuleView === 'write' ? (
+                  <textarea
+                    className="md-textarea"
+                    value={draftProjectRuleBody}
+                    onChange={(e) => setDraftProjectRuleBody(e.target.value)}
+                    placeholder="Rule details (Markdown)"
+                    style={{ width: '100%', minHeight: 140 }}
+                  />
+                ) : (
+                  <MarkdownView value={draftProjectRuleBody} />
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className="meta" style={{ marginTop: 10 }}>External links</div>
+      <ExternalRefEditor
+        refs={parseExternalRefsText(projectExternalRefsText)}
+        onRemoveIndex={(idx) => setProjectExternalRefsText((prev) => removeExternalRefByIndex(prev, idx))}
+        onAdd={(ref) =>
+          setProjectExternalRefsText((prev) => externalRefsToText([...parseExternalRefsText(prev), ref]))
+        }
+      />
+      <div className="meta" style={{ marginTop: 8 }}>
+        File attachments are available after project is created.
+      </div>
+      <div style={{ marginTop: 10 }}>
+        <div className="meta" style={{ marginBottom: 6 }}>Assign users to project</div>
+        <div className="row wrap" style={{ gap: 6 }}>
+          {workspaceUsers.map((u) => {
+            const selected = createProjectMemberIds.includes(u.id)
+            return (
+              <button
+                key={`create-member-${u.id}`}
+                type="button"
+                className={`status-chip ${selected ? 'active' : ''}`}
+                onClick={() => toggleCreateProjectMember(u.id)}
+                aria-pressed={selected}
+                title={`${u.full_name} (${u.user_type})`}
+              >
+                {u.full_name} · {u.user_type}
+              </button>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}

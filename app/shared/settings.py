@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 
 
 def _parse_csv_env(name: str) -> set[str]:
@@ -26,6 +27,12 @@ def _env_int(name: str, default: int) -> int:
 
 DB_PATH = os.getenv("DB_PATH", "/data/app.db")
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip() or f"sqlite:///{DB_PATH}"
+APP_VERSION = os.getenv("APP_VERSION", "dev").strip() or "dev"
+APP_BUILD = os.getenv("APP_BUILD", "").strip()
+APP_DEPLOYED_AT_UTC = (
+    os.getenv("APP_DEPLOYED_AT_UTC", "").strip()
+    or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+)
 SNAPSHOT_EVERY = int(os.getenv("SNAPSHOT_EVERY", "20"))
 EVENTSTORE_URI = os.getenv("EVENTSTORE_URI", "").strip()
 DEFAULT_STATUSES = ["To do", "In progress", "Done"]

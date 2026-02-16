@@ -1,0 +1,150 @@
+import React from 'react'
+import { parseCommaTags } from '../utils/ui'
+
+export function useTagState(c: any) {
+  const taskTagSuggestions = React.useMemo(() => {
+    return (c.projectTagsData?.tags ?? []).slice(0, 40)
+  }, [c.projectTagsData?.tags])
+
+  const noteTagSuggestions = React.useMemo(() => {
+    return (c.projectTagsData?.tags ?? []).slice(0, 24)
+  }, [c.projectTagsData?.tags])
+
+  const toggleSearchTag = React.useCallback((tag: string) => {
+    const cleaned = String(tag || '').trim().toLowerCase()
+    if (!cleaned) return
+    c.setSearchTags((prev: string[]) => (prev.includes(cleaned) ? prev.filter((t) => t !== cleaned) : [...prev, cleaned]))
+  }, [c.setSearchTags])
+
+  const toggleNoteFilterTag = React.useCallback((tag: string) => {
+    const cleaned = String(tag || '').trim().toLowerCase()
+    if (!cleaned) return
+    c.setNoteTags((prev: string[]) => (prev.includes(cleaned) ? prev.filter((t) => t !== cleaned) : [...prev, cleaned]))
+  }, [c.setNoteTags])
+
+  const addNoteTag = React.useCallback(
+    (raw: string) => {
+      const cleaned = String(raw || '').trim().replace(/,+$/, '')
+      if (!cleaned) return
+      const current = parseCommaTags(c.editNoteTags)
+      const next = parseCommaTags([...current, cleaned].join(', '))
+      c.setEditNoteTags(next.join(', '))
+      c.setTagPickerQuery('')
+    },
+    [c.editNoteTags, c.setEditNoteTags, c.setTagPickerQuery]
+  )
+
+  const currentNoteTags = React.useMemo(() => parseCommaTags(c.editNoteTags), [c.editNoteTags])
+  const currentNoteTagsLower = React.useMemo(() => new Set(currentNoteTags.map((t) => t.toLowerCase())), [currentNoteTags])
+
+  const toggleNoteTag = React.useCallback(
+    (tag: string) => {
+      const cleaned = String(tag || '').trim()
+      if (!cleaned) return
+      const lower = cleaned.toLowerCase()
+      const exists = currentNoteTagsLower.has(lower)
+      const next = exists ? currentNoteTags.filter((t) => t.toLowerCase() !== lower) : [...currentNoteTags, cleaned]
+      c.setEditNoteTags(parseCommaTags(next.join(', ')).join(', '))
+    },
+    [c.setEditNoteTags, currentNoteTags, currentNoteTagsLower]
+  )
+
+  const allNoteTags = React.useMemo(() => {
+    const set = new Set<string>()
+    const out: string[] = []
+    for (const t of [...noteTagSuggestions, ...currentNoteTags]) {
+      const cleaned = String(t || '').trim()
+      if (!cleaned) continue
+      const key = cleaned.toLowerCase()
+      if (set.has(key)) continue
+      set.add(key)
+      out.push(cleaned)
+    }
+    return out
+  }, [currentNoteTags, noteTagSuggestions])
+
+  const filteredNoteTags = React.useMemo(() => {
+    const q = c.tagPickerQuery.trim().toLowerCase()
+    const base = q ? allNoteTags.filter((t) => t.toLowerCase().includes(q)) : allNoteTags
+    return base.slice(0, 40)
+  }, [allNoteTags, c.tagPickerQuery])
+
+  const canCreateTag = React.useMemo(() => {
+    const q = c.tagPickerQuery.trim()
+    if (!q) return false
+    return !allNoteTags.some((t) => t.toLowerCase() === q.toLowerCase())
+  }, [allNoteTags, c.tagPickerQuery])
+
+  const toggleTaskTag = React.useCallback(
+    (tag: string) => {
+      const cleaned = String(tag || '').trim()
+      if (!cleaned) return
+      const lower = cleaned.toLowerCase()
+      const exists = c.editTaskTags.some((t: string) => t.toLowerCase() === lower)
+      const next = exists ? c.editTaskTags.filter((t: string) => t.toLowerCase() !== lower) : [...c.editTaskTags, cleaned]
+      c.setEditTaskTags(parseCommaTags(next.join(', ')))
+    },
+    [c.editTaskTags, c.setEditTaskTags]
+  )
+
+  const toggleQuickTaskTag = React.useCallback(
+    (tag: string) => {
+      const cleaned = String(tag || '').trim()
+      if (!cleaned) return
+      const lower = cleaned.toLowerCase()
+      const exists = c.quickTaskTags.some((t: string) => t.toLowerCase() === lower)
+      const next = exists ? c.quickTaskTags.filter((t: string) => t.toLowerCase() !== lower) : [...c.quickTaskTags, cleaned]
+      c.setQuickTaskTags(parseCommaTags(next.join(', ')))
+    },
+    [c.quickTaskTags, c.setQuickTaskTags]
+  )
+
+  const filteredTaskTags = React.useMemo(() => {
+    const q = c.taskTagPickerQuery.trim().toLowerCase()
+    const base = q ? taskTagSuggestions.filter((t: string) => t.toLowerCase().includes(q)) : taskTagSuggestions
+    return base.slice(0, 50)
+  }, [c.taskTagPickerQuery, taskTagSuggestions])
+
+  const taskTagsLower = React.useMemo(() => new Set(c.editTaskTags.map((t: string) => t.toLowerCase())), [c.editTaskTags])
+
+  const canCreateTaskTag = React.useMemo(() => {
+    const q = c.taskTagPickerQuery.trim()
+    if (!q) return false
+    return !taskTagSuggestions.some((t: string) => t.toLowerCase() === q.toLowerCase())
+  }, [c.taskTagPickerQuery, taskTagSuggestions])
+
+  const filteredQuickTaskTags = React.useMemo(() => {
+    const q = c.quickTaskTagQuery.trim().toLowerCase()
+    const base = q ? taskTagSuggestions.filter((t: string) => t.toLowerCase().includes(q)) : taskTagSuggestions
+    return base.slice(0, 50)
+  }, [c.quickTaskTagQuery, taskTagSuggestions])
+
+  const quickTaskTagsLower = React.useMemo(() => new Set(c.quickTaskTags.map((t: string) => t.toLowerCase())), [c.quickTaskTags])
+
+  const canCreateQuickTaskTag = React.useMemo(() => {
+    const q = c.quickTaskTagQuery.trim()
+    if (!q) return false
+    return !taskTagSuggestions.some((t: string) => t.toLowerCase() === q.toLowerCase())
+  }, [c.quickTaskTagQuery, taskTagSuggestions])
+
+  return {
+    taskTagSuggestions,
+    noteTagSuggestions,
+    toggleSearchTag,
+    toggleNoteFilterTag,
+    addNoteTag,
+    currentNoteTags,
+    currentNoteTagsLower,
+    toggleNoteTag,
+    filteredNoteTags,
+    canCreateTag,
+    toggleTaskTag,
+    toggleQuickTaskTag,
+    filteredTaskTags,
+    taskTagsLower,
+    canCreateTaskTag,
+    filteredQuickTaskTags,
+    quickTaskTagsLower,
+    canCreateQuickTaskTag,
+  }
+}

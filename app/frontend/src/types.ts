@@ -78,6 +78,12 @@ export type Notification = {
   created_at: string | null
 }
 
+export type AppVersionPayload = {
+  backend_version: string
+  backend_build: string | null
+  deployed_at_utc: string
+}
+
 export type BootstrapPayload = {
   current_user: User
   workspaces: Workspace[]

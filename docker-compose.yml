@@ -44,6 +44,9 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://m4tr1x:m4tr1x@postgres:5432/task_management
       EVENTSTORE_URI: esdb://kurrentdb:2113?tls=false
+      APP_VERSION: "${APP_VERSION:-dev}"
+      APP_BUILD: "${APP_BUILD:-}"
+      APP_DEPLOYED_AT_UTC: "${APP_DEPLOYED_AT_UTC:-}"
       AGENT_RUNNER_ENABLED: "true"
       AGENT_RUNNER_INTERVAL_SECONDS: "3"
       AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS: "true"
@@ -70,6 +73,9 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://m4tr1x:m4tr1x@postgres:5432/task_management
       EVENTSTORE_URI: esdb://kurrentdb:2113?tls=false
+      APP_VERSION: "${APP_VERSION:-dev}"
+      APP_BUILD: "${APP_BUILD:-}"
+      APP_DEPLOYED_AT_UTC: "${APP_DEPLOYED_AT_UTC:-}"
       MCP_SERVER_TRANSPORT: streamable-http
       MCP_SERVER_HOST: 0.0.0.0
       MCP_SERVER_PORT: "8090"
@@ -104,6 +110,9 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://m4tr1x:m4tr1x@postgres:5432/task_management
       EVENTSTORE_URI: esdb://kurrentdb:2113?tls=false
+      APP_VERSION: "${APP_VERSION:-dev}"
+      APP_BUILD: "${APP_BUILD:-}"
+      APP_DEPLOYED_AT_UTC: "${APP_DEPLOYED_AT_UTC:-}"
       MCP_SERVER_TRANSPORT: streamable-http
       MCP_SERVER_HOST: 0.0.0.0
       MCP_SERVER_PORT: "8090"

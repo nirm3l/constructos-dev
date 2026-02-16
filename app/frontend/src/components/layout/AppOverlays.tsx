@@ -1,0 +1,148 @@
+import React from 'react'
+import { BottomTabs } from '../tasks/taskViews'
+import { CodexChatDrawer } from '../chat/CodexChatDrawer'
+import { FloatingActions } from '../shared/FloatingActions'
+import { TaskDrawer } from '../tasks/TaskDrawer'
+
+export function AppOverlays({ state }: { state: any }) {
+  return (
+    <>
+      <BottomTabs tab={state.tab} onSelectTab={state.setTab} />
+
+      <FloatingActions
+        state={{
+          fabHidden: state.fabHidden,
+          setQuickProjectId: state.setQuickProjectId,
+          selectedProjectId: state.selectedProjectId,
+          bootstrap: state.bootstrap,
+          setQuickTaskExternalRefsText: state.setQuickTaskExternalRefsText,
+          setQuickTaskAttachmentRefsText: state.setQuickTaskAttachmentRefsText,
+          setShowQuickAdd: state.setShowQuickAdd,
+          isCodexChatRunning: state.isCodexChatRunning,
+          codexChatElapsedSeconds: state.codexChatElapsedSeconds,
+          setCodexChatProjectId: state.setCodexChatProjectId,
+          setShowCodexChat: state.setShowCodexChat,
+        }}
+      />
+
+      <TaskDrawer
+        state={{
+          selectedTask: state.selectedTask,
+          closeTaskEditor: state.closeTaskEditor,
+          taskIsDirty: state.taskIsDirty,
+          saveTaskMutation: state.saveTaskMutation,
+          copyShareLink: state.copyShareLink,
+          reopenTaskMutation: state.reopenTaskMutation,
+          completeTaskMutation: state.completeTaskMutation,
+          restoreTaskMutation: state.restoreTaskMutation,
+          archiveTaskMutation: state.archiveTaskMutation,
+          editTitle: state.editTitle,
+          setEditTitle: state.setEditTitle,
+          setSelectedProjectId: state.setSelectedProjectId,
+          setTab: state.setTab,
+          projectNames: state.projectNames,
+          editStatus: state.editStatus,
+          setEditStatus: state.setEditStatus,
+          editPriority: state.editPriority,
+          setEditPriority: state.setEditPriority,
+          editDueDate: state.editDueDate,
+          setEditDueDate: state.setEditDueDate,
+          editDescription: state.editDescription,
+          setEditDescription: state.setEditDescription,
+          editTaskTags: state.editTaskTags,
+          tagHue: state.tagHue,
+          setShowTaskTagPicker: state.setShowTaskTagPicker,
+          editTaskType: state.editTaskType,
+          setEditTaskType: state.setEditTaskType,
+          taskEditorError: state.taskEditorError,
+          editScheduledAtUtc: state.editScheduledAtUtc,
+          setEditScheduledAtUtc: state.setEditScheduledAtUtc,
+          editScheduleTimezone: state.editScheduleTimezone,
+          setEditScheduleTimezone: state.setEditScheduleTimezone,
+          editRecurringEvery: state.editRecurringEvery,
+          setEditRecurringEvery: state.setEditRecurringEvery,
+          editRecurringUnit: state.editRecurringUnit,
+          setEditRecurringUnit: state.setEditRecurringUnit,
+          editScheduledInstruction: state.editScheduledInstruction,
+          setEditScheduledInstruction: state.setEditScheduledInstruction,
+          priorityTone: state.priorityTone,
+          parseExternalRefsText: state.parseExternalRefsText,
+          editTaskExternalRefsText: state.editTaskExternalRefsText,
+          setEditTaskExternalRefsText: state.setEditTaskExternalRefsText,
+          removeExternalRefByIndex: state.removeExternalRefByIndex,
+          externalRefsToText: state.externalRefsToText,
+          taskFileInputRef: state.taskFileInputRef,
+          uploadAttachmentRef: state.uploadAttachmentRef,
+          editProjectId: state.editProjectId,
+          attachmentRefsToText: state.attachmentRefsToText,
+          parseAttachmentRefsText: state.parseAttachmentRefsText,
+          toErrorMessage: state.toErrorMessage,
+          setUiError: state.setUiError,
+          setTaskEditorError: state.setTaskEditorError,
+          editTaskAttachmentRefsText: state.editTaskAttachmentRefsText,
+          workspaceId: state.workspaceId,
+          userId: state.userId,
+          removeAttachmentByPath: state.removeAttachmentByPath,
+          selectedTaskCreator: state.selectedTaskCreator,
+          selectedTaskTimeMeta: state.selectedTaskTimeMeta,
+          toUserDateTime: state.toUserDateTime,
+          userTimezone: state.userTimezone,
+          showTaskTagPicker: state.showTaskTagPicker,
+          taskTagPickerQuery: state.taskTagPickerQuery,
+          setTaskTagPickerQuery: state.setTaskTagPickerQuery,
+          filteredTaskTags: state.filteredTaskTags,
+          taskTagsLower: state.taskTagsLower,
+          toggleTaskTag: state.toggleTaskTag,
+          canCreateTaskTag: state.canCreateTaskTag,
+          comments: state.comments,
+          commentsListRef: state.commentsListRef,
+          expandedCommentIds: state.expandedCommentIds,
+          setExpandedCommentIds: state.setExpandedCommentIds,
+          actorNames: state.actorNames,
+          deleteCommentMutation: state.deleteCommentMutation,
+          commentInputRef: state.commentInputRef,
+          commentBody: state.commentBody,
+          setCommentBody: state.setCommentBody,
+          addCommentMutation: state.addCommentMutation,
+          automationStatus: state.automationStatus,
+          automationInstruction: state.automationInstruction,
+          setAutomationInstruction: state.setAutomationInstruction,
+          runAutomationMutation: state.runAutomationMutation,
+          selectedTaskId: state.selectedTaskId,
+          activityShowRawDetails: state.activityShowRawDetails,
+          setActivityShowRawDetails: state.setActivityShowRawDetails,
+          activity: state.activity,
+          formatActivitySummary: state.formatActivitySummary,
+          activityTone: state.activityTone,
+          activityExpandedIds: state.activityExpandedIds,
+          setActivityExpandedIds: state.setActivityExpandedIds,
+          toReadableDate: state.toReadableDate,
+        }}
+      />
+
+      <CodexChatDrawer
+        state={{
+          showCodexChat: state.showCodexChat,
+          setShowCodexChat: state.setShowCodexChat,
+          codexChatSessionId: state.codexChatSessionId,
+          codexChatProjectId: state.codexChatProjectId,
+          setCodexChatProjectId: state.setCodexChatProjectId,
+          runAgentChatMutation: state.runAgentChatMutation,
+          bootstrap: state.bootstrap,
+          codexChatHistoryRef: state.codexChatHistoryRef,
+          codexChatTurns: state.codexChatTurns,
+          codexChatInstruction: state.codexChatInstruction,
+          setCodexChatInstruction: state.setCodexChatInstruction,
+          setCodexChatTurns: state.setCodexChatTurns,
+          isCodexChatRunning: state.isCodexChatRunning,
+          codexChatElapsedSeconds: state.codexChatElapsedSeconds,
+          setIsCodexChatRunning: state.setIsCodexChatRunning,
+          setCodexChatRunStartedAt: state.setCodexChatRunStartedAt,
+          setCodexChatElapsedSeconds: state.setCodexChatElapsedSeconds,
+          workspaceId: state.workspaceId,
+          codexChatLastTaskEventAt: state.codexChatLastTaskEventAt,
+        }}
+      />
+    </>
+  )
+}
