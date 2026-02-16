@@ -57,7 +57,6 @@ AGENT_EXECUTOR_MODE = os.getenv("AGENT_EXECUTOR_MODE", "placeholder").strip().lo
 AGENT_EXECUTOR_TIMEOUT_SECONDS = float(os.getenv("AGENT_EXECUTOR_TIMEOUT_SECONDS", "180"))
 AGENT_CODEX_COMMAND = os.getenv("AGENT_CODEX_COMMAND", "").strip()
 AGENT_CODEX_MCP_URL = os.getenv("AGENT_CODEX_MCP_URL", "http://mcp-tools:8090/mcp").strip()
-AGENT_CODEX_MCP_READONLY_URL = os.getenv("AGENT_CODEX_MCP_READONLY_URL", "http://mcp-tools-ro:8090/mcp").strip()
 AGENT_CODEX_MODEL = os.getenv("AGENT_CODEX_MODEL", "").strip()
 ATTACHMENTS_DIR = os.getenv("ATTACHMENTS_DIR", "/data/uploads").strip() or "/data/uploads"
 MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "").strip()

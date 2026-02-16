@@ -40,7 +40,7 @@ services:
     depends_on:
       - postgres
       - kurrentdb
-      - mcp-tools-ro
+      - mcp-tools
     environment:
       DATABASE_URL: postgresql+psycopg://m4tr1x:m4tr1x@postgres:5432/task_management
       EVENTSTORE_URI: esdb://kurrentdb:2113?tls=false
@@ -54,7 +54,6 @@ services:
       AGENT_EXECUTOR_TIMEOUT_SECONDS: "180"
       AGENT_CODEX_COMMAND: "python -m features.agents.codex_mcp_adapter"
       AGENT_CODEX_MCP_URL: "http://mcp-tools:8090/mcp"
-      AGENT_CODEX_MCP_READONLY_URL: "http://mcp-tools-ro:8090/mcp"
       MCP_AUTH_TOKEN: "dev-mcp-token"
       MCP_ALLOWED_WORKSPACE_IDS: "10000000-0000-0000-0000-000000000001"
     volumes:
@@ -98,33 +97,6 @@ services:
       MCP_EMAIL_ALLOWED_DOMAINS: "${MCP_EMAIL_ALLOWED_DOMAINS:-}"
     ports:
       - "8091:8090"
-    restart: unless-stopped
-
-  mcp-tools-ro:
-    build: ./app
-    container_name: mcp-tools-ro
-    depends_on:
-      - postgres
-      - kurrentdb
-    command: ["python", "-m", "features.agents.mcp_server"]
-    environment:
-      DATABASE_URL: postgresql+psycopg://m4tr1x:m4tr1x@postgres:5432/task_management
-      EVENTSTORE_URI: esdb://kurrentdb:2113?tls=false
-      APP_VERSION: "${APP_VERSION:-dev}"
-      APP_BUILD: "${APP_BUILD:-}"
-      APP_DEPLOYED_AT_UTC: "${APP_DEPLOYED_AT_UTC:-}"
-      MCP_SERVER_TRANSPORT: streamable-http
-      MCP_SERVER_HOST: 0.0.0.0
-      MCP_SERVER_PORT: "8090"
-      MCP_SERVER_PATH: /mcp
-      MCP_SERVER_STATELESS_HTTP: "true"
-      AGENT_EXECUTOR_TIMEOUT_SECONDS: "180"
-      MCP_SERVER_READ_ONLY: "true"
-      MCP_AUTH_TOKEN: "dev-mcp-token"
-      MCP_TOOL_AUTH_TOKEN: "dev-mcp-token"
-      MCP_ACTOR_USER_ID: "00000000-0000-0000-0000-000000000099"
-      MCP_DEFAULT_WORKSPACE_ID: "10000000-0000-0000-0000-000000000001"
-      MCP_ALLOWED_WORKSPACE_IDS: "10000000-0000-0000-0000-000000000001"
     restart: unless-stopped
 
 volumes:
