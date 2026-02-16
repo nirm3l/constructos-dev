@@ -520,7 +520,6 @@ function App() {
   const [createProjectMemberIds, setCreateProjectMemberIds] = React.useState<string[]>([])
   const [editProjectMemberIds, setEditProjectMemberIds] = React.useState<string[]>([])
   const [editProjectDescriptionView, setEditProjectDescriptionView] = React.useState<'write' | 'preview'>('write')
-  const [projectRuleQ, setProjectRuleQ] = React.useState('')
   const [selectedProjectRuleId, setSelectedProjectRuleId] = React.useState<string | null>(null)
   const [projectRuleTitle, setProjectRuleTitle] = React.useState('')
   const [projectRuleBody, setProjectRuleBody] = React.useState('')
@@ -812,11 +811,10 @@ function App() {
     enabled: Boolean(selectedProjectId)
   })
   const projectRules = useQuery({
-    queryKey: ['project-rules', userId, workspaceId, selectedProjectId, projectRuleQ],
+    queryKey: ['project-rules', userId, workspaceId, selectedProjectId],
     queryFn: () =>
       getProjectRules(userId, workspaceId, {
         project_id: selectedProjectId,
-        q: projectRuleQ || undefined,
       }),
     enabled: Boolean(workspaceId && selectedProjectId) && tab === 'projects'
   })
@@ -2434,7 +2432,25 @@ function App() {
                             <div className="task-main">
                               <div className="task-title">
                                 <strong>{rule.title || 'Untitled rule'}</strong>
-                                {isSelected && <span className="badge">Editing</span>}
+                                <div className="row" style={{ gap: 6 }}>
+                                  {isSelected && <span className="badge">Editing</span>}
+                                  <button
+                                    className="action-icon danger-ghost"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      setDraftProjectRules((prev) => prev.filter((item) => item.id !== rule.id))
+                                      if (selectedDraftProjectRuleId === rule.id) {
+                                        setSelectedDraftProjectRuleId(null)
+                                        setDraftProjectRuleTitle('')
+                                        setDraftProjectRuleBody('')
+                                      }
+                                    }}
+                                    title="Delete draft rule"
+                                    aria-label="Delete draft rule"
+                                  >
+                                    <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                                  </button>
+                                </div>
                               </div>
                               <div className="meta">{(rule.body || '').replace(/\s+/g, ' ').slice(0, 120) || '(empty)'}</div>
                             </div>
@@ -2442,99 +2458,77 @@ function App() {
                         )
                       })
                     )}
+                    <div
+                      className="task-item rule-item add-new-rule-item"
+                      role="button"
+                      onClick={() => {
+                        setSelectedDraftProjectRuleId(null)
+                        setDraftProjectRuleTitle('')
+                        setDraftProjectRuleBody('')
+                        setDraftProjectRuleView('write')
+                      }}
+                    >
+                      <div className="task-main">
+                        <div className="task-title">
+                          <strong>Add new rule</strong>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                   <div className="rules-editor">
-                    <div className="row" style={{ marginBottom: 8, justifyContent: 'space-between', gap: 8 }}>
+                    <div className="row rule-title-row" style={{ marginBottom: 8, justifyContent: 'space-between', gap: 8 }}>
                       <input
+                        className="rule-title-input"
                         value={draftProjectRuleTitle}
                         onChange={(e) => setDraftProjectRuleTitle(e.target.value)}
                         placeholder="Rule title"
                       />
                       <button
-                        className="status-chip"
+                        className="action-icon primary"
+                        disabled={!draftProjectRuleTitle.trim()}
                         onClick={() => {
-                          setSelectedDraftProjectRuleId(null)
-                          setDraftProjectRuleTitle('')
-                          setDraftProjectRuleBody('')
-                          setDraftProjectRuleView('write')
+                          const title = draftProjectRuleTitle.trim()
+                          if (!title) return
+                          if (selectedDraftProjectRuleId) {
+                            setDraftProjectRules((prev) =>
+                              prev.map((item) =>
+                                item.id === selectedDraftProjectRuleId
+                                  ? { ...item, title, body: draftProjectRuleBody }
+                                  : item
+                              )
+                            )
+                          } else {
+                            const newId = globalThis.crypto?.randomUUID?.() ?? `draft-rule-${Date.now()}`
+                            setDraftProjectRules((prev) => [...prev, { id: newId, title, body: draftProjectRuleBody }])
+                            setSelectedDraftProjectRuleId(newId)
+                          }
                         }}
-                        title="New rule"
-                        aria-label="New rule"
+                        title={selectedDraftProjectRuleId ? 'Update draft rule' : 'Add draft rule'}
+                        aria-label={selectedDraftProjectRuleId ? 'Update draft rule' : 'Add draft rule'}
                       >
-                        New rule
+                        <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
                       </button>
                     </div>
-                    <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-                      <div className="seg" role="tablist" aria-label="Draft project rule editor view">
-                        <button
-                          className={`seg-btn ${draftProjectRuleView === 'write' ? 'active' : ''}`}
-                          onClick={() => setDraftProjectRuleView('write')}
-                          type="button"
-                        >
-                          Write
-                        </button>
-                        <button
-                          className={`seg-btn ${draftProjectRuleView === 'preview' ? 'active' : ''}`}
-                          onClick={() => setDraftProjectRuleView('preview')}
-                          type="button"
-                        >
-                          Preview
-                        </button>
-                      </div>
-                      <div className="row" style={{ gap: 8 }}>
-                        <button
-                          className="primary"
-                          disabled={!draftProjectRuleTitle.trim()}
-                          onClick={() => {
-                            const title = draftProjectRuleTitle.trim()
-                            if (!title) return
-                            if (selectedDraftProjectRuleId) {
-                              setDraftProjectRules((prev) =>
-                                prev.map((item) =>
-                                  item.id === selectedDraftProjectRuleId
-                                    ? { ...item, title, body: draftProjectRuleBody }
-                                    : item
-                                )
-                              )
-                            } else {
-                              const newId = globalThis.crypto?.randomUUID?.() ?? `draft-rule-${Date.now()}`
-                              setDraftProjectRules((prev) => [...prev, { id: newId, title, body: draftProjectRuleBody }])
-                              setSelectedDraftProjectRuleId(newId)
-                            }
-                          }}
-                          title={selectedDraftProjectRuleId ? 'Update draft rule' : 'Add draft rule'}
-                          aria-label={selectedDraftProjectRuleId ? 'Update draft rule' : 'Add draft rule'}
-                        >
-                          <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
-                        </button>
-                        {selectedDraftProjectRuleId && (
-                          <button
-                            className="action-icon danger-ghost"
-                            onClick={() => {
-                              if (!selectedDraftProjectRuleId) return
-                              setDraftProjectRules((prev) => prev.filter((item) => item.id !== selectedDraftProjectRuleId))
-                              setSelectedDraftProjectRuleId(null)
-                              setDraftProjectRuleTitle('')
-                              setDraftProjectRuleBody('')
-                            }}
-                            title="Remove draft rule"
-                            aria-label="Remove draft rule"
-                          >
-                            <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
-                          </button>
+                    <div className="md-editor-surface">
+                      <MarkdownModeToggle
+                        view={draftProjectRuleView}
+                        onChange={setDraftProjectRuleView}
+                        ariaLabel="Draft project rule editor view"
+                      />
+                      <div className="md-editor-content">
+                        {draftProjectRuleView === 'write' ? (
+                          <textarea
+                            className="md-textarea"
+                            value={draftProjectRuleBody}
+                            onChange={(e) => setDraftProjectRuleBody(e.target.value)}
+                            placeholder="Rule details (Markdown)"
+                            style={{ width: '100%', minHeight: 140 }}
+                          />
+                        ) : (
+                          <MarkdownView value={draftProjectRuleBody} />
                         )}
                       </div>
                     </div>
-                    {draftProjectRuleView === 'write' ? (
-                      <textarea
-                        value={draftProjectRuleBody}
-                        onChange={(e) => setDraftProjectRuleBody(e.target.value)}
-                        placeholder="Rule details (Markdown)"
-                        style={{ width: '100%', minHeight: 140 }}
-                      />
-                    ) : (
-                      <MarkdownView value={draftProjectRuleBody} />
-                    )}
                   </div>
                 </div>
               </div>
@@ -2652,16 +2646,8 @@ function App() {
                             </div>
                           </div>
                           <div className="rules-studio" style={{ marginTop: 10, marginBottom: 14 }}>
-                            <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+                            <div className="row wrap rules-head-row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
                               <h3 style={{ margin: 0 }}>Project Rules ({projectRules.data?.total ?? 0})</h3>
-                              <div className="row" style={{ gap: 8 }}>
-                                <input
-                                  value={projectRuleQ}
-                                  onChange={(e) => setProjectRuleQ(e.target.value)}
-                                  placeholder="Search rules"
-                                  className="rules-search-input"
-                                />
-                              </div>
                             </div>
                             <div className="rules-layout">
                               <div className="rules-list">
@@ -2680,7 +2666,22 @@ function App() {
                                         <div className="task-main">
                                           <div className="task-title">
                                             <strong>{rule.title || 'Untitled rule'}</strong>
-                                            {isSelected && <span className="badge">Editing</span>}
+                                            <div className="row" style={{ gap: 6 }}>
+                                              {isSelected && <span className="badge">Editing</span>}
+                                              <button
+                                                className="action-icon danger-ghost"
+                                                disabled={deleteProjectRuleMutation.isPending}
+                                                onClick={(e) => {
+                                                  e.stopPropagation()
+                                                  if (!window.confirm('Delete this rule?')) return
+                                                  deleteProjectRuleMutation.mutate(rule.id)
+                                                }}
+                                                title="Delete rule"
+                                                aria-label="Delete rule"
+                                              >
+                                                <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                                              </button>
+                                            </div>
                                           </div>
                                           <div className="meta">{(rule.body || '').replace(/\s+/g, ' ').slice(0, 120) || '(empty)'}</div>
                                           <div className="meta">Updated: {toUserDateTime(rule.updated_at, userTimezone)}</div>
@@ -2689,85 +2690,64 @@ function App() {
                                     )
                                   })
                                 )}
+                                <div
+                                  className="task-item rule-item add-new-rule-item"
+                                  role="button"
+                                  onClick={() => {
+                                    setSelectedProjectRuleId(null)
+                                    setProjectRuleTitle('')
+                                    setProjectRuleBody('')
+                                    setProjectRuleView('write')
+                                  }}
+                                >
+                                  <div className="task-main">
+                                    <div className="task-title">
+                                      <strong>Add new rule</strong>
+                                    </div>
+                                  </div>
+                                </div>
                               </div>
                               <div className="rules-editor">
-                                <div className="row" style={{ marginBottom: 8, justifyContent: 'space-between', gap: 8 }}>
+                                <div className="row rule-title-row" style={{ marginBottom: 8, justifyContent: 'space-between', gap: 8 }}>
                                   <input
+                                    className="rule-title-input"
                                     value={projectRuleTitle}
                                     onChange={(e) => setProjectRuleTitle(e.target.value)}
                                     placeholder="Rule title"
                                   />
                                   <button
-                                    className="status-chip"
+                                    className="action-icon primary"
+                                    disabled={!projectRuleTitle.trim() || createProjectRuleMutation.isPending || patchProjectRuleMutation.isPending}
                                     onClick={() => {
-                                      setSelectedProjectRuleId(null)
-                                      setProjectRuleTitle('')
-                                      setProjectRuleBody('')
-                                      setProjectRuleView('write')
+                                      if (selectedProjectRuleId) patchProjectRuleMutation.mutate()
+                                      else createProjectRuleMutation.mutate()
                                     }}
-                                    title="New rule"
-                                    aria-label="New rule"
+                                    title={selectedProjectRuleId ? 'Update rule' : 'Create rule'}
+                                    aria-label={selectedProjectRuleId ? 'Update rule' : 'Create rule'}
                                   >
-                                    New rule
+                                    <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
                                   </button>
                                 </div>
-                                <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-                                  <div className="seg" role="tablist" aria-label="Project rule editor view">
-                                    <button
-                                      className={`seg-btn ${projectRuleView === 'write' ? 'active' : ''}`}
-                                      onClick={() => setProjectRuleView('write')}
-                                      type="button"
-                                    >
-                                      Write
-                                    </button>
-                                    <button
-                                      className={`seg-btn ${projectRuleView === 'preview' ? 'active' : ''}`}
-                                      onClick={() => setProjectRuleView('preview')}
-                                      type="button"
-                                    >
-                                      Preview
-                                    </button>
-                                  </div>
-                                  <div className="row" style={{ gap: 8 }}>
-                                    <button
-                                      className="primary"
-                                      disabled={!projectRuleTitle.trim() || createProjectRuleMutation.isPending || patchProjectRuleMutation.isPending}
-                                      onClick={() => {
-                                        if (selectedProjectRuleId) patchProjectRuleMutation.mutate()
-                                        else createProjectRuleMutation.mutate()
-                                      }}
-                                      title={selectedProjectRuleId ? 'Update rule' : 'Create rule'}
-                                      aria-label={selectedProjectRuleId ? 'Update rule' : 'Create rule'}
-                                    >
-                                      <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
-                                    </button>
-                                    {selectedProjectRuleId && (
-                                      <button
-                                        className="action-icon danger-ghost"
-                                        disabled={deleteProjectRuleMutation.isPending}
-                                        onClick={() => {
-                                          if (!selectedProjectRuleId) return
-                                          if (!window.confirm('Delete this rule?')) return
-                                          deleteProjectRuleMutation.mutate(selectedProjectRuleId)
-                                        }}
-                                        title="Delete rule"
-                                        aria-label="Delete rule"
-                                      >
-                                        <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
-                                      </button>
+                                <div className="md-editor-surface">
+                                  <MarkdownModeToggle
+                                    view={projectRuleView}
+                                    onChange={setProjectRuleView}
+                                    ariaLabel="Project rule editor view"
+                                  />
+                                  <div className="md-editor-content">
+                                    {projectRuleView === 'write' ? (
+                                      <textarea
+                                        className="md-textarea"
+                                        value={projectRuleBody}
+                                        onChange={(e) => setProjectRuleBody(e.target.value)}
+                                        placeholder="Rule details (Markdown)"
+                                        style={{ width: '100%', minHeight: 140 }}
+                                      />
+                                    ) : (
+                                      <MarkdownView value={projectRuleBody} />
                                     )}
                                   </div>
                                 </div>
-                                {projectRuleView === 'write' ? (
-                                  <textarea
-                                    value={projectRuleBody}
-                                    onChange={(e) => setProjectRuleBody(e.target.value)}
-                                    placeholder="Rule details (Markdown)"
-                                    style={{ width: '100%', minHeight: 140 }}
-                                  />
-                                ) : (
-                                  <MarkdownView value={projectRuleBody} />
-                                )}
                               </div>
                             </div>
                           </div>
@@ -3365,7 +3345,7 @@ function App() {
                 style={{ width: '100%' }}
               />
             </label>
-            <div className="field-control" style={{ marginBottom: 10 }}>
+            <div className="field-control" style={{ marginBottom: 8 }}>
               <span className="field-label">Project</span>
               <button
                 className="pill subtle task-project-pill"
@@ -3380,8 +3360,8 @@ function App() {
                 <span>{projectNames[selectedTask.project_id] || selectedTask.project_id}</span>
               </button>
             </div>
-	            <div className="task-edit-grid" style={{ marginBottom: 8 }}>
-                <label className="field-control">
+	            <div className="task-edit-grid task-main-fields" style={{ marginBottom: 8 }}>
+                <label className="field-control task-field-half">
                   <span className="field-label">Status</span>
 	                <select value={editStatus} onChange={(e) => setEditStatus(e.target.value)}>
                     <option value="To do">To do</option>
@@ -3389,7 +3369,7 @@ function App() {
                     <option value="Done">Done</option>
                   </select>
                 </label>
-                <label className="field-control">
+                <label className="field-control task-field-half">
                   <span className="field-label">Priority</span>
                   <select value={editPriority} onChange={(e) => setEditPriority(e.target.value)}>
                     <option value="Low">Low</option>
@@ -3397,13 +3377,7 @@ function App() {
                     <option value="High">High</option>
                   </select>
                 </label>
-                <label className="field-control">
-                  <span className="field-label">Project</span>
-                  <select value={editProjectId} onChange={(e) => setEditProjectId(e.target.value)}>
-	                  {bootstrap.data.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-	                </select>
-                </label>
-                <label className="field-control">
+                <label className="field-control task-field-full">
                   <span className="field-label">Due date</span>
 	                <input className="due-input" type="datetime-local" value={editDueDate} onChange={(e) => setEditDueDate(e.target.value)} />
                 </label>

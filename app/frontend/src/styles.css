@@ -2004,11 +2004,6 @@ textarea {
   background: color-mix(in srgb, var(--surface), var(--surface-alt) 20%);
 }
 
-.rules-search-input {
-  width: min(220px, 100%);
-  min-width: 0;
-}
-
 .rules-editor .row {
   flex-wrap: wrap;
 }
@@ -2016,6 +2011,33 @@ textarea {
 .rules-editor .row > input {
   flex: 1 1 220px;
   min-width: 0;
+}
+
+.rules-head-row {
+  align-items: center;
+}
+
+.rule-title-row {
+  align-items: center;
+}
+
+.rule-title-row .action-icon {
+  flex-shrink: 0;
+}
+
+.rule-title-input {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+
+.rule-actions-row {
+  justify-content: flex-end;
+}
+
+.add-new-rule-item {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--brand), var(--line) 45%);
+  background: color-mix(in srgb, var(--brand), var(--surface) 94%);
 }
 
 .resource-ref-list {
@@ -2064,6 +2086,7 @@ textarea {
   .rules-list {
     max-height: 260px;
   }
+
 }
 
 @media (max-width: 560px) {
@@ -2121,6 +2144,14 @@ textarea {
 
   .task-edit-grid {
     grid-template-columns: 1fr;
+  }
+
+  .task-edit-grid.task-main-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .task-edit-grid.task-main-fields .task-field-full {
+    grid-column: 1 / -1;
   }
 
   .action-icon {
