@@ -81,6 +81,8 @@ def ensure_task_table_columns(db: Session):
         "schedule_state": "ALTER TABLE tasks ADD COLUMN schedule_state VARCHAR(16) DEFAULT 'idle'",
         "last_schedule_run_at": "ALTER TABLE tasks ADD COLUMN last_schedule_run_at TIMESTAMP WITH TIME ZONE",
         "last_schedule_error": "ALTER TABLE tasks ADD COLUMN last_schedule_error TEXT",
+        "external_refs": "ALTER TABLE tasks ADD COLUMN external_refs TEXT DEFAULT '[]'",
+        "attachment_refs": "ALTER TABLE tasks ADD COLUMN attachment_refs TEXT DEFAULT '[]'",
     }
     for column, ddl in required_columns.items():
         if column not in existing:
@@ -92,6 +94,24 @@ def ensure_saved_view_table_columns(db: Session):
     existing = {column["name"] for column in inspect(db.bind).get_columns("saved_views")}
     if "project_id" not in existing:
         db.execute(text("ALTER TABLE saved_views ADD COLUMN project_id VARCHAR(36)"))
+    db.commit()
+
+
+def ensure_project_table_columns(db: Session):
+    existing = {column["name"] for column in inspect(db.bind).get_columns("projects")}
+    if "external_refs" not in existing:
+        db.execute(text("ALTER TABLE projects ADD COLUMN external_refs TEXT DEFAULT '[]'"))
+    if "attachment_refs" not in existing:
+        db.execute(text("ALTER TABLE projects ADD COLUMN attachment_refs TEXT DEFAULT '[]'"))
+    db.commit()
+
+
+def ensure_note_table_columns(db: Session):
+    existing = {column["name"] for column in inspect(db.bind).get_columns("notes")}
+    if "external_refs" not in existing:
+        db.execute(text("ALTER TABLE notes ADD COLUMN external_refs TEXT DEFAULT '[]'"))
+    if "attachment_refs" not in existing:
+        db.execute(text("ALTER TABLE notes ADD COLUMN attachment_refs TEXT DEFAULT '[]'"))
     db.commit()
 
 
@@ -107,6 +127,8 @@ def bootstrap_data():
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
         ensure_user_table_columns(db)
+        ensure_project_table_columns(db)
+        ensure_note_table_columns(db)
         ensure_task_table_columns(db)
         ensure_saved_view_table_columns(db)
         ensure_task_comment_table_columns(db)
@@ -162,7 +184,14 @@ def bootstrap_data():
                 aggregate_type="Project",
                 aggregate_id=BOOTSTRAP_PROJECT_ID,
                 event_type=PROJECT_EVENT_CREATED,
-                payload={"workspace_id": BOOTSTRAP_WORKSPACE_ID, "name": "General", "description": "Default project", "custom_statuses": DEFAULT_STATUSES},
+                payload={
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "name": "General",
+                    "description": "Default project",
+                    "custom_statuses": DEFAULT_STATUSES,
+                    "external_refs": [],
+                    "attachment_refs": [],
+                },
                 metadata={"actor_id": DEFAULT_USER_ID, "workspace_id": BOOTSTRAP_WORKSPACE_ID, "project_id": BOOTSTRAP_PROJECT_ID},
                 expected_version=0,
             )
@@ -184,6 +213,8 @@ def bootstrap_data():
                     "labels": ["welcome"],
                     "subtasks": [],
                     "attachments": [],
+                    "external_refs": [],
+                    "attachment_refs": [],
                     "recurring_rule": None,
                     "order_index": 1,
                 },
@@ -244,6 +275,14 @@ def _backfill_project_streams_from_read_model(db: Session) -> None:
             custom_statuses = json.loads(p.custom_statuses or "[]")
         except Exception:
             custom_statuses = DEFAULT_STATUSES
+        try:
+            external_refs = json.loads(p.external_refs or "[]")
+        except Exception:
+            external_refs = []
+        try:
+            attachment_refs = json.loads(p.attachment_refs or "[]")
+        except Exception:
+            attachment_refs = []
         append_event(
             db,
             aggregate_type="Project",
@@ -254,6 +293,8 @@ def _backfill_project_streams_from_read_model(db: Session) -> None:
                 "name": p.name,
                 "description": p.description or "",
                 "custom_statuses": custom_statuses or DEFAULT_STATUSES,
+                "external_refs": external_refs,
+                "attachment_refs": attachment_refs,
             },
             metadata={"actor_id": DEFAULT_USER_ID, "workspace_id": p.workspace_id, "project_id": p.id},
             expected_version=0,
@@ -280,6 +321,14 @@ def _backfill_task_streams_from_read_model(db: Session) -> None:
             attachments = json.loads(t.attachments or "[]")
         except Exception:
             attachments = []
+        try:
+            external_refs = json.loads(t.external_refs or "[]")
+        except Exception:
+            external_refs = []
+        try:
+            attachment_refs = json.loads(t.attachment_refs or "[]")
+        except Exception:
+            attachment_refs = attachments
 
         append_event(
             db,
@@ -298,6 +347,8 @@ def _backfill_task_streams_from_read_model(db: Session) -> None:
                 "labels": labels,
                 "subtasks": subtasks,
                 "attachments": attachments,
+                "external_refs": external_refs,
+                "attachment_refs": attachment_refs,
                 "recurring_rule": t.recurring_rule,
                 "order_index": int(t.order_index or 0),
                 "task_type": t.task_type or "manual",

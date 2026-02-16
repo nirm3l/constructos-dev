@@ -63,6 +63,51 @@ def _normalize_tags(values: list[str] | None) -> list[str]:
     return out
 
 
+def _normalize_external_refs(values: list[dict] | None) -> list[dict]:
+    if not values:
+        return []
+    out: list[dict] = []
+    for raw in values:
+        if not isinstance(raw, dict):
+            continue
+        url = str(raw.get("url") or "").strip()
+        if not url:
+            continue
+        item = {"url": url}
+        title = str(raw.get("title") or "").strip()
+        source = str(raw.get("source") or "").strip()
+        if title:
+            item["title"] = title
+        if source:
+            item["source"] = source
+        out.append(item)
+    return out
+
+
+def _normalize_attachment_refs(values: list[dict] | None) -> list[dict]:
+    if not values:
+        return []
+    out: list[dict] = []
+    for raw in values:
+        if not isinstance(raw, dict):
+            continue
+        path = str(raw.get("path") or "").strip()
+        if not path:
+            continue
+        item = {"path": path}
+        name = str(raw.get("name") or "").strip()
+        mime_type = str(raw.get("mime_type") or "").strip()
+        size_bytes = raw.get("size_bytes")
+        if name:
+            item["name"] = name
+        if mime_type:
+            item["mime_type"] = mime_type
+        if isinstance(size_bytes, int) and size_bytes >= 0:
+            item["size_bytes"] = size_bytes
+        out.append(item)
+    return out
+
+
 def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> Project:
     project = db.get(Project, project_id)
     if not project or project.is_deleted:
@@ -118,6 +163,10 @@ class CreateTaskHandler:
         task_type = (self.payload.task_type or "manual").strip() or "manual"
         scheduled_at = normalize_datetime_to_utc(self.payload.scheduled_at_utc, user_tz)
         scheduled_instruction = (self.payload.scheduled_instruction or "").strip() or None
+        external_refs = _normalize_external_refs([r.model_dump() for r in self.payload.external_refs])
+        attachment_refs = _normalize_attachment_refs([r.model_dump() for r in self.payload.attachment_refs])
+        if not attachment_refs and self.payload.attachments:
+            attachment_refs = _normalize_attachment_refs(self.payload.attachments)
         _validate_schedule_fields(
             task_type=task_type,
             scheduled_instruction=scheduled_instruction,
@@ -143,7 +192,9 @@ class CreateTaskHandler:
                 "assignee_id": self.payload.assignee_id,
                 "labels": _normalize_tags(self.payload.labels),
                 "subtasks": self.payload.subtasks,
-                "attachments": self.payload.attachments,
+                "attachments": attachment_refs,
+                "external_refs": external_refs,
+                "attachment_refs": attachment_refs,
                 "recurring_rule": self.payload.recurring_rule,
                 "task_type": task_type,
                 "scheduled_instruction": scheduled_instruction if task_type == "scheduled_instruction" else None,
@@ -208,6 +259,14 @@ class PatchTaskHandler:
             _require_project_scope(self.ctx.db, workspace_id=workspace_id, project_id=str(data["project_id"]))
         if "labels" in data and data["labels"] is not None:
             data["labels"] = _normalize_tags(data["labels"])
+        if "external_refs" in data and data["external_refs"] is not None:
+            data["external_refs"] = _normalize_external_refs(data["external_refs"])
+        if "attachment_refs" in data and data["attachment_refs"] is not None:
+            data["attachment_refs"] = _normalize_attachment_refs(data["attachment_refs"])
+            data["attachments"] = data["attachment_refs"]
+        elif "attachments" in data and data["attachments"] is not None:
+            data["attachments"] = _normalize_attachment_refs(data["attachments"])
+            data["attachment_refs"] = data["attachments"]
         current_row = self.ctx.db.get(Task, self.task_id)
         current_state = None
         if current_row is None and get_kurrent_client() is not None:

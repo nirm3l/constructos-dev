@@ -18,6 +18,8 @@ class NoteAggregate(Aggregate):
         title: str,
         body: str,
         tags: list[str],
+        external_refs: list[dict[str, Any]],
+        attachment_refs: list[dict[str, Any]],
         pinned: bool,
         archived: bool,
         created_by: str,
@@ -29,6 +31,8 @@ class NoteAggregate(Aggregate):
         self.title = title
         self.body = body
         self.tags = tags
+        self.external_refs = external_refs
+        self.attachment_refs = attachment_refs
         self.pinned = pinned
         self.archived = archived
         self.is_deleted = False
@@ -77,4 +81,3 @@ MUTATION_EVENTS = {
     EVENT_UNPINNED,
     EVENT_DELETED,
 }
-

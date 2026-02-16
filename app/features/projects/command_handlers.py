@@ -38,6 +38,51 @@ class CommandContext:
     user: User
 
 
+def _normalize_external_refs(values: list[dict] | None) -> list[dict]:
+    if not values:
+        return []
+    out: list[dict] = []
+    for raw in values:
+        if not isinstance(raw, dict):
+            continue
+        url = str(raw.get("url") or "").strip()
+        if not url:
+            continue
+        item = {"url": url}
+        title = str(raw.get("title") or "").strip()
+        source = str(raw.get("source") or "").strip()
+        if title:
+            item["title"] = title
+        if source:
+            item["source"] = source
+        out.append(item)
+    return out
+
+
+def _normalize_attachment_refs(values: list[dict] | None) -> list[dict]:
+    if not values:
+        return []
+    out: list[dict] = []
+    for raw in values:
+        if not isinstance(raw, dict):
+            continue
+        path = str(raw.get("path") or "").strip()
+        if not path:
+            continue
+        item = {"path": path}
+        name = str(raw.get("name") or "").strip()
+        mime_type = str(raw.get("mime_type") or "").strip()
+        size_bytes = raw.get("size_bytes")
+        if name:
+            item["name"] = name
+        if mime_type:
+            item["mime_type"] = mime_type
+        if isinstance(size_bytes, int) and size_bytes >= 0:
+            item["size_bytes"] = size_bytes
+        out.append(item)
+    return out
+
+
 @dataclass(frozen=True, slots=True)
 class CreateProjectHandler:
     ctx: CommandContext
@@ -68,6 +113,8 @@ class CreateProjectHandler:
                 "name": self.payload.name.strip(),
                 "description": self.payload.description,
                 "custom_statuses": self.payload.custom_statuses or DEFAULT_STATUSES,
+                "external_refs": _normalize_external_refs([r.model_dump() for r in self.payload.external_refs]),
+                "attachment_refs": _normalize_attachment_refs([r.model_dump() for r in self.payload.attachment_refs]),
                 "status": "Active",
             },
             metadata={"actor_id": self.ctx.user.id, "workspace_id": self.payload.workspace_id, "project_id": pid},
@@ -168,7 +215,7 @@ class PatchProjectHandler:
         ensure_role(self.ctx.db, project.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
 
         data = self.payload.model_dump(exclude_unset=True)
-        event_payload: dict[str, str] = {}
+        event_payload: dict = {}
         if "name" in data and data["name"] is not None:
             name = str(data["name"]).strip()
             if not name:
@@ -176,6 +223,10 @@ class PatchProjectHandler:
             event_payload["name"] = name
         if "description" in data and data["description"] is not None:
             event_payload["description"] = str(data["description"])
+        if "external_refs" in data and data["external_refs"] is not None:
+            event_payload["external_refs"] = _normalize_external_refs(data["external_refs"])
+        if "attachment_refs" in data and data["attachment_refs"] is not None:
+            event_payload["attachment_refs"] = _normalize_attachment_refs(data["attachment_refs"])
 
         if not event_payload:
             view = load_project_view(self.ctx.db, self.project_id)

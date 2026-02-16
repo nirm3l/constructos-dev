@@ -61,6 +61,8 @@ class Project(Base, TimeMixin):
     description: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(16), default="Active")
     custom_statuses: Mapped[str] = mapped_column(Text, default='["To do", "In progress", "Done"]')
+    external_refs: Mapped[str] = mapped_column(Text, default="[]")
+    attachment_refs: Mapped[str] = mapped_column(Text, default="[]")
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
@@ -89,6 +91,8 @@ class Task(Base, TimeMixin):
     labels: Mapped[str] = mapped_column(Text, default="[]")
     subtasks: Mapped[str] = mapped_column(Text, default="[]")
     attachments: Mapped[str] = mapped_column(Text, default="[]")
+    external_refs: Mapped[str] = mapped_column(Text, default="[]")
+    attachment_refs: Mapped[str] = mapped_column(Text, default="[]")
     recurring_rule: Mapped[str | None] = mapped_column(String(64), nullable=True)
     task_type: Mapped[str] = mapped_column(String(32), default="manual")
     scheduled_instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -128,6 +132,8 @@ class Note(Base, TimeMixin):
     title: Mapped[str] = mapped_column(String(256))
     body: Mapped[str] = mapped_column(Text, default="")
     tags: Mapped[str] = mapped_column(Text, default="[]")
+    external_refs: Mapped[str] = mapped_column(Text, default="[]")
+    attachment_refs: Mapped[str] = mapped_column(Text, default="[]")
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)

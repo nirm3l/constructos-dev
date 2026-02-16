@@ -11,7 +11,9 @@ import {
   deleteComment,
   createTask,
   createNote,
+  deleteAttachment,
   deleteNote,
+  attachmentDownloadUrl,
   deleteProject,
   deleteProjectRule,
   getTaskAutomationStatus,
@@ -37,10 +39,11 @@ import {
   removeProjectMember,
   runAgentChat,
   runTaskWithCodex,
+  uploadAttachment,
   unpinNote,
   archiveNote
 } from './api'
-import type { Notification, Note, ProjectRule, Task, TaskAutomationStatus } from './types'
+import type { AttachmentRef, ExternalRef, Notification, Note, ProjectRule, Task, TaskAutomationStatus } from './types'
 import { MarkdownView } from './markdown/MarkdownView'
 import './styles.css'
 
@@ -71,6 +74,11 @@ function parseStoredProjectId(raw: string | null): string {
 function parseStoredProjectsMode(raw: string | null): 'board' | 'list' {
   if (raw === 'list') return 'list'
   return 'board'
+}
+
+function parseUrlTab(raw: string | null): Tab | null {
+  if (!raw) return null
+  return TAB_ORDER.includes(raw as Tab) ? (raw as Tab) : null
 }
 
 function toLocalDateTimeInput(iso: string | null): string {
@@ -104,6 +112,15 @@ function toUserDateTime(iso: unknown, timezone: string | undefined): string {
   } catch {
     return d.toLocaleString()
   }
+}
+
+function pickSingleTimeMeta(createdAt: string | null | undefined, updatedAt: string | null | undefined): { label: 'Created' | 'Updated'; value: string } | null {
+  const created = createdAt || null
+  const updated = updatedAt || null
+  if (updated && created && updated !== created) return { label: 'Updated', value: updated }
+  if (created) return { label: 'Created', value: created }
+  if (updated) return { label: 'Updated', value: updated }
+  return null
 }
 
 function formatActivitySummary(
@@ -232,10 +249,212 @@ function parseCommaTags(raw: string): string[] {
   return out
 }
 
+function parseExternalRefsText(raw: string): ExternalRef[] {
+  return String(raw || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [urlPart, titlePart, sourcePart] = line.split('|').map((x) => x.trim())
+      const item: ExternalRef = { url: urlPart || '' }
+      if (titlePart) item.title = titlePart
+      if (sourcePart) item.source = sourcePart
+      return item
+    })
+    .filter((item) => item.url)
+}
+
+function externalRefsToText(items: ExternalRef[] | undefined | null): string {
+  return (items ?? [])
+    .map((item) => [item.url, item.title, item.source].filter(Boolean).join(' | '))
+    .join('\n')
+}
+
+function removeExternalRefByIndex(raw: string, index: number): string {
+  const parsed = parseExternalRefsText(raw)
+  if (index < 0 || index >= parsed.length) return raw
+  parsed.splice(index, 1)
+  return externalRefsToText(parsed)
+}
+
+function parseAttachmentRefsText(raw: string): AttachmentRef[] {
+  return String(raw || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [pathPart, namePart, mimePart, sizePart] = line.split('|').map((x) => x.trim())
+      const item: AttachmentRef = { path: pathPart || '' }
+      if (namePart) item.name = namePart
+      if (mimePart) item.mime_type = mimePart
+      if (sizePart) {
+        const n = Number(sizePart)
+        if (Number.isFinite(n) && n >= 0) item.size_bytes = Math.floor(n)
+      }
+      return item
+    })
+    .filter((item) => item.path)
+}
+
+function attachmentRefsToText(items: AttachmentRef[] | undefined | null): string {
+  return (items ?? [])
+    .map((item) => [item.path, item.name, item.mime_type, item.size_bytes != null ? String(item.size_bytes) : ''].filter(Boolean).join(' | '))
+    .join('\n')
+}
+
+function removeAttachmentByPath(raw: string, path: string): string {
+  const filtered = parseAttachmentRefsText(raw).filter((item) => item.path !== path)
+  return attachmentRefsToText(filtered)
+}
+
+function ExternalRefList({
+  refs,
+  onRemoveIndex
+}: {
+  refs: ExternalRef[] | undefined | null
+  onRemoveIndex?: (index: number) => void
+}) {
+  if (!refs || refs.length === 0) return null
+  return (
+    <div className="row wrap" style={{ gap: 6 }}>
+      {refs.map((ref, idx) => {
+        const label = ref.title || ref.url
+        return (
+          <span key={`${ref.url}-${idx}`} className="row" style={{ gap: 6 }}>
+            <a
+              className="status-chip"
+              href={ref.url}
+              target="_blank"
+              rel="noreferrer"
+              title={ref.source ? `${label} (${ref.source})` : label}
+            >
+              {ref.source ? `${label} · ${ref.source}` : label}
+            </a>
+            {onRemoveIndex && (
+              <button
+                type="button"
+                className="action-icon danger-ghost"
+                onClick={() => onRemoveIndex(idx)}
+                title="Remove link"
+                aria-label="Remove link"
+              >
+                <Icon path="M6 6l12 12M18 6 6 18" />
+              </button>
+            )}
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
+function ExternalRefEditor({
+  refs,
+  onAdd,
+  onRemoveIndex,
+}: {
+  refs: ExternalRef[]
+  onAdd: (ref: ExternalRef) => void
+  onRemoveIndex: (index: number) => void
+}) {
+  const [url, setUrl] = React.useState('')
+  const [title, setTitle] = React.useState('')
+  const [source, setSource] = React.useState('')
+  return (
+    <div style={{ marginTop: 8 }}>
+      <ExternalRefList refs={refs} onRemoveIndex={onRemoveIndex} />
+      <div className="row wrap" style={{ gap: 8, marginTop: 6 }}>
+        <input
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder="https://example.com"
+          style={{ minWidth: 240 }}
+        />
+        <input
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          placeholder="Title (optional)"
+          style={{ minWidth: 180 }}
+        />
+        <input
+          value={source}
+          onChange={(e) => setSource(e.target.value)}
+          placeholder="Source (optional)"
+          style={{ minWidth: 140 }}
+        />
+        <button
+          className="status-chip"
+          type="button"
+          onClick={() => {
+            const cleaned = url.trim()
+            if (!cleaned) return
+            onAdd({
+              url: cleaned,
+              ...(title.trim() ? { title: title.trim() } : {}),
+              ...(source.trim() ? { source: source.trim() } : {}),
+            })
+            setUrl('')
+            setTitle('')
+            setSource('')
+          }}
+        >
+          Add link
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function AttachmentRefList({
+  refs,
+  workspaceId,
+  userId,
+  onRemovePath
+}: {
+  refs: AttachmentRef[] | undefined | null
+  workspaceId: string
+  userId: string
+  onRemovePath?: (path: string) => void
+}) {
+  if (!refs || refs.length === 0) return null
+  return (
+    <div className="row wrap" style={{ gap: 6 }}>
+      {refs.map((ref, idx) => (
+        <span key={`${ref.path}-${idx}`} className="row" style={{ gap: 6 }}>
+          <a
+            className="status-chip"
+            title={ref.path}
+            href={attachmentDownloadUrl({ user_id: userId, workspace_id: workspaceId, path: ref.path })}
+            target="_blank"
+            rel="noreferrer"
+          >
+            {ref.name || ref.path}
+          </a>
+          {onRemovePath && (
+            <button
+              type="button"
+              className="action-icon danger-ghost"
+              onClick={() => onRemovePath(ref.path)}
+              title="Remove file"
+              aria-label="Remove file"
+            >
+              <Icon path="M6 6l12 12M18 6 6 18" />
+            </button>
+          )}
+        </span>
+      ))}
+    </div>
+  )
+}
+
 function toErrorMessage(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message.trim()) return err.message.trim()
   if (typeof err === 'string' && err.trim()) return err.trim()
   return fallback
+}
+
+function stableJson(value: unknown): string {
+  return JSON.stringify(value ?? null)
 }
 
 function tagHue(tag: string): number {
@@ -259,11 +478,15 @@ function App() {
   const [quickDueDateFocused, setQuickDueDateFocused] = React.useState(false)
   const [projectName, setProjectName] = React.useState('')
   const [projectDescription, setProjectDescription] = React.useState('')
+  const [projectExternalRefsText, setProjectExternalRefsText] = React.useState('')
+  const [projectAttachmentRefsText, setProjectAttachmentRefsText] = React.useState('')
   const [projectDescriptionView, setProjectDescriptionView] = React.useState<'write' | 'preview'>('write')
   const [showProjectCreateForm, setShowProjectCreateForm] = React.useState(false)
   const [showProjectEditForm, setShowProjectEditForm] = React.useState(false)
   const [editProjectName, setEditProjectName] = React.useState('')
   const [editProjectDescription, setEditProjectDescription] = React.useState('')
+  const [editProjectExternalRefsText, setEditProjectExternalRefsText] = React.useState('')
+  const [editProjectAttachmentRefsText, setEditProjectAttachmentRefsText] = React.useState('')
   const [createProjectMemberIds, setCreateProjectMemberIds] = React.useState<string[]>([])
   const [editProjectMemberIds, setEditProjectMemberIds] = React.useState<string[]>([])
   const [editProjectDescriptionView, setEditProjectDescriptionView] = React.useState<'write' | 'preview'>('write')
@@ -282,6 +505,8 @@ function App() {
   )
   const [quickProjectId, setQuickProjectId] = React.useState<string>('')
   const [quickTaskTags, setQuickTaskTags] = React.useState<string[]>([])
+  const [quickTaskExternalRefsText, setQuickTaskExternalRefsText] = React.useState('')
+  const [quickTaskAttachmentRefsText, setQuickTaskAttachmentRefsText] = React.useState('')
   const [showQuickTaskTagPicker, setShowQuickTaskTagPicker] = React.useState(false)
   const [quickTaskTagQuery, setQuickTaskTagQuery] = React.useState('')
   const [selectedTaskId, setSelectedTaskId] = React.useState<string | null>(null)
@@ -298,6 +523,8 @@ function App() {
   const [editNoteTitle, setEditNoteTitle] = React.useState('')
   const [editNoteBody, setEditNoteBody] = React.useState('')
   const [editNoteTags, setEditNoteTags] = React.useState('')
+  const [editNoteExternalRefsText, setEditNoteExternalRefsText] = React.useState('')
+  const [editNoteAttachmentRefsText, setEditNoteAttachmentRefsText] = React.useState('')
   const [showTagPicker, setShowTagPicker] = React.useState(false)
   const [tagPickerQuery, setTagPickerQuery] = React.useState('')
   const [noteEditorView, setNoteEditorView] = React.useState<'write' | 'preview'>('preview')
@@ -325,6 +552,8 @@ function App() {
   const [editDueDate, setEditDueDate] = React.useState('')
   const [editProjectId, setEditProjectId] = React.useState('')
   const [editTaskTags, setEditTaskTags] = React.useState<string[]>([])
+  const [editTaskExternalRefsText, setEditTaskExternalRefsText] = React.useState('')
+  const [editTaskAttachmentRefsText, setEditTaskAttachmentRefsText] = React.useState('')
   const [showTaskTagPicker, setShowTaskTagPicker] = React.useState(false)
   const [taskTagPickerQuery, setTaskTagPickerQuery] = React.useState('')
   const [editTaskType, setEditTaskType] = React.useState<'manual' | 'scheduled_instruction'>('manual')
@@ -337,16 +566,22 @@ function App() {
   const [activityShowRawDetails, setActivityShowRawDetails] = React.useState(false)
   const [scrollToNewestComment, setScrollToNewestComment] = React.useState(false)
   const [uiError, setUiError] = React.useState<string | null>(null)
+  const [uiInfo, setUiInfo] = React.useState<string | null>(null)
   const [taskEditorError, setTaskEditorError] = React.useState<string | null>(null)
   const qc = useQueryClient()
   const realtimeRefreshTimerRef = React.useRef<number | null>(null)
   const codexChatHistoryRef = React.useRef<HTMLDivElement | null>(null)
   const commentInputRef = React.useRef<HTMLTextAreaElement | null>(null)
   const commentsListRef = React.useRef<HTMLDivElement | null>(null)
+  const quickTaskFileInputRef = React.useRef<HTMLInputElement | null>(null)
+  const taskFileInputRef = React.useRef<HTMLInputElement | null>(null)
+  const noteFileInputRef = React.useRef<HTMLInputElement | null>(null)
+  const editProjectFileInputRef = React.useRef<HTMLInputElement | null>(null)
   const fabIdleTimerRef = React.useRef<number | null>(null)
   const openNextSelectedNoteInWriteRef = React.useRef(false)
   const projectDescriptionRef = React.useRef<HTMLTextAreaElement | null>(null)
   const editProjectDescriptionRef = React.useRef<HTMLTextAreaElement | null>(null)
+  const urlInitAppliedRef = React.useRef(false)
 
   const autoResizeTextarea = React.useCallback((el: HTMLTextAreaElement | null) => {
     if (!el) return
@@ -361,6 +596,25 @@ function App() {
   React.useEffect(() => {
     localStorage.setItem('ui_tab', tab)
   }, [tab])
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return
+    const params = new URLSearchParams(window.location.search)
+    const urlTab = parseUrlTab(params.get('tab'))
+    if (urlTab) setTab(urlTab)
+    const projectId = params.get('project')
+    if (projectId) setSelectedProjectId(projectId)
+    const taskId = params.get('task')
+    if (taskId) {
+      setSelectedTaskId(taskId)
+      setTab('tasks')
+    }
+    const noteId = params.get('note')
+    if (noteId) {
+      setSelectedNoteId(noteId)
+      setTab('notes')
+    }
+  }, [])
 
   React.useEffect(() => {
     localStorage.setItem('ui_selected_project_id', selectedProjectId)
@@ -444,6 +698,34 @@ function App() {
   }, [bootstrap.data, selectedProjectId])
 
   React.useEffect(() => {
+    if (!bootstrap.data || urlInitAppliedRef.current) return
+    urlInitAppliedRef.current = true
+    const params = new URLSearchParams(window.location.search)
+    const urlProject = params.get('project')
+    if (urlProject && !(bootstrap.data.projects ?? []).some((p) => p.id === urlProject)) {
+      params.delete('project')
+      params.delete('task')
+      params.delete('note')
+      const next = params.toString()
+      window.history.replaceState(null, '', next ? `?${next}` : window.location.pathname)
+    }
+  }, [bootstrap.data])
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return
+    const params = new URLSearchParams(window.location.search)
+    params.set('tab', tab)
+    if (selectedProjectId) params.set('project', selectedProjectId)
+    else params.delete('project')
+    if (selectedTaskId) params.set('task', selectedTaskId)
+    else params.delete('task')
+    if (selectedNoteId) params.set('note', selectedNoteId)
+    else params.delete('note')
+    const next = params.toString()
+    window.history.replaceState(null, '', next ? `?${next}` : window.location.pathname)
+  }, [tab, selectedProjectId, selectedTaskId, selectedNoteId])
+
+  React.useEffect(() => {
     if (!showProjectCreateForm) return
     if (createProjectMemberIds.length > 0) return
     if (!bootstrap.data?.current_user?.id) return
@@ -455,8 +737,11 @@ function App() {
     const ids = (bootstrap.data?.project_members ?? [])
       .filter((pm) => pm.project_id === selectedProjectId)
       .map((pm) => pm.user_id)
-    setEditProjectMemberIds(Array.from(new Set(ids)))
-  }, [showProjectEditForm, selectedProjectId, bootstrap.data?.project_members])
+    const uniqueIds = Array.from(new Set(ids))
+    setEditProjectMemberIds(uniqueIds)
+    const project = (bootstrap.data?.projects ?? []).find((p) => p.id === selectedProjectId)
+    if (!project) return
+  }, [showProjectEditForm, selectedProjectId, bootstrap.data?.project_members, bootstrap.data?.projects])
 
   const taskParams = React.useMemo(() => {
     if (!selectedProjectId) return null
@@ -750,6 +1035,154 @@ function App() {
     return !taskTagSuggestions.some((t) => t.toLowerCase() === q.toLowerCase())
   }, [taskTagPickerQuery, taskTagSuggestions])
 
+  const selectedProjectMemberIds = React.useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (bootstrap.data?.project_members ?? [])
+            .filter((pm) => pm.project_id === selectedProjectId)
+            .map((pm) => pm.user_id)
+        )
+      ).sort(),
+    [bootstrap.data?.project_members, selectedProjectId]
+  )
+
+  const projectIsDirty = React.useMemo(() => {
+    if (!showProjectEditForm || !selectedProject) return false
+    return (
+      editProjectName.trim() !== (selectedProject.name ?? '').trim() ||
+      editProjectDescription !== (selectedProject.description ?? '') ||
+      stableJson(parseExternalRefsText(editProjectExternalRefsText)) !== stableJson(selectedProject.external_refs ?? []) ||
+      stableJson(parseAttachmentRefsText(editProjectAttachmentRefsText)) !== stableJson(selectedProject.attachment_refs ?? []) ||
+      stableJson(Array.from(new Set(editProjectMemberIds.filter(Boolean))).sort()) !== stableJson(selectedProjectMemberIds)
+    )
+  }, [
+    editProjectAttachmentRefsText,
+    editProjectDescription,
+    editProjectExternalRefsText,
+    editProjectMemberIds,
+    editProjectName,
+    selectedProject,
+    selectedProjectMemberIds,
+    showProjectEditForm,
+  ])
+
+  const noteIsDirty = React.useMemo(() => {
+    if (!selectedNote) return false
+    return (
+      (editNoteTitle.trim() || 'Untitled') !== (selectedNote.title?.trim() || 'Untitled') ||
+      editNoteBody !== (selectedNote.body ?? '') ||
+      stableJson(parseCommaTags(editNoteTags)) !== stableJson(selectedNote.tags ?? []) ||
+      stableJson(parseExternalRefsText(editNoteExternalRefsText)) !== stableJson(selectedNote.external_refs ?? []) ||
+      stableJson(parseAttachmentRefsText(editNoteAttachmentRefsText)) !== stableJson(selectedNote.attachment_refs ?? [])
+    )
+  }, [editNoteAttachmentRefsText, editNoteBody, editNoteExternalRefsText, editNoteTags, editNoteTitle, selectedNote])
+
+  const taskIsDirty = React.useMemo(() => {
+    if (!selectedTask) return false
+    const current = {
+      description: editDescription,
+      status: editStatus,
+      priority: editPriority,
+      project_id: editProjectId || selectedTask.project_id,
+      labels: editTaskTags,
+      due_date: editDueDate || '',
+      task_type: editTaskType,
+      scheduled_at_utc: editScheduledAtUtc || '',
+      schedule_timezone: editTaskType === 'scheduled_instruction' ? (editScheduleTimezone || '') : '',
+      scheduled_instruction: editTaskType === 'scheduled_instruction' ? editScheduledInstruction : '',
+      recurring_rule:
+        editTaskType === 'scheduled_instruction' && editRecurringEvery.trim()
+          ? `every:${Math.max(1, Number(editRecurringEvery) || 1)}${editRecurringUnit}`
+          : '',
+      external_refs: parseExternalRefsText(editTaskExternalRefsText),
+      attachment_refs: parseAttachmentRefsText(editTaskAttachmentRefsText),
+    }
+    const original = {
+      description: selectedTask.description ?? '',
+      status: selectedTask.status ?? 'To do',
+      priority: selectedTask.priority ?? 'Med',
+      project_id: selectedTask.project_id ?? '',
+      labels: selectedTask.labels ?? [],
+      due_date: toLocalDateTimeInput(selectedTask.due_date),
+      task_type: selectedTask.task_type ?? 'manual',
+      scheduled_at_utc: toLocalDateTimeInput(selectedTask.scheduled_at_utc),
+      schedule_timezone:
+        (selectedTask.task_type ?? 'manual') === 'scheduled_instruction' ? (selectedTask.schedule_timezone ?? '') : '',
+      scheduled_instruction:
+        (selectedTask.task_type ?? 'manual') === 'scheduled_instruction' ? (selectedTask.scheduled_instruction ?? '') : '',
+      recurring_rule:
+        (selectedTask.task_type ?? 'manual') === 'scheduled_instruction' ? String(selectedTask.recurring_rule ?? '') : '',
+      external_refs: selectedTask.external_refs ?? [],
+      attachment_refs: selectedTask.attachment_refs ?? [],
+    }
+    return stableJson(current) !== stableJson(original)
+  }, [
+    editDescription,
+    editDueDate,
+    editPriority,
+    editProjectId,
+    editRecurringEvery,
+    editRecurringUnit,
+    editScheduledAtUtc,
+    editScheduledInstruction,
+    editScheduleTimezone,
+    editStatus,
+    editTaskAttachmentRefsText,
+    editTaskExternalRefsText,
+    editTaskTags,
+    editTaskType,
+    selectedTask,
+  ])
+
+  const confirmDiscardChanges = React.useCallback(() => {
+    if (typeof window === 'undefined') return true
+    return window.confirm('You have unsaved changes. Discard them?')
+  }, [])
+
+  const closeTaskEditor = React.useCallback(() => {
+    if (taskIsDirty && !confirmDiscardChanges()) return false
+    setSelectedTaskId(null)
+    setTaskEditorError(null)
+    return true
+  }, [confirmDiscardChanges, taskIsDirty])
+
+  const openTaskEditor = React.useCallback((taskId: string) => {
+    if (selectedTaskId === taskId) return true
+    if (selectedTaskId && taskIsDirty && !confirmDiscardChanges()) return false
+    setSelectedTaskId(taskId)
+    setTaskEditorError(null)
+    return true
+  }, [confirmDiscardChanges, selectedTaskId, taskIsDirty])
+
+  const toggleNoteEditor = React.useCallback((noteId: string) => {
+    if (selectedNoteId === noteId) {
+      if (noteIsDirty && !confirmDiscardChanges()) return false
+      setSelectedNoteId(null)
+      return true
+    }
+    if (selectedNoteId && noteIsDirty && !confirmDiscardChanges()) return false
+    setSelectedNoteId(noteId)
+    return true
+  }, [confirmDiscardChanges, noteIsDirty, selectedNoteId])
+
+  const toggleProjectEditor = React.useCallback((projectId: string) => {
+    if (selectedProjectId === projectId) {
+      if (showProjectEditForm) {
+        if (projectIsDirty && !confirmDiscardChanges()) return false
+        setShowProjectEditForm(false)
+        return true
+      }
+      setShowProjectCreateForm(false)
+      setShowProjectEditForm(true)
+      return true
+    }
+    if (showProjectEditForm && projectIsDirty && !confirmDiscardChanges()) return false
+    setSelectedProjectId(projectId)
+    setShowProjectEditForm(false)
+    return true
+  }, [confirmDiscardChanges, projectIsDirty, selectedProjectId, showProjectEditForm])
+
   const filteredQuickTaskTags = React.useMemo(() => {
     const q = quickTaskTagQuery.trim().toLowerCase()
     const base = q ? taskTagSuggestions.filter((t) => t.toLowerCase().includes(q)) : taskTagSuggestions
@@ -770,6 +1203,8 @@ function App() {
     setEditDueDate(toLocalDateTimeInput(selectedTask.due_date))
     setEditProjectId(selectedTask.project_id)
     setEditTaskTags(selectedTask.labels ?? [])
+    setEditTaskExternalRefsText(externalRefsToText(selectedTask.external_refs))
+    setEditTaskAttachmentRefsText(attachmentRefsToText(selectedTask.attachment_refs))
     setShowTaskTagPicker(false)
     setTaskTagPickerQuery('')
     setEditTaskType((selectedTask.task_type ?? 'manual') as 'manual' | 'scheduled_instruction')
@@ -794,7 +1229,7 @@ function App() {
     setTaskEditorError(null)
     // Helpful default: focus comment box when opening a task.
     window.setTimeout(() => commentInputRef.current?.focus(), 0)
-  }, [bootstrap.data?.current_user?.timezone, selectedTask])
+  }, [bootstrap.data?.current_user?.timezone, selectedTask?.id])
 
   React.useEffect(() => {
     if (!taskEditorError) return
@@ -808,11 +1243,14 @@ function App() {
     setEditNoteTitle(selectedNote.title ?? '')
     setEditNoteBody(selectedNote.body ?? '')
     setEditNoteTags((selectedNote.tags ?? []).join(', '))
+    setEditNoteExternalRefsText(externalRefsToText(selectedNote.external_refs))
+    setEditNoteAttachmentRefsText(attachmentRefsToText(selectedNote.attachment_refs))
     setTagPickerQuery('')
     setShowTagPicker(false)
-    setNoteEditorView(openNextSelectedNoteInWriteRef.current ? 'write' : 'preview')
+    const hasBody = Boolean((selectedNote.body ?? '').trim())
+    setNoteEditorView(openNextSelectedNoteInWriteRef.current || !hasBody ? 'write' : 'preview')
     openNextSelectedNoteInWriteRef.current = false
-  }, [selectedNote])
+  }, [selectedNote?.id])
 
   const comments = useQuery({
     queryKey: ['comments', userId, selectedTaskId],
@@ -857,6 +1295,225 @@ function App() {
     await qc.invalidateQueries({ queryKey: ['project-rules'] })
   }
 
+  const uploadAttachmentRef = React.useCallback(
+    async (file: File, scope: { project_id?: string | null; task_id?: string | null; note_id?: string | null }) => {
+      const projectId = scope.project_id ?? undefined
+      const taskId = scope.task_id ?? undefined
+      const noteId = scope.note_id ?? undefined
+      if (!workspaceId) throw new Error('Workspace is missing')
+      if (!projectId && !taskId && !noteId) throw new Error('Select project/task/note before upload')
+      const ref = await uploadAttachment(userId, {
+        workspace_id: workspaceId,
+        project_id: projectId,
+        task_id: taskId,
+        note_id: noteId,
+        file,
+      })
+      setUiError(null)
+      return ref
+    },
+    [userId, workspaceId]
+  )
+
+  const removeUploadedAttachment = React.useCallback(
+    async (path: string) => {
+      if (!workspaceId) throw new Error('Workspace is missing')
+      try {
+        await deleteAttachment(userId, { workspace_id: workspaceId, path })
+      } catch (err) {
+        const message = toErrorMessage(err, '')
+        // Idempotent delete: stale refs can point to files already removed on disk.
+        if (!/attachment not found/i.test(message)) throw err
+      }
+      setUiError(null)
+    },
+    [userId, workspaceId]
+  )
+
+  const buildShareUrl = React.useCallback(
+    (payload: { tab?: Tab; projectId?: string; taskId?: string; noteId?: string }) => {
+      const u = new URL(window.location.href)
+      u.searchParams.set('tab', payload.tab ?? tab)
+      if (payload.projectId) u.searchParams.set('project', payload.projectId)
+      else u.searchParams.delete('project')
+      if (payload.taskId) u.searchParams.set('task', payload.taskId)
+      else u.searchParams.delete('task')
+      if (payload.noteId) u.searchParams.set('note', payload.noteId)
+      else u.searchParams.delete('note')
+      return u.toString()
+    },
+    [tab]
+  )
+
+  const copyShareLink = React.useCallback(async (payload: { tab?: Tab; projectId?: string; taskId?: string; noteId?: string }) => {
+    try {
+      const text = buildShareUrl(payload)
+      const canUseClipboardApi = typeof navigator !== 'undefined' && !!navigator.clipboard?.writeText
+      if (canUseClipboardApi) {
+        await navigator.clipboard.writeText(text)
+      } else if (typeof document !== 'undefined') {
+        const ta = document.createElement('textarea')
+        ta.value = text
+        ta.setAttribute('readonly', 'true')
+        ta.style.position = 'fixed'
+        ta.style.opacity = '0'
+        ta.style.pointerEvents = 'none'
+        document.body.appendChild(ta)
+        ta.focus()
+        ta.select()
+        const ok = document.execCommand('copy')
+        document.body.removeChild(ta)
+        if (!ok) throw new Error('Clipboard copy is not supported in this browser context')
+      } else {
+        throw new Error('Clipboard copy is not available')
+      }
+      setUiInfo('Link copied to clipboard')
+      setTimeout(() => setUiInfo(null), 1800)
+    } catch (err) {
+      setUiError(toErrorMessage(err, 'Copy link failed'))
+    }
+  }, [buildShareUrl])
+
+  const syncProjectMembers = React.useCallback(async (projectId: string, desiredMemberIds: string[]) => {
+    const currentMemberIds = Array.from(
+      new Set(
+        (bootstrap.data?.project_members ?? [])
+          .filter((pm) => pm.project_id === projectId)
+          .map((pm) => pm.user_id)
+      )
+    )
+    const currentSet = new Set(currentMemberIds)
+    const desiredSet = new Set(desiredMemberIds)
+    const toAdd = desiredMemberIds.filter((uid) => !currentSet.has(uid))
+    const toRemove = currentMemberIds.filter((uid) => !desiredSet.has(uid))
+    if (toAdd.length > 0 || toRemove.length > 0) {
+      await Promise.all([
+        ...toAdd.map((uid) => addProjectMember(userId, projectId, { user_id: uid })),
+        ...toRemove.map((uid) => removeProjectMember(userId, projectId, uid)),
+      ])
+    }
+  }, [bootstrap.data?.project_members, userId])
+
+  const saveProjectNow = React.useCallback(async () => {
+    if (!selectedProjectId) throw new Error('No project selected')
+    const name = editProjectName.trim()
+    if (!name) throw new Error('Project name is required')
+    const memberIds = Array.from(new Set(editProjectMemberIds.filter(Boolean))).sort()
+    await patchProject(userId, selectedProjectId, {
+      name,
+      description: editProjectDescription,
+      external_refs: parseExternalRefsText(editProjectExternalRefsText),
+      attachment_refs: parseAttachmentRefsText(editProjectAttachmentRefsText),
+    })
+    await syncProjectMembers(selectedProjectId, memberIds)
+    await qc.invalidateQueries({ queryKey: ['bootstrap'] })
+  }, [
+    editProjectAttachmentRefsText,
+    editProjectDescription,
+    editProjectExternalRefsText,
+    editProjectMemberIds,
+    editProjectName,
+    qc,
+    selectedProjectId,
+    syncProjectMembers,
+    userId,
+  ])
+
+  const saveNoteNow = React.useCallback(async () => {
+    if (!selectedNoteId) throw new Error('No note selected')
+    const payload = {
+      title: editNoteTitle.trim() || 'Untitled',
+      body: editNoteBody,
+      tags: parseCommaTags(editNoteTags),
+      external_refs: parseExternalRefsText(editNoteExternalRefsText),
+      attachment_refs: parseAttachmentRefsText(editNoteAttachmentRefsText),
+    }
+    await patchNote(userId, selectedNoteId, payload)
+    await qc.invalidateQueries({ queryKey: ['notes'] })
+    await qc.invalidateQueries({ queryKey: ['project-tags'] })
+  }, [editNoteAttachmentRefsText, editNoteBody, editNoteExternalRefsText, editNoteTags, editNoteTitle, qc, selectedNoteId, userId])
+
+  const buildTaskPatchPayload = React.useCallback(() => {
+    if (!selectedTaskId) throw new Error('No task selected')
+    const recurringRule =
+      editTaskType === 'scheduled_instruction' && editRecurringEvery.trim()
+        ? `every:${Math.max(1, Number(editRecurringEvery) || 1)}${editRecurringUnit}`
+        : null
+    const payload = {
+      description: editDescription,
+      status: editStatus,
+      priority: editPriority,
+      project_id: editProjectId || selectedTask?.project_id,
+      labels: editTaskTags,
+      external_refs: parseExternalRefsText(editTaskExternalRefsText),
+      attachment_refs: parseAttachmentRefsText(editTaskAttachmentRefsText),
+      due_date: editDueDate ? new Date(editDueDate).toISOString() : null,
+      task_type: editTaskType,
+      scheduled_at_utc: editTaskType === 'scheduled_instruction' && editScheduledAtUtc ? new Date(editScheduledAtUtc).toISOString() : null,
+      schedule_timezone: editTaskType === 'scheduled_instruction' ? (editScheduleTimezone || null) : null,
+      scheduled_instruction: editTaskType === 'scheduled_instruction' ? (editScheduledInstruction.trim() || null) : null,
+      recurring_rule: recurringRule,
+    }
+    return { payload }
+  }, [
+    editTaskAttachmentRefsText,
+    editDescription,
+    editDueDate,
+    editPriority,
+    editProjectId,
+    editRecurringEvery,
+    editRecurringUnit,
+    editScheduledAtUtc,
+    editScheduledInstruction,
+    editScheduleTimezone,
+    editStatus,
+    editTaskTags,
+    editTaskType,
+    editTaskExternalRefsText,
+    selectedTask?.project_id,
+    selectedTaskId,
+  ])
+
+  const saveTaskNow = React.useCallback(async () => {
+    if (!selectedTaskId) throw new Error('No task selected')
+    if (editTaskType === 'scheduled_instruction' && !editScheduledInstruction.trim()) {
+      throw new Error('Add scheduled instruction to save.')
+    }
+    const { payload } = buildTaskPatchPayload()
+    await patchTask(userId, selectedTaskId, payload)
+    await qc.invalidateQueries({ queryKey: ['tasks'] })
+    await qc.invalidateQueries({ queryKey: ['board'] })
+  }, [buildTaskPatchPayload, editScheduledInstruction, editTaskType, qc, selectedTaskId, userId])
+
+  const saveProjectMutation = useMutation({
+    mutationFn: () => saveProjectNow(),
+    onSuccess: () => {
+      setUiError(null)
+    },
+    onError: (err) => setUiError(toErrorMessage(err, 'Project save failed')),
+  })
+
+  const saveNoteMutation = useMutation({
+    mutationFn: () => saveNoteNow(),
+    onSuccess: () => {
+      setUiError(null)
+    },
+    onError: (err) => setUiError(toErrorMessage(err, 'Note save failed')),
+  })
+
+  const saveTaskMutation = useMutation({
+    mutationFn: () => saveTaskNow(),
+    onSuccess: () => {
+      setUiError(null)
+      setTaskEditorError(null)
+    },
+    onError: (err) => {
+      const message = toErrorMessage(err, 'Task save failed')
+      setUiError(message)
+      setTaskEditorError(message)
+    },
+  })
+
   const createTaskMutation = useMutation({
     mutationFn: () =>
       createTask(userId, {
@@ -864,13 +1521,17 @@ function App() {
         workspace_id: workspaceId,
         project_id: quickProjectId || selectedProjectId,
         due_date: quickDueDate ? new Date(quickDueDate).toISOString() : null,
-        labels: quickTaskTags
+        labels: quickTaskTags,
+        external_refs: parseExternalRefsText(quickTaskExternalRefsText),
+        attachment_refs: parseAttachmentRefsText(quickTaskAttachmentRefsText),
       }),
     onSuccess: async () => {
       setUiError(null)
       setTaskTitle('')
       setQuickDueDate('')
       setQuickTaskTags([])
+      setQuickTaskExternalRefsText('')
+      setQuickTaskAttachmentRefsText('')
       setShowQuickTaskTagPicker(false)
       setQuickTaskTagQuery('')
       setShowQuickAdd(false)
@@ -914,47 +1575,14 @@ function App() {
     onError: (err) => setUiError(err instanceof Error ? err.message : 'Restore failed')
   })
 
-  const patchTaskMutation = useMutation({
-    mutationFn: () => {
-      if (editTaskType === 'scheduled_instruction' && !editScheduledInstruction.trim()) {
-        throw new Error('Scheduled task requires an instruction.')
-      }
-      return patchTask(userId, selectedTaskId as string, {
-        description: editDescription,
-        status: editStatus,
-        priority: editPriority,
-        project_id: editProjectId || selectedTask?.project_id,
-        labels: editTaskTags,
-        due_date: editDueDate ? new Date(editDueDate).toISOString() : null,
-        task_type: editTaskType,
-        scheduled_at_utc: editTaskType === 'scheduled_instruction' && editScheduledAtUtc ? new Date(editScheduledAtUtc).toISOString() : null,
-        schedule_timezone: editTaskType === 'scheduled_instruction' ? (editScheduleTimezone || null) : null,
-        scheduled_instruction: editTaskType === 'scheduled_instruction' ? (editScheduledInstruction.trim() || null) : null,
-        recurring_rule:
-          editTaskType === 'scheduled_instruction' && editRecurringEvery.trim()
-            ? `every:${Math.max(1, Number(editRecurringEvery) || 1)}${editRecurringUnit}`
-            : null
-      })
-    },
-    onSuccess: async () => {
-      setUiError(null)
-      setTaskEditorError(null)
-      await invalidateAll()
-      setSelectedTaskId(null)
-    },
-    onError: (err) => {
-      const message = toErrorMessage(err, 'Save failed')
-      setUiError(message)
-      setTaskEditorError(message)
-    }
-  })
-
   const createProjectMutation = useMutation({
     mutationFn: () =>
       createProject(userId, {
         workspace_id: workspaceId,
         name: projectName.trim(),
         description: projectDescription,
+        external_refs: parseExternalRefsText(projectExternalRefsText),
+        attachment_refs: parseAttachmentRefsText(projectAttachmentRefsText),
         member_user_ids: Array.from(new Set(createProjectMemberIds)),
       }),
     onSuccess: async (createdProject) => {
@@ -976,6 +1604,8 @@ function App() {
       }
       setProjectName('')
       setProjectDescription('')
+      setProjectExternalRefsText('')
+      setProjectAttachmentRefsText('')
       setProjectDescriptionView('write')
       setCreateProjectMemberIds([])
       setDraftProjectRules([])
@@ -987,40 +1617,6 @@ function App() {
       await invalidateAll()
     },
     onError: (err) => setUiError(err instanceof Error ? err.message : 'Project create failed')
-  })
-
-  const patchProjectMutation = useMutation({
-    mutationFn: async () => {
-      if (!selectedProjectId) throw new Error('No project selected')
-      await patchProject(userId, selectedProjectId, {
-        name: editProjectName.trim(),
-        description: editProjectDescription,
-      })
-      const currentMemberIds = Array.from(
-        new Set(
-          (bootstrap.data?.project_members ?? [])
-            .filter((pm) => pm.project_id === selectedProjectId)
-            .map((pm) => pm.user_id)
-        )
-      )
-      const desiredMemberIds = Array.from(new Set(editProjectMemberIds.filter(Boolean)))
-      const currentSet = new Set(currentMemberIds)
-      const desiredSet = new Set(desiredMemberIds)
-      const toAdd = desiredMemberIds.filter((uid) => !currentSet.has(uid))
-      const toRemove = currentMemberIds.filter((uid) => !desiredSet.has(uid))
-      if (toAdd.length > 0 || toRemove.length > 0) {
-        await Promise.all([
-          ...toAdd.map((uid) => addProjectMember(userId, selectedProjectId, { user_id: uid })),
-          ...toRemove.map((uid) => removeProjectMember(userId, selectedProjectId, uid)),
-        ])
-      }
-      return { ok: true }
-    },
-    onSuccess: async () => {
-      setUiError(null)
-      await invalidateAll()
-    },
-    onError: (err) => setUiError(err instanceof Error ? err.message : 'Project update failed')
   })
 
   const deleteProjectMutation = useMutation({
@@ -1080,7 +1676,9 @@ function App() {
         title: 'Untitled',
         workspace_id: workspaceId,
         project_id: selectedProjectId,
-        body: ''
+        body: '',
+        external_refs: [],
+        attachment_refs: [],
       }),
     onSuccess: async (note) => {
       setUiError(null)
@@ -1092,24 +1690,6 @@ function App() {
       await invalidateAll()
     },
     onError: (err) => setUiError(err instanceof Error ? err.message : 'Note create failed')
-  })
-
-  const patchNoteMutation = useMutation({
-    mutationFn: () =>
-      patchNote(userId, selectedNoteId as string, {
-        title: editNoteTitle.trim() || 'Untitled',
-        body: editNoteBody,
-        tags: editNoteTags
-          .split(',')
-          .map((t) => t.trim())
-          .filter(Boolean)
-      }),
-    onSuccess: async () => {
-      setUiError(null)
-      await qc.invalidateQueries({ queryKey: ['notes'] })
-      await qc.invalidateQueries({ queryKey: ['project-tags'] })
-    },
-    onError: (err) => setUiError(err instanceof Error ? err.message : 'Note save failed')
   })
 
   const pinNoteMutation = useMutation({
@@ -1267,6 +1847,8 @@ function App() {
     if (!selectedProject) {
       setEditProjectName('')
       setEditProjectDescription('')
+      setEditProjectExternalRefsText('')
+      setEditProjectAttachmentRefsText('')
       setEditProjectDescriptionView('write')
       setShowProjectEditForm(false)
       setSelectedProjectRuleId(null)
@@ -1277,12 +1859,21 @@ function App() {
     }
     setEditProjectName(selectedProject.name ?? '')
     setEditProjectDescription(selectedProject.description ?? '')
-    setEditProjectDescriptionView('write')
+    setEditProjectExternalRefsText(externalRefsToText(selectedProject.external_refs))
+    setEditProjectAttachmentRefsText(attachmentRefsToText(selectedProject.attachment_refs))
+    const hasDescription = Boolean((selectedProject.description ?? '').trim())
+    setEditProjectDescriptionView(hasDescription ? 'preview' : 'write')
     setSelectedProjectRuleId(null)
     setProjectRuleTitle('')
     setProjectRuleBody('')
     setProjectRuleView('write')
   }, [selectedProject?.id])
+
+  React.useEffect(() => {
+    if (!showProjectCreateForm) return
+    const hasDescription = Boolean(projectDescription.trim())
+    setProjectDescriptionView(hasDescription ? 'preview' : 'write')
+  }, [showProjectCreateForm])
 
   React.useEffect(() => {
     if (!selectedProjectRule) return
@@ -1316,6 +1907,12 @@ function App() {
   const unreadCount = (notifications.data ?? []).filter((n) => !n.is_read).length
   const actorNames = Object.fromEntries((bootstrap.data.users ?? []).map((u) => [u.id, u.username]))
   const projectNames = Object.fromEntries((bootstrap.data.projects ?? []).map((p) => [p.id, p.name]))
+  const selectedTaskTimeMeta = pickSingleTimeMeta(selectedTask?.created_at, selectedTask?.updated_at)
+  const selectedNoteTimeMeta = pickSingleTimeMeta(selectedNote?.created_at, selectedNote?.updated_at)
+  const selectedProjectTimeMeta = pickSingleTimeMeta(selectedProject?.created_at, selectedProject?.updated_at)
+  const selectedTaskCreator = selectedTask?.created_by ? actorNames[selectedTask.created_by] || selectedTask.created_by : 'Unknown'
+  const selectedNoteCreator = selectedNote?.created_by ? actorNames[selectedNote.created_by] || selectedNote.created_by : 'Unknown'
+  const selectedProjectCreator = selectedProject?.created_by ? actorNames[selectedProject.created_by] || selectedProject.created_by : 'Unknown'
 
   return (
     <div className="page">
@@ -1425,6 +2022,14 @@ function App() {
           </button>
         </div>
       )}
+      {uiInfo && (
+        <div className="notice notice-global" role="status">
+          <span>{uiInfo}</span>
+          <button className="action-icon" onClick={() => setUiInfo(null)} title="Dismiss" aria-label="Dismiss">
+            <Icon path="M6 6l12 12M18 6 6 18" />
+          </button>
+        </div>
+      )}
 
 	      {showQuickAdd && (
 	        <div className="drawer open" onClick={() => setShowQuickAdd(false)}>
@@ -1488,6 +2093,50 @@ function App() {
 		                <Icon path="M12 5v14M5 12h14" />
 		              </button>
 		            </div>
+                <div className="meta" style={{ marginTop: 8 }}>External links</div>
+                <ExternalRefEditor
+                  refs={parseExternalRefsText(quickTaskExternalRefsText)}
+                  onRemoveIndex={(idx) => setQuickTaskExternalRefsText((prev) => removeExternalRefByIndex(prev, idx))}
+                  onAdd={(ref) =>
+                    setQuickTaskExternalRefsText((prev) => externalRefsToText([...parseExternalRefsText(prev), ref]))
+                  }
+                />
+                <div className="meta" style={{ marginTop: 8 }}>File attachments</div>
+                <div className="row" style={{ marginTop: 6 }}>
+                  <button
+                    className="status-chip"
+                    type="button"
+                    onClick={() => quickTaskFileInputRef.current?.click()}
+                  >
+                    Upload file
+                  </button>
+                  <input
+                    ref={quickTaskFileInputRef}
+                    type="file"
+                    style={{ display: 'none' }}
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0]
+                      e.currentTarget.value = ''
+                      if (!file) return
+                      try {
+                        const ref = await uploadAttachmentRef(file, { project_id: quickProjectId || selectedProjectId })
+                        setQuickTaskAttachmentRefsText((prev) => attachmentRefsToText([...parseAttachmentRefsText(prev), ref]))
+                      } catch (err) {
+                        setUiError(toErrorMessage(err, 'Upload failed'))
+                      }
+                    }}
+                  />
+                </div>
+                <AttachmentRefList
+                  refs={parseAttachmentRefsText(quickTaskAttachmentRefsText)}
+                  workspaceId={workspaceId}
+                  userId={userId}
+                  onRemovePath={(path) => {
+                    removeUploadedAttachment(path)
+                      .then(() => setQuickTaskAttachmentRefsText((prev) => removeAttachmentByPath(prev, path)))
+                      .catch((err) => setUiError(toErrorMessage(err, 'Remove file failed')))
+                  }}
+                />
 		            <div className="tag-bar" aria-label="Task tags" style={{ marginTop: 10 }}>
 		              <div className="tag-chiplist">
 		                {quickTaskTags.length === 0 ? (
@@ -1624,7 +2273,7 @@ function App() {
                   </div>
                   <div className="kanban-list">
                     {(board.data.lanes[status] ?? []).map((task) => (
-                      <div key={task.id} className="kanban-card" onClick={() => setSelectedTaskId(task.id)} role="button">
+                      <div key={task.id} className="kanban-card" onClick={() => openTaskEditor(task.id)} role="button">
                         <div className="kanban-title">
                           <strong>{task.title}</strong>
                           <span className={`prio prio-${priorityTone(task.priority)}`} title={`Priority: ${task.priority}`}>
@@ -1657,7 +2306,7 @@ function App() {
             <div className="task-list" style={{ marginTop: 12 }}>
               {(tasks.data?.items ?? []).map((task: Task) => (
                 <div key={task.id} className={`task-item ${task.task_type === 'scheduled_instruction' ? 'scheduled' : ''}`}>
-                  <div className="task-main" role="button" onClick={() => setSelectedTaskId(task.id)}>
+                  <div className="task-main" role="button" onClick={() => openTaskEditor(task.id)}>
                     <div className="task-title">
                       <strong>{task.title}</strong>
                     </div>
@@ -1713,34 +2362,23 @@ function App() {
 
       {tab === 'projects' && (
         <section className="card">
-          <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-            <h2 style={{ margin: 0 }}>Projects ({bootstrap.data.projects.length})</h2>
-            <div className="row" style={{ gap: 8 }}>
-              <button
-                className="primary"
-                onClick={() => {
-                  setShowProjectCreateForm((v) => !v)
-                  if (showProjectEditForm) setShowProjectEditForm(false)
-                }}
-                title={showProjectCreateForm ? 'Close create' : 'New project'}
-                aria-label={showProjectCreateForm ? 'Close create' : 'New project'}
-              >
-                <Icon path={showProjectCreateForm ? 'M6 6l12 12M18 6L6 18' : 'M12 5v14M5 12h14'} />
-              </button>
-              <button
-                className="primary"
-                disabled={!selectedProject}
-                onClick={() => {
-                  setShowProjectEditForm((v) => !v)
-                  if (showProjectCreateForm) setShowProjectCreateForm(false)
-                }}
-                title={showProjectEditForm ? 'Close edit' : 'Edit selected project'}
-                aria-label={showProjectEditForm ? 'Close edit' : 'Edit selected project'}
-              >
-                <Icon path={showProjectEditForm ? 'M6 6l12 12M18 6L6 18' : 'M3 17.25V21h3.75L17.8 9.94l-3.75-3.75L3 17.25zM20.7 7.04a1 1 0 0 0 0-1.41L18.37 3.3a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.82-1.84z'} />
-              </button>
-            </div>
-          </div>
+	          <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+	            <h2 style={{ margin: 0 }}>Projects ({bootstrap.data.projects.length})</h2>
+	            <div className="row" style={{ gap: 8 }}>
+	                <button
+	                  className="primary"
+	                  onClick={() => {
+	                    if (showProjectEditForm && projectIsDirty && !confirmDiscardChanges()) return
+	                    setShowProjectEditForm(false)
+	                    setShowProjectCreateForm((v) => !v)
+	                  }}
+	                  title={showProjectCreateForm ? 'Close create' : 'New project'}
+	                  aria-label={showProjectCreateForm ? 'Close create' : 'New project'}
+	              >
+	                <Icon path={showProjectCreateForm ? 'M6 6l12 12M18 6L6 18' : 'M12 5v14M5 12h14'} />
+	              </button>
+	            </div>
+	          </div>
           {showProjectCreateForm && (
             <div style={{ marginBottom: 10 }}>
               <h3 style={{ margin: '0 0 8px 0' }}>Create project</h3>
@@ -1761,14 +2399,14 @@ function App() {
                   <Icon path="M12 5v14M5 12h14" />
                 </button>
               </div>
-              <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+              <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 8 }}>
                 <div className="seg" role="tablist" aria-label="Project description editor view">
                   <button
                     className={`seg-btn ${projectDescriptionView === 'write' ? 'active' : ''}`}
                     onClick={() => setProjectDescriptionView('write')}
                     type="button"
                   >
-                    Write
+                    Edit
                   </button>
                   <button
                     className={`seg-btn ${projectDescriptionView === 'preview' ? 'active' : ''}`}
@@ -1790,6 +2428,143 @@ function App() {
               ) : (
                 <MarkdownView value={projectDescription} />
               )}
+              <div className="rules-studio" style={{ marginTop: 10, marginBottom: 14 }}>
+                <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+                  <h3 style={{ margin: 0 }}>Project Rules (Draft: {draftProjectRules.length})</h3>
+                  <div className="meta">These rules are created with the new project.</div>
+                </div>
+                <div className="rules-layout">
+                  <div className="rules-list">
+                    {draftProjectRules.length === 0 ? (
+                      <div className="notice">No draft rules yet.</div>
+                    ) : (
+                      draftProjectRules.map((rule) => {
+                        const isSelected = selectedDraftProjectRuleId === rule.id
+                        return (
+                          <div
+                            key={rule.id}
+                            className={`task-item rule-item ${isSelected ? 'selected' : ''}`}
+                            onClick={() => setSelectedDraftProjectRuleId(rule.id)}
+                            role="button"
+                          >
+                            <div className="task-main">
+                              <div className="task-title">
+                                <strong>{rule.title || 'Untitled rule'}</strong>
+                                {isSelected && <span className="badge">Editing</span>}
+                              </div>
+                              <div className="meta">{(rule.body || '').replace(/\s+/g, ' ').slice(0, 120) || '(empty)'}</div>
+                            </div>
+                          </div>
+                        )
+                      })
+                    )}
+                  </div>
+                  <div className="rules-editor">
+                    <div className="row" style={{ marginBottom: 8, justifyContent: 'space-between', gap: 8 }}>
+                      <input
+                        value={draftProjectRuleTitle}
+                        onChange={(e) => setDraftProjectRuleTitle(e.target.value)}
+                        placeholder="Rule title"
+                      />
+                      <button
+                        className="status-chip"
+                        onClick={() => {
+                          setSelectedDraftProjectRuleId(null)
+                          setDraftProjectRuleTitle('')
+                          setDraftProjectRuleBody('')
+                          setDraftProjectRuleView('write')
+                        }}
+                        title="New rule"
+                        aria-label="New rule"
+                      >
+                        New rule
+                      </button>
+                    </div>
+                    <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+                      <div className="seg" role="tablist" aria-label="Draft project rule editor view">
+                        <button
+                          className={`seg-btn ${draftProjectRuleView === 'write' ? 'active' : ''}`}
+                          onClick={() => setDraftProjectRuleView('write')}
+                          type="button"
+                        >
+                          Write
+                        </button>
+                        <button
+                          className={`seg-btn ${draftProjectRuleView === 'preview' ? 'active' : ''}`}
+                          onClick={() => setDraftProjectRuleView('preview')}
+                          type="button"
+                        >
+                          Preview
+                        </button>
+                      </div>
+                      <div className="row" style={{ gap: 8 }}>
+                        <button
+                          className="primary"
+                          disabled={!draftProjectRuleTitle.trim()}
+                          onClick={() => {
+                            const title = draftProjectRuleTitle.trim()
+                            if (!title) return
+                            if (selectedDraftProjectRuleId) {
+                              setDraftProjectRules((prev) =>
+                                prev.map((item) =>
+                                  item.id === selectedDraftProjectRuleId
+                                    ? { ...item, title, body: draftProjectRuleBody }
+                                    : item
+                                )
+                              )
+                            } else {
+                              const newId = globalThis.crypto?.randomUUID?.() ?? `draft-rule-${Date.now()}`
+                              setDraftProjectRules((prev) => [...prev, { id: newId, title, body: draftProjectRuleBody }])
+                              setSelectedDraftProjectRuleId(newId)
+                            }
+                          }}
+                          title={selectedDraftProjectRuleId ? 'Update draft rule' : 'Add draft rule'}
+                          aria-label={selectedDraftProjectRuleId ? 'Update draft rule' : 'Add draft rule'}
+                        >
+                          <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+                        </button>
+                        {selectedDraftProjectRuleId && (
+                          <button
+                            className="action-icon danger-ghost"
+                            onClick={() => {
+                              if (!selectedDraftProjectRuleId) return
+                              setDraftProjectRules((prev) => prev.filter((item) => item.id !== selectedDraftProjectRuleId))
+                              setSelectedDraftProjectRuleId(null)
+                              setDraftProjectRuleTitle('')
+                              setDraftProjectRuleBody('')
+                            }}
+                            title="Remove draft rule"
+                            aria-label="Remove draft rule"
+                          >
+                            <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    {draftProjectRuleView === 'write' ? (
+                      <textarea
+                        value={draftProjectRuleBody}
+                        onChange={(e) => setDraftProjectRuleBody(e.target.value)}
+                        placeholder="Rule details (Markdown)"
+                        style={{ width: '100%', minHeight: 140 }}
+                      />
+                    ) : (
+                      <MarkdownView value={draftProjectRuleBody} />
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="meta" style={{ marginTop: 10 }}>External links</div>
+              <ExternalRefEditor
+                refs={parseExternalRefsText(projectExternalRefsText)}
+                onRemoveIndex={(idx) => setProjectExternalRefsText((prev) => removeExternalRefByIndex(prev, idx))}
+                onAdd={(ref) =>
+                  setProjectExternalRefsText((prev) => externalRefsToText([...parseExternalRefsText(prev), ref]))
+                }
+              />
+              <div className="meta" style={{ marginTop: 8 }}>
+                File attachments are available after project is created.
+              </div>
               <div style={{ marginTop: 10 }}>
                 <div className="meta" style={{ marginBottom: 6 }}>Assign users to project</div>
                 <div className="row wrap" style={{ gap: 6 }}>
@@ -1812,356 +2587,289 @@ function App() {
               </div>
             </div>
           )}
-          {showProjectEditForm && selectedProject && (
-            <div style={{ marginBottom: 14 }}>
-              <h3 style={{ margin: '0 0 8px 0' }}>Edit selected project</h3>
-              <div className="row" style={{ marginBottom: 10 }}>
-                <input value={editProjectName} onChange={(e) => setEditProjectName(e.target.value)} placeholder="Project name" />
-                <button
-                  className="primary"
-                  disabled={!selectedProjectId || !editProjectName.trim() || patchProjectMutation.isPending}
-                  onClick={() => patchProjectMutation.mutate()}
-                  title="Save project"
-                  aria-label="Save project"
-                >
-                  <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
-                </button>
-              </div>
-              <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-                <div className="seg" role="tablist" aria-label="Edit project description editor view">
-                  <button
-                    className={`seg-btn ${editProjectDescriptionView === 'write' ? 'active' : ''}`}
-                    onClick={() => setEditProjectDescriptionView('write')}
-                    type="button"
-                  >
-                    Write
-                  </button>
-                  <button
-                    className={`seg-btn ${editProjectDescriptionView === 'preview' ? 'active' : ''}`}
-                    onClick={() => setEditProjectDescriptionView('preview')}
-                    type="button"
-                  >
-                    Preview
-                  </button>
-                </div>
-              </div>
-              {editProjectDescriptionView === 'write' ? (
-                <textarea
-                  ref={editProjectDescriptionRef}
-                  value={editProjectDescription}
-                  onChange={(e) => setEditProjectDescription(e.target.value)}
-                  placeholder="Project description (Markdown)"
-                  style={{ width: '100%', minHeight: 96, maxHeight: 280, resize: 'none', overflowY: 'hidden' }}
-                />
-              ) : (
-                <MarkdownView value={editProjectDescription} />
-              )}
-              <div style={{ marginTop: 10 }}>
-                <div className="meta" style={{ marginBottom: 6 }}>Assigned users</div>
-                <div className="row wrap" style={{ gap: 6 }}>
-                  {workspaceUsers.map((u) => {
-                    const selected = editProjectMemberIds.includes(u.id)
-                    return (
-                      <button
-                        key={`edit-member-${u.id}`}
-                        type="button"
-                        className={`status-chip ${selected ? 'active' : ''}`}
-                        onClick={() => toggleEditProjectMember(u.id)}
-                        aria-pressed={selected}
-                        title={`${u.full_name} (${u.user_type})`}
-                      >
-                        {u.full_name} · {u.user_type}
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-            </div>
-          )}
-          {(showProjectCreateForm || (selectedProject && showProjectEditForm)) && (
-            <div className="rules-studio" style={{ marginBottom: 14 }}>
-              {showProjectCreateForm && !showProjectEditForm ? (
-                <>
-                  <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-                    <h3 style={{ margin: 0 }}>Project Rules (Draft: {draftProjectRules.length})</h3>
-                    <div className="meta">These rules are created with the new project.</div>
-                  </div>
-                  <div className="rules-layout">
-                    <div className="rules-list">
-                      {draftProjectRules.length === 0 ? (
-                        <div className="notice">No draft rules yet.</div>
-                      ) : (
-                        draftProjectRules.map((rule) => {
-                          const isSelected = selectedDraftProjectRuleId === rule.id
-                          return (
-                            <div
-                              key={rule.id}
-                              className={`task-item rule-item ${isSelected ? 'selected' : ''}`}
-                              onClick={() => setSelectedDraftProjectRuleId(rule.id)}
-                              role="button"
-                            >
-                              <div className="task-main">
-                                <div className="task-title">
-                                  <strong>{rule.title || 'Untitled rule'}</strong>
-                                  {isSelected && <span className="badge">Editing</span>}
-                                </div>
-                                <div className="meta">{(rule.body || '').replace(/\s+/g, ' ').slice(0, 120) || '(empty)'}</div>
-                              </div>
-                            </div>
-                          )
-                        })
-                      )}
-                    </div>
-                    <div className="rules-editor">
-                      <div className="row" style={{ marginBottom: 8, justifyContent: 'space-between', gap: 8 }}>
-                        <input
-                          value={draftProjectRuleTitle}
-                          onChange={(e) => setDraftProjectRuleTitle(e.target.value)}
-                          placeholder="Rule title"
-                        />
-                        <button
-                          className="status-chip"
-                          onClick={() => {
-                            setSelectedDraftProjectRuleId(null)
-                            setDraftProjectRuleTitle('')
-                            setDraftProjectRuleBody('')
-                            setDraftProjectRuleView('write')
-                          }}
-                          title="New rule"
-                          aria-label="New rule"
-                        >
-                          New rule
-                        </button>
-                      </div>
-                      <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-                        <div className="seg" role="tablist" aria-label="Draft project rule editor view">
-                          <button
-                            className={`seg-btn ${draftProjectRuleView === 'write' ? 'active' : ''}`}
-                            onClick={() => setDraftProjectRuleView('write')}
-                            type="button"
-                          >
-                            Write
-                          </button>
-                          <button
-                            className={`seg-btn ${draftProjectRuleView === 'preview' ? 'active' : ''}`}
-                            onClick={() => setDraftProjectRuleView('preview')}
-                            type="button"
-                          >
-                            Preview
-                          </button>
-                        </div>
-                        <div className="row" style={{ gap: 8 }}>
-                          <button
-                            className="primary"
-                            disabled={!draftProjectRuleTitle.trim()}
-                            onClick={() => {
-                              const title = draftProjectRuleTitle.trim()
-                              if (!title) return
-                              if (selectedDraftProjectRuleId) {
-                                setDraftProjectRules((prev) =>
-                                  prev.map((item) =>
-                                    item.id === selectedDraftProjectRuleId
-                                      ? { ...item, title, body: draftProjectRuleBody }
-                                      : item
-                                  )
-                                )
-                              } else {
-                                const newId = globalThis.crypto?.randomUUID?.() ?? `draft-rule-${Date.now()}`
-                                setDraftProjectRules((prev) => [...prev, { id: newId, title, body: draftProjectRuleBody }])
-                                setSelectedDraftProjectRuleId(newId)
-                              }
-                            }}
-                            title={selectedDraftProjectRuleId ? 'Update draft rule' : 'Add draft rule'}
-                            aria-label={selectedDraftProjectRuleId ? 'Update draft rule' : 'Add draft rule'}
-                          >
-                            <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
-                          </button>
-                          {selectedDraftProjectRuleId && (
-                            <button
-                              className="action-icon danger-ghost"
-                              onClick={() => {
-                                if (!selectedDraftProjectRuleId) return
-                                setDraftProjectRules((prev) => prev.filter((item) => item.id !== selectedDraftProjectRuleId))
-                                setSelectedDraftProjectRuleId(null)
-                                setDraftProjectRuleTitle('')
-                                setDraftProjectRuleBody('')
-                              }}
-                              title="Remove draft rule"
-                              aria-label="Remove draft rule"
-                            >
-                              <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                      {draftProjectRuleView === 'write' ? (
-                        <textarea
-                          value={draftProjectRuleBody}
-                          onChange={(e) => setDraftProjectRuleBody(e.target.value)}
-                          placeholder="Rule details (Markdown)"
-                          style={{ width: '100%', minHeight: 140 }}
-                        />
-                      ) : (
-                        <MarkdownView value={draftProjectRuleBody} />
-                      )}
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-                    <h3 style={{ margin: 0 }}>Project Rules ({projectRules.data?.total ?? 0})</h3>
-                    <div className="row" style={{ gap: 8 }}>
-                      <input
-                        value={projectRuleQ}
-                        onChange={(e) => setProjectRuleQ(e.target.value)}
-                        placeholder="Search rules"
-                        style={{ minWidth: 180 }}
-                      />
-                    </div>
-                  </div>
-                  <div className="rules-layout">
-                    <div className="rules-list">
-                      {(projectRules.data?.items ?? []).length === 0 ? (
-                        <div className="notice">No rules yet for this project.</div>
-                      ) : (
-                        (projectRules.data?.items ?? []).map((rule: ProjectRule) => {
-                          const isSelected = selectedProjectRuleId === rule.id
-                          return (
-                            <div
-                              key={rule.id}
-                              className={`task-item rule-item ${isSelected ? 'selected' : ''}`}
-                              onClick={() => setSelectedProjectRuleId(rule.id)}
-                              role="button"
-                            >
-                              <div className="task-main">
-                                <div className="task-title">
-                                  <strong>{rule.title || 'Untitled rule'}</strong>
-                                  {isSelected && <span className="badge">Editing</span>}
-                                </div>
-                                <div className="meta">{(rule.body || '').replace(/\s+/g, ' ').slice(0, 120) || '(empty)'}</div>
-                                <div className="meta">Updated: {toUserDateTime(rule.updated_at, userTimezone)}</div>
-                              </div>
-                            </div>
-                          )
-                        })
-                      )}
-                    </div>
-                    <div className="rules-editor">
-                      <div className="row" style={{ marginBottom: 8, justifyContent: 'space-between', gap: 8 }}>
-                        <input
-                          value={projectRuleTitle}
-                          onChange={(e) => setProjectRuleTitle(e.target.value)}
-                          placeholder="Rule title"
-                        />
-                        <button
-                          className="status-chip"
-                          onClick={() => {
-                            setSelectedProjectRuleId(null)
-                            setProjectRuleTitle('')
-                            setProjectRuleBody('')
-                            setProjectRuleView('write')
-                          }}
-                          title="New rule"
-                          aria-label="New rule"
-                        >
-                          New rule
-                        </button>
-                      </div>
-                      <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-                        <div className="seg" role="tablist" aria-label="Project rule editor view">
-                          <button
-                            className={`seg-btn ${projectRuleView === 'write' ? 'active' : ''}`}
-                            onClick={() => setProjectRuleView('write')}
-                            type="button"
-                          >
-                            Write
-                          </button>
-                          <button
-                            className={`seg-btn ${projectRuleView === 'preview' ? 'active' : ''}`}
-                            onClick={() => setProjectRuleView('preview')}
-                            type="button"
-                          >
-                            Preview
-                          </button>
-                        </div>
-                        <div className="row" style={{ gap: 8 }}>
-                          <button
-                            className="primary"
-                            disabled={!projectRuleTitle.trim() || createProjectRuleMutation.isPending || patchProjectRuleMutation.isPending}
-                            onClick={() => {
-                              if (selectedProjectRuleId) patchProjectRuleMutation.mutate()
-                              else createProjectRuleMutation.mutate()
-                            }}
-                            title={selectedProjectRuleId ? 'Update rule' : 'Create rule'}
-                            aria-label={selectedProjectRuleId ? 'Update rule' : 'Create rule'}
-                          >
-                            <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
-                          </button>
-                          {selectedProjectRuleId && (
-                            <button
-                              className="action-icon danger-ghost"
-                              disabled={deleteProjectRuleMutation.isPending}
-                              onClick={() => {
-                                if (!selectedProjectRuleId) return
-                                if (!window.confirm('Delete this rule?')) return
-                                deleteProjectRuleMutation.mutate(selectedProjectRuleId)
-                              }}
-                              title="Delete rule"
-                              aria-label="Delete rule"
-                            >
-                              <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                      {projectRuleView === 'write' ? (
-                        <textarea
-                          value={projectRuleBody}
-                          onChange={(e) => setProjectRuleBody(e.target.value)}
-                          placeholder="Rule details (Markdown)"
-                          style={{ width: '100%', minHeight: 140 }}
-                        />
-                      ) : (
-                        <MarkdownView value={projectRuleBody} />
-                      )}
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-          <div className="task-list">
-            {bootstrap.data.projects.map((project, idx) => {
-              const isSelected = selectedProjectId === project.id
-              const taskCount = projectTaskCountQueries[idx]?.data?.total
-              const noteCount = projectNoteCountQueries[idx]?.data?.total
-              const ruleCount = projectRuleCountQueries[idx]?.data?.total
-              return (
-                <div key={project.id} className="task-item">
-                  <div className="task-main" role="button" onClick={() => setSelectedProjectId(project.id)}>
-                    <div className="task-title">
-                      <strong>{project.name}</strong>
-                      {isSelected && <span className="badge">Selected</span>}
-                    </div>
+	          <div className="task-list">
+	            {bootstrap.data.projects.map((project, idx) => {
+	              const isSelected = selectedProjectId === project.id
+              const isOpen = isSelected && showProjectEditForm && selectedProject?.id === project.id
+	              const taskCount = projectTaskCountQueries[idx]?.data?.total
+	              const noteCount = projectNoteCountQueries[idx]?.data?.total
+	              const ruleCount = projectRuleCountQueries[idx]?.data?.total
+	              return (
+	                <div key={project.id} className={`task-item project-item ${isOpen ? 'open selected' : isSelected ? 'selected' : ''}`}>
+	                  <div className="task-main" role="button" onClick={() => toggleProjectEditor(project.id)}>
+	                    <div className="task-title">
+	                      <strong>{project.name}</strong>
+	                    </div>
                     <span className="meta">Status: {project.status || 'active'}</span>
                     <div className="meta">{project.description || '(no description)'}</div>
                     <div className="meta">
-                      Tasks: {taskCount ?? '...'} | Notes: {noteCount ?? '...'} | Rules: {ruleCount ?? '...'} | Members: {projectMemberCounts[project.id] ?? 0}
+                      {[
+                        typeof taskCount === 'number' && taskCount > 0 ? `Tasks: ${taskCount}` : '',
+                        typeof noteCount === 'number' && noteCount > 0 ? `Notes: ${noteCount}` : '',
+                        typeof ruleCount === 'number' && ruleCount > 0 ? `Rules: ${ruleCount}` : '',
+                        (projectMemberCounts[project.id] ?? 0) > 0 ? `Members: ${projectMemberCounts[project.id] ?? 0}` : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' | ')}
                     </div>
+	                    <ExternalRefList refs={project.external_refs} />
+	                    <AttachmentRefList refs={project.attachment_refs} workspaceId={workspaceId} userId={userId} />
+                      {isOpen && selectedProject && (
+                        <div style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
+                          <div className="row wrap resource-meta-row" style={{ marginBottom: 8 }}>
+                            <div className="meta">Created by: {selectedProjectCreator}</div>
+                            {selectedProjectTimeMeta && <div className="meta">{selectedProjectTimeMeta.label}: {toUserDateTime(selectedProjectTimeMeta.value, userTimezone)}</div>}
+                          </div>
+                          <div className="row" style={{ marginBottom: 10 }}>
+                            <input value={editProjectName} onChange={(e) => setEditProjectName(e.target.value)} placeholder="Project name" />
+                            {projectIsDirty && <span className="badge unsaved-badge">Unsaved</span>}
+                            <button
+                              className="primary"
+                              onClick={() => saveProjectMutation.mutate()}
+                              disabled={saveProjectMutation.isPending || !editProjectName.trim() || !projectIsDirty}
+                              title="Save project"
+                              aria-label="Save project"
+                            >
+                              Save
+                            </button>
+                          </div>
+                          <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 8 }}>
+                            <div className="seg" role="tablist" aria-label="Edit project description editor view">
+                              <button
+                                className={`seg-btn ${editProjectDescriptionView === 'write' ? 'active' : ''}`}
+                                onClick={() => setEditProjectDescriptionView('write')}
+                                type="button"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                className={`seg-btn ${editProjectDescriptionView === 'preview' ? 'active' : ''}`}
+                                onClick={() => setEditProjectDescriptionView('preview')}
+                                type="button"
+                              >
+                                Preview
+                              </button>
+                            </div>
+                          </div>
+                          {editProjectDescriptionView === 'write' ? (
+                            <textarea
+                              ref={editProjectDescriptionRef}
+                              value={editProjectDescription}
+                              onChange={(e) => setEditProjectDescription(e.target.value)}
+                              placeholder="Project description (Markdown)"
+                              style={{ width: '100%', minHeight: 96, maxHeight: 280, resize: 'none', overflowY: 'hidden' }}
+                            />
+                          ) : (
+                            <MarkdownView value={editProjectDescription} />
+                          )}
+                          <div className="rules-studio" style={{ marginTop: 10, marginBottom: 14 }}>
+                            <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+                              <h3 style={{ margin: 0 }}>Project Rules ({projectRules.data?.total ?? 0})</h3>
+                              <div className="row" style={{ gap: 8 }}>
+                                <input
+                                  value={projectRuleQ}
+                                  onChange={(e) => setProjectRuleQ(e.target.value)}
+                                  placeholder="Search rules"
+                                  style={{ minWidth: 180 }}
+                                />
+                              </div>
+                            </div>
+                            <div className="rules-layout">
+                              <div className="rules-list">
+                                {(projectRules.data?.items ?? []).length === 0 ? (
+                                  <div className="notice">No rules yet for this project.</div>
+                                ) : (
+                                  (projectRules.data?.items ?? []).map((rule: ProjectRule) => {
+                                    const isSelected = selectedProjectRuleId === rule.id
+                                    return (
+                                      <div
+                                        key={rule.id}
+                                        className={`task-item rule-item ${isSelected ? 'selected' : ''}`}
+                                        onClick={() => setSelectedProjectRuleId(rule.id)}
+                                        role="button"
+                                      >
+                                        <div className="task-main">
+                                          <div className="task-title">
+                                            <strong>{rule.title || 'Untitled rule'}</strong>
+                                            {isSelected && <span className="badge">Editing</span>}
+                                          </div>
+                                          <div className="meta">{(rule.body || '').replace(/\s+/g, ' ').slice(0, 120) || '(empty)'}</div>
+                                          <div className="meta">Updated: {toUserDateTime(rule.updated_at, userTimezone)}</div>
+                                        </div>
+                                      </div>
+                                    )
+                                  })
+                                )}
+                              </div>
+                              <div className="rules-editor">
+                                <div className="row" style={{ marginBottom: 8, justifyContent: 'space-between', gap: 8 }}>
+                                  <input
+                                    value={projectRuleTitle}
+                                    onChange={(e) => setProjectRuleTitle(e.target.value)}
+                                    placeholder="Rule title"
+                                  />
+                                  <button
+                                    className="status-chip"
+                                    onClick={() => {
+                                      setSelectedProjectRuleId(null)
+                                      setProjectRuleTitle('')
+                                      setProjectRuleBody('')
+                                      setProjectRuleView('write')
+                                    }}
+                                    title="New rule"
+                                    aria-label="New rule"
+                                  >
+                                    New rule
+                                  </button>
+                                </div>
+                                <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+                                  <div className="seg" role="tablist" aria-label="Project rule editor view">
+                                    <button
+                                      className={`seg-btn ${projectRuleView === 'write' ? 'active' : ''}`}
+                                      onClick={() => setProjectRuleView('write')}
+                                      type="button"
+                                    >
+                                      Write
+                                    </button>
+                                    <button
+                                      className={`seg-btn ${projectRuleView === 'preview' ? 'active' : ''}`}
+                                      onClick={() => setProjectRuleView('preview')}
+                                      type="button"
+                                    >
+                                      Preview
+                                    </button>
+                                  </div>
+                                  <div className="row" style={{ gap: 8 }}>
+                                    <button
+                                      className="primary"
+                                      disabled={!projectRuleTitle.trim() || createProjectRuleMutation.isPending || patchProjectRuleMutation.isPending}
+                                      onClick={() => {
+                                        if (selectedProjectRuleId) patchProjectRuleMutation.mutate()
+                                        else createProjectRuleMutation.mutate()
+                                      }}
+                                      title={selectedProjectRuleId ? 'Update rule' : 'Create rule'}
+                                      aria-label={selectedProjectRuleId ? 'Update rule' : 'Create rule'}
+                                    >
+                                      <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+                                    </button>
+                                    {selectedProjectRuleId && (
+                                      <button
+                                        className="action-icon danger-ghost"
+                                        disabled={deleteProjectRuleMutation.isPending}
+                                        onClick={() => {
+                                          if (!selectedProjectRuleId) return
+                                          if (!window.confirm('Delete this rule?')) return
+                                          deleteProjectRuleMutation.mutate(selectedProjectRuleId)
+                                        }}
+                                        title="Delete rule"
+                                        aria-label="Delete rule"
+                                      >
+                                        <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                                {projectRuleView === 'write' ? (
+                                  <textarea
+                                    value={projectRuleBody}
+                                    onChange={(e) => setProjectRuleBody(e.target.value)}
+                                    placeholder="Rule details (Markdown)"
+                                    style={{ width: '100%', minHeight: 140 }}
+                                  />
+                                ) : (
+                                  <MarkdownView value={projectRuleBody} />
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="meta" style={{ marginTop: 10 }}>External links</div>
+                          <ExternalRefEditor
+                            refs={parseExternalRefsText(editProjectExternalRefsText)}
+                            onRemoveIndex={(idx) => setEditProjectExternalRefsText((prev) => removeExternalRefByIndex(prev, idx))}
+                            onAdd={(ref) =>
+                              setEditProjectExternalRefsText((prev) => externalRefsToText([...parseExternalRefsText(prev), ref]))
+                            }
+                          />
+                          <div className="meta" style={{ marginTop: 8 }}>File attachments</div>
+                          <div className="row" style={{ marginTop: 6 }}>
+                            <button
+                              className="status-chip"
+                              type="button"
+                              onClick={() => editProjectFileInputRef.current?.click()}
+                            >
+                              Upload file
+                            </button>
+                            <input
+                              ref={editProjectFileInputRef}
+                              type="file"
+                              style={{ display: 'none' }}
+                              onChange={async (e) => {
+                                const file = e.target.files?.[0]
+                                e.currentTarget.value = ''
+                                if (!file || !selectedProject) return
+                                try {
+                                  const ref = await uploadAttachmentRef(file, { project_id: selectedProject.id })
+                                  setEditProjectAttachmentRefsText((prev) => attachmentRefsToText([...parseAttachmentRefsText(prev), ref]))
+                                } catch (err) {
+                                  setUiError(toErrorMessage(err, 'Upload failed'))
+                                }
+                              }}
+                            />
+                          </div>
+                          <AttachmentRefList
+                            refs={parseAttachmentRefsText(editProjectAttachmentRefsText)}
+                            workspaceId={workspaceId}
+                            userId={userId}
+                            onRemovePath={(path) => {
+                              setEditProjectAttachmentRefsText((prev) => removeAttachmentByPath(prev, path))
+                            }}
+                          />
+                          <div style={{ marginTop: 10 }}>
+                            <div className="meta" style={{ marginBottom: 6 }}>Assigned users</div>
+                            <div className="row wrap" style={{ gap: 6 }}>
+                              {workspaceUsers.map((u) => {
+                                const selected = editProjectMemberIds.includes(u.id)
+                                return (
+                                  <button
+                                    key={`edit-member-${u.id}`}
+                                    type="button"
+                                    className={`status-chip ${selected ? 'active' : ''}`}
+                                    onClick={() => toggleEditProjectMember(u.id)}
+                                    aria-pressed={selected}
+                                    title={`${u.full_name} (${u.user_type})`}
+                                  >
+                                    {u.full_name} · {u.user_type}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+	                  </div>
+                  <div className="project-item-actions">
+                    <button
+                      className="action-icon"
+                      type="button"
+                      onClick={() => copyShareLink({ tab: 'projects', projectId: project.id })}
+                      title="Copy project link"
+                      aria-label="Copy project link"
+                    >
+                      <Icon path="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4m2 7a5 5 0 0 0-7.07 0L3.1 13.83a5 5 0 1 0 7.07 7.07L13 18" />
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!window.confirm(`Delete ${project.name}? This permanently deletes project resources.`)) return
+                        deleteProjectMutation.mutate(project.id)
+                      }}
+                      disabled={deleteProjectMutation.isPending}
+                      title="Delete project"
+                      aria-label="Delete project"
+                      className="action-icon danger-ghost"
+                    >
+                      <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                    </button>
                   </div>
-                  <button
-                    onClick={() => {
-                      if (!window.confirm(`Delete ${project.name}? This permanently deletes project resources.`)) return
-                      deleteProjectMutation.mutate(project.id)
-                    }}
-                    disabled={deleteProjectMutation.isPending}
-                    title="Delete project"
-                    aria-label="Delete project"
-                    className="action-icon danger-ghost"
-                  >
-                    <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
-                  </button>
                 </div>
               )
             })}
@@ -2216,9 +2924,10 @@ function App() {
 		                    key={n.id}
 		                    className={`note-row ${isOpen ? 'open selected' : ''}`}
 		                    onClick={() => {
+                          const changed = toggleNoteEditor(n.id)
+                          if (!changed) return
 		                      setShowTagPicker(false)
 		                      setTagPickerQuery('')
-		                      setSelectedNoteId((prev) => (prev === n.id ? null : n.id))
 		                    }}
 		                    role="button"
 		                  >
@@ -2229,7 +2938,6 @@ function App() {
 		                        </span>
 		                      )}
 		                      {n.archived && <span className="badge">Archived</span>}
-                          {selectedProject && <span className="badge">Project: {selectedProject.name}</span>}
 		                      <strong>{displayTitle}</strong>
 		                    </div>
 		                    {(n.tags ?? []).length > 0 && (
@@ -2250,9 +2958,12 @@ function App() {
 		                      </div>
 		                    )}
 		                    <div className="note-snippet">{(n.body || '').replace(/\\s+/g, ' ').slice(0, 160) || '(empty)'}</div>
-			                    <div className="meta">
-                            Created: {toUserDateTime(n.created_at, userTimezone)} | Updated: {toUserDateTime(n.updated_at, userTimezone)}
-                          </div>
+                          {((n.external_refs?.length ?? 0) > 0 || (n.attachment_refs?.length ?? 0) > 0) && (
+                            <div className="row wrap" style={{ gap: 6 }} onClick={(e) => e.stopPropagation()}>
+                              <ExternalRefList refs={n.external_refs} />
+                              <AttachmentRefList refs={n.attachment_refs} workspaceId={workspaceId} userId={userId} />
+                            </div>
+                          )}
 
 		                    {isOpen && isSelected && selectedNote && (
 		                      <div className="note-accordion" onClick={(e) => e.stopPropagation()} role="region" aria-label="Note editor">
@@ -2261,23 +2972,26 @@ function App() {
 			                            className="note-title-input"
 			                            value={editNoteTitle}
 			                            onChange={(e) => setEditNoteTitle(e.target.value)}
-			                            onKeyDown={(e) => {
-			                              if (e.key === 'Enter' && !e.shiftKey) {
-			                                if (!selectedNoteId || patchNoteMutation.isPending) return
-			                                patchNoteMutation.mutate()
-			                              }
-			                            }}
 			                            placeholder="Title"
 			                          />
-		                          <div className="note-actions">
+			                          <div className="note-actions">
+                            {noteIsDirty && <span className="badge unsaved-badge">Unsaved</span>}
                             <button
                               className="action-icon primary"
-                              onClick={() => patchNoteMutation.mutate()}
-                              disabled={!selectedNoteId}
-                              title="Save"
-                              aria-label="Save"
+                              onClick={() => saveNoteMutation.mutate()}
+                              disabled={saveNoteMutation.isPending || !noteIsDirty}
+                              title="Save note"
+                              aria-label="Save note"
                             >
                               <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+                            </button>
+                            <button
+                              className="action-icon"
+                              onClick={() => copyShareLink({ tab: 'notes', projectId: selectedNote.project_id, noteId: selectedNote.id })}
+                              title="Copy note link"
+                              aria-label="Copy note link"
+                            >
+                              <Icon path="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4m2 7a5 5 0 0 0-7.07 0L3.1 13.83a5 5 0 1 0 7.07 7.07L13 18" />
                             </button>
 		                            {selectedNote.pinned ? (
 		                              <button className="action-icon" onClick={() => unpinNoteMutation.mutate(selectedNote.id)} title="Unpin" aria-label="Unpin">
@@ -2297,56 +3011,99 @@ function App() {
 		                                <Icon path="M20 8H4m2-3h12l2 3v13H4V8l2-3zm3 7h6" />
 		                              </button>
 		                            )}
-		                            <button className="action-icon danger-ghost" onClick={() => deleteNoteMutation.mutate(selectedNote.id)} title="Delete" aria-label="Delete">
+				                            <button className="action-icon danger-ghost" onClick={() => deleteNoteMutation.mutate(selectedNote.id)} title="Delete" aria-label="Delete">
 		                              <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
 		                            </button>
 				                        </div>
-                        <div className="meta" style={{ marginBottom: 8 }}>Created: {toUserDateTime(selectedNote.created_at, userTimezone)}</div>
+                        <div className="row wrap resource-meta-row" style={{ marginBottom: 8 }}>
+                          <div className="meta">Created by: {selectedNoteCreator}</div>
+                          {selectedNoteTimeMeta && <div className="meta">{selectedNoteTimeMeta.label}: {toUserDateTime(selectedNoteTimeMeta.value, userTimezone)}</div>}
+                        </div>
 		                        </div>
 
-		                        <div className="tag-bar" aria-label="Tags">
-		                          <div className="tag-chiplist">
-		                            {currentNoteTags.length === 0 ? (
-		                              <span className="meta">No tags</span>
-		                            ) : (
-		                              currentNoteTags.map((t) => (
-		                                <span
-		                                  key={t}
-		                                  className="tag-chip"
-		                                  style={{
-		                                    background: `linear-gradient(135deg, hsl(${tagHue(t)}, 70%, 92%), hsl(${tagHue(t)}, 70%, 86%))`,
-		                                    borderColor: `hsl(${tagHue(t)}, 70%, 74%)`,
-		                                    color: `hsl(${tagHue(t)}, 55%, 22%)`
-		                                  }}
-		                                >
-		                                  <span className="tag-text">{t}</span>
-		                                </span>
-		                              ))
-		                            )}
-		                          </div>
-		                          <button className="action-icon" onClick={() => setShowTagPicker(true)} title="Edit tags" aria-label="Edit tags">
-		                            <Icon path="M3 12h8m-8 6h12m-12-12h18" />
-		                          </button>
-		                        </div>
-
-		                        <div className="row" style={{ justifyContent: 'space-between' }}>
-		                          <div className="seg" role="tablist" aria-label="Note editor view">
-		                            <button className={`seg-btn ${noteEditorView === 'write' ? 'active' : ''}`} onClick={() => setNoteEditorView('write')} type="button">
-		                              Write
-		                            </button>
+			                        <div className="row" style={{ justifyContent: 'flex-end' }}>
+			                          <div className="seg" role="tablist" aria-label="Note editor view">
+			                            <button className={`seg-btn ${noteEditorView === 'write' ? 'active' : ''}`} onClick={() => setNoteEditorView('write')} type="button">
+			                              Edit
+			                            </button>
 		                            <button className={`seg-btn ${noteEditorView === 'preview' ? 'active' : ''}`} onClick={() => setNoteEditorView('preview')} type="button">
 		                              Preview
-		                            </button>
-		                          </div>
-		                        </div>
-
-		                        {noteEditorView === 'write' ? (
-		                          <textarea value={editNoteBody} onChange={(e) => setEditNoteBody(e.target.value)} placeholder="Write Markdown..." />
-		                        ) : (
-		                          <MarkdownView value={editNoteBody} />
-		                        )}
-		                      </div>
-		                    )}
+			                            </button>
+			                          </div>
+			                        </div>
+			                        {noteEditorView === 'write' ? (
+			                          <textarea value={editNoteBody} onChange={(e) => setEditNoteBody(e.target.value)} placeholder="Write Markdown..." />
+			                        ) : (
+			                          <MarkdownView value={editNoteBody} />
+			                        )}
+			                        <div className="tag-bar" aria-label="Tags">
+			                          <div className="tag-chiplist">
+			                            {currentNoteTags.length === 0 ? (
+			                              <span className="meta">No tags</span>
+			                            ) : (
+			                              currentNoteTags.map((t) => (
+			                                <span
+			                                  key={t}
+			                                  className="tag-chip"
+			                                  style={{
+			                                    background: `linear-gradient(135deg, hsl(${tagHue(t)}, 70%, 92%), hsl(${tagHue(t)}, 70%, 86%))`,
+			                                    borderColor: `hsl(${tagHue(t)}, 70%, 74%)`,
+			                                    color: `hsl(${tagHue(t)}, 55%, 22%)`
+			                                  }}
+			                                >
+			                                  <span className="tag-text">{t}</span>
+			                                </span>
+			                              ))
+			                            )}
+			                          </div>
+			                          <button className="action-icon" onClick={() => setShowTagPicker(true)} title="Edit tags" aria-label="Edit tags">
+			                            <Icon path="M3 12h8m-8 6h12m-12-12h18" />
+			                          </button>
+			                        </div>
+	                        <div className="meta" style={{ marginTop: 8 }}>External links</div>
+	                        <ExternalRefEditor
+	                          refs={parseExternalRefsText(editNoteExternalRefsText)}
+                          onRemoveIndex={(idx) => setEditNoteExternalRefsText((prev) => removeExternalRefByIndex(prev, idx))}
+                          onAdd={(ref) =>
+                            setEditNoteExternalRefsText((prev) => externalRefsToText([...parseExternalRefsText(prev), ref]))
+                          }
+                        />
+                        <div className="meta" style={{ marginTop: 8 }}>File attachments</div>
+                        <div className="row" style={{ marginTop: 6 }}>
+                          <button
+                            className="status-chip"
+                            type="button"
+                            onClick={() => noteFileInputRef.current?.click()}
+                          >
+                            Upload file
+                          </button>
+                          <input
+                            ref={noteFileInputRef}
+                            type="file"
+                            style={{ display: 'none' }}
+                            onChange={async (e) => {
+                              const file = e.target.files?.[0]
+                              e.currentTarget.value = ''
+                              if (!file || !selectedNote) return
+                              try {
+                                const ref = await uploadAttachmentRef(file, { project_id: selectedNote.project_id, note_id: selectedNote.id })
+                                setEditNoteAttachmentRefsText((prev) => attachmentRefsToText([...parseAttachmentRefsText(prev), ref]))
+                              } catch (err) {
+                                setUiError(toErrorMessage(err, 'Upload failed'))
+                              }
+                            }}
+                          />
+                        </div>
+                        <AttachmentRefList
+                          refs={parseAttachmentRefsText(editNoteAttachmentRefsText)}
+                          workspaceId={workspaceId}
+                          userId={userId}
+	                          onRemovePath={(path) => {
+	                            setEditNoteAttachmentRefsText((prev) => removeAttachmentByPath(prev, path))
+	                          }}
+	                        />
+			                      </div>
+			                    )}
 
 		                    {showTagPicker && isSelected && (
 		                      <div className="drawer open" onClick={() => setShowTagPicker(false)}>
@@ -2466,12 +3223,12 @@ function App() {
           <div className="task-list">
             {tasks.data?.items.map((task: Task) => (
               <div key={task.id} className={`task-item ${task.task_type === 'scheduled_instruction' ? 'scheduled' : ''}`}>
-                <div className="task-main" role="button" onClick={() => setSelectedTaskId(task.id)}>
+                <div className="task-main" role="button" onClick={() => openTaskEditor(task.id)}>
                   <div className="task-title">
                     <strong>{task.title}</strong>
                   </div>
 		                  <span className="meta">
-		                    {task.status} | {task.due_date ? new Date(task.due_date).toLocaleString() : 'No due date'} | Created: {toUserDateTime(task.created_at, userTimezone)}
+		                    {task.status} | {task.due_date ? new Date(task.due_date).toLocaleString() : 'No due date'}
 		                    {tab === 'search' && (
                       <>
                         {' '}| Project: {projectNames[task.project_id] || task.project_id}
@@ -2540,10 +3297,6 @@ function App() {
           <Icon path="M4 6h16M4 12h10M4 18h13" />
           <span className="tab-label">Tasks</span>
         </button>
-        <button className={tab === 'projects' ? 'primary' : ''} onClick={() => setTab('projects')} title="Projects" aria-label="Projects">
-          <Icon path="M3 7h7l2 2h9v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 7V5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2" />
-          <span className="tab-label">Projects</span>
-        </button>
         <button className={tab === 'notes' ? 'primary' : ''} onClick={() => setTab('notes')} title="Notes" aria-label="Notes">
           <Icon path="M6 2h9l3 3v17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm8 1v3h3" />
           <span className="tab-label">Notes</span>
@@ -2554,6 +3307,8 @@ function App() {
 		        className={`fab fab-task ${fabHidden ? 'fab-hide' : ''}`}
 		        onClick={() => {
               setQuickProjectId(selectedProjectId || bootstrap.data?.projects?.[0]?.id || '')
+              setQuickTaskExternalRefsText('')
+              setQuickTaskAttachmentRefsText('')
               setShowQuickAdd(true)
             }}
 		        title="New Task"
@@ -2576,16 +3331,63 @@ function App() {
 	      </button>
 
 	      {selectedTask && (
-	        <div className="drawer open" onClick={() => setSelectedTaskId(null)}>
-	          <div className="drawer-body" onClick={(e) => e.stopPropagation()}>
+	        <div className="drawer open" onClick={() => closeTaskEditor()}>
+	          <div className="drawer-body task-drawer-body" onClick={(e) => e.stopPropagation()}>
             <div className="drawer-header">
-              <h3 className="drawer-title">{selectedTask.title}</h3>
-              <button className="action-icon" onClick={() => setSelectedTaskId(null)} title="Close" aria-label="Close">
-                <Icon path="M6 6l12 12M18 6 6 18" />
-              </button>
+              <div className="task-header-main">
+                <h3 className="drawer-title">{selectedTask.title}</h3>
+              </div>
+              <div className="row task-header-actions">
+                {taskIsDirty && <span className="badge unsaved-badge">Unsaved</span>}
+                <button
+                  className="action-icon primary"
+                  onClick={() => saveTaskMutation.mutate()}
+                  disabled={saveTaskMutation.isPending || !taskIsDirty}
+                  title="Save task"
+                  aria-label="Save task"
+                >
+                  <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+                </button>
+                <button
+                  className="action-icon"
+                  onClick={() => copyShareLink({ tab: 'tasks', projectId: selectedTask.project_id, taskId: selectedTask.id })}
+                  title="Copy task link"
+                  aria-label="Copy task link"
+                >
+                  <Icon path="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4m2 7a5 5 0 0 0-7.07 0L3.1 13.83a5 5 0 1 0 7.07 7.07L13 18" />
+                </button>
+                <span className="action-separator" aria-hidden="true" />
+                {selectedTask.status === 'Done' ? (
+                  <button className="action-icon" onClick={() => reopenTaskMutation.mutate(selectedTask.id)} title="Reopen" aria-label="Reopen">
+                    <Icon path="M3 12a9 9 0 1 0 3-6.7M3 4v5h5" />
+                  </button>
+                ) : (
+                  <button className="action-icon" onClick={() => completeTaskMutation.mutate(selectedTask.id)} title="Complete" aria-label="Complete">
+                    <Icon path="m5 13 4 4L19 7" />
+                  </button>
+                )}
+                {selectedTask.archived ? (
+                  <button className="action-icon" onClick={() => restoreTaskMutation.mutate(selectedTask.id)} title="Restore" aria-label="Restore">
+                    <Icon path="M20 16v5H4v-5M12 3v12M7 8l5-5 5 5" />
+                  </button>
+                ) : (
+                  <button className="action-icon" onClick={() => archiveTaskMutation.mutate(selectedTask.id)} title="Archive" aria-label="Archive">
+                    <Icon path="M3 7h18M5 7l1 13h12l1-13M9 7V4h6v3" />
+                  </button>
+                )}
+                <span className="action-separator" aria-hidden="true" />
+                <button className="action-icon" onClick={() => closeTaskEditor()} title="Close" aria-label="Close">
+                  <Icon path="M6 6l12 12M18 6 6 18" />
+                </button>
+              </div>
             </div>
-            <div className="meta" style={{ marginTop: 4 }}>Created: {toUserDateTime(selectedTask.created_at, userTimezone)}</div>
-            <div className="meta">Task ID: <code>{selectedTask.id}</code></div>
+            <div style={{ marginBottom: 10 }}>
+              <div className="meta">Task ID: <code>{selectedTask.id}</code></div>
+              <div className="meta">
+                Created by: {selectedTaskCreator}
+                {selectedTaskTimeMeta ? ` | ${selectedTaskTimeMeta.label}: ${toUserDateTime(selectedTaskTimeMeta.value, userTimezone)}` : ''}
+              </div>
+            </div>
             <div className="row wrap" style={{ marginTop: 8, marginBottom: 10 }}>
               <button
                 className="pill"
@@ -2599,12 +3401,6 @@ function App() {
                 <Icon path="M3 7h7l2 2h9v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 7V5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2" />
                 <span>{projectNames[selectedTask.project_id] || selectedTask.project_id}</span>
               </button>
-              {selectedTask.due_date && (
-                <span className="pill subtle" title="Due date" aria-label="Due date">
-                  <Icon path="M8 3v4M16 3v4M4 10h16M4 5h16v15H4z" />
-                  <span>{new Date(selectedTask.due_date).toLocaleString()}</span>
-                </span>
-              )}
             </div>
 	            <div className="row wrap" style={{ marginBottom: 8 }}>
 	              <select value={editStatus} onChange={(e) => setEditStatus(e.target.value)}>
@@ -2617,32 +3413,17 @@ function App() {
                 <option value="Med">Med</option>
                 <option value="High">High</option>
               </select>
-	              <select value={editProjectId} onChange={(e) => setEditProjectId(e.target.value)}>
+              <select value={editProjectId} onChange={(e) => setEditProjectId(e.target.value)}>
 	                {bootstrap.data.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
 	              </select>
-              <input className="due-input" type="datetime-local" value={editDueDate} onChange={(e) => setEditDueDate(e.target.value)} />
-              <button className="primary action-icon" onClick={() => patchTaskMutation.mutate()} title="Save" aria-label="Save">
-                <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
-              </button>
-              {selectedTask.status === 'Done' ? (
-                <button className="action-icon" onClick={() => reopenTaskMutation.mutate(selectedTask.id)} title="Reopen" aria-label="Reopen">
-                  <Icon path="M3 12a9 9 0 1 0 3-6.7M3 4v5h5" />
-                </button>
-              ) : (
-                <button className="action-icon" onClick={() => completeTaskMutation.mutate(selectedTask.id)} title="Complete" aria-label="Complete">
-                  <Icon path="m5 13 4 4L19 7" />
-                </button>
-              )}
-	              {selectedTask.archived ? (
-                <button className="action-icon" onClick={() => restoreTaskMutation.mutate(selectedTask.id)} title="Restore" aria-label="Restore">
-                  <Icon path="M20 16v5H4v-5M12 3v12M7 8l5-5 5 5" />
-                </button>
-	              ) : (
-                <button className="action-icon" onClick={() => archiveTaskMutation.mutate(selectedTask.id)} title="Archive" aria-label="Archive">
-                  <Icon path="M3 7h18M5 7l1 13h12l1-13M9 7V4h6v3" />
-                </button>
-	              )}
+	              <input className="due-input" type="datetime-local" value={editDueDate} onChange={(e) => setEditDueDate(e.target.value)} />
 	            </div>
+	            <textarea
+	              value={editDescription}
+	              onChange={(e) => setEditDescription(e.target.value)}
+	              rows={4}
+	              style={{ width: '100%', marginBottom: 10 }}
+	            />
 	            <div className="tag-bar" aria-label="Task tags" style={{ marginBottom: 10 }}>
 	              <div className="tag-chiplist">
 	                {editTaskTags.length === 0 ? (
@@ -2669,73 +3450,72 @@ function App() {
 	            </div>
 	            <div className="row wrap" style={{ marginBottom: 8 }}>
 	              <select value={editTaskType} onChange={(e) => setEditTaskType(e.target.value as 'manual' | 'scheduled_instruction')}>
-	                <option value="manual">Manual</option>
-	                <option value="scheduled_instruction">Scheduled</option>
-	              </select>
-              <input
-                className="due-input"
-                type="datetime-local"
-                value={editScheduledAtUtc}
-                onChange={(e) => setEditScheduledAtUtc(e.target.value)}
-                disabled={editTaskType !== 'scheduled_instruction'}
-              />
-              <input
-                value={editScheduleTimezone}
-                onChange={(e) => setEditScheduleTimezone(e.target.value)}
-                placeholder="Timezone (e.g. Europe/Sarajevo)"
-                disabled={editTaskType !== 'scheduled_instruction'}
-              />
-            </div>
-            <div className="row wrap" style={{ marginBottom: 8 }}>
-              <input
-                type="number"
-                min={1}
-                inputMode="numeric"
-                value={editRecurringEvery}
-                onChange={(e) => setEditRecurringEvery(e.target.value)}
-                placeholder="Repeat every"
-                disabled={editTaskType !== 'scheduled_instruction'}
-                style={{ width: 140 }}
-              />
-              <select
-                value={editRecurringUnit}
-                onChange={(e) => setEditRecurringUnit(e.target.value as 'm' | 'h' | 'd')}
-                disabled={editTaskType !== 'scheduled_instruction'}
-              >
-                <option value="m">minutes</option>
-                <option value="h">hours</option>
-                <option value="d">days</option>
-              </select>
-              {editTaskType === 'scheduled_instruction' && (
-                <button
-                  className="action-icon"
-                  onClick={() => {
-                    setEditRecurringEvery('')
-                    setEditRecurringUnit('h')
-                  }}
-                  title="Clear repeat"
-                  aria-label="Clear repeat"
-                >
-                  <Icon path="M6 6l12 12M18 6 6 18" />
-                </button>
-              )}
+		                <option value="manual">Manual</option>
+		                <option value="scheduled_instruction">Scheduled</option>
+		              </select>
 	            </div>
-            {taskEditorError && (
-              <div className="notice" role="alert" style={{ marginBottom: 8 }}>
-                {taskEditorError}
-              </div>
-            )}
-            <textarea
-              value={editScheduledInstruction}
-              onChange={(e) => setEditScheduledInstruction(e.target.value)}
-              rows={3}
-              style={{ width: '100%', marginBottom: 8 }}
-              placeholder='Scheduled (executed automatically when due)'
-              disabled={editTaskType !== 'scheduled_instruction'}
-            />
-            {selectedTask.schedule_state && editTaskType === 'scheduled_instruction' && (
-              <div className="row wrap" style={{ marginBottom: 8 }}>
-                <span className="badge">Schedule: {selectedTask.schedule_state}</span>
+	            {taskEditorError && (
+	              <div className="notice" role="alert" style={{ marginBottom: 8 }}>
+	                {taskEditorError}
+	              </div>
+	            )}
+	            {editTaskType === 'scheduled_instruction' && (
+	              <>
+	                <div className="row wrap" style={{ marginBottom: 8 }}>
+	                  <input
+	                    className="due-input"
+	                    type="datetime-local"
+	                    value={editScheduledAtUtc}
+	                    onChange={(e) => setEditScheduledAtUtc(e.target.value)}
+	                  />
+	                  <input
+	                    value={editScheduleTimezone}
+	                    onChange={(e) => setEditScheduleTimezone(e.target.value)}
+	                    placeholder="Timezone (e.g. Europe/Sarajevo)"
+	                  />
+	                </div>
+	                <div className="row wrap" style={{ marginBottom: 8 }}>
+	                  <input
+	                    type="number"
+	                    min={1}
+	                    inputMode="numeric"
+	                    value={editRecurringEvery}
+	                    onChange={(e) => setEditRecurringEvery(e.target.value)}
+	                    placeholder="Repeat every"
+	                    style={{ width: 140 }}
+	                  />
+	                  <select
+	                    value={editRecurringUnit}
+	                    onChange={(e) => setEditRecurringUnit(e.target.value as 'm' | 'h' | 'd')}
+	                  >
+	                    <option value="m">minutes</option>
+	                    <option value="h">hours</option>
+	                    <option value="d">days</option>
+	                  </select>
+	                  <button
+	                    className="action-icon"
+	                    onClick={() => {
+	                      setEditRecurringEvery('')
+	                      setEditRecurringUnit('h')
+	                    }}
+	                    title="Clear repeat"
+	                    aria-label="Clear repeat"
+	                  >
+	                    <Icon path="M6 6l12 12M18 6 6 18" />
+	                  </button>
+	                </div>
+	                <textarea
+	                  value={editScheduledInstruction}
+	                  onChange={(e) => setEditScheduledInstruction(e.target.value)}
+	                  rows={3}
+	                  style={{ width: '100%', marginBottom: 8 }}
+	                  placeholder='Scheduled (executed automatically when due)'
+	                />
+	              </>
+	            )}
+	            {selectedTask.schedule_state && editTaskType === 'scheduled_instruction' && (
+	              <div className="row wrap" style={{ marginBottom: 8 }}>
+	                <span className="badge">Schedule: {selectedTask.schedule_state}</span>
                 <span className={`prio prio-${priorityTone(selectedTask.priority)}`} title="Priority">
                   {selectedTask.priority}
                 </span>
@@ -2744,7 +3524,50 @@ function App() {
                 {selectedTask.last_schedule_error && <span className="meta">Last error: {selectedTask.last_schedule_error}</span>}
               </div>
             )}
-	            <textarea value={editDescription} onChange={(e) => setEditDescription(e.target.value)} rows={4} style={{ width: '100%' }} />
+            <div className="meta" style={{ marginBottom: 6 }}>External links</div>
+            <ExternalRefEditor
+              refs={parseExternalRefsText(editTaskExternalRefsText)}
+              onRemoveIndex={(idx) => setEditTaskExternalRefsText((prev) => removeExternalRefByIndex(prev, idx))}
+              onAdd={(ref) =>
+                setEditTaskExternalRefsText((prev) => externalRefsToText([...parseExternalRefsText(prev), ref]))
+              }
+            />
+            <div className="meta" style={{ marginBottom: 6 }}>File attachments</div>
+            <div className="row" style={{ marginBottom: 8 }}>
+              <button
+                className="status-chip"
+                type="button"
+                onClick={() => taskFileInputRef.current?.click()}
+              >
+                Upload file
+              </button>
+              <input
+                ref={taskFileInputRef}
+                type="file"
+                style={{ display: 'none' }}
+                onChange={async (e) => {
+                  const file = e.target.files?.[0]
+                  e.currentTarget.value = ''
+                  if (!file || !selectedTask) return
+                  try {
+                    const ref = await uploadAttachmentRef(file, { project_id: editProjectId || selectedTask.project_id, task_id: selectedTask.id })
+                    setEditTaskAttachmentRefsText((prev) => attachmentRefsToText([...parseAttachmentRefsText(prev), ref]))
+                  } catch (err) {
+                    const message = toErrorMessage(err, 'Upload failed')
+                    setUiError(message)
+                    setTaskEditorError(message)
+                  }
+                }}
+              />
+            </div>
+            <AttachmentRefList
+              refs={parseAttachmentRefsText(editTaskAttachmentRefsText)}
+              workspaceId={workspaceId}
+              userId={userId}
+              onRemovePath={(path) => {
+                setEditTaskAttachmentRefsText((prev) => removeAttachmentByPath(prev, path))
+              }}
+            />
 	            {showTaskTagPicker && (
 	              <div className="drawer open" onClick={() => setShowTaskTagPicker(false)}>
 	                <div className="drawer-body tag-picker-body" onClick={(e) => e.stopPropagation()}>

@@ -7,6 +7,19 @@ export type User = {
   theme: 'light' | 'dark'
 }
 
+export type ExternalRef = {
+  url: string
+  title?: string
+  source?: string
+}
+
+export type AttachmentRef = {
+  path: string
+  name?: string
+  mime_type?: string
+  size_bytes?: number
+}
+
 export type Workspace = {
   id: string
   name: string
@@ -20,6 +33,11 @@ export type Project = {
   description: string
   status: string
   custom_statuses: string[]
+  external_refs: ExternalRef[]
+  attachment_refs: AttachmentRef[]
+  created_by: string
+  created_at: string | null
+  updated_at: string | null
 }
 
 export type Task = {
@@ -35,6 +53,8 @@ export type Task = {
   labels: string[]
   subtasks: Array<Record<string, unknown>>
   attachments: Array<Record<string, unknown>>
+  external_refs: ExternalRef[]
+  attachment_refs: AttachmentRef[]
   recurring_rule: string | null
   task_type: 'manual' | 'scheduled_instruction'
   scheduled_instruction: string | null
@@ -47,6 +67,7 @@ export type Task = {
   completed_at: string | null
   created_at: string | null
   updated_at: string | null
+  created_by: string
   order_index: number
 }
 
@@ -178,6 +199,8 @@ export type Note = {
   title: string
   body: string
   tags: string[]
+  external_refs: ExternalRef[]
+  attachment_refs: AttachmentRef[]
   pinned: boolean
   archived: boolean
   created_by: string

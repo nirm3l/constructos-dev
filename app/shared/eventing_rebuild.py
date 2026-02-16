@@ -259,6 +259,8 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "labels": p.get("labels", []),
             "subtasks": p.get("subtasks", []),
             "attachments": p.get("attachments", []),
+            "external_refs": p.get("external_refs", []),
+            "attachment_refs": p.get("attachment_refs", p.get("attachments", [])),
             "recurring_rule": p.get("recurring_rule"),
             "task_type": p.get("task_type", "manual"),
             "scheduled_instruction": p.get("scheduled_instruction"),
@@ -354,6 +356,8 @@ def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str
             "description": p.get("description", ""),
             "status": p.get("status", "Active"),
             "custom_statuses": p.get("custom_statuses", DEFAULT_STATUSES),
+            "external_refs": p.get("external_refs", []),
+            "attachment_refs": p.get("attachment_refs", []),
             "is_deleted": False,
         }
     elif event.event_type == PROJECT_EVENT_DELETED:
@@ -363,6 +367,10 @@ def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str
             s["name"] = p.get("name")
         if "description" in p:
             s["description"] = p.get("description", "")
+        if "external_refs" in p:
+            s["external_refs"] = p.get("external_refs", [])
+        if "attachment_refs" in p:
+            s["attachment_refs"] = p.get("attachment_refs", [])
     return s
 
 
@@ -378,6 +386,8 @@ def apply_note_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "title": p.get("title", ""),
             "body": p.get("body", ""),
             "tags": p.get("tags", []),
+            "external_refs": p.get("external_refs", []),
+            "attachment_refs": p.get("attachment_refs", []),
             "pinned": bool(p.get("pinned", False)),
             "archived": bool(p.get("archived", False)),
             "is_deleted": bool(p.get("is_deleted", False)),
@@ -492,6 +502,8 @@ def project_event(db: Session, ev: EventEnvelope):
         project.description = p.get("description", "") or ""
         project.status = p.get("status", "Active")
         project.custom_statuses = json.dumps(p.get("custom_statuses", DEFAULT_STATUSES))
+        project.external_refs = json.dumps(p.get("external_refs", []))
+        project.attachment_refs = json.dumps(p.get("attachment_refs", []))
     elif ev.event_type == PROJECT_EVENT_DELETED:
         project = db.get(Project, ev.aggregate_id)
         if project:
@@ -504,6 +516,10 @@ def project_event(db: Session, ev: EventEnvelope):
                 project.name = p.get("name") or project.name
             if "description" in p:
                 project.description = p.get("description", "") or ""
+            if "external_refs" in p:
+                project.external_refs = json.dumps(p.get("external_refs", []))
+            if "attachment_refs" in p:
+                project.attachment_refs = json.dumps(p.get("attachment_refs", []))
     elif ev.event_type == NOTE_EVENT_CREATED:
         note = db.get(Note, ev.aggregate_id)
         if note is None:
@@ -515,6 +531,8 @@ def project_event(db: Session, ev: EventEnvelope):
         note.title = p.get("title", "") or ""
         note.body = p.get("body", "") or ""
         note.tags = json.dumps(p.get("tags", []))
+        note.external_refs = json.dumps(p.get("external_refs", []))
+        note.attachment_refs = json.dumps(p.get("attachment_refs", []))
         note.pinned = bool(p.get("pinned", False))
         note.archived = bool(p.get("archived", False))
         note.is_deleted = bool(p.get("is_deleted", False))
@@ -549,6 +567,8 @@ def project_event(db: Session, ev: EventEnvelope):
         task.labels = json.dumps(p.get("labels", []))
         task.subtasks = json.dumps(p.get("subtasks", []))
         task.attachments = json.dumps(p.get("attachments", []))
+        task.external_refs = json.dumps(p.get("external_refs", []))
+        task.attachment_refs = json.dumps(p.get("attachment_refs", p.get("attachments", [])))
         task.recurring_rule = p.get("recurring_rule")
         task.task_type = p.get("task_type", "manual")
         task.scheduled_instruction = p.get("scheduled_instruction")
@@ -567,6 +587,10 @@ def project_event(db: Session, ev: EventEnvelope):
                 for k, v in p.items():
                     if k == "tags" and v is not None:
                         note.tags = json.dumps(v)
+                    elif k == "external_refs" and v is not None:
+                        note.external_refs = json.dumps(v)
+                    elif k == "attachment_refs" and v is not None:
+                        note.attachment_refs = json.dumps(v)
                     else:
                         setattr(note, k, v)
             elif ev.event_type == NOTE_EVENT_ARCHIVED:
@@ -607,7 +631,7 @@ def project_event(db: Session, ev: EventEnvelope):
             old_project_id = task.project_id
             if ev.event_type == TASK_EVENT_UPDATED:
                 for k, v in p.items():
-                    if k in {"labels", "subtasks", "attachments"} and v is not None:
+                    if k in {"labels", "subtasks", "attachments", "external_refs", "attachment_refs"} and v is not None:
                         setattr(task, k, json.dumps(v))
                     elif k == "due_date":
                         task.due_date = datetime.fromisoformat(v) if v else None

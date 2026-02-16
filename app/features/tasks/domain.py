@@ -23,6 +23,8 @@ class TaskAggregate(Aggregate):
         labels: list[str],
         subtasks: list[dict[str, Any]],
         attachments: list[dict[str, Any]],
+        external_refs: list[dict[str, Any]],
+        attachment_refs: list[dict[str, Any]],
         recurring_rule: str | None,
         order_index: int,
         task_type: str = "manual",
@@ -42,6 +44,8 @@ class TaskAggregate(Aggregate):
         self.labels = labels
         self.subtasks = subtasks
         self.attachments = attachments
+        self.external_refs = external_refs
+        self.attachment_refs = attachment_refs
         self.recurring_rule = recurring_rule
         self.task_type = task_type
         self.scheduled_instruction = scheduled_instruction

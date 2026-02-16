@@ -1164,6 +1164,34 @@ button:disabled {
   background: color-mix(in srgb, var(--surface), var(--surface-alt) 25%);
 }
 
+.project-item {
+  position: relative;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+  align-items: flex-start;
+}
+
+.project-item .task-main {
+  padding-left: 12px;
+}
+
+.project-item.selected {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 22%);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand), transparent 76%);
+  background: color-mix(in srgb, var(--brand), var(--surface) 90%);
+}
+
+.project-item.selected::before {
+  content: "";
+  position: absolute;
+  left: 8px;
+  top: 10px;
+  bottom: 10px;
+  width: 4px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--brand), var(--brand-strong));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand), transparent 60%);
+}
+
 .task-item.scheduled {
   border-color: color-mix(in srgb, var(--brand), var(--line) 35%);
   background: color-mix(in srgb, var(--brand), var(--surface) 90%);
@@ -1172,6 +1200,17 @@ button:disabled {
 .task-main {
   display: grid;
   gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.project-item-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 2px;
 }
 
 .meta {
@@ -1192,6 +1231,13 @@ button:disabled {
 .badge.done {
   border-color: color-mix(in srgb, var(--ok), white 55%);
   color: var(--ok);
+}
+
+.unsaved-badge {
+  border-color: color-mix(in srgb, #b26a00, var(--line) 45%);
+  color: #8a4f00;
+  background: color-mix(in srgb, #ffcf7f, var(--surface) 75%);
+  font-weight: 800;
 }
 
 .notice {
@@ -1512,6 +1558,76 @@ button:disabled {
 .drawer-header .action-icon {
   flex-shrink: 0;
   align-self: start;
+}
+
+.task-header-main {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.task-drawer-body {
+  padding-top: 0;
+}
+
+.task-drawer-body .drawer-header {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  background: var(--surface);
+  padding: 14px 0 10px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 8px;
+}
+
+.task-meta-top {
+  display: grid;
+  gap: 2px;
+  text-align: left;
+}
+
+.resource-meta-row {
+  gap: 12px;
+  align-items: center;
+}
+
+.task-header-actions {
+  gap: 6px;
+  align-items: center;
+  justify-content: flex-start;
+  flex-wrap: nowrap;
+}
+
+.task-drawer-body .drawer-header > .task-header-actions {
+  align-items: center;
+}
+
+.task-header-actions .unsaved-badge {
+  align-self: center;
+}
+
+.action-separator {
+  width: 1px;
+  height: 30px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--line), transparent 90%) 0%,
+    color-mix(in srgb, var(--line), transparent 8%) 22%,
+    color-mix(in srgb, var(--line), transparent 8%) 78%,
+    color-mix(in srgb, var(--line), transparent 90%) 100%
+  );
+  border-radius: 999px;
+  margin: 0 3px;
+}
+
+.task-drawer-body .drawer-header > .row:not(.task-header-actions) {
+  align-items: flex-start;
+}
+
+@media (max-width: 560px) {
+  .task-meta-top .meta {
+    font-size: 12px;
+  }
 }
 
 .bottom-tabs {

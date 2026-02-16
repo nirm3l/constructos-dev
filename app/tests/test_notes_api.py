@@ -11,6 +11,7 @@ def build_client(tmp_path: Path) -> TestClient:
 
     db_file = tmp_path / "test.db"
     os.environ["DATABASE_URL"] = f"sqlite:///{db_file}"
+    os.environ["ATTACHMENTS_DIR"] = str(tmp_path / "uploads")
     os.environ.pop("DB_PATH", None)
     os.environ["EVENTSTORE_URI"] = ""
     import main
@@ -135,3 +136,25 @@ def test_note_tags_are_normalized_and_filterable(tmp_path: Path):
     filtered = client.get(f"/api/notes?workspace_id={ws_id}&project_id={project_id}&tags=review,ux")
     assert filtered.status_code == 200
     assert any(item["id"] == note["id"] for item in filtered.json()["items"])
+
+
+def test_note_refs_roundtrip(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+
+    created = client.post(
+        "/api/notes",
+        json={
+            "title": "Refs note",
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "external_refs": [{"url": "https://example.com/doc"}],
+            "attachment_refs": [{"path": "/tmp/readme.md"}],
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    assert payload["external_refs"][0]["url"] == "https://example.com/doc"
+    assert payload["attachment_refs"][0]["path"] == "/tmp/readme.md"

@@ -8,6 +8,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from shared.core import Task, ensure_role, get_user_zoneinfo, load_task_command_state, normalize_datetime_to_utc, rebuild_state, serialize_task
+from shared.serializers import load_created_by_map
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +71,13 @@ def list_tasks_read_model(db: Session, user, query: TaskListQuery) -> dict:
 
     total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one()
     tasks = db.execute(stmt.order_by(Task.order_index.asc(), Task.created_at.desc()).limit(query.limit).offset(query.offset)).scalars().all()
-    return {"items": [serialize_task(t) for t in tasks], "total": total, "limit": query.limit, "offset": query.offset}
+    created_by_map = load_created_by_map(db, "Task", [t.id for t in tasks])
+    return {
+        "items": [serialize_task(t, created_by=created_by_map.get(t.id, "")) for t in tasks],
+        "total": total,
+        "limit": query.limit,
+        "offset": query.offset,
+    }
 
 
 def get_task_automation_status_read_model(db: Session, user, task_id: str) -> dict:

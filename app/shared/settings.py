@@ -52,6 +52,7 @@ AGENT_CODEX_COMMAND = os.getenv("AGENT_CODEX_COMMAND", "").strip()
 AGENT_CODEX_MCP_URL = os.getenv("AGENT_CODEX_MCP_URL", "http://mcp-tools:8090/mcp").strip()
 AGENT_CODEX_MCP_READONLY_URL = os.getenv("AGENT_CODEX_MCP_READONLY_URL", "http://mcp-tools-ro:8090/mcp").strip()
 AGENT_CODEX_MODEL = os.getenv("AGENT_CODEX_MODEL", "").strip()
+ATTACHMENTS_DIR = os.getenv("ATTACHMENTS_DIR", "/data/uploads").strip() or "/data/uploads"
 MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "").strip()
 MCP_ACTOR_USER_ID = os.getenv("MCP_ACTOR_USER_ID", DEFAULT_USER_ID).strip() or DEFAULT_USER_ID
 MCP_DEFAULT_WORKSPACE_ID = os.getenv("MCP_DEFAULT_WORKSPACE_ID", "").strip()

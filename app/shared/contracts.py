@@ -7,6 +7,19 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class ExternalRef(BaseModel):
+    url: str = Field(min_length=1)
+    title: str | None = None
+    source: str | None = None
+
+
+class AttachmentRef(BaseModel):
+    path: str = Field(min_length=1)
+    name: str | None = None
+    mime_type: str | None = None
+    size_bytes: int | None = None
+
+
 class TaskCreate(BaseModel):
     title: str = Field(min_length=1)
     workspace_id: str
@@ -18,6 +31,8 @@ class TaskCreate(BaseModel):
     labels: list[str] = Field(default_factory=list)
     subtasks: list[dict[str, Any]] = Field(default_factory=list)
     attachments: list[dict[str, Any]] = Field(default_factory=list)
+    external_refs: list[ExternalRef] = Field(default_factory=list)
+    attachment_refs: list[AttachmentRef] = Field(default_factory=list)
     recurring_rule: str | None = None
     task_type: str = "manual"
     scheduled_instruction: str | None = None
@@ -35,6 +50,8 @@ class TaskPatch(BaseModel):
     labels: list[str] | None = None
     subtasks: list[dict[str, Any]] | None = None
     attachments: list[dict[str, Any]] | None = None
+    external_refs: list[ExternalRef] | None = None
+    attachment_refs: list[AttachmentRef] | None = None
     archived: bool | None = None
     project_id: str | None = None
     recurring_rule: str | None = None
@@ -74,6 +91,8 @@ class NoteCreate(BaseModel):
     task_id: str | None = None
     body: str = ""
     tags: list[str] = Field(default_factory=list)
+    external_refs: list[ExternalRef] = Field(default_factory=list)
+    attachment_refs: list[AttachmentRef] = Field(default_factory=list)
     pinned: bool = False
 
 
@@ -81,6 +100,8 @@ class NotePatch(BaseModel):
     title: str | None = None
     body: str | None = None
     tags: list[str] | None = None
+    external_refs: list[ExternalRef] | None = None
+    attachment_refs: list[AttachmentRef] | None = None
     pinned: bool | None = None
     archived: bool | None = None
     project_id: str | None = None
@@ -100,12 +121,16 @@ class ProjectCreate(BaseModel):
     name: str = Field(min_length=1)
     description: str = ""
     custom_statuses: list[str] | None = None
+    external_refs: list[ExternalRef] = Field(default_factory=list)
+    attachment_refs: list[AttachmentRef] = Field(default_factory=list)
     member_user_ids: list[str] = Field(default_factory=list)
 
 
 class ProjectPatch(BaseModel):
     name: str | None = None
     description: str | None = None
+    external_refs: list[ExternalRef] | None = None
+    attachment_refs: list[AttachmentRef] | None = None
 
 
 class ProjectMemberUpsert(BaseModel):
@@ -160,6 +185,8 @@ class TaskDTO:
     labels: list[str]
     subtasks: list[dict[str, Any]]
     attachments: list[dict[str, Any]]
+    external_refs: list[dict[str, Any]]
+    attachment_refs: list[dict[str, Any]]
     recurring_rule: str | None
     task_type: str
     scheduled_instruction: str | None
@@ -172,6 +199,7 @@ class TaskDTO:
     completed_at: str | None
     created_at: str | None
     updated_at: str | None
+    created_by: str
     order_index: int
 
 
@@ -206,6 +234,8 @@ class NoteDTO:
     title: str
     body: str
     tags: list[str]
+    external_refs: list[dict[str, Any]]
+    attachment_refs: list[dict[str, Any]]
     pinned: bool
     archived: bool
     created_by: str

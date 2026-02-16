@@ -4,6 +4,8 @@ import type {
   Notification,
   Note,
   NotesPage,
+  AttachmentRef,
+  ExternalRef,
   Project,
   ProjectBoard,
   ProjectMembersPage,
@@ -78,6 +80,19 @@ export async function api<T>(path: string, userId: string, init?: RequestInit): 
   return (await res.json()) as T
 }
 
+async function uploadApi<T>(path: string, userId: string, body: FormData): Promise<T> {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'X-User-Id': userId },
+    body
+  })
+  if (!res.ok) {
+    const raw = await res.text()
+    throw new Error(formatApiError(raw, res.status))
+  }
+  return (await res.json()) as T
+}
+
 export const getBootstrap = (userId: string) => api<BootstrapPayload>('/api/bootstrap', userId)
 
 export const getTasks = (
@@ -113,7 +128,15 @@ export const getTasks = (
 
 export const createTask = (
   userId: string,
-  payload: { title: string; workspace_id: string; project_id: string; due_date?: string | null; labels?: string[] }
+  payload: {
+    title: string
+    workspace_id: string
+    project_id: string
+    due_date?: string | null
+    labels?: string[]
+    external_refs?: ExternalRef[]
+    attachment_refs?: AttachmentRef[]
+  }
 ) => api<Task>('/api/tasks', userId, { method: 'POST', body: JSON.stringify(payload) })
 
 export const completeTask = (userId: string, taskId: string) =>
@@ -146,6 +169,8 @@ export const patchTask = (
       | 'scheduled_instruction'
       | 'scheduled_at_utc'
       | 'schedule_timezone'
+      | 'external_refs'
+      | 'attachment_refs'
     >
   >
 ) => api<Task>(`/api/tasks/${taskId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })
@@ -188,14 +213,21 @@ export const markNotificationRead = (userId: string, id: string) =>
 
 export const createProject = (
   userId: string,
-  payload: { workspace_id: string; name: string; description?: string; member_user_ids?: string[] }
+  payload: {
+    workspace_id: string
+    name: string
+    description?: string
+    member_user_ids?: string[]
+    external_refs?: ExternalRef[]
+    attachment_refs?: AttachmentRef[]
+  }
 ) =>
   api<Project>('/api/projects', userId, { method: 'POST', body: JSON.stringify(payload) })
 
 export const patchProject = (
   userId: string,
   projectId: string,
-  payload: Partial<Pick<Project, 'name' | 'description'>>
+  payload: Partial<Pick<Project, 'name' | 'description' | 'external_refs' | 'attachment_refs'>>
 ) => api<Project>(`/api/projects/${projectId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })
 
 export const deleteProject = (userId: string, projectId: string) =>
@@ -285,13 +317,23 @@ export const getNotes = (
 
 export const createNote = (
   userId: string,
-  payload: { title: string; workspace_id: string; project_id: string; task_id?: string | null; body?: string; tags?: string[]; pinned?: boolean }
+  payload: {
+    title: string
+    workspace_id: string
+    project_id: string
+    task_id?: string | null
+    body?: string
+    tags?: string[]
+    pinned?: boolean
+    external_refs?: ExternalRef[]
+    attachment_refs?: AttachmentRef[]
+  }
 ) => api<Note>('/api/notes', userId, { method: 'POST', body: JSON.stringify(payload) })
 
 export const patchNote = (
   userId: string,
   noteId: string,
-  payload: Partial<Pick<Note, 'title' | 'body' | 'tags' | 'pinned' | 'archived' | 'project_id' | 'task_id'>>
+  payload: Partial<Pick<Note, 'title' | 'body' | 'tags' | 'pinned' | 'archived' | 'project_id' | 'task_id' | 'external_refs' | 'attachment_refs'>>
 ) => api<Note>(`/api/notes/${noteId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })
 
 export const archiveNote = (userId: string, noteId: string) =>
@@ -304,3 +346,32 @@ export const unpinNote = (userId: string, noteId: string) =>
   api<{ ok: true }>(`/api/notes/${noteId}/unpin`, userId, { method: 'POST' })
 export const deleteNote = (userId: string, noteId: string) =>
   api<{ ok: true }>(`/api/notes/${noteId}/delete`, userId, { method: 'POST' })
+
+export const uploadAttachment = async (
+  userId: string,
+  payload: {
+    workspace_id: string
+    project_id?: string | null
+    task_id?: string | null
+    note_id?: string | null
+    file: File
+  }
+) => {
+  const form = new FormData()
+  form.set('workspace_id', payload.workspace_id)
+  if (payload.project_id) form.set('project_id', payload.project_id)
+  if (payload.task_id) form.set('task_id', payload.task_id)
+  if (payload.note_id) form.set('note_id', payload.note_id)
+  form.set('file', payload.file)
+  return uploadApi<AttachmentRef>('/api/attachments/upload', userId, form)
+}
+
+export const attachmentDownloadUrl = (payload: { user_id: string; workspace_id: string; path: string }): string =>
+  `/api/attachments/download${queryString({
+    user_id: payload.user_id,
+    workspace_id: payload.workspace_id,
+    path: payload.path
+  })}`
+
+export const deleteAttachment = (userId: string, payload: { workspace_id: string; path: string }) =>
+  api<{ ok: true }>('/api/attachments/delete', userId, { method: 'POST', body: JSON.stringify(payload) })

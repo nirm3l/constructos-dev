@@ -15,6 +15,7 @@ from features.tasks.api import router as tasks_router
 from features.users.api import router as users_router
 from features.views.api import router as views_router
 from features.agents.api import router as agents_router
+from features.attachments.api import router as attachments_router
 from features.notes.api import router as notes_router
 from features.agents.runner import start_automation_runner, stop_automation_runner
 from shared.core import bootstrap_data, project_kurrent_events_once, start_projection_worker, startup_bootstrap, stop_projection_worker
@@ -56,6 +57,7 @@ app.include_router(projects_router)
 app.include_router(rules_router)
 app.include_router(tasks_router)
 app.include_router(notes_router)
+app.include_router(attachments_router)
 app.include_router(notifications_router)
 app.include_router(views_router)
 app.include_router(agents_router)

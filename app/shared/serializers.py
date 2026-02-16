@@ -21,7 +21,7 @@ from .contracts import (
     TaskCommandState,
     TaskDTO,
 )
-from .models import Note, Notification, Project, ProjectRule, SavedView, Task
+from .models import Note, Notification, Project, ProjectRule, SavedView, StoredEvent, Task
 from .settings import DEFAULT_STATUSES
 
 
@@ -48,7 +48,45 @@ def normalize_datetime_to_utc(value: datetime | None, user_tz: ZoneInfo) -> date
     return value.astimezone(timezone.utc)
 
 
-def serialize_task(task: Task) -> dict[str, Any]:
+def load_created_by(db: Session, aggregate_type: str, aggregate_id: str) -> str:
+    row = db.execute(
+        select(StoredEvent.meta).where(
+            StoredEvent.aggregate_type == aggregate_type,
+            StoredEvent.aggregate_id == aggregate_id,
+            StoredEvent.version == 1,
+        )
+    ).first()
+    if not row:
+        return ""
+    try:
+        metadata = json.loads(row[0] or "{}")
+    except Exception:
+        metadata = {}
+    return str(metadata.get("actor_id") or "")
+
+
+def load_created_by_map(db: Session, aggregate_type: str, aggregate_ids: list[str]) -> dict[str, str]:
+    ids = [aggregate_id for aggregate_id in aggregate_ids if aggregate_id]
+    if not ids:
+        return {}
+    rows = db.execute(
+        select(StoredEvent.aggregate_id, StoredEvent.meta).where(
+            StoredEvent.aggregate_type == aggregate_type,
+            StoredEvent.aggregate_id.in_(ids),
+            StoredEvent.version == 1,
+        )
+    ).all()
+    out: dict[str, str] = {}
+    for aggregate_id, raw_meta in rows:
+        try:
+            metadata = json.loads(raw_meta or "{}")
+        except Exception:
+            metadata = {}
+        out[str(aggregate_id)] = str(metadata.get("actor_id") or "")
+    return out
+
+
+def serialize_task(task: Task, created_by: str = "") -> dict[str, Any]:
     dto = TaskDTO(
         id=task.id,
         workspace_id=task.workspace_id,
@@ -62,6 +100,8 @@ def serialize_task(task: Task) -> dict[str, Any]:
         labels=json.loads(task.labels or "[]"),
         subtasks=json.loads(task.subtasks or "[]"),
         attachments=json.loads(task.attachments or "[]"),
+        external_refs=json.loads(task.external_refs or "[]"),
+        attachment_refs=json.loads(task.attachment_refs or "[]"),
         recurring_rule=task.recurring_rule,
         task_type=task.task_type or "manual",
         scheduled_instruction=task.scheduled_instruction,
@@ -74,6 +114,7 @@ def serialize_task(task: Task) -> dict[str, Any]:
         completed_at=to_iso_utc(task.completed_at),
         created_at=to_iso_utc(task.created_at),
         updated_at=to_iso_utc(task.updated_at),
+        created_by=created_by,
         order_index=task.order_index,
     )
     return asdict(dto)
@@ -88,6 +129,8 @@ def serialize_note(note: Note) -> dict[str, Any]:
         title=note.title,
         body=note.body or "",
         tags=json.loads(note.tags or "[]"),
+        external_refs=json.loads(note.external_refs or "[]"),
+        attachment_refs=json.loads(note.attachment_refs or "[]"),
         pinned=bool(note.pinned),
         archived=bool(note.archived),
         created_by=note.created_by,
@@ -130,6 +173,7 @@ def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
         state, _ = rebuild_state(db, "Task", task_id)
         if not state or state.get("is_deleted"):
             return None
+        created_by = str(state.get("created_by") or "") or load_created_by(db, "Task", task_id)
         return {
             "id": task_id,
             "workspace_id": state.get("workspace_id"),
@@ -143,6 +187,8 @@ def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
             "labels": state.get("labels", []),
             "subtasks": state.get("subtasks", []),
             "attachments": state.get("attachments", []),
+            "external_refs": state.get("external_refs", []),
+            "attachment_refs": state.get("attachment_refs", state.get("attachments", [])),
             "recurring_rule": state.get("recurring_rule"),
             "task_type": state.get("task_type", "manual"),
             "scheduled_instruction": state.get("scheduled_instruction"),
@@ -155,12 +201,13 @@ def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
             "completed_at": state.get("completed_at"),
             "created_at": None,
             "updated_at": None,
+            "created_by": created_by,
             "order_index": int(state.get("order_index", 0)),
         }
 
     task = db.get(Task, task_id)
     if task and not task.is_deleted:
-        return serialize_task(task)
+        return serialize_task(task, created_by=load_created_by(db, "Task", task_id))
     return None
 
 
@@ -179,6 +226,8 @@ def load_note_view(db: Session, note_id: str) -> dict[str, Any] | None:
             "title": state.get("title") or "",
             "body": state.get("body", ""),
             "tags": state.get("tags", []),
+            "external_refs": state.get("external_refs", []),
+            "attachment_refs": state.get("attachment_refs", []),
             "pinned": bool(state.get("pinned", False)),
             "archived": bool(state.get("archived", False)),
             "created_by": state.get("created_by") or "",
@@ -256,6 +305,7 @@ def load_note_command_state(db: Session, note_id: str) -> NoteCommandState | Non
 def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
     project = db.get(Project, project_id)
     if project and not project.is_deleted:
+        created_by = load_created_by(db, "Project", project.id)
         return {
             "id": project.id,
             "workspace_id": project.workspace_id,
@@ -263,6 +313,11 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
             "description": project.description,
             "status": project.status,
             "custom_statuses": json.loads(project.custom_statuses or "[]"),
+            "external_refs": json.loads(project.external_refs or "[]"),
+            "attachment_refs": json.loads(project.attachment_refs or "[]"),
+            "created_by": created_by,
+            "created_at": to_iso_utc(project.created_at),
+            "updated_at": to_iso_utc(project.updated_at),
         }
 
     from .eventing import get_kurrent_client, rebuild_state
@@ -272,6 +327,7 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
     state, _ = rebuild_state(db, "Project", project_id)
     if not state or state.get("is_deleted"):
         return None
+    created_by = str(state.get("created_by") or "") or load_created_by(db, "Project", project_id)
     return {
         "id": project_id,
         "workspace_id": state.get("workspace_id"),
@@ -279,6 +335,11 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
         "description": state.get("description", ""),
         "status": state.get("status", "Active"),
         "custom_statuses": state.get("custom_statuses", DEFAULT_STATUSES),
+        "external_refs": state.get("external_refs", []),
+        "attachment_refs": state.get("attachment_refs", []),
+        "created_by": created_by,
+        "created_at": None,
+        "updated_at": None,
     }
 
 

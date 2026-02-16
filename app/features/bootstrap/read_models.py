@@ -7,7 +7,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from shared.models import Notification, Project, ProjectMember, SavedView, User, Workspace, WorkspaceMember
-from shared.serializers import serialize_notification
+from shared.serializers import load_created_by_map, serialize_notification, to_iso_utc
 
 
 def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
@@ -36,6 +36,7 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
             or_(SavedView.user_id == user.id, SavedView.shared == True),
         )
     ).scalars().all()
+    project_creator_map = load_created_by_map(db, "Project", project_ids)
     return {
         "current_user": {
             "id": user.id,
@@ -55,6 +56,11 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
                 "description": p.description,
                 "status": p.status,
                 "custom_statuses": json.loads(p.custom_statuses),
+                "external_refs": json.loads(p.external_refs or "[]"),
+                "attachment_refs": json.loads(p.attachment_refs or "[]"),
+                "created_by": project_creator_map.get(p.id, ""),
+                "created_at": to_iso_utc(p.created_at),
+                "updated_at": to_iso_utc(p.updated_at),
             }
             for p in projects
         ],

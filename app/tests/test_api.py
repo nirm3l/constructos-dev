@@ -4,6 +4,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 
 from fastapi.testclient import TestClient
 
@@ -11,6 +12,7 @@ from fastapi.testclient import TestClient
 def build_client(tmp_path: Path):
     db_file = tmp_path / "test.db"
     os.environ["DATABASE_URL"] = f"sqlite:///{db_file}"
+    os.environ["ATTACHMENTS_DIR"] = str(tmp_path / "uploads")
     os.environ.pop("DB_PATH", None)
     os.environ["EVENTSTORE_URI"] = ""
     import main
@@ -53,6 +55,79 @@ def test_search_filter(tmp_path):
     res = client.get(f'/api/tasks?workspace_id={ws_id}&project_id={project_id}&priority=High')
     assert res.status_code == 200
     assert any(t['priority'] == 'High' for t in res.json()['items'])
+
+
+def test_project_and_task_refs_roundtrip(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    project = client.post(
+        '/api/projects',
+        json={
+            'workspace_id': ws_id,
+            'name': 'With refs',
+            'external_refs': [{'url': 'https://docs.example.com/spec', 'title': 'Spec'}],
+            'attachment_refs': [{'path': '/tmp/spec.pdf', 'name': 'spec.pdf'}],
+        },
+    )
+    assert project.status_code == 200
+    project_payload = project.json()
+    assert project_payload['external_refs'][0]['url'] == 'https://docs.example.com/spec'
+    assert project_payload['attachment_refs'][0]['path'] == '/tmp/spec.pdf'
+
+    task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Task refs',
+            'workspace_id': ws_id,
+            'project_id': project_payload['id'],
+            'external_refs': [{'url': 'https://jira.example.com/TASK-1'}],
+            'attachment_refs': [{'path': '/tmp/local.txt'}],
+        },
+    )
+    assert task.status_code == 200
+    task_payload = task.json()
+    assert task_payload['external_refs'][0]['url'] == 'https://jira.example.com/TASK-1'
+    assert task_payload['attachment_refs'][0]['path'] == '/tmp/local.txt'
+
+
+def test_local_attachment_upload_and_download(tmp_path):
+    os.environ["ATTACHMENTS_DIR"] = str(tmp_path / "uploads")
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    task = client.post('/api/tasks', json={'title': 'Attachment target', 'workspace_id': ws_id, 'project_id': project_id})
+    assert task.status_code == 200
+    task_id = task.json()['id']
+
+    uploaded = client.post(
+        '/api/attachments/upload',
+        data={'workspace_id': ws_id, 'project_id': project_id, 'task_id': task_id},
+        files={'file': ('hello.txt', BytesIO(b'hello world'), 'text/plain')},
+    )
+    assert uploaded.status_code == 200
+    payload = uploaded.json()
+    assert payload['name'] == 'hello.txt'
+    assert payload['size_bytes'] == 11
+    assert payload['path'].startswith(f'workspace/{ws_id}/')
+
+    downloaded = client.get(
+        f"/api/attachments/download?workspace_id={ws_id}&path={payload['path']}"
+    )
+    assert downloaded.status_code == 200
+    assert downloaded.content == b'hello world'
+
+    deleted = client.post('/api/attachments/delete', json={'workspace_id': ws_id, 'path': payload['path']})
+    assert deleted.status_code == 200
+    assert deleted.json()['ok'] is True
+
+    after_delete = client.get(
+        f"/api/attachments/download?workspace_id={ws_id}&path={payload['path']}"
+    )
+    assert after_delete.status_code == 404
 
 
 def test_comment_mention_creates_notification(tmp_path):

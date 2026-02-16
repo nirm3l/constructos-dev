@@ -55,6 +55,51 @@ def _normalize_tags(values: list[str] | None) -> list[str]:
     return out
 
 
+def _normalize_external_refs(values: list[dict] | None) -> list[dict]:
+    if not values:
+        return []
+    out: list[dict] = []
+    for raw in values:
+        if not isinstance(raw, dict):
+            continue
+        url = str(raw.get("url") or "").strip()
+        if not url:
+            continue
+        item = {"url": url}
+        title = str(raw.get("title") or "").strip()
+        source = str(raw.get("source") or "").strip()
+        if title:
+            item["title"] = title
+        if source:
+            item["source"] = source
+        out.append(item)
+    return out
+
+
+def _normalize_attachment_refs(values: list[dict] | None) -> list[dict]:
+    if not values:
+        return []
+    out: list[dict] = []
+    for raw in values:
+        if not isinstance(raw, dict):
+            continue
+        path = str(raw.get("path") or "").strip()
+        if not path:
+            continue
+        item = {"path": path}
+        name = str(raw.get("name") or "").strip()
+        mime_type = str(raw.get("mime_type") or "").strip()
+        size_bytes = raw.get("size_bytes")
+        if name:
+            item["name"] = name
+        if mime_type:
+            item["mime_type"] = mime_type
+        if isinstance(size_bytes, int) and size_bytes >= 0:
+            item["size_bytes"] = size_bytes
+        out.append(item)
+    return out
+
+
 def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> Project:
     project = db.get(Project, project_id)
     if not project or project.is_deleted:
@@ -109,6 +154,8 @@ class CreateNoteHandler:
                 "title": self.payload.title.strip(),
                 "body": self.payload.body or "",
                 "tags": _normalize_tags(self.payload.tags),
+                "external_refs": _normalize_external_refs([r.model_dump() for r in self.payload.external_refs]),
+                "attachment_refs": _normalize_attachment_refs([r.model_dump() for r in self.payload.attachment_refs]),
                 "pinned": bool(self.payload.pinned),
                 "archived": False,
                 "is_deleted": False,
@@ -159,6 +206,10 @@ class PatchNoteHandler:
                 raise HTTPException(status_code=422, detail="title cannot be empty")
         if "tags" in data and data["tags"] is not None:
             data["tags"] = _normalize_tags(data["tags"])
+        if "external_refs" in data and data["external_refs"] is not None:
+            data["external_refs"] = _normalize_external_refs(data["external_refs"])
+        if "attachment_refs" in data and data["attachment_refs"] is not None:
+            data["attachment_refs"] = _normalize_attachment_refs(data["attachment_refs"])
         # Keep updated_by in event payload for easy projection/audit.
         data["updated_by"] = self.ctx.user.id
         append_event(
