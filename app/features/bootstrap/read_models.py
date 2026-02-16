@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from shared.models import Notification, Project, SavedView, User, Workspace, WorkspaceMember
+from shared.models import Notification, Project, ProjectMember, SavedView, User, Workspace, WorkspaceMember
 from shared.serializers import serialize_notification
 
 
@@ -15,9 +15,20 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
     workspace_ids = [m.workspace_id for m in memberships]
     workspaces = db.execute(select(Workspace).where(Workspace.id.in_(workspace_ids), Workspace.is_deleted == False)).scalars().all()
     projects = db.execute(select(Project).where(Project.workspace_id.in_(workspace_ids), Project.is_deleted == False)).scalars().all()
-    users = db.execute(select(User)).scalars().all()
+    users = db.execute(
+        select(User)
+        .join(WorkspaceMember, WorkspaceMember.user_id == User.id)
+        .where(WorkspaceMember.workspace_id.in_(workspace_ids))
+        .distinct()
+    ).scalars().all()
     notifications = db.execute(select(Notification).where(Notification.user_id == user.id).order_by(Notification.created_at.desc()).limit(20)).scalars().all()
     project_ids = [p.id for p in projects]
+    project_members = db.execute(
+        select(ProjectMember).where(
+            ProjectMember.workspace_id.in_(workspace_ids),
+            ProjectMember.project_id.in_(project_ids),
+        )
+    ).scalars().all()
     saved = db.execute(
         select(SavedView).where(
             SavedView.workspace_id.in_(workspace_ids),
@@ -30,6 +41,7 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
             "id": user.id,
             "username": user.username,
             "full_name": user.full_name,
+            "user_type": user.user_type,
             "theme": user.theme,
             "timezone": user.timezone,
         },
@@ -46,7 +58,15 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
             }
             for p in projects
         ],
-        "users": [{"id": u.id, "username": u.username, "full_name": u.full_name} for u in users],
+        "users": [{"id": u.id, "username": u.username, "full_name": u.full_name, "user_type": u.user_type} for u in users],
+        "project_members": [
+            {
+                "project_id": pm.project_id,
+                "user_id": pm.user_id,
+                "role": pm.role,
+            }
+            for pm in project_members
+        ],
         "notifications": [serialize_notification(n) for n in notifications],
         "saved_views": [
             {

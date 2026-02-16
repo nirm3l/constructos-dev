@@ -100,11 +100,17 @@ class ProjectCreate(BaseModel):
     name: str = Field(min_length=1)
     description: str = ""
     custom_statuses: list[str] | None = None
+    member_user_ids: list[str] = Field(default_factory=list)
 
 
 class ProjectPatch(BaseModel):
     name: str | None = None
     description: str | None = None
+
+
+class ProjectMemberUpsert(BaseModel):
+    user_id: str
+    role: str = "Contributor"
 
 
 class ProjectRuleCreate(BaseModel):

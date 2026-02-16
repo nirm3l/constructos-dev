@@ -15,7 +15,7 @@ from .eventing import append_event, current_version, emit_system_notifications, 
 from features.projects.domain import EVENT_CREATED as PROJECT_EVENT_CREATED
 from features.rules.domain import EVENT_CREATED as PROJECT_RULE_EVENT_CREATED
 from features.tasks.domain import EVENT_CREATED as TASK_EVENT_CREATED
-from .models import Base, Note, Project, ProjectRule, ProjectTagIndex, SessionLocal, Task, User, Workspace, WorkspaceMember, engine
+from .models import Base, Note, Project, ProjectMember, ProjectRule, ProjectTagIndex, SessionLocal, Task, User, Workspace, WorkspaceMember, engine
 from .serializers import to_iso_utc
 from .settings import (
     AGENT_SYSTEM_FULL_NAME,
@@ -40,10 +40,15 @@ def ensure_system_users(db: Session):
                 id=AGENT_SYSTEM_USER_ID,
                 username=AGENT_SYSTEM_USERNAME,
                 full_name=AGENT_SYSTEM_FULL_NAME,
+                user_type="agent",
                 timezone="UTC",
                 theme="dark",
             )
         )
+    else:
+        agent_user = db.get(User, AGENT_SYSTEM_USER_ID)
+        if agent_user and agent_user.user_type != "agent":
+            agent_user.user_type = "agent"
     workspace = db.get(Workspace, BOOTSTRAP_WORKSPACE_ID)
     if workspace:
         membership = db.execute(
@@ -54,6 +59,15 @@ def ensure_system_users(db: Session):
         ).scalar_one_or_none()
         if not membership:
             db.add(WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=AGENT_SYSTEM_USER_ID, role="Member"))
+    db.commit()
+
+
+def ensure_user_table_columns(db: Session):
+    existing = {column["name"] for column in inspect(db.bind).get_columns("users")}
+    if "user_type" not in existing:
+        db.execute(text("ALTER TABLE users ADD COLUMN user_type VARCHAR(16) DEFAULT 'human'"))
+    db.execute(text("UPDATE users SET user_type='human' WHERE user_type IS NULL OR user_type = ''"))
+    db.execute(text("UPDATE users SET user_type='agent' WHERE id = :agent_id"), {"agent_id": AGENT_SYSTEM_USER_ID})
     db.commit()
 
 
@@ -92,6 +106,7 @@ def ensure_task_comment_table_columns(db: Session):
 def bootstrap_data():
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
+        ensure_user_table_columns(db)
         ensure_task_table_columns(db)
         ensure_saved_view_table_columns(db)
         ensure_task_comment_table_columns(db)
@@ -100,7 +115,14 @@ def bootstrap_data():
         if not default_user:
             db.add_all(
                 [
-                    User(id=DEFAULT_USER_ID, username=BOOTSTRAP_USERNAME, full_name=BOOTSTRAP_FULL_NAME, timezone="Europe/Sarajevo", theme="light"),
+                    User(
+                        id=DEFAULT_USER_ID,
+                        username=BOOTSTRAP_USERNAME,
+                        full_name=BOOTSTRAP_FULL_NAME,
+                        user_type="human",
+                        timezone="Europe/Sarajevo",
+                        theme="light",
+                    ),
                     Workspace(id=BOOTSTRAP_WORKSPACE_ID, name="My Workspace", type="team"),
                 ]
             )
@@ -180,6 +202,7 @@ def bootstrap_data():
         _backfill_project_rule_streams_from_read_model(db)
         _backfill_task_streams_from_read_model(db)
         _rebuild_project_tag_index(db)
+        _backfill_project_members_for_existing_projects(db)
         db.commit()
 
 
@@ -323,6 +346,36 @@ def _backfill_project_rule_streams_from_read_model(db: Session) -> None:
             },
             expected_version=0,
         )
+
+
+def _backfill_project_members_for_existing_projects(db: Session) -> None:
+    projects = db.execute(select(Project).where(Project.is_deleted == False)).scalars().all()
+    for project in projects:
+        has_members = db.execute(
+            select(func.count(ProjectMember.id)).where(
+                ProjectMember.project_id == project.id,
+            )
+        ).scalar() or 0
+        if has_members > 0:
+            continue
+        # Safe default: assign workspace owners to existing projects.
+        owners = db.execute(
+            select(WorkspaceMember.user_id).where(
+                WorkspaceMember.workspace_id == project.workspace_id,
+                WorkspaceMember.role.in_(["Owner", "Admin"]),
+            )
+        ).scalars().all()
+        if not owners:
+            owners = [DEFAULT_USER_ID]
+        for uid in dict.fromkeys(owners):
+            db.add(
+                ProjectMember(
+                    workspace_id=project.workspace_id,
+                    project_id=project.id,
+                    user_id=uid,
+                    role="Owner",
+                )
+            )
 
 
 def _parse_tag_list(raw: str | None) -> list[str]:

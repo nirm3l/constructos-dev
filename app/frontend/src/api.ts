@@ -6,6 +6,7 @@ import type {
   NotesPage,
   Project,
   ProjectBoard,
+  ProjectMembersPage,
   ProjectRule,
   ProjectRulesPage,
   ProjectTags,
@@ -185,7 +186,10 @@ export const getNotifications = (userId: string) => api<Notification[]>('/api/no
 export const markNotificationRead = (userId: string, id: string) =>
   api<{ ok: true }>(`/api/notifications/${id}/read`, userId, { method: 'POST' })
 
-export const createProject = (userId: string, payload: { workspace_id: string; name: string; description?: string }) =>
+export const createProject = (
+  userId: string,
+  payload: { workspace_id: string; name: string; description?: string; member_user_ids?: string[] }
+) =>
   api<Project>('/api/projects', userId, { method: 'POST', body: JSON.stringify(payload) })
 
 export const patchProject = (
@@ -202,6 +206,18 @@ export const getProjectBoard = (userId: string, projectId: string) =>
 
 export const getProjectTags = (userId: string, projectId: string) =>
   api<ProjectTags>(`/api/projects/${projectId}/tags`, userId)
+
+export const getProjectMembers = (userId: string, projectId: string) =>
+  api<ProjectMembersPage>(`/api/projects/${projectId}/members`, userId)
+
+export const addProjectMember = (
+  userId: string,
+  projectId: string,
+  payload: { user_id: string; role?: string }
+) => api<{ ok: boolean; project_id: string; user_id: string; role: string }>(`/api/projects/${projectId}/members`, userId, { method: 'POST', body: JSON.stringify(payload) })
+
+export const removeProjectMember = (userId: string, projectId: string, memberUserId: string) =>
+  api<{ ok: boolean; project_id: string; user_id: string }>(`/api/projects/${projectId}/members/${memberUserId}/remove`, userId, { method: 'POST' })
 
 export const getProjectRules = (
   userId: string,

@@ -71,6 +71,8 @@ def _build_prompt(ctx: dict) -> str:
         "- If you are in task context, link the note to the task by setting task_id when creating the note.\n"
         "- Mutating tools are allowed for this request.\n"
         "- Apply requested changes via MCP tools directly when possible.\n"
+        "- For recurring schedules, set task.recurring_rule explicitly using canonical format: every:<number><m|h|d> (example: every:1m).\n"
+        "- After scheduling changes, verify by reading the task and confirming scheduled_at_utc + recurring_rule values.\n"
         "- Return action=complete only if this task should be completed; otherwise return action=comment.\n"
         "- summary must state what was actually done.\n"
         "- comment should be concise and optional; use null when no extra runner comment is needed.\n"

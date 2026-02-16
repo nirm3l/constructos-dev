@@ -1494,6 +1494,26 @@ button:disabled {
   padding: 14px;
 }
 
+.drawer-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+}
+
+.drawer-title {
+  margin: 0;
+  min-width: 0;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.drawer-header .action-icon {
+  flex-shrink: 0;
+  align-self: start;
+}
+
 .bottom-tabs {
   position: fixed;
   left: 0;

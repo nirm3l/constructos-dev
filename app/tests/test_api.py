@@ -142,6 +142,54 @@ def test_patch_project_name_and_description(tmp_path):
     assert payload['description'] == '## Overview\n\nUpdated project description.'
 
 
+def test_project_members_assignment_and_user_types(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    owner_id = bootstrap['current_user']['id']
+
+    from shared.models import SessionLocal, User, WorkspaceMember
+
+    second_user_id = '00000000-0000-0000-0000-000000000222'
+    with SessionLocal() as db:
+        if not db.get(User, second_user_id):
+            db.add(User(id=second_user_id, username='alice', full_name='Alice Example', user_type='human'))
+        member = db.query(WorkspaceMember).filter_by(workspace_id=ws_id, user_id=second_user_id).first()
+        if not member:
+            db.add(WorkspaceMember(workspace_id=ws_id, user_id=second_user_id, role='Member'))
+        db.commit()
+
+    created = client.post(
+        '/api/projects',
+        json={
+            'workspace_id': ws_id,
+            'name': 'Members project',
+            'member_user_ids': [second_user_id],
+        },
+    )
+    assert created.status_code == 200
+    project_id = created.json()['id']
+
+    members = client.get(f'/api/projects/{project_id}/members')
+    assert members.status_code == 200
+    payload = members.json()
+    member_ids = {item['user_id'] for item in payload['items']}
+    assert owner_id in member_ids
+    assert second_user_id in member_ids
+    assert payload['total'] >= 2
+
+    removed = client.post(f'/api/projects/{project_id}/members/{second_user_id}/remove')
+    assert removed.status_code == 200
+    members_after = client.get(f'/api/projects/{project_id}/members').json()
+    member_ids_after = {item['user_id'] for item in members_after['items']}
+    assert second_user_id not in member_ids_after
+
+    refreshed = client.get('/api/bootstrap').json()
+    assert refreshed['current_user']['user_type'] in {'human', 'agent'}
+    assert all(u['user_type'] in {'human', 'agent'} for u in refreshed['users'])
+    assert any(pm['project_id'] == project_id for pm in refreshed['project_members'])
+
+
 def test_delete_project_deletes_project_resources(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -510,10 +558,16 @@ def test_agent_service_create_task_infers_workspace_from_project(tmp_path):
     created = service.create_task(
         title='Created via project context',
         project_id=project['id'],
+        task_type='scheduled_instruction',
+        scheduled_instruction='Post current time in comment',
+        scheduled_at_utc='2026-02-16T12:10:53+00:00',
+        schedule_timezone='UTC',
+        recurring_rule='every:1m',
         auth_token=svc_module.MCP_AUTH_TOKEN or None,
     )
     assert created['workspace_id'] == ws_id
     assert created['project_id'] == project['id']
+    assert created['recurring_rule'] == 'every:1m'
 
 
 def test_agent_service_create_task_requires_project_id(tmp_path, monkeypatch):
@@ -631,6 +685,8 @@ def test_scheduled_instruction_task_is_queued_and_processed(tmp_path):
     )
     assert created.status_code == 200
     task_id = created.json()['id']
+    moved = client.patch(f'/api/tasks/{task_id}', json={'status': 'In progress'})
+    assert moved.status_code == 200
 
     from features.agents.runner import queue_due_scheduled_tasks_once, run_queued_automation_once
 
@@ -671,6 +727,8 @@ def test_recurring_scheduled_instruction_rearms_next_run(tmp_path):
     )
     assert created.status_code == 200
     task_id = created.json()['id']
+    moved = client.patch(f'/api/tasks/{task_id}', json={'status': 'In progress'})
+    assert moved.status_code == 200
 
     from features.agents.runner import queue_due_scheduled_tasks_once, run_queued_automation_once
 
@@ -682,6 +740,99 @@ def test_recurring_scheduled_instruction_rearms_next_run(tmp_path):
 
     status = client.get(f'/api/tasks/{task_id}/automation').json()
     assert status['automation_state'] == 'completed'
+    assert status['schedule_state'] == 'idle'
+    assert status['scheduled_at_utc'] is not None
+    assert datetime.fromisoformat(status['scheduled_at_utc']) > datetime.now(timezone.utc)
+
+
+def test_scheduled_instruction_is_not_queued_outside_in_progress(tmp_path):
+    client = build_client(tmp_path)
+    ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
+    project_id = client.get('/api/bootstrap').json()['projects'][0]['id']
+    due_at = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Scheduled todo should not run',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'task_type': 'scheduled_instruction',
+            'scheduled_instruction': 'Leave progress note',
+            'scheduled_at_utc': due_at,
+            'schedule_timezone': 'UTC',
+            'recurring_rule': 'every:1m',
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()['id']
+
+    from features.agents.runner import queue_due_scheduled_tasks_once
+
+    queued = queue_due_scheduled_tasks_once(limit=10)
+    assert queued == 0
+
+    status = client.get(f'/api/tasks/{task_id}/automation').json()
+    assert status['automation_state'] == 'idle'
+    assert status['schedule_state'] == 'idle'
+
+
+def test_recover_stale_recurring_scheduled_task_rearms_schedule(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    due_at = (datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat()
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Stale recurring recovery',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'task_type': 'scheduled_instruction',
+            'scheduled_instruction': 'Leave progress note',
+            'scheduled_at_utc': due_at,
+            'schedule_timezone': 'UTC',
+            'recurring_rule': 'every:1m',
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()['id']
+    moved = client.patch(f'/api/tasks/{task_id}', json={'status': 'In progress'})
+    assert moved.status_code == 200
+
+    from features.agents.runner import recover_stale_running_automation_once
+    from shared.eventing import append_event
+    from shared.models import SessionLocal
+    from shared.settings import AGENT_SYSTEM_USER_ID
+
+    stale_started_at = datetime.now(timezone.utc) - timedelta(minutes=7)
+    stale_started_iso = stale_started_at.isoformat()
+    with SessionLocal() as db:
+        append_event(
+            db,
+            aggregate_type='Task',
+            aggregate_id=task_id,
+            event_type='TaskAutomationStarted',
+            payload={'started_at': stale_started_iso},
+            metadata={'actor_id': AGENT_SYSTEM_USER_ID, 'workspace_id': ws_id, 'project_id': project_id, 'task_id': task_id},
+        )
+        append_event(
+            db,
+            aggregate_type='Task',
+            aggregate_id=task_id,
+            event_type='TaskScheduleStarted',
+            payload={'started_at': stale_started_iso},
+            metadata={'actor_id': AGENT_SYSTEM_USER_ID, 'workspace_id': ws_id, 'project_id': project_id, 'task_id': task_id},
+        )
+        db.commit()
+
+    recovered = recover_stale_running_automation_once(limit=20)
+    assert recovered >= 1
+
+    status = client.get(f'/api/tasks/{task_id}/automation').json()
+    assert status['automation_state'] == 'failed'
     assert status['schedule_state'] == 'idle'
     assert status['scheduled_at_utc'] is not None
     assert datetime.fromisoformat(status['scheduled_at_utc']) > datetime.now(timezone.utc)

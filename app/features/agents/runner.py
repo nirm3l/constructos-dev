@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from .executor import execute_task_automation
 from features.tasks.domain import (
+    EVENT_UPDATED as TASK_EVENT_UPDATED,
     EVENT_COMPLETED as TASK_EVENT_COMPLETED,
     EVENT_AUTOMATION_COMPLETED,
     EVENT_AUTOMATION_REQUESTED,
@@ -28,6 +29,11 @@ from shared.settings import AGENT_EXECUTOR_TIMEOUT_SECONDS
 
 _runner_stop_event = threading.Event()
 _runner_thread: threading.Thread | None = None
+
+
+def _is_schedule_active_status(status: str | None) -> bool:
+    # Scheduled tasks should run only while actively being worked.
+    return str(status or "").strip().lower() == "in progress"
 
 
 def run_queued_automation_once(limit: int = 10) -> int:
@@ -261,6 +267,8 @@ def recover_stale_running_automation_once(limit: int = 20) -> int:
             if not workspace_id:
                 continue
             project_id = state.get("project_id")
+            recurring_rule_raw = (state.get("recurring_rule") or "").strip() or None
+            scheduled_at_raw = state.get("scheduled_at_utc")
             failed_at = to_iso_utc(now)
             error = f"Automation run exceeded stale threshold ({int(stale_after_seconds)}s) and was recovered."
             append_event(
@@ -280,6 +288,38 @@ def recover_stale_running_automation_once(limit: int = 20) -> int:
                     payload={"failed_at": failed_at, "error": error},
                     metadata={"actor_id": AGENT_SYSTEM_USER_ID, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id},
                 )
+                # Recurring schedules should self-heal after stale recovery.
+                if recurring_rule_raw:
+                    update_payload = {"schedule_state": "idle"}
+                    interval = parse_recurring_rule(recurring_rule_raw)
+                    if interval:
+                        try:
+                            base_scheduled_at = (
+                                datetime.fromisoformat(str(scheduled_at_raw))
+                                if scheduled_at_raw
+                                else now
+                            )
+                        except Exception:
+                            base_scheduled_at = now
+                        next_at = next_scheduled_at_utc(
+                            base_scheduled_at_utc=base_scheduled_at,
+                            now_utc=now,
+                            interval=interval,
+                        )
+                        update_payload["scheduled_at_utc"] = to_iso_utc(next_at)
+                    append_event(
+                        db,
+                        aggregate_type="Task",
+                        aggregate_id=task_id,
+                        event_type=TASK_EVENT_UPDATED,
+                        payload=update_payload,
+                        metadata={
+                            "actor_id": AGENT_SYSTEM_USER_ID,
+                            "workspace_id": workspace_id,
+                            "project_id": project_id,
+                            "task_id": task_id,
+                        },
+                    )
             db.commit()
             recovered += 1
             if recovered >= limit:
@@ -308,6 +348,8 @@ def queue_due_scheduled_tasks_once(limit: int = 20) -> int:
         for task in tasks:
             state, _ = rebuild_state(db, "Task", task.id)
             if state.get("task_type") != "scheduled_instruction":
+                continue
+            if not _is_schedule_active_status(state.get("status")):
                 continue
             if state.get("schedule_state", "idle") != "idle":
                 continue

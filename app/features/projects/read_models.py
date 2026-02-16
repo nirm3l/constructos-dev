@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from shared.core import ActivityLog, DEFAULT_STATUSES, Project, ProjectTagIndex, Task, ensure_role, serialize_task, to_iso_utc
+from shared.core import ActivityLog, DEFAULT_STATUSES, Project, ProjectMember, ProjectTagIndex, Task, User, ensure_role, serialize_task, to_iso_utc
 
 
 def get_project_board_read_model(db: Session, user, project_id: str) -> dict:
@@ -43,3 +43,35 @@ def get_project_tags_read_model(db: Session, user, project_id: str) -> dict:
         .order_by(ProjectTagIndex.tag.asc())
     ).scalars().all()
     return {"project_id": project_id, "tags": tags}
+
+
+def get_project_members_read_model(db: Session, user, project_id: str) -> dict:
+    project = db.get(Project, project_id)
+    if not project or project.is_deleted:
+        raise HTTPException(status_code=404, detail="Project not found")
+    ensure_role(db, project.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+
+    members = db.execute(
+        select(ProjectMember, User)
+        .join(User, User.id == ProjectMember.user_id)
+        .where(ProjectMember.project_id == project_id)
+        .order_by(User.full_name.asc())
+    ).all()
+    return {
+        "project_id": project_id,
+        "items": [
+            {
+                "project_id": pm.project_id,
+                "user_id": pm.user_id,
+                "role": pm.role,
+                "user": {
+                    "id": u.id,
+                    "username": u.username,
+                    "full_name": u.full_name,
+                    "user_type": u.user_type,
+                },
+            }
+            for pm, u in members
+        ],
+        "total": len(members),
+    }

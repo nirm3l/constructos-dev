@@ -2,6 +2,7 @@ export type User = {
   id: string
   username: string
   full_name: string
+  user_type: 'human' | 'agent'
   timezone: string
   theme: 'light' | 'dark'
 }
@@ -61,7 +62,8 @@ export type BootstrapPayload = {
   workspaces: Workspace[]
   memberships: Array<{ workspace_id: string; role: string }>
   projects: Project[]
-  users: Array<{ id: string; username: string; full_name: string }>
+  users: Array<{ id: string; username: string; full_name: string; user_type: 'human' | 'agent' }>
+  project_members: Array<{ project_id: string; user_id: string; role: string }>
   notifications: Notification[]
   saved_views: Array<{
     id: string
@@ -121,6 +123,24 @@ export type ProjectBoard = {
 export type ProjectTags = {
   project_id: string
   tags: string[]
+}
+
+export type ProjectMember = {
+  project_id: string
+  user_id: string
+  role: string
+  user: {
+    id: string
+    username: string
+    full_name: string
+    user_type: 'human' | 'agent'
+  }
+}
+
+export type ProjectMembersPage = {
+  project_id: string
+  items: ProjectMember[]
+  total: number
 }
 
 export type ProjectRule = {

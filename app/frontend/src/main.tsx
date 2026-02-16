@@ -2,6 +2,7 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider, useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  addProjectMember,
   addComment,
   archiveTask,
   completeTask,
@@ -33,6 +34,7 @@ import {
   restoreNote,
   restoreTask,
   reopenTask,
+  removeProjectMember,
   runAgentChat,
   runTaskWithCodex,
   unpinNote,
@@ -262,6 +264,8 @@ function App() {
   const [showProjectEditForm, setShowProjectEditForm] = React.useState(false)
   const [editProjectName, setEditProjectName] = React.useState('')
   const [editProjectDescription, setEditProjectDescription] = React.useState('')
+  const [createProjectMemberIds, setCreateProjectMemberIds] = React.useState<string[]>([])
+  const [editProjectMemberIds, setEditProjectMemberIds] = React.useState<string[]>([])
   const [editProjectDescriptionView, setEditProjectDescriptionView] = React.useState<'write' | 'preview'>('write')
   const [projectRuleQ, setProjectRuleQ] = React.useState('')
   const [selectedProjectRuleId, setSelectedProjectRuleId] = React.useState<string | null>(null)
@@ -417,6 +421,17 @@ function App() {
 
   const workspaceId = bootstrap.data?.workspaces[0]?.id ?? ''
   const userTimezone = bootstrap.data?.current_user?.timezone
+  const workspaceUsers = React.useMemo(
+    () => [...(bootstrap.data?.users ?? [])].sort((a, b) => a.full_name.localeCompare(b.full_name)),
+    [bootstrap.data?.users]
+  )
+  const projectMemberCounts = React.useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const pm of bootstrap.data?.project_members ?? []) {
+      counts[pm.project_id] = (counts[pm.project_id] ?? 0) + 1
+    }
+    return counts
+  }, [bootstrap.data?.project_members])
   const selectedProject = React.useMemo(
     () => bootstrap.data?.projects.find((p) => p.id === selectedProjectId) ?? null,
     [bootstrap.data?.projects, selectedProjectId]
@@ -427,6 +442,21 @@ function App() {
     const validSelected = Boolean(selectedProjectId && (bootstrap.data?.projects ?? []).some((p) => p.id === selectedProjectId))
     if ((!selectedProjectId || !validSelected) && firstProjectId) setSelectedProjectId(firstProjectId)
   }, [bootstrap.data, selectedProjectId])
+
+  React.useEffect(() => {
+    if (!showProjectCreateForm) return
+    if (createProjectMemberIds.length > 0) return
+    if (!bootstrap.data?.current_user?.id) return
+    setCreateProjectMemberIds([bootstrap.data.current_user.id])
+  }, [showProjectCreateForm, createProjectMemberIds.length, bootstrap.data?.current_user?.id])
+
+  React.useEffect(() => {
+    if (!showProjectEditForm || !selectedProjectId) return
+    const ids = (bootstrap.data?.project_members ?? [])
+      .filter((pm) => pm.project_id === selectedProjectId)
+      .map((pm) => pm.user_id)
+    setEditProjectMemberIds(Array.from(new Set(ids)))
+  }, [showProjectEditForm, selectedProjectId, bootstrap.data?.project_members])
 
   const taskParams = React.useMemo(() => {
     if (!selectedProjectId) return null
@@ -697,6 +727,16 @@ function App() {
     },
     [quickTaskTags]
   )
+  const toggleCreateProjectMember = React.useCallback((userIdToToggle: string) => {
+    const id = String(userIdToToggle || '').trim()
+    if (!id) return
+    setCreateProjectMemberIds((prev) => (prev.includes(id) ? prev.filter((v) => v !== id) : [...prev, id]))
+  }, [])
+  const toggleEditProjectMember = React.useCallback((userIdToToggle: string) => {
+    const id = String(userIdToToggle || '').trim()
+    if (!id) return
+    setEditProjectMemberIds((prev) => (prev.includes(id) ? prev.filter((v) => v !== id) : [...prev, id]))
+  }, [])
 
   const filteredTaskTags = React.useMemo(() => {
     const q = taskTagPickerQuery.trim().toLowerCase()
@@ -915,6 +955,7 @@ function App() {
         workspace_id: workspaceId,
         name: projectName.trim(),
         description: projectDescription,
+        member_user_ids: Array.from(new Set(createProjectMemberIds)),
       }),
     onSuccess: async (createdProject) => {
       setUiError(null)
@@ -936,6 +977,7 @@ function App() {
       setProjectName('')
       setProjectDescription('')
       setProjectDescriptionView('write')
+      setCreateProjectMemberIds([])
       setDraftProjectRules([])
       setSelectedDraftProjectRuleId(null)
       setDraftProjectRuleTitle('')
@@ -948,11 +990,32 @@ function App() {
   })
 
   const patchProjectMutation = useMutation({
-    mutationFn: () =>
-      patchProject(userId, selectedProjectId, {
+    mutationFn: async () => {
+      if (!selectedProjectId) throw new Error('No project selected')
+      await patchProject(userId, selectedProjectId, {
         name: editProjectName.trim(),
         description: editProjectDescription,
-      }),
+      })
+      const currentMemberIds = Array.from(
+        new Set(
+          (bootstrap.data?.project_members ?? [])
+            .filter((pm) => pm.project_id === selectedProjectId)
+            .map((pm) => pm.user_id)
+        )
+      )
+      const desiredMemberIds = Array.from(new Set(editProjectMemberIds.filter(Boolean)))
+      const currentSet = new Set(currentMemberIds)
+      const desiredSet = new Set(desiredMemberIds)
+      const toAdd = desiredMemberIds.filter((uid) => !currentSet.has(uid))
+      const toRemove = currentMemberIds.filter((uid) => !desiredSet.has(uid))
+      if (toAdd.length > 0 || toRemove.length > 0) {
+        await Promise.all([
+          ...toAdd.map((uid) => addProjectMember(userId, selectedProjectId, { user_id: uid })),
+          ...toRemove.map((uid) => removeProjectMember(userId, selectedProjectId, uid)),
+        ])
+      }
+      return { ok: true }
+    },
     onSuccess: async () => {
       setUiError(null)
       await invalidateAll()
@@ -1727,6 +1790,26 @@ function App() {
               ) : (
                 <MarkdownView value={projectDescription} />
               )}
+              <div style={{ marginTop: 10 }}>
+                <div className="meta" style={{ marginBottom: 6 }}>Assign users to project</div>
+                <div className="row wrap" style={{ gap: 6 }}>
+                  {workspaceUsers.map((u) => {
+                    const selected = createProjectMemberIds.includes(u.id)
+                    return (
+                      <button
+                        key={`create-member-${u.id}`}
+                        type="button"
+                        className={`status-chip ${selected ? 'active' : ''}`}
+                        onClick={() => toggleCreateProjectMember(u.id)}
+                        aria-pressed={selected}
+                        title={`${u.full_name} (${u.user_type})`}
+                      >
+                        {u.full_name} · {u.user_type}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
             </div>
           )}
           {showProjectEditForm && selectedProject && (
@@ -1773,6 +1856,26 @@ function App() {
               ) : (
                 <MarkdownView value={editProjectDescription} />
               )}
+              <div style={{ marginTop: 10 }}>
+                <div className="meta" style={{ marginBottom: 6 }}>Assigned users</div>
+                <div className="row wrap" style={{ gap: 6 }}>
+                  {workspaceUsers.map((u) => {
+                    const selected = editProjectMemberIds.includes(u.id)
+                    return (
+                      <button
+                        key={`edit-member-${u.id}`}
+                        type="button"
+                        className={`status-chip ${selected ? 'active' : ''}`}
+                        onClick={() => toggleEditProjectMember(u.id)}
+                        aria-pressed={selected}
+                        title={`${u.full_name} (${u.user_type})`}
+                      >
+                        {u.full_name} · {u.user_type}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
             </div>
           )}
           {(showProjectCreateForm || (selectedProject && showProjectEditForm)) && (
@@ -2044,7 +2147,7 @@ function App() {
                     <span className="meta">Status: {project.status || 'active'}</span>
                     <div className="meta">{project.description || '(no description)'}</div>
                     <div className="meta">
-                      Tasks: {taskCount ?? '...'} | Notes: {noteCount ?? '...'} | Rules: {ruleCount ?? '...'}
+                      Tasks: {taskCount ?? '...'} | Notes: {noteCount ?? '...'} | Rules: {ruleCount ?? '...'} | Members: {projectMemberCounts[project.id] ?? 0}
                     </div>
                   </div>
                   <button
@@ -2475,13 +2578,14 @@ function App() {
 	      {selectedTask && (
 	        <div className="drawer open" onClick={() => setSelectedTaskId(null)}>
 	          <div className="drawer-body" onClick={(e) => e.stopPropagation()}>
-            <div className="row wrap" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
-              <h3 style={{ margin: 0 }}>{selectedTask.title}</h3>
+            <div className="drawer-header">
+              <h3 className="drawer-title">{selectedTask.title}</h3>
               <button className="action-icon" onClick={() => setSelectedTaskId(null)} title="Close" aria-label="Close">
                 <Icon path="M6 6l12 12M18 6 6 18" />
               </button>
             </div>
             <div className="meta" style={{ marginTop: 4 }}>Created: {toUserDateTime(selectedTask.created_at, userTimezone)}</div>
+            <div className="meta">Task ID: <code>{selectedTask.id}</code></div>
             <div className="row wrap" style={{ marginTop: 8, marginBottom: 10 }}>
               <button
                 className="pill"

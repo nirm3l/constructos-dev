@@ -31,6 +31,7 @@ class User(Base, TimeMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     username: Mapped[str] = mapped_column(String(64), unique=True)
     full_name: Mapped[str] = mapped_column(String(128))
+    user_type: Mapped[str] = mapped_column(String(16), default="human")
     theme: Mapped[str] = mapped_column(String(16), default="light")
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")
     notifications_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -61,6 +62,17 @@ class Project(Base, TimeMixin):
     status: Mapped[str] = mapped_column(String(16), default="Active")
     custom_statuses: Mapped[str] = mapped_column(Text, default='["To do", "In progress", "Done"]')
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class ProjectMember(Base, TimeMixin):
+    __tablename__ = "project_members"
+    __table_args__ = (UniqueConstraint("project_id", "user_id", name="ux_project_members_project_user"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    role: Mapped[str] = mapped_column(String(16), default="Contributor")
 
 
 class Task(Base, TimeMixin):
