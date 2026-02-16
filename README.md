@@ -1,4 +1,4 @@
-# m4tr1x (CQRS + Event Sourcing + KurrentDB)
+# m4tr1x (CQRS + Event Sourcing + KurrentDB + PostgreSQL Projections)
 
 ## Backend Architecture Status
 Short answer: mostly yes, with caveats.
@@ -26,13 +26,14 @@ What still needs improvement:
 - Event store: KurrentDB/EventStoreDB
 - Frontend: React + TypeScript + TanStack Query
 - Runtime: Docker Compose
+- Projection DB: PostgreSQL (`DATABASE_URL`)
 
 ## Project Layout
 - `app/main.py`: app bootstrap and router wiring
 - `app/features/*`: vertical slices by bounded area
 - `app/shared/*`: cross-cutting infrastructure (eventing, deps, serializers, bootstrap)
 - `app/frontend/*`: React app
-- `docker-compose.yml`: local stack (app + kurrentdb)
+- `docker-compose.yml`: local stack (app + postgres + kurrentdb)
 
 ## Command and Query Model
 ### Commands

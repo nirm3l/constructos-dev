@@ -1,4 +1,22 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_DB: task_management
+      POSTGRES_USER: m4tr1x
+      POSTGRES_PASSWORD: m4tr1x
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U m4tr1x -d task_management"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
   kurrentdb:
     image: eventstore/eventstore:24.10.0-jammy
     container_name: kurrentdb
@@ -20,9 +38,11 @@ services:
     build: ./app
     container_name: task-app
     depends_on:
+      - postgres
       - kurrentdb
       - mcp-tools-ro
     environment:
+      DATABASE_URL: postgresql+psycopg://m4tr1x:m4tr1x@postgres:5432/task_management
       EVENTSTORE_URI: esdb://kurrentdb:2113?tls=false
       AGENT_RUNNER_ENABLED: "true"
       AGENT_RUNNER_INTERVAL_SECONDS: "3"
@@ -35,7 +55,6 @@ services:
       MCP_AUTH_TOKEN: "dev-mcp-token"
       MCP_ALLOWED_WORKSPACE_IDS: "10000000-0000-0000-0000-000000000001"
     volumes:
-      - ./data:/data
       - /home/m4tr1x/.codex/auth.json:/root/.codex/auth.json:ro
     ports:
       - "8080:8000"
@@ -45,11 +64,12 @@ services:
     build: ./app
     container_name: mcp-tools
     depends_on:
+      - postgres
       - kurrentdb
     command: ["python", "-m", "features.agents.mcp_server"]
     environment:
+      DATABASE_URL: postgresql+psycopg://m4tr1x:m4tr1x@postgres:5432/task_management
       EVENTSTORE_URI: esdb://kurrentdb:2113?tls=false
-      DB_PATH: /data/app.db
       MCP_SERVER_TRANSPORT: streamable-http
       MCP_SERVER_HOST: 0.0.0.0
       MCP_SERVER_PORT: "8090"
@@ -72,19 +92,18 @@ services:
       MCP_EMAIL_ALLOWED_DOMAINS: "${MCP_EMAIL_ALLOWED_DOMAINS:-}"
     ports:
       - "8091:8090"
-    volumes:
-      - ./data:/data
     restart: unless-stopped
 
   mcp-tools-ro:
     build: ./app
     container_name: mcp-tools-ro
     depends_on:
+      - postgres
       - kurrentdb
     command: ["python", "-m", "features.agents.mcp_server"]
     environment:
+      DATABASE_URL: postgresql+psycopg://m4tr1x:m4tr1x@postgres:5432/task_management
       EVENTSTORE_URI: esdb://kurrentdb:2113?tls=false
-      DB_PATH: /data/app.db
       MCP_SERVER_TRANSPORT: streamable-http
       MCP_SERVER_HOST: 0.0.0.0
       MCP_SERVER_PORT: "8090"
@@ -97,9 +116,8 @@ services:
       MCP_ACTOR_USER_ID: "00000000-0000-0000-0000-000000000099"
       MCP_DEFAULT_WORKSPACE_ID: "10000000-0000-0000-0000-000000000001"
       MCP_ALLOWED_WORKSPACE_IDS: "10000000-0000-0000-0000-000000000001"
-    volumes:
-      - ./data:/data
     restart: unless-stopped
 
 volumes:
+  postgres-data:
   kurrent-data:

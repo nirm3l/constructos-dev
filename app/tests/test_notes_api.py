@@ -10,7 +10,8 @@ def build_client(tmp_path: Path) -> TestClient:
     from importlib import reload
 
     db_file = tmp_path / "test.db"
-    os.environ["DB_PATH"] = str(db_file)
+    os.environ["DATABASE_URL"] = f"sqlite:///{db_file}"
+    os.environ.pop("DB_PATH", None)
     os.environ["EVENTSTORE_URI"] = ""
     import main
 

@@ -16,6 +16,5 @@ RUN npm install -g @openai/codex
 COPY . /app
 COPY --from=frontend-builder /frontend/dist /app/static
 
-ENV DB_PATH=/data/app.db
 EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

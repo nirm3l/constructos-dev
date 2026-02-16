@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, inspect, select, text
 from sqlalchemy.orm import Session
 
 from features.bootstrap.read_models import bootstrap_payload_read_model
@@ -26,6 +26,7 @@ from .settings import (
     BOOTSTRAP_USERNAME,
     BOOTSTRAP_WORKSPACE_ID,
     DB_PATH,
+    DATABASE_URL,
     DEFAULT_USER_ID,
     DEFAULT_STATUSES,
 )
@@ -56,18 +57,14 @@ def ensure_system_users(db: Session):
 
 
 def ensure_task_table_columns(db: Session):
-    # Lightweight SQLite migration path for new task scheduling fields.
-    existing = {
-        row[1]
-        for row in db.execute(text("PRAGMA table_info(tasks)")).fetchall()
-    }
+    existing = {column["name"] for column in inspect(db.bind).get_columns("tasks")}
     required_columns = {
         "task_type": "ALTER TABLE tasks ADD COLUMN task_type VARCHAR(32) DEFAULT 'manual'",
         "scheduled_instruction": "ALTER TABLE tasks ADD COLUMN scheduled_instruction TEXT",
-        "scheduled_at_utc": "ALTER TABLE tasks ADD COLUMN scheduled_at_utc DATETIME",
+        "scheduled_at_utc": "ALTER TABLE tasks ADD COLUMN scheduled_at_utc TIMESTAMP WITH TIME ZONE",
         "schedule_timezone": "ALTER TABLE tasks ADD COLUMN schedule_timezone VARCHAR(64)",
         "schedule_state": "ALTER TABLE tasks ADD COLUMN schedule_state VARCHAR(16) DEFAULT 'idle'",
-        "last_schedule_run_at": "ALTER TABLE tasks ADD COLUMN last_schedule_run_at DATETIME",
+        "last_schedule_run_at": "ALTER TABLE tasks ADD COLUMN last_schedule_run_at TIMESTAMP WITH TIME ZONE",
         "last_schedule_error": "ALTER TABLE tasks ADD COLUMN last_schedule_error TEXT",
     }
     for column, ddl in required_columns.items():
@@ -77,17 +74,14 @@ def ensure_task_table_columns(db: Session):
 
 
 def ensure_saved_view_table_columns(db: Session):
-    existing = {
-        row[1]
-        for row in db.execute(text("PRAGMA table_info(saved_views)")).fetchall()
-    }
+    existing = {column["name"] for column in inspect(db.bind).get_columns("saved_views")}
     if "project_id" not in existing:
         db.execute(text("ALTER TABLE saved_views ADD COLUMN project_id VARCHAR(36)"))
     db.commit()
 
 
 def ensure_task_comment_table_columns(db: Session):
-    existing = {row[1] for row in db.execute(text("PRAGMA table_info(task_comments)")).fetchall()}
+    existing = {column["name"] for column in inspect(db.bind).get_columns("task_comments")}
     if "event_version" not in existing:
         db.execute(text("ALTER TABLE task_comments ADD COLUMN event_version INTEGER"))
     db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_task_comments_task_event_version ON task_comments(task_id, event_version)"))
@@ -181,14 +175,15 @@ def bootstrap_data():
         db.commit()
 
         # Repair drift: if Kurrent was reset but app.db persisted, backfill streams.
-        _backfill_project_streams_from_sqlite(db)
-        _backfill_task_streams_from_sqlite(db)
+        _backfill_project_streams_from_read_model(db)
+        _backfill_task_streams_from_read_model(db)
         _rebuild_project_tag_index(db)
         db.commit()
 
 
 def startup_bootstrap():
-    os.makedirs(Path(DB_PATH).parent, exist_ok=True)
+    if DATABASE_URL.startswith("sqlite"):
+        os.makedirs(Path(DB_PATH).parent, exist_ok=True)
     last_exc: Exception | None = None
     for _ in range(20):
         try:
@@ -207,7 +202,7 @@ def bootstrap_payload(db: Session, user: User) -> dict[str, Any]:
     return bootstrap_payload_read_model(db, user)
 
 
-def _backfill_project_streams_from_sqlite(db: Session) -> None:
+def _backfill_project_streams_from_read_model(db: Session) -> None:
     """
     If EventStore/Kurrent was reset but app.db is persisted, we can end up with
     read-model rows that have no corresponding event streams. That breaks edits
@@ -240,7 +235,7 @@ def _backfill_project_streams_from_sqlite(db: Session) -> None:
         )
 
 
-def _backfill_task_streams_from_sqlite(db: Session) -> None:
+def _backfill_task_streams_from_read_model(db: Session) -> None:
     if get_kurrent_client() is None:
         return
 

@@ -704,11 +704,19 @@ def project_event(db: Session, ev: EventEnvelope):
     workspace_id = m.get("workspace_id")
     actor_id = m.get("actor_id")
     if workspace_id and actor_id:
+        # Ensure projected entities are persisted before writing FK-bound activity rows.
+        db.flush()
+        project_id = m.get("project_id")
+        task_id = m.get("task_id")
+        if project_id and db.get(Project, project_id) is None:
+            project_id = None
+        if task_id and db.get(Task, task_id) is None:
+            task_id = None
         db.add(
             ActivityLog(
                 workspace_id=workspace_id,
-                project_id=m.get("project_id"),
-                task_id=m.get("task_id"),
+                project_id=project_id,
+                task_id=task_id,
                 actor_id=actor_id,
                 action=ev.event_type,
                 details=json.dumps(p),

@@ -71,7 +71,7 @@ from .serializers import (
     serialize_task,
     to_iso_utc,
 )
-from .settings import DB_PATH, DEFAULT_STATUSES, EVENTSTORE_URI
+from .settings import DEFAULT_STATUSES, EVENTSTORE_URI
 from .observability import snapshot as metrics_snapshot
 from features.notifications.domain import (
     EVENT_CREATED as NOTIFICATION_EVENT_CREATED,

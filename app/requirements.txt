@@ -3,6 +3,7 @@ eventsourcing-kurrentdb==1.2.2
 fastapi==0.128.5
 uvicorn[standard]==0.38.0
 SQLAlchemy==2.0.46
+psycopg[binary]==3.2.12
 pydantic==2.12.5
 python-multipart==0.0.22
 pytest==9.0.2

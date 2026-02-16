@@ -25,7 +25,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 DB_PATH = os.getenv("DB_PATH", "/data/app.db")
-DATABASE_URL = f"sqlite:///{DB_PATH}"
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip() or f"sqlite:///{DB_PATH}"
 SNAPSHOT_EVERY = int(os.getenv("SNAPSHOT_EVERY", "20"))
 EVENTSTORE_URI = os.getenv("EVENTSTORE_URI", "").strip()
 DEFAULT_STATUSES = ["To do", "In progress", "Done"]
