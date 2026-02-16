@@ -1124,6 +1124,36 @@ button:disabled {
   background: color-mix(in srgb, var(--brand), var(--surface) 88%);
 }
 
+.tag-filter-chip {
+  border-width: 1.5px;
+  border-color: color-mix(in srgb, var(--line), var(--brand) 20%);
+  color: color-mix(in srgb, var(--text), var(--muted) 18%);
+  font-weight: 700;
+  transition: border-color 0.16s ease, background-color 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.tag-filter-chip:hover {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 35%);
+}
+
+.tag-filter-chip.active {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--brand), white 20%),
+    color-mix(in srgb, var(--brand), var(--surface) 12%)
+  );
+  border-color: color-mix(in srgb, var(--brand-strong), var(--line) 20%);
+  color: #f7fffb;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand), transparent 78%);
+}
+
+.tag-filter-chip.active::before {
+  content: "✓";
+  margin-right: 5px;
+  font-size: 11px;
+  font-weight: 900;
+}
+
 .task-item {
   border: 1px solid color-mix(in srgb, var(--line), transparent 5%);
   border-radius: 14px;
@@ -1262,9 +1292,27 @@ button:disabled {
   min-height: 1em; /* keep toolbar height stable when empty */
 }
 
+.codex-chat-context {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  max-width: 100%;
+}
+
+.codex-chat-context-label {
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.codex-chat-context-select {
+  width: min(280px, 100%);
+  min-width: 0;
+}
+
 .quickadd-form {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr) auto;
   gap: 10px;
   align-items: end;
 }
@@ -1275,6 +1323,23 @@ button:disabled {
 
 .quickadd-form select {
   min-width: 0;
+}
+
+.quickadd-project-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.quickadd-project-label {
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.quickadd-project-select {
+  min-width: 0;
+  width: min(210px, 100%);
 }
 
 .quickadd-due {
@@ -1318,7 +1383,40 @@ button:disabled {
 
 @media (max-width: 560px) {
   .quickadd-form {
-    gap: 8px;
+    gap: 6px;
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1fr) auto;
+  }
+
+  .quickadd-project-field {
+    gap: 6px;
+  }
+
+  .quickadd-project-label {
+    display: none;
+  }
+
+  .quickadd-project-select {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .quickadd-due .due-input {
+    font-size: 13px;
+    padding-left: 10px;
+    padding-right: 8px;
+  }
+
+  .quickadd-due-placeholder {
+    left: 10px;
+  }
+
+  .codex-chat-context {
+    display: flex;
+    width: 100%;
+  }
+
+  .codex-chat-context-select {
+    width: 100%;
   }
 }
 
@@ -1522,6 +1620,22 @@ button:disabled {
 [data-theme="dark"] .status-chip {
   background: #1b2f54;
   border-color: #35558d;
+}
+
+[data-theme="dark"] .tag-filter-chip {
+  border-color: color-mix(in srgb, var(--line), var(--brand) 35%);
+  color: color-mix(in srgb, var(--text), #c8d9f5 16%);
+}
+
+[data-theme="dark"] .tag-filter-chip.active {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--brand), #0b1811 38%),
+    color-mix(in srgb, var(--brand-strong), #09110d 28%)
+  );
+  border-color: color-mix(in srgb, var(--brand), #d4ffe4 22%);
+  color: #ecfff4;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand), transparent 74%);
 }
 
 [data-theme="dark"] .action-icon {

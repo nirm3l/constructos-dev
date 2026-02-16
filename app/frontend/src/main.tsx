@@ -286,6 +286,7 @@ function App() {
   const [expandedCommentIds, setExpandedCommentIds] = React.useState<Set<string>>(new Set())
   const [automationInstruction, setAutomationInstruction] = React.useState('')
   const [showCodexChat, setShowCodexChat] = React.useState(false)
+  const [codexChatProjectId, setCodexChatProjectId] = React.useState<string>('')
   const [codexChatInstruction, setCodexChatInstruction] = React.useState('')
   const [codexChatTurns, setCodexChatTurns] = React.useState<ChatTurn[]>([])
   const [codexChatSessionId] = React.useState<string>(() => globalThis.crypto?.randomUUID?.() ?? `chat-${Date.now()}`)
@@ -410,8 +411,7 @@ function App() {
     const firstProjectId = bootstrap.data?.projects[0]?.id ?? ''
     const validSelected = Boolean(selectedProjectId && (bootstrap.data?.projects ?? []).some((p) => p.id === selectedProjectId))
     if ((!selectedProjectId || !validSelected) && firstProjectId) setSelectedProjectId(firstProjectId)
-    if (!quickProjectId && firstProjectId) setQuickProjectId(firstProjectId)
-  }, [bootstrap.data, quickProjectId, selectedProjectId])
+  }, [bootstrap.data, selectedProjectId])
 
   const taskParams = React.useMemo(() => {
     if (!selectedProjectId) return null
@@ -1050,10 +1050,10 @@ function App() {
   })
 
   const runAgentChatMutation = useMutation({
-    mutationFn: (payload: { instruction: string; history: Array<{ role: 'user' | 'assistant'; content: string }> }) =>
+    mutationFn: (payload: { instruction: string; history: Array<{ role: 'user' | 'assistant'; content: string }>; projectId: string | null }) =>
       runAgentChat(userId, {
         workspace_id: workspaceId,
-        project_id: selectedProjectId,
+        project_id: payload.projectId,
         session_id: codexChatSessionId,
         instruction: payload.instruction,
         history: payload.history,
@@ -1256,23 +1256,31 @@ function App() {
 	                className="quickadd-title"
 	                value={taskTitle}
 	                onChange={(e) => setTaskTitle(e.target.value)}
-	                onKeyDown={(e) => {
-		                  if (e.key === 'Enter' && !e.shiftKey) {
-		                    const title = taskTitle.trim()
-		                    if (!title || !quickProjectId || createTaskMutation.isPending) return
-		                    createTaskMutation.mutate()
-		                  }
-	                }}
-	                placeholder="Task title"
-	                autoFocus
-	              />
-		              <select value={quickProjectId} onChange={(e) => setQuickProjectId(e.target.value)}>
-		                {bootstrap.data.projects.map((p) => (
-	                  <option key={p.id} value={p.id}>
-	                    {p.name}
-	                  </option>
-	                ))}
-	              </select>
+		                onKeyDown={(e) => {
+			                  if (e.key === 'Enter' && !e.shiftKey) {
+			                    const title = taskTitle.trim()
+			                    if (!title || !quickProjectId || createTaskMutation.isPending) return
+			                    createTaskMutation.mutate()
+			                  }
+		                }}
+		                placeholder="Task title"
+		                autoFocus
+		              />
+                <div className="quickadd-project-field">
+                  <span className="meta quickadd-project-label">Project</span>
+			              <select
+                    className="quickadd-project-select"
+                    value={quickProjectId}
+                    onChange={(e) => setQuickProjectId(e.target.value)}
+                    aria-label="Project"
+                  >
+			                  {(bootstrap.data?.projects ?? []).map((p) => (
+		                  <option key={p.id} value={p.id}>
+		                    {p.name}
+		                  </option>
+		                ))}
+			              </select>
+                </div>
 	              <div className={`quickadd-due ${quickDueDate ? 'has-value' : ''} ${quickDueDateFocused ? 'focused' : ''}`}>
 	                <span className="quickadd-due-placeholder">Due Date</span>
 	                <input
@@ -1286,12 +1294,12 @@ function App() {
 	                  aria-label="Due date"
 	                />
 	              </div>
-		              <button
-		                className="action-icon primary quickadd-create"
-			                disabled={!taskTitle.trim() || !quickProjectId || createTaskMutation.isPending}
-		                onClick={() => createTaskMutation.mutate()}
-		                title="Create task"
-		                aria-label="Create task"
+			              <button
+			                className="action-icon primary quickadd-create"
+				                disabled={!taskTitle.trim() || !quickProjectId || createTaskMutation.isPending}
+			                onClick={() => createTaskMutation.mutate()}
+			                title="Create task"
+			                aria-label="Create task"
 		              >
 		                <Icon path="M12 5v14M5 12h14" />
 		              </button>
@@ -1705,8 +1713,9 @@ function App() {
                         {noteTagSuggestions.slice(0, 8).map((tag) => (
                           <button
                             key={`note-filter-${tag}`}
-                            className={`status-chip ${noteTags.includes(tag.toLowerCase()) ? 'active' : ''}`}
+                            className={`status-chip tag-filter-chip ${noteTags.includes(tag.toLowerCase()) ? 'active' : ''}`}
                             onClick={() => toggleNoteFilterTag(tag)}
+                            aria-pressed={noteTags.includes(tag.toLowerCase())}
                           >
                             #{tag}
                           </button>
@@ -1945,8 +1954,9 @@ function App() {
               {taskTagSuggestions.slice(0, 10).map((tag) => (
                 <button
                   key={`search-tag-${tag}`}
-                  className={`status-chip ${searchTags.includes(tag.toLowerCase()) ? 'active' : ''}`}
+                  className={`status-chip tag-filter-chip ${searchTags.includes(tag.toLowerCase()) ? 'active' : ''}`}
                   onClick={() => toggleSearchTag(tag)}
+                  aria-pressed={searchTags.includes(tag.toLowerCase())}
                 >
                   #{tag}
                 </button>
@@ -2062,21 +2072,27 @@ function App() {
         </button>
       </nav>
 
-	      <button
-	        className={`fab fab-task ${fabHidden ? 'fab-hide' : ''}`}
-	        onClick={() => setShowQuickAdd(true)}
-	        title="New Task"
-	        aria-label="New Task"
-	      >
+		      <button
+		        className={`fab fab-task ${fabHidden ? 'fab-hide' : ''}`}
+		        onClick={() => {
+              setQuickProjectId(selectedProjectId || bootstrap.data?.projects?.[0]?.id || '')
+              setShowQuickAdd(true)
+            }}
+		        title="New Task"
+		        aria-label="New Task"
+		      >
 	        <Icon path="M12 5v14M5 12h14" />
 	      </button>
 	
-	      <button
-	        className={`fab ${isCodexChatRunning ? 'busy' : ''} ${fabHidden ? 'fab-hide' : ''}`}
-	        onClick={() => setShowCodexChat(true)}
-	        title="Codex Chat"
-	        aria-label="Codex Chat"
-	      >
+		      <button
+		        className={`fab ${isCodexChatRunning ? 'busy' : ''} ${fabHidden ? 'fab-hide' : ''}`}
+		        onClick={() => {
+              setCodexChatProjectId(selectedProjectId || '')
+              setShowCodexChat(true)
+            }}
+		        title="Codex Chat"
+		        aria-label="Codex Chat"
+		      >
 	        <Icon path="M4 4h16v11H7l-3 3V4z" />
 	        <span>{isCodexChatRunning ? `Chat (${codexChatElapsedSeconds}s)` : 'Chat'}</span>
 	      </button>
@@ -2493,7 +2509,26 @@ function App() {
                 <Icon path="M6 6l12 12M18 6 6 18" />
               </button>
             </div>
-            <p className="meta">General instruction mode. Session: <code>{codexChatSessionId}</code></p>
+            <p className="meta">
+              General instruction mode. Session: <code>{codexChatSessionId}</code>
+            </p>
+            <div className="codex-chat-context">
+              <label className="meta codex-chat-context-label" htmlFor="codex-chat-project-context">Project</label>
+              <select
+                className="codex-chat-context-select"
+                id="codex-chat-project-context"
+                value={codexChatProjectId}
+                onChange={(e) => setCodexChatProjectId(e.target.value)}
+                disabled={runAgentChatMutation.isPending}
+              >
+                <option value="">No project</option>
+                {(bootstrap.data?.projects ?? []).map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </div>
             <div className="codex-chat-history" ref={codexChatHistoryRef}>
               {codexChatTurns.length === 0 && (
                 <div className="meta">Chat is empty. Send your first instruction.</div>
@@ -2545,8 +2580,12 @@ function App() {
                   setIsCodexChatRunning(true)
                   setCodexChatRunStartedAt(Date.now())
                   setCodexChatElapsedSeconds(0)
-                  runAgentChatMutation.mutate({ instruction, history })
-                }}
+	                  runAgentChatMutation.mutate({
+                      instruction,
+                      history,
+                      projectId: codexChatProjectId.trim() ? codexChatProjectId : null,
+                    })
+	                }}
                 disabled={runAgentChatMutation.isPending || !codexChatInstruction.trim() || !workspaceId}
                 title="Send to Codex"
                 aria-label="Send to Codex"
