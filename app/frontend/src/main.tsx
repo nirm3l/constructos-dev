@@ -43,7 +43,7 @@ import {
   unpinNote,
   archiveNote
 } from './api'
-import type { AttachmentRef, ExternalRef, Notification, Note, ProjectRule, Task, TaskAutomationStatus } from './types'
+import type { AttachmentRef, ExternalRef, Notification, Note, ProjectRule, Task, TaskAutomationStatus, TaskComment } from './types'
 import { MarkdownView } from './markdown/MarkdownView'
 import './styles.css'
 
@@ -234,6 +234,36 @@ function Icon({ path }: { path: string }) {
   )
 }
 
+function MarkdownModeToggle({
+  view,
+  onChange,
+  ariaLabel,
+}: {
+  view: 'write' | 'preview'
+  onChange: (next: 'write' | 'preview') => void
+  ariaLabel: string
+}) {
+  return (
+    <div className="seg md-mode-toggle" role="tablist" aria-label={ariaLabel}>
+      <button
+        className={`seg-btn ${view === 'write' ? 'active' : ''}`}
+        onClick={() => onChange('write')}
+        type="button"
+      >
+        Edit
+      </button>
+      <button
+        className={`seg-btn ${view === 'preview' ? 'active' : ''}`}
+        onClick={() => onChange('preview')}
+        type="button"
+      >
+        Preview
+      </button>
+      <span className="md-chip">MD</span>
+    </div>
+  )
+}
+
 function parseCommaTags(raw: string): string[] {
   const seen = new Set<string>()
   const out: string[] = []
@@ -316,13 +346,13 @@ function ExternalRefList({
 }) {
   if (!refs || refs.length === 0) return null
   return (
-    <div className="row wrap" style={{ gap: 6 }}>
+    <div className="resource-ref-list">
       {refs.map((ref, idx) => {
         const label = ref.title || ref.url
         return (
-          <span key={`${ref.url}-${idx}`} className="row" style={{ gap: 6 }}>
+          <span key={`${ref.url}-${idx}`} className="resource-ref-item">
             <a
-              className="status-chip"
+              className="status-chip resource-ref-chip"
               href={ref.url}
               target="_blank"
               rel="noreferrer"
@@ -418,11 +448,11 @@ function AttachmentRefList({
 }) {
   if (!refs || refs.length === 0) return null
   return (
-    <div className="row wrap" style={{ gap: 6 }}>
+    <div className="resource-ref-list">
       {refs.map((ref, idx) => (
-        <span key={`${ref.path}-${idx}`} className="row" style={{ gap: 6 }}>
+        <span key={`${ref.path}-${idx}`} className="resource-ref-item">
           <a
-            className="status-chip"
+            className="status-chip resource-ref-chip"
             title={ref.path}
             href={attachmentDownloadUrl({ user_id: userId, workspace_id: workspaceId, path: ref.path })}
             target="_blank"
@@ -519,7 +549,6 @@ function App() {
   const [noteQ, setNoteQ] = React.useState('')
   const [noteTags, setNoteTags] = React.useState<string[]>([])
   const [noteArchived, setNoteArchived] = React.useState(false)
-  const [notePinnedFilter, setNotePinnedFilter] = React.useState<'any' | 'pinned' | 'unpinned'>('any')
   const [editNoteTitle, setEditNoteTitle] = React.useState('')
   const [editNoteBody, setEditNoteBody] = React.useState('')
   const [editNoteTags, setEditNoteTags] = React.useState('')
@@ -547,6 +576,7 @@ function App() {
     parseStoredProjectsMode(localStorage.getItem('ui_projects_mode'))
   )
   const [editStatus, setEditStatus] = React.useState('To do')
+  const [editTitle, setEditTitle] = React.useState('')
   const [editDescription, setEditDescription] = React.useState('')
   const [editPriority, setEditPriority] = React.useState('Med')
   const [editDueDate, setEditDueDate] = React.useState('')
@@ -573,7 +603,6 @@ function App() {
   const codexChatHistoryRef = React.useRef<HTMLDivElement | null>(null)
   const commentInputRef = React.useRef<HTMLTextAreaElement | null>(null)
   const commentsListRef = React.useRef<HTMLDivElement | null>(null)
-  const quickTaskFileInputRef = React.useRef<HTMLInputElement | null>(null)
   const taskFileInputRef = React.useRef<HTMLInputElement | null>(null)
   const noteFileInputRef = React.useRef<HTMLInputElement | null>(null)
   const editProjectFileInputRef = React.useRef<HTMLInputElement | null>(null)
@@ -766,21 +795,14 @@ function App() {
     enabled: Boolean(workspaceId && taskParams) && (tab === 'today' || tab === 'tasks' || tab === 'search')
   })
 
-  const notesPinnedParam = React.useMemo(() => {
-    if (notePinnedFilter === 'pinned') return true
-    if (notePinnedFilter === 'unpinned') return false
-    return null
-  }, [notePinnedFilter])
-
   const notes = useQuery({
-    queryKey: ['notes', userId, workspaceId, selectedProjectId, noteQ, noteArchived, notePinnedFilter, noteTags.join(',')],
+    queryKey: ['notes', userId, workspaceId, selectedProjectId, noteQ, noteArchived, noteTags.join(',')],
     queryFn: () =>
       getNotes(userId, workspaceId, {
         project_id: selectedProjectId,
         q: noteQ || undefined,
         tags: noteTags,
-        archived: noteArchived,
-        pinned: notesPinnedParam
+        archived: noteArchived
       }),
     enabled: Boolean(workspaceId && selectedProjectId) && tab === 'notes'
   })
@@ -1081,6 +1103,7 @@ function App() {
   const taskIsDirty = React.useMemo(() => {
     if (!selectedTask) return false
     const current = {
+      title: (editTitle.trim() || 'Untitled'),
       description: editDescription,
       status: editStatus,
       priority: editPriority,
@@ -1099,6 +1122,7 @@ function App() {
       attachment_refs: parseAttachmentRefsText(editTaskAttachmentRefsText),
     }
     const original = {
+      title: selectedTask.title?.trim() || 'Untitled',
       description: selectedTask.description ?? '',
       status: selectedTask.status ?? 'To do',
       priority: selectedTask.priority ?? 'Med',
@@ -1118,6 +1142,7 @@ function App() {
     }
     return stableJson(current) !== stableJson(original)
   }, [
+    editTitle,
     editDescription,
     editDueDate,
     editPriority,
@@ -1197,6 +1222,7 @@ function App() {
 
   React.useEffect(() => {
     if (!selectedTask) return
+    setEditTitle(selectedTask.title ?? '')
     setEditStatus(selectedTask.status)
     setEditDescription(selectedTask.description)
     setEditPriority(selectedTask.priority)
@@ -1227,8 +1253,6 @@ function App() {
     setCommentBody('')
     setExpandedCommentIds(new Set())
     setTaskEditorError(null)
-    // Helpful default: focus comment box when opening a task.
-    window.setTimeout(() => commentInputRef.current?.focus(), 0)
   }, [bootstrap.data?.current_user?.timezone, selectedTask?.id])
 
   React.useEffect(() => {
@@ -1262,8 +1286,16 @@ function App() {
     if (!scrollToNewestComment || comments.isFetching) return
     const list = commentsListRef.current
     if (!list) return
-    list.scrollTo({ top: 0, behavior: 'smooth' })
-    const newest = list.querySelector('.comment-item') as HTMLElement | null
+    const newestRecord = (comments.data ?? []).reduce<TaskComment | null>((acc, item) => {
+      if (!acc) return item
+      const itemTs = item.created_at ? Date.parse(item.created_at) : Number.NEGATIVE_INFINITY
+      const accTs = acc.created_at ? Date.parse(acc.created_at) : Number.NEGATIVE_INFINITY
+      return itemTs >= accTs ? item : acc
+    }, null)
+    const newestKey = newestRecord ? `${newestRecord.id ?? 'null'}-${newestRecord.created_at ?? ''}-${newestRecord.user_id}` : null
+    const newest = newestKey
+      ? (list.querySelector(`[data-comment-key="${newestKey}"]`) as HTMLElement | null)
+      : null
     if (newest) newest.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
     setScrollToNewestComment(false)
   }, [scrollToNewestComment, comments.isFetching, comments.data])
@@ -1440,6 +1472,7 @@ function App() {
         ? `every:${Math.max(1, Number(editRecurringEvery) || 1)}${editRecurringUnit}`
         : null
     const payload = {
+      title: editTitle.trim() || 'Untitled',
       description: editDescription,
       status: editStatus,
       priority: editPriority,
@@ -1457,6 +1490,7 @@ function App() {
     return { payload }
   }, [
     editTaskAttachmentRefsText,
+    editTitle,
     editDescription,
     editDueDate,
     editPriority,
@@ -1542,16 +1576,18 @@ function App() {
 
   const completeTaskMutation = useMutation({
     mutationFn: (id: string) => completeTask(userId, id),
-    onSuccess: async () => {
+    onSuccess: async (task) => {
       setUiError(null)
+      if (selectedTaskId === task.id) setEditStatus(task.status)
       await invalidateAll()
     },
     onError: (err) => setUiError(err instanceof Error ? err.message : 'Complete failed')
   })
   const reopenTaskMutation = useMutation({
     mutationFn: (id: string) => reopenTask(userId, id),
-    onSuccess: async () => {
+    onSuccess: async (task) => {
       setUiError(null)
+      if (selectedTaskId === task.id) setEditStatus(task.status)
       await invalidateAll()
     },
     onError: (err) => setUiError(err instanceof Error ? err.message : 'Reopen failed')
@@ -2093,50 +2129,6 @@ function App() {
 		                <Icon path="M12 5v14M5 12h14" />
 		              </button>
 		            </div>
-                <div className="meta" style={{ marginTop: 8 }}>External links</div>
-                <ExternalRefEditor
-                  refs={parseExternalRefsText(quickTaskExternalRefsText)}
-                  onRemoveIndex={(idx) => setQuickTaskExternalRefsText((prev) => removeExternalRefByIndex(prev, idx))}
-                  onAdd={(ref) =>
-                    setQuickTaskExternalRefsText((prev) => externalRefsToText([...parseExternalRefsText(prev), ref]))
-                  }
-                />
-                <div className="meta" style={{ marginTop: 8 }}>File attachments</div>
-                <div className="row" style={{ marginTop: 6 }}>
-                  <button
-                    className="status-chip"
-                    type="button"
-                    onClick={() => quickTaskFileInputRef.current?.click()}
-                  >
-                    Upload file
-                  </button>
-                  <input
-                    ref={quickTaskFileInputRef}
-                    type="file"
-                    style={{ display: 'none' }}
-                    onChange={async (e) => {
-                      const file = e.target.files?.[0]
-                      e.currentTarget.value = ''
-                      if (!file) return
-                      try {
-                        const ref = await uploadAttachmentRef(file, { project_id: quickProjectId || selectedProjectId })
-                        setQuickTaskAttachmentRefsText((prev) => attachmentRefsToText([...parseAttachmentRefsText(prev), ref]))
-                      } catch (err) {
-                        setUiError(toErrorMessage(err, 'Upload failed'))
-                      }
-                    }}
-                  />
-                </div>
-                <AttachmentRefList
-                  refs={parseAttachmentRefsText(quickTaskAttachmentRefsText)}
-                  workspaceId={workspaceId}
-                  userId={userId}
-                  onRemovePath={(path) => {
-                    removeUploadedAttachment(path)
-                      .then(() => setQuickTaskAttachmentRefsText((prev) => removeAttachmentByPath(prev, path)))
-                      .catch((err) => setUiError(toErrorMessage(err, 'Remove file failed')))
-                  }}
-                />
 		            <div className="tag-bar" aria-label="Task tags" style={{ marginTop: 10 }}>
 		              <div className="tag-chiplist">
 		                {quickTaskTags.length === 0 ? (
@@ -2399,35 +2391,27 @@ function App() {
                   <Icon path="M12 5v14M5 12h14" />
                 </button>
               </div>
-              <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 8 }}>
-                <div className="seg" role="tablist" aria-label="Project description editor view">
-                  <button
-                    className={`seg-btn ${projectDescriptionView === 'write' ? 'active' : ''}`}
-                    onClick={() => setProjectDescriptionView('write')}
-                    type="button"
-                  >
-                    Edit
-                  </button>
-                  <button
-                    className={`seg-btn ${projectDescriptionView === 'preview' ? 'active' : ''}`}
-                    onClick={() => setProjectDescriptionView('preview')}
-                    type="button"
-                  >
-                    Preview
-                  </button>
+              <div className="md-editor-surface">
+                <MarkdownModeToggle
+                  view={projectDescriptionView}
+                  onChange={setProjectDescriptionView}
+                  ariaLabel="Project description editor view"
+                />
+                <div className="md-editor-content">
+                  {projectDescriptionView === 'write' ? (
+                    <textarea
+                      className="md-textarea"
+                      ref={projectDescriptionRef}
+                      value={projectDescription}
+                      onChange={(e) => setProjectDescription(e.target.value)}
+                      placeholder="Project description (Markdown)"
+                      style={{ width: '100%', minHeight: 96, maxHeight: 280, resize: 'none', overflowY: 'hidden' }}
+                    />
+                  ) : (
+                    <MarkdownView value={projectDescription} />
+                  )}
                 </div>
               </div>
-              {projectDescriptionView === 'write' ? (
-                <textarea
-                  ref={projectDescriptionRef}
-                  value={projectDescription}
-                  onChange={(e) => setProjectDescription(e.target.value)}
-                  placeholder="Project description (Markdown)"
-                  style={{ width: '100%', minHeight: 96, maxHeight: 280, resize: 'none', overflowY: 'hidden' }}
-                />
-              ) : (
-                <MarkdownView value={projectDescription} />
-              )}
               <div className="rules-studio" style={{ marginTop: 10, marginBottom: 14 }}>
                 <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
                   <h3 style={{ margin: 0 }}>Project Rules (Draft: {draftProjectRules.length})</h3>
@@ -2615,53 +2599,58 @@ function App() {
 	                    <ExternalRefList refs={project.external_refs} />
 	                    <AttachmentRefList refs={project.attachment_refs} workspaceId={workspaceId} userId={userId} />
                       {isOpen && selectedProject && (
-                        <div style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
-                          <div className="row wrap resource-meta-row" style={{ marginBottom: 8 }}>
-                            <div className="meta">Created by: {selectedProjectCreator}</div>
-                            {selectedProjectTimeMeta && <div className="meta">{selectedProjectTimeMeta.label}: {toUserDateTime(selectedProjectTimeMeta.value, userTimezone)}</div>}
-                          </div>
-                          <div className="row" style={{ marginBottom: 10 }}>
-                            <input value={editProjectName} onChange={(e) => setEditProjectName(e.target.value)} placeholder="Project name" />
+                        <div className="project-inline-editor" style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
+                          <div className="row wrap" style={{ marginBottom: 10 }}>
+                            <input
+                              value={editProjectName}
+                              onChange={(e) => setEditProjectName(e.target.value)}
+                              placeholder="Project name"
+                              style={{ flex: 1, minWidth: 0 }}
+                            />
                             {projectIsDirty && <span className="badge unsaved-badge">Unsaved</span>}
                             <button
-                              className="primary"
+                              className="action-icon primary"
                               onClick={() => saveProjectMutation.mutate()}
                               disabled={saveProjectMutation.isPending || !editProjectName.trim() || !projectIsDirty}
                               title="Save project"
                               aria-label="Save project"
                             >
-                              Save
+                              <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+                            </button>
+                            <button
+                              className="action-icon danger-ghost"
+                              onClick={() => {
+                                if (!window.confirm(`Delete ${project.name}? This permanently deletes project resources.`)) return
+                                deleteProjectMutation.mutate(project.id)
+                              }}
+                              disabled={deleteProjectMutation.isPending}
+                              title="Delete project"
+                              aria-label="Delete project"
+                            >
+                              <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
                             </button>
                           </div>
-                          <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 8 }}>
-                            <div className="seg" role="tablist" aria-label="Edit project description editor view">
-                              <button
-                                className={`seg-btn ${editProjectDescriptionView === 'write' ? 'active' : ''}`}
-                                onClick={() => setEditProjectDescriptionView('write')}
-                                type="button"
-                              >
-                                Edit
-                              </button>
-                              <button
-                                className={`seg-btn ${editProjectDescriptionView === 'preview' ? 'active' : ''}`}
-                                onClick={() => setEditProjectDescriptionView('preview')}
-                                type="button"
-                              >
-                                Preview
-                              </button>
+                          <div className="md-editor-surface">
+                            <MarkdownModeToggle
+                              view={editProjectDescriptionView}
+                              onChange={setEditProjectDescriptionView}
+                              ariaLabel="Edit project description editor view"
+                            />
+                            <div className="md-editor-content">
+                              {editProjectDescriptionView === 'write' ? (
+                                <textarea
+                                  className="md-textarea"
+                                  ref={editProjectDescriptionRef}
+                                  value={editProjectDescription}
+                                  onChange={(e) => setEditProjectDescription(e.target.value)}
+                                  placeholder="Project description (Markdown)"
+                                  style={{ width: '100%', minHeight: 96, maxHeight: 280, resize: 'none', overflowY: 'hidden' }}
+                                />
+                              ) : (
+                                <MarkdownView value={editProjectDescription} />
+                              )}
                             </div>
                           </div>
-                          {editProjectDescriptionView === 'write' ? (
-                            <textarea
-                              ref={editProjectDescriptionRef}
-                              value={editProjectDescription}
-                              onChange={(e) => setEditProjectDescription(e.target.value)}
-                              placeholder="Project description (Markdown)"
-                              style={{ width: '100%', minHeight: 96, maxHeight: 280, resize: 'none', overflowY: 'hidden' }}
-                            />
-                          ) : (
-                            <MarkdownView value={editProjectDescription} />
-                          )}
                           <div className="rules-studio" style={{ marginTop: 10, marginBottom: 14 }}>
                             <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
                               <h3 style={{ margin: 0 }}>Project Rules ({projectRules.data?.total ?? 0})</h3>
@@ -2670,7 +2659,7 @@ function App() {
                                   value={projectRuleQ}
                                   onChange={(e) => setProjectRuleQ(e.target.value)}
                                   placeholder="Search rules"
-                                  style={{ minWidth: 180 }}
+                                  className="rules-search-input"
                                 />
                               </div>
                             </div>
@@ -2844,6 +2833,10 @@ function App() {
                               })}
                             </div>
                           </div>
+                          <div className="row wrap resource-meta-row" style={{ marginTop: 10 }}>
+                            <div className="meta">Created by: {selectedProjectCreator}</div>
+                            {selectedProjectTimeMeta && <div className="meta">{selectedProjectTimeMeta.label}: {toUserDateTime(selectedProjectTimeMeta.value, userTimezone)}</div>}
+                          </div>
                         </div>
                       )}
 	                  </div>
@@ -2856,18 +2849,6 @@ function App() {
                       aria-label="Copy project link"
                     >
                       <Icon path="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4m2 7a5 5 0 0 0-7.07 0L3.1 13.83a5 5 0 1 0 7.07 7.07L13 18" />
-                    </button>
-                    <button
-                      onClick={() => {
-                        if (!window.confirm(`Delete ${project.name}? This permanently deletes project resources.`)) return
-                        deleteProjectMutation.mutate(project.id)
-                      }}
-                      disabled={deleteProjectMutation.isPending}
-                      title="Delete project"
-                      aria-label="Delete project"
-                      className="action-icon danger-ghost"
-                    >
-                      <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
                     </button>
                   </div>
                 </div>
@@ -2885,33 +2866,26 @@ function App() {
 		              <div className="notes-search">
 		                <input value={noteQ} onChange={(e) => setNoteQ(e.target.value)} placeholder="Search notes" />
 		              </div>
-		              <div className="notes-filters">
-		                <select value={notePinnedFilter} onChange={(e) => setNotePinnedFilter(e.target.value as 'any' | 'pinned' | 'unpinned')}>
-		                  <option value="any">Any pin</option>
-		                  <option value="pinned">Pinned</option>
-		                  <option value="unpinned">Unpinned</option>
-		                </select>
-			                <label className="row archived-toggle">
-			                  <input type="checkbox" checked={noteArchived} onChange={(e) => setNoteArchived(e.target.checked)} />
-			                  Archived only
-			                </label>
-                      <div className="row wrap">
-                        {noteTagSuggestions.slice(0, 8).map((tag) => (
-                          <button
-                            key={`note-filter-${tag}`}
-                            className={`status-chip tag-filter-chip ${noteTags.includes(tag.toLowerCase()) ? 'active' : ''}`}
-                            onClick={() => toggleNoteFilterTag(tag)}
-                            aria-pressed={noteTags.includes(tag.toLowerCase())}
-                          >
-                            #{tag}
-                          </button>
-                        ))}
-                      </div>
-			                <button className="action-icon primary" onClick={() => createNoteMutation.mutate()} title="New note" aria-label="New note">
-			                  <Icon path="M12 5v14M5 12h14" />
-			                </button>
-			              </div>
+                  <button className="action-icon primary" onClick={() => createNoteMutation.mutate()} title="New note" aria-label="New note">
+                    <Icon path="M12 5v14M5 12h14" />
+                  </button>
 		            </div>
+                <div className="row wrap notes-tag-filters">
+                  <label className="row archived-toggle notes-archived-filter">
+                    <input type="checkbox" checked={noteArchived} onChange={(e) => setNoteArchived(e.target.checked)} />
+                    Archived
+                  </label>
+                  {noteTagSuggestions.slice(0, 8).map((tag) => (
+                    <button
+                      key={`note-filter-${tag}`}
+                      className={`status-chip tag-filter-chip ${noteTags.includes(tag.toLowerCase()) ? 'active' : ''}`}
+                      onClick={() => toggleNoteFilterTag(tag)}
+                      aria-pressed={noteTags.includes(tag.toLowerCase())}
+                    >
+                      #{tag}
+                    </button>
+                  ))}
+                </div>
 
 		            <div className="task-list">
 		              {notes.isLoading && <div className="notice">Loading notes...</div>}
@@ -2993,6 +2967,7 @@ function App() {
                             >
                               <Icon path="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4m2 7a5 5 0 0 0-7.07 0L3.1 13.83a5 5 0 1 0 7.07 7.07L13 18" />
                             </button>
+                            <span className="action-separator" aria-hidden="true" />
 		                            {selectedNote.pinned ? (
 		                              <button className="action-icon" onClick={() => unpinNoteMutation.mutate(selectedNote.id)} title="Unpin" aria-label="Unpin">
 		                                <Icon path="M6 2h12v20l-6-4-6 4V2z" />
@@ -3011,31 +2986,27 @@ function App() {
 		                                <Icon path="M20 8H4m2-3h12l2 3v13H4V8l2-3zm3 7h6" />
 		                              </button>
 		                            )}
+                            <span className="action-separator" aria-hidden="true" />
 				                            <button className="action-icon danger-ghost" onClick={() => deleteNoteMutation.mutate(selectedNote.id)} title="Delete" aria-label="Delete">
 		                              <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
 		                            </button>
 				                        </div>
-                        <div className="row wrap resource-meta-row" style={{ marginBottom: 8 }}>
-                          <div className="meta">Created by: {selectedNoteCreator}</div>
-                          {selectedNoteTimeMeta && <div className="meta">{selectedNoteTimeMeta.label}: {toUserDateTime(selectedNoteTimeMeta.value, userTimezone)}</div>}
-                        </div>
 		                        </div>
 
-			                        <div className="row" style={{ justifyContent: 'flex-end' }}>
-			                          <div className="seg" role="tablist" aria-label="Note editor view">
-			                            <button className={`seg-btn ${noteEditorView === 'write' ? 'active' : ''}`} onClick={() => setNoteEditorView('write')} type="button">
-			                              Edit
-			                            </button>
-		                            <button className={`seg-btn ${noteEditorView === 'preview' ? 'active' : ''}`} onClick={() => setNoteEditorView('preview')} type="button">
-		                              Preview
-			                            </button>
-			                          </div>
+			                        <div className="md-editor-surface">
+                                <MarkdownModeToggle
+                                  view={noteEditorView}
+                                  onChange={setNoteEditorView}
+                                  ariaLabel="Note editor view"
+                                />
+                                <div className="md-editor-content">
+			                            {noteEditorView === 'write' ? (
+			                              <textarea className="md-textarea" value={editNoteBody} onChange={(e) => setEditNoteBody(e.target.value)} placeholder="Write Markdown..." />
+			                            ) : (
+			                              <MarkdownView value={editNoteBody} />
+			                            )}
+                                </div>
 			                        </div>
-			                        {noteEditorView === 'write' ? (
-			                          <textarea value={editNoteBody} onChange={(e) => setEditNoteBody(e.target.value)} placeholder="Write Markdown..." />
-			                        ) : (
-			                          <MarkdownView value={editNoteBody} />
-			                        )}
 			                        <div className="tag-bar" aria-label="Tags">
 			                          <div className="tag-chiplist">
 			                            {currentNoteTags.length === 0 ? (
@@ -3102,6 +3073,10 @@ function App() {
 	                            setEditNoteAttachmentRefsText((prev) => removeAttachmentByPath(prev, path))
 	                          }}
 	                        />
+                        <div className="row wrap resource-meta-row" style={{ marginTop: 10 }}>
+                          <div className="meta">Created by: {selectedNoteCreator}</div>
+                          {selectedNoteTimeMeta && <div className="meta">{selectedNoteTimeMeta.label}: {toUserDateTime(selectedNoteTimeMeta.value, userTimezone)}</div>}
+                        </div>
 			                      </div>
 			                    )}
 
@@ -3381,16 +3356,19 @@ function App() {
                 </button>
               </div>
             </div>
-            <div style={{ marginBottom: 10 }}>
-              <div className="meta">Task ID: <code>{selectedTask.id}</code></div>
-              <div className="meta">
-                Created by: {selectedTaskCreator}
-                {selectedTaskTimeMeta ? ` | ${selectedTaskTimeMeta.label}: ${toUserDateTime(selectedTaskTimeMeta.value, userTimezone)}` : ''}
-              </div>
-            </div>
-            <div className="row wrap" style={{ marginTop: 8, marginBottom: 10 }}>
+            <label className="field-control" style={{ marginTop: 8, marginBottom: 8 }}>
+              <span className="field-label">Task name</span>
+              <input
+                value={editTitle}
+                onChange={(e) => setEditTitle(e.target.value)}
+                placeholder="Task title"
+                style={{ width: '100%' }}
+              />
+            </label>
+            <div className="field-control" style={{ marginBottom: 10 }}>
+              <span className="field-label">Project</span>
               <button
-                className="pill"
+                className="pill subtle task-project-pill"
                 onClick={() => {
                   setSelectedProjectId(selectedTask.project_id)
                   setTab('tasks')
@@ -3402,28 +3380,43 @@ function App() {
                 <span>{projectNames[selectedTask.project_id] || selectedTask.project_id}</span>
               </button>
             </div>
-	            <div className="row wrap" style={{ marginBottom: 8 }}>
-	              <select value={editStatus} onChange={(e) => setEditStatus(e.target.value)}>
-                <option value="To do">To do</option>
-                <option value="In progress">In progress</option>
-                <option value="Done">Done</option>
-              </select>
-              <select value={editPriority} onChange={(e) => setEditPriority(e.target.value)}>
-                <option value="Low">Low</option>
-                <option value="Med">Med</option>
-                <option value="High">High</option>
-              </select>
-              <select value={editProjectId} onChange={(e) => setEditProjectId(e.target.value)}>
-	                {bootstrap.data.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-	              </select>
-	              <input className="due-input" type="datetime-local" value={editDueDate} onChange={(e) => setEditDueDate(e.target.value)} />
+	            <div className="task-edit-grid" style={{ marginBottom: 8 }}>
+                <label className="field-control">
+                  <span className="field-label">Status</span>
+	                <select value={editStatus} onChange={(e) => setEditStatus(e.target.value)}>
+                    <option value="To do">To do</option>
+                    <option value="In progress">In progress</option>
+                    <option value="Done">Done</option>
+                  </select>
+                </label>
+                <label className="field-control">
+                  <span className="field-label">Priority</span>
+                  <select value={editPriority} onChange={(e) => setEditPriority(e.target.value)}>
+                    <option value="Low">Low</option>
+                    <option value="Med">Med</option>
+                    <option value="High">High</option>
+                  </select>
+                </label>
+                <label className="field-control">
+                  <span className="field-label">Project</span>
+                  <select value={editProjectId} onChange={(e) => setEditProjectId(e.target.value)}>
+	                  {bootstrap.data.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+	                </select>
+                </label>
+                <label className="field-control">
+                  <span className="field-label">Due date</span>
+	                <input className="due-input" type="datetime-local" value={editDueDate} onChange={(e) => setEditDueDate(e.target.value)} />
+                </label>
 	            </div>
+              <label className="field-control" style={{ marginBottom: 10 }}>
+                <span className="field-label">Description</span>
 	            <textarea
 	              value={editDescription}
 	              onChange={(e) => setEditDescription(e.target.value)}
 	              rows={4}
-	              style={{ width: '100%', marginBottom: 10 }}
+	              style={{ width: '100%' }}
 	            />
+              </label>
 	            <div className="tag-bar" aria-label="Task tags" style={{ marginBottom: 10 }}>
 	              <div className="tag-chiplist">
 	                {editTaskTags.length === 0 ? (
@@ -3448,11 +3441,14 @@ function App() {
 	                <Icon path="M3 12h8m-8 6h12m-12-12h18" />
 	              </button>
 	            </div>
-	            <div className="row wrap" style={{ marginBottom: 8 }}>
-	              <select value={editTaskType} onChange={(e) => setEditTaskType(e.target.value as 'manual' | 'scheduled_instruction')}>
-		                <option value="manual">Manual</option>
-		                <option value="scheduled_instruction">Scheduled</option>
-		              </select>
+	            <div className="task-edit-grid" style={{ marginBottom: 8 }}>
+                <label className="field-control">
+                  <span className="field-label">Task type</span>
+	                <select value={editTaskType} onChange={(e) => setEditTaskType(e.target.value as 'manual' | 'scheduled_instruction')}>
+		                  <option value="manual">Manual</option>
+		                  <option value="scheduled_instruction">Scheduled</option>
+		                </select>
+                </label>
 	            </div>
 	            {taskEditorError && (
 	              <div className="notice" role="alert" style={{ marginBottom: 8 }}>
@@ -3461,56 +3457,70 @@ function App() {
 	            )}
 	            {editTaskType === 'scheduled_instruction' && (
 	              <>
-	                <div className="row wrap" style={{ marginBottom: 8 }}>
-	                  <input
-	                    className="due-input"
-	                    type="datetime-local"
-	                    value={editScheduledAtUtc}
-	                    onChange={(e) => setEditScheduledAtUtc(e.target.value)}
-	                  />
-	                  <input
-	                    value={editScheduleTimezone}
-	                    onChange={(e) => setEditScheduleTimezone(e.target.value)}
-	                    placeholder="Timezone (e.g. Europe/Sarajevo)"
-	                  />
+	                <div className="task-edit-grid" style={{ marginBottom: 8 }}>
+                    <label className="field-control">
+                      <span className="field-label">Scheduled for</span>
+	                    <input
+	                      className="due-input"
+	                      type="datetime-local"
+	                      value={editScheduledAtUtc}
+	                      onChange={(e) => setEditScheduledAtUtc(e.target.value)}
+	                    />
+                    </label>
+                    <label className="field-control">
+                      <span className="field-label">Timezone</span>
+	                    <input
+	                      value={editScheduleTimezone}
+	                      onChange={(e) => setEditScheduleTimezone(e.target.value)}
+	                      placeholder="e.g. Europe/Sarajevo"
+	                    />
+                    </label>
 	                </div>
-	                <div className="row wrap" style={{ marginBottom: 8 }}>
-	                  <input
-	                    type="number"
-	                    min={1}
-	                    inputMode="numeric"
-	                    value={editRecurringEvery}
-	                    onChange={(e) => setEditRecurringEvery(e.target.value)}
-	                    placeholder="Repeat every"
-	                    style={{ width: 140 }}
-	                  />
-	                  <select
-	                    value={editRecurringUnit}
-	                    onChange={(e) => setEditRecurringUnit(e.target.value as 'm' | 'h' | 'd')}
-	                  >
-	                    <option value="m">minutes</option>
-	                    <option value="h">hours</option>
-	                    <option value="d">days</option>
-	                  </select>
-	                  <button
-	                    className="action-icon"
-	                    onClick={() => {
-	                      setEditRecurringEvery('')
-	                      setEditRecurringUnit('h')
-	                    }}
-	                    title="Clear repeat"
-	                    aria-label="Clear repeat"
-	                  >
-	                    <Icon path="M6 6l12 12M18 6 6 18" />
-	                  </button>
+	                <div className="task-edit-grid" style={{ marginBottom: 8 }}>
+                    <div className="field-control">
+                      <span className="field-label">Repeat (optional)</span>
+                      <div className="row wrap">
+	                      <input
+	                        type="number"
+	                        min={1}
+	                        inputMode="numeric"
+	                        value={editRecurringEvery}
+	                        onChange={(e) => setEditRecurringEvery(e.target.value)}
+	                        placeholder="Every"
+	                        style={{ width: 120 }}
+	                      />
+	                      <select
+	                        value={editRecurringUnit}
+	                        onChange={(e) => setEditRecurringUnit(e.target.value as 'm' | 'h' | 'd')}
+	                      >
+	                        <option value="m">minutes</option>
+	                        <option value="h">hours</option>
+	                        <option value="d">days</option>
+	                      </select>
+	                      <button
+	                        className="action-icon"
+	                        onClick={() => {
+	                          setEditRecurringEvery('')
+	                          setEditRecurringUnit('h')
+	                        }}
+	                        title="Clear repeat"
+	                        aria-label="Clear repeat"
+	                      >
+	                        <Icon path="M6 6l12 12M18 6 6 18" />
+	                      </button>
+                      </div>
+                    </div>
 	                </div>
+                  <label className="field-control" style={{ marginBottom: 8 }}>
+                    <span className="field-label">Instruction</span>
 	                <textarea
 	                  value={editScheduledInstruction}
 	                  onChange={(e) => setEditScheduledInstruction(e.target.value)}
 	                  rows={3}
-	                  style={{ width: '100%', marginBottom: 8 }}
+	                  style={{ width: '100%' }}
 	                  placeholder='Scheduled (executed automatically when due)'
 	                />
+                  </label>
 	              </>
 	            )}
 	            {selectedTask.schedule_state && editTaskType === 'scheduled_instruction' && (
@@ -3568,6 +3578,13 @@ function App() {
                 setEditTaskAttachmentRefsText((prev) => removeAttachmentByPath(prev, path))
               }}
             />
+            <div style={{ marginTop: 10, marginBottom: 10 }}>
+              <div className="meta">Task ID: <code>{selectedTask.id}</code></div>
+              <div className="meta">
+                Created by: {selectedTaskCreator}
+                {selectedTaskTimeMeta ? ` | ${selectedTaskTimeMeta.label}: ${toUserDateTime(selectedTaskTimeMeta.value, userTimezone)}` : ''}
+              </div>
+            </div>
 	            {showTaskTagPicker && (
 	              <div className="drawer open" onClick={() => setShowTaskTagPicker(false)}>
 	                <div className="drawer-body tag-picker-body" onClick={(e) => e.stopPropagation()}>
@@ -3627,7 +3644,11 @@ function App() {
             <div ref={commentsListRef} className="note-list comment-list">
               {comments.isLoading && <div className="meta">Loading comments...</div>}
               {comments.data?.map((c) => (
-                <div className="note comment-item" key={`${c.id}-${c.created_at}`}>
+                <div
+                  className="note comment-item"
+                  key={`${c.id}-${c.created_at}`}
+                  data-comment-key={`${c.id ?? 'null'}-${c.created_at ?? ''}-${c.user_id}`}
+                >
                   {(() => {
                     const body = c.body || ''
                     const commentId = c.id

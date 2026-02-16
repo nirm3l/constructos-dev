@@ -236,6 +236,71 @@ body {
   border-color: transparent;
 }
 
+.md-editor-surface {
+  position: relative;
+  margin-bottom: 8px;
+}
+
+.md-mode-toggle {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  box-shadow: 0 6px 14px color-mix(in srgb, var(--brand), transparent 88%);
+}
+
+.md-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  padding: 0 6px;
+  min-height: 26px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-alt), var(--surface) 30%);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.md-mode-toggle .seg-btn {
+  min-height: 26px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.md-editor-content {
+  padding-top: 0;
+}
+
+.md-editor-content .md-textarea {
+  padding-top: 44px;
+}
+
+.md-editor-content .markdown {
+  padding-top: 44px;
+}
+
+@media (max-width: 560px) {
+  .md-mode-toggle {
+    top: 8px;
+    right: 4px;
+  }
+
+  .md-mode-toggle .seg-btn {
+    min-height: 24px;
+    padding: 4px 7px;
+    font-size: 11px;
+  }
+
+  .md-chip {
+    min-height: 24px;
+    min-width: 24px;
+  }
+}
+
 .top-search {
   min-width: 0;
   flex: 1;
@@ -397,6 +462,31 @@ body {
   flex-wrap: wrap;
 }
 
+.task-edit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.field-control {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.field-label {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.field-control > input,
+.field-control > select,
+.field-control > textarea {
+  width: 100%;
+}
+
 input, select, button {
   font: inherit;
   border-radius: 12px;
@@ -465,6 +555,17 @@ button.danger {
 .pill.subtle {
   background: transparent;
   color: var(--muted);
+}
+
+.task-project-pill {
+  font-size: 13px;
+  padding: 6px 10px;
+  min-height: 32px;
+}
+
+.task-project-pill .icon {
+  width: 15px;
+  height: 15px;
 }
 
 button.primary .icon,
@@ -551,6 +652,14 @@ button:disabled {
   align-items: baseline;
   justify-content: space-between;
   gap: 10px;
+  min-width: 0;
+}
+
+.task-title strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .task-badges {
@@ -631,14 +740,14 @@ button:disabled {
 
 .notes-toolbar {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 10px;
   align-items: center;
   max-width: 100%;
 }
 
 .notes-search {
-  flex: 1 1 240px;
+  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -663,14 +772,22 @@ button:disabled {
   min-width: 0;
 }
 
+.notes-tag-filters {
+  margin-top: -2px;
+  margin-bottom: 2px;
+}
+
+.notes-archived-filter {
+  margin-right: 2px;
+  flex-shrink: 0;
+}
+
 /* Notes is accordion-only; no split columns. */
 
 @media (max-width: 560px) {
   .notes-toolbar {
-    align-items: stretch;
-  }
-  .notes-filters {
-    justify-content: space-between;
+    gap: 8px;
+    align-items: center;
   }
 }
 
@@ -771,7 +888,7 @@ button:disabled {
 .note-actions {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
   justify-content: flex-end;
   min-width: 0;
@@ -1174,6 +1291,10 @@ button:disabled {
   padding-left: 12px;
 }
 
+.project-item .task-main > * {
+  min-width: 0;
+}
+
 .project-item.selected {
   border-color: color-mix(in srgb, var(--brand), var(--line) 22%);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand), transparent 76%);
@@ -1216,6 +1337,11 @@ button:disabled {
 .meta {
   color: var(--muted);
   font-size: 13px;
+}
+
+.project-item .meta {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .badge {
@@ -1550,6 +1676,8 @@ button:disabled {
 .drawer-title {
   margin: 0;
   min-width: 0;
+  font-size: 15px;
+  font-weight: 700;
   line-height: 1.2;
   overflow-wrap: anywhere;
   word-break: break-word;
@@ -1592,7 +1720,7 @@ button:disabled {
 }
 
 .task-header-actions {
-  gap: 6px;
+  gap: 4px;
   align-items: center;
   justify-content: flex-start;
   flex-wrap: nowrap;
@@ -1600,6 +1728,7 @@ button:disabled {
 
 .task-drawer-body .drawer-header > .task-header-actions {
   align-items: center;
+  justify-self: end;
 }
 
 .task-header-actions .unsaved-badge {
@@ -1800,9 +1929,10 @@ button:disabled {
 }
 
 .action-icon {
-  width: 38px;
-  min-width: 38px;
-  height: 38px;
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  min-height: 34px;
   padding: 0;
   border-radius: 999px;
   display: inline-flex;
@@ -1874,6 +2004,45 @@ textarea {
   background: color-mix(in srgb, var(--surface), var(--surface-alt) 20%);
 }
 
+.rules-search-input {
+  width: min(220px, 100%);
+  min-width: 0;
+}
+
+.rules-editor .row {
+  flex-wrap: wrap;
+}
+
+.rules-editor .row > input {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.resource-ref-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.resource-ref-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.resource-ref-chip {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: min(100%, 320px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 @media (max-width: 900px) {
   .shell {
     grid-template-columns: 1fr;
@@ -1902,5 +2071,62 @@ textarea {
   .due-input {
     width: 100%;
     min-width: 0;
+  }
+
+  .resource-ref-chip {
+    max-width: min(100%, 220px);
+  }
+
+  .project-inline-editor .row {
+    flex-wrap: wrap;
+  }
+
+  .project-inline-editor .row > * {
+    max-width: 100%;
+  }
+
+  .project-item.open {
+    display: block;
+  }
+
+  .project-item.open .task-main {
+    width: 100%;
+    padding-right: 0;
+  }
+
+  .project-item.open .project-item-actions {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    margin-top: 0;
+    z-index: 1;
+  }
+
+  .note-editor-head {
+    display: grid;
+    grid-template-columns: 1fr;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .note-title-input {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .note-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .task-edit-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .action-icon {
+    width: 32px;
+    min-width: 32px;
+    height: 32px;
+    min-height: 32px;
   }
 }
