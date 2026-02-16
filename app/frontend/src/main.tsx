@@ -6,15 +6,18 @@ import {
   archiveTask,
   completeTask,
   createProject,
+  createProjectRule,
   deleteComment,
   createTask,
   createNote,
   deleteNote,
   deleteProject,
+  deleteProjectRule,
   getTaskAutomationStatus,
   getBootstrap,
   getNotifications,
   getProjectBoard,
+  getProjectRules,
   getProjectTags,
   getNotes,
   getTasks,
@@ -24,6 +27,7 @@ import {
   patchNote,
   patchMyPreferences,
   patchProject,
+  patchProjectRule,
   patchTask,
   pinNote,
   restoreNote,
@@ -34,7 +38,7 @@ import {
   unpinNote,
   archiveNote
 } from './api'
-import type { Notification, Note, Task, TaskAutomationStatus } from './types'
+import type { Notification, Note, ProjectRule, Task, TaskAutomationStatus } from './types'
 import { MarkdownView } from './markdown/MarkdownView'
 import './styles.css'
 
@@ -43,6 +47,7 @@ const DEFAULT_USER_ID = '00000000-0000-0000-0000-000000000001'
 type Tab = 'today' | 'tasks' | 'notes' | 'projects' | 'search' | 'profile'
 type ChatRole = 'user' | 'assistant'
 type ChatTurn = { id: string; role: ChatRole; content: string; createdAt: number }
+type DraftProjectRule = { id: string; title: string; body: string }
 
 const TAB_ORDER: Tab[] = ['today', 'tasks', 'notes', 'projects', 'search', 'profile']
 
@@ -258,6 +263,16 @@ function App() {
   const [editProjectName, setEditProjectName] = React.useState('')
   const [editProjectDescription, setEditProjectDescription] = React.useState('')
   const [editProjectDescriptionView, setEditProjectDescriptionView] = React.useState<'write' | 'preview'>('write')
+  const [projectRuleQ, setProjectRuleQ] = React.useState('')
+  const [selectedProjectRuleId, setSelectedProjectRuleId] = React.useState<string | null>(null)
+  const [projectRuleTitle, setProjectRuleTitle] = React.useState('')
+  const [projectRuleBody, setProjectRuleBody] = React.useState('')
+  const [projectRuleView, setProjectRuleView] = React.useState<'write' | 'preview'>('write')
+  const [draftProjectRules, setDraftProjectRules] = React.useState<DraftProjectRule[]>([])
+  const [selectedDraftProjectRuleId, setSelectedDraftProjectRuleId] = React.useState<string | null>(null)
+  const [draftProjectRuleTitle, setDraftProjectRuleTitle] = React.useState('')
+  const [draftProjectRuleBody, setDraftProjectRuleBody] = React.useState('')
+  const [draftProjectRuleView, setDraftProjectRuleView] = React.useState<'write' | 'preview'>('write')
   const [selectedProjectId, setSelectedProjectId] = React.useState<string>(() =>
     parseStoredProjectId(localStorage.getItem('ui_selected_project_id'))
   )
@@ -459,6 +474,15 @@ function App() {
     queryFn: () => getProjectTags(userId, selectedProjectId),
     enabled: Boolean(selectedProjectId)
   })
+  const projectRules = useQuery({
+    queryKey: ['project-rules', userId, workspaceId, selectedProjectId, projectRuleQ],
+    queryFn: () =>
+      getProjectRules(userId, workspaceId, {
+        project_id: selectedProjectId,
+        q: projectRuleQ || undefined,
+      }),
+    enabled: Boolean(workspaceId && selectedProjectId) && tab === 'projects'
+  })
   const projectTaskCountQueries = useQueries({
     queries: (bootstrap.data?.projects ?? []).map((project) => ({
       queryKey: ['project-task-count', userId, workspaceId, project.id],
@@ -470,6 +494,13 @@ function App() {
     queries: (bootstrap.data?.projects ?? []).map((project) => ({
       queryKey: ['project-note-count', userId, workspaceId, project.id],
       queryFn: () => getNotes(userId, workspaceId, { project_id: project.id, limit: 1, offset: 0 }),
+      enabled: Boolean(workspaceId && tab === 'projects')
+    }))
+  })
+  const projectRuleCountQueries = useQueries({
+    queries: (bootstrap.data?.projects ?? []).map((project) => ({
+      queryKey: ['project-rule-count', userId, workspaceId, project.id],
+      queryFn: () => getProjectRules(userId, workspaceId, { project_id: project.id, limit: 1, offset: 0 }),
       enabled: Boolean(workspaceId && tab === 'projects')
     }))
   })
@@ -573,6 +604,10 @@ function App() {
 
   const selectedTask = React.useMemo(() => tasks.data?.items.find((t) => t.id === selectedTaskId) ?? null, [tasks.data?.items, selectedTaskId])
   const selectedNote = React.useMemo(() => notes.data?.items.find((n) => n.id === selectedNoteId) ?? null, [notes.data?.items, selectedNoteId])
+  const selectedProjectRule = React.useMemo(
+    () => projectRules.data?.items.find((r) => r.id === selectedProjectRuleId) ?? null,
+    [projectRules.data?.items, selectedProjectRuleId]
+  )
 
   const taskTagSuggestions = React.useMemo(() => {
     return (projectTags.data?.tags ?? []).slice(0, 40)
@@ -779,6 +814,7 @@ function App() {
     await qc.invalidateQueries({ queryKey: ['board'] })
     await qc.invalidateQueries({ queryKey: ['bootstrap'] })
     await qc.invalidateQueries({ queryKey: ['notifications'] })
+    await qc.invalidateQueries({ queryKey: ['project-rules'] })
   }
 
   const createTaskMutation = useMutation({
@@ -880,11 +916,31 @@ function App() {
         name: projectName.trim(),
         description: projectDescription,
       }),
-    onSuccess: async () => {
+    onSuccess: async (createdProject) => {
       setUiError(null)
+      if (draftProjectRules.length > 0) {
+        const creations = draftProjectRules.map((rule) =>
+          createProjectRule(userId, {
+            workspace_id: workspaceId,
+            project_id: createdProject.id,
+            title: rule.title,
+            body: rule.body,
+          })
+        )
+        try {
+          await Promise.all(creations)
+        } catch (err) {
+          setUiError(toErrorMessage(err, 'Project created, but some rules failed to save'))
+        }
+      }
       setProjectName('')
       setProjectDescription('')
       setProjectDescriptionView('write')
+      setDraftProjectRules([])
+      setSelectedDraftProjectRuleId(null)
+      setDraftProjectRuleTitle('')
+      setDraftProjectRuleBody('')
+      setDraftProjectRuleView('write')
       setShowProjectCreateForm(false)
       await invalidateAll()
     },
@@ -912,6 +968,47 @@ function App() {
       // If selected project was deleted, bootstrap effect will select first remaining.
     },
     onError: (err) => setUiError(err instanceof Error ? err.message : 'Project delete failed')
+  })
+
+  const createProjectRuleMutation = useMutation({
+    mutationFn: () =>
+      createProjectRule(userId, {
+        workspace_id: workspaceId,
+        project_id: selectedProjectId,
+        title: projectRuleTitle.trim(),
+        body: projectRuleBody,
+      }),
+    onSuccess: async (rule) => {
+      setUiError(null)
+      setSelectedProjectRuleId(rule.id)
+      await qc.invalidateQueries({ queryKey: ['project-rules'] })
+    },
+    onError: (err) => setUiError(err instanceof Error ? err.message : 'Rule create failed')
+  })
+
+  const patchProjectRuleMutation = useMutation({
+    mutationFn: () =>
+      patchProjectRule(userId, selectedProjectRuleId as string, {
+        title: projectRuleTitle.trim(),
+        body: projectRuleBody,
+      }),
+    onSuccess: async () => {
+      setUiError(null)
+      await qc.invalidateQueries({ queryKey: ['project-rules'] })
+    },
+    onError: (err) => setUiError(err instanceof Error ? err.message : 'Rule update failed')
+  })
+
+  const deleteProjectRuleMutation = useMutation({
+    mutationFn: (ruleId: string) => deleteProjectRule(userId, ruleId),
+    onSuccess: async () => {
+      setUiError(null)
+      setSelectedProjectRuleId(null)
+      setProjectRuleTitle('')
+      setProjectRuleBody('')
+      await qc.invalidateQueries({ queryKey: ['project-rules'] })
+    },
+    onError: (err) => setUiError(err instanceof Error ? err.message : 'Rule delete failed')
   })
 
   const createNoteMutation = useMutation({
@@ -1109,12 +1206,36 @@ function App() {
       setEditProjectDescription('')
       setEditProjectDescriptionView('write')
       setShowProjectEditForm(false)
+      setSelectedProjectRuleId(null)
+      setProjectRuleTitle('')
+      setProjectRuleBody('')
+      setProjectRuleView('write')
       return
     }
     setEditProjectName(selectedProject.name ?? '')
     setEditProjectDescription(selectedProject.description ?? '')
     setEditProjectDescriptionView('write')
+    setSelectedProjectRuleId(null)
+    setProjectRuleTitle('')
+    setProjectRuleBody('')
+    setProjectRuleView('write')
   }, [selectedProject?.id])
+
+  React.useEffect(() => {
+    if (!selectedProjectRule) return
+    setProjectRuleTitle(selectedProjectRule.title ?? '')
+    setProjectRuleBody(selectedProjectRule.body ?? '')
+    setProjectRuleView('write')
+  }, [selectedProjectRule?.id])
+
+  React.useEffect(() => {
+    if (!selectedDraftProjectRuleId) return
+    const selected = draftProjectRules.find((r) => r.id === selectedDraftProjectRuleId)
+    if (!selected) return
+    setDraftProjectRuleTitle(selected.title)
+    setDraftProjectRuleBody(selected.body)
+    setDraftProjectRuleView('write')
+  }, [selectedDraftProjectRuleId, draftProjectRules])
 
   React.useEffect(() => {
     if (!showProjectCreateForm || projectDescriptionView !== 'write') return
@@ -1141,7 +1262,7 @@ function App() {
             <div className="brand-mark" aria-hidden="true">m</div>
             <div className="brand-stack">
               <div className="brand-name">m4tr1x</div>
-              <div className="brand-sub">tasks + notes</div>
+              <div className="brand-sub">c0d3 w1th m3m0ry</div>
             </div>
           </div>
 
@@ -1654,11 +1775,265 @@ function App() {
               )}
             </div>
           )}
+          {(showProjectCreateForm || (selectedProject && showProjectEditForm)) && (
+            <div className="rules-studio" style={{ marginBottom: 14 }}>
+              {showProjectCreateForm && !showProjectEditForm ? (
+                <>
+                  <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+                    <h3 style={{ margin: 0 }}>Project Rules (Draft: {draftProjectRules.length})</h3>
+                    <div className="meta">These rules are created with the new project.</div>
+                  </div>
+                  <div className="rules-layout">
+                    <div className="rules-list">
+                      {draftProjectRules.length === 0 ? (
+                        <div className="notice">No draft rules yet.</div>
+                      ) : (
+                        draftProjectRules.map((rule) => {
+                          const isSelected = selectedDraftProjectRuleId === rule.id
+                          return (
+                            <div
+                              key={rule.id}
+                              className={`task-item rule-item ${isSelected ? 'selected' : ''}`}
+                              onClick={() => setSelectedDraftProjectRuleId(rule.id)}
+                              role="button"
+                            >
+                              <div className="task-main">
+                                <div className="task-title">
+                                  <strong>{rule.title || 'Untitled rule'}</strong>
+                                  {isSelected && <span className="badge">Editing</span>}
+                                </div>
+                                <div className="meta">{(rule.body || '').replace(/\s+/g, ' ').slice(0, 120) || '(empty)'}</div>
+                              </div>
+                            </div>
+                          )
+                        })
+                      )}
+                    </div>
+                    <div className="rules-editor">
+                      <div className="row" style={{ marginBottom: 8, justifyContent: 'space-between', gap: 8 }}>
+                        <input
+                          value={draftProjectRuleTitle}
+                          onChange={(e) => setDraftProjectRuleTitle(e.target.value)}
+                          placeholder="Rule title"
+                        />
+                        <button
+                          className="status-chip"
+                          onClick={() => {
+                            setSelectedDraftProjectRuleId(null)
+                            setDraftProjectRuleTitle('')
+                            setDraftProjectRuleBody('')
+                            setDraftProjectRuleView('write')
+                          }}
+                          title="New rule"
+                          aria-label="New rule"
+                        >
+                          New rule
+                        </button>
+                      </div>
+                      <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+                        <div className="seg" role="tablist" aria-label="Draft project rule editor view">
+                          <button
+                            className={`seg-btn ${draftProjectRuleView === 'write' ? 'active' : ''}`}
+                            onClick={() => setDraftProjectRuleView('write')}
+                            type="button"
+                          >
+                            Write
+                          </button>
+                          <button
+                            className={`seg-btn ${draftProjectRuleView === 'preview' ? 'active' : ''}`}
+                            onClick={() => setDraftProjectRuleView('preview')}
+                            type="button"
+                          >
+                            Preview
+                          </button>
+                        </div>
+                        <div className="row" style={{ gap: 8 }}>
+                          <button
+                            className="primary"
+                            disabled={!draftProjectRuleTitle.trim()}
+                            onClick={() => {
+                              const title = draftProjectRuleTitle.trim()
+                              if (!title) return
+                              if (selectedDraftProjectRuleId) {
+                                setDraftProjectRules((prev) =>
+                                  prev.map((item) =>
+                                    item.id === selectedDraftProjectRuleId
+                                      ? { ...item, title, body: draftProjectRuleBody }
+                                      : item
+                                  )
+                                )
+                              } else {
+                                const newId = globalThis.crypto?.randomUUID?.() ?? `draft-rule-${Date.now()}`
+                                setDraftProjectRules((prev) => [...prev, { id: newId, title, body: draftProjectRuleBody }])
+                                setSelectedDraftProjectRuleId(newId)
+                              }
+                            }}
+                            title={selectedDraftProjectRuleId ? 'Update draft rule' : 'Add draft rule'}
+                            aria-label={selectedDraftProjectRuleId ? 'Update draft rule' : 'Add draft rule'}
+                          >
+                            <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+                          </button>
+                          {selectedDraftProjectRuleId && (
+                            <button
+                              className="action-icon danger-ghost"
+                              onClick={() => {
+                                if (!selectedDraftProjectRuleId) return
+                                setDraftProjectRules((prev) => prev.filter((item) => item.id !== selectedDraftProjectRuleId))
+                                setSelectedDraftProjectRuleId(null)
+                                setDraftProjectRuleTitle('')
+                                setDraftProjectRuleBody('')
+                              }}
+                              title="Remove draft rule"
+                              aria-label="Remove draft rule"
+                            >
+                              <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {draftProjectRuleView === 'write' ? (
+                        <textarea
+                          value={draftProjectRuleBody}
+                          onChange={(e) => setDraftProjectRuleBody(e.target.value)}
+                          placeholder="Rule details (Markdown)"
+                          style={{ width: '100%', minHeight: 140 }}
+                        />
+                      ) : (
+                        <MarkdownView value={draftProjectRuleBody} />
+                      )}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+                    <h3 style={{ margin: 0 }}>Project Rules ({projectRules.data?.total ?? 0})</h3>
+                    <div className="row" style={{ gap: 8 }}>
+                      <input
+                        value={projectRuleQ}
+                        onChange={(e) => setProjectRuleQ(e.target.value)}
+                        placeholder="Search rules"
+                        style={{ minWidth: 180 }}
+                      />
+                    </div>
+                  </div>
+                  <div className="rules-layout">
+                    <div className="rules-list">
+                      {(projectRules.data?.items ?? []).length === 0 ? (
+                        <div className="notice">No rules yet for this project.</div>
+                      ) : (
+                        (projectRules.data?.items ?? []).map((rule: ProjectRule) => {
+                          const isSelected = selectedProjectRuleId === rule.id
+                          return (
+                            <div
+                              key={rule.id}
+                              className={`task-item rule-item ${isSelected ? 'selected' : ''}`}
+                              onClick={() => setSelectedProjectRuleId(rule.id)}
+                              role="button"
+                            >
+                              <div className="task-main">
+                                <div className="task-title">
+                                  <strong>{rule.title || 'Untitled rule'}</strong>
+                                  {isSelected && <span className="badge">Editing</span>}
+                                </div>
+                                <div className="meta">{(rule.body || '').replace(/\s+/g, ' ').slice(0, 120) || '(empty)'}</div>
+                                <div className="meta">Updated: {toUserDateTime(rule.updated_at, userTimezone)}</div>
+                              </div>
+                            </div>
+                          )
+                        })
+                      )}
+                    </div>
+                    <div className="rules-editor">
+                      <div className="row" style={{ marginBottom: 8, justifyContent: 'space-between', gap: 8 }}>
+                        <input
+                          value={projectRuleTitle}
+                          onChange={(e) => setProjectRuleTitle(e.target.value)}
+                          placeholder="Rule title"
+                        />
+                        <button
+                          className="status-chip"
+                          onClick={() => {
+                            setSelectedProjectRuleId(null)
+                            setProjectRuleTitle('')
+                            setProjectRuleBody('')
+                            setProjectRuleView('write')
+                          }}
+                          title="New rule"
+                          aria-label="New rule"
+                        >
+                          New rule
+                        </button>
+                      </div>
+                      <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+                        <div className="seg" role="tablist" aria-label="Project rule editor view">
+                          <button
+                            className={`seg-btn ${projectRuleView === 'write' ? 'active' : ''}`}
+                            onClick={() => setProjectRuleView('write')}
+                            type="button"
+                          >
+                            Write
+                          </button>
+                          <button
+                            className={`seg-btn ${projectRuleView === 'preview' ? 'active' : ''}`}
+                            onClick={() => setProjectRuleView('preview')}
+                            type="button"
+                          >
+                            Preview
+                          </button>
+                        </div>
+                        <div className="row" style={{ gap: 8 }}>
+                          <button
+                            className="primary"
+                            disabled={!projectRuleTitle.trim() || createProjectRuleMutation.isPending || patchProjectRuleMutation.isPending}
+                            onClick={() => {
+                              if (selectedProjectRuleId) patchProjectRuleMutation.mutate()
+                              else createProjectRuleMutation.mutate()
+                            }}
+                            title={selectedProjectRuleId ? 'Update rule' : 'Create rule'}
+                            aria-label={selectedProjectRuleId ? 'Update rule' : 'Create rule'}
+                          >
+                            <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+                          </button>
+                          {selectedProjectRuleId && (
+                            <button
+                              className="action-icon danger-ghost"
+                              disabled={deleteProjectRuleMutation.isPending}
+                              onClick={() => {
+                                if (!selectedProjectRuleId) return
+                                if (!window.confirm('Delete this rule?')) return
+                                deleteProjectRuleMutation.mutate(selectedProjectRuleId)
+                              }}
+                              title="Delete rule"
+                              aria-label="Delete rule"
+                            >
+                              <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {projectRuleView === 'write' ? (
+                        <textarea
+                          value={projectRuleBody}
+                          onChange={(e) => setProjectRuleBody(e.target.value)}
+                          placeholder="Rule details (Markdown)"
+                          style={{ width: '100%', minHeight: 140 }}
+                        />
+                      ) : (
+                        <MarkdownView value={projectRuleBody} />
+                      )}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
           <div className="task-list">
             {bootstrap.data.projects.map((project, idx) => {
               const isSelected = selectedProjectId === project.id
               const taskCount = projectTaskCountQueries[idx]?.data?.total
               const noteCount = projectNoteCountQueries[idx]?.data?.total
+              const ruleCount = projectRuleCountQueries[idx]?.data?.total
               return (
                 <div key={project.id} className="task-item">
                   <div className="task-main" role="button" onClick={() => setSelectedProjectId(project.id)}>
@@ -1669,7 +2044,7 @@ function App() {
                     <span className="meta">Status: {project.status || 'active'}</span>
                     <div className="meta">{project.description || '(no description)'}</div>
                     <div className="meta">
-                      Tasks: {taskCount ?? '...'} | Notes: {noteCount ?? '...'}
+                      Tasks: {taskCount ?? '...'} | Notes: {noteCount ?? '...'} | Rules: {ruleCount ?? '...'}
                     </div>
                   </div>
                   <button
@@ -2536,7 +2911,7 @@ function App() {
               {codexChatTurns.map((turn) => (
                 <div key={turn.id} className={`codex-chat-bubble ${turn.role}`}>
                   <div className="codex-chat-role">{turn.role === 'user' ? 'You' : 'Codex'}</div>
-                  <div>{turn.content}</div>
+                  {turn.role === 'assistant' ? <MarkdownView value={turn.content} /> : <div>{turn.content}</div>}
                 </div>
               ))}
             </div>

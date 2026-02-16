@@ -5,6 +5,9 @@ import shlex
 import subprocess
 from dataclasses import dataclass
 
+from sqlalchemy import select
+
+from shared.models import Project, ProjectRule, SessionLocal
 from shared.settings import AGENT_CODEX_COMMAND, AGENT_EXECUTOR_MODE, AGENT_EXECUTOR_TIMEOUT_SECONDS
 
 
@@ -13,6 +16,30 @@ class AutomationOutcome:
     action: str
     summary: str
     comment: str | None = None
+
+
+def _load_project_context(project_id: str | None) -> tuple[str | None, str, list[dict[str, str]]]:
+    if not project_id:
+        return None, "", []
+    with SessionLocal() as db:
+        row = db.execute(
+            select(Project.name, Project.description).where(Project.id == project_id, Project.is_deleted == False)
+        ).first()
+        rules = db.execute(
+            select(ProjectRule.title, ProjectRule.body)
+            .where(ProjectRule.project_id == project_id, ProjectRule.is_deleted == False)
+            .order_by(ProjectRule.updated_at.desc())
+        ).all()
+    if not row:
+        return None, "", []
+    normalized_rules = [
+        {
+            "title": str(item[0] or "").strip(),
+            "body": str(item[1] or ""),
+        }
+        for item in rules
+    ]
+    return str(row[0] or "").strip() or None, str(row[1] or ""), normalized_rules
 
 
 def _placeholder_outcome(*, instruction: str, current_status: str) -> AutomationOutcome:
@@ -71,6 +98,7 @@ def execute_task_automation(
         raise RuntimeError("AGENT_EXECUTOR_MODE=command requires AGENT_CODEX_COMMAND")
 
     command = shlex.split(AGENT_CODEX_COMMAND)
+    project_name, project_description, project_rules = _load_project_context(project_id)
     context = {
         "task_id": task_id,
         "title": title,
@@ -79,6 +107,9 @@ def execute_task_automation(
         "instruction": instruction,
         "workspace_id": workspace_id,
         "project_id": project_id,
+        "project_name": project_name,
+        "project_description": project_description,
+        "project_rules": project_rules,
         "allow_mutations": allow_mutations,
     }
     try:

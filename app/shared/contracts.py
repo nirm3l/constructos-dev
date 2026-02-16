@@ -107,6 +107,18 @@ class ProjectPatch(BaseModel):
     description: str | None = None
 
 
+class ProjectRuleCreate(BaseModel):
+    workspace_id: str
+    project_id: str
+    title: str = Field(min_length=1)
+    body: str = ""
+
+
+class ProjectRulePatch(BaseModel):
+    title: str | None = None
+    body: str | None = None
+
+
 class ReorderPayload(BaseModel):
     ordered_ids: list[str]
     status: str | None = None
@@ -204,4 +216,25 @@ class NoteCommandState:
     task_id: str | None
     pinned: bool
     archived: bool
+    is_deleted: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectRuleDTO:
+    id: str
+    workspace_id: str
+    project_id: str
+    title: str
+    body: str
+    created_by: str
+    updated_by: str
+    created_at: str | None
+    updated_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectRuleCommandState:
+    id: str
+    workspace_id: str
+    project_id: str
     is_deleted: bool

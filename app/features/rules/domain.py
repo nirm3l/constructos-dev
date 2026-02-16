@@ -1,0 +1,5 @@
+EVENT_CREATED = "ProjectRuleCreated"
+EVENT_UPDATED = "ProjectRuleUpdated"
+EVENT_DELETED = "ProjectRuleDeleted"
+
+MUTATION_EVENTS = {EVENT_UPDATED, EVENT_DELETED}

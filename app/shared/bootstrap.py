@@ -13,8 +13,9 @@ from sqlalchemy.orm import Session
 from features.bootstrap.read_models import bootstrap_payload_read_model
 from .eventing import append_event, current_version, emit_system_notifications, get_kurrent_client
 from features.projects.domain import EVENT_CREATED as PROJECT_EVENT_CREATED
+from features.rules.domain import EVENT_CREATED as PROJECT_RULE_EVENT_CREATED
 from features.tasks.domain import EVENT_CREATED as TASK_EVENT_CREATED
-from .models import Base, Note, Project, ProjectTagIndex, SessionLocal, Task, User, Workspace, WorkspaceMember, engine
+from .models import Base, Note, Project, ProjectRule, ProjectTagIndex, SessionLocal, Task, User, Workspace, WorkspaceMember, engine
 from .serializers import to_iso_utc
 from .settings import (
     AGENT_SYSTEM_FULL_NAME,
@@ -176,6 +177,7 @@ def bootstrap_data():
 
         # Repair drift: if Kurrent was reset but app.db persisted, backfill streams.
         _backfill_project_streams_from_read_model(db)
+        _backfill_project_rule_streams_from_read_model(db)
         _backfill_task_streams_from_read_model(db)
         _rebuild_project_tag_index(db)
         db.commit()
@@ -286,6 +288,38 @@ def _backfill_task_streams_from_read_model(db: Session) -> None:
                 "workspace_id": t.workspace_id,
                 "project_id": t.project_id,
                 "task_id": t.id,
+            },
+            expected_version=0,
+        )
+
+
+def _backfill_project_rule_streams_from_read_model(db: Session) -> None:
+    if get_kurrent_client() is None:
+        return
+
+    rules = db.execute(select(ProjectRule).where(ProjectRule.is_deleted == False)).scalars().all()
+    for rule in rules:
+        if current_version(db, "ProjectRule", rule.id) != 0:
+            continue
+        append_event(
+            db,
+            aggregate_type="ProjectRule",
+            aggregate_id=rule.id,
+            event_type=PROJECT_RULE_EVENT_CREATED,
+            payload={
+                "workspace_id": rule.workspace_id,
+                "project_id": rule.project_id,
+                "title": rule.title,
+                "body": rule.body or "",
+                "created_by": rule.created_by,
+                "updated_by": rule.updated_by,
+                "is_deleted": False,
+            },
+            metadata={
+                "actor_id": rule.created_by or DEFAULT_USER_ID,
+                "workspace_id": rule.workspace_id,
+                "project_id": rule.project_id,
+                "project_rule_id": rule.id,
             },
             expected_version=0,
         )

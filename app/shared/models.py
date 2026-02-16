@@ -134,6 +134,18 @@ class ProjectTagIndex(Base, TimeMixin):
     usage_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class ProjectRule(Base, TimeMixin):
+    __tablename__ = "project_rules"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    title: Mapped[str] = mapped_column(String(160))
+    body: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    updated_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class Notification(Base, TimeMixin):
     __tablename__ = "notifications"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)

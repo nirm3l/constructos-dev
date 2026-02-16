@@ -93,6 +93,30 @@ def create_mcp(*, read_only: bool = False):
         auth_token = auth_token or default_tool_token
         return service.get_note(note_id=note_id, auth_token=auth_token)
 
+    @mcp.tool(description="List project rules in a workspace/project.")
+    def list_project_rules(
+        workspace_id: str,
+        project_id: str,
+        auth_token: str | None = None,
+        q: str | None = None,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.list_project_rules(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            auth_token=auth_token,
+            q=q,
+            limit=limit,
+            offset=offset,
+        )
+
+    @mcp.tool(description="Get one project rule by id.")
+    def get_project_rule(rule_id: str, auth_token: str | None = None) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.get_project_rule(rule_id=rule_id, auth_token=auth_token)
+
     if not read_only:
         @mcp.tool(description="Apply a bulk action to multiple tasks (e.g. archive, complete, delete).")
         def bulk_task_action(
@@ -281,6 +305,40 @@ def create_mcp(*, read_only: bool = False):
                 custom_statuses=custom_statuses,
                 command_id=command_id,
             )
+
+        @mcp.tool(description="Create a project rule in a workspace/project.")
+        def create_project_rule(
+            title: str,
+            project_id: str,
+            workspace_id: str | None = None,
+            body: str = "",
+            auth_token: str | None = None,
+            command_id: str | None = None,
+        ) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.create_project_rule(
+                title=title,
+                project_id=project_id,
+                workspace_id=workspace_id,
+                body=body,
+                auth_token=auth_token,
+                command_id=command_id,
+            )
+
+        @mcp.tool(description="Patch a project rule. Accepts the same fields as ProjectRulePatch.")
+        def update_project_rule(
+            rule_id: str,
+            patch: dict[str, Any],
+            auth_token: str | None = None,
+            command_id: str | None = None,
+        ) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.update_project_rule(rule_id=rule_id, patch=patch, auth_token=auth_token, command_id=command_id)
+
+        @mcp.tool(description="Soft-delete a project rule.")
+        def delete_project_rule(rule_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.delete_project_rule(rule_id=rule_id, auth_token=auth_token, command_id=command_id)
 
         @mcp.tool(description="Patch a task. Accepts the same fields as TaskPatch.")
         def update_task(task_id: str, patch: dict[str, Any], auth_token: str | None = None, command_id: str | None = None) -> dict[str, Any]:

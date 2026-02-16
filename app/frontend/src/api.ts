@@ -6,6 +6,8 @@ import type {
   NotesPage,
   Project,
   ProjectBoard,
+  ProjectRule,
+  ProjectRulesPage,
   ProjectTags,
   Task,
   TaskActivity,
@@ -200,6 +202,36 @@ export const getProjectBoard = (userId: string, projectId: string) =>
 
 export const getProjectTags = (userId: string, projectId: string) =>
   api<ProjectTags>(`/api/projects/${projectId}/tags`, userId)
+
+export const getProjectRules = (
+  userId: string,
+  workspaceId: string,
+  params: { project_id: string; q?: string; limit?: number; offset?: number }
+) =>
+  api<ProjectRulesPage>(
+    `/api/project-rules${queryString({
+      workspace_id: workspaceId,
+      project_id: params.project_id,
+      q: params.q,
+      limit: params.limit ?? 100,
+      offset: params.offset ?? 0,
+    })}`,
+    userId
+  )
+
+export const createProjectRule = (
+  userId: string,
+  payload: { workspace_id: string; project_id: string; title: string; body?: string }
+) => api<ProjectRule>('/api/project-rules', userId, { method: 'POST', body: JSON.stringify(payload) })
+
+export const patchProjectRule = (
+  userId: string,
+  ruleId: string,
+  payload: Partial<Pick<ProjectRule, 'title' | 'body'>>
+) => api<ProjectRule>(`/api/project-rules/${ruleId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })
+
+export const deleteProjectRule = (userId: string, ruleId: string) =>
+  api<{ ok: true }>(`/api/project-rules/${ruleId}/delete`, userId, { method: 'POST' })
 
 export const patchMyPreferences = (
   userId: string,

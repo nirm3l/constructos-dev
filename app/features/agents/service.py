@@ -7,12 +7,15 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from features.projects.application import ProjectApplicationService
+from features.rules.application import ProjectRuleApplicationService
+from features.rules.read_models import ProjectRuleListQuery, list_project_rules_read_model
 from features.tasks.application import TaskApplicationService
 from features.tasks.read_models import TaskListQuery, get_task_automation_status_read_model, list_tasks_read_model
 from features.notes.application import NoteApplicationService
 from features.notes.read_models import NoteListQuery, list_notes_read_model
-from shared.core import BulkAction, CommentCreate, Project, ProjectCreate, SessionLocal, TaskAutomationRun, TaskCreate, TaskPatch, User, load_task_command_state, load_task_view
+from shared.core import BulkAction, CommentCreate, Project, ProjectCreate, ProjectRuleCreate, ProjectRulePatch, SessionLocal, TaskAutomationRun, TaskCreate, TaskPatch, User, load_task_command_state, load_task_view
 from shared.core import NoteCreate, NotePatch, load_note_command_state, load_note_view
+from shared.core import load_project_rule_command_state, load_project_rule_view
 from shared.deps import ensure_role
 from shared.models import User as UserModel
 from shared.settings import (
@@ -49,6 +52,16 @@ class AgentTaskService:
         state = load_task_command_state(db, task_id)
         if not state or state.is_deleted:
             raise HTTPException(status_code=404, detail="Task not found")
+        self._assert_workspace_allowed(state.workspace_id)
+        self._assert_project_allowed(state.project_id)
+        return state
+
+    def _assert_project_rule_allowed(self, *, db, rule_id: str | None):
+        if not rule_id:
+            return None
+        state = load_project_rule_command_state(db, rule_id)
+        if not state or state.is_deleted:
+            raise HTTPException(status_code=404, detail="Project rule not found")
         self._assert_workspace_allowed(state.workspace_id)
         self._assert_project_allowed(state.project_id)
         return state
@@ -189,6 +202,36 @@ class AgentTaskService:
                 ),
             )
 
+    def list_project_rules(
+        self,
+        *,
+        workspace_id: str,
+        auth_token: str | None = None,
+        project_id: str | None = None,
+        q: str | None = None,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> dict:
+        self._require_token(auth_token)
+        self._assert_workspace_allowed(workspace_id)
+        if not project_id:
+            raise HTTPException(status_code=400, detail="project_id is required")
+        self._assert_project_allowed(project_id)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            return list_project_rules_read_model(
+                db,
+                user,
+                ProjectRuleListQuery(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    q=q,
+                    limit=limit,
+                    offset=offset,
+                ),
+            )
+
     def get_note(self, *, note_id: str, auth_token: str | None = None) -> dict:
         self._require_token(auth_token)
         user = self._resolve_actor_user()
@@ -220,6 +263,18 @@ class AgentTaskService:
             if not task:
                 raise HTTPException(status_code=404, detail="Task not found")
             return task
+
+    def get_project_rule(self, *, rule_id: str, auth_token: str | None = None) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            state = self._assert_project_rule_allowed(db=db, rule_id=rule_id)
+            assert state is not None
+            ensure_role(db, state.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            rule = load_project_rule_view(db, rule_id)
+            if not rule:
+                raise HTTPException(status_code=404, detail="Project rule not found")
+            return rule
 
     def get_task_automation_status(self, *, task_id: str, auth_token: str | None = None) -> dict:
         self._require_token(auth_token)
@@ -328,6 +383,53 @@ class AgentTaskService:
                 custom_statuses=custom_statuses,
             )
             return ProjectApplicationService(db, user, command_id=command_id or f"mcp-project-create-{uuid.uuid4()}").create_project(payload)
+
+    def create_project_rule(
+        self,
+        *,
+        title: str,
+        project_id: str,
+        workspace_id: str | None = None,
+        body: str = "",
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_create(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            payload = ProjectRuleCreate(
+                workspace_id=resolved_workspace_id,
+                project_id=resolved_project_id,
+                title=title,
+                body=body or "",
+            )
+            return ProjectRuleApplicationService(
+                db, user, command_id=command_id or f"mcp-project-rule-create-{uuid.uuid4()}"
+            ).create_project_rule(payload)
+
+    def update_project_rule(self, *, rule_id: str, patch: dict, auth_token: str | None = None, command_id: str | None = None) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            self._assert_project_rule_allowed(db=db, rule_id=rule_id)
+            payload = ProjectRulePatch(**patch)
+            return ProjectRuleApplicationService(
+                db, user, command_id=command_id or f"mcp-project-rule-patch-{uuid.uuid4()}"
+            ).patch_project_rule(rule_id, payload)
+
+    def delete_project_rule(self, *, rule_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            self._assert_project_rule_allowed(db=db, rule_id=rule_id)
+            return ProjectRuleApplicationService(
+                db, user, command_id=command_id or f"mcp-project-rule-delete-{uuid.uuid4()}"
+            ).delete_project_rule(rule_id)
 
     def update_note(self, *, note_id: str, patch: dict, auth_token: str | None = None, command_id: str | None = None) -> dict:
         self._require_token(auth_token)

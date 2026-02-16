@@ -17,6 +17,24 @@ def _build_prompt(ctx: dict) -> str:
     instruction = ctx.get("instruction", "")
     workspace_id = ctx.get("workspace_id") or ""
     project_id = ctx.get("project_id") or ""
+    project_name = ctx.get("project_name") or ""
+    project_description = str(ctx.get("project_description") or "")
+    project_rules = ctx.get("project_rules") or []
+    soul_md = project_description.strip() or "_(empty)_"
+    rules_md_lines: list[str] = []
+    for item in project_rules:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        body = str(item.get("body") or "").strip()
+        if not title and not body:
+            continue
+        label = title or "Untitled rule"
+        if body:
+            rules_md_lines.append(f"- {label}: {body}")
+        else:
+            rules_md_lines.append(f"- {label}")
+    rules_md = "\n".join(rules_md_lines) if rules_md_lines else "_(no project rules)_"
     has_task_context = bool(str(task_id or "").strip())
     context_guidance = (
         "- First call MCP tool get_task(task_id) to validate current task data.\n"
@@ -33,9 +51,18 @@ def _build_prompt(ctx: dict) -> str:
         f"Description: {description}\n"
         f"Workspace ID: {workspace_id}\n"
         f"Project ID: {project_id}\n"
+        f"Project Name: {project_name}\n"
         f"Instruction: {instruction}\n\n"
+        "Context Pack:\n"
+        "File: Soul.md (source: project.description)\n"
+        f"{soul_md}\n\n"
+        "File: ProjectRules.md (source: project_rules)\n"
+        f"{rules_md}\n\n"
         "Guidance:\n"
         f"{context_guidance}"
+        "- Treat Soul.md and ProjectRules.md as durable project-level context.\n"
+        "- ProjectRules.md defines how you should behave within this project.\n"
+        "- If project context conflicts with the latest explicit user instruction, follow the latest explicit user instruction.\n"
         "- You may call task-management MCP tools relevant to the request.\n"
         "- Prefer bulk tools when operating on many tasks (avoid per-task loops when possible).\n"
         "- Prefer archive_all_notes/archive_all_tasks for 'archive everything' requests.\n"

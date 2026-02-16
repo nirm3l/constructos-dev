@@ -6,8 +6,9 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from shared.core import ActivityLog, DEFAULT_STATUSES, Note, Project, ProjectCreate, ProjectPatch, SavedView, Task, User, append_event, allocate_id, ensure_role, load_project_view
+from shared.core import ActivityLog, DEFAULT_STATUSES, Note, Project, ProjectCreate, ProjectPatch, ProjectRule, SavedView, Task, User, append_event, allocate_id, ensure_role, load_project_view
 from ..notes.domain import EVENT_DELETED as NOTE_EVENT_DELETED
+from ..rules.domain import EVENT_DELETED as PROJECT_RULE_EVENT_DELETED
 from ..tasks.domain import EVENT_DELETED as TASK_EVENT_DELETED
 from .domain import EVENT_CREATED as PROJECT_EVENT_CREATED
 from .domain import EVENT_DELETED as PROJECT_EVENT_DELETED
@@ -80,6 +81,16 @@ class DeleteProjectHandler:
                 event_type=NOTE_EVENT_DELETED,
                 payload={"updated_by": self.ctx.user.id},
                 metadata={"actor_id": self.ctx.user.id, "workspace_id": project.workspace_id, "task_id": n.task_id, "project_id": self.project_id, "note_id": n.id},
+            )
+        rules = self.ctx.db.execute(select(ProjectRule).where(ProjectRule.project_id == self.project_id, ProjectRule.is_deleted == False)).scalars().all()
+        for r in rules:
+            append_event(
+                self.ctx.db,
+                aggregate_type="ProjectRule",
+                aggregate_id=r.id,
+                event_type=PROJECT_RULE_EVENT_DELETED,
+                payload={"updated_by": self.ctx.user.id},
+                metadata={"actor_id": self.ctx.user.id, "workspace_id": project.workspace_id, "project_id": self.project_id, "project_rule_id": r.id},
             )
         for view in self.ctx.db.execute(select(SavedView).where(SavedView.project_id == self.project_id)).scalars().all():
             self.ctx.db.delete(view)

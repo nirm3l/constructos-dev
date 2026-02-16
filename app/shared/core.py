@@ -13,6 +13,8 @@ from .contracts import (
     NotificationDTO,
     ProjectCreate,
     ProjectPatch,
+    ProjectRuleCreate,
+    ProjectRulePatch,
     ReorderPayload,
     SavedViewCreate,
     TaskAutomationRun,
@@ -20,6 +22,8 @@ from .contracts import (
     TaskCreate,
     TaskDTO,
     TaskPatch,
+    ProjectRuleDTO,
+    ProjectRuleCommandState,
     UserPreferencesPatch,
 )
 from .deps import ensure_role, get_command_id, get_current_user, get_db, run_command_with_retry
@@ -45,6 +49,7 @@ from .models import (
     Project,
     ProjectionCheckpoint,
     ProjectTagIndex,
+    ProjectRule,
     SavedView,
     SessionLocal,
     StoredEvent,
@@ -60,6 +65,8 @@ from .serializers import (
     export_tasks_response,
     get_user_zoneinfo,
     load_project_view,
+    load_project_rule_command_state,
+    load_project_rule_view,
     load_saved_view,
     load_note_command_state,
     load_note_view,
@@ -68,6 +75,7 @@ from .serializers import (
     normalize_datetime_to_utc,
     serialize_note,
     serialize_notification,
+    serialize_project_rule,
     serialize_task,
     to_iso_utc,
 )
@@ -81,6 +89,11 @@ from features.projects.domain import (
     EVENT_CREATED as PROJECT_EVENT_CREATED,
     EVENT_DELETED as PROJECT_EVENT_DELETED,
     EVENT_UPDATED as PROJECT_EVENT_UPDATED,
+)
+from features.rules.domain import (
+    EVENT_CREATED as PROJECT_RULE_EVENT_CREATED,
+    EVENT_DELETED as PROJECT_RULE_EVENT_DELETED,
+    EVENT_UPDATED as PROJECT_RULE_EVENT_UPDATED,
 )
 from features.tasks.domain import (
     EVENT_ARCHIVED as TASK_EVENT_ARCHIVED,

@@ -55,6 +55,12 @@ from features.notes.domain import (
     EVENT_UPDATED as NOTE_EVENT_UPDATED,
     MUTATION_EVENTS as NOTE_MUTATION_EVENTS,
 )
+from features.rules.domain import (
+    EVENT_CREATED as PROJECT_RULE_EVENT_CREATED,
+    EVENT_DELETED as PROJECT_RULE_EVENT_DELETED,
+    EVENT_UPDATED as PROJECT_RULE_EVENT_UPDATED,
+    MUTATION_EVENTS as PROJECT_RULE_MUTATION_EVENTS,
+)
 from features.users.domain import EVENT_PREFERENCES_UPDATED as USER_EVENT_PREFERENCES_UPDATED
 from features.views.domain import EVENT_CREATED as SAVED_VIEW_EVENT_CREATED
 from .models import (
@@ -64,6 +70,7 @@ from .models import (
     Notification,
     Project,
     ProjectTagIndex,
+    ProjectRule,
     SavedView,
     StoredEvent,
     Task,
@@ -402,6 +409,29 @@ def apply_note_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
     return s
 
 
+def apply_project_rule_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, Any]:
+    s = dict(state)
+    p = event.payload
+    if event.event_type == PROJECT_RULE_EVENT_CREATED:
+        s = {
+            "id": event.aggregate_id,
+            "workspace_id": p["workspace_id"],
+            "project_id": p["project_id"],
+            "title": p.get("title", ""),
+            "body": p.get("body", ""),
+            "created_by": p.get("created_by"),
+            "updated_by": p.get("updated_by"),
+            "is_deleted": bool(p.get("is_deleted", False)),
+        }
+    elif event.event_type == PROJECT_RULE_EVENT_UPDATED:
+        s.update(p)
+    elif event.event_type == PROJECT_RULE_EVENT_DELETED:
+        s["is_deleted"] = True
+        if "updated_by" in p:
+            s["updated_by"] = p.get("updated_by")
+    return s
+
+
 def rebuild_state(db: Session, aggregate_type: str, aggregate_id: str) -> tuple[dict[str, Any], int]:
     state, version = load_snapshot(db, aggregate_type, aggregate_id)
     for ev in load_events_after(db, aggregate_type, aggregate_id, version):
@@ -411,6 +441,8 @@ def rebuild_state(db: Session, aggregate_type: str, aggregate_id: str) -> tuple[
             state = apply_project_event(state, ev)
         elif aggregate_type == "Note":
             state = apply_note_event(state, ev)
+        elif aggregate_type == "ProjectRule":
+            state = apply_project_rule_event(state, ev)
         version = ev.version
     return state, version
 
@@ -489,6 +521,18 @@ def project_event(db: Session, ev: EventEnvelope):
         note.created_by = p.get("created_by") or m.get("actor_id") or ""
         note.updated_by = p.get("updated_by") or m.get("actor_id") or ""
         _recompute_project_tag_index(db, note.project_id)
+    elif ev.event_type == PROJECT_RULE_EVENT_CREATED:
+        rule = db.get(ProjectRule, ev.aggregate_id)
+        if rule is None:
+            rule = ProjectRule(id=ev.aggregate_id, workspace_id=p["workspace_id"], project_id=p["project_id"], title=p.get("title", ""))
+            db.add(rule)
+        rule.workspace_id = p["workspace_id"]
+        rule.project_id = p["project_id"]
+        rule.title = p.get("title", "") or ""
+        rule.body = p.get("body", "") or ""
+        rule.created_by = p.get("created_by") or m.get("actor_id") or ""
+        rule.updated_by = p.get("updated_by") or m.get("actor_id") or ""
+        rule.is_deleted = bool(p.get("is_deleted", False))
     elif ev.event_type == TASK_EVENT_CREATED:
         task = db.get(Task, ev.aggregate_id)
         if task is None:
@@ -547,6 +591,16 @@ def project_event(db: Session, ev: EventEnvelope):
                     note.updated_by = p["updated_by"]
             _recompute_project_tag_index(db, old_project_id)
             _recompute_project_tag_index(db, note.project_id)
+    elif ev.event_type in PROJECT_RULE_MUTATION_EVENTS:
+        rule = db.get(ProjectRule, ev.aggregate_id)
+        if rule:
+            if ev.event_type == PROJECT_RULE_EVENT_UPDATED:
+                for k, v in p.items():
+                    setattr(rule, k, v)
+            elif ev.event_type == PROJECT_RULE_EVENT_DELETED:
+                rule.is_deleted = True
+                if p.get("updated_by"):
+                    rule.updated_by = p["updated_by"]
     elif ev.event_type in TASK_MUTATION_EVENTS:
         task = db.get(Task, ev.aggregate_id)
         if task:

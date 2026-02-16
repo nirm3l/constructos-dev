@@ -12,8 +12,16 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .contracts import NoteCommandState, NoteDTO, NotificationDTO, TaskCommandState, TaskDTO
-from .models import Note, Notification, Project, SavedView, Task
+from .contracts import (
+    NoteCommandState,
+    NoteDTO,
+    NotificationDTO,
+    ProjectRuleCommandState,
+    ProjectRuleDTO,
+    TaskCommandState,
+    TaskDTO,
+)
+from .models import Note, Notification, Project, ProjectRule, SavedView, Task
 from .settings import DEFAULT_STATUSES
 
 
@@ -96,6 +104,21 @@ def serialize_notification(notification: Notification) -> dict[str, Any]:
         message=notification.message,
         is_read=notification.is_read,
         created_at=to_iso_utc(notification.created_at),
+    )
+    return asdict(dto)
+
+
+def serialize_project_rule(rule: ProjectRule) -> dict[str, Any]:
+    dto = ProjectRuleDTO(
+        id=rule.id,
+        workspace_id=rule.workspace_id,
+        project_id=rule.project_id,
+        title=rule.title,
+        body=rule.body or "",
+        created_by=rule.created_by,
+        updated_by=rule.updated_by,
+        created_at=to_iso_utc(rule.created_at),
+        updated_at=to_iso_utc(rule.updated_at),
     )
     return asdict(dto)
 
@@ -270,6 +293,56 @@ def load_saved_view(db: Session, saved_view_id: str) -> dict[str, Any] | None:
             "filters": json.loads(saved_view.filters or "{}"),
         }
     return None
+
+
+def load_project_rule_view(db: Session, rule_id: str) -> dict[str, Any] | None:
+    from .eventing import get_kurrent_client, rebuild_state
+
+    if get_kurrent_client() is not None:
+        state, _ = rebuild_state(db, "ProjectRule", rule_id)
+        if not state or state.get("is_deleted"):
+            return None
+        return {
+            "id": rule_id,
+            "workspace_id": state.get("workspace_id"),
+            "project_id": state.get("project_id"),
+            "title": state.get("title", ""),
+            "body": state.get("body", ""),
+            "created_by": state.get("created_by") or "",
+            "updated_by": state.get("updated_by") or "",
+            "created_at": None,
+            "updated_at": None,
+        }
+
+    rule = db.get(ProjectRule, rule_id)
+    if rule and not rule.is_deleted:
+        return serialize_project_rule(rule)
+    return None
+
+
+def load_project_rule_command_state(db: Session, rule_id: str) -> ProjectRuleCommandState | None:
+    from .eventing import get_kurrent_client, rebuild_state
+
+    if get_kurrent_client() is None:
+        rule = db.get(ProjectRule, rule_id)
+        if not rule:
+            return None
+        return ProjectRuleCommandState(
+            id=rule.id,
+            workspace_id=rule.workspace_id,
+            project_id=rule.project_id,
+            is_deleted=bool(rule.is_deleted),
+        )
+
+    state, _ = rebuild_state(db, "ProjectRule", rule_id)
+    if not state:
+        return None
+    return ProjectRuleCommandState(
+        id=rule_id,
+        workspace_id=state.get("workspace_id", ""),
+        project_id=state.get("project_id", ""),
+        is_deleted=bool(state.get("is_deleted", False)),
+    )
 
 
 def export_tasks_response(db: Session, workspace_id: str, project_id: str, format: str):

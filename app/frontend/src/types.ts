@@ -123,6 +123,25 @@ export type ProjectTags = {
   tags: string[]
 }
 
+export type ProjectRule = {
+  id: string
+  workspace_id: string
+  project_id: string
+  title: string
+  body: string
+  created_by: string
+  updated_by: string
+  created_at: string | null
+  updated_at: string | null
+}
+
+export type ProjectRulesPage = {
+  items: ProjectRule[]
+  total: number
+  limit: number
+  offset: number
+}
+
 export type AgentChatResponse = {
   ok: boolean
   action: 'complete' | 'comment'
