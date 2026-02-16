@@ -76,10 +76,21 @@ def ensure_task_table_columns(db: Session):
     db.commit()
 
 
+def ensure_saved_view_table_columns(db: Session):
+    existing = {
+        row[1]
+        for row in db.execute(text("PRAGMA table_info(saved_views)")).fetchall()
+    }
+    if "project_id" not in existing:
+        db.execute(text("ALTER TABLE saved_views ADD COLUMN project_id VARCHAR(36)"))
+    db.commit()
+
+
 def bootstrap_data():
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
         ensure_task_table_columns(db)
+        ensure_saved_view_table_columns(db)
         ensure_system_users(db)
         default_user = db.get(User, DEFAULT_USER_ID)
         if not default_user:

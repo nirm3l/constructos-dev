@@ -264,6 +264,7 @@ def load_saved_view(db: Session, saved_view_id: str) -> dict[str, Any] | None:
     if saved_view:
         return {
             "id": saved_view.id,
+            "project_id": saved_view.project_id,
             "name": saved_view.name,
             "shared": saved_view.shared,
             "filters": json.loads(saved_view.filters or "{}"),
@@ -271,8 +272,14 @@ def load_saved_view(db: Session, saved_view_id: str) -> dict[str, Any] | None:
     return None
 
 
-def export_tasks_response(db: Session, workspace_id: str, format: str):
-    tasks = db.execute(select(Task).where(Task.workspace_id == workspace_id, Task.is_deleted == False)).scalars().all()
+def export_tasks_response(db: Session, workspace_id: str, project_id: str, format: str):
+    tasks = db.execute(
+        select(Task).where(
+            Task.workspace_id == workspace_id,
+            Task.project_id == project_id,
+            Task.is_deleted == False,
+        )
+    ).scalars().all()
     if format == "csv":
         buff = io.StringIO()
         writer = csv.DictWriter(buff, fieldnames=["id", "title", "status", "priority", "due_date", "assignee_id", "project_id"])

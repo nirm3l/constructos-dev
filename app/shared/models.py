@@ -145,6 +145,7 @@ class SavedView(Base, TimeMixin):
     __tablename__ = "saved_views"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), nullable=True, index=True)
     user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     name: Mapped[str] = mapped_column(String(128))
     filters: Mapped[str] = mapped_column(Text, default="{}")

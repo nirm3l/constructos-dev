@@ -30,8 +30,9 @@ def test_create_and_complete_task(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
 
-    created = client.post('/api/tasks', json={'title': 'Write tests', 'workspace_id': ws_id})
+    created = client.post('/api/tasks', json={'title': 'Write tests', 'workspace_id': ws_id, 'project_id': project_id})
     assert created.status_code == 200
     task = created.json()
     assert task['title'] == 'Write tests'
@@ -45,9 +46,10 @@ def test_search_filter(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
 
-    client.post('/api/tasks', json={'title': 'High prio', 'workspace_id': ws_id, 'priority': 'High'})
-    res = client.get(f'/api/tasks?workspace_id={ws_id}&priority=High')
+    client.post('/api/tasks', json={'title': 'High prio', 'workspace_id': ws_id, 'project_id': project_id, 'priority': 'High'})
+    res = client.get(f'/api/tasks?workspace_id={ws_id}&project_id={project_id}&priority=High')
     assert res.status_code == 200
     assert any(t['priority'] == 'High' for t in res.json()['items'])
 
@@ -56,8 +58,9 @@ def test_comment_mention_creates_notification(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
     current_user = bootstrap['current_user']
-    task = client.post('/api/tasks', json={'title': 'Mention', 'workspace_id': ws_id}).json()
+    task = client.post('/api/tasks', json={'title': 'Mention', 'workspace_id': ws_id, 'project_id': project_id}).json()
 
     comment = client.post(f"/api/tasks/{task['id']}/comments", json={'body': f"Ping @{current_user['username']}"})
     assert comment.status_code == 200
@@ -71,6 +74,7 @@ def test_today_view_respects_user_timezone(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
     user_tz = ZoneInfo(bootstrap['current_user']['timezone'])
 
     now_utc = datetime.now(timezone.utc)
@@ -80,11 +84,11 @@ def test_today_view_respects_user_timezone(tmp_path):
 
     created = client.post(
         '/api/tasks',
-        json={'title': 'TZ today task', 'workspace_id': ws_id, 'due_date': due_utc.isoformat()},
+        json={'title': 'TZ today task', 'workspace_id': ws_id, 'project_id': project_id, 'due_date': due_utc.isoformat()},
     )
     assert created.status_code == 200
 
-    today = client.get(f'/api/tasks?workspace_id={ws_id}&view=today')
+    today = client.get(f'/api/tasks?workspace_id={ws_id}&project_id={project_id}&view=today')
     assert today.status_code == 200
     assert any(t['title'] == 'TZ today task' for t in today.json()['items'])
 
@@ -101,7 +105,7 @@ def test_create_project(tmp_path):
     assert payload['workspace_id'] == ws_id
 
 
-def test_delete_project_moves_tasks_to_inbox(tmp_path):
+def test_delete_project_deletes_project_resources(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
@@ -110,13 +114,18 @@ def test_delete_project_moves_tasks_to_inbox(tmp_path):
     task = client.post('/api/tasks', json={'title': 'Belongs to project', 'workspace_id': ws_id, 'project_id': project['id']}).json()
     assert task['project_id'] == project['id']
 
+    note = client.post('/api/notes', json={'title': 'Project note', 'workspace_id': ws_id, 'project_id': project['id']}).json()
+
     deleted = client.delete(f"/api/projects/{project['id']}")
     assert deleted.status_code == 200
     assert deleted.json()['ok'] is True
+    assert deleted.json()['deleted_tasks'] == 1
+    assert deleted.json()['deleted_notes'] == 1
 
-    tasks = client.get(f'/api/tasks?workspace_id={ws_id}').json()['items']
-    moved_task = next(t for t in tasks if t['id'] == task['id'])
-    assert moved_task['project_id'] is None
+    tasks = client.get(f'/api/tasks?workspace_id={ws_id}&project_id={project["id"]}').json()['items']
+    assert all(t['id'] != task['id'] for t in tasks)
+    notes = client.get(f'/api/notes?workspace_id={ws_id}&project_id={project["id"]}').json()['items']
+    assert all(n['id'] != note['id'] for n in notes)
 
 
 def test_user_theme_preferences_persist(tmp_path):
@@ -134,11 +143,12 @@ def test_due_soon_system_notification(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
     due_utc = datetime.now(timezone.utc) + timedelta(minutes=30)
 
     created = client.post(
         '/api/tasks',
-        json={'title': 'Soon deadline', 'workspace_id': ws_id, 'due_date': due_utc.isoformat()},
+        json={'title': 'Soon deadline', 'workspace_id': ws_id, 'project_id': project_id, 'due_date': due_utc.isoformat()},
     )
     assert created.status_code == 200
 
@@ -181,23 +191,24 @@ def test_command_id_idempotency_for_create_task(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
     command_id = "cmd-create-task-001"
 
     first = client.post(
         '/api/tasks',
-        json={'title': 'Idempotent create', 'workspace_id': ws_id},
+        json={'title': 'Idempotent create', 'workspace_id': ws_id, 'project_id': project_id},
         headers={'X-Command-Id': command_id},
     )
     second = client.post(
         '/api/tasks',
-        json={'title': 'Idempotent create', 'workspace_id': ws_id},
+        json={'title': 'Idempotent create', 'workspace_id': ws_id, 'project_id': project_id},
         headers={'X-Command-Id': command_id},
     )
     assert first.status_code == 200
     assert second.status_code == 200
     assert first.json()['id'] == second.json()['id']
 
-    tasks = client.get(f'/api/tasks?workspace_id={ws_id}&q=Idempotent create').json()['items']
+    tasks = client.get(f'/api/tasks?workspace_id={ws_id}&project_id={project_id}&q=Idempotent create').json()['items']
     assert len(tasks) == 1
 
 
@@ -214,7 +225,8 @@ def test_local_snapshot_payload_has_schema_version(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
-    task = client.post('/api/tasks', json={'title': 'Snapshot schema test', 'workspace_id': ws_id}).json()
+    project_id = bootstrap['projects'][0]['id']
+    task = client.post('/api/tasks', json={'title': 'Snapshot schema test', 'workspace_id': ws_id, 'project_id': project_id}).json()
 
     for i in range(1, 22):
         res = client.patch(f"/api/tasks/{task['id']}", json={'description': f'v{i}'})
@@ -267,8 +279,9 @@ def test_request_task_automation_run_sets_queued_status(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
 
-    task = client.post('/api/tasks', json={'title': 'Automate me', 'workspace_id': ws_id}).json()
+    task = client.post('/api/tasks', json={'title': 'Automate me', 'workspace_id': ws_id, 'project_id': project_id}).json()
     run = client.post(f"/api/tasks/{task['id']}/automation/run", json={'instruction': 'Implement feature X'})
     assert run.status_code == 200
     payload = run.json()
@@ -291,7 +304,8 @@ def test_agent_service_can_request_automation_run(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
-    created = client.post('/api/tasks', json={'title': 'Agent task', 'workspace_id': ws_id}).json()
+    project_id = bootstrap['projects'][0]['id']
+    created = client.post('/api/tasks', json={'title': 'Agent task', 'workspace_id': ws_id, 'project_id': project_id}).json()
 
     from features.agents.service import AgentTaskService
     import features.agents.service as svc_module
@@ -312,7 +326,8 @@ def test_runner_processes_queued_automation(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
-    task = client.post('/api/tasks', json={'title': 'Runner task', 'workspace_id': ws_id}).json()
+    project_id = bootstrap['projects'][0]['id']
+    task = client.post('/api/tasks', json={'title': 'Runner task', 'workspace_id': ws_id, 'project_id': project_id}).json()
 
     queued = client.post(f"/api/tasks/{task['id']}/automation/run", json={'instruction': 'Do runner check'})
     assert queued.status_code == 200
@@ -339,7 +354,8 @@ def test_runner_can_complete_task_from_instruction(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
-    task = client.post('/api/tasks', json={'title': 'Complete me', 'workspace_id': ws_id}).json()
+    project_id = bootstrap['projects'][0]['id']
+    task = client.post('/api/tasks', json={'title': 'Complete me', 'workspace_id': ws_id, 'project_id': project_id}).json()
 
     queued = client.post(f"/api/tasks/{task['id']}/automation/run", json={'instruction': '#complete'})
     assert queued.status_code == 200
@@ -349,7 +365,7 @@ def test_runner_can_complete_task_from_instruction(tmp_path):
     processed = run_queued_automation_once(limit=5)
     assert processed >= 1
 
-    refreshed = client.get(f"/api/tasks?workspace_id={ws_id}&q=Complete me")
+    refreshed = client.get(f"/api/tasks?workspace_id={ws_id}&project_id={project_id}&q=Complete me")
     assert refreshed.status_code == 200
     current = next(t for t in refreshed.json()['items'] if t['id'] == task['id'])
     assert current['status'] == 'Done'
@@ -398,7 +414,8 @@ def test_runner_marks_failed_when_executor_raises(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
-    task = client.post('/api/tasks', json={'title': 'Executor fail task', 'workspace_id': ws_id}).json()
+    project_id = bootstrap['projects'][0]['id']
+    task = client.post('/api/tasks', json={'title': 'Executor fail task', 'workspace_id': ws_id, 'project_id': project_id}).json()
     queued = client.post(f"/api/tasks/{task['id']}/automation/run", json={'instruction': 'trigger failure'})
     assert queued.status_code == 200
 
@@ -437,10 +454,11 @@ def test_agent_service_create_task_infers_workspace_from_project(tmp_path):
     assert created['project_id'] == project['id']
 
 
-def test_agent_service_create_task_uses_single_allowed_workspace_when_missing(tmp_path, monkeypatch):
+def test_agent_service_create_task_requires_project_id(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
 
+    from fastapi import HTTPException
     from features.agents.service import AgentTaskService
     import features.agents.service as svc_module
 
@@ -449,8 +467,11 @@ def test_agent_service_create_task_uses_single_allowed_workspace_when_missing(tm
     monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
 
     service = AgentTaskService()
-    created = service.create_task(title='Created via single allowlist workspace')
-    assert created['workspace_id'] == ws_id
+    try:
+        service.create_task(title='Missing project')
+        assert False, "Expected HTTPException"
+    except HTTPException as exc:
+        assert exc.status_code == 400
 
 
 def test_agent_service_create_project_uses_default_workspace(tmp_path, monkeypatch):
@@ -474,8 +495,8 @@ def test_workspace_activity_cursor_read_model_returns_new_rows(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
-
-    created = client.post('/api/tasks', json={'title': 'Activity SSE seed', 'workspace_id': ws_id})
+    project_id = bootstrap['projects'][0]['id']
+    created = client.post('/api/tasks', json={'title': 'Activity SSE seed', 'workspace_id': ws_id, 'project_id': project_id})
     assert created.status_code == 200
 
     from shared.models import SessionLocal
@@ -488,12 +509,15 @@ def test_workspace_activity_cursor_read_model_returns_new_rows(tmp_path):
 
 def test_agents_chat_endpoint_returns_executor_response(tmp_path):
     client = build_client(tmp_path)
-    ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
 
     res = client.post(
         '/api/agents/chat',
         json={
             'workspace_id': ws_id,
+            'project_id': project_id,
             'instruction': 'Leave a quick summary',
             'session_id': 'test-session-1',
             'history': [{'role': 'user', 'content': 'Hi'}],
@@ -510,12 +534,14 @@ def test_agents_chat_endpoint_returns_executor_response(tmp_path):
 def test_create_scheduled_task_requires_instruction_and_time(tmp_path):
     client = build_client(tmp_path)
     ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
+    project_id = client.get('/api/bootstrap').json()['projects'][0]['id']
 
     res = client.post(
         '/api/tasks',
         json={
             'title': 'Scheduled invalid',
             'workspace_id': ws_id,
+            'project_id': project_id,
             'task_type': 'scheduled_instruction',
         },
     )
@@ -526,6 +552,7 @@ def test_create_scheduled_task_requires_instruction_and_time(tmp_path):
 def test_scheduled_instruction_task_is_queued_and_processed(tmp_path):
     client = build_client(tmp_path)
     ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
+    project_id = client.get('/api/bootstrap').json()['projects'][0]['id']
     due_at = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
 
     created = client.post(
@@ -533,6 +560,7 @@ def test_scheduled_instruction_task_is_queued_and_processed(tmp_path):
         json={
             'title': 'Scheduled run',
             'workspace_id': ws_id,
+            'project_id': project_id,
             'task_type': 'scheduled_instruction',
             'scheduled_instruction': 'Leave progress note',
             'scheduled_at_utc': due_at,
@@ -563,6 +591,7 @@ def test_scheduled_instruction_task_is_queued_and_processed(tmp_path):
 def test_recurring_scheduled_instruction_rearms_next_run(tmp_path):
     client = build_client(tmp_path)
     ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
+    project_id = client.get('/api/bootstrap').json()['projects'][0]['id']
     due_at = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
 
     created = client.post(
@@ -570,6 +599,7 @@ def test_recurring_scheduled_instruction_rearms_next_run(tmp_path):
         json={
             'title': 'Recurring scheduled run',
             'workspace_id': ws_id,
+            'project_id': project_id,
             'task_type': 'scheduled_instruction',
             'scheduled_instruction': 'Leave progress note',
             'scheduled_at_utc': due_at,
@@ -593,3 +623,74 @@ def test_recurring_scheduled_instruction_rearms_next_run(tmp_path):
     assert status['schedule_state'] == 'idle'
     assert status['scheduled_at_utc'] is not None
     assert datetime.fromisoformat(status['scheduled_at_utc']) > datetime.now(timezone.utc)
+
+
+def test_create_task_requires_project_id(tmp_path):
+    client = build_client(tmp_path)
+    ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
+    res = client.post('/api/tasks', json={'title': 'No project', 'workspace_id': ws_id})
+    assert res.status_code == 422
+
+
+def test_task_tags_are_normalized_and_filterable(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created = client.post(
+        '/api/tasks',
+        json={'title': 'Tag task', 'workspace_id': ws_id, 'project_id': project_id, 'labels': ['Critical', 'critical', ' UI ']},
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    assert payload['labels'] == ['critical', 'ui']
+
+    filtered = client.get(f'/api/tasks?workspace_id={ws_id}&project_id={project_id}&tags=critical,ui')
+    assert filtered.status_code == 200
+    assert any(item['id'] == payload['id'] for item in filtered.json()['items'])
+
+
+def test_saved_view_projection_is_idempotent(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created = client.post(
+        '/api/saved-views',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'name': 'Mine',
+            'shared': False,
+            'filters': {'q': 'x'},
+        },
+    )
+    assert created.status_code == 200
+    sid = created.json()['id']
+
+    from shared.eventing_rebuild import project_event
+    from shared.models import SessionLocal
+    from shared.core import EventEnvelope
+
+    ev = EventEnvelope(
+        aggregate_type='SavedView',
+        aggregate_id=sid,
+        version=1,
+        event_type='SavedViewCreated',
+        payload={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'user_id': bootstrap['current_user']['id'],
+            'name': 'Mine',
+            'shared': False,
+            'filters': {'q': 'x'},
+        },
+        metadata={'actor_id': bootstrap['current_user']['id'], 'workspace_id': ws_id, 'project_id': project_id},
+    )
+
+    with SessionLocal() as db:
+        project_event(db, ev)
+        project_event(db, ev)
+        db.commit()

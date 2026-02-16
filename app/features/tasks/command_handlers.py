@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from shared.core import (
     BulkAction,
     CommentCreate,
+    DEFAULT_STATUSES,
+    Project,
     ReorderPayload,
     Task,
     TaskComment,
@@ -42,6 +46,29 @@ from .domain import (
     EVENT_UPDATED,
     EVENT_WATCH_TOGGLED,
 )
+
+
+def _normalize_tags(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in values:
+        tag = str(raw).strip().lower()
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        out.append(tag)
+    return out
+
+
+def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> Project:
+    project = db.get(Project, project_id)
+    if not project or project.is_deleted:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.workspace_id != workspace_id:
+        raise HTTPException(status_code=400, detail="Project does not belong to workspace")
+    return project
 
 
 def _validate_schedule_fields(
@@ -80,6 +107,12 @@ class CreateTaskHandler:
 
     def __call__(self) -> dict:
         ensure_role(self.ctx.db, self.payload.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
+        project = _require_project_scope(self.ctx.db, workspace_id=self.payload.workspace_id, project_id=self.payload.project_id)
+        try:
+            statuses = json.loads(project.custom_statuses or "[]")
+        except Exception:
+            statuses = DEFAULT_STATUSES
+        initial_status = (statuses[0] if statuses else DEFAULT_STATUSES[0]) or DEFAULT_STATUSES[0]
         user_tz = get_user_zoneinfo(self.ctx.user)
         task_type = (self.payload.task_type or "manual").strip() or "manual"
         scheduled_at = normalize_datetime_to_utc(self.payload.scheduled_at_utc, user_tz)
@@ -90,7 +123,9 @@ class CreateTaskHandler:
             scheduled_at_utc=to_iso_utc(scheduled_at),
         )
         tid = allocate_id(self.ctx.db)
-        max_order = self.ctx.db.execute(select(func.max(Task.order_index)).where(Task.workspace_id == self.payload.workspace_id)).scalar() or 0
+        max_order = self.ctx.db.execute(
+            select(func.max(Task.order_index)).where(Task.workspace_id == self.payload.workspace_id, Task.project_id == self.payload.project_id)
+        ).scalar() or 0
         append_event(
             self.ctx.db,
             aggregate_type="Task",
@@ -101,11 +136,11 @@ class CreateTaskHandler:
                 "project_id": self.payload.project_id,
                 "title": self.payload.title.strip(),
                 "description": self.payload.description,
-                "status": "To do",
+                "status": initial_status,
                 "priority": self.payload.priority,
                 "due_date": to_iso_utc(normalize_datetime_to_utc(self.payload.due_date, user_tz)),
                 "assignee_id": self.payload.assignee_id,
-                "labels": self.payload.labels,
+                "labels": _normalize_tags(self.payload.labels),
                 "subtasks": self.payload.subtasks,
                 "attachments": self.payload.attachments,
                 "recurring_rule": self.payload.recurring_rule,
@@ -143,7 +178,13 @@ class CreateTaskHandler:
                     "task_id": tid,
                 },
             )
-        self.ctx.db.commit()
+        try:
+            self.ctx.db.commit()
+        except IntegrityError as exc:
+            self.ctx.db.rollback()
+            message = str(exc).lower()
+            if "unique constraint failed" not in message or "tasks.id" not in message:
+                raise
         task_view = load_task_view(self.ctx.db, tid)
         if task_view is None:
             raise HTTPException(status_code=404, detail="Task not found after create")
@@ -160,6 +201,12 @@ class PatchTaskHandler:
         user_tz = get_user_zoneinfo(self.ctx.user)
         data = self.payload.model_dump(exclude_unset=True)
         workspace_id, project_id, _, _ = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member"})
+        if "project_id" in data:
+            if not data["project_id"]:
+                raise HTTPException(status_code=422, detail="project_id cannot be null")
+            _require_project_scope(self.ctx.db, workspace_id=workspace_id, project_id=str(data["project_id"]))
+        if "labels" in data and data["labels"] is not None:
+            data["labels"] = _normalize_tags(data["labels"])
         current_row = self.ctx.db.get(Task, self.task_id)
         current_state = None
         if current_row is None and get_kurrent_client() is not None:
@@ -212,7 +259,12 @@ class PatchTaskHandler:
             aggregate_id=self.task_id,
             event_type=EVENT_UPDATED,
             payload=event_payload,
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": self.task_id},
+            metadata={
+                "actor_id": self.ctx.user.id,
+                "workspace_id": workspace_id,
+                "project_id": event_payload.get("project_id", project_id),
+                "task_id": self.task_id,
+            },
         )
         if effective_task_type == "scheduled_instruction":
             append_event(
@@ -268,12 +320,21 @@ class ReopenTaskHandler:
         workspace_id, project_id, status, _ = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member"})
         if status != "Done":
             raise HTTPException(status_code=409, detail="Task is not completed")
+        reopen_status = "To do"
+        if project_id:
+            project = self.ctx.db.get(Project, project_id)
+            if project and not project.is_deleted:
+                try:
+                    statuses = json.loads(project.custom_statuses or "[]")
+                except Exception:
+                    statuses = DEFAULT_STATUSES
+                reopen_status = (statuses[0] if statuses else DEFAULT_STATUSES[0]) or DEFAULT_STATUSES[0]
         append_event(
             self.ctx.db,
             aggregate_type="Task",
             aggregate_id=self.task_id,
             event_type=EVENT_REOPENED,
-            payload={"status": "To do"},
+            payload={"status": reopen_status},
             metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": self.task_id},
         )
         self.ctx.db.commit()
@@ -367,11 +428,17 @@ class BulkTaskActionHandler:
 class ReorderTasksHandler:
     ctx: CommandContext
     workspace_id: str
+    project_id: str
     payload: ReorderPayload
 
     def __call__(self, task_id: str, order_index: int) -> bool:
         state = load_task_command_state(self.ctx.db, task_id)
-        if not state or state.is_deleted or state.workspace_id != self.workspace_id:
+        if (
+            not state
+            or state.is_deleted
+            or state.workspace_id != self.workspace_id
+            or state.project_id != self.project_id
+        ):
             return False
         append_event(
             self.ctx.db,

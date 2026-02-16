@@ -5,12 +5,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from shared.core import (
     Note,
     NoteCreate,
     NotePatch,
+    Project,
+    Task,
     User,
     append_event,
     allocate_id,
@@ -38,6 +41,40 @@ def require_note_command_state(db: Session, user: User, note_id: str, *, allowed
     return state.workspace_id, state.project_id, state.task_id, bool(state.archived), bool(state.pinned)
 
 
+def _normalize_tags(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in values:
+        tag = str(raw).strip().lower()
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        out.append(tag)
+    return out
+
+
+def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> Project:
+    project = db.get(Project, project_id)
+    if not project or project.is_deleted:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.workspace_id != workspace_id:
+        raise HTTPException(status_code=400, detail="Project does not belong to workspace")
+    return project
+
+
+def _require_task_scope(db: Session, *, workspace_id: str, project_id: str, task_id: str) -> Task:
+    task = db.execute(select(Task).where(Task.id == task_id, Task.is_deleted == False)).scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.workspace_id != workspace_id:
+        raise HTTPException(status_code=400, detail="Task does not belong to workspace")
+    if task.project_id != project_id:
+        raise HTTPException(status_code=400, detail="Task does not belong to project")
+    return task
+
+
 @dataclass(frozen=True, slots=True)
 class CommandContext:
     db: Session
@@ -51,6 +88,14 @@ class CreateNoteHandler:
 
     def __call__(self) -> dict:
         ensure_role(self.ctx.db, self.payload.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
+        _require_project_scope(self.ctx.db, workspace_id=self.payload.workspace_id, project_id=self.payload.project_id)
+        if self.payload.task_id:
+            _require_task_scope(
+                self.ctx.db,
+                workspace_id=self.payload.workspace_id,
+                project_id=self.payload.project_id,
+                task_id=self.payload.task_id,
+            )
         nid = allocate_id(self.ctx.db)
         append_event(
             self.ctx.db,
@@ -63,7 +108,7 @@ class CreateNoteHandler:
                 "task_id": self.payload.task_id,
                 "title": self.payload.title.strip(),
                 "body": self.payload.body or "",
-                "tags": list(self.payload.tags or []),
+                "tags": _normalize_tags(self.payload.tags),
                 "pinned": bool(self.payload.pinned),
                 "archived": False,
                 "is_deleted": False,
@@ -98,12 +143,22 @@ class PatchNoteHandler:
             self.ctx.db, self.ctx.user, self.note_id, allowed={"Owner", "Admin", "Member"}
         )
         data = self.payload.model_dump(exclude_unset=True)
+        effective_project_id = project_id
+        if "project_id" in data:
+            if not data["project_id"]:
+                raise HTTPException(status_code=422, detail="project_id cannot be null")
+            _require_project_scope(self.ctx.db, workspace_id=workspace_id, project_id=str(data["project_id"]))
+            effective_project_id = str(data["project_id"])
+        if "task_id" in data and data["task_id"]:
+            if not effective_project_id:
+                raise HTTPException(status_code=400, detail="project_id is required when task_id is set")
+            _require_task_scope(self.ctx.db, workspace_id=workspace_id, project_id=effective_project_id or "", task_id=str(data["task_id"]))
         if "title" in data and data["title"] is not None:
             data["title"] = str(data["title"]).strip()
             if not data["title"]:
                 raise HTTPException(status_code=422, detail="title cannot be empty")
         if "tags" in data and data["tags"] is not None:
-            data["tags"] = [str(t).strip() for t in data["tags"] if str(t).strip()]
+            data["tags"] = _normalize_tags(data["tags"])
         # Keep updated_by in event payload for easy projection/audit.
         data["updated_by"] = self.ctx.user.id
         append_event(
@@ -115,8 +170,8 @@ class PatchNoteHandler:
             metadata={
                 "actor_id": self.ctx.user.id,
                 "workspace_id": workspace_id,
-                "project_id": project_id,
-                "task_id": task_id,
+                "project_id": data.get("project_id", project_id),
+                "task_id": data.get("task_id", task_id),
                 "note_id": self.note_id,
             },
         )
@@ -243,4 +298,3 @@ class DeleteNoteHandler:
 def _debug_dump_notes(db: Session) -> str:  # pragma: no cover
     notes = db.query(Note).order_by(Note.updated_at.desc()).limit(10).all()
     return json.dumps([{"id": n.id, "title": n.title, "archived": n.archived, "pinned": n.pinned} for n in notes])
-

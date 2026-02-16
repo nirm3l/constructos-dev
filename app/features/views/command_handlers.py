@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from shared.core import SavedViewCreate, User, append_event, allocate_id, ensure_role, load_saved_view
+from shared.core import Project, SavedViewCreate, User, append_event, allocate_id, ensure_role, load_saved_view
 from .domain import EVENT_CREATED as SAVED_VIEW_EVENT_CREATED
 
 
@@ -22,6 +24,11 @@ class CreateSavedViewHandler:
     def __call__(self) -> dict:
         role_required = {"Owner", "Admin", "Member"} if self.payload.shared else {"Owner", "Admin", "Member", "Guest"}
         ensure_role(self.ctx.db, self.payload.workspace_id, self.ctx.user.id, role_required)
+        project = self.ctx.db.get(Project, self.payload.project_id)
+        if not project or project.is_deleted:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if project.workspace_id != self.payload.workspace_id:
+            raise HTTPException(status_code=400, detail="Project does not belong to workspace")
         sid = allocate_id(self.ctx.db)
         append_event(
             self.ctx.db,
@@ -30,15 +37,22 @@ class CreateSavedViewHandler:
             event_type=SAVED_VIEW_EVENT_CREATED,
             payload={
                 "workspace_id": self.payload.workspace_id,
+                "project_id": self.payload.project_id,
                 "user_id": None if self.payload.shared else self.ctx.user.id,
                 "name": self.payload.name,
                 "shared": self.payload.shared,
                 "filters": self.payload.filters,
             },
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": self.payload.workspace_id},
+            metadata={"actor_id": self.ctx.user.id, "workspace_id": self.payload.workspace_id, "project_id": self.payload.project_id},
             expected_version=0,
         )
-        self.ctx.db.commit()
+        try:
+            self.ctx.db.commit()
+        except IntegrityError as exc:
+            self.ctx.db.rollback()
+            message = str(exc).lower()
+            if "unique constraint failed" not in message or "saved_views.id" not in message:
+                raise
         sv = load_saved_view(self.ctx.db, sid)
         if sv is None:
             return {"id": sid, "name": self.payload.name, "shared": self.payload.shared, "filters": self.payload.filters}

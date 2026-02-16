@@ -17,9 +17,11 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
     projects = db.execute(select(Project).where(Project.workspace_id.in_(workspace_ids), Project.is_deleted == False)).scalars().all()
     users = db.execute(select(User)).scalars().all()
     notifications = db.execute(select(Notification).where(Notification.user_id == user.id).order_by(Notification.created_at.desc()).limit(20)).scalars().all()
+    project_ids = [p.id for p in projects]
     saved = db.execute(
         select(SavedView).where(
             SavedView.workspace_id.in_(workspace_ids),
+            SavedView.project_id.in_(project_ids),
             or_(SavedView.user_id == user.id, SavedView.shared == True),
         )
     ).scalars().all()
@@ -50,6 +52,7 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
             {
                 "id": s.id,
                 "workspace_id": s.workspace_id,
+                "project_id": s.project_id,
                 "user_id": s.user_id,
                 "name": s.name,
                 "shared": s.shared,

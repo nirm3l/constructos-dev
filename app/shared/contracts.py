@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 class TaskCreate(BaseModel):
     title: str = Field(min_length=1)
     workspace_id: str
-    project_id: str | None = None
+    project_id: str
     description: str = ""
     priority: str = "Med"
     due_date: datetime | None = None
@@ -70,7 +70,7 @@ class AgentChatRun(BaseModel):
 class NoteCreate(BaseModel):
     title: str = Field(min_length=1)
     workspace_id: str
-    project_id: str | None = None
+    project_id: str
     task_id: str | None = None
     body: str = ""
     tags: list[str] = Field(default_factory=list)
@@ -89,6 +89,7 @@ class NotePatch(BaseModel):
 
 class SavedViewCreate(BaseModel):
     workspace_id: str
+    project_id: str
     name: str
     shared: bool = False
     filters: dict[str, Any]

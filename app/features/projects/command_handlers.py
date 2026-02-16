@@ -6,8 +6,9 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from shared.core import DEFAULT_STATUSES, Project, ProjectCreate, Task, User, append_event, allocate_id, ensure_role, load_project_view
-from ..tasks.domain import EVENT_MOVED_TO_INBOX as TASK_EVENT_MOVED_TO_INBOX
+from shared.core import ActivityLog, DEFAULT_STATUSES, Note, Project, ProjectCreate, SavedView, Task, User, append_event, allocate_id, ensure_role, load_project_view
+from ..notes.domain import EVENT_DELETED as NOTE_EVENT_DELETED
+from ..tasks.domain import EVENT_DELETED as TASK_EVENT_DELETED
 from .domain import EVENT_CREATED as PROJECT_EVENT_CREATED
 from .domain import EVENT_DELETED as PROJECT_EVENT_DELETED
 
@@ -65,17 +66,31 @@ class DeleteProjectHandler:
                 self.ctx.db,
                 aggregate_type="Task",
                 aggregate_id=t.id,
-                event_type=TASK_EVENT_MOVED_TO_INBOX,
-                payload={"from_project_id": self.project_id},
+                event_type=TASK_EVENT_DELETED,
+                payload={},
                 metadata={"actor_id": self.ctx.user.id, "workspace_id": project.workspace_id, "task_id": t.id, "project_id": self.project_id},
             )
+        notes = self.ctx.db.execute(select(Note).where(Note.project_id == self.project_id, Note.is_deleted == False)).scalars().all()
+        for n in notes:
+            append_event(
+                self.ctx.db,
+                aggregate_type="Note",
+                aggregate_id=n.id,
+                event_type=NOTE_EVENT_DELETED,
+                payload={"updated_by": self.ctx.user.id},
+                metadata={"actor_id": self.ctx.user.id, "workspace_id": project.workspace_id, "task_id": n.task_id, "project_id": self.project_id, "note_id": n.id},
+            )
+        for view in self.ctx.db.execute(select(SavedView).where(SavedView.project_id == self.project_id)).scalars().all():
+            self.ctx.db.delete(view)
+        for log in self.ctx.db.execute(select(ActivityLog).where(ActivityLog.project_id == self.project_id)).scalars().all():
+            self.ctx.db.delete(log)
         append_event(
             self.ctx.db,
             aggregate_type="Project",
             aggregate_id=self.project_id,
             event_type=PROJECT_EVENT_DELETED,
-            payload={"moved_tasks": len(tasks)},
+            payload={"deleted_tasks": len(tasks), "deleted_notes": len(notes)},
             metadata={"actor_id": self.ctx.user.id, "workspace_id": project.workspace_id, "project_id": self.project_id},
         )
         self.ctx.db.commit()
-        return {"ok": True, "moved_tasks": len(tasks)}
+        return {"ok": True, "deleted_tasks": len(tasks), "deleted_notes": len(notes)}

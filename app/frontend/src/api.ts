@@ -48,11 +48,14 @@ export const getTasks = (
   workspaceId: string,
   params?: {
     view?: string
-    project_id?: string | null
+    project_id: string
     q?: string
     status?: string
     priority?: string
+    tags?: string[]
     archived?: boolean
+    limit?: number
+    offset?: number
   }
 ) =>
   api<TasksPage>(
@@ -60,19 +63,20 @@ export const getTasks = (
       workspace_id: workspaceId,
       archived: params?.archived ?? false,
       view: params?.view,
-      project_id: params?.project_id ?? undefined,
+      project_id: params?.project_id,
       q: params?.q,
       status: params?.status,
       priority: params?.priority,
-      limit: 100,
-      offset: 0
+      tags: params?.tags?.join(',') || undefined,
+      limit: params?.limit ?? 100,
+      offset: params?.offset ?? 0
     })}`,
     userId
   )
 
 export const createTask = (
   userId: string,
-  payload: { title: string; workspace_id: string; project_id: string | null; due_date?: string | null; labels?: string[] }
+  payload: { title: string; workspace_id: string; project_id: string; due_date?: string | null; labels?: string[] }
 ) => api<Task>('/api/tasks', userId, { method: 'POST', body: JSON.stringify(payload) })
 
 export const completeTask = (userId: string, taskId: string) =>
@@ -161,30 +165,34 @@ export const getNotes = (
   userId: string,
   workspaceId: string,
   params?: {
-    project_id?: string | null
+    project_id: string
     task_id?: string | null
     q?: string
+    tags?: string[]
     archived?: boolean
     pinned?: boolean | null
+    limit?: number
+    offset?: number
   }
 ) =>
   api<NotesPage>(
     `/api/notes${queryString({
       workspace_id: workspaceId,
-      project_id: params?.project_id ?? undefined,
+      project_id: params?.project_id,
       task_id: params?.task_id ?? undefined,
       q: params?.q,
+      tags: params?.tags?.join(',') || undefined,
       archived: params?.archived ?? false,
       pinned: params?.pinned ?? undefined,
-      limit: 100,
-      offset: 0
+      limit: params?.limit ?? 100,
+      offset: params?.offset ?? 0
     })}`,
     userId
   )
 
 export const createNote = (
   userId: string,
-  payload: { title: string; workspace_id: string; project_id?: string | null; task_id?: string | null; body?: string; tags?: string[]; pinned?: boolean }
+  payload: { title: string; workspace_id: string; project_id: string; task_id?: string | null; body?: string; tags?: string[]; pinned?: boolean }
 ) => api<Note>('/api/notes', userId, { method: 'POST', body: JSON.stringify(payload) })
 
 export const patchNote = (

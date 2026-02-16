@@ -24,7 +24,7 @@ export type Project = {
 export type Task = {
   id: string
   workspace_id: string
-  project_id: string | null
+  project_id: string
   title: string
   description: string
   status: string
@@ -66,6 +66,7 @@ export type BootstrapPayload = {
   saved_views: Array<{
     id: string
     workspace_id: string
+    project_id: string | null
     user_id: string | null
     name: string
     shared: boolean
@@ -128,7 +129,7 @@ export type AgentChatResponse = {
 export type Note = {
   id: string
   workspace_id: string
-  project_id: string | null
+  project_id: string
   task_id: string | null
   title: string
   body: string

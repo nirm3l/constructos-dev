@@ -12,9 +12,10 @@ from shared.core import Note, User, ensure_role, serialize_note
 @dataclass(frozen=True, slots=True)
 class NoteListQuery:
     workspace_id: str
-    project_id: str | None = None
+    project_id: str
     task_id: str | None = None
     q: str | None = None
+    tags: list[str] | None = None
     archived: bool = False
     pinned: bool | None = None
     limit: int = 30
@@ -23,9 +24,11 @@ class NoteListQuery:
 
 def list_notes_read_model(db: Session, user: User, query: NoteListQuery) -> dict:
     ensure_role(db, query.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
-    stmt = select(Note).where(Note.workspace_id == query.workspace_id, Note.is_deleted == False)
-    if query.project_id:
-        stmt = stmt.where(Note.project_id == query.project_id)
+    stmt = select(Note).where(
+        Note.workspace_id == query.workspace_id,
+        Note.project_id == query.project_id,
+        Note.is_deleted == False,
+    )
     if query.task_id:
         stmt = stmt.where(Note.task_id == query.task_id)
     if query.archived:
@@ -41,6 +44,9 @@ def list_notes_read_model(db: Session, user: User, query: NoteListQuery) -> dict
         if q:
             like = f"%{q}%"
             stmt = stmt.where(or_(Note.title.ilike(like), Note.body.ilike(like)))
+    if query.tags:
+        for tag in query.tags:
+            stmt = stmt.where(Note.tags.ilike(f'%"{tag}"%'))
     total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0
     items = (
         db.execute(
@@ -70,4 +76,3 @@ def list_notes_read_model(db: Session, user: User, query: NoteListQuery) -> dict
             )
         ),
     }
-

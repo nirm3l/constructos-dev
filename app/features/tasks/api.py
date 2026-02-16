@@ -36,10 +36,11 @@ router = APIRouter()
 @router.get("/api/tasks")
 def list_tasks(
     workspace_id: str,
+    project_id: str,
     view: str | None = None,
     q: str | None = None,
     status: str | None = None,
-    project_id: str | None = None,
+    tags: str | None = None,
     label: str | None = None,
     assignee_id: str | None = None,
     due_from: datetime | None = None,
@@ -57,10 +58,11 @@ def list_tasks(
         user,
         TaskListQuery(
             workspace_id=workspace_id,
+            project_id=project_id,
             view=view,
             q=q,
             status=status,
-            project_id=project_id,
+            tags=[t.strip().lower() for t in tags.split(",") if t.strip()] if tags else None,
             label=label,
             assignee_id=assignee_id,
             due_from=due_from,
@@ -148,20 +150,36 @@ def bulk_action(
 def reorder_tasks(
     payload: ReorderPayload,
     workspace_id: str,
+    project_id: str,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return TaskApplicationService(db, user, command_id=command_id).reorder_tasks(workspace_id, payload)
+    return TaskApplicationService(db, user, command_id=command_id).reorder_tasks(workspace_id, project_id, payload)
 
 
 @router.get("/api/calendar")
-def calendar_view(workspace_id: str, from_date: date, to_date: date, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def calendar_view(
+    workspace_id: str,
+    project_id: str,
+    from_date: date,
+    to_date: date,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
     ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     user_tz = get_user_zoneinfo(user)
     start = datetime.combine(from_date, datetime.min.time(), tzinfo=user_tz).astimezone(timezone.utc)
     end = datetime.combine(to_date, datetime.max.time(), tzinfo=user_tz).astimezone(timezone.utc)
-    tasks = db.execute(select(Task).where(Task.workspace_id == workspace_id, Task.due_date >= start, Task.due_date <= end, Task.is_deleted == False)).scalars().all()
+    tasks = db.execute(
+        select(Task).where(
+            Task.workspace_id == workspace_id,
+            Task.project_id == project_id,
+            Task.due_date >= start,
+            Task.due_date <= end,
+            Task.is_deleted == False,
+        )
+    ).scalars().all()
     return {"items": [serialize_task(t) for t in tasks]}
 
 
@@ -207,9 +225,15 @@ def task_activity(task_id: str, db: Session = Depends(get_db), user: User = Depe
 
 
 @router.get("/api/export")
-def export_tasks(workspace_id: str, format: str = "json", db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def export_tasks(
+    workspace_id: str,
+    project_id: str,
+    format: str = "json",
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
     ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member"})
-    return export_tasks_response(db, workspace_id, format)
+    return export_tasks_response(db, workspace_id, project_id, format)
 
 
 @router.post("/api/tasks/{task_id}/automation/run")

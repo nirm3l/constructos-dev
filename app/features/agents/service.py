@@ -60,34 +60,18 @@ class AgentTaskService:
                 raise HTTPException(status_code=401, detail="User not found")
             return user
 
-    def _resolve_workspace_for_create(self, *, db, explicit_workspace_id: str | None, project_id: str | None) -> tuple[str, str | None]:
-        if project_id:
-            project = db.execute(select(Project).where(Project.id == project_id, Project.is_deleted == False)).scalar_one_or_none()
-            if not project:
-                raise HTTPException(status_code=404, detail="Project not found")
-            self._assert_project_allowed(project_id)
-            if explicit_workspace_id and explicit_workspace_id != project.workspace_id:
-                raise HTTPException(status_code=400, detail="Project does not belong to workspace")
-            workspace_id = project.workspace_id
-            self._assert_workspace_allowed(workspace_id)
-            return workspace_id, project_id
-
-        if explicit_workspace_id:
-            self._assert_workspace_allowed(explicit_workspace_id)
-            return explicit_workspace_id, None
-
-        if MCP_DEFAULT_WORKSPACE_ID:
-            self._assert_workspace_allowed(MCP_DEFAULT_WORKSPACE_ID)
-            return MCP_DEFAULT_WORKSPACE_ID, None
-
-        if len(MCP_ALLOWED_WORKSPACE_IDS) == 1:
-            only_workspace = next(iter(MCP_ALLOWED_WORKSPACE_IDS))
-            return only_workspace, None
-
-        raise HTTPException(
-            status_code=400,
-            detail="workspace_id is required when no project_id is provided and MCP default workspace is not configured",
-        )
+    def _resolve_workspace_for_create(self, *, db, explicit_workspace_id: str | None, project_id: str | None) -> tuple[str, str]:
+        if not project_id:
+            raise HTTPException(status_code=400, detail="project_id is required")
+        project = db.execute(select(Project).where(Project.id == project_id, Project.is_deleted == False)).scalar_one_or_none()
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        self._assert_project_allowed(project_id)
+        if explicit_workspace_id and explicit_workspace_id != project.workspace_id:
+            raise HTTPException(status_code=400, detail="Project does not belong to workspace")
+        workspace_id = project.workspace_id
+        self._assert_workspace_allowed(workspace_id)
+        return workspace_id, project_id
 
     def _resolve_workspace_for_project_create(self, *, explicit_workspace_id: str | None) -> str:
         if explicit_workspace_id:
@@ -143,6 +127,8 @@ class AgentTaskService:
     ) -> dict:
         self._require_token(auth_token)
         self._assert_workspace_allowed(workspace_id)
+        if not project_id:
+            raise HTTPException(status_code=400, detail="project_id is required")
         self._assert_project_allowed(project_id)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
@@ -180,6 +166,8 @@ class AgentTaskService:
     ) -> dict:
         self._require_token(auth_token)
         self._assert_workspace_allowed(workspace_id)
+        if not project_id:
+            raise HTTPException(status_code=400, detail="project_id is required")
         self._assert_project_allowed(project_id)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
@@ -510,6 +498,8 @@ class AgentTaskService:
     ) -> dict:
         self._require_token(auth_token)
         self._assert_workspace_allowed(workspace_id)
+        if not project_id:
+            raise HTTPException(status_code=400, detail="project_id is required")
         self._assert_project_allowed(project_id)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
@@ -544,6 +534,8 @@ class AgentTaskService:
     ) -> dict:
         self._require_token(auth_token)
         self._assert_workspace_allowed(workspace_id)
+        if not project_id:
+            raise HTTPException(status_code=400, detail="project_id is required")
         self._assert_project_allowed(project_id)
         user = self._resolve_actor_user()
         updated = 0

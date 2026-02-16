@@ -569,16 +569,25 @@ def project_event(db: Session, ev: EventEnvelope):
             if n.is_read is None:
                 n.is_read = False
     elif ev.event_type == SAVED_VIEW_EVENT_CREATED:
-        db.add(
-            SavedView(
+        saved = db.get(SavedView, ev.aggregate_id)
+        if saved is None:
+            saved = SavedView(
                 id=ev.aggregate_id,
                 workspace_id=p["workspace_id"],
+                project_id=p.get("project_id"),
                 user_id=p.get("user_id"),
                 name=p["name"],
                 shared=p.get("shared", False),
                 filters=json.dumps(p.get("filters", {})),
             )
-        )
+            db.add(saved)
+        else:
+            saved.workspace_id = p["workspace_id"]
+            saved.project_id = p.get("project_id")
+            saved.user_id = p.get("user_id")
+            saved.name = p["name"]
+            saved.shared = p.get("shared", False)
+            saved.filters = json.dumps(p.get("filters", {}))
     elif ev.event_type == USER_EVENT_PREFERENCES_UPDATED:
         user = db.get(User, ev.aggregate_id)
         if user:

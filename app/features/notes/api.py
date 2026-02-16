@@ -15,9 +15,10 @@ router = APIRouter()
 @router.get("/api/notes")
 def list_notes(
     workspace_id: str,
-    project_id: str | None = None,
+    project_id: str,
     task_id: str | None = None,
     q: str | None = None,
+    tags: str | None = None,
     archived: bool = False,
     pinned: bool | None = None,
     limit: int = Query(default=30, le=200),
@@ -34,6 +35,7 @@ def list_notes(
             project_id=project_id,
             task_id=task_id,
             q=q,
+            tags=[t.strip().lower() for t in tags.split(",") if t.strip()] if tags else None,
             archived=archived,
             pinned=pinned,
             limit=limit,
@@ -120,4 +122,3 @@ def delete_note(
     command_id: str | None = Depends(get_command_id),
 ):
     return NoteApplicationService(db, user, command_id=command_id).delete_note(note_id)
-

@@ -13,12 +13,14 @@ class SavedViewAggregate(Aggregate):
         self,
         *,
         workspace_id: str,
+        project_id: str | None,
         user_id: str | None,
         name: str,
         shared: bool,
         filters: dict[str, Any],
     ) -> None:
         self.workspace_id = workspace_id
+        self.project_id = project_id
         self.user_id = user_id
         self.name = name
         self.shared = shared

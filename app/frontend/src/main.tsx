@@ -1,6 +1,6 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
-import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   addComment,
   archiveTask,
@@ -37,11 +37,11 @@ import './styles.css'
 
 const DEFAULT_USER_ID = '00000000-0000-0000-0000-000000000001'
 
-type Tab = 'inbox' | 'today' | 'projects' | 'notes' | 'search' | 'profile'
+type Tab = 'today' | 'tasks' | 'notes' | 'projects' | 'search' | 'profile'
 type ChatRole = 'user' | 'assistant'
 type ChatTurn = { id: string; role: ChatRole; content: string; createdAt: number }
 
-const TAB_ORDER: Tab[] = ['inbox', 'today', 'projects', 'notes', 'search', 'profile']
+const TAB_ORDER: Tab[] = ['today', 'tasks', 'notes', 'projects', 'search', 'profile']
 
 function normalizeStoredUserId(raw: string | null): string {
   if (!raw || raw === '1' || raw === '2') return DEFAULT_USER_ID
@@ -50,7 +50,7 @@ function normalizeStoredUserId(raw: string | null): string {
 
 function parseStoredTab(raw: string | null): Tab {
   if (raw && TAB_ORDER.includes(raw as Tab)) return raw as Tab
-  return 'inbox'
+  return 'tasks'
 }
 
 function parseStoredProjectId(raw: string | null): string {
@@ -79,6 +79,21 @@ function toReadableDate(iso: unknown): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return iso
   return d.toLocaleString()
+}
+
+function toUserDateTime(iso: unknown, timezone: string | undefined): string {
+  if (typeof iso !== 'string' || !iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+      timeZone: timezone || 'UTC',
+    }).format(d)
+  } catch {
+    return d.toLocaleString()
+  }
 }
 
 function formatActivitySummary(
@@ -238,8 +253,10 @@ function App() {
   const [searchQ, setSearchQ] = React.useState('')
   const [searchStatus, setSearchStatus] = React.useState('')
   const [searchPriority, setSearchPriority] = React.useState('')
+  const [searchTags, setSearchTags] = React.useState<string[]>([])
   const [searchArchived, setSearchArchived] = React.useState(false)
   const [noteQ, setNoteQ] = React.useState('')
+  const [noteTags, setNoteTags] = React.useState<string[]>([])
   const [noteArchived, setNoteArchived] = React.useState(false)
   const [notePinnedFilter, setNotePinnedFilter] = React.useState<'any' | 'pinned' | 'unpinned'>('any')
   const [editNoteTitle, setEditNoteTitle] = React.useState('')
@@ -343,29 +360,40 @@ function App() {
   }, [bootstrap.data?.current_user?.theme])
 
   const workspaceId = bootstrap.data?.workspaces[0]?.id ?? ''
+  const userTimezone = bootstrap.data?.current_user?.timezone
+  const selectedProject = React.useMemo(
+    () => bootstrap.data?.projects.find((p) => p.id === selectedProjectId) ?? null,
+    [bootstrap.data?.projects, selectedProjectId]
+  )
 
   React.useEffect(() => {
     const firstProjectId = bootstrap.data?.projects[0]?.id ?? ''
     const validSelected = Boolean(selectedProjectId && (bootstrap.data?.projects ?? []).some((p) => p.id === selectedProjectId))
     if ((!selectedProjectId || !validSelected) && firstProjectId) setSelectedProjectId(firstProjectId)
-    if (tab === 'inbox') {
-      if (quickProjectId !== '') setQuickProjectId('')
-      return
-    }
     if (!quickProjectId && firstProjectId) setQuickProjectId(firstProjectId)
-  }, [bootstrap.data, quickProjectId, selectedProjectId, tab])
+  }, [bootstrap.data, quickProjectId, selectedProjectId])
 
   const taskParams = React.useMemo(() => {
-    if (tab === 'today') return { view: 'today' }
-    if (tab === 'projects') return { project_id: selectedProjectId || undefined }
-    if (tab === 'search') return { q: searchQ || undefined, status: searchStatus || undefined, priority: searchPriority || undefined, archived: searchArchived }
-    return { view: 'inbox' }
-  }, [tab, selectedProjectId, searchQ, searchStatus, searchPriority, searchArchived])
+    if (!selectedProjectId) return null
+    if (tab === 'today') return { project_id: selectedProjectId, view: 'today' }
+    if (tab === 'tasks') return { project_id: selectedProjectId, tags: searchTags }
+    if (tab === 'search') {
+      return {
+        project_id: selectedProjectId,
+        q: searchQ || undefined,
+        status: searchStatus || undefined,
+        priority: searchPriority || undefined,
+        tags: searchTags,
+        archived: searchArchived,
+      }
+    }
+    return null
+  }, [tab, selectedProjectId, searchQ, searchStatus, searchPriority, searchArchived, searchTags])
 
   const tasks = useQuery({
-    queryKey: ['tasks', userId, workspaceId, tab, selectedProjectId, searchQ, searchStatus, searchPriority, searchArchived],
-    queryFn: () => getTasks(userId, workspaceId, taskParams),
-    enabled: Boolean(workspaceId)
+    queryKey: ['tasks', userId, workspaceId, tab, selectedProjectId, searchQ, searchStatus, searchPriority, searchArchived, searchTags.join(',')],
+    queryFn: () => getTasks(userId, workspaceId, taskParams as { project_id: string; view?: string; q?: string; status?: string; priority?: string; tags?: string[]; archived?: boolean }),
+    enabled: Boolean(workspaceId && taskParams) && (tab === 'today' || tab === 'tasks' || tab === 'search')
   })
 
   const notesPinnedParam = React.useMemo(() => {
@@ -375,14 +403,30 @@ function App() {
   }, [notePinnedFilter])
 
   const notes = useQuery({
-    queryKey: ['notes', userId, workspaceId, noteQ, noteArchived, notePinnedFilter],
+    queryKey: ['notes', userId, workspaceId, selectedProjectId, noteQ, noteArchived, notePinnedFilter, noteTags.join(',')],
     queryFn: () =>
       getNotes(userId, workspaceId, {
+        project_id: selectedProjectId,
         q: noteQ || undefined,
+        tags: noteTags,
         archived: noteArchived,
         pinned: notesPinnedParam
       }),
-    enabled: Boolean(workspaceId) && tab === 'notes'
+    enabled: Boolean(workspaceId && selectedProjectId) && tab === 'notes'
+  })
+  const projectTaskCountQueries = useQueries({
+    queries: (bootstrap.data?.projects ?? []).map((project) => ({
+      queryKey: ['project-task-count', userId, workspaceId, project.id],
+      queryFn: () => getTasks(userId, workspaceId, { project_id: project.id, limit: 1, offset: 0 }),
+      enabled: Boolean(workspaceId && tab === 'projects')
+    }))
+  })
+  const projectNoteCountQueries = useQueries({
+    queries: (bootstrap.data?.projects ?? []).map((project) => ({
+      queryKey: ['project-note-count', userId, workspaceId, project.id],
+      queryFn: () => getNotes(userId, workspaceId, { project_id: project.id, limit: 1, offset: 0 }),
+      enabled: Boolean(workspaceId && tab === 'projects')
+    }))
   })
 
   const notifications = useQuery({
@@ -478,7 +522,7 @@ function App() {
   const board = useQuery({
     queryKey: ['board', userId, selectedProjectId],
     queryFn: () => getProjectBoard(userId, selectedProjectId),
-    enabled: Boolean(selectedProjectId && tab === 'projects' && projectsMode === 'board')
+    enabled: Boolean(selectedProjectId && tab === 'tasks' && projectsMode === 'board')
   })
 
   const selectedTask = React.useMemo(() => tasks.data?.items.find((t) => t.id === selectedTaskId) ?? null, [tasks.data?.items, selectedTaskId])
@@ -522,6 +566,16 @@ function App() {
       .slice(0, 24)
       .map(([t]) => t)
   }, [notes.data?.items])
+  const toggleSearchTag = React.useCallback((tag: string) => {
+    const cleaned = String(tag || '').trim().toLowerCase()
+    if (!cleaned) return
+    setSearchTags((prev) => (prev.includes(cleaned) ? prev.filter((t) => t !== cleaned) : [...prev, cleaned]))
+  }, [])
+  const toggleNoteFilterTag = React.useCallback((tag: string) => {
+    const cleaned = String(tag || '').trim().toLowerCase()
+    if (!cleaned) return
+    setNoteTags((prev) => (prev.includes(cleaned) ? prev.filter((t) => t !== cleaned) : [...prev, cleaned]))
+  }, [])
 
   const addNoteTag = React.useCallback(
     (raw: string) => {
@@ -625,7 +679,7 @@ function App() {
     setEditDescription(selectedTask.description)
     setEditPriority(selectedTask.priority)
     setEditDueDate(toLocalDateTimeInput(selectedTask.due_date))
-    setEditProjectId(selectedTask.project_id ?? '')
+    setEditProjectId(selectedTask.project_id)
     setEditTaskTags(selectedTask.labels ?? [])
     setShowTaskTagPicker(false)
     setTaskTagPickerQuery('')
@@ -700,7 +754,7 @@ function App() {
       createTask(userId, {
         title: taskTitle.trim(),
         workspace_id: workspaceId,
-        project_id: quickProjectId || (tab === 'projects' ? selectedProjectId || null : null),
+        project_id: quickProjectId || selectedProjectId,
         due_date: quickDueDate ? new Date(quickDueDate).toISOString() : null,
         labels: quickTaskTags
       }),
@@ -758,7 +812,7 @@ function App() {
         description: editDescription,
         status: editStatus,
         priority: editPriority,
-        project_id: editProjectId || null,
+        project_id: editProjectId || selectedTask?.project_id,
         labels: editTaskTags,
         due_date: editDueDate ? new Date(editDueDate).toISOString() : null,
         task_type: editTaskType,
@@ -803,6 +857,7 @@ function App() {
       createNote(userId, {
         title: 'Untitled',
         workspace_id: workspaceId,
+        project_id: selectedProjectId,
         body: ''
       }),
     onSuccess: async (note) => {
@@ -924,7 +979,7 @@ function App() {
     mutationFn: (payload: { instruction: string; history: Array<{ role: 'user' | 'assistant'; content: string }> }) =>
       runAgentChat(userId, {
         workspace_id: workspaceId,
-        project_id: selectedProjectId || null,
+        project_id: selectedProjectId,
         session_id: codexChatSessionId,
         instruction: payload.instruction,
         history: payload.history,
@@ -1036,6 +1091,15 @@ function App() {
               placeholder="Search tasks..."
             />
           </div>
+          <div className="header-project-scope">
+            <span className="meta">Project</span>
+            <select value={selectedProjectId} onChange={(e) => setSelectedProjectId(e.target.value)}>
+              {bootstrap.data.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+            <button className="action-icon" onClick={() => setTab('projects')} title="Manage projects" aria-label="Manage projects">
+              <Icon path="M3 7h7l2 2h9v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 7V5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2" />
+            </button>
+          </div>
         </div>
         {showNotificationsPanel && (
           <div className="header-panel">
@@ -1089,18 +1153,17 @@ function App() {
 	                value={taskTitle}
 	                onChange={(e) => setTaskTitle(e.target.value)}
 	                onKeyDown={(e) => {
-	                  if (e.key === 'Enter' && !e.shiftKey) {
-	                    const title = taskTitle.trim()
-	                    if (!title || createTaskMutation.isPending) return
-	                    createTaskMutation.mutate()
-	                  }
+		                  if (e.key === 'Enter' && !e.shiftKey) {
+		                    const title = taskTitle.trim()
+		                    if (!title || !quickProjectId || createTaskMutation.isPending) return
+		                    createTaskMutation.mutate()
+		                  }
 	                }}
 	                placeholder="Task title"
 	                autoFocus
 	              />
-	              <select value={quickProjectId} onChange={(e) => setQuickProjectId(e.target.value)}>
-	                <option value="">Inbox</option>
-	                {bootstrap.data.projects.map((p) => (
+		              <select value={quickProjectId} onChange={(e) => setQuickProjectId(e.target.value)}>
+		                {bootstrap.data.projects.map((p) => (
 	                  <option key={p.id} value={p.id}>
 	                    {p.name}
 	                  </option>
@@ -1118,7 +1181,7 @@ function App() {
 	              </div>
 		              <button
 		                className="action-icon primary quickadd-create"
-		                disabled={!taskTitle.trim() || createTaskMutation.isPending}
+			                disabled={!taskTitle.trim() || !quickProjectId || createTaskMutation.isPending}
 		                onClick={() => createTaskMutation.mutate()}
 		                title="Create task"
 		                aria-label="Create task"
@@ -1206,11 +1269,11 @@ function App() {
 		        </div>
 		      )}
 
-      {tab === 'projects' && (
+      {tab === 'tasks' && (
         <section className="card">
           <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-            <h2 style={{ margin: 0 }}>Projects</h2>
-            <div className="seg" role="tablist" aria-label="Project view mode">
+            <h2 style={{ margin: 0 }}>Tasks</h2>
+            <div className="seg" role="tablist" aria-label="Task view mode">
               <button
                 className={`seg-btn ${projectsMode === 'board' ? 'active' : ''}`}
                 onClick={() => setProjectsMode('board')}
@@ -1231,42 +1294,17 @@ function App() {
               </button>
             </div>
           </div>
-
-          <div className="row" style={{ marginBottom: 8 }}>
-            <select value={selectedProjectId} onChange={(e) => setSelectedProjectId(e.target.value)}>
-              {bootstrap.data.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
-            <button
-              onClick={() => {
-                const project = bootstrap.data.projects.find((p) => p.id === selectedProjectId)
-                const name = project?.name || 'this project'
-                if (!selectedProjectId) return
-                if (!window.confirm(`Delete ${name}? Tasks will be moved to Inbox.`)) return
-                deleteProjectMutation.mutate(selectedProjectId)
-              }}
-              disabled={!selectedProjectId || deleteProjectMutation.isPending}
-              title="Delete project"
-              aria-label="Delete project"
-              className="action-icon danger-ghost"
-            >
-              <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
-            </button>
+          <div className="row wrap" style={{ marginBottom: 8 }}>
+            {taskTagSuggestions.slice(0, 10).map((tag) => (
+              <button
+                key={`project-tag-${tag}`}
+                className={`status-chip ${searchTags.includes(tag.toLowerCase()) ? 'active' : ''}`}
+                onClick={() => toggleSearchTag(tag)}
+              >
+                #{tag}
+              </button>
+            ))}
           </div>
-	          <div className="row">
-	            <input
-	              value={projectName}
-	              onChange={(e) => setProjectName(e.target.value)}
-	              onKeyDown={(e) => {
-	                if (e.key === 'Enter' && !e.shiftKey) {
-	                  const name = projectName.trim()
-	                  if (!name) return
-	                  createProjectMutation.mutate()
-	                }
-	              }}
-	              placeholder="New project"
-	            />
-	            <button className="primary" disabled={!projectName.trim()} onClick={() => createProjectMutation.mutate()}>Create</button>
-	          </div>
 
           {projectsMode === 'board' && board.data && (
             <div className="kanban">
@@ -1318,7 +1356,7 @@ function App() {
 	                  <span className="meta">{task.status} | {task.due_date ? new Date(task.due_date).toLocaleString() : 'No due date'}</span>
 	                  {(task.labels ?? []).length > 0 && (
 	                    <div className="task-tags">
-	                      {(task.labels ?? []).slice(0, 3).map((t) => (
+                      {(task.labels ?? []).map((t) => (
 	                        <span
 	                          key={t}
 	                          className="tag-mini"
@@ -1365,6 +1403,63 @@ function App() {
         </section>
       )}
 
+      {tab === 'projects' && (
+        <section className="card">
+          <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+            <h2 style={{ margin: 0 }}>Projects ({bootstrap.data.projects.length})</h2>
+          </div>
+          <div className="row" style={{ marginBottom: 10 }}>
+            <input
+              value={projectName}
+              onChange={(e) => setProjectName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  const name = projectName.trim()
+                  if (!name) return
+                  createProjectMutation.mutate()
+                }
+              }}
+              placeholder="New project"
+            />
+            <button className="primary" disabled={!projectName.trim()} onClick={() => createProjectMutation.mutate()}>Create</button>
+          </div>
+          <div className="task-list">
+            {bootstrap.data.projects.map((project, idx) => {
+              const isSelected = selectedProjectId === project.id
+              const taskCount = projectTaskCountQueries[idx]?.data?.total
+              const noteCount = projectNoteCountQueries[idx]?.data?.total
+              return (
+                <div key={project.id} className="task-item">
+                  <div className="task-main" role="button" onClick={() => setSelectedProjectId(project.id)}>
+                    <div className="task-title">
+                      <strong>{project.name}</strong>
+                      {isSelected && <span className="badge">Selected</span>}
+                    </div>
+                    <span className="meta">Status: {project.status || 'active'}</span>
+                    <div className="meta">{project.description || '(no description)'}</div>
+                    <div className="meta">
+                      Tasks: {taskCount ?? '...'} | Notes: {noteCount ?? '...'}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      if (!window.confirm(`Delete ${project.name}? This permanently deletes project resources.`)) return
+                      deleteProjectMutation.mutate(project.id)
+                    }}
+                    disabled={deleteProjectMutation.isPending}
+                    title="Delete project"
+                    aria-label="Delete project"
+                    className="action-icon danger-ghost"
+                  >
+                    <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+        </section>
+      )}
+
 		      {tab === 'notes' && (
 		        <section className="card">
 		          <h2>Notes ({notes.data?.total ?? 0})</h2>
@@ -1379,14 +1474,25 @@ function App() {
 		                  <option value="pinned">Pinned</option>
 		                  <option value="unpinned">Unpinned</option>
 		                </select>
-		                <label className="row archived-toggle">
-		                  <input type="checkbox" checked={noteArchived} onChange={(e) => setNoteArchived(e.target.checked)} />
-		                  Archived only
-		                </label>
-		                <button className="action-icon primary" onClick={() => createNoteMutation.mutate()} title="New note" aria-label="New note">
-		                  <Icon path="M12 5v14M5 12h14" />
-		                </button>
-		              </div>
+			                <label className="row archived-toggle">
+			                  <input type="checkbox" checked={noteArchived} onChange={(e) => setNoteArchived(e.target.checked)} />
+			                  Archived only
+			                </label>
+                      <div className="row wrap">
+                        {noteTagSuggestions.slice(0, 8).map((tag) => (
+                          <button
+                            key={`note-filter-${tag}`}
+                            className={`status-chip ${noteTags.includes(tag.toLowerCase()) ? 'active' : ''}`}
+                            onClick={() => toggleNoteFilterTag(tag)}
+                          >
+                            #{tag}
+                          </button>
+                        ))}
+                      </div>
+			                <button className="action-icon primary" onClick={() => createNoteMutation.mutate()} title="New note" aria-label="New note">
+			                  <Icon path="M12 5v14M5 12h14" />
+			                </button>
+			              </div>
 		            </div>
 
 		            <div className="task-list">
@@ -1412,11 +1518,12 @@ function App() {
 		                        </span>
 		                      )}
 		                      {n.archived && <span className="badge">Archived</span>}
+                          {selectedProject && <span className="badge">Project: {selectedProject.name}</span>}
 		                      <strong>{n.title || 'Untitled'}</strong>
 		                    </div>
 		                    {(n.tags ?? []).length > 0 && (
 		                      <div className="note-tags">
-		                        {(n.tags ?? []).slice(0, 3).map((t) => (
+                        {(n.tags ?? []).map((t) => (
 		                          <span
 		                            key={t}
 		                            className="tag-mini"
@@ -1432,11 +1539,13 @@ function App() {
 		                      </div>
 		                    )}
 		                    <div className="note-snippet">{(n.body || '').replace(/\\s+/g, ' ').slice(0, 160) || '(empty)'}</div>
-		                    <div className="meta">{n.updated_at ? new Date(n.updated_at).toLocaleString() : ''}</div>
+			                    <div className="meta">
+                            Created: {toUserDateTime(n.created_at, userTimezone)} | Updated: {toUserDateTime(n.updated_at, userTimezone)}
+                          </div>
 
 		                    {isOpen && isSelected && selectedNote && (
 		                      <div className="note-accordion" onClick={(e) => e.stopPropagation()} role="region" aria-label="Note editor">
-			                        <div className="note-editor-head">
+				                        <div className="note-editor-head">
 			                          <input
 			                            className="note-title-input"
 			                            value={editNoteTitle}
@@ -1480,7 +1589,8 @@ function App() {
 		                            <button className="action-icon danger-ghost" onClick={() => deleteNoteMutation.mutate(selectedNote.id)} title="Delete" aria-label="Delete">
 		                              <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
 		                            </button>
-		                          </div>
+				                        </div>
+                        <div className="meta" style={{ marginBottom: 8 }}>Created: {toUserDateTime(selectedNote.created_at, userTimezone)}</div>
 		                        </div>
 
 		                        <div className="tag-bar" aria-label="Tags">
@@ -1604,7 +1714,18 @@ function App() {
               <input type="checkbox" checked={searchArchived} onChange={(e) => setSearchArchived(e.target.checked)} />
               Archived only
             </label>
-            <button onClick={() => setTab('inbox')}>Close</button>
+            <div className="row wrap">
+              {taskTagSuggestions.slice(0, 10).map((tag) => (
+                <button
+                  key={`search-tag-${tag}`}
+                  className={`status-chip ${searchTags.includes(tag.toLowerCase()) ? 'active' : ''}`}
+                  onClick={() => toggleSearchTag(tag)}
+                >
+                  #{tag}
+                </button>
+              ))}
+            </div>
+            <button onClick={() => setTab('tasks')}>Close</button>
           </div>
         </section>
       )}
@@ -1624,7 +1745,7 @@ function App() {
             </button>
           </div>
         </section>
-      ) : tab !== 'projects' && tab !== 'notes' ? (
+      ) : tab !== 'tasks' && tab !== 'projects' && tab !== 'notes' ? (
         <section className="card">
           <h2>Tasks ({tasks.data?.total ?? 0})</h2>
           <div className="task-list">
@@ -1634,17 +1755,17 @@ function App() {
                   <div className="task-title">
                     <strong>{task.title}</strong>
                   </div>
-	                  <span className="meta">
-	                    {task.status} | {task.due_date ? new Date(task.due_date).toLocaleString() : 'No due date'}
-	                    {tab === 'search' && (
+		                  <span className="meta">
+		                    {task.status} | {task.due_date ? new Date(task.due_date).toLocaleString() : 'No due date'} | Created: {toUserDateTime(task.created_at, userTimezone)}
+		                    {tab === 'search' && (
                       <>
-                        {' '}| Project: {task.project_id ? (projectNames[task.project_id] || task.project_id) : 'Inbox'}
+                        {' '}| Project: {projectNames[task.project_id] || task.project_id}
                       </>
                     )}
 	                  </span>
 	                  {(task.labels ?? []).length > 0 && (
 	                    <div className="task-tags">
-	                      {(task.labels ?? []).slice(0, 3).map((t) => (
+                      {(task.labels ?? []).map((t) => (
 	                        <span
 	                          key={t}
 	                          className="tag-mini"
@@ -1696,13 +1817,13 @@ function App() {
       ) : null}
 
       <nav className="bottom-tabs">
-        <button className={tab === 'inbox' ? 'primary' : ''} onClick={() => setTab('inbox')} title="Inbox" aria-label="Inbox">
-          <Icon path="M4 13h4l2 3h4l2-3h4M4 13V6h16v7M4 13v5h16v-5" />
-          <span className="tab-label">Inbox</span>
-        </button>
         <button className={tab === 'today' ? 'primary' : ''} onClick={() => setTab('today')} title="Today" aria-label="Today">
           <Icon path="M8 3v4M16 3v4M4 10h16M4 5h16v15H4z" />
           <span className="tab-label">Today</span>
+        </button>
+        <button className={tab === 'tasks' ? 'primary' : ''} onClick={() => setTab('tasks')} title="Tasks" aria-label="Tasks">
+          <Icon path="M4 6h16M4 12h10M4 18h13" />
+          <span className="tab-label">Tasks</span>
         </button>
         <button className={tab === 'projects' ? 'primary' : ''} onClick={() => setTab('projects')} title="Projects" aria-label="Projects">
           <Icon path="M3 7h7l2 2h9v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 7V5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2" />
@@ -1742,22 +1863,19 @@ function App() {
                 <Icon path="M6 6l12 12M18 6 6 18" />
               </button>
             </div>
+            <div className="meta" style={{ marginTop: 4 }}>Created: {toUserDateTime(selectedTask.created_at, userTimezone)}</div>
             <div className="row wrap" style={{ marginTop: 8, marginBottom: 10 }}>
               <button
                 className="pill"
                 onClick={() => {
-                  if (selectedTask.project_id) {
-                    setSelectedProjectId(selectedTask.project_id)
-                    setTab('projects')
-                  } else {
-                    setTab('inbox')
-                  }
+                  setSelectedProjectId(selectedTask.project_id)
+                  setTab('tasks')
                 }}
                 title="Open project"
                 aria-label="Open project"
               >
-                <Icon path={selectedTask.project_id ? "M3 7h7l2 2h9v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 7V5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2" : "M4 13h4l2 3h4l2-3h4M4 13V6h16v7M4 13v5h16v-5"} />
-                <span>{selectedTask.project_id ? (projectNames[selectedTask.project_id] || selectedTask.project_id) : 'Inbox'}</span>
+                <Icon path="M3 7h7l2 2h9v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 7V5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2" />
+                <span>{projectNames[selectedTask.project_id] || selectedTask.project_id}</span>
               </button>
               {selectedTask.due_date && (
                 <span className="pill subtle" title="Due date" aria-label="Due date">
@@ -1777,10 +1895,9 @@ function App() {
                 <option value="Med">Med</option>
                 <option value="High">High</option>
               </select>
-              <select value={editProjectId} onChange={(e) => setEditProjectId(e.target.value)}>
-                <option value="">Inbox</option>
-                {bootstrap.data.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
+	              <select value={editProjectId} onChange={(e) => setEditProjectId(e.target.value)}>
+	                {bootstrap.data.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+	              </select>
               <input className="due-input" type="datetime-local" value={editDueDate} onChange={(e) => setEditDueDate(e.target.value)} />
               <button className="primary action-icon" onClick={() => patchTaskMutation.mutate()} title="Save" aria-label="Save">
                 <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />

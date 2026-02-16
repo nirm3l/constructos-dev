@@ -96,9 +96,9 @@ class TaskApplicationService:
                 updated += 1
         return {"updated": updated}
 
-    def reorder_tasks(self, workspace_id: str, payload: ReorderPayload) -> dict:
+    def reorder_tasks(self, workspace_id: str, project_id: str, payload: ReorderPayload) -> dict:
         ensure_role(self.db, workspace_id, self.user.id, {"Owner", "Admin", "Member"})
-        handler = ReorderTasksHandler(self.ctx, workspace_id, payload)
+        handler = ReorderTasksHandler(self.ctx, workspace_id, project_id, payload)
         for idx, task_id in enumerate(payload.ordered_ids):
             execute_command(
                 self.db,

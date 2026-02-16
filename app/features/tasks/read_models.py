@@ -13,10 +13,11 @@ from shared.core import Task, ensure_role, get_user_zoneinfo, load_task_command_
 @dataclass(frozen=True, slots=True)
 class TaskListQuery:
     workspace_id: str
+    project_id: str
     view: str | None = None
     q: str | None = None
     status: str | None = None
-    project_id: str | None = None
+    tags: list[str] | None = None
     label: str | None = None
     assignee_id: str | None = None
     due_from: datetime | None = None
@@ -28,7 +29,12 @@ class TaskListQuery:
 
 
 def list_tasks_read_model(db: Session, user, query: TaskListQuery) -> dict:
-    stmt = select(Task).where(Task.workspace_id == query.workspace_id, Task.is_deleted == False, Task.archived == query.archived)
+    stmt = select(Task).where(
+        Task.workspace_id == query.workspace_id,
+        Task.project_id == query.project_id,
+        Task.is_deleted == False,
+        Task.archived == query.archived,
+    )
     now = datetime.now(timezone.utc)
     user_tz = get_user_zoneinfo(user)
 
@@ -36,10 +42,11 @@ def list_tasks_read_model(db: Session, user, query: TaskListQuery) -> dict:
         stmt = stmt.where(or_(Task.title.ilike(f"%{query.q}%"), Task.description.ilike(f"%{query.q}%"), Task.labels.ilike(f"%{query.q}%")))
     if query.status:
         stmt = stmt.where(Task.status == query.status)
-    if query.project_id is not None:
-        stmt = stmt.where(Task.project_id == query.project_id)
     if query.label:
         stmt = stmt.where(Task.labels.ilike(f"%{query.label}%"))
+    if query.tags:
+        for tag in query.tags:
+            stmt = stmt.where(Task.labels.ilike(f'%"{tag}"%'))
     if query.assignee_id is not None:
         stmt = stmt.where(Task.assignee_id == query.assignee_id)
     if query.due_from:
@@ -49,9 +56,7 @@ def list_tasks_read_model(db: Session, user, query: TaskListQuery) -> dict:
     if query.priority:
         stmt = stmt.where(Task.priority == query.priority)
 
-    if query.view == "inbox":
-        stmt = stmt.where(Task.project_id.is_(None))
-    elif query.view == "today":
+    if query.view == "today":
         local_now = now.astimezone(user_tz)
         local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
         local_end = local_start + timedelta(days=1)

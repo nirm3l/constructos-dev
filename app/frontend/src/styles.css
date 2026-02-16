@@ -192,6 +192,18 @@ body {
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand), transparent 86%);
 }
 
+.header-project-scope {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.header-project-scope select {
+  min-width: 220px;
+  flex: 1;
+}
+
 .seg {
   display: inline-flex;
   align-items: center;
@@ -240,6 +252,10 @@ body {
 @media (max-width: 560px) {
   .top-search {
     min-width: 0;
+  }
+  .header-project-scope select {
+    min-width: 0;
+    width: 100%;
   }
 }
 
@@ -517,6 +533,18 @@ button:disabled {
   align-items: baseline;
   justify-content: space-between;
   gap: 10px;
+  min-width: 0;
+}
+
+.kanban-title strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kanban-title .prio {
+  flex-shrink: 0;
 }
 
 .task-title {
@@ -1069,6 +1097,11 @@ button:disabled {
   border-radius: 999px;
   font-size: 12px;
   background: var(--surface-alt);
+}
+
+.status-chip.active {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 45%);
+  background: color-mix(in srgb, var(--brand), var(--surface) 88%);
 }
 
 .task-item {
