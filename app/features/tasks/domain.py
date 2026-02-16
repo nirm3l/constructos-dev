@@ -97,6 +97,10 @@ class TaskAggregate(Aggregate):
     def comment_added(self, *, task_id: str, user_id: str, body: str) -> None:
         _ = (task_id, user_id, body)
 
+    @event("CommentDeleted")
+    def comment_deleted(self, *, task_id: str, comment_id: int) -> None:
+        _ = (task_id, comment_id)
+
     @event("WatchToggled")
     def watch_toggled(self, *, task_id: str, user_id: str) -> None:
         _ = (task_id, user_id)
@@ -112,6 +116,7 @@ EVENT_RESTORED = "TaskRestored"
 EVENT_DELETED = "TaskDeleted"
 EVENT_MOVED_TO_INBOX = "TaskMovedToInbox"
 EVENT_COMMENT_ADDED = "TaskCommentAdded"
+EVENT_COMMENT_DELETED = "TaskCommentDeleted"
 EVENT_WATCH_TOGGLED = "TaskWatchToggled"
 EVENT_AUTOMATION_REQUESTED = "TaskAutomationRequested"
 EVENT_AUTOMATION_STARTED = "TaskAutomationStarted"

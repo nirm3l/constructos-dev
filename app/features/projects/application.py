@@ -3,9 +3,9 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from shared.commanding import execute_command
-from shared.core import ProjectCreate, User
+from shared.core import ProjectCreate, ProjectPatch, User
 
-from .command_handlers import CommandContext, CreateProjectHandler, DeleteProjectHandler
+from .command_handlers import CommandContext, CreateProjectHandler, DeleteProjectHandler, PatchProjectHandler
 
 
 class ProjectApplicationService:
@@ -31,4 +31,13 @@ class ProjectApplicationService:
             user_id=self.user.id,
             command_id=self.command_id,
             handler=DeleteProjectHandler(self.ctx, project_id),
+        )
+
+    def patch_project(self, project_id: str, payload: ProjectPatch) -> dict:
+        return execute_command(
+            self.db,
+            command_name="Project.Patch",
+            user_id=self.user.id,
+            command_id=self.command_id,
+            handler=PatchProjectHandler(self.ctx, project_id, payload),
         )

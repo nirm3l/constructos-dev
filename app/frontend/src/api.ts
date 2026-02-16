@@ -6,12 +6,45 @@ import type {
   NotesPage,
   Project,
   ProjectBoard,
+  ProjectTags,
   Task,
   TaskActivity,
   TaskAutomationStatus,
   TaskComment,
   TasksPage,
 } from './types'
+
+function formatApiError(raw: string, status: number): string {
+  const fallback = `Request failed (${status})`
+  const text = String(raw || '').trim()
+  if (!text) return fallback
+  try {
+    const parsed = JSON.parse(text) as unknown
+    const payload = parsed as Record<string, unknown>
+    const detail = payload?.detail ?? payload?.message ?? payload?.error ?? parsed
+    if (typeof detail === 'string' && detail.trim()) return detail.trim()
+    if (Array.isArray(detail)) {
+      const messages = detail
+        .map((item) => {
+          if (typeof item === 'string') return item.trim()
+          if (item && typeof item === 'object') {
+            const o = item as Record<string, unknown>
+            const msg = typeof o.msg === 'string' ? o.msg.trim() : ''
+            const loc = Array.isArray(o.loc)
+              ? o.loc.map((x) => String(x)).filter(Boolean).join('.')
+              : ''
+            return loc && msg ? `${loc}: ${msg}` : msg
+          }
+          return ''
+        })
+        .filter(Boolean)
+      if (messages.length) return messages.join(' | ')
+    }
+  } catch {
+    // Not JSON; fall back to plain text below.
+  }
+  return text
+}
 
 function queryString(params: Record<string, string | number | boolean | undefined | null>): string {
   const q = new URLSearchParams()
@@ -36,7 +69,8 @@ export async function api<T>(path: string, userId: string, init?: RequestInit): 
     }
   })
   if (!res.ok) {
-    throw new Error(await res.text())
+    const raw = await res.text()
+    throw new Error(formatApiError(raw, res.status))
   }
   return (await res.json()) as T
 }
@@ -116,6 +150,8 @@ export const patchTask = (
 export const listComments = (userId: string, taskId: string) => api<TaskComment[]>(`/api/tasks/${taskId}/comments`, userId)
 export const addComment = (userId: string, taskId: string, body: string) =>
   api<TaskComment>(`/api/tasks/${taskId}/comments`, userId, { method: 'POST', body: JSON.stringify({ body }) })
+export const deleteComment = (userId: string, taskId: string, commentId: number) =>
+  api<{ ok: true }>(`/api/tasks/${taskId}/comments/${commentId}/delete`, userId, { method: 'POST' })
 export const listActivity = (userId: string, taskId: string) => api<TaskActivity[]>(`/api/tasks/${taskId}/activity`, userId)
 export const runTaskWithCodex = (userId: string, taskId: string, instruction: string) =>
   api<{ ok: boolean; task_id: string; automation_state: string; requested_at: string }>(
@@ -147,14 +183,23 @@ export const getNotifications = (userId: string) => api<Notification[]>('/api/no
 export const markNotificationRead = (userId: string, id: string) =>
   api<{ ok: true }>(`/api/notifications/${id}/read`, userId, { method: 'POST' })
 
-export const createProject = (userId: string, payload: { workspace_id: string; name: string }) =>
+export const createProject = (userId: string, payload: { workspace_id: string; name: string; description?: string }) =>
   api<Project>('/api/projects', userId, { method: 'POST', body: JSON.stringify(payload) })
+
+export const patchProject = (
+  userId: string,
+  projectId: string,
+  payload: Partial<Pick<Project, 'name' | 'description'>>
+) => api<Project>(`/api/projects/${projectId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })
 
 export const deleteProject = (userId: string, projectId: string) =>
   api<{ ok: true }>(`/api/projects/${projectId}`, userId, { method: 'DELETE' })
 
 export const getProjectBoard = (userId: string, projectId: string) =>
   api<ProjectBoard>(`/api/projects/${projectId}/board`, userId)
+
+export const getProjectTags = (userId: string, projectId: string) =>
+  api<ProjectTags>(`/api/projects/${projectId}/tags`, userId)
 
 export const patchMyPreferences = (
   userId: string,

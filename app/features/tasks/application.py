@@ -12,6 +12,7 @@ from .command_handlers import (
     CommandContext,
     CompleteTaskHandler,
     CreateTaskHandler,
+    DeleteCommentHandler,
     PatchTaskHandler,
     ReopenTaskHandler,
     ReorderTasksHandler,
@@ -116,6 +117,15 @@ class TaskApplicationService:
             user_id=self.user.id,
             command_id=self.command_id,
             handler=AddCommentHandler(self.ctx, task_id, payload),
+        )
+
+    def delete_comment(self, task_id: str, comment_id: int) -> dict:
+        return execute_command(
+            self.db,
+            command_name="Task.CommentDelete",
+            user_id=self.user.id,
+            command_id=self.command_id,
+            handler=DeleteCommentHandler(self.ctx, task_id, comment_id),
         )
 
     def toggle_watch(self, task_id: str) -> dict:

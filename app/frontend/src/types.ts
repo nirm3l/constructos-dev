@@ -118,6 +118,11 @@ export type ProjectBoard = {
   lanes: Record<string, Task[]>
 }
 
+export type ProjectTags = {
+  project_id: string
+  tags: string[]
+}
+
 export type AgentChatResponse = {
   ok: boolean
   action: 'complete' | 'comment'

@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from shared.core import ProjectCreate, get_command_id, get_current_user, get_db
+from shared.core import ProjectCreate, ProjectPatch, get_command_id, get_current_user, get_db
 from .application import ProjectApplicationService
-from .read_models import get_project_activity_read_model, get_project_board_read_model
+from .read_models import get_project_activity_read_model, get_project_board_read_model, get_project_tags_read_model
 
 router = APIRouter()
 
@@ -28,6 +28,17 @@ def delete_project(
     return ProjectApplicationService(db, user, command_id=command_id).delete_project(project_id)
 
 
+@router.patch("/api/projects/{project_id}")
+def patch_project(
+    project_id: str,
+    payload: ProjectPatch,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+    command_id: str | None = Depends(get_command_id),
+):
+    return ProjectApplicationService(db, user, command_id=command_id).patch_project(project_id, payload)
+
+
 @router.get("/api/projects/{project_id}/board")
 def project_board(project_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
     return get_project_board_read_model(db, user, project_id)
@@ -36,3 +47,8 @@ def project_board(project_id: str, db: Session = Depends(get_db), user=Depends(g
 @router.get("/api/projects/{project_id}/activity")
 def project_activity(project_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
     return get_project_activity_read_model(db, user, project_id)
+
+
+@router.get("/api/projects/{project_id}/tags")
+def project_tags(project_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    return get_project_tags_read_model(db, user, project_id)

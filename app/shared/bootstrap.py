@@ -14,7 +14,7 @@ from features.bootstrap.read_models import bootstrap_payload_read_model
 from .eventing import append_event, current_version, emit_system_notifications, get_kurrent_client
 from features.projects.domain import EVENT_CREATED as PROJECT_EVENT_CREATED
 from features.tasks.domain import EVENT_CREATED as TASK_EVENT_CREATED
-from .models import Base, Project, SessionLocal, Task, User, Workspace, WorkspaceMember, engine
+from .models import Base, Note, Project, ProjectTagIndex, SessionLocal, Task, User, Workspace, WorkspaceMember, engine
 from .serializers import to_iso_utc
 from .settings import (
     AGENT_SYSTEM_FULL_NAME,
@@ -86,11 +86,20 @@ def ensure_saved_view_table_columns(db: Session):
     db.commit()
 
 
+def ensure_task_comment_table_columns(db: Session):
+    existing = {row[1] for row in db.execute(text("PRAGMA table_info(task_comments)")).fetchall()}
+    if "event_version" not in existing:
+        db.execute(text("ALTER TABLE task_comments ADD COLUMN event_version INTEGER"))
+    db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_task_comments_task_event_version ON task_comments(task_id, event_version)"))
+    db.commit()
+
+
 def bootstrap_data():
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
         ensure_task_table_columns(db)
         ensure_saved_view_table_columns(db)
+        ensure_task_comment_table_columns(db)
         ensure_system_users(db)
         default_user = db.get(User, DEFAULT_USER_ID)
         if not default_user:
@@ -174,6 +183,7 @@ def bootstrap_data():
         # Repair drift: if Kurrent was reset but app.db persisted, backfill streams.
         _backfill_project_streams_from_sqlite(db)
         _backfill_task_streams_from_sqlite(db)
+        _rebuild_project_tag_index(db)
         db.commit()
 
 
@@ -284,3 +294,56 @@ def _backfill_task_streams_from_sqlite(db: Session) -> None:
             },
             expected_version=0,
         )
+
+
+def _parse_tag_list(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        values = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(values, list):
+        return []
+    out: list[str] = []
+    for value in values:
+        tag = str(value or "").strip().lower()
+        if tag:
+            out.append(tag)
+    return out
+
+
+def _rebuild_project_tag_index(db: Session) -> None:
+    db.query(ProjectTagIndex).delete()
+    projects = db.execute(select(Project).where(Project.is_deleted == False)).scalars().all()
+    for project in projects:
+        counts: dict[str, int] = {}
+        task_rows = db.execute(
+            select(Task.labels).where(
+                Task.project_id == project.id,
+                Task.is_deleted == False,
+                Task.archived == False,
+            )
+        ).all()
+        note_rows = db.execute(
+            select(Note.tags).where(
+                Note.project_id == project.id,
+                Note.is_deleted == False,
+                Note.archived == False,
+            )
+        ).all()
+        for (labels_raw,) in task_rows:
+            for tag in _parse_tag_list(labels_raw):
+                counts[tag] = counts.get(tag, 0) + 1
+        for (tags_raw,) in note_rows:
+            for tag in _parse_tag_list(tags_raw):
+                counts[tag] = counts.get(tag, 0) + 1
+        for tag, usage_count in sorted(counts.items(), key=lambda item: item[0]):
+            db.add(
+                ProjectTagIndex(
+                    workspace_id=project.workspace_id,
+                    project_id=project.id,
+                    tag=tag,
+                    usage_count=usage_count,
+                )
+            )

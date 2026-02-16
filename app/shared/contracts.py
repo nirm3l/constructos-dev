@@ -102,6 +102,11 @@ class ProjectCreate(BaseModel):
     custom_statuses: list[str] | None = None
 
 
+class ProjectPatch(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
 class ReorderPayload(BaseModel):
     ordered_ids: list[str]
     status: str | None = None

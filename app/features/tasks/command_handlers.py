@@ -36,6 +36,7 @@ from .domain import (
     EVENT_ARCHIVED,
     EVENT_AUTOMATION_REQUESTED,
     EVENT_COMMENT_ADDED,
+    EVENT_COMMENT_DELETED,
     EVENT_COMPLETED,
     EVENT_CREATED,
     EVENT_DELETED,
@@ -473,6 +474,29 @@ class AddCommentHandler:
         if last:
             return {"id": last.id, "task_id": self.task_id, "body": last.body, "created_at": to_iso_utc(last.created_at)}
         return {"id": None, "task_id": self.task_id, "body": self.payload.body, "created_at": None}
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteCommentHandler:
+    ctx: CommandContext
+    task_id: str
+    comment_id: int
+
+    def __call__(self) -> dict:
+        workspace_id, project_id, _, _ = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member", "Guest"})
+        comment = self.ctx.db.get(TaskComment, self.comment_id)
+        if not comment or comment.task_id != self.task_id:
+            raise HTTPException(status_code=404, detail="Comment not found")
+        append_event(
+            self.ctx.db,
+            aggregate_type="Task",
+            aggregate_id=self.task_id,
+            event_type=EVENT_COMMENT_DELETED,
+            payload={"task_id": self.task_id, "comment_id": self.comment_id},
+            metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": self.task_id},
+        )
+        self.ctx.db.commit()
+        return {"ok": True}
 
 
 @dataclass(frozen=True, slots=True)

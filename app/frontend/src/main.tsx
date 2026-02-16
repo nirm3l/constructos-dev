@@ -6,6 +6,7 @@ import {
   archiveTask,
   completeTask,
   createProject,
+  deleteComment,
   createTask,
   createNote,
   deleteNote,
@@ -14,6 +15,7 @@ import {
   getBootstrap,
   getNotifications,
   getProjectBoard,
+  getProjectTags,
   getNotes,
   getTasks,
   listActivity,
@@ -21,6 +23,7 @@ import {
   markNotificationRead,
   patchNote,
   patchMyPreferences,
+  patchProject,
   patchTask,
   pinNote,
   restoreNote,
@@ -222,6 +225,12 @@ function parseCommaTags(raw: string): string[] {
   return out
 }
 
+function toErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error && err.message.trim()) return err.message.trim()
+  if (typeof err === 'string' && err.trim()) return err.trim()
+  return fallback
+}
+
 function tagHue(tag: string): number {
   // Deterministic hash -> hue for consistent chip coloring.
   let h = 0
@@ -240,7 +249,15 @@ function App() {
   const [theme, setTheme] = React.useState<'light' | 'dark'>('light')
   const [taskTitle, setTaskTitle] = React.useState('')
   const [quickDueDate, setQuickDueDate] = React.useState('')
+  const [quickDueDateFocused, setQuickDueDateFocused] = React.useState(false)
   const [projectName, setProjectName] = React.useState('')
+  const [projectDescription, setProjectDescription] = React.useState('')
+  const [projectDescriptionView, setProjectDescriptionView] = React.useState<'write' | 'preview'>('write')
+  const [showProjectCreateForm, setShowProjectCreateForm] = React.useState(false)
+  const [showProjectEditForm, setShowProjectEditForm] = React.useState(false)
+  const [editProjectName, setEditProjectName] = React.useState('')
+  const [editProjectDescription, setEditProjectDescription] = React.useState('')
+  const [editProjectDescriptionView, setEditProjectDescriptionView] = React.useState<'write' | 'preview'>('write')
   const [selectedProjectId, setSelectedProjectId] = React.useState<string>(() =>
     parseStoredProjectId(localStorage.getItem('ui_selected_project_id'))
   )
@@ -298,12 +315,28 @@ function App() {
   const [editRecurringUnit, setEditRecurringUnit] = React.useState<'m' | 'h' | 'd'>('h')
   const [activityExpandedIds, setActivityExpandedIds] = React.useState<Set<number>>(new Set())
   const [activityShowRawDetails, setActivityShowRawDetails] = React.useState(false)
+  const [scrollToNewestComment, setScrollToNewestComment] = React.useState(false)
   const [uiError, setUiError] = React.useState<string | null>(null)
+  const [taskEditorError, setTaskEditorError] = React.useState<string | null>(null)
   const qc = useQueryClient()
   const realtimeRefreshTimerRef = React.useRef<number | null>(null)
   const codexChatHistoryRef = React.useRef<HTMLDivElement | null>(null)
   const commentInputRef = React.useRef<HTMLTextAreaElement | null>(null)
+  const commentsListRef = React.useRef<HTMLDivElement | null>(null)
   const fabIdleTimerRef = React.useRef<number | null>(null)
+  const openNextSelectedNoteInWriteRef = React.useRef(false)
+  const projectDescriptionRef = React.useRef<HTMLTextAreaElement | null>(null)
+  const editProjectDescriptionRef = React.useRef<HTMLTextAreaElement | null>(null)
+
+  const autoResizeTextarea = React.useCallback((el: HTMLTextAreaElement | null) => {
+    if (!el) return
+    const minHeight = 96
+    const maxHeight = 280
+    el.style.height = 'auto'
+    const next = Math.max(minHeight, Math.min(el.scrollHeight, maxHeight))
+    el.style.height = `${next}px`
+    el.style.overflowY = el.scrollHeight > maxHeight ? 'auto' : 'hidden'
+  }, [])
 
   React.useEffect(() => {
     localStorage.setItem('ui_tab', tab)
@@ -338,6 +371,13 @@ function App() {
 
   React.useEffect(() => {
     if (tab === 'notes') setSelectedTaskId(null)
+  }, [tab])
+
+  React.useEffect(() => {
+    if (tab !== 'projects') {
+      setShowProjectCreateForm(false)
+      setShowProjectEditForm(false)
+    }
   }, [tab])
 
   React.useEffect(() => {
@@ -414,6 +454,11 @@ function App() {
       }),
     enabled: Boolean(workspaceId && selectedProjectId) && tab === 'notes'
   })
+  const projectTags = useQuery({
+    queryKey: ['project-tags', userId, selectedProjectId],
+    queryFn: () => getProjectTags(userId, selectedProjectId),
+    enabled: Boolean(selectedProjectId)
+  })
   const projectTaskCountQueries = useQueries({
     queries: (bootstrap.data?.projects ?? []).map((project) => ({
       queryKey: ['project-task-count', userId, workspaceId, project.id],
@@ -441,6 +486,7 @@ function App() {
     }
     realtimeRefreshTimerRef.current = window.setTimeout(() => {
       qc.invalidateQueries({ queryKey: ['tasks'] })
+      qc.invalidateQueries({ queryKey: ['project-tags'] })
       qc.invalidateQueries({ queryKey: ['board'] })
       qc.invalidateQueries({ queryKey: ['bootstrap'] })
       if (selectedTaskId) {
@@ -529,43 +575,11 @@ function App() {
   const selectedNote = React.useMemo(() => notes.data?.items.find((n) => n.id === selectedNoteId) ?? null, [notes.data?.items, selectedNoteId])
 
   const taskTagSuggestions = React.useMemo(() => {
-    const counts = new Map<string, number>()
-    for (const t of tasks.data?.items ?? []) {
-      for (const label of t.labels ?? []) {
-        const k = String(label || '').trim()
-        if (!k) continue
-        counts.set(k, (counts.get(k) ?? 0) + 1)
-      }
-    }
-    // If board is loaded, include tags from kanban items too.
-    for (const laneTasks of Object.values(board.data?.lanes ?? {})) {
-      for (const t of laneTasks ?? []) {
-        for (const label of (t as any).labels ?? []) {
-          const k = String(label || '').trim()
-          if (!k) continue
-          counts.set(k, (counts.get(k) ?? 0) + 1)
-        }
-      }
-    }
-    return [...counts.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 40)
-      .map(([t]) => t)
-  }, [board.data?.lanes, tasks.data?.items])
+    return (projectTags.data?.tags ?? []).slice(0, 40)
+  }, [projectTags.data?.tags])
   const noteTagSuggestions = React.useMemo(() => {
-    const counts = new Map<string, number>()
-    for (const n of notes.data?.items ?? []) {
-      for (const t of n.tags ?? []) {
-        const k = String(t || '').trim()
-        if (!k) continue
-        counts.set(k, (counts.get(k) ?? 0) + 1)
-      }
-    }
-    return [...counts.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 24)
-      .map(([t]) => t)
-  }, [notes.data?.items])
+    return (projectTags.data?.tags ?? []).slice(0, 24)
+  }, [projectTags.data?.tags])
   const toggleSearchTag = React.useCallback((tag: string) => {
     const cleaned = String(tag || '').trim().toLowerCase()
     if (!cleaned) return
@@ -702,9 +716,15 @@ function App() {
     setAutomationInstruction('')
     setCommentBody('')
     setExpandedCommentIds(new Set())
+    setTaskEditorError(null)
     // Helpful default: focus comment box when opening a task.
     window.setTimeout(() => commentInputRef.current?.focus(), 0)
   }, [bootstrap.data?.current_user?.timezone, selectedTask])
+
+  React.useEffect(() => {
+    if (!taskEditorError) return
+    setTaskEditorError(null)
+  }, [editTaskType, editScheduledInstruction, editScheduledAtUtc, editScheduleTimezone, editRecurringEvery, editRecurringUnit])
 
   // Notes uses an accordion: do not auto-open a note.
 
@@ -715,7 +735,8 @@ function App() {
     setEditNoteTags((selectedNote.tags ?? []).join(', '))
     setTagPickerQuery('')
     setShowTagPicker(false)
-    setNoteEditorView('preview')
+    setNoteEditorView(openNextSelectedNoteInWriteRef.current ? 'write' : 'preview')
+    openNextSelectedNoteInWriteRef.current = false
   }, [selectedNote])
 
   const comments = useQuery({
@@ -723,6 +744,16 @@ function App() {
     queryFn: () => listComments(userId, selectedTaskId as string),
     enabled: Boolean(selectedTaskId)
   })
+
+  React.useEffect(() => {
+    if (!scrollToNewestComment || comments.isFetching) return
+    const list = commentsListRef.current
+    if (!list) return
+    list.scrollTo({ top: 0, behavior: 'smooth' })
+    const newest = list.querySelector('.comment-item') as HTMLElement | null
+    if (newest) newest.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    setScrollToNewestComment(false)
+  }, [scrollToNewestComment, comments.isFetching, comments.data])
 
   const activity = useQuery({
     queryKey: ['activity', userId, selectedTaskId],
@@ -744,6 +775,7 @@ function App() {
   const invalidateAll = async () => {
     await qc.invalidateQueries({ queryKey: ['tasks'] })
     await qc.invalidateQueries({ queryKey: ['notes'] })
+    await qc.invalidateQueries({ queryKey: ['project-tags'] })
     await qc.invalidateQueries({ queryKey: ['board'] })
     await qc.invalidateQueries({ queryKey: ['bootstrap'] })
     await qc.invalidateQueries({ queryKey: ['notifications'] })
@@ -807,8 +839,11 @@ function App() {
   })
 
   const patchTaskMutation = useMutation({
-    mutationFn: () =>
-      patchTask(userId, selectedTaskId as string, {
+    mutationFn: () => {
+      if (editTaskType === 'scheduled_instruction' && !editScheduledInstruction.trim()) {
+        throw new Error('Scheduled task requires an instruction.')
+      }
+      return patchTask(userId, selectedTaskId as string, {
         description: editDescription,
         status: editStatus,
         priority: editPriority,
@@ -823,23 +858,50 @@ function App() {
           editTaskType === 'scheduled_instruction' && editRecurringEvery.trim()
             ? `every:${Math.max(1, Number(editRecurringEvery) || 1)}${editRecurringUnit}`
             : null
+      })
+    },
+    onSuccess: async () => {
+      setUiError(null)
+      setTaskEditorError(null)
+      await invalidateAll()
+      setSelectedTaskId(null)
+    },
+    onError: (err) => {
+      const message = toErrorMessage(err, 'Save failed')
+      setUiError(message)
+      setTaskEditorError(message)
+    }
+  })
+
+  const createProjectMutation = useMutation({
+    mutationFn: () =>
+      createProject(userId, {
+        workspace_id: workspaceId,
+        name: projectName.trim(),
+        description: projectDescription,
+      }),
+    onSuccess: async () => {
+      setUiError(null)
+      setProjectName('')
+      setProjectDescription('')
+      setProjectDescriptionView('write')
+      setShowProjectCreateForm(false)
+      await invalidateAll()
+    },
+    onError: (err) => setUiError(err instanceof Error ? err.message : 'Project create failed')
+  })
+
+  const patchProjectMutation = useMutation({
+    mutationFn: () =>
+      patchProject(userId, selectedProjectId, {
+        name: editProjectName.trim(),
+        description: editProjectDescription,
       }),
     onSuccess: async () => {
       setUiError(null)
       await invalidateAll()
-      setSelectedTaskId(null)
     },
-    onError: (err) => setUiError(err instanceof Error ? err.message : 'Save failed')
-  })
-
-  const createProjectMutation = useMutation({
-    mutationFn: () => createProject(userId, { workspace_id: workspaceId, name: projectName.trim() }),
-    onSuccess: async () => {
-      setUiError(null)
-      setProjectName('')
-      await invalidateAll()
-    },
-    onError: (err) => setUiError(err instanceof Error ? err.message : 'Project create failed')
+    onError: (err) => setUiError(err instanceof Error ? err.message : 'Project update failed')
   })
 
   const deleteProjectMutation = useMutation({
@@ -863,6 +925,7 @@ function App() {
     onSuccess: async (note) => {
       setUiError(null)
       setTab('notes')
+      openNextSelectedNoteInWriteRef.current = true
       setSelectedNoteId(note.id)
       setShowTagPicker(true)
       setTagPickerQuery('')
@@ -884,6 +947,7 @@ function App() {
     onSuccess: async () => {
       setUiError(null)
       await qc.invalidateQueries({ queryKey: ['notes'] })
+      await qc.invalidateQueries({ queryKey: ['project-tags'] })
     },
     onError: (err) => setUiError(err instanceof Error ? err.message : 'Note save failed')
   })
@@ -957,10 +1021,20 @@ function App() {
     onSuccess: async () => {
       setUiError(null)
       setCommentBody('')
+      setScrollToNewestComment(true)
       await qc.invalidateQueries({ queryKey: ['comments', userId, selectedTaskId] })
       await qc.invalidateQueries({ queryKey: ['activity', userId, selectedTaskId] })
     },
     onError: (err) => setUiError(err instanceof Error ? err.message : 'Comment failed')
+  })
+  const deleteCommentMutation = useMutation({
+    mutationFn: (commentId: number) => deleteComment(userId, selectedTaskId as string, commentId),
+    onSuccess: async () => {
+      setUiError(null)
+      await qc.invalidateQueries({ queryKey: ['comments', userId, selectedTaskId] })
+      await qc.invalidateQueries({ queryKey: ['activity', userId, selectedTaskId] })
+    },
+    onError: (err) => setUiError(err instanceof Error ? err.message : 'Delete comment failed')
   })
 
   const runAutomationMutation = useMutation({
@@ -1028,6 +1102,29 @@ function App() {
       ])
     }
   })
+
+  React.useEffect(() => {
+    if (!selectedProject) {
+      setEditProjectName('')
+      setEditProjectDescription('')
+      setEditProjectDescriptionView('write')
+      setShowProjectEditForm(false)
+      return
+    }
+    setEditProjectName(selectedProject.name ?? '')
+    setEditProjectDescription(selectedProject.description ?? '')
+    setEditProjectDescriptionView('write')
+  }, [selectedProject?.id])
+
+  React.useEffect(() => {
+    if (!showProjectCreateForm || projectDescriptionView !== 'write') return
+    autoResizeTextarea(projectDescriptionRef.current)
+  }, [autoResizeTextarea, projectDescription, projectDescriptionView, showProjectCreateForm])
+
+  React.useEffect(() => {
+    if (!showProjectEditForm || editProjectDescriptionView !== 'write') return
+    autoResizeTextarea(editProjectDescriptionRef.current)
+  }, [autoResizeTextarea, editProjectDescription, editProjectDescriptionView, showProjectEditForm])
 
   if (bootstrap.isLoading) return <div className="page"><div className="card skeleton">Loading workspace...</div></div>
   if (bootstrap.isError || !bootstrap.data) return <div className="page"><div className="notice">Unable to load bootstrap data.</div></div>
@@ -1136,7 +1233,14 @@ function App() {
           </div>
         )}
       </header>
-      {uiError && <div className="notice">{uiError}</div>}
+      {uiError && (
+        <div className="notice notice-global" role="alert">
+          <span>{uiError}</span>
+          <button className="action-icon" onClick={() => setUiError(null)} title="Dismiss" aria-label="Dismiss">
+            <Icon path="M6 6l12 12M18 6 6 18" />
+          </button>
+        </div>
+      )}
 
 	      {showQuickAdd && (
 	        <div className="drawer open" onClick={() => setShowQuickAdd(false)}>
@@ -1169,13 +1273,16 @@ function App() {
 	                  </option>
 	                ))}
 	              </select>
-	              <div className={`quickadd-due ${quickDueDate ? 'has-value' : ''}`}>
-	                <span className="quickadd-due-placeholder">Due date</span>
+	              <div className={`quickadd-due ${quickDueDate ? 'has-value' : ''} ${quickDueDateFocused ? 'focused' : ''}`}>
+	                <span className="quickadd-due-placeholder">Due Date</span>
 	                <input
-	                  className="due-input"
+	                  id="quick-task-due-date"
+	                  className={`due-input ${!quickDueDate && !quickDueDateFocused ? 'due-input-empty' : ''}`}
 	                  type="datetime-local"
 	                  value={quickDueDate}
 	                  onChange={(e) => setQuickDueDate(e.target.value)}
+	                  onFocus={() => setQuickDueDateFocused(true)}
+	                  onBlur={() => setQuickDueDateFocused(false)}
 	                  aria-label="Due date"
 	                />
 	              </div>
@@ -1260,8 +1367,17 @@ function App() {
 		              })}
 		              {filteredQuickTaskTags.length === 0 && <div className="meta">No tags found.</div>}
 		            </div>
-		            {canCreateQuickTaskTag && (
-		              <button className="primary tag-picker-create" onClick={() => toggleQuickTaskTag(quickTaskTagQuery)} title="Create tag" aria-label="Create tag">
+		                          {canCreateQuickTaskTag && (
+		              <button
+                        className="primary tag-picker-create"
+                        onClick={() => {
+                          toggleQuickTaskTag(quickTaskTagQuery)
+                          setQuickTaskTagQuery('')
+                          setShowQuickTaskTagPicker(false)
+                        }}
+                        title="Create tag"
+                        aria-label="Create tag"
+                      >
 		                Create "{quickTaskTagQuery.trim()}"
 		              </button>
 		            )}
@@ -1407,22 +1523,129 @@ function App() {
         <section className="card">
           <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
             <h2 style={{ margin: 0 }}>Projects ({bootstrap.data.projects.length})</h2>
+            <div className="row" style={{ gap: 8 }}>
+              <button
+                className="primary"
+                onClick={() => {
+                  setShowProjectCreateForm((v) => !v)
+                  if (showProjectEditForm) setShowProjectEditForm(false)
+                }}
+                title={showProjectCreateForm ? 'Close create' : 'New project'}
+                aria-label={showProjectCreateForm ? 'Close create' : 'New project'}
+              >
+                <Icon path={showProjectCreateForm ? 'M6 6l12 12M18 6L6 18' : 'M12 5v14M5 12h14'} />
+              </button>
+              <button
+                className="primary"
+                disabled={!selectedProject}
+                onClick={() => {
+                  setShowProjectEditForm((v) => !v)
+                  if (showProjectCreateForm) setShowProjectCreateForm(false)
+                }}
+                title={showProjectEditForm ? 'Close edit' : 'Edit selected project'}
+                aria-label={showProjectEditForm ? 'Close edit' : 'Edit selected project'}
+              >
+                <Icon path={showProjectEditForm ? 'M6 6l12 12M18 6L6 18' : 'M3 17.25V21h3.75L17.8 9.94l-3.75-3.75L3 17.25zM20.7 7.04a1 1 0 0 0 0-1.41L18.37 3.3a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.82-1.84z'} />
+              </button>
+            </div>
           </div>
-          <div className="row" style={{ marginBottom: 10 }}>
-            <input
-              value={projectName}
-              onChange={(e) => setProjectName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  const name = projectName.trim()
-                  if (!name) return
-                  createProjectMutation.mutate()
-                }
-              }}
-              placeholder="New project"
-            />
-            <button className="primary" disabled={!projectName.trim()} onClick={() => createProjectMutation.mutate()}>Create</button>
-          </div>
+          {showProjectCreateForm && (
+            <div style={{ marginBottom: 10 }}>
+              <h3 style={{ margin: '0 0 8px 0' }}>Create project</h3>
+              <div className="row" style={{ marginBottom: 10 }}>
+                <input
+                  value={projectName}
+                  onChange={(e) => setProjectName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      const name = projectName.trim()
+                      if (!name) return
+                      createProjectMutation.mutate()
+                    }
+                  }}
+                  placeholder="New project"
+                />
+                <button className="primary" disabled={!projectName.trim()} onClick={() => createProjectMutation.mutate()}>
+                  <Icon path="M12 5v14M5 12h14" />
+                </button>
+              </div>
+              <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+                <div className="seg" role="tablist" aria-label="Project description editor view">
+                  <button
+                    className={`seg-btn ${projectDescriptionView === 'write' ? 'active' : ''}`}
+                    onClick={() => setProjectDescriptionView('write')}
+                    type="button"
+                  >
+                    Write
+                  </button>
+                  <button
+                    className={`seg-btn ${projectDescriptionView === 'preview' ? 'active' : ''}`}
+                    onClick={() => setProjectDescriptionView('preview')}
+                    type="button"
+                  >
+                    Preview
+                  </button>
+                </div>
+              </div>
+              {projectDescriptionView === 'write' ? (
+                <textarea
+                  ref={projectDescriptionRef}
+                  value={projectDescription}
+                  onChange={(e) => setProjectDescription(e.target.value)}
+                  placeholder="Project description (Markdown)"
+                  style={{ width: '100%', minHeight: 96, maxHeight: 280, resize: 'none', overflowY: 'hidden' }}
+                />
+              ) : (
+                <MarkdownView value={projectDescription} />
+              )}
+            </div>
+          )}
+          {showProjectEditForm && selectedProject && (
+            <div style={{ marginBottom: 14 }}>
+              <h3 style={{ margin: '0 0 8px 0' }}>Edit selected project</h3>
+              <div className="row" style={{ marginBottom: 10 }}>
+                <input value={editProjectName} onChange={(e) => setEditProjectName(e.target.value)} placeholder="Project name" />
+                <button
+                  className="primary"
+                  disabled={!selectedProjectId || !editProjectName.trim() || patchProjectMutation.isPending}
+                  onClick={() => patchProjectMutation.mutate()}
+                  title="Save project"
+                  aria-label="Save project"
+                >
+                  <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+                </button>
+              </div>
+              <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+                <div className="seg" role="tablist" aria-label="Edit project description editor view">
+                  <button
+                    className={`seg-btn ${editProjectDescriptionView === 'write' ? 'active' : ''}`}
+                    onClick={() => setEditProjectDescriptionView('write')}
+                    type="button"
+                  >
+                    Write
+                  </button>
+                  <button
+                    className={`seg-btn ${editProjectDescriptionView === 'preview' ? 'active' : ''}`}
+                    onClick={() => setEditProjectDescriptionView('preview')}
+                    type="button"
+                  >
+                    Preview
+                  </button>
+                </div>
+              </div>
+              {editProjectDescriptionView === 'write' ? (
+                <textarea
+                  ref={editProjectDescriptionRef}
+                  value={editProjectDescription}
+                  onChange={(e) => setEditProjectDescription(e.target.value)}
+                  placeholder="Project description (Markdown)"
+                  style={{ width: '100%', minHeight: 96, maxHeight: 280, resize: 'none', overflowY: 'hidden' }}
+                />
+              ) : (
+                <MarkdownView value={editProjectDescription} />
+              )}
+            </div>
+          )}
           <div className="task-list">
             {bootstrap.data.projects.map((project, idx) => {
               const isSelected = selectedProjectId === project.id
@@ -1500,6 +1723,7 @@ function App() {
 		              {notes.data?.items.map((n: Note) => {
 		                const isOpen = selectedNoteId === n.id
 		                const isSelected = selectedNote?.id === n.id
+                    const displayTitle = isSelected ? editNoteTitle || 'Untitled' : n.title || 'Untitled'
 		                return (
 		                  <div
 		                    key={n.id}
@@ -1519,7 +1743,7 @@ function App() {
 		                      )}
 		                      {n.archived && <span className="badge">Archived</span>}
                           {selectedProject && <span className="badge">Project: {selectedProject.name}</span>}
-		                      <strong>{n.title || 'Untitled'}</strong>
+		                      <strong>{displayTitle}</strong>
 		                    </div>
 		                    {(n.tags ?? []).length > 0 && (
 		                      <div className="note-tags">
@@ -1559,15 +1783,15 @@ function App() {
 			                            placeholder="Title"
 			                          />
 		                          <div className="note-actions">
-		                            <button
-		                              className="action-icon primary"
-		                              onClick={() => patchNoteMutation.mutate()}
-		                              disabled={!selectedNoteId}
-		                              title="Save"
-		                              aria-label="Save"
-		                            >
-		                              <Icon path="m5 13 4 4L19 7" />
-		                            </button>
+                            <button
+                              className="action-icon primary"
+                              onClick={() => patchNoteMutation.mutate()}
+                              disabled={!selectedNoteId}
+                              title="Save"
+                              aria-label="Save"
+                            >
+                              <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+                            </button>
 		                            {selectedNote.pinned ? (
 		                              <button className="action-icon" onClick={() => unpinNoteMutation.mutate(selectedNote.id)} title="Unpin" aria-label="Unpin">
 		                                <Icon path="M6 2h12v20l-6-4-6 4V2z" />
@@ -1675,7 +1899,10 @@ function App() {
 		                          {canCreateTag && (
 		                            <button
 		                              className="primary tag-picker-create"
-		                              onClick={() => addNoteTag(tagPickerQuery)}
+		                              onClick={() => {
+                                addNoteTag(tagPickerQuery)
+                                setShowTagPicker(false)
+                              }}
 		                              title="Create tag"
 		                              aria-label="Create tag"
 		                            >
@@ -1997,7 +2224,12 @@ function App() {
                   <Icon path="M6 6l12 12M18 6 6 18" />
                 </button>
               )}
-            </div>
+	            </div>
+            {taskEditorError && (
+              <div className="notice" role="alert" style={{ marginBottom: 8 }}>
+                {taskEditorError}
+              </div>
+            )}
             <textarea
               value={editScheduledInstruction}
               onChange={(e) => setEditScheduledInstruction(e.target.value)}
@@ -2054,7 +2286,16 @@ function App() {
 	                    {filteredTaskTags.length === 0 && <div className="meta">No tags found.</div>}
 	                  </div>
 	                  {canCreateTaskTag && (
-	                    <button className="primary tag-picker-create" onClick={() => toggleTaskTag(taskTagPickerQuery)} title="Create tag" aria-label="Create tag">
+	                    <button
+                        className="primary tag-picker-create"
+                        onClick={() => {
+                          toggleTaskTag(taskTagPickerQuery)
+                          setTaskTagPickerQuery('')
+                          setShowTaskTagPicker(false)
+                        }}
+                        title="Create tag"
+                        aria-label="Create tag"
+                      >
 	                      Create "{taskTagPickerQuery.trim()}"
 	                    </button>
 	                  )}
@@ -2065,12 +2306,13 @@ function App() {
 	              <h4 style={{ margin: 0 }}>Comments</h4>
 	              <span className="meta">{comments.data?.length ?? 0}</span>
 	            </div>
-            <div className="note-list comment-list">
+            <div ref={commentsListRef} className="note-list comment-list">
               {comments.isLoading && <div className="meta">Loading comments...</div>}
               {comments.data?.map((c) => (
                 <div className="note comment-item" key={`${c.id}-${c.created_at}`}>
                   {(() => {
                     const body = c.body || ''
+                    const commentId = c.id
                     const commentKey = `${c.id ?? 'null'}-${c.created_at ?? ''}-${c.user_id}`
                     const expanded = expandedCommentIds.has(commentKey)
                     const isLong = body.length > 520 || body.split('\n').length > 14
@@ -2084,7 +2326,23 @@ function App() {
                         <div className="comment-main">
                           <div className="comment-head">
                             <strong className="comment-author">{author}</strong>
-                            <span className="meta">{c.created_at ? new Date(c.created_at).toLocaleString() : ''}</span>
+                            <div className="row" style={{ gap: 6 }}>
+                              <span className="meta">{c.created_at ? new Date(c.created_at).toLocaleString() : ''}</span>
+                              {typeof commentId === 'number' && (
+                                <button
+                                  className="action-icon danger-ghost comment-delete-btn"
+                                  title="Delete comment"
+                                  aria-label="Delete comment"
+                                  disabled={deleteCommentMutation.isPending}
+                                  onClick={() => {
+                                    if (!window.confirm('Delete this comment?')) return
+                                    deleteCommentMutation.mutate(commentId)
+                                  }}
+                                >
+                                  <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                                </button>
+                              )}
+                            </div>
                           </div>
                           <div className={`comment-body ${isLong && !expanded ? 'collapsed' : ''}`}>
                             <MarkdownView value={body} />

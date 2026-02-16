@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from .settings import DATABASE_URL
@@ -104,6 +104,7 @@ class TaskComment(Base, TimeMixin):
     task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id"))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
     body: Mapped[str] = mapped_column(Text)
+    event_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class Note(Base, TimeMixin):
@@ -120,6 +121,17 @@ class Note(Base, TimeMixin):
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     updated_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+
+class ProjectTagIndex(Base, TimeMixin):
+    __tablename__ = "project_tag_index"
+    __table_args__ = (UniqueConstraint("project_id", "tag", name="ux_project_tag_index_project_tag"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    tag: Mapped[str] = mapped_column(String(128), index=True)
+    usage_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Notification(Base, TimeMixin):

@@ -70,6 +70,25 @@ def test_comment_mention_creates_notification(tmp_path):
     assert any('mentioned' in n['message'] for n in notes.json())
 
 
+def test_delete_comment(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    task = client.post('/api/tasks', json={'title': 'Delete comment', 'workspace_id': ws_id, 'project_id': project_id}).json()
+
+    comment = client.post(f"/api/tasks/{task['id']}/comments", json={'body': "Temporary"}).json()
+    assert comment.get('id') is not None
+
+    deleted = client.post(f"/api/tasks/{task['id']}/comments/{comment['id']}/delete")
+    assert deleted.status_code == 200
+    assert deleted.json()['ok'] is True
+
+    comments = client.get(f"/api/tasks/{task['id']}/comments")
+    assert comments.status_code == 200
+    assert all(c['id'] != comment['id'] for c in comments.json())
+
+
 def test_today_view_respects_user_timezone(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -105,6 +124,23 @@ def test_create_project(tmp_path):
     assert payload['workspace_id'] == ws_id
 
 
+def test_patch_project_name_and_description(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project = client.post('/api/projects', json={'workspace_id': ws_id, 'name': 'Docs'}).json()
+
+    patched = client.patch(
+        f"/api/projects/{project['id']}",
+        json={'name': 'Docs v2', 'description': '## Overview\n\nUpdated project description.'},
+    )
+    assert patched.status_code == 200
+    payload = patched.json()
+    assert payload['id'] == project['id']
+    assert payload['name'] == 'Docs v2'
+    assert payload['description'] == '## Overview\n\nUpdated project description.'
+
+
 def test_delete_project_deletes_project_resources(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -126,6 +162,31 @@ def test_delete_project_deletes_project_resources(tmp_path):
     assert all(t['id'] != task['id'] for t in tasks)
     notes = client.get(f'/api/notes?workspace_id={ws_id}&project_id={project["id"]}').json()['items']
     assert all(n['id'] != note['id'] for n in notes)
+
+
+def test_project_tags_are_shared_between_tasks_and_notes(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    task = client.post(
+        '/api/tasks',
+        json={'title': 'Tagged task', 'workspace_id': ws_id, 'project_id': project_id, 'labels': ['Shared', 'TaskOnly']},
+    )
+    assert task.status_code == 200
+
+    note = client.post(
+        '/api/notes',
+        json={'title': 'Tagged note', 'workspace_id': ws_id, 'project_id': project_id, 'tags': ['shared', 'NoteOnly']},
+    )
+    assert note.status_code == 200
+
+    tags = client.get(f"/api/projects/{project_id}/tags")
+    assert tags.status_code == 200
+    payload = tags.json()
+    assert payload['project_id'] == project_id
+    assert {'noteonly', 'shared', 'taskonly'}.issubset(set(payload['tags']))
 
 
 def test_user_theme_preferences_persist(tmp_path):
@@ -694,3 +755,33 @@ def test_saved_view_projection_is_idempotent(tmp_path):
         project_event(db, ev)
         project_event(db, ev)
         db.commit()
+
+
+def test_task_comment_projection_is_idempotent(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    task = client.post('/api/tasks', json={'title': 'Comment idempotency', 'workspace_id': ws_id, 'project_id': project_id}).json()
+
+    from shared.eventing_rebuild import project_event
+    from shared.models import SessionLocal, TaskComment
+    from shared.core import EventEnvelope
+
+    ev = EventEnvelope(
+        aggregate_type='Task',
+        aggregate_id=task['id'],
+        version=2,
+        event_type='TaskCommentAdded',
+        payload={'task_id': task['id'], 'user_id': bootstrap['current_user']['id'], 'body': 'same'},
+        metadata={'actor_id': bootstrap['current_user']['id'], 'workspace_id': ws_id, 'project_id': project_id, 'task_id': task['id']},
+    )
+
+    with SessionLocal() as db:
+        project_event(db, ev)
+        project_event(db, ev)
+        db.commit()
+        rows = db.query(TaskComment).filter(TaskComment.task_id == task['id']).all()
+        same_rows = [r for r in rows if r.body == 'same']
+        assert len(same_rows) == 1

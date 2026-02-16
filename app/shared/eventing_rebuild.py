@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from .contracts import EventEnvelope
@@ -18,6 +18,7 @@ from features.notifications.domain import (
 from features.projects.domain import (
     EVENT_CREATED as PROJECT_EVENT_CREATED,
     EVENT_DELETED as PROJECT_EVENT_DELETED,
+    EVENT_UPDATED as PROJECT_EVENT_UPDATED,
 )
 from features.tasks.domain import (
     EVENT_ARCHIVED as TASK_EVENT_ARCHIVED,
@@ -26,6 +27,7 @@ from features.tasks.domain import (
     EVENT_AUTOMATION_REQUESTED as TASK_EVENT_AUTOMATION_REQUESTED,
     EVENT_AUTOMATION_STARTED as TASK_EVENT_AUTOMATION_STARTED,
     EVENT_COMMENT_ADDED as TASK_EVENT_COMMENT_ADDED,
+    EVENT_COMMENT_DELETED as TASK_EVENT_COMMENT_DELETED,
     EVENT_COMPLETED as TASK_EVENT_COMPLETED,
     EVENT_CREATED as TASK_EVENT_CREATED,
     EVENT_DELETED as TASK_EVENT_DELETED,
@@ -61,6 +63,7 @@ from .models import (
     Note,
     Notification,
     Project,
+    ProjectTagIndex,
     SavedView,
     StoredEvent,
     Task,
@@ -73,6 +76,68 @@ from .event_upcasters import upcast_event, upcast_snapshot
 from .eventing_store import StreamState, get_kurrent_client, kurrent_read_stream, snapshot_stream_id, stream_id, NotFoundError, serialize_snapshot_event
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_tag_list(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        values = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(values, list):
+        return []
+    out: list[str] = []
+    for value in values:
+        tag = str(value or "").strip().lower()
+        if tag:
+            out.append(tag)
+    return out
+
+
+def _recompute_project_tag_index(db: Session, project_id: str | None) -> None:
+    if not project_id:
+        return
+    db.flush()
+    project = db.get(Project, project_id)
+    if not project or project.is_deleted:
+        db.execute(delete(ProjectTagIndex).where(ProjectTagIndex.project_id == project_id))
+        return
+
+    counts: dict[str, int] = {}
+
+    task_rows = db.execute(
+        select(Task.labels).where(
+            Task.project_id == project_id,
+            Task.is_deleted == False,
+            Task.archived == False,
+        )
+    ).all()
+    for (labels_raw,) in task_rows:
+        for tag in _parse_tag_list(labels_raw):
+            counts[tag] = counts.get(tag, 0) + 1
+
+    note_rows = db.execute(
+        select(Note.tags).where(
+            Note.project_id == project_id,
+            Note.is_deleted == False,
+            Note.archived == False,
+        )
+    ).all()
+    for (tags_raw,) in note_rows:
+        for tag in _parse_tag_list(tags_raw):
+            counts[tag] = counts.get(tag, 0) + 1
+
+    db.execute(delete(ProjectTagIndex).where(ProjectTagIndex.project_id == project_id))
+    for tag, usage_count in sorted(counts.items(), key=lambda item: item[0]):
+        db.add(
+            ProjectTagIndex(
+                workspace_id=project.workspace_id,
+                project_id=project_id,
+                tag=tag,
+                usage_count=usage_count,
+            )
+        )
 
 
 def load_snapshot(db: Session, aggregate_type: str, aggregate_id: str) -> tuple[dict[str, Any], int]:
@@ -286,6 +351,11 @@ def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str
         }
     elif event.event_type == PROJECT_EVENT_DELETED:
         s["is_deleted"] = True
+    elif event.event_type == PROJECT_EVENT_UPDATED:
+        if "name" in p:
+            s["name"] = p.get("name")
+        if "description" in p:
+            s["description"] = p.get("description", "")
     return s
 
 
@@ -394,6 +464,14 @@ def project_event(db: Session, ev: EventEnvelope):
         project = db.get(Project, ev.aggregate_id)
         if project:
             project.is_deleted = True
+        db.execute(delete(ProjectTagIndex).where(ProjectTagIndex.project_id == ev.aggregate_id))
+    elif ev.event_type == PROJECT_EVENT_UPDATED:
+        project = db.get(Project, ev.aggregate_id)
+        if project:
+            if "name" in p:
+                project.name = p.get("name") or project.name
+            if "description" in p:
+                project.description = p.get("description", "") or ""
     elif ev.event_type == NOTE_EVENT_CREATED:
         note = db.get(Note, ev.aggregate_id)
         if note is None:
@@ -410,6 +488,7 @@ def project_event(db: Session, ev: EventEnvelope):
         note.is_deleted = bool(p.get("is_deleted", False))
         note.created_by = p.get("created_by") or m.get("actor_id") or ""
         note.updated_by = p.get("updated_by") or m.get("actor_id") or ""
+        _recompute_project_tag_index(db, note.project_id)
     elif ev.event_type == TASK_EVENT_CREATED:
         task = db.get(Task, ev.aggregate_id)
         if task is None:
@@ -435,9 +514,11 @@ def project_event(db: Session, ev: EventEnvelope):
         task.last_schedule_run_at = None
         task.last_schedule_error = None
         task.order_index = p.get("order_index", 0)
+        _recompute_project_tag_index(db, task.project_id)
     elif ev.event_type in NOTE_MUTATION_EVENTS:
         note = db.get(Note, ev.aggregate_id)
         if note:
+            old_project_id = note.project_id
             if ev.event_type == NOTE_EVENT_UPDATED:
                 for k, v in p.items():
                     if k == "tags" and v is not None:
@@ -464,9 +545,12 @@ def project_event(db: Session, ev: EventEnvelope):
                 note.is_deleted = True
                 if p.get("updated_by"):
                     note.updated_by = p["updated_by"]
+            _recompute_project_tag_index(db, old_project_id)
+            _recompute_project_tag_index(db, note.project_id)
     elif ev.event_type in TASK_MUTATION_EVENTS:
         task = db.get(Task, ev.aggregate_id)
         if task:
+            old_project_id = task.project_id
             if ev.event_type == TASK_EVENT_UPDATED:
                 for k, v in p.items():
                     if k in {"labels", "subtasks", "attachments"} and v is not None:
@@ -531,8 +615,23 @@ def project_event(db: Session, ev: EventEnvelope):
                 task.schedule_timezone = None
                 task.schedule_state = "idle"
                 task.last_schedule_error = None
+            _recompute_project_tag_index(db, old_project_id)
+            _recompute_project_tag_index(db, task.project_id)
     elif ev.event_type == TASK_EVENT_COMMENT_ADDED:
-        db.add(TaskComment(task_id=p["task_id"], user_id=p["user_id"], body=p["body"]))
+        pending_exists = any(
+            isinstance(obj, TaskComment)
+            and obj.task_id == p["task_id"]
+            and obj.event_version == ev.version
+            for obj in db.new
+        )
+        existing_comment = db.execute(
+            select(TaskComment).where(
+                TaskComment.task_id == p["task_id"],
+                TaskComment.event_version == ev.version,
+            )
+        ).scalar_one_or_none()
+        if existing_comment is None and not pending_exists:
+            db.add(TaskComment(task_id=p["task_id"], user_id=p["user_id"], body=p["body"], event_version=ev.version))
         mentions = re.findall(r"@([A-Za-z0-9_\-]+)", p["body"])
         if mentions:
             users = db.execute(select(User).where(User.username.in_(mentions))).scalars().all()
@@ -540,6 +639,10 @@ def project_event(db: Session, ev: EventEnvelope):
             actor_username = actor.username if actor else "Someone"
             for mentioned in users:
                 db.add(Notification(user_id=mentioned.id, message=f"{actor_username} mentioned you on task #{p['task_id']}"))
+    elif ev.event_type == TASK_EVENT_COMMENT_DELETED:
+        comment = db.get(TaskComment, p["comment_id"])
+        if comment and comment.task_id == p["task_id"]:
+            db.delete(comment)
     elif ev.event_type == TASK_EVENT_WATCH_TOGGLED:
         existing = db.execute(
             select(TaskWatcher).where(

@@ -37,7 +37,7 @@ async def lifespan(_app: FastAPI):
     stop_projection_worker()
 
 
-app = FastAPI(title="Task Management (CQRS + Event Sourcing + Vertical Slice)", lifespan=lifespan)
+app = FastAPI(title="m4tr1x (CQRS + Event Sourcing + Vertical Slice)", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

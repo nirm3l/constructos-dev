@@ -6,11 +6,12 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from shared.core import ActivityLog, DEFAULT_STATUSES, Note, Project, ProjectCreate, SavedView, Task, User, append_event, allocate_id, ensure_role, load_project_view
+from shared.core import ActivityLog, DEFAULT_STATUSES, Note, Project, ProjectCreate, ProjectPatch, SavedView, Task, User, append_event, allocate_id, ensure_role, load_project_view
 from ..notes.domain import EVENT_DELETED as NOTE_EVENT_DELETED
 from ..tasks.domain import EVENT_DELETED as TASK_EVENT_DELETED
 from .domain import EVENT_CREATED as PROJECT_EVENT_CREATED
 from .domain import EVENT_DELETED as PROJECT_EVENT_DELETED
+from .domain import EVENT_UPDATED as PROJECT_EVENT_UPDATED
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,3 +95,46 @@ class DeleteProjectHandler:
         )
         self.ctx.db.commit()
         return {"ok": True, "deleted_tasks": len(tasks), "deleted_notes": len(notes)}
+
+
+@dataclass(frozen=True, slots=True)
+class PatchProjectHandler:
+    ctx: CommandContext
+    project_id: str
+    payload: ProjectPatch
+
+    def __call__(self) -> dict:
+        project = self.ctx.db.get(Project, self.project_id)
+        if not project or project.is_deleted:
+            raise HTTPException(status_code=404, detail="Project not found")
+        ensure_role(self.ctx.db, project.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
+
+        data = self.payload.model_dump(exclude_unset=True)
+        event_payload: dict[str, str] = {}
+        if "name" in data and data["name"] is not None:
+            name = str(data["name"]).strip()
+            if not name:
+                raise HTTPException(status_code=422, detail="name cannot be empty")
+            event_payload["name"] = name
+        if "description" in data and data["description"] is not None:
+            event_payload["description"] = str(data["description"])
+
+        if not event_payload:
+            view = load_project_view(self.ctx.db, self.project_id)
+            if view is None:
+                raise HTTPException(status_code=404, detail="Project not found")
+            return view
+
+        append_event(
+            self.ctx.db,
+            aggregate_type="Project",
+            aggregate_id=self.project_id,
+            event_type=PROJECT_EVENT_UPDATED,
+            payload=event_payload,
+            metadata={"actor_id": self.ctx.user.id, "workspace_id": project.workspace_id, "project_id": self.project_id},
+        )
+        self.ctx.db.commit()
+        view = load_project_view(self.ctx.db, self.project_id)
+        if view is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        return view

@@ -1,4 +1,4 @@
-# Task Management (CQRS + Event Sourcing + KurrentDB)
+# m4tr1x (CQRS + Event Sourcing + KurrentDB)
 
 ## Backend Architecture Status
 Short answer: mostly yes, with caveats.

@@ -28,6 +28,14 @@ class ProjectAggregate(Aggregate):
         _ = moved_tasks
         self.is_deleted = True
 
+    @event("Updated")
+    def updated(self, *, name: str | None = None, description: str | None = None) -> None:
+        if name is not None:
+            self.name = name
+        if description is not None:
+            self.description = description
+
 
 EVENT_CREATED = "ProjectCreated"
 EVENT_DELETED = "ProjectDeleted"
+EVENT_UPDATED = "ProjectUpdated"

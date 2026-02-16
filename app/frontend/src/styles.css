@@ -1,27 +1,27 @@
 :root {
-  --bg: #f2f6ff;
+  --bg: #eef6f0;
   --surface: #ffffff;
-  --surface-alt: #edf3ff;
-  --line: #d2dced;
-  --text: #12213a;
-  --muted: #5e708f;
-  --brand: #1f6feb;
-  --brand-strong: #1552af;
-  --ok: #188a48;
-  --shadow: 0 10px 30px rgba(17, 37, 68, 0.12);
+  --surface-alt: #e6f1e9;
+  --line: #c8d9cc;
+  --text: #15231a;
+  --muted: #5c7262;
+  --brand: #2f8f4d;
+  --brand-strong: #1f6b39;
+  --ok: #218a49;
+  --shadow: 0 10px 30px rgba(18, 44, 28, 0.12);
 }
 
 [data-theme="dark"] {
-  --bg: #0b1220;
-  --surface: #111b31;
-  --surface-alt: #162540;
-  --line: #2a3e67;
-  --text: #ebf2ff;
-  --muted: #9cb0d6;
-  --brand: #5b94ff;
-  --brand-strong: #3b79ed;
-  --ok: #42c777;
-  --shadow: 0 12px 34px rgba(2, 8, 20, 0.62);
+  --bg: #0a120d;
+  --surface: #0f1b14;
+  --surface-alt: #13241a;
+  --line: #2a4534;
+  --text: #e8f3ea;
+  --muted: #9cb8a3;
+  --brand: #4db975;
+  --brand-strong: #2f8a53;
+  --ok: #5fd18b;
+  --shadow: 0 12px 34px rgba(2, 10, 6, 0.62);
 }
 
 * { box-sizing: border-box; }
@@ -34,8 +34,8 @@ html, body, #root {
 body {
   font-family: "Avenir Next", "Trebuchet MS", "Gill Sans", sans-serif;
   background:
-    radial-gradient(circle at 5% 5%, rgba(31,111,235,0.16), transparent 25%),
-    radial-gradient(circle at 90% 10%, rgba(21,82,175,0.12), transparent 30%),
+    radial-gradient(circle at 5% 5%, rgba(47, 143, 77, 0.15), transparent 25%),
+    radial-gradient(circle at 90% 10%, rgba(31, 107, 57, 0.12), transparent 30%),
     var(--bg);
   color: var(--text);
   overflow-x: hidden;
@@ -43,9 +43,9 @@ body {
 
 [data-theme="dark"] body {
   background:
-    radial-gradient(circle at 6% 4%, rgba(79, 140, 255, 0.26), transparent 28%),
-    radial-gradient(circle at 88% 8%, rgba(47, 111, 232, 0.2), transparent 32%),
-    linear-gradient(180deg, #0b1220 0%, #0a1020 100%);
+    radial-gradient(circle at 6% 4%, rgba(77, 185, 117, 0.22), transparent 28%),
+    radial-gradient(circle at 88% 8%, rgba(47, 138, 83, 0.2), transparent 32%),
+    linear-gradient(180deg, #0a120d 0%, #08100b 100%);
 }
 
 .page {
@@ -1048,6 +1048,26 @@ button:disabled {
   justify-content: flex-end;
 }
 
+.comment-delete-btn {
+  width: auto;
+  min-width: 0;
+  height: auto;
+  padding: 2px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.comment-delete-btn .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.comment-delete-btn:hover {
+  background: color-mix(in srgb, #ef4444, transparent 90%);
+}
+
 .comment-composer {
   margin-top: 10px;
   border: 1px solid var(--line);
@@ -1116,8 +1136,8 @@ button:disabled {
 }
 
 .task-item.scheduled {
-  border-color: #7b9be0;
-  background: color-mix(in srgb, #edf3ff, var(--surface) 70%);
+  border-color: color-mix(in srgb, var(--brand), var(--line) 35%);
+  background: color-mix(in srgb, var(--brand), var(--surface) 90%);
 }
 
 .task-main {
@@ -1151,6 +1171,20 @@ button:disabled {
   color: #8d1f1f;
   border-radius: 12px;
   padding: 10px;
+}
+
+.notice-global {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  width: min(720px, calc(100vw - 24px));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  box-shadow: 0 12px 28px rgba(10, 20, 10, 0.2);
 }
 
 .skeleton {
@@ -1262,8 +1296,17 @@ button:disabled {
   pointer-events: none;
 }
 
-.quickadd-due.has-value .quickadd-due-placeholder {
+.quickadd-due.has-value .quickadd-due-placeholder,
+.quickadd-due.focused .quickadd-due-placeholder {
   display: none;
+}
+
+.quickadd-due .due-input.due-input-empty {
+  color: transparent;
+}
+
+.quickadd-due .due-input.due-input-empty::-webkit-datetime-edit {
+  color: transparent;
 }
 
 .quickadd-create {

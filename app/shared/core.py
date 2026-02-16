@@ -12,6 +12,7 @@ from .contracts import (
     NotePatch,
     NotificationDTO,
     ProjectCreate,
+    ProjectPatch,
     ReorderPayload,
     SavedViewCreate,
     TaskAutomationRun,
@@ -43,6 +44,7 @@ from .models import (
     Notification,
     Project,
     ProjectionCheckpoint,
+    ProjectTagIndex,
     SavedView,
     SessionLocal,
     StoredEvent,
@@ -78,10 +80,12 @@ from features.notifications.domain import (
 from features.projects.domain import (
     EVENT_CREATED as PROJECT_EVENT_CREATED,
     EVENT_DELETED as PROJECT_EVENT_DELETED,
+    EVENT_UPDATED as PROJECT_EVENT_UPDATED,
 )
 from features.tasks.domain import (
     EVENT_ARCHIVED as TASK_EVENT_ARCHIVED,
     EVENT_COMMENT_ADDED as TASK_EVENT_COMMENT_ADDED,
+    EVENT_COMMENT_DELETED as TASK_EVENT_COMMENT_DELETED,
     EVENT_COMPLETED as TASK_EVENT_COMPLETED,
     EVENT_CREATED as TASK_EVENT_CREATED,
     EVENT_DELETED as TASK_EVENT_DELETED,

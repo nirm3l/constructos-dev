@@ -204,6 +204,17 @@ def list_comments(task_id: str, db: Session = Depends(get_db), user: User = Depe
     return [{"id": c.id, "task_id": c.task_id, "user_id": c.user_id, "body": c.body, "created_at": to_iso_utc(c.created_at)} for c in comments]
 
 
+@router.post("/api/tasks/{task_id}/comments/{comment_id}/delete")
+def delete_comment(
+    task_id: str,
+    comment_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    command_id: str | None = Depends(get_command_id),
+):
+    return TaskApplicationService(db, user, command_id=command_id).delete_comment(task_id, comment_id)
+
+
 @router.post("/api/tasks/{task_id}/watch")
 def toggle_watch(
     task_id: str,
