@@ -345,6 +345,76 @@ def test_project_tags_are_shared_between_tasks_notes_and_specifications(tmp_path
     assert {'noteonly', 'shared', 'taskonly', 'speconly'}.issubset(set(payload['tags']))
 
 
+def test_project_knowledge_graph_endpoints(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.projects import api as projects_api
+
+    monkeypatch.setattr(projects_api, 'require_graph_available', lambda: None)
+    monkeypatch.setattr(
+        projects_api,
+        'graph_get_project_overview',
+        lambda project_id, top_limit=8: {
+            'project_id': project_id,
+            'project_name': 'Stub Project',
+            'counts': {'tasks': 2, 'notes': 1, 'specifications': 1, 'project_rules': 1},
+            'top_tags': [{'tag': 'shared', 'usage': 3}],
+            'top_relationships': [{'relationship': 'IN_PROJECT', 'count': 10}],
+        },
+    )
+    monkeypatch.setattr(
+        projects_api,
+        'graph_context_pack',
+        lambda project_id, focus_entity_type=None, focus_entity_id=None, limit=20: {
+            'project_id': project_id,
+            'focus_entity_type': focus_entity_type,
+            'focus_entity_id': focus_entity_id,
+            'overview': {
+                'project_id': project_id,
+                'project_name': 'Stub Project',
+                'counts': {'tasks': 2, 'notes': 1, 'specifications': 1, 'project_rules': 1},
+                'top_tags': [{'tag': 'shared', 'usage': 3}],
+                'top_relationships': [{'relationship': 'IN_PROJECT', 'count': 10}],
+            },
+            'focus_neighbors': [],
+            'connected_resources': [{'entity_type': 'Task', 'entity_id': 't1', 'title': 'Task one', 'degree': 4}],
+            'markdown': '# Graph Context',
+        },
+    )
+
+    overview = client.get(f"/api/projects/{project_id}/knowledge-graph/overview")
+    assert overview.status_code == 200
+    assert overview.json()['project_id'] == project_id
+    assert overview.json()['counts']['tasks'] == 2
+
+    context_pack = client.get(f"/api/projects/{project_id}/knowledge-graph/context-pack")
+    assert context_pack.status_code == 200
+    assert context_pack.json()['project_id'] == project_id
+    assert context_pack.json()['markdown'] == '# Graph Context'
+
+    bad_focus = client.get(f"/api/projects/{project_id}/knowledge-graph/context-pack?focus_entity_type=Task")
+    assert bad_focus.status_code == 400
+    assert 'focus_entity_type and focus_entity_id' in bad_focus.json()['detail']
+
+
+def test_project_knowledge_graph_endpoint_returns_503_when_unavailable(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.projects import api as projects_api
+
+    def _raise_unavailable():
+        raise RuntimeError('disabled')
+
+    monkeypatch.setattr(projects_api, 'require_graph_available', _raise_unavailable)
+    res = client.get(f"/api/projects/{project_id}/knowledge-graph/overview")
+    assert res.status_code == 503
+    assert 'Knowledge graph is unavailable' in res.json()['detail']
+
+
 def test_user_theme_preferences_persist(tmp_path):
     client = build_client(tmp_path)
     updated = client.patch('/api/me/preferences', json={'theme': 'dark'})

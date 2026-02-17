@@ -3,6 +3,8 @@ import {
   getNotifications,
   getNotes,
   getProjectBoard,
+  getProjectGraphContextPack,
+  getProjectGraphOverview,
   getProjectRules,
   getSpecifications,
   getProjectTags,
@@ -75,6 +77,18 @@ export function useCoreQueries(c: any) {
         project_id: c.selectedProjectId,
       }),
     enabled: Boolean(c.workspaceId && c.selectedProjectId) && c.tab === 'projects'
+  })
+
+  const projectGraphOverview = useQuery({
+    queryKey: ['project-graph-overview', c.userId, c.selectedProjectId],
+    queryFn: () => getProjectGraphOverview(c.userId, c.selectedProjectId),
+    enabled: Boolean(c.selectedProjectId) && c.tab === 'projects',
+  })
+
+  const projectGraphContextPack = useQuery({
+    queryKey: ['project-graph-context-pack', c.userId, c.selectedProjectId],
+    queryFn: () => getProjectGraphContextPack(c.userId, c.selectedProjectId, { limit: 20 }),
+    enabled: Boolean(c.selectedProjectId) && c.tab === 'projects',
   })
 
   const specifications = useQuery({
@@ -198,6 +212,8 @@ export function useCoreQueries(c: any) {
     taskNotes,
     projectTags,
     projectRules,
+    projectGraphOverview,
+    projectGraphContextPack,
     specifications,
     searchSpecifications,
     specificationLookup,

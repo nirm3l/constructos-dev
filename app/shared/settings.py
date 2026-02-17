@@ -76,4 +76,14 @@ MCP_EMAIL_FROM = os.getenv("MCP_EMAIL_FROM", "").strip()
 MCP_EMAIL_ALLOWED_RECIPIENTS = {s.strip().lower() for s in _parse_csv_env("MCP_EMAIL_ALLOWED_RECIPIENTS")}
 MCP_EMAIL_ALLOWED_DOMAINS = {s.strip().lower() for s in _parse_csv_env("MCP_EMAIL_ALLOWED_DOMAINS")}
 
+KNOWLEDGE_GRAPH_ENABLED = _env_bool("KNOWLEDGE_GRAPH_ENABLED", False)
+NEO4J_URI = os.getenv("NEO4J_URI", "").strip()
+NEO4J_USERNAME = os.getenv("NEO4J_USERNAME", "").strip()
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "").strip()
+NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j").strip() or "neo4j"
+GRAPH_PROJECTION_BATCH_SIZE = _env_int("GRAPH_PROJECTION_BATCH_SIZE", 500)
+GRAPH_PROJECTION_POLL_INTERVAL_SECONDS = float(os.getenv("GRAPH_PROJECTION_POLL_INTERVAL_SECONDS", "1"))
+GRAPH_CONTEXT_MAX_HOPS = _env_int("GRAPH_CONTEXT_MAX_HOPS", 2)
+GRAPH_CONTEXT_MAX_TOKENS = _env_int("GRAPH_CONTEXT_MAX_TOKENS", 1600)
+
 logger = logging.getLogger(__name__)

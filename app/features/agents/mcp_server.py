@@ -185,6 +185,93 @@ def create_mcp():
         auth_token = auth_token or default_tool_token
         return service.get_specification(specification_id=specification_id, auth_token=auth_token)
 
+    @mcp.tool(description="Read project-level knowledge graph overview (counts, tags, top relations).")
+    def graph_get_project_overview(
+        project_id: str,
+        auth_token: str | None = None,
+        top_limit: int = 8,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.graph_get_project_overview(
+            project_id=project_id,
+            auth_token=auth_token,
+            top_limit=top_limit,
+        )
+
+    @mcp.tool(description="List graph neighbors of one entity within a project scope.")
+    def graph_get_neighbors(
+        project_id: str,
+        entity_type: str,
+        entity_id: str,
+        auth_token: str | None = None,
+        rel_types: list[str] | None = None,
+        depth: int = 1,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.graph_get_neighbors(
+            project_id=project_id,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            auth_token=auth_token,
+            rel_types=rel_types,
+            depth=depth,
+            limit=limit,
+        )
+
+    @mcp.tool(description="Find related resources in project knowledge graph by text query.")
+    def graph_find_related_resources(
+        project_id: str,
+        query: str,
+        auth_token: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.graph_find_related_resources(
+            project_id=project_id,
+            query=query,
+            auth_token=auth_token,
+            limit=limit,
+        )
+
+    @mcp.tool(description="Find dependency path between two entities in project knowledge graph.")
+    def graph_get_dependency_path(
+        project_id: str,
+        from_entity_type: str,
+        from_entity_id: str,
+        to_entity_type: str,
+        to_entity_id: str,
+        auth_token: str | None = None,
+        max_depth: int = 4,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.graph_get_dependency_path(
+            project_id=project_id,
+            from_entity_type=from_entity_type,
+            from_entity_id=from_entity_id,
+            to_entity_type=to_entity_type,
+            to_entity_id=to_entity_id,
+            auth_token=auth_token,
+            max_depth=max_depth,
+        )
+
+    @mcp.tool(description="Build markdown context pack from project knowledge graph.")
+    def graph_context_pack(
+        project_id: str,
+        auth_token: str | None = None,
+        focus_entity_type: str | None = None,
+        focus_entity_id: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.graph_context_pack(
+            project_id=project_id,
+            auth_token=auth_token,
+            focus_entity_type=focus_entity_type,
+            focus_entity_id=focus_entity_id,
+            limit=limit,
+        )
+
     @mcp.tool(description="Apply a bulk action to multiple tasks (e.g. archive, complete, delete).")
     def bulk_task_action(
         task_ids: list[str],

@@ -25,6 +25,14 @@ from shared.core import (
     load_specification_view,
 )
 from shared.deps import ensure_role
+from shared.knowledge_graph import (
+    graph_context_pack as graph_context_pack_query,
+    graph_find_related_resources as graph_find_related_resources_query,
+    graph_get_dependency_path as graph_get_dependency_path_query,
+    graph_get_neighbors as graph_get_neighbors_query,
+    graph_get_project_overview as graph_get_project_overview_query,
+    require_graph_available,
+)
 from shared.models import User as UserModel
 from shared.settings import (
     MCP_ACTOR_USER_ID,
@@ -416,6 +424,134 @@ class AgentTaskService:
             self._assert_workspace_allowed(state.workspace_id)
             self._assert_project_allowed(state.project_id)
             return get_task_automation_status_read_model(db, user, task_id)
+
+    def _load_project_scope(self, *, db, project_id: str):
+        project = db.execute(select(Project).where(Project.id == project_id, Project.is_deleted == False)).scalar_one_or_none()
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        self._assert_workspace_allowed(project.workspace_id)
+        self._assert_project_allowed(project.id)
+        return project
+
+    def graph_get_project_overview(
+        self,
+        *,
+        project_id: str,
+        auth_token: str | None = None,
+        top_limit: int = 8,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            project = self._load_project_scope(db=db, project_id=project_id)
+            ensure_role(db, project.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+        try:
+            require_graph_available()
+            return graph_get_project_overview_query(project_id=project_id, top_limit=top_limit)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Knowledge graph is unavailable: {exc}") from exc
+
+    def graph_get_neighbors(
+        self,
+        *,
+        project_id: str,
+        entity_type: str,
+        entity_id: str,
+        auth_token: str | None = None,
+        rel_types: list[str] | None = None,
+        depth: int = 1,
+        limit: int = 50,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            project = self._load_project_scope(db=db, project_id=project_id)
+            ensure_role(db, project.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+        try:
+            require_graph_available()
+            return graph_get_neighbors_query(
+                project_id=project_id,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                rel_types=rel_types,
+                depth=depth,
+                limit=limit,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Knowledge graph is unavailable: {exc}") from exc
+
+    def graph_find_related_resources(
+        self,
+        *,
+        project_id: str,
+        query: str,
+        auth_token: str | None = None,
+        limit: int = 20,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            project = self._load_project_scope(db=db, project_id=project_id)
+            ensure_role(db, project.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+        try:
+            require_graph_available()
+            return graph_find_related_resources_query(project_id=project_id, query=query, limit=limit)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Knowledge graph is unavailable: {exc}") from exc
+
+    def graph_get_dependency_path(
+        self,
+        *,
+        project_id: str,
+        from_entity_type: str,
+        from_entity_id: str,
+        to_entity_type: str,
+        to_entity_id: str,
+        auth_token: str | None = None,
+        max_depth: int = 4,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            project = self._load_project_scope(db=db, project_id=project_id)
+            ensure_role(db, project.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+        try:
+            require_graph_available()
+            return graph_get_dependency_path_query(
+                project_id=project_id,
+                from_entity_type=from_entity_type,
+                from_entity_id=from_entity_id,
+                to_entity_type=to_entity_type,
+                to_entity_id=to_entity_id,
+                max_depth=max_depth,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Knowledge graph is unavailable: {exc}") from exc
+
+    def graph_context_pack(
+        self,
+        *,
+        project_id: str,
+        auth_token: str | None = None,
+        focus_entity_type: str | None = None,
+        focus_entity_id: str | None = None,
+        limit: int = 20,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            project = self._load_project_scope(db=db, project_id=project_id)
+            ensure_role(db, project.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+        try:
+            require_graph_available()
+            return graph_context_pack_query(
+                project_id=project_id,
+                focus_entity_type=focus_entity_type,
+                focus_entity_id=focus_entity_id,
+                limit=limit,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Knowledge graph is unavailable: {exc}") from exc
 
     def create_task(
         self,

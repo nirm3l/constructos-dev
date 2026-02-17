@@ -1,6 +1,6 @@
 import React from 'react'
 import { MarkdownView } from '../../markdown/MarkdownView'
-import type { AttachmentRef, Project, ProjectRule, ProjectRulesPage } from '../../types'
+import type { AttachmentRef, GraphContextPack, GraphProjectOverview, Project, ProjectRule, ProjectRulesPage } from '../../types'
 import { AttachmentRefList, ExternalRefEditor, Icon, MarkdownModeToggle } from '../shared/uiHelpers'
 import {
   attachmentRefsToText,
@@ -11,10 +11,20 @@ import {
   removeExternalRefByIndex,
   toErrorMessage,
 } from '../../utils/ui'
+import { ProjectKnowledgeGraphPanel } from './ProjectKnowledgeGraphPanel'
 
 type ProjectMutation = {
   isPending: boolean
   mutate: (...args: any[]) => void
+}
+
+type QueryLike<T> = {
+  data?: T
+  isLoading?: boolean
+  isFetching?: boolean
+  isError?: boolean
+  error?: unknown
+  refetch?: () => void
 }
 
 type WorkspaceUser = {
@@ -37,6 +47,8 @@ export function ProjectsInlineEditor({
   editProjectDescription,
   setEditProjectDescription,
   projectRules,
+  projectGraphOverview,
+  projectGraphContextPack,
   selectedProjectRuleId,
   setSelectedProjectRuleId,
   projectRuleTitle,
@@ -78,6 +90,8 @@ export function ProjectsInlineEditor({
   editProjectDescription: string
   setEditProjectDescription: React.Dispatch<React.SetStateAction<string>>
   projectRules: { data?: ProjectRulesPage }
+  projectGraphOverview: QueryLike<GraphProjectOverview>
+  projectGraphContextPack: QueryLike<GraphContextPack>
   selectedProjectRuleId: string | null
   setSelectedProjectRuleId: React.Dispatch<React.SetStateAction<string | null>>
   projectRuleTitle: string
@@ -265,6 +279,11 @@ export function ProjectsInlineEditor({
           </div>
         </div>
       </div>
+      <ProjectKnowledgeGraphPanel
+        projectName={project.name}
+        overviewQuery={projectGraphOverview}
+        contextPackQuery={projectGraphContextPack}
+      />
       <div className="meta" style={{ marginTop: 10 }}>External links</div>
       <ExternalRefEditor
         refs={parseExternalRefsText(editProjectExternalRefsText)}

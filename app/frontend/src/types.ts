@@ -158,6 +158,49 @@ export type ProjectTags = {
   tags: string[]
 }
 
+export type GraphProjectOverview = {
+  project_id: string
+  project_name: string
+  counts: {
+    tasks: number
+    notes: number
+    specifications: number
+    project_rules: number
+  }
+  top_tags: Array<{
+    tag: string
+    usage: number
+  }>
+  top_relationships: Array<{
+    relationship: string
+    count: number
+  }>
+}
+
+export type GraphContextNeighbor = {
+  entity_type: string
+  entity_id: string
+  title: string
+  path_types: string[]
+}
+
+export type GraphContextResource = {
+  entity_type: string
+  entity_id: string
+  title: string
+  degree: number
+}
+
+export type GraphContextPack = {
+  project_id: string
+  focus_entity_type: string | null
+  focus_entity_id: string | null
+  overview: GraphProjectOverview
+  focus_neighbors: GraphContextNeighbor[]
+  connected_resources: GraphContextResource[]
+  markdown: string
+}
+
 export type ProjectMember = {
   project_id: string
   user_id: string

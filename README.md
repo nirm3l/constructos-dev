@@ -58,6 +58,7 @@ Task list query path:
 - Event append: `app/shared/eventing.py:append_event()`
 - Rebuild and projection logic: `app/shared/eventing_rebuild.py`
 - Startup catch-up + worker loop: `app/shared/eventing_projections.py`
+- Knowledge graph projection (Neo4j): `app/shared/eventing_graph.py`
 - KurrentDB adapter: `app/shared/eventing_store.py`
 
 `append_event()` writes `schema_version=2` into metadata for new events.
@@ -89,6 +90,11 @@ SSE sends:
   - `add_task_comment`
   - `run_task_with_codex`
   - `get_task_automation_status`
+  - `graph_get_project_overview`
+  - `graph_get_neighbors`
+  - `graph_find_related_resources`
+  - `graph_get_dependency_path`
+  - `graph_context_pack`
 - Run server (example):
 ```bash
 cd app
@@ -122,6 +128,11 @@ curl -sS http://localhost:8091/mcp \
   - `MCP_EMAIL_SMTP_STARTTLS` (default `true`), `MCP_EMAIL_SMTP_SSL` (default `false`)
   - `MCP_EMAIL_FROM`
   - allowlist (recommended): `MCP_EMAIL_ALLOWED_RECIPIENTS` (comma-separated) and/or `MCP_EMAIL_ALLOWED_DOMAINS` (comma-separated)
+- Knowledge graph environment variables (optional):
+  - `KNOWLEDGE_GRAPH_ENABLED` (`true|false`)
+  - `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`
+  - `GRAPH_PROJECTION_BATCH_SIZE`, `GRAPH_PROJECTION_POLL_INTERVAL_SECONDS`
+  - `GRAPH_CONTEXT_MAX_HOPS`, `GRAPH_CONTEXT_MAX_TOKENS`
 - Optional local automation runner:
   - worker module: `app/features/agents/runner.py`
   - enable via env: `AGENT_RUNNER_ENABLED=true`

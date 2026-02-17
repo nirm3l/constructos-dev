@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import select
 
+from shared.knowledge_graph import build_graph_context_markdown
 from shared.models import Project, ProjectRule, SessionLocal
 from shared.settings import AGENT_CODEX_COMMAND, AGENT_EXECUTOR_MODE, AGENT_EXECUTOR_TIMEOUT_SECONDS
 
@@ -99,6 +100,11 @@ def execute_task_automation(
 
     command = shlex.split(AGENT_CODEX_COMMAND)
     project_name, project_description, project_rules = _load_project_context(project_id)
+    graph_context_markdown = build_graph_context_markdown(
+        project_id=project_id,
+        focus_entity_type="Task" if str(task_id or "").strip() else None,
+        focus_entity_id=task_id if str(task_id or "").strip() else None,
+    )
     context = {
         "task_id": task_id,
         "title": title,
@@ -110,6 +116,7 @@ def execute_task_automation(
         "project_name": project_name,
         "project_description": project_description,
         "project_rules": project_rules,
+        "graph_context_markdown": graph_context_markdown,
         "allow_mutations": allow_mutations,
     }
     try:

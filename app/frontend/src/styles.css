@@ -1684,6 +1684,89 @@ button:disabled {
   word-break: break-word;
 }
 
+.graph-insights {
+  margin-top: 12px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 12%);
+  border-radius: 12px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 18%);
+}
+
+.graph-insights-head {
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.graph-count-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.graph-stat {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 25%);
+  display: grid;
+  gap: 4px;
+}
+
+.graph-stat strong {
+  font-size: 20px;
+  line-height: 1.1;
+}
+
+.graph-chip-block,
+.graph-connected-block,
+.graph-markdown-block {
+  margin-top: 10px;
+}
+
+.graph-chip-row {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.graph-connected-list {
+  margin-top: 6px;
+  display: grid;
+  gap: 6px;
+}
+
+.graph-connected-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 22%);
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.graph-markdown-preview {
+  margin-top: 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  max-height: 260px;
+  overflow: auto;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 18%);
+}
+
+.graph-markdown-preview .markdown {
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+  overflow: visible;
+  max-height: none;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
@@ -2202,6 +2285,18 @@ button:disabled {
   background: #13213b;
 }
 
+[data-theme="dark"] .graph-insights {
+  border-color: #2c426d;
+  background: #12213b;
+}
+
+[data-theme="dark"] .graph-stat,
+[data-theme="dark"] .graph-connected-row,
+[data-theme="dark"] .graph-markdown-preview {
+  border-color: #2c426d;
+  background: #0f1d36;
+}
+
 [data-theme="dark"] .task-item.scheduled {
   border-color: #5a7fc3;
   background: #122745;
@@ -2469,6 +2564,10 @@ textarea {
     right: 8px;
     margin-top: 0;
     z-index: 1;
+  }
+
+  .graph-count-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .note-editor-head {

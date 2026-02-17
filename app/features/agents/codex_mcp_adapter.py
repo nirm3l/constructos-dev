@@ -20,7 +20,9 @@ def _build_prompt(ctx: dict) -> str:
     project_name = ctx.get("project_name") or ""
     project_description = str(ctx.get("project_description") or "")
     project_rules = ctx.get("project_rules") or []
+    graph_context_markdown = str(ctx.get("graph_context_markdown") or "").strip()
     soul_md = project_description.strip() or "_(empty)_"
+    graph_md = graph_context_markdown or "_(knowledge graph unavailable)_"
     rules_md_lines: list[str] = []
     for item in project_rules:
         if not isinstance(item, dict):
@@ -58,12 +60,16 @@ def _build_prompt(ctx: dict) -> str:
         f"{soul_md}\n\n"
         "File: ProjectRules.md (source: project_rules)\n"
         f"{rules_md}\n\n"
+        "File: GraphContext.md (source: knowledge_graph)\n"
+        f"{graph_md}\n\n"
         "Guidance:\n"
         f"{context_guidance}"
-        "- Treat Soul.md and ProjectRules.md as durable project-level context.\n"
+        "- Treat Soul.md, ProjectRules.md, and GraphContext.md as durable project-level context.\n"
         "- ProjectRules.md defines how you should behave within this project.\n"
+        "- GraphContext.md captures resource relations and should guide dependency-aware decisions.\n"
         "- If project context conflicts with the latest explicit user instruction, follow the latest explicit user instruction.\n"
         "- You may call task-management MCP tools relevant to the request.\n"
+        "- Use graph_* MCP tools when you need relation-aware lookup across project resources.\n"
         "- Prefer bulk tools when operating on many tasks (avoid per-task loops when possible).\n"
         "- Prefer archive_all_notes/archive_all_tasks for 'archive everything' requests.\n"
         "- If the user asks for a plan/spec/design doc, prefer creating a Note (Markdown) via MCP tools so it is visible in the UI.\n"

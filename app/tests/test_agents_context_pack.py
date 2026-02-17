@@ -44,6 +44,7 @@ def test_execute_task_automation_includes_project_description_in_context(tmp_pat
 
     monkeypatch.setattr(executor_module, "AGENT_EXECUTOR_MODE", "command")
     monkeypatch.setattr(executor_module, "AGENT_CODEX_COMMAND", "dummy-exec")
+    monkeypatch.setattr(executor_module, "build_graph_context_markdown", lambda **_: "## Graph\nTask -> Specification")
 
     captured: dict = {}
 
@@ -76,6 +77,7 @@ def test_execute_task_automation_includes_project_description_in_context(tmp_pat
     assert captured["project_description"] == "# Project soul\nAlways include tests."
     assert captured["project_rules"][0]["title"] == "Definition of done"
     assert captured["project_rules"][0]["body"] == "Always add or update tests."
+    assert captured["graph_context_markdown"] == "## Graph\nTask -> Specification"
 
 
 def test_codex_prompt_includes_soul_md_section():
@@ -93,6 +95,7 @@ def test_codex_prompt_includes_soul_md_section():
             "project_name": "Alpha",
             "project_description": "## Soul\nUse strict acceptance criteria.",
             "project_rules": [{"title": "Quality", "body": "Do not skip tests."}],
+            "graph_context_markdown": "## Graph\nTask A IMPLEMENTS Spec B",
         }
     )
 
@@ -101,3 +104,5 @@ def test_codex_prompt_includes_soul_md_section():
     assert "## Soul\nUse strict acceptance criteria." in prompt
     assert "File: ProjectRules.md (source: project_rules)" in prompt
     assert "Quality: Do not skip tests." in prompt
+    assert "File: GraphContext.md (source: knowledge_graph)" in prompt
+    assert "Task A IMPLEMENTS Spec B" in prompt

@@ -1,6 +1,8 @@
 import type {
   BootstrapPayload,
   AgentChatResponse,
+  GraphContextPack,
+  GraphProjectOverview,
   Notification,
   Note,
   NotesPage,
@@ -255,6 +257,32 @@ export const getProjectBoard = (userId: string, projectId: string) =>
 
 export const getProjectTags = (userId: string, projectId: string) =>
   api<ProjectTags>(`/api/projects/${projectId}/tags`, userId)
+
+export const getProjectGraphOverview = (userId: string, projectId: string, topLimit = 8) =>
+  api<GraphProjectOverview>(
+    `/api/projects/${projectId}/knowledge-graph/overview${queryString({
+      top_limit: topLimit,
+    })}`,
+    userId
+  )
+
+export const getProjectGraphContextPack = (
+  userId: string,
+  projectId: string,
+  params?: {
+    focus_entity_type?: string
+    focus_entity_id?: string
+    limit?: number
+  }
+) =>
+  api<GraphContextPack>(
+    `/api/projects/${projectId}/knowledge-graph/context-pack${queryString({
+      focus_entity_type: params?.focus_entity_type,
+      focus_entity_id: params?.focus_entity_id,
+      limit: params?.limit ?? 20,
+    })}`,
+    userId
+  )
 
 export const getProjectMembers = (userId: string, projectId: string) =>
   api<ProjectMembersPage>(`/api/projects/${projectId}/members`, userId)

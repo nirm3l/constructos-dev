@@ -75,6 +75,8 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
             editProjectDescription={state.editProjectDescription}
             setEditProjectDescription={state.setEditProjectDescription}
             projectRules={state.projectRules}
+            projectGraphOverview={state.projectGraphOverview}
+            projectGraphContextPack={state.projectGraphContextPack}
             selectedProjectRuleId={state.selectedProjectRuleId}
             setSelectedProjectRuleId={state.setSelectedProjectRuleId}
             projectRuleTitle={state.projectRuleTitle}
