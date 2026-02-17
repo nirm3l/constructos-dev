@@ -94,6 +94,7 @@ export function ProjectKnowledgeGraphPanel({
     notes: 0,
     specifications: 0,
     project_rules: 0,
+    comments: 0,
   }
 
   const filteredGraph = React.useMemo(() => {
@@ -122,6 +123,7 @@ export function ProjectKnowledgeGraphPanel({
     if (key === 'specification') return '#0d9488'
     if (key === 'task') return '#0284c7'
     if (key === 'note') return '#9333ea'
+    if (key === 'comment') return '#16a34a'
     if (key === 'projectrule') return '#ea580c'
     if (key === 'tag') return '#ca8a04'
     if (key === 'user') return '#4f46e5'
@@ -293,6 +295,10 @@ export function ProjectKnowledgeGraphPanel({
             <div className="graph-stat">
               <span className="meta">Rules</span>
               <strong>{counts.project_rules}</strong>
+            </div>
+            <div className="graph-stat">
+              <span className="meta">Comments</span>
+              <strong>{counts.comments}</strong>
             </div>
           </div>
 

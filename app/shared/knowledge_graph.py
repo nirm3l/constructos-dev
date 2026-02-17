@@ -33,6 +33,9 @@ _ENTITY_LABELS = {
     "project": "Project",
     "task": "Task",
     "note": "Note",
+    "comment": "Comment",
+    "taskcomment": "Comment",
+    "task_comment": "Comment",
     "specification": "Specification",
     "projectrule": "ProjectRule",
     "project_rule": "ProjectRule",
@@ -188,7 +191,7 @@ def graph_get_project_overview(project_id: str, *, top_limit: int = 8) -> dict[s
         return {
             "project_id": project_id,
             "project_name": "",
-            "counts": {"tasks": 0, "notes": 0, "specifications": 0, "project_rules": 0},
+            "counts": {"tasks": 0, "notes": 0, "specifications": 0, "project_rules": 0, "comments": 0},
             "top_tags": [],
             "top_relationships": [],
         }
@@ -196,18 +199,41 @@ def graph_get_project_overview(project_id: str, *, top_limit: int = 8) -> dict[s
     counts_rows = run_graph_query(
         """
         MATCH (p:Project {id:$project_id})
-        OPTIONAL MATCH (p)<-[:IN_PROJECT]-(t:Task)
+        OPTIONAL MATCH (t:Task)
         WHERE coalesce(t.is_deleted, false) = false
-        WITH p, count(t) AS task_count
-        OPTIONAL MATCH (p)<-[:IN_PROJECT]-(n:Note)
+          AND (
+            coalesce(t.project_id, '') = $project_id
+            OR EXISTS { MATCH (t)-[:IN_PROJECT]->(p) }
+          )
+        WITH p, count(DISTINCT t) AS task_count
+        OPTIONAL MATCH (n:Note)
         WHERE coalesce(n.is_deleted, false) = false
-        WITH p, task_count, count(n) AS note_count
-        OPTIONAL MATCH (p)<-[:IN_PROJECT]-(s:Specification)
+          AND (
+            coalesce(n.project_id, '') = $project_id
+            OR EXISTS { MATCH (n)-[:IN_PROJECT]->(p) }
+          )
+        WITH p, task_count, count(DISTINCT n) AS note_count
+        OPTIONAL MATCH (s:Specification)
         WHERE coalesce(s.is_deleted, false) = false
-        WITH p, task_count, note_count, count(s) AS specification_count
-        OPTIONAL MATCH (p)<-[:IN_PROJECT]-(r:ProjectRule)
+          AND (
+            coalesce(s.project_id, '') = $project_id
+            OR EXISTS { MATCH (s)-[:IN_PROJECT]->(p) }
+          )
+        WITH p, task_count, note_count, count(DISTINCT s) AS specification_count
+        OPTIONAL MATCH (r:ProjectRule)
         WHERE coalesce(r.is_deleted, false) = false
-        RETURN task_count, note_count, specification_count, count(r) AS rule_count
+          AND (
+            coalesce(r.project_id, '') = $project_id
+            OR EXISTS { MATCH (r)-[:IN_PROJECT]->(p) }
+          )
+        WITH p, task_count, note_count, specification_count, count(DISTINCT r) AS rule_count
+        OPTIONAL MATCH (tc:Task)-[cr:COMMENTED_BY]->(:User)
+        WHERE coalesce(tc.is_deleted, false) = false
+          AND (
+            coalesce(tc.project_id, '') = $project_id
+            OR EXISTS { MATCH (tc)-[:IN_PROJECT]->(p) }
+          )
+        RETURN task_count, note_count, specification_count, rule_count, coalesce(sum(coalesce(cr.count, 1)), 0) AS comment_count
         """,
         {"project_id": project_id},
     )
@@ -215,8 +241,13 @@ def graph_get_project_overview(project_id: str, *, top_limit: int = 8) -> dict[s
 
     top_tags = run_graph_query(
         """
-        MATCH (p:Project {id:$project_id})<-[:IN_PROJECT]-(n)-[:TAGGED_WITH]->(tag:Tag)
+        MATCH (p:Project {id:$project_id})
+        MATCH (n)-[:TAGGED_WITH]->(tag:Tag)
         WHERE coalesce(n.is_deleted, false) = false
+          AND (
+            coalesce(n.project_id, '') = $project_id
+            OR EXISTS { MATCH (n)-[:IN_PROJECT]->(p) }
+          )
         RETURN tag.value AS tag, count(*) AS usage
         ORDER BY usage DESC, tag ASC
         LIMIT $limit
@@ -226,8 +257,13 @@ def graph_get_project_overview(project_id: str, *, top_limit: int = 8) -> dict[s
 
     top_relationships = run_graph_query(
         """
-        MATCH (p:Project {id:$project_id})<-[:IN_PROJECT]-(n)-[r]-()
+        MATCH (p:Project {id:$project_id})
+        MATCH (n)-[r]-()
         WHERE coalesce(n.is_deleted, false) = false
+          AND (
+            coalesce(n.project_id, '') = $project_id
+            OR EXISTS { MATCH (n)-[:IN_PROJECT]->(p) }
+          )
         RETURN type(r) AS relationship, count(r) AS count
         ORDER BY count DESC, relationship ASC
         LIMIT $limit
@@ -244,6 +280,7 @@ def graph_get_project_overview(project_id: str, *, top_limit: int = 8) -> dict[s
             "notes": int(counts.get("note_count") or 0),
             "specifications": int(counts.get("specification_count") or 0),
             "project_rules": int(counts.get("rule_count") or 0),
+            "comments": int(counts.get("comment_count") or 0),
         },
         "top_tags": [{"tag": str(row.get("tag") or ""), "usage": int(row.get("usage") or 0)} for row in top_tags],
         "top_relationships": [
@@ -284,8 +321,15 @@ def graph_get_project_subgraph(
     project_name = str(project_rows[0].get("project_name") or "").strip()
     resource_rows = run_graph_query(
         """
-        MATCH (p:Project {id:$project_id})<-[:IN_PROJECT]-(n)
+        MATCH (p:Project {id:$project_id})
+        MATCH (n)
         WHERE coalesce(n.is_deleted, false) = false
+          AND n.id IS NOT NULL
+          AND n.id <> $project_id
+          AND (
+            coalesce(n.project_id, '') = $project_id
+            OR EXISTS { MATCH (n)-[:IN_PROJECT]->(p) }
+          )
         RETURN DISTINCT
           head(labels(n)) AS entity_type,
           n.id AS entity_id,
@@ -293,8 +337,40 @@ def graph_get_project_subgraph(
         ORDER BY title ASC
         LIMIT $limit
         """,
-        {"project_id": project_id, "limit": max(1, safe_nodes - 1)},
+        {"project_id": project_id, "limit": max(200, safe_nodes * 8)},
     )
+
+    buckets: dict[str, list[dict[str, str]]] = {}
+    for row in resource_rows:
+        entity_id = str(row.get("entity_id") or "").strip()
+        if not entity_id:
+            continue
+        entity_type = str(row.get("entity_type") or "Entity").strip() or "Entity"
+        bucket_key = entity_type.lower()
+        buckets.setdefault(bucket_key, []).append(
+            {
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "title": str(row.get("title") or entity_id),
+            }
+        )
+    for values in buckets.values():
+        values.sort(key=lambda item: str(item.get("title") or "").lower())
+
+    preferred_order = ["specification", "comment", "task", "note", "projectrule", "user", "tag", "workspace"]
+    ordered_types = preferred_order + sorted([key for key in buckets.keys() if key not in preferred_order])
+    selected_rows: list[dict[str, str]] = []
+    comment_slot_reserve = min(8, max(2, safe_nodes // 5))
+    max_resource_nodes = max(0, safe_nodes - 1 - comment_slot_reserve)
+    while len(selected_rows) < max_resource_nodes and any(buckets.get(key) for key in ordered_types):
+        for key in ordered_types:
+            if len(selected_rows) >= max_resource_nodes:
+                break
+            queue = buckets.get(key) or []
+            if not queue:
+                continue
+            selected_rows.append(queue.pop(0))
+            buckets[key] = queue
 
     nodes: list[dict[str, Any]] = [
         {
@@ -305,7 +381,7 @@ def graph_get_project_subgraph(
         }
     ]
     seen_ids = {project_id}
-    for row in resource_rows:
+    for row in selected_rows:
         entity_id = str(row.get("entity_id") or "").strip()
         if not entity_id or entity_id in seen_ids:
             continue
@@ -317,7 +393,81 @@ def graph_get_project_subgraph(
                 "title": str(row.get("title") or entity_id),
                 "degree": 0,
             }
+            )
+
+    synthetic_edges: list[dict[str, str]] = []
+    task_ids = [str(node.get("entity_id") or "") for node in nodes if str(node.get("entity_type") or "").lower() == "task"]
+    remaining_node_slots = max(0, safe_nodes - len(nodes))
+    if task_ids and remaining_node_slots:
+        comment_rows = run_graph_query(
+            """
+            MATCH (t:Task)-[r:COMMENTED_BY]->(u:User)
+            WHERE t.id IN $task_ids
+              AND coalesce(t.is_deleted, false) = false
+            RETURN
+              t.id AS task_id,
+              u.id AS user_id,
+              coalesce(u.username, u.name, u.id) AS author_label,
+              coalesce(r.count, 1) AS comment_count
+            ORDER BY comment_count DESC, author_label ASC
+            LIMIT $limit
+            """,
+            {"task_ids": task_ids, "limit": min(remaining_node_slots, safe_edges, 80)},
         )
+        for row in comment_rows:
+            if len(nodes) >= safe_nodes:
+                break
+            task_id = str(row.get("task_id") or "").strip()
+            user_id = str(row.get("user_id") or "").strip()
+            if not task_id or not user_id:
+                continue
+            comment_id = f"comment-thread:{task_id}:{user_id}"
+            if comment_id in seen_ids:
+                continue
+            count = max(1, int(row.get("comment_count") or 1))
+            author = str(row.get("author_label") or user_id).strip() or user_id
+            label = f"{author} · {count} comment{'s' if count != 1 else ''}"
+            seen_ids.add(comment_id)
+            nodes.append(
+                {
+                    "entity_type": "Comment",
+                    "entity_id": comment_id,
+                    "title": label,
+                    "degree": 0,
+                }
+            )
+            synthetic_edges.append(
+                {
+                    "source_entity_id": comment_id,
+                    "target_entity_id": task_id,
+                    "relationship": "COMMENT_ACTIVITY",
+                }
+            )
+        remaining_node_slots = max(0, safe_nodes - len(nodes))
+
+    if remaining_node_slots and any(buckets.get(key) for key in ordered_types):
+        while remaining_node_slots > 0 and any(buckets.get(key) for key in ordered_types):
+            for key in ordered_types:
+                if remaining_node_slots <= 0:
+                    break
+                queue = buckets.get(key) or []
+                while queue:
+                    row = queue.pop(0)
+                    entity_id = str(row.get("entity_id") or "").strip()
+                    if not entity_id or entity_id in seen_ids:
+                        continue
+                    seen_ids.add(entity_id)
+                    nodes.append(
+                        {
+                            "entity_type": str(row.get("entity_type") or "Entity"),
+                            "entity_id": entity_id,
+                            "title": str(row.get("title") or entity_id),
+                            "degree": 0,
+                        }
+                    )
+                    remaining_node_slots -= 1
+                    break
+                buckets[key] = queue
 
     node_ids = [str(n["entity_id"]) for n in nodes if str(n.get("entity_id", "")).strip()]
     if len(node_ids) <= 1:
@@ -371,6 +521,29 @@ def graph_get_project_subgraph(
         degree_map[target] = int(degree_map.get(target) or 0) + 1
         if len(edges) >= safe_edges:
             break
+
+    for edge in synthetic_edges:
+        if len(edges) >= safe_edges:
+            break
+        source = str(edge.get("source_entity_id") or "").strip()
+        target = str(edge.get("target_entity_id") or "").strip()
+        relationship = str(edge.get("relationship") or "RELATED").strip() or "RELATED"
+        if not source or not target or source == target:
+            continue
+        lhs, rhs = (source, target) if source <= target else (target, source)
+        key = (lhs, rhs, relationship)
+        if key in dedup:
+            continue
+        dedup.add(key)
+        edges.append(
+            {
+                "source_entity_id": source,
+                "target_entity_id": target,
+                "relationship": relationship,
+            }
+        )
+        degree_map[source] = int(degree_map.get(source) or 0) + 1
+        degree_map[target] = int(degree_map.get(target) or 0) + 1
 
     for node in nodes:
         node_id = str(node.get("entity_id") or "")
@@ -577,11 +750,12 @@ def _render_context_markdown(
     lines.append("")
     lines.append("## Counts")
     lines.append(
-        "- tasks={tasks}, notes={notes}, specifications={specs}, project_rules={rules}".format(
+        "- tasks={tasks}, notes={notes}, specifications={specs}, project_rules={rules}, comments={comments}".format(
             tasks=int(counts.get("tasks") or 0),
             notes=int(counts.get("notes") or 0),
             specs=int(counts.get("specifications") or 0),
             rules=int(counts.get("project_rules") or 0),
+            comments=int(counts.get("comments") or 0),
         )
     )
 
@@ -662,15 +836,19 @@ def graph_context_pack(
 
     connected_resources = run_graph_query(
         """
+        MATCH (p:Project {id:$project_id})
         MATCH (n)
-        WHERE n.project_id = $project_id
+        WHERE (
+            coalesce(n.project_id, '') = $project_id
+            OR EXISTS { MATCH (n)-[:IN_PROJECT]->(p) }
+          )
           AND coalesce(n.is_deleted, false) = false
         OPTIONAL MATCH (n)-[r]-()
         RETURN
           head(labels(n)) AS entity_type,
           n.id AS entity_id,
           coalesce(n.title, n.name, n.id) AS title,
-          count(r) AS degree
+          count(DISTINCT r) AS degree
         ORDER BY degree DESC, title ASC
         LIMIT $limit
         """,
@@ -679,6 +857,47 @@ def graph_context_pack(
             "limit": safe_limit,
         },
     )
+
+    comment_resources = run_graph_query(
+        """
+        MATCH (p:Project {id:$project_id})
+        MATCH (t:Task)-[r:COMMENTED_BY]->(u:User)
+        WHERE coalesce(t.is_deleted, false) = false
+          AND (
+            coalesce(t.project_id, '') = $project_id
+            OR EXISTS { MATCH (t)-[:IN_PROJECT]->(p) }
+          )
+        RETURN
+          'Comment' AS entity_type,
+          ('comment-thread:' + t.id + ':' + u.id) AS entity_id,
+          (coalesce(u.username, u.name, u.id) + ' · ' + toString(coalesce(r.count, 1)) + ' comments on ' + coalesce(t.title, t.id)) AS title,
+          toInteger(coalesce(r.count, 1) + 1) AS degree
+        ORDER BY degree DESC, title ASC
+        LIMIT $limit
+        """,
+        {
+            "project_id": project_id,
+            "limit": safe_limit,
+        },
+    )
+
+    merged_resources: list[dict[str, Any]] = []
+    seen_resource_ids: set[str] = set()
+    for row in [*connected_resources, *comment_resources]:
+        entity_id = str(row.get("entity_id") or "").strip()
+        if not entity_id or entity_id in seen_resource_ids:
+            continue
+        seen_resource_ids.add(entity_id)
+        merged_resources.append(
+            {
+                "entity_type": str(row.get("entity_type") or "Entity"),
+                "entity_id": entity_id,
+                "title": str(row.get("title") or entity_id),
+                "degree": int(row.get("degree") or 0),
+            }
+        )
+    merged_resources.sort(key=lambda item: (-int(item.get("degree") or 0), str(item.get("title") or "").lower()))
+    connected_resources = merged_resources[:safe_limit]
 
     markdown = _render_context_markdown(
         overview=overview,

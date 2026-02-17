@@ -166,6 +166,7 @@ export type GraphProjectOverview = {
     notes: number
     specifications: number
     project_rules: number
+    comments: number
   }
   top_tags: Array<{
     tag: string
