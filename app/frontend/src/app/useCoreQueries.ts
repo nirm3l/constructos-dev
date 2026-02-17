@@ -5,6 +5,7 @@ import {
   getProjectBoard,
   getProjectGraphContextPack,
   getProjectGraphOverview,
+  getProjectGraphSubgraph,
   getProjectRules,
   getSpecifications,
   getProjectTags,
@@ -88,6 +89,12 @@ export function useCoreQueries(c: any) {
   const projectGraphContextPack = useQuery({
     queryKey: ['project-graph-context-pack', c.userId, c.selectedProjectId],
     queryFn: () => getProjectGraphContextPack(c.userId, c.selectedProjectId, { limit: 20 }),
+    enabled: Boolean(c.selectedProjectId) && c.tab === 'projects',
+  })
+
+  const projectGraphSubgraph = useQuery({
+    queryKey: ['project-graph-subgraph', c.userId, c.selectedProjectId],
+    queryFn: () => getProjectGraphSubgraph(c.userId, c.selectedProjectId, { limit_nodes: 48, limit_edges: 160 }),
     enabled: Boolean(c.selectedProjectId) && c.tab === 'projects',
   })
 
@@ -214,6 +221,7 @@ export function useCoreQueries(c: any) {
     projectRules,
     projectGraphOverview,
     projectGraphContextPack,
+    projectGraphSubgraph,
     specifications,
     searchSpecifications,
     specificationLookup,

@@ -1,6 +1,14 @@
 import React from 'react'
 import { MarkdownView } from '../../markdown/MarkdownView'
-import type { AttachmentRef, GraphContextPack, GraphProjectOverview, Project, ProjectRule, ProjectRulesPage } from '../../types'
+import type {
+  AttachmentRef,
+  GraphContextPack,
+  GraphProjectOverview,
+  GraphProjectSubgraph,
+  Project,
+  ProjectRule,
+  ProjectRulesPage,
+} from '../../types'
 import { AttachmentRefList, ExternalRefEditor, Icon, MarkdownModeToggle } from '../shared/uiHelpers'
 import {
   attachmentRefsToText,
@@ -49,6 +57,7 @@ export function ProjectsInlineEditor({
   projectRules,
   projectGraphOverview,
   projectGraphContextPack,
+  projectGraphSubgraph,
   selectedProjectRuleId,
   setSelectedProjectRuleId,
   projectRuleTitle,
@@ -92,6 +101,7 @@ export function ProjectsInlineEditor({
   projectRules: { data?: ProjectRulesPage }
   projectGraphOverview: QueryLike<GraphProjectOverview>
   projectGraphContextPack: QueryLike<GraphContextPack>
+  projectGraphSubgraph: QueryLike<GraphProjectSubgraph>
   selectedProjectRuleId: string | null
   setSelectedProjectRuleId: React.Dispatch<React.SetStateAction<string | null>>
   projectRuleTitle: string
@@ -279,11 +289,6 @@ export function ProjectsInlineEditor({
           </div>
         </div>
       </div>
-      <ProjectKnowledgeGraphPanel
-        projectName={project.name}
-        overviewQuery={projectGraphOverview}
-        contextPackQuery={projectGraphContextPack}
-      />
       <div className="meta" style={{ marginTop: 10 }}>External links</div>
       <ExternalRefEditor
         refs={parseExternalRefsText(editProjectExternalRefsText)}
@@ -346,6 +351,12 @@ export function ProjectsInlineEditor({
           })}
         </div>
       </div>
+      <ProjectKnowledgeGraphPanel
+        projectName={project.name}
+        overviewQuery={projectGraphOverview}
+        contextPackQuery={projectGraphContextPack}
+        subgraphQuery={projectGraphSubgraph}
+      />
       <div className="row wrap resource-meta-row" style={{ marginTop: 10 }}>
         <div className="meta">Created by: {selectedProjectCreator}</div>
         {selectedProjectTimeMeta && <div className="meta">{selectedProjectTimeMeta.label}: {toUserDateTime(selectedProjectTimeMeta.value, userTimezone)}</div>}

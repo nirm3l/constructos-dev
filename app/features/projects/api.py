@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from shared.core import Project, ProjectCreate, ProjectMemberUpsert, ProjectPatch, ensure_role, get_command_id, get_current_user, get_db
-from shared.knowledge_graph import graph_context_pack, graph_get_project_overview, require_graph_available
+from shared.knowledge_graph import graph_context_pack, graph_get_project_overview, graph_get_project_subgraph, require_graph_available
 from .application import ProjectApplicationService
 from .read_models import (
     get_project_activity_read_model,
@@ -107,6 +107,26 @@ def project_knowledge_graph_context_pack(
             focus_entity_type=focus_entity_type,
             focus_entity_id=focus_entity_id,
             limit=limit,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Knowledge graph is unavailable: {exc}") from exc
+
+
+@router.get("/api/projects/{project_id}/knowledge-graph/subgraph")
+def project_knowledge_graph_subgraph(
+    project_id: str,
+    limit_nodes: int = Query(default=48, ge=8, le=120),
+    limit_edges: int = Query(default=160, ge=8, le=320),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    project = _load_project_with_access(db, user, project_id)
+    try:
+        require_graph_available()
+        return graph_get_project_subgraph(
+            project_id=project.id,
+            limit_nodes=limit_nodes,
+            limit_edges=limit_edges,
         )
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Knowledge graph is unavailable: {exc}") from exc

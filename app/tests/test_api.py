@@ -383,6 +383,25 @@ def test_project_knowledge_graph_endpoints(tmp_path, monkeypatch):
             'markdown': '# Graph Context',
         },
     )
+    monkeypatch.setattr(
+        projects_api,
+        'graph_get_project_subgraph',
+        lambda project_id, limit_nodes=48, limit_edges=160: {
+            'project_id': project_id,
+            'project_name': 'Stub Project',
+            'node_count': 3,
+            'edge_count': 2,
+            'nodes': [
+                {'entity_type': 'Project', 'entity_id': project_id, 'title': 'Stub Project', 'degree': 2},
+                {'entity_type': 'Task', 'entity_id': 't1', 'title': 'Task one', 'degree': 1},
+                {'entity_type': 'Note', 'entity_id': 'n1', 'title': 'Note one', 'degree': 1},
+            ],
+            'edges': [
+                {'source_entity_id': project_id, 'target_entity_id': 't1', 'relationship': 'IN_PROJECT'},
+                {'source_entity_id': project_id, 'target_entity_id': 'n1', 'relationship': 'IN_PROJECT'},
+            ],
+        },
+    )
 
     overview = client.get(f"/api/projects/{project_id}/knowledge-graph/overview")
     assert overview.status_code == 200
@@ -393,6 +412,12 @@ def test_project_knowledge_graph_endpoints(tmp_path, monkeypatch):
     assert context_pack.status_code == 200
     assert context_pack.json()['project_id'] == project_id
     assert context_pack.json()['markdown'] == '# Graph Context'
+
+    subgraph = client.get(f"/api/projects/{project_id}/knowledge-graph/subgraph")
+    assert subgraph.status_code == 200
+    assert subgraph.json()['project_id'] == project_id
+    assert subgraph.json()['node_count'] == 3
+    assert subgraph.json()['edge_count'] == 2
 
     bad_focus = client.get(f"/api/projects/{project_id}/knowledge-graph/context-pack?focus_entity_type=Task")
     assert bad_focus.status_code == 400

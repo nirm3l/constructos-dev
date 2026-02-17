@@ -3,6 +3,7 @@ import type {
   AgentChatResponse,
   GraphContextPack,
   GraphProjectOverview,
+  GraphProjectSubgraph,
   Notification,
   Note,
   NotesPage,
@@ -280,6 +281,22 @@ export const getProjectGraphContextPack = (
       focus_entity_type: params?.focus_entity_type,
       focus_entity_id: params?.focus_entity_id,
       limit: params?.limit ?? 20,
+    })}`,
+    userId
+  )
+
+export const getProjectGraphSubgraph = (
+  userId: string,
+  projectId: string,
+  params?: {
+    limit_nodes?: number
+    limit_edges?: number
+  }
+) =>
+  api<GraphProjectSubgraph>(
+    `/api/projects/${projectId}/knowledge-graph/subgraph${queryString({
+      limit_nodes: params?.limit_nodes ?? 48,
+      limit_edges: params?.limit_edges ?? 160,
     })}`,
     userId
   )

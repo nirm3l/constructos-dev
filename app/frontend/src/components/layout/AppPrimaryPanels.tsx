@@ -111,6 +111,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             projectRules: state.projectRules,
             projectGraphOverview: state.projectGraphOverview,
             projectGraphContextPack: state.projectGraphContextPack,
+            projectGraphSubgraph: state.projectGraphSubgraph,
             selectedProjectRuleId: state.selectedProjectRuleId,
             setSelectedProjectRuleId: state.setSelectedProjectRuleId,
             projectRuleTitle: state.projectRuleTitle,

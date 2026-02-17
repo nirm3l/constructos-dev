@@ -253,6 +253,139 @@ def graph_get_project_overview(project_id: str, *, top_limit: int = 8) -> dict[s
     }
 
 
+def graph_get_project_subgraph(
+    project_id: str,
+    *,
+    limit_nodes: int = 48,
+    limit_edges: int = 160,
+) -> dict[str, Any]:
+    require_graph_available()
+    safe_nodes = max(8, min(int(limit_nodes or 48), 120))
+    safe_edges = max(8, min(int(limit_edges or 160), 320))
+
+    project_rows = run_graph_query(
+        """
+        MATCH (p:Project {id:$project_id})
+        RETURN p.id AS project_id, coalesce(p.name, '') AS project_name
+        LIMIT 1
+        """,
+        {"project_id": project_id},
+    )
+    if not project_rows:
+        return {
+            "project_id": project_id,
+            "project_name": "",
+            "node_count": 0,
+            "edge_count": 0,
+            "nodes": [],
+            "edges": [],
+        }
+
+    project_name = str(project_rows[0].get("project_name") or "").strip()
+    resource_rows = run_graph_query(
+        """
+        MATCH (p:Project {id:$project_id})<-[:IN_PROJECT]-(n)
+        WHERE coalesce(n.is_deleted, false) = false
+        RETURN DISTINCT
+          head(labels(n)) AS entity_type,
+          n.id AS entity_id,
+          coalesce(n.title, n.name, n.username, n.value, n.id) AS title
+        ORDER BY title ASC
+        LIMIT $limit
+        """,
+        {"project_id": project_id, "limit": max(1, safe_nodes - 1)},
+    )
+
+    nodes: list[dict[str, Any]] = [
+        {
+            "entity_type": "Project",
+            "entity_id": project_id,
+            "title": project_name or project_id,
+            "degree": 0,
+        }
+    ]
+    seen_ids = {project_id}
+    for row in resource_rows:
+        entity_id = str(row.get("entity_id") or "").strip()
+        if not entity_id or entity_id in seen_ids:
+            continue
+        seen_ids.add(entity_id)
+        nodes.append(
+            {
+                "entity_type": str(row.get("entity_type") or "Entity"),
+                "entity_id": entity_id,
+                "title": str(row.get("title") or entity_id),
+                "degree": 0,
+            }
+        )
+
+    node_ids = [str(n["entity_id"]) for n in nodes if str(n.get("entity_id", "")).strip()]
+    if len(node_ids) <= 1:
+        return {
+            "project_id": project_id,
+            "project_name": project_name,
+            "node_count": len(nodes),
+            "edge_count": 0,
+            "nodes": nodes,
+            "edges": [],
+        }
+
+    edge_rows = run_graph_query(
+        """
+        MATCH (a)-[r]-(b)
+        WHERE a.id IN $node_ids
+          AND b.id IN $node_ids
+          AND a.id <> b.id
+        RETURN a.id AS source_entity_id, b.id AS target_entity_id, type(r) AS relationship
+        LIMIT $limit
+        """,
+        {
+            "node_ids": node_ids,
+            "limit": safe_edges * 4,
+        },
+    )
+
+    dedup: set[tuple[str, str, str]] = set()
+    edges: list[dict[str, str]] = []
+    degree_map: dict[str, int] = {node_id: 0 for node_id in node_ids}
+    for row in edge_rows:
+        source = str(row.get("source_entity_id") or "").strip()
+        target = str(row.get("target_entity_id") or "").strip()
+        relationship = str(row.get("relationship") or "RELATED").strip() or "RELATED"
+        if not source or not target or source == target:
+            continue
+        if source > target:
+            source, target = target, source
+        key = (source, target, relationship)
+        if key in dedup:
+            continue
+        dedup.add(key)
+        edges.append(
+            {
+                "source_entity_id": source,
+                "target_entity_id": target,
+                "relationship": relationship,
+            }
+        )
+        degree_map[source] = int(degree_map.get(source) or 0) + 1
+        degree_map[target] = int(degree_map.get(target) or 0) + 1
+        if len(edges) >= safe_edges:
+            break
+
+    for node in nodes:
+        node_id = str(node.get("entity_id") or "")
+        node["degree"] = int(degree_map.get(node_id) or 0)
+
+    return {
+        "project_id": project_id,
+        "project_name": project_name,
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "nodes": nodes,
+        "edges": edges,
+    }
+
+
 def graph_get_neighbors(
     *,
     project_id: str | None = None,

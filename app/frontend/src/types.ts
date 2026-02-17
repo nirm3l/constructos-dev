@@ -201,6 +201,28 @@ export type GraphContextPack = {
   markdown: string
 }
 
+export type GraphSubgraphNode = {
+  entity_type: string
+  entity_id: string
+  title: string
+  degree: number
+}
+
+export type GraphSubgraphEdge = {
+  source_entity_id: string
+  target_entity_id: string
+  relationship: string
+}
+
+export type GraphProjectSubgraph = {
+  project_id: string
+  project_name: string
+  node_count: number
+  edge_count: number
+  nodes: GraphSubgraphNode[]
+  edges: GraphSubgraphEdge[]
+}
+
 export type ProjectMember = {
   project_id: string
   user_id: string
