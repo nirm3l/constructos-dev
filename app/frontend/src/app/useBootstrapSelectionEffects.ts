@@ -16,15 +16,23 @@ export function useBootstrapSelectionEffects(c: any) {
     if (!c.bootstrap.data || c.urlInitAppliedRef.current) return
     c.urlInitAppliedRef.current = true
     const params = new URLSearchParams(window.location.search)
+    const urlTab = params.get('tab')
     const urlProject = params.get('project')
-    if (urlProject && !(c.bootstrap.data.projects ?? []).some((p: any) => p.id === urlProject)) {
+    const projectExists = Boolean(urlProject && (c.bootstrap.data.projects ?? []).some((p: any) => p.id === urlProject))
+    if (urlProject && !projectExists) {
       params.delete('project')
       params.delete('task')
       params.delete('note')
+      params.delete('specification')
       const next = params.toString()
       window.history.replaceState(null, '', next ? `?${next}` : window.location.pathname)
+      return
     }
-  }, [c.bootstrap.data, c.urlInitAppliedRef])
+    if (urlTab === 'projects' && projectExists) {
+      c.setShowProjectCreateForm(false)
+      c.setShowProjectEditForm(true)
+    }
+  }, [c.bootstrap.data, c.setShowProjectCreateForm, c.setShowProjectEditForm, c.urlInitAppliedRef])
 
   React.useEffect(() => {
     if (!c.showProjectCreateForm) return

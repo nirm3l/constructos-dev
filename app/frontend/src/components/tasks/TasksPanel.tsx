@@ -10,6 +10,7 @@ type TasksPanelProps = {
   taskTagSuggestions: string[]
   searchTags: string[]
   toggleSearchTag: (tag: string) => void
+  clearSearchTags: () => void
   boardData: ProjectBoard | undefined
   onOpenTaskEditor: (taskId: string) => void
   onOpenSpecification: (specificationId: string, projectId: string) => void
@@ -27,6 +28,7 @@ export function TasksPanel({
   taskTagSuggestions,
   searchTags,
   toggleSearchTag,
+  clearSearchTags,
   boardData,
   onOpenTaskEditor,
   onOpenSpecification,
@@ -62,16 +64,28 @@ export function TasksPanel({
           </button>
         </div>
       </div>
-      <div className="row wrap" style={{ marginBottom: 8 }}>
+      <div className="row wrap notes-tag-filters task-tag-filters">
         {taskTagSuggestions.slice(0, 10).map((tag) => (
           <button
             key={`project-tag-${tag}`}
-            className={`status-chip ${searchTags.includes(tag.toLowerCase()) ? 'active' : ''}`}
+            className={`status-chip tag-filter-chip ${searchTags.includes(tag.toLowerCase()) ? 'active' : ''}`}
             onClick={() => toggleSearchTag(tag)}
+            aria-pressed={searchTags.includes(tag.toLowerCase())}
           >
             #{tag}
           </button>
         ))}
+        {searchTags.length > 0 && (
+          <button
+            className="action-icon tag-filter-clear"
+            type="button"
+            onClick={clearSearchTags}
+            title="Clear selected tags"
+            aria-label="Clear selected tags"
+          >
+            <Icon path="M6 6l12 12M18 6 6 18" />
+          </button>
+        )}
       </div>
 
       {projectsMode === 'board' && boardData && (

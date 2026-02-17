@@ -28,15 +28,26 @@ export function useCoreQueries(c: any) {
   })
 
   const notes = useQuery({
-    queryKey: ['notes', c.userId, c.workspaceId, c.selectedProjectId, c.noteQ, c.noteArchived, c.noteTags.join(',')],
+    queryKey: ['notes', c.userId, c.workspaceId, c.selectedProjectId, c.noteArchived, c.noteTags.join(',')],
     queryFn: () =>
       getNotes(c.userId, c.workspaceId, {
         project_id: c.selectedProjectId,
-        q: c.noteQ || undefined,
         tags: c.noteTags,
         archived: c.noteArchived
       }),
     enabled: Boolean(c.workspaceId && c.selectedProjectId) && c.tab === 'notes'
+  })
+
+  const searchNotes = useQuery({
+    queryKey: ['search-notes', c.userId, c.workspaceId, c.selectedProjectId, c.searchQ, c.searchArchived, c.searchTags.join(',')],
+    queryFn: () =>
+      getNotes(c.userId, c.workspaceId, {
+        project_id: c.selectedProjectId,
+        q: c.searchQ || undefined,
+        tags: c.searchTags,
+        archived: c.searchArchived,
+      }),
+    enabled: Boolean(c.workspaceId && c.selectedProjectId) && c.tab === 'search'
   })
 
   const taskNotes = useQuery({
@@ -72,18 +83,40 @@ export function useCoreQueries(c: any) {
       c.userId,
       c.workspaceId,
       c.selectedProjectId,
-      c.specificationQ,
       c.specificationStatus,
       c.specificationArchived,
+      c.specificationTags.join(','),
     ],
     queryFn: () =>
       getSpecifications(c.userId, c.workspaceId, {
         project_id: c.selectedProjectId,
-        q: c.specificationQ || undefined,
         status: c.specificationStatus || undefined,
+        tags: c.specificationTags,
         archived: c.specificationArchived,
       }),
     enabled: Boolean(c.workspaceId && c.selectedProjectId) && c.tab === 'specifications',
+  })
+
+  const searchSpecifications = useQuery({
+    queryKey: [
+      'search-specifications',
+      c.userId,
+      c.workspaceId,
+      c.selectedProjectId,
+      c.searchQ,
+      c.searchArchived,
+      c.searchSpecificationStatus,
+      c.searchTags.join(','),
+    ],
+    queryFn: () =>
+      getSpecifications(c.userId, c.workspaceId, {
+        project_id: c.selectedProjectId,
+        q: c.searchQ || undefined,
+        status: c.searchSpecificationStatus || undefined,
+        tags: c.searchTags,
+        archived: c.searchArchived,
+      }),
+    enabled: Boolean(c.workspaceId && c.selectedProjectId) && c.tab === 'search',
   })
 
   const specificationLookup = useQuery({
@@ -161,10 +194,12 @@ export function useCoreQueries(c: any) {
     tasks,
     taskLookup,
     notes,
+    searchNotes,
     taskNotes,
     projectTags,
     projectRules,
     specifications,
+    searchSpecifications,
     specificationLookup,
     specTasks,
     specNotes,

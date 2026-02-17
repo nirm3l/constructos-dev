@@ -160,6 +160,7 @@ class SpecificationCreate(BaseModel):
     title: str = Field(min_length=1)
     body: str = ""
     status: str = "Draft"
+    tags: list[str] = Field(default_factory=list)
     external_refs: list[ExternalRef] = Field(default_factory=list)
     attachment_refs: list[AttachmentRef] = Field(default_factory=list)
 
@@ -168,6 +169,7 @@ class SpecificationPatch(BaseModel):
     title: str | None = None
     body: str | None = None
     status: str | None = None
+    tags: list[str] | None = None
     external_refs: list[ExternalRef] | None = None
     attachment_refs: list[AttachmentRef] | None = None
     archived: bool | None = None
@@ -316,6 +318,7 @@ class SpecificationDTO:
     title: str
     body: str
     status: str
+    tags: list[str]
     external_refs: list[dict[str, Any]]
     attachment_refs: list[dict[str, Any]]
     archived: bool

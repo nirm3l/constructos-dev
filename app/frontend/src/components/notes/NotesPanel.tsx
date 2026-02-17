@@ -14,10 +14,7 @@ export function NotesPanel({
     <section className="card">
       <h2>Notes ({state.notes.data?.total ?? 0})</h2>
       <div className="notes-shell">
-        <div className="notes-toolbar">
-          <div className="notes-search">
-            <input value={state.noteQ} onChange={(e) => state.setNoteQ(e.target.value)} placeholder="Search notes" />
-          </div>
+        <div className="row" style={{ justifyContent: 'flex-end' }}>
           <button
             className="action-icon primary"
             onClick={() => state.createNoteMutation.mutate()}
@@ -33,7 +30,7 @@ export function NotesPanel({
             <input type="checkbox" checked={state.noteArchived} onChange={(e) => state.setNoteArchived(e.target.checked)} />
             Archived
           </label>
-          {state.noteTagSuggestions.slice(0, 8).map((tag: string) => (
+          {state.noteTagSuggestions.slice(0, 10).map((tag: string) => (
             <button
               key={`note-filter-${tag}`}
               className={`status-chip tag-filter-chip ${state.noteTags.includes(tag.toLowerCase()) ? 'active' : ''}`}
@@ -43,6 +40,17 @@ export function NotesPanel({
               #{tag}
             </button>
           ))}
+          {state.noteTags.length > 0 && (
+            <button
+              className="action-icon tag-filter-clear"
+              type="button"
+              onClick={() => state.clearNoteFilterTags()}
+              title="Clear selected tags"
+              aria-label="Clear selected tags"
+            >
+              <Icon path="M6 6l12 12M18 6 6 18" />
+            </button>
+          )}
         </div>
 
         <div className="task-list">
@@ -303,12 +311,23 @@ export function NotesPanel({
                           <Icon path="M6 6l12 12M18 6 6 18" />
                         </button>
                       </div>
-                      <input
-                        value={state.tagPickerQuery}
-                        onChange={(e) => state.setTagPickerQuery(e.target.value)}
-                        placeholder="Search or create tag"
-                        autoFocus
-                      />
+                      <div className="tag-picker-input-row">
+                        <input
+                          value={state.tagPickerQuery}
+                          onChange={(e) => state.setTagPickerQuery(e.target.value)}
+                          placeholder="Search or create tag"
+                          autoFocus
+                        />
+                        <button
+                          className="status-chip"
+                          type="button"
+                          onClick={() => state.setShowTagPicker(false)}
+                          title="Done"
+                          aria-label="Done"
+                        >
+                          Done
+                        </button>
+                      </div>
                       <div className="tag-picker-list" role="listbox" aria-label="Tag list">
                         {state.filteredNoteTags.map((t: string) => {
                           const selected = state.currentNoteTagsLower.has(t.toLowerCase())

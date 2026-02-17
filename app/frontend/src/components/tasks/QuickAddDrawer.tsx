@@ -111,12 +111,23 @@ export function QuickAddDrawer({ state }: { state: any }) {
                 <Icon path="M6 6l12 12M18 6 6 18" />
               </button>
             </div>
-            <input
-              value={state.quickTaskTagQuery}
-              onChange={(e) => state.setQuickTaskTagQuery(e.target.value)}
-              placeholder="Search or create tag"
-              autoFocus
-            />
+            <div className="tag-picker-input-row">
+              <input
+                value={state.quickTaskTagQuery}
+                onChange={(e) => state.setQuickTaskTagQuery(e.target.value)}
+                placeholder="Search or create tag"
+                autoFocus
+              />
+              <button
+                className="status-chip"
+                type="button"
+                onClick={() => state.setShowQuickTaskTagPicker(false)}
+                title="Done"
+                aria-label="Done"
+              >
+                Done
+              </button>
+            </div>
             <div className="tag-picker-list" role="listbox" aria-label="Tag list">
               {state.filteredQuickTaskTags.map((t: string) => {
                 const selected = state.quickTaskTagsLower.has(t.toLowerCase())

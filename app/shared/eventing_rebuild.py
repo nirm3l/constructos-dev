@@ -144,6 +144,17 @@ def _recompute_project_tag_index(db: Session, project_id: str | None) -> None:
         for tag in _parse_tag_list(tags_raw):
             counts[tag] = counts.get(tag, 0) + 1
 
+    specification_rows = db.execute(
+        select(Specification.tags).where(
+            Specification.project_id == project_id,
+            Specification.is_deleted == False,
+            Specification.archived == False,
+        )
+    ).all()
+    for (tags_raw,) in specification_rows:
+        for tag in _parse_tag_list(tags_raw):
+            counts[tag] = counts.get(tag, 0) + 1
+
     db.execute(delete(ProjectTagIndex).where(ProjectTagIndex.project_id == project_id))
     for tag, usage_count in sorted(counts.items(), key=lambda item: item[0]):
         db.add(
@@ -464,6 +475,7 @@ def apply_specification_event(state: dict[str, Any], event: EventEnvelope) -> di
             "title": p.get("title", ""),
             "body": p.get("body", ""),
             "status": p.get("status", "Draft"),
+            "tags": p.get("tags", []),
             "external_refs": p.get("external_refs", []),
             "attachment_refs": p.get("attachment_refs", []),
             "created_by": p.get("created_by"),
@@ -618,12 +630,14 @@ def project_event(db: Session, ev: EventEnvelope):
         specification.title = p.get("title", "") or ""
         specification.body = p.get("body", "") or ""
         specification.status = p.get("status", "Draft")
+        specification.tags = json.dumps(p.get("tags", []))
         specification.external_refs = json.dumps(p.get("external_refs", []))
         specification.attachment_refs = json.dumps(p.get("attachment_refs", []))
         specification.created_by = p.get("created_by") or m.get("actor_id") or ""
         specification.updated_by = p.get("updated_by") or m.get("actor_id") or ""
         specification.archived = bool(p.get("archived", False))
         specification.is_deleted = bool(p.get("is_deleted", False))
+        _recompute_project_tag_index(db, specification.project_id)
     elif ev.event_type == TASK_EVENT_CREATED:
         task = db.get(Task, ev.aggregate_id)
         if task is None:
@@ -702,9 +716,12 @@ def project_event(db: Session, ev: EventEnvelope):
     elif ev.event_type in SPECIFICATION_MUTATION_EVENTS:
         specification = db.get(Specification, ev.aggregate_id)
         if specification:
+            old_project_id = specification.project_id
             if ev.event_type == SPECIFICATION_EVENT_UPDATED:
                 for k, v in p.items():
-                    if k == "external_refs" and v is not None:
+                    if k == "tags" and v is not None:
+                        specification.tags = json.dumps(v)
+                    elif k == "external_refs" and v is not None:
                         specification.external_refs = json.dumps(v)
                     elif k == "attachment_refs" and v is not None:
                         specification.attachment_refs = json.dumps(v)
@@ -725,6 +742,8 @@ def project_event(db: Session, ev: EventEnvelope):
                 specification.is_deleted = True
                 if p.get("updated_by"):
                     specification.updated_by = p["updated_by"]
+            _recompute_project_tag_index(db, old_project_id)
+            _recompute_project_tag_index(db, specification.project_id)
     elif ev.event_type in TASK_MUTATION_EVENTS:
         task = db.get(Task, ev.aggregate_id)
         if task:

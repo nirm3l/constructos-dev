@@ -71,8 +71,40 @@ body {
 .brand {
   display: flex;
   align-items: center;
-  gap: 10px;
   min-width: 0;
+  flex-shrink: 0;
+}
+
+.brand-badge {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  max-width: 390px;
+  padding: 5px 10px 5px 6px;
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at 24% 22%, rgba(255,255,255,0.36), transparent 48%),
+    linear-gradient(
+      160deg,
+      color-mix(in srgb, var(--surface), var(--surface-alt) 34%),
+      color-mix(in srgb, var(--surface-alt), var(--brand) 14%)
+    );
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 24%);
+  box-shadow: 0 10px 18px color-mix(in srgb, var(--brand), transparent 88%);
+}
+
+[data-theme="dark"] .brand-badge {
+  background:
+    radial-gradient(circle at 24% 22%, rgba(255,255,255,0.1), transparent 46%),
+    linear-gradient(
+      160deg,
+      color-mix(in srgb, var(--surface), var(--surface-alt) 34%),
+      color-mix(in srgb, var(--surface-alt), var(--brand) 16%)
+    );
+  border-color: color-mix(in srgb, var(--line), var(--brand) 30%);
+  box-shadow: 0 10px 18px color-mix(in srgb, var(--brand), transparent 90%);
 }
 
 .brand-meta {
@@ -109,49 +141,125 @@ body {
 }
 
 .brand-mark {
-  width: 36px;
-  height: 36px;
-  border-radius: 12px;
+  width: 40px;
+  height: 40px;
+  border-radius: 13px;
   display: grid;
   place-items: center;
   font-weight: 900;
+  font-size: 21px;
   letter-spacing: 0.02em;
-  color: #f8fbff;
+  color: #0f1611;
+  -webkit-text-stroke: 0.35px rgba(255, 255, 255, 0.2);
+  text-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.18),
+    0 0 4px rgba(10, 20, 14, 0.12);
   background:
-    radial-gradient(circle at 30% 25%, rgba(255,255,255,0.28), transparent 45%),
-    linear-gradient(160deg, var(--brand), var(--brand-strong));
-  box-shadow: 0 10px 18px rgba(14, 38, 78, 0.18);
-  border: 1px solid color-mix(in srgb, var(--brand-strong), white 12%);
+    radial-gradient(circle at 30% 25%, rgba(255,255,255,0.3), transparent 45%),
+    linear-gradient(165deg, color-mix(in srgb, var(--brand), white 12%), color-mix(in srgb, var(--brand-strong), black 8%));
+  box-shadow:
+    inset 0 1px 2px rgba(255, 255, 255, 0.2),
+    0 6px 12px rgba(7, 27, 15, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.24);
 }
 
 [data-theme="dark"] .brand-mark {
-  box-shadow: 0 14px 26px rgba(2, 8, 20, 0.6);
+  color: #eaf8ef;
+  -webkit-text-stroke: 0.38px rgba(0, 0, 0, 0.5);
+  text-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.42),
+    0 0 7px rgba(255, 255, 255, 0.16);
+  box-shadow:
+    inset 0 1px 2px rgba(255, 255, 255, 0.12),
+    0 8px 16px rgba(2, 8, 20, 0.45);
 }
 
-.brand-stack {
+.brand-lockup {
   display: grid;
-  gap: 2px;
+  grid-template-rows: auto auto;
+  align-content: center;
+  gap: 1px;
+  min-height: 40px;
   min-width: 0;
+  margin-left: 4px;
 }
 
 .brand-name {
-  font-size: 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 20px;
   font-weight: 900;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.01em;
   line-height: 1;
-  background: linear-gradient(90deg, color-mix(in srgb, var(--text), var(--brand) 22%), var(--text));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  color: #0f1611;
+  transform: translateY(1px);
+  text-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.16),
+    0 0 3px rgba(10, 20, 14, 0.1);
+}
+
+.brand-glyph {
+  display: inline-block;
+  color: #0f1611;
+  -webkit-text-stroke: 0.35px rgba(255, 255, 255, 0.18);
+  text-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.16),
+    0 0 3px rgba(10, 20, 14, 0.12);
+}
+
+.brand-glyph-1 { color: #0f1611; }
+.brand-glyph-2 { color: #0f1611; }
+.brand-glyph-3 { color: #0f1611; }
+.brand-glyph-4 { color: #0f1611; }
+.brand-glyph-5 { color: #0f1611; }
+
+[data-theme="dark"] .brand-name {
+  color: #eefcf2;
+  text-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.42),
+    0 0 7px rgba(255, 255, 255, 0.12);
+}
+[data-theme="dark"] .brand-glyph-1 { color: #eefcf2; }
+[data-theme="dark"] .brand-glyph-2 { color: #eefcf2; }
+[data-theme="dark"] .brand-glyph-3 { color: #eefcf2; }
+[data-theme="dark"] .brand-glyph-4 { color: #eefcf2; }
+[data-theme="dark"] .brand-glyph-5 { color: #eefcf2; }
+[data-theme="dark"] .brand-glyph {
+  -webkit-text-stroke: 0.42px rgba(0, 0, 0, 0.56);
+  text-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.46),
+    0 0 6px rgba(255, 255, 255, 0.1);
+}
+[data-theme="dark"] .brand-sub {
+  color: #d6ebdc;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.42);
 }
 
 .brand-sub {
-  font-size: 12px;
-  color: var(--muted);
-  letter-spacing: 0.02em;
+  font-size: 8px;
+  letter-spacing: 0.09em;
+  line-height: 1.15;
+  font-weight: 700;
+  color: #0f1611;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.14);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  opacity: 1;
+}
+
+.brand-sub-stack {
+  display: grid;
+  gap: 1px;
+}
+
+.brand-sub-top {
+  align-self: start;
+}
+
+.brand-sub-bottom {
+  align-self: start;
 }
 
 .top-actions {
@@ -330,12 +438,61 @@ body {
 }
 
 @media (max-width: 720px) {
+  .brand-badge {
+    max-width: 300px;
+    padding: 4px 10px 4px 5px;
+    gap: 2px;
+    border-radius: 14px;
+  }
+
+  .brand-mark {
+    width: 34px;
+    height: 34px;
+    border-radius: 11px;
+    font-size: 18px;
+  }
+
+  .brand-name {
+    font-size: 17px;
+    gap: 9px;
+    transform: translateY(0.5px);
+  }
+
+  .brand-lockup {
+    margin-left: 3px;
+  }
+
+  .brand-sub {
+    font-size: 7px;
+    letter-spacing: 0.06em;
+  }
+
   .brand-meta-row {
     font-size: 11px;
   }
 }
 
 @media (max-width: 520px) {
+  .brand-badge {
+    max-width: 230px;
+    padding-right: 8px;
+    gap: 4px;
+  }
+
+  .brand-name {
+    font-size: 14px;
+    gap: 6.5px;
+    transform: translateY(0px);
+  }
+
+  .brand-lockup {
+    margin-left: 2px;
+  }
+
+  .brand-sub {
+    font-size: 6.5px;
+  }
+
   /* Keep header readable on narrow screens: show user, hide workspace line. */
   .brand-meta-row:last-child {
     display: none;
@@ -375,7 +532,10 @@ body {
 
 .notif-main {
   display: grid;
-  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 10px;
+  row-gap: 4px;
+  align-items: start;
   min-width: 0;
 }
 
@@ -383,6 +543,7 @@ body {
   font-size: 13px;
   color: var(--text);
   line-height: 1.35;
+  min-width: 0;
 }
 
 .notif.read .notif-message {
@@ -391,7 +552,32 @@ body {
 
 .notif-actions {
   display: flex;
-  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-start;
+  align-items: center;
+  justify-self: end;
+  align-self: start;
+}
+
+.notif-actions .status-chip {
+  min-height: 24px;
+  padding: 3px 8px;
+  font-size: 12px;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .notif-main {
+    grid-template-columns: 1fr;
+    row-gap: 6px;
+  }
+
+  .notif-actions {
+    justify-content: flex-start;
+    justify-self: start;
+  }
 }
 
 .notif-dot {
@@ -791,6 +977,11 @@ button:disabled {
   margin-bottom: 2px;
 }
 
+.task-tag-filters {
+  margin-top: -2px;
+  margin-bottom: 2px;
+}
+
 .notes-archived-filter {
   margin-right: 2px;
   flex-shrink: 0;
@@ -970,6 +1161,13 @@ button:disabled {
 .tag-picker-body {
   max-width: 720px;
   margin: 0 auto;
+}
+
+.tag-picker-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
 }
 
 .tag-picker-list {
@@ -1387,6 +1585,29 @@ button:disabled {
   margin-right: 5px;
   font-size: 11px;
   font-weight: 900;
+}
+
+.tag-filter-clear {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  border-radius: 999px;
+  border-width: 1.5px;
+  border-color: color-mix(in srgb, var(--line), var(--brand) 24%);
+  background: color-mix(in srgb, var(--surface-alt), var(--surface) 42%);
+  color: color-mix(in srgb, var(--muted), var(--text) 36%);
+}
+
+.tag-filter-clear .icon {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2.4;
+}
+
+.tag-filter-clear:hover {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 22%);
+  color: color-mix(in srgb, var(--text), var(--brand) 22%);
 }
 
 .task-item {
@@ -2019,6 +2240,12 @@ button:disabled {
   border-color: color-mix(in srgb, var(--brand), #d4ffe4 22%);
   color: #ecfff4;
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand), transparent 74%);
+}
+
+[data-theme="dark"] .tag-filter-clear {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 44%);
+  background: color-mix(in srgb, #1a2d4f, var(--surface) 34%);
+  color: color-mix(in srgb, #d4e7ff, var(--text) 28%);
 }
 
 [data-theme="dark"] .action-icon {

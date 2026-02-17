@@ -74,6 +74,8 @@ export function useEditorGuards(c: any) {
       (c.editSpecificationTitle || '').trim() !== (c.selectedSpecification.title || '').trim() ||
       (c.editSpecificationBody || '') !== (c.selectedSpecification.body || '') ||
       (c.editSpecificationStatus || 'Draft') !== (c.selectedSpecification.status || 'Draft') ||
+      stableJson(parseCommaTags(c.editSpecificationTags).map((tag) => tag.toLowerCase())) !==
+        stableJson((c.selectedSpecification.tags ?? []).map((tag: string) => String(tag || '').toLowerCase())) ||
       stableJson(c.parseExternalRefsText(c.editSpecificationExternalRefsText)) !== stableJson(c.selectedSpecification.external_refs ?? []) ||
       stableJson(c.parseAttachmentRefsText(c.editSpecificationAttachmentRefsText)) !== stableJson(c.selectedSpecification.attachment_refs ?? [])
     )
@@ -82,6 +84,7 @@ export function useEditorGuards(c: any) {
     c.editSpecificationBody,
     c.editSpecificationExternalRefsText,
     c.editSpecificationStatus,
+    c.editSpecificationTags,
     c.editSpecificationTitle,
     c.parseAttachmentRefsText,
     c.parseExternalRefsText,

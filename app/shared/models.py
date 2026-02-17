@@ -174,6 +174,7 @@ class Specification(Base, TimeMixin):
     title: Mapped[str] = mapped_column(String(256))
     body: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(32), default="Draft")
+    tags: Mapped[str] = mapped_column(Text, default="[]")
     external_refs: Mapped[str] = mapped_column(Text, default="[]")
     attachment_refs: Mapped[str] = mapped_column(Text, default="[]")
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))

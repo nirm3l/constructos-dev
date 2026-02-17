@@ -49,10 +49,21 @@ export function AppHeader({
     <header className="header card">
       <div className="title-row">
         <div className="brand" role="banner">
-          <div className="brand-mark" aria-hidden="true">m</div>
-          <div className="brand-stack">
-            <div className="brand-name">m4tr1x</div>
-            <div className="brand-sub">c0d3 w1th m3m0ry</div>
+          <div className="brand-badge" role="img" aria-label="m4tr1x logo">
+            <div className="brand-mark" aria-hidden="true">m</div>
+            <div className="brand-lockup">
+              <div className="brand-name" aria-hidden="true">
+                <span className="brand-glyph brand-glyph-1">4</span>
+                <span className="brand-glyph brand-glyph-2">t</span>
+                <span className="brand-glyph brand-glyph-3">r</span>
+                <span className="brand-glyph brand-glyph-4">1</span>
+                <span className="brand-glyph brand-glyph-5">x</span>
+              </div>
+              <div className="brand-sub-stack">
+                <div className="brand-sub brand-sub-top">3m0ry b3h1nd th3 c0d3</div>
+                <div className="brand-sub brand-sub-bottom">c0nt3xt und3r c0ntr0l...</div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -96,7 +107,7 @@ export function AppHeader({
               setSearchQ(e.target.value)
               if (tab !== 'search') setTab('search')
             }}
-            placeholder="Search tasks..."
+            placeholder="Search tasks, notes, specifications..."
           />
         </div>
         <div className="header-project-scope">

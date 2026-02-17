@@ -120,7 +120,7 @@ def test_note_tags_are_normalized_and_filterable(tmp_path: Path):
     ws_id = bootstrap["workspaces"][0]["id"]
     project_id = bootstrap["projects"][0]["id"]
 
-    created = client.post(
+    created_both = client.post(
         "/api/notes",
         json={
             "title": "Tagged note",
@@ -129,13 +129,28 @@ def test_note_tags_are_normalized_and_filterable(tmp_path: Path):
             "tags": ["Review", "review", " UX "],
         },
     )
-    assert created.status_code == 200
-    note = created.json()
-    assert note["tags"] == ["review", "ux"]
+    assert created_both.status_code == 200
+    note_both = created_both.json()
+    assert note_both["tags"] == ["review", "ux"]
+
+    created_single = client.post(
+        "/api/notes",
+        json={
+            "title": "Review only note",
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "tags": ["review"],
+        },
+    )
+    assert created_single.status_code == 200
+    note_single = created_single.json()
+    assert note_single["tags"] == ["review"]
 
     filtered = client.get(f"/api/notes?workspace_id={ws_id}&project_id={project_id}&tags=review,ux")
     assert filtered.status_code == 200
-    assert any(item["id"] == note["id"] for item in filtered.json()["items"])
+    filtered_ids = {item["id"] for item in filtered.json()["items"]}
+    assert note_both["id"] in filtered_ids
+    assert note_single["id"] in filtered_ids
 
 
 def test_note_refs_roundtrip(tmp_path: Path):

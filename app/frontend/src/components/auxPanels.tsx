@@ -1,5 +1,7 @@
 import React from 'react'
-import type { Task } from '../types'
+import type { Note, Specification, Task } from '../types'
+import { tagHue } from '../utils/ui'
+import { Icon } from './shared/uiHelpers'
 import { TaskListItem } from './tasks/taskViews'
 
 export function SearchPanel({
@@ -7,6 +9,8 @@ export function SearchPanel({
   setSearchQ,
   searchStatus,
   setSearchStatus,
+  searchSpecificationStatus,
+  setSearchSpecificationStatus,
   searchPriority,
   setSearchPriority,
   searchArchived,
@@ -14,12 +18,15 @@ export function SearchPanel({
   taskTagSuggestions,
   searchTags,
   toggleSearchTag,
+  clearSearchTags,
   onClose,
 }: {
   searchQ: string
   setSearchQ: React.Dispatch<React.SetStateAction<string>>
   searchStatus: string
   setSearchStatus: React.Dispatch<React.SetStateAction<string>>
+  searchSpecificationStatus: string
+  setSearchSpecificationStatus: React.Dispatch<React.SetStateAction<string>>
   searchPriority: string
   setSearchPriority: React.Dispatch<React.SetStateAction<string>>
   searchArchived: boolean
@@ -27,18 +34,32 @@ export function SearchPanel({
   taskTagSuggestions: string[]
   searchTags: string[]
   toggleSearchTag: (tag: string) => void
+  clearSearchTags: () => void
   onClose: () => void
 }) {
   return (
     <section className="card">
-      <h2>Search</h2>
-      <div className="row wrap">
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+        <h2 style={{ margin: 0 }}>Search</h2>
+        <button className="action-icon" onClick={onClose} title="Close search" aria-label="Close search">
+          <Icon path="M6 6l12 12M18 6 6 18" />
+        </button>
+      </div>
+      <div className="row wrap" style={{ marginTop: 10 }}>
         <input value={searchQ} onChange={(e) => setSearchQ(e.target.value)} placeholder="Search text" />
         <select value={searchStatus} onChange={(e) => setSearchStatus(e.target.value)}>
           <option value="">Any status</option>
           <option value="To do">To do</option>
           <option value="In progress">In progress</option>
           <option value="Done">Done</option>
+        </select>
+        <select value={searchSpecificationStatus} onChange={(e) => setSearchSpecificationStatus(e.target.value)}>
+          <option value="">Any spec status</option>
+          <option value="Draft">Draft</option>
+          <option value="Ready">Ready</option>
+          <option value="In progress">In progress</option>
+          <option value="Implemented">Implemented</option>
+          <option value="Archived">Archived</option>
         </select>
         <select value={searchPriority} onChange={(e) => setSearchPriority(e.target.value)}>
           <option value="">Any priority</option>
@@ -61,8 +82,18 @@ export function SearchPanel({
               #{tag}
             </button>
           ))}
+          {searchTags.length > 0 && (
+            <button
+              className="action-icon tag-filter-clear"
+              type="button"
+              onClick={clearSearchTags}
+              title="Clear selected tags"
+              aria-label="Clear selected tags"
+            >
+              <Icon path="M6 6l12 12M18 6 6 18" />
+            </button>
+          )}
         </div>
-        <button onClick={onClose}>Close</button>
       </div>
     </section>
   )
@@ -146,5 +177,164 @@ export function TaskResultsPanel({
         ))}
       </div>
     </section>
+  )
+}
+
+export function GlobalSearchResultsPanel({
+  tasks,
+  tasksTotal,
+  notes,
+  notesTotal,
+  specifications,
+  specificationsTotal,
+  projectNames,
+  specificationNames,
+  onOpenSpecification,
+  onOpenTask,
+  onRestoreTask,
+  onReopenTask,
+  onCompleteTask,
+  onOpenNote,
+}: {
+  tasks: Task[]
+  tasksTotal: number
+  notes: Note[]
+  notesTotal: number
+  specifications: Specification[]
+  specificationsTotal: number
+  projectNames: Record<string, string>
+  specificationNames: Record<string, string>
+  onOpenSpecification: (specificationId: string, projectId: string) => void
+  onOpenTask: (taskId: string) => void
+  onRestoreTask: (taskId: string) => void
+  onReopenTask: (taskId: string) => void
+  onCompleteTask: (taskId: string) => void
+  onOpenNote: (noteId: string, projectId?: string | null) => boolean
+}) {
+  return (
+    <>
+      <section className="card">
+        <h2>Tasks ({tasksTotal})</h2>
+        <div className="task-list">
+          {tasks.length === 0 ? (
+            <div className="notice">No matching tasks.</div>
+          ) : (
+            tasks.map((task) => (
+              <TaskListItem
+                key={task.id}
+                task={task}
+                onOpen={onOpenTask}
+                onOpenSpecification={onOpenSpecification}
+                onRestore={onRestoreTask}
+                onReopen={onReopenTask}
+                onComplete={onCompleteTask}
+                showProject
+                projectName={projectNames[task.project_id]}
+                specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
+              />
+            ))
+          )}
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>Notes ({notesTotal})</h2>
+        <div className="task-list">
+          {notes.length === 0 ? (
+            <div className="notice">No matching notes.</div>
+          ) : (
+            notes.map((note) => (
+              <div key={note.id} className="note-row">
+                <div className="note-title">
+                  {note.archived && <span className="badge">Archived</span>}
+                  {note.pinned && <span className="badge">Pinned</span>}
+                  <strong>{note.title || 'Untitled'}</strong>
+                </div>
+                <div className="meta" style={{ marginTop: 6 }}>{projectNames[note.project_id] || 'Unknown project'}</div>
+                <div className="note-snippet">{(note.body || '').replace(/\s+/g, ' ').slice(0, 180) || '(empty)'}</div>
+                {(note.tags ?? []).length > 0 && (
+                  <div className="note-tags" style={{ marginTop: 8 }}>
+                    {(note.tags ?? []).map((tag) => (
+                      <span
+                        key={`${note.id}-${tag}`}
+                        className="tag-mini"
+                        style={{
+                          backgroundColor: `hsl(${tagHue(tag)}, 70%, 92%)`,
+                          borderColor: `hsl(${tagHue(tag)}, 70%, 78%)`,
+                          color: `hsl(${tagHue(tag)}, 55%, 28%)`
+                        }}
+                      >
+                        #{tag}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div className="row wrap" style={{ marginTop: 8, gap: 6 }}>
+                  <button className="status-chip" onClick={() => onOpenNote(note.id, note.project_id)}>
+                    Open note
+                  </button>
+                  {note.specification_id && (
+                    <button
+                      className="status-chip"
+                      onClick={() => onOpenSpecification(note.specification_id as string, note.project_id)}
+                    >
+                      Open specification
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>Specifications ({specificationsTotal})</h2>
+        <div className="task-list">
+          {specifications.length === 0 ? (
+            <div className="notice">No matching specifications.</div>
+          ) : (
+            specifications.map((specification) => (
+              <div key={specification.id} className="note-row">
+                <div className="note-title">
+                  {specification.archived && <span className="badge">Archived</span>}
+                  <strong>{specification.title || 'Untitled spec'}</strong>
+                </div>
+                <div className="row wrap" style={{ marginTop: 6, gap: 6 }}>
+                  <span className="status-chip">{specification.status}</span>
+                  <span className="meta">{projectNames[specification.project_id] || 'Unknown project'}</span>
+                </div>
+                <div className="note-snippet">{(specification.body || '').replace(/\s+/g, ' ').slice(0, 180) || '(empty)'}</div>
+                {(specification.tags ?? []).length > 0 && (
+                  <div className="task-tags" style={{ marginTop: 8 }}>
+                    {(specification.tags ?? []).map((tag) => (
+                      <span
+                        key={`${specification.id}-${tag}`}
+                        className="tag-mini"
+                        style={{
+                          backgroundColor: `hsl(${tagHue(tag)}, 70%, 92%)`,
+                          borderColor: `hsl(${tagHue(tag)}, 70%, 78%)`,
+                          color: `hsl(${tagHue(tag)}, 55%, 28%)`
+                        }}
+                      >
+                        #{tag}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div className="row wrap" style={{ marginTop: 8 }}>
+                  <button
+                    className="status-chip"
+                    onClick={() => onOpenSpecification(specification.id, specification.project_id)}
+                  >
+                    Open specification
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </section>
+    </>
   )
 }

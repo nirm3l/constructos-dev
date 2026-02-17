@@ -66,6 +66,72 @@ def test_specification_crud_and_filters(tmp_path: Path):
     assert restored.json()["ok"] is True
 
 
+def test_specification_tags_are_normalized_and_filterable(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+
+    spec_both = client.post(
+        "/api/specifications",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Spec both",
+            "status": "Draft",
+            "tags": ["Backend", "backend", " UX "],
+        },
+    )
+    assert spec_both.status_code == 200
+    spec_both_payload = spec_both.json()
+    assert spec_both_payload["tags"] == ["backend", "ux"]
+
+    spec_single = client.post(
+        "/api/specifications",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Spec backend only",
+            "status": "Draft",
+            "tags": ["backend"],
+        },
+    )
+    assert spec_single.status_code == 200
+    spec_single_payload = spec_single.json()
+    assert spec_single_payload["tags"] == ["backend"]
+
+    spec_other = client.post(
+        "/api/specifications",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Spec other",
+            "status": "Draft",
+            "tags": ["ops"],
+        },
+    )
+    assert spec_other.status_code == 200
+
+    filtered = client.get(f"/api/specifications?workspace_id={ws_id}&project_id={project_id}&tags=backend,ux")
+    assert filtered.status_code == 200
+    filtered_ids = {item["id"] for item in filtered.json()["items"]}
+    assert spec_both_payload["id"] in filtered_ids
+    assert spec_single_payload["id"] in filtered_ids
+    assert spec_other.json()["id"] not in filtered_ids
+
+    patched = client.patch(
+        f"/api/specifications/{spec_single_payload['id']}",
+        json={"tags": ["Critical", "critical", "infra"]},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["tags"] == ["critical", "infra"]
+
+    filtered_after_patch = client.get(f"/api/specifications?workspace_id={ws_id}&project_id={project_id}&tags=critical")
+    assert filtered_after_patch.status_code == 200
+    filtered_after_patch_ids = {item["id"] for item in filtered_after_patch.json()["items"]}
+    assert spec_single_payload["id"] in filtered_after_patch_ids
+
+
 def test_task_and_note_can_link_to_specification(tmp_path: Path):
     client = build_client(tmp_path)
     bootstrap = client.get("/api/bootstrap").json()

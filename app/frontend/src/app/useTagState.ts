@@ -2,6 +2,54 @@ import React from 'react'
 import { parseCommaTags } from '../utils/ui'
 
 export function useTagState(c: any) {
+  const buildSharedFilterTags = React.useCallback(() => {
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const raw of [...(c.searchTags ?? []), ...(c.noteTags ?? []), ...(c.specificationTags ?? [])]) {
+      const cleaned = String(raw || '').trim().toLowerCase()
+      if (!cleaned || seen.has(cleaned)) continue
+      seen.add(cleaned)
+      out.push(cleaned)
+    }
+    return out
+  }, [c.noteTags, c.searchTags, c.specificationTags])
+
+  const applySharedFilterTagToggle = React.useCallback(
+    (tag: string) => {
+      const cleaned = String(tag || '').trim().toLowerCase()
+      if (!cleaned) return
+      const base = buildSharedFilterTags()
+      const next = base.includes(cleaned) ? base.filter((t) => t !== cleaned) : [...base, cleaned]
+      c.setSearchTags(next)
+      c.setNoteTags(next)
+      c.setSpecificationTags(next)
+    },
+    [buildSharedFilterTags, c.setNoteTags, c.setSearchTags, c.setSpecificationTags]
+  )
+
+  React.useEffect(() => {
+    const merged = buildSharedFilterTags()
+    const mergedKey = merged.join(',')
+    if (
+      String((c.searchTags ?? []).join(',')) === mergedKey &&
+      String((c.noteTags ?? []).join(',')) === mergedKey &&
+      String((c.specificationTags ?? []).join(',')) === mergedKey
+    ) {
+      return
+    }
+    c.setSearchTags(merged)
+    c.setNoteTags(merged)
+    c.setSpecificationTags(merged)
+  }, [
+    buildSharedFilterTags,
+    c.noteTags,
+    c.searchTags,
+    c.setNoteTags,
+    c.setSearchTags,
+    c.setSpecificationTags,
+    c.specificationTags,
+  ])
+
   const taskTagSuggestions = React.useMemo(() => {
     return (c.projectTagsData?.tags ?? []).slice(0, 40)
   }, [c.projectTagsData?.tags])
@@ -11,16 +59,34 @@ export function useTagState(c: any) {
   }, [c.projectTagsData?.tags])
 
   const toggleSearchTag = React.useCallback((tag: string) => {
-    const cleaned = String(tag || '').trim().toLowerCase()
-    if (!cleaned) return
-    c.setSearchTags((prev: string[]) => (prev.includes(cleaned) ? prev.filter((t) => t !== cleaned) : [...prev, cleaned]))
-  }, [c.setSearchTags])
+    applySharedFilterTagToggle(tag)
+  }, [applySharedFilterTagToggle])
 
   const toggleNoteFilterTag = React.useCallback((tag: string) => {
-    const cleaned = String(tag || '').trim().toLowerCase()
-    if (!cleaned) return
-    c.setNoteTags((prev: string[]) => (prev.includes(cleaned) ? prev.filter((t) => t !== cleaned) : [...prev, cleaned]))
-  }, [c.setNoteTags])
+    applySharedFilterTagToggle(tag)
+  }, [applySharedFilterTagToggle])
+
+  const toggleSpecificationFilterTag = React.useCallback((tag: string) => {
+    applySharedFilterTagToggle(tag)
+  }, [applySharedFilterTagToggle])
+
+  const clearSharedFilterTags = React.useCallback(() => {
+    c.setSearchTags([])
+    c.setNoteTags([])
+    c.setSpecificationTags([])
+  }, [c.setNoteTags, c.setSearchTags, c.setSpecificationTags])
+
+  const clearSearchTags = React.useCallback(() => {
+    clearSharedFilterTags()
+  }, [clearSharedFilterTags])
+
+  const clearNoteFilterTags = React.useCallback(() => {
+    clearSharedFilterTags()
+  }, [clearSharedFilterTags])
+
+  const clearSpecificationFilterTags = React.useCallback(() => {
+    clearSharedFilterTags()
+  }, [clearSharedFilterTags])
 
   const addNoteTag = React.useCallback(
     (raw: string) => {
@@ -132,6 +198,10 @@ export function useTagState(c: any) {
     noteTagSuggestions,
     toggleSearchTag,
     toggleNoteFilterTag,
+    toggleSpecificationFilterTag,
+    clearSearchTags,
+    clearNoteFilterTags,
+    clearSpecificationFilterTags,
     addNoteTag,
     currentNoteTags,
     currentNoteTagsLower,

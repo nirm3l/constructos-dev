@@ -119,6 +119,13 @@ def ensure_note_table_columns(db: Session):
     db.commit()
 
 
+def ensure_specification_table_columns(db: Session):
+    existing = {column["name"] for column in inspect(db.bind).get_columns("specifications")}
+    if "tags" not in existing:
+        db.execute(text("ALTER TABLE specifications ADD COLUMN tags TEXT DEFAULT '[]'"))
+    db.commit()
+
+
 def ensure_notification_table_columns(db: Session):
     existing = {column["name"] for column in inspect(db.bind).get_columns("notifications")}
     if "workspace_id" not in existing:
@@ -153,6 +160,7 @@ def bootstrap_data():
         ensure_user_table_columns(db)
         ensure_project_table_columns(db)
         ensure_note_table_columns(db)
+        ensure_specification_table_columns(db)
         ensure_notification_table_columns(db)
         ensure_task_table_columns(db)
         ensure_saved_view_table_columns(db)
@@ -442,6 +450,10 @@ def _backfill_specification_streams_from_read_model(db: Session) -> None:
             attachment_refs = json.loads(specification.attachment_refs or "[]")
         except Exception:
             attachment_refs = []
+        try:
+            tags = json.loads(specification.tags or "[]")
+        except Exception:
+            tags = []
         append_event(
             db,
             aggregate_type="Specification",
@@ -453,6 +465,7 @@ def _backfill_specification_streams_from_read_model(db: Session) -> None:
                 "title": specification.title,
                 "body": specification.body or "",
                 "status": specification.status or "Draft",
+                "tags": tags,
                 "external_refs": external_refs,
                 "attachment_refs": attachment_refs,
                 "created_by": specification.created_by,
@@ -536,10 +549,20 @@ def _rebuild_project_tag_index(db: Session) -> None:
                 Note.archived == False,
             )
         ).all()
+        specification_rows = db.execute(
+            select(Specification.tags).where(
+                Specification.project_id == project.id,
+                Specification.is_deleted == False,
+                Specification.archived == False,
+            )
+        ).all()
         for (labels_raw,) in task_rows:
             for tag in _parse_tag_list(labels_raw):
                 counts[tag] = counts.get(tag, 0) + 1
         for (tags_raw,) in note_rows:
+            for tag in _parse_tag_list(tags_raw):
+                counts[tag] = counts.get(tag, 0) + 1
+        for (tags_raw,) in specification_rows:
             for tag in _parse_tag_list(tags_raw):
                 counts[tag] = counts.get(tag, 0) + 1
         for tag, usage_count in sorted(counts.items(), key=lambda item: item[0]):

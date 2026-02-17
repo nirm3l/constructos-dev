@@ -4,7 +4,7 @@ import { SpecificationsPanel } from '../specifications/SpecificationsPanel'
 import { NotesPanel } from '../notes/NotesPanel'
 import { QuickAddDrawer } from '../tasks/QuickAddDrawer'
 import { TasksPanel } from '../tasks/TasksPanel'
-import { ProfilePanel, SearchPanel, TaskResultsPanel } from '../auxPanels'
+import { GlobalSearchResultsPanel, ProfilePanel, SearchPanel } from '../auxPanels'
 
 export function AppPrimaryPanels({ state }: { state: any }) {
   return (
@@ -43,6 +43,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           taskTagSuggestions={state.taskTagSuggestions}
           searchTags={state.searchTags}
           toggleSearchTag={state.toggleSearchTag}
+          clearSearchTags={state.clearSearchTags}
           boardData={state.board.data}
           onOpenTaskEditor={state.openTaskEditor}
           onOpenSpecification={state.openSpecification}
@@ -142,10 +143,12 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             specifications: state.specifications,
             specTasks: state.specTasks,
             specNotes: state.specNotes,
-            specificationQ: state.specificationQ,
-            setSpecificationQ: state.setSpecificationQ,
             specificationStatus: state.specificationStatus,
             setSpecificationStatus: state.setSpecificationStatus,
+            taskTagSuggestions: state.taskTagSuggestions,
+            specificationTags: state.specificationTags,
+            toggleSpecificationFilterTag: state.toggleSpecificationFilterTag,
+            clearSpecificationFilterTags: state.clearSpecificationFilterTags,
             specificationArchived: state.specificationArchived,
             setSpecificationArchived: state.setSpecificationArchived,
             createSpecificationMutation: state.createSpecificationMutation,
@@ -157,6 +160,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             setEditSpecificationBody: state.setEditSpecificationBody,
             editSpecificationStatus: state.editSpecificationStatus,
             setEditSpecificationStatus: state.setEditSpecificationStatus,
+            editSpecificationTags: state.editSpecificationTags,
+            setEditSpecificationTags: state.setEditSpecificationTags,
             editSpecificationExternalRefsText: state.editSpecificationExternalRefsText,
             setEditSpecificationExternalRefsText: state.setEditSpecificationExternalRefsText,
             editSpecificationAttachmentRefsText: state.editSpecificationAttachmentRefsText,
@@ -184,8 +189,10 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             selectedProjectId: state.selectedProjectId,
             workspaceId: state.workspaceId,
             userId: state.userId,
+            tagHue: state.tagHue,
             openTask: state.openTask,
             openNote: state.openNote,
+            copyShareLink: state.copyShareLink,
             specFileInputRef: state.specFileInputRef,
             uploadAttachmentRef: state.uploadAttachmentRef,
             toErrorMessage: state.toErrorMessage,
@@ -198,14 +205,13 @@ export function AppPrimaryPanels({ state }: { state: any }) {
         <NotesPanel
           state={{
             notes: state.notes,
-            noteQ: state.noteQ,
-            setNoteQ: state.setNoteQ,
             createNoteMutation: state.createNoteMutation,
             noteArchived: state.noteArchived,
             setNoteArchived: state.setNoteArchived,
             noteTagSuggestions: state.noteTagSuggestions,
             noteTags: state.noteTags,
             toggleNoteFilterTag: state.toggleNoteFilterTag,
+            clearNoteFilterTags: state.clearNoteFilterTags,
             selectedNoteId: state.selectedNoteId,
             selectedNote: state.selectedNote,
             editNoteTitle: state.editNoteTitle,
@@ -270,6 +276,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           setSearchQ={state.setSearchQ}
           searchStatus={state.searchStatus}
           setSearchStatus={state.setSearchStatus}
+          searchSpecificationStatus={state.searchSpecificationStatus}
+          setSearchSpecificationStatus={state.setSearchSpecificationStatus}
           searchPriority={state.searchPriority}
           setSearchPriority={state.setSearchPriority}
           searchArchived={state.searchArchived}
@@ -277,6 +285,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           taskTagSuggestions={state.taskTagSuggestions}
           searchTags={state.searchTags}
           toggleSearchTag={state.toggleSearchTag}
+          clearSearchTags={state.clearSearchTags}
           onClose={() => state.setTab('tasks')}
         />
       )}
@@ -295,18 +304,22 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             state.themeMutation.mutate(next)
           }}
         />
-      ) : state.tab !== 'tasks' && state.tab !== 'projects' && state.tab !== 'notes' && state.tab !== 'specifications' ? (
-        <TaskResultsPanel
+      ) : state.tab === 'search' ? (
+        <GlobalSearchResultsPanel
           tasks={state.tasks.data?.items ?? []}
-          total={state.tasks.data?.total ?? 0}
-          showProject={state.tab === 'search'}
+          tasksTotal={state.tasks.data?.total ?? 0}
+          notes={state.searchNotes.data?.items ?? []}
+          notesTotal={state.searchNotes.data?.total ?? 0}
+          specifications={state.searchSpecifications.data?.items ?? []}
+          specificationsTotal={state.searchSpecifications.data?.total ?? 0}
           projectNames={state.projectNames}
           specificationNames={state.specificationNameMap}
           onOpenSpecification={state.openSpecification}
-          onOpen={state.openTaskEditor}
-          onRestore={(taskId) => state.restoreTaskMutation.mutate(taskId)}
-          onReopen={(taskId) => state.reopenTaskMutation.mutate(taskId)}
-          onComplete={(taskId) => state.completeTaskMutation.mutate(taskId)}
+          onOpenTask={state.openTaskEditor}
+          onRestoreTask={(taskId) => state.restoreTaskMutation.mutate(taskId)}
+          onReopenTask={(taskId) => state.reopenTaskMutation.mutate(taskId)}
+          onCompleteTask={(taskId) => state.completeTaskMutation.mutate(taskId)}
+          onOpenNote={state.openNote}
         />
       ) : null}
     </>

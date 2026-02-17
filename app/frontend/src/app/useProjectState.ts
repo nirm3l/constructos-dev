@@ -26,9 +26,13 @@ export function useProjectState() {
   const [draftProjectRuleTitle, setDraftProjectRuleTitle] = React.useState('')
   const [draftProjectRuleBody, setDraftProjectRuleBody] = React.useState('')
   const [draftProjectRuleView, setDraftProjectRuleView] = React.useState<'write' | 'preview'>('write')
-  const [selectedProjectId, setSelectedProjectId] = React.useState<string>(() =>
-    parseStoredProjectId(localStorage.getItem('ui_selected_project_id'))
-  )
+  const [selectedProjectId, setSelectedProjectId] = React.useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const fromUrl = new URLSearchParams(window.location.search).get('project')
+      if (fromUrl) return fromUrl
+    }
+    return parseStoredProjectId(localStorage.getItem('ui_selected_project_id'))
+  })
   const [projectsMode, setProjectsMode] = React.useState<'board' | 'list'>(() =>
     parseStoredProjectsMode(localStorage.getItem('ui_projects_mode'))
   )

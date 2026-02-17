@@ -236,6 +236,7 @@ export type Specification = {
   title: string
   body: string
   status: 'Draft' | 'Ready' | 'In progress' | 'Implemented' | 'Archived'
+  tags: string[]
   external_refs: ExternalRef[]
   attachment_refs: AttachmentRef[]
   archived: boolean

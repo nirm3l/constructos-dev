@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { getNotes, getTasks } from '../../api'
 import type { Note, Specification, Task } from '../../types'
 import { MarkdownView } from '../../markdown/MarkdownView'
+import { parseCommaTags } from '../../utils/ui'
 import {
   AttachmentRefList,
   ExternalRefEditor,
@@ -23,6 +24,8 @@ export function SpecificationsPanel({ state }: { state: any }) {
   const [noteLinkOpen, setNoteLinkOpen] = React.useState(false)
   const [taskLinkQuery, setTaskLinkQuery] = React.useState('')
   const [noteLinkQuery, setNoteLinkQuery] = React.useState('')
+  const [showSpecTagPicker, setShowSpecTagPicker] = React.useState(false)
+  const [specTagQuery, setSpecTagQuery] = React.useState('')
 
   React.useEffect(() => {
     setNewTaskTitle('')
@@ -33,6 +36,8 @@ export function SpecificationsPanel({ state }: { state: any }) {
     setNoteLinkOpen(false)
     setTaskLinkQuery('')
     setNoteLinkQuery('')
+    setShowSpecTagPicker(false)
+    setSpecTagQuery('')
   }, [selectedSpecificationId])
 
   const taskLinkCandidates = useQuery({
@@ -83,19 +88,63 @@ export function SpecificationsPanel({ state }: { state: any }) {
   )
 
   const bulkResult = state.bulkCreateSpecificationTasksMutation.data
+  const currentSpecificationTags = React.useMemo(
+    () => parseCommaTags(state.editSpecificationTags ?? ''),
+    [state.editSpecificationTags]
+  )
+  const currentSpecificationTagsLower = React.useMemo(
+    () => new Set(currentSpecificationTags.map((tag) => tag.toLowerCase())),
+    [currentSpecificationTags]
+  )
+  const allSpecificationTags = React.useMemo(() => {
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const tag of [...(state.taskTagSuggestions ?? []), ...currentSpecificationTags]) {
+      const cleaned = String(tag || '').trim()
+      if (!cleaned) continue
+      const key = cleaned.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(cleaned)
+    }
+    return out
+  }, [currentSpecificationTags, state.taskTagSuggestions])
+  const filteredSpecificationTags = React.useMemo(() => {
+    const query = specTagQuery.trim().toLowerCase()
+    const base = query ? allSpecificationTags.filter((tag) => tag.toLowerCase().includes(query)) : allSpecificationTags
+    return base.slice(0, 40)
+  }, [allSpecificationTags, specTagQuery])
+  const canCreateSpecificationTag = React.useMemo(() => {
+    const query = specTagQuery.trim()
+    if (!query) return false
+    return !allSpecificationTags.some((tag) => tag.toLowerCase() === query.toLowerCase())
+  }, [allSpecificationTags, specTagQuery])
+  const toggleSpecificationTag = React.useCallback(
+    (tag: string) => {
+      const cleaned = String(tag || '').trim()
+      if (!cleaned) return
+      const lower = cleaned.toLowerCase()
+      const next = currentSpecificationTagsLower.has(lower)
+        ? currentSpecificationTags.filter((value) => value.toLowerCase() !== lower)
+        : [...currentSpecificationTags, cleaned]
+      state.setEditSpecificationTags(parseCommaTags(next.join(', ')).join(', '))
+    },
+    [currentSpecificationTags, currentSpecificationTagsLower, state]
+  )
+  const createSpecificationTag = React.useCallback(() => {
+    const cleaned = String(specTagQuery || '').trim()
+    if (!cleaned) return
+    const next = parseCommaTags([...currentSpecificationTags, cleaned].join(', '))
+    state.setEditSpecificationTags(next.join(', '))
+    setSpecTagQuery('')
+    setShowSpecTagPicker(false)
+  }, [currentSpecificationTags, specTagQuery, state])
 
   return (
     <section className="card">
       <h2>Specifications ({state.specifications.data?.total ?? 0})</h2>
       <div className="notes-shell">
         <div className="notes-toolbar">
-          <div className="notes-search">
-            <input
-              value={state.specificationQ}
-              onChange={(e) => state.setSpecificationQ(e.target.value)}
-              placeholder="Search specifications"
-            />
-          </div>
           <select
             value={state.specificationStatus}
             onChange={(e) => state.setSpecificationStatus(e.target.value)}
@@ -128,6 +177,27 @@ export function SpecificationsPanel({ state }: { state: any }) {
             />
             Archived
           </label>
+          {(state.taskTagSuggestions ?? []).slice(0, 10).map((tag: string) => (
+            <button
+              key={`spec-filter-${tag}`}
+              className={`status-chip tag-filter-chip ${state.specificationTags.includes(tag.toLowerCase()) ? 'active' : ''}`}
+              onClick={() => state.toggleSpecificationFilterTag(tag)}
+              aria-pressed={state.specificationTags.includes(tag.toLowerCase())}
+            >
+              #{tag}
+            </button>
+          ))}
+          {state.specificationTags.length > 0 && (
+            <button
+              className="action-icon tag-filter-clear"
+              type="button"
+              onClick={() => state.clearSpecificationFilterTags()}
+              title="Clear selected tags"
+              aria-label="Clear selected tags"
+            >
+              <Icon path="M6 6l12 12M18 6 6 18" />
+            </button>
+          )}
         </div>
 
         <div className="task-list">
@@ -149,6 +219,23 @@ export function SpecificationsPanel({ state }: { state: any }) {
                 <div className="row" style={{ marginTop: 6 }}>
                   <span className="status-chip">{status}</span>
                 </div>
+                {(specification.tags ?? []).length > 0 && (
+                  <div className="task-tags" style={{ marginTop: 8 }}>
+                    {(specification.tags ?? []).map((tag) => (
+                      <span
+                        key={`${specification.id}-${tag}`}
+                        className="tag-mini"
+                        style={{
+                          backgroundColor: `hsl(${state.tagHue(tag)}, 70%, 92%)`,
+                          borderColor: `hsl(${state.tagHue(tag)}, 70%, 78%)`,
+                          color: `hsl(${state.tagHue(tag)}, 55%, 28%)`
+                        }}
+                      >
+                        #{tag}
+                      </span>
+                    ))}
+                  </div>
+                )}
                 <div className="note-snippet">
                   {(specification.body || '').replace(/\s+/g, ' ').slice(0, 180) || '(empty)'}
                 </div>
@@ -172,6 +259,20 @@ export function SpecificationsPanel({ state }: { state: any }) {
                           aria-label="Save specification"
                         >
                           <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+                        </button>
+                        <button
+                          className="action-icon"
+                          onClick={() =>
+                            state.copyShareLink({
+                              tab: 'specifications',
+                              projectId: specification.project_id,
+                              specificationId: specification.id,
+                            })
+                          }
+                          title="Copy specification link"
+                          aria-label="Copy specification link"
+                        >
+                          <Icon path="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4m2 7a5 5 0 0 0-7.07 0L3.1 13.83a5 5 0 1 0 7.07 7.07L13 18" />
                         </button>
                         <span className="action-separator" aria-hidden="true" />
                         {specification.archived ? (
@@ -221,6 +322,89 @@ export function SpecificationsPanel({ state }: { state: any }) {
                         <option value="Archived">Archived</option>
                       </select>
                     </div>
+                    <div className="tag-bar" aria-label="Specification tags" style={{ marginBottom: 8 }}>
+                      <div className="tag-chiplist">
+                        {currentSpecificationTags.length === 0 ? (
+                          <span className="meta">No tags</span>
+                        ) : (
+                          currentSpecificationTags.map((tag) => (
+                            <span
+                              key={`spec-tag-${specification.id}-${tag}`}
+                              className="tag-chip"
+                              style={{
+                                background: `linear-gradient(135deg, hsl(${state.tagHue(tag)}, 70%, 92%), hsl(${state.tagHue(tag)}, 70%, 86%))`,
+                                borderColor: `hsl(${state.tagHue(tag)}, 70%, 74%)`,
+                                color: `hsl(${state.tagHue(tag)}, 55%, 22%)`
+                              }}
+                            >
+                              <span className="tag-text">{tag}</span>
+                            </span>
+                          ))
+                        )}
+                      </div>
+                      <button className="action-icon" onClick={() => setShowSpecTagPicker(true)} title="Edit tags" aria-label="Edit tags">
+                        <Icon path="M3 12h8m-8 6h12m-12-12h18" />
+                      </button>
+                    </div>
+                    {showSpecTagPicker && (
+                      <div className="drawer open" onClick={() => setShowSpecTagPicker(false)}>
+                        <div className="drawer-body tag-picker-body" onClick={(e) => e.stopPropagation()}>
+                          <div className="row" style={{ justifyContent: 'space-between', marginBottom: 10 }}>
+                            <h3 style={{ margin: 0 }}>Specification tags</h3>
+                            <button className="action-icon" onClick={() => setShowSpecTagPicker(false)} title="Close" aria-label="Close">
+                              <Icon path="M6 6l12 12M18 6 6 18" />
+                            </button>
+                          </div>
+                          <div className="tag-picker-input-row">
+                            <input
+                              value={specTagQuery}
+                              onChange={(e) => setSpecTagQuery(e.target.value)}
+                              placeholder="Search or create tag"
+                              autoFocus
+                            />
+                            <button
+                              className="status-chip"
+                              type="button"
+                              onClick={() => setShowSpecTagPicker(false)}
+                              title="Done"
+                              aria-label="Done"
+                            >
+                              Done
+                            </button>
+                          </div>
+                          <div className="tag-picker-list" role="listbox" aria-label="Specification tag list">
+                            {filteredSpecificationTags.map((tag) => {
+                              const selected = currentSpecificationTagsLower.has(tag.toLowerCase())
+                              return (
+                                <button
+                                  key={`spec-picker-${tag}`}
+                                  className={`tag-picker-item ${selected ? 'selected' : ''}`}
+                                  onClick={() => toggleSpecificationTag(tag)}
+                                  aria-label={selected ? `Remove tag ${tag}` : `Add tag ${tag}`}
+                                  title={selected ? 'Remove tag' : 'Add tag'}
+                                >
+                                  <span className="tag-picker-check" aria-hidden="true">
+                                    <Icon path={selected ? 'm5 13 4 4L19 7' : 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z'} />
+                                  </span>
+                                  <span className="tag-picker-name">{tag}</span>
+                                </button>
+                              )
+                            })}
+                            {filteredSpecificationTags.length === 0 && <div className="meta">No tags found.</div>}
+                          </div>
+                          {canCreateSpecificationTag && (
+                            <button
+                              className="primary tag-picker-create"
+                              onClick={createSpecificationTag}
+                              title="Create tag"
+                              aria-label="Create tag"
+                            >
+                              Create "{specTagQuery.trim()}"
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
 
                     <div className="md-editor-surface">
                       <MarkdownModeToggle

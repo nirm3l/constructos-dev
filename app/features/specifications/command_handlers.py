@@ -22,6 +22,20 @@ from .domain import EVENT_ARCHIVED, EVENT_CREATED, EVENT_DELETED, EVENT_RESTORED
 ALLOWED_SPEC_STATUSES = {"Draft", "Ready", "In progress", "Implemented", "Archived"}
 
 
+def _normalize_tags(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in values:
+        tag = str(raw).strip().lower()
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        out.append(tag)
+    return out
+
+
 def _normalize_external_refs(values: list[dict] | None) -> list[dict]:
     if not values:
         return []
@@ -125,6 +139,7 @@ class CreateSpecificationHandler:
                 "title": title,
                 "body": self.payload.body or "",
                 "status": status,
+                "tags": _normalize_tags(self.payload.tags),
                 "external_refs": _normalize_external_refs([r.model_dump() for r in self.payload.external_refs]),
                 "attachment_refs": _normalize_attachment_refs([r.model_dump() for r in self.payload.attachment_refs]),
                 "archived": status == "Archived",
@@ -172,6 +187,8 @@ class PatchSpecificationHandler:
             event_payload["body"] = str(data["body"])
         if "status" in data and data["status"] is not None:
             event_payload["status"] = _normalize_status(data["status"])
+        if "tags" in data and data["tags"] is not None:
+            event_payload["tags"] = _normalize_tags(data["tags"])
         if "external_refs" in data and data["external_refs"] is not None:
             event_payload["external_refs"] = _normalize_external_refs(data["external_refs"])
         if "attachment_refs" in data and data["attachment_refs"] is not None:

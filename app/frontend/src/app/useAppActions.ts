@@ -10,6 +10,14 @@ import {
 } from '../api'
 import { parseCommaTags, toErrorMessage } from '../utils/ui'
 
+type SharePayload = {
+  tab?: string
+  projectId?: string
+  taskId?: string
+  noteId?: string
+  specificationId?: string
+}
+
 export function useAppActions(c: any) {
   const invalidateAll = React.useCallback(async () => {
     await c.qc.invalidateQueries({ queryKey: ['tasks'] })
@@ -69,21 +77,27 @@ export function useAppActions(c: any) {
   )
 
   const buildShareUrl = React.useCallback(
-    (payload: { tab?: string; projectId?: string; taskId?: string; noteId?: string }) => {
+    (payload: SharePayload) => {
       const u = new URL(window.location.href)
-      u.searchParams.set('tab', payload.tab ?? c.tab)
+      const tab = payload.tab ?? c.tab
+      u.searchParams.set('tab', tab)
       if (payload.projectId) u.searchParams.set('project', payload.projectId)
       else u.searchParams.delete('project')
       if (payload.taskId) u.searchParams.set('task', payload.taskId)
       else u.searchParams.delete('task')
       if (payload.noteId) u.searchParams.set('note', payload.noteId)
       else u.searchParams.delete('note')
+      if (payload.specificationId) u.searchParams.set('specification', payload.specificationId)
+      else u.searchParams.delete('specification')
+      if (tab !== 'tasks') u.searchParams.delete('task')
+      if (tab !== 'notes') u.searchParams.delete('note')
+      if (tab !== 'specifications') u.searchParams.delete('specification')
       return u.toString()
     },
     [c.tab]
   )
 
-  const copyShareLink = React.useCallback(async (payload: { tab?: string; projectId?: string; taskId?: string; noteId?: string }) => {
+  const copyShareLink = React.useCallback(async (payload: SharePayload) => {
     try {
       const text = buildShareUrl(payload)
       const canUseClipboardApi = typeof navigator !== 'undefined' && !!navigator.clipboard?.writeText

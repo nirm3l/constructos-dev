@@ -14,6 +14,7 @@ class SpecificationListQuery:
     project_id: str
     q: str | None = None
     status: str | None = None
+    tags: list[str] | None = None
     archived: bool = False
     limit: int = 30
     offset: int = 0
@@ -34,6 +35,10 @@ def list_specifications_read_model(db: Session, user: User, query: Specification
             stmt = stmt.where(or_(Specification.title.ilike(like), Specification.body.ilike(like)))
     if query.status:
         stmt = stmt.where(Specification.status == query.status)
+    if query.tags:
+        tag_filters = [Specification.tags.ilike(f'%"{tag}"%') for tag in query.tags]
+        if tag_filters:
+            stmt = stmt.where(or_(*tag_filters))
 
     total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0
     items = db.execute(stmt.order_by(Specification.updated_at.desc()).limit(query.limit).offset(query.offset)).scalars().all()

@@ -9,7 +9,7 @@ export function useProjectEditorEffects(c: any) {
       c.setEditProjectExternalRefsText('')
       c.setEditProjectAttachmentRefsText('')
       c.setEditProjectDescriptionView('write')
-      c.setShowProjectEditForm(false)
+      if (!c.selectedProjectId) c.setShowProjectEditForm(false)
       c.setSelectedProjectRuleId(null)
       c.setProjectRuleTitle('')
       c.setProjectRuleBody('')
@@ -26,7 +26,7 @@ export function useProjectEditorEffects(c: any) {
     c.setProjectRuleTitle('')
     c.setProjectRuleBody('')
     c.setProjectRuleView('write')
-  }, [c.selectedProject?.id])
+  }, [c.selectedProject?.id, c.selectedProjectId, c.setShowProjectEditForm])
 
   React.useEffect(() => {
     if (!c.showProjectCreateForm) return

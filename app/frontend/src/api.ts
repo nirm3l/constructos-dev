@@ -365,6 +365,7 @@ export const getSpecifications = (
     project_id: string
     q?: string
     status?: string
+    tags?: string[]
     archived?: boolean
     limit?: number
     offset?: number
@@ -376,6 +377,7 @@ export const getSpecifications = (
       project_id: params.project_id,
       q: params.q,
       status: params.status,
+      tags: params.tags?.join(',') || undefined,
       archived: params.archived ?? false,
       limit: params.limit ?? 100,
       offset: params.offset ?? 0,
@@ -391,6 +393,7 @@ export const createSpecification = (
     title: string
     body?: string
     status?: Specification['status']
+    tags?: string[]
     external_refs?: ExternalRef[]
     attachment_refs?: AttachmentRef[]
   }
@@ -399,7 +402,7 @@ export const createSpecification = (
 export const patchSpecification = (
   userId: string,
   specificationId: string,
-  payload: Partial<Pick<Specification, 'title' | 'body' | 'status' | 'external_refs' | 'attachment_refs' | 'archived'>>
+  payload: Partial<Pick<Specification, 'title' | 'body' | 'status' | 'tags' | 'external_refs' | 'attachment_refs' | 'archived'>>
 ) => api<Specification>(`/api/specifications/${specificationId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })
 
 export const createSpecificationTask = (

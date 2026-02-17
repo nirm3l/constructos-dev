@@ -47,8 +47,9 @@ def list_tasks_read_model(db: Session, user, query: TaskListQuery) -> dict:
     if query.label:
         stmt = stmt.where(Task.labels.ilike(f"%{query.label}%"))
     if query.tags:
-        for tag in query.tags:
-            stmt = stmt.where(Task.labels.ilike(f'%"{tag}"%'))
+        tag_filters = [Task.labels.ilike(f'%"{tag}"%') for tag in query.tags]
+        if tag_filters:
+            stmt = stmt.where(or_(*tag_filters))
     if query.assignee_id is not None:
         stmt = stmt.where(Task.assignee_id == query.assignee_id)
     if query.specification_id is not None:

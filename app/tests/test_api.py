@@ -308,7 +308,7 @@ def test_delete_project_deletes_project_resources(tmp_path):
     assert all(n['id'] != note['id'] for n in notes)
 
 
-def test_project_tags_are_shared_between_tasks_and_notes(tmp_path):
+def test_project_tags_are_shared_between_tasks_notes_and_specifications(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
@@ -326,11 +326,23 @@ def test_project_tags_are_shared_between_tasks_and_notes(tmp_path):
     )
     assert note.status_code == 200
 
+    specification = client.post(
+        '/api/specifications',
+        json={
+            'title': 'Tagged specification',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'Draft',
+            'tags': ['shared', 'SpecOnly'],
+        },
+    )
+    assert specification.status_code == 200
+
     tags = client.get(f"/api/projects/{project_id}/tags")
     assert tags.status_code == 200
     payload = tags.json()
     assert payload['project_id'] == project_id
-    assert {'noteonly', 'shared', 'taskonly'}.issubset(set(payload['tags']))
+    assert {'noteonly', 'shared', 'taskonly', 'speconly'}.issubset(set(payload['tags']))
 
 
 def test_user_theme_preferences_persist(tmp_path):
@@ -949,17 +961,27 @@ def test_task_tags_are_normalized_and_filterable(tmp_path):
     ws_id = bootstrap['workspaces'][0]['id']
     project_id = bootstrap['projects'][0]['id']
 
-    created = client.post(
+    created_both = client.post(
         '/api/tasks',
         json={'title': 'Tag task', 'workspace_id': ws_id, 'project_id': project_id, 'labels': ['Critical', 'critical', ' UI ']},
     )
-    assert created.status_code == 200
-    payload = created.json()
-    assert payload['labels'] == ['critical', 'ui']
+    assert created_both.status_code == 200
+    payload_both = created_both.json()
+    assert payload_both['labels'] == ['critical', 'ui']
+
+    created_single = client.post(
+        '/api/tasks',
+        json={'title': 'Critical only task', 'workspace_id': ws_id, 'project_id': project_id, 'labels': ['critical']},
+    )
+    assert created_single.status_code == 200
+    payload_single = created_single.json()
+    assert payload_single['labels'] == ['critical']
 
     filtered = client.get(f'/api/tasks?workspace_id={ws_id}&project_id={project_id}&tags=critical,ui')
     assert filtered.status_code == 200
-    assert any(item['id'] == payload['id'] for item in filtered.json()['items'])
+    filtered_ids = {item['id'] for item in filtered.json()['items']}
+    assert payload_both['id'] in filtered_ids
+    assert payload_single['id'] in filtered_ids
 
 
 def test_saved_view_projection_is_idempotent(tmp_path):

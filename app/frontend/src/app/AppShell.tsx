@@ -27,7 +27,9 @@ import {
   formatActivitySummary,
   normalizeStoredUserId,
   parseAttachmentRefsText,
+  parseCommaTags,
   parseExternalRefsText,
+  parseUrlTab,
   parseStoredTab,
   priorityTone,
   removeAttachmentByPath,
@@ -43,8 +45,43 @@ import '../styles.css'
 const queryClient = new QueryClient()
 
 function App() {
+  const initialUrlStateRef = React.useRef<{
+    tab: Tab | null
+    projectId: string | null
+    taskId: string | null
+    noteId: string | null
+    specificationId: string | null
+  } | null>(null)
+  if (!initialUrlStateRef.current) {
+    if (typeof window === 'undefined') {
+      initialUrlStateRef.current = {
+        tab: null,
+        projectId: null,
+        taskId: null,
+        noteId: null,
+        specificationId: null,
+      }
+    } else {
+      const params = new URLSearchParams(window.location.search)
+      initialUrlStateRef.current = {
+        tab: parseUrlTab(params.get('tab')),
+        projectId: params.get('project'),
+        taskId: params.get('task'),
+        noteId: params.get('note'),
+        specificationId: params.get('specification'),
+      }
+    }
+  }
+  const initialUrlState = initialUrlStateRef.current!
+
   const [userId] = React.useState<string>(() => normalizeStoredUserId(localStorage.getItem('user_id')))
-  const [tab, setTab] = React.useState<Tab>(() => parseStoredTab(localStorage.getItem('ui_tab')))
+  const [tab, setTab] = React.useState<Tab>(() => {
+    if (initialUrlState.tab) return initialUrlState.tab
+    if (initialUrlState.specificationId) return 'specifications'
+    if (initialUrlState.noteId) return 'notes'
+    if (initialUrlState.taskId) return 'tasks'
+    return parseStoredTab(localStorage.getItem('ui_tab'))
+  })
   const [theme, setTheme] = React.useState<'light' | 'dark'>('light')
   const [taskTitle, setTaskTitle] = React.useState('')
   const [quickDueDate, setQuickDueDate] = React.useState('')
@@ -67,23 +104,24 @@ function App() {
   const [quickTaskAttachmentRefsText, setQuickTaskAttachmentRefsText] = React.useState('')
   const [showQuickTaskTagPicker, setShowQuickTaskTagPicker] = React.useState(false)
   const [quickTaskTagQuery, setQuickTaskTagQuery] = React.useState('')
-  const [selectedTaskId, setSelectedTaskId] = React.useState<string | null>(null)
-  const [selectedNoteId, setSelectedNoteId] = React.useState<string | null>(null)
+  const [selectedTaskId, setSelectedTaskId] = React.useState<string | null>(() => initialUrlState.taskId)
+  const [selectedNoteId, setSelectedNoteId] = React.useState<string | null>(() => initialUrlState.noteId)
   const [searchQ, setSearchQ] = React.useState('')
   const [searchStatus, setSearchStatus] = React.useState('')
+  const [searchSpecificationStatus, setSearchSpecificationStatus] = React.useState('')
   const [searchPriority, setSearchPriority] = React.useState('')
   const [searchTags, setSearchTags] = React.useState<string[]>([])
   const [searchArchived, setSearchArchived] = React.useState(false)
-  const [noteQ, setNoteQ] = React.useState('')
   const [noteTags, setNoteTags] = React.useState<string[]>([])
   const [noteArchived, setNoteArchived] = React.useState(false)
-  const [specificationQ, setSpecificationQ] = React.useState('')
   const [specificationStatus, setSpecificationStatus] = React.useState('')
+  const [specificationTags, setSpecificationTags] = React.useState<string[]>([])
   const [specificationArchived, setSpecificationArchived] = React.useState(false)
-  const [selectedSpecificationId, setSelectedSpecificationId] = React.useState<string | null>(null)
+  const [selectedSpecificationId, setSelectedSpecificationId] = React.useState<string | null>(() => initialUrlState.specificationId)
   const [editSpecificationTitle, setEditSpecificationTitle] = React.useState('')
   const [editSpecificationBody, setEditSpecificationBody] = React.useState('')
   const [editSpecificationStatus, setEditSpecificationStatus] = React.useState('Draft')
+  const [editSpecificationTags, setEditSpecificationTags] = React.useState('')
   const [editSpecificationExternalRefsText, setEditSpecificationExternalRefsText] = React.useState('')
   const [editSpecificationAttachmentRefsText, setEditSpecificationAttachmentRefsText] = React.useState('')
   const [specificationEditorView, setSpecificationEditorView] = React.useState<'write' | 'preview'>('preview')
@@ -175,6 +213,8 @@ function App() {
     setSelectedProjectId,
     urlInitAppliedRef,
     showProjectCreateForm,
+    setShowProjectCreateForm,
+    setShowProjectEditForm,
     createProjectMemberIds,
     setCreateProjectMemberIds,
     showProjectEditForm,
@@ -195,8 +235,10 @@ function App() {
     tasks,
     taskLookup,
     notes,
+    searchNotes,
     taskNotes,
     specifications,
+    searchSpecifications,
     specificationLookup,
     specTasks,
     specNotes,
@@ -216,15 +258,15 @@ function App() {
     selectedSpecificationId,
     searchQ,
     searchStatus,
+    searchSpecificationStatus,
     searchPriority,
     searchArchived,
     searchTags,
     taskParams,
-    noteQ,
     noteArchived,
     noteTags,
-    specificationQ,
     specificationStatus,
+    specificationTags,
     specificationArchived,
     projects: bootstrap.data?.projects ?? [],
     projectsMode,
@@ -289,18 +331,21 @@ function App() {
 
   const openSpecification = React.useCallback((specificationId: string, projectId?: string | null) => {
     if (projectId) setSelectedProjectId(projectId)
-    setSpecificationQ('')
     setSpecificationStatus('')
     setSpecificationArchived(false)
     setSelectedSpecificationId(specificationId)
     setTab('specifications')
-  }, [setSelectedProjectId, setSpecificationQ, setSpecificationStatus, setSpecificationArchived, setSelectedSpecificationId, setTab])
+  }, [setSelectedProjectId, setSpecificationStatus, setSpecificationArchived, setSelectedSpecificationId, setTab])
 
   const {
     taskTagSuggestions,
     noteTagSuggestions,
     toggleSearchTag,
     toggleNoteFilterTag,
+    toggleSpecificationFilterTag,
+    clearSearchTags,
+    clearNoteFilterTags,
+    clearSpecificationFilterTags,
     addNoteTag,
     currentNoteTags,
     currentNoteTagsLower,
@@ -317,8 +362,12 @@ function App() {
     canCreateQuickTaskTag,
   } = useTagState({
     projectTagsData: projectTags.data,
+    searchTags,
+    noteTags,
+    specificationTags,
     setSearchTags,
     setNoteTags,
+    setSpecificationTags,
     editNoteTags,
     setEditNoteTags,
     setTagPickerQuery,
@@ -366,6 +415,7 @@ function App() {
     editSpecificationTitle,
     editSpecificationBody,
     editSpecificationStatus,
+    editSpecificationTags,
     editSpecificationExternalRefsText,
     editSpecificationAttachmentRefsText,
     selectedTask,
@@ -634,6 +684,7 @@ function App() {
     editSpecificationTitle,
     editSpecificationBody,
     editSpecificationStatus,
+    editSpecificationTags,
     editSpecificationExternalRefsText,
     editSpecificationAttachmentRefsText,
   })
@@ -669,22 +720,24 @@ function App() {
   })
 
   React.useEffect(() => {
-    const items = specifications.data?.items ?? []
+    if (!specifications.data) return
+    const items = specifications.data.items ?? []
     if (items.length === 0) {
-      setSelectedSpecificationId(null)
+      if (selectedSpecificationId) setSelectedSpecificationId(null)
       return
     }
     if (selectedSpecificationId && !items.some((item: any) => item.id === selectedSpecificationId)) {
       const first = items[0]
       if (first?.id) setSelectedSpecificationId(first.id)
     }
-  }, [selectedSpecificationId, specifications.data?.items])
+  }, [selectedSpecificationId, specifications.data, setSelectedSpecificationId])
 
   React.useEffect(() => {
     if (!selectedSpecification) {
       setEditSpecificationTitle('')
       setEditSpecificationBody('')
       setEditSpecificationStatus('Draft')
+      setEditSpecificationTags('')
       setEditSpecificationExternalRefsText('')
       setEditSpecificationAttachmentRefsText('')
       setSpecificationEditorView('preview')
@@ -693,6 +746,7 @@ function App() {
     setEditSpecificationTitle(selectedSpecification.title || '')
     setEditSpecificationBody(selectedSpecification.body || '')
     setEditSpecificationStatus(selectedSpecification.status || 'Draft')
+    setEditSpecificationTags((selectedSpecification.tags ?? []).join(', '))
     setEditSpecificationExternalRefsText(externalRefsToText(selectedSpecification.external_refs))
     setEditSpecificationAttachmentRefsText(attachmentRefsToText(selectedSpecification.attachment_refs))
     const hasBody = Boolean((selectedSpecification.body || '').trim())
@@ -705,6 +759,8 @@ function App() {
       (editSpecificationTitle || '').trim() !== (selectedSpecification.title || '').trim() ||
       (editSpecificationBody || '') !== (selectedSpecification.body || '') ||
       (editSpecificationStatus || 'Draft') !== (selectedSpecification.status || 'Draft') ||
+      parseCommaTags(editSpecificationTags).map((tag) => tag.toLowerCase()).join(',') !==
+        (selectedSpecification.tags ?? []).map((tag) => String(tag || '').toLowerCase()).join(',') ||
       editSpecificationExternalRefsText.trim() !== externalRefsToText(selectedSpecification.external_refs).trim() ||
       editSpecificationAttachmentRefsText.trim() !== attachmentRefsToText(selectedSpecification.attachment_refs).trim()
     )
@@ -713,6 +769,7 @@ function App() {
     editSpecificationBody,
     editSpecificationExternalRefsText,
     editSpecificationStatus,
+    editSpecificationTags,
     editSpecificationTitle,
     selectedSpecification,
   ])
@@ -779,6 +836,7 @@ function App() {
       taskTagSuggestions,
       searchTags,
       toggleSearchTag,
+      clearSearchTags,
       board,
       openTaskEditor,
       moveTaskToStatus,
@@ -857,19 +915,20 @@ function App() {
       toggleEditProjectMember,
       selectedProjectCreator,
       selectedProjectTimeMeta,
-      noteQ,
       notes,
+      searchNotes,
       taskNotes,
       specifications,
+      searchSpecifications,
       specTasks,
       specNotes,
-      setNoteQ,
       createNoteMutation,
       noteArchived,
       setNoteArchived,
       noteTagSuggestions,
       noteTags,
       toggleNoteFilterTag,
+      clearNoteFilterTags,
       selectedNoteId,
       selectedNote,
       editNoteTitle,
@@ -911,10 +970,11 @@ function App() {
       toggleNoteTag,
       canCreateTag,
       addNoteTag,
-      specificationQ,
-      setSpecificationQ,
       specificationStatus,
       setSpecificationStatus,
+      specificationTags,
+      toggleSpecificationFilterTag,
+      clearSpecificationFilterTags,
       specificationArchived,
       setSpecificationArchived,
       selectedSpecificationId,
@@ -926,6 +986,8 @@ function App() {
       setEditSpecificationBody,
       editSpecificationStatus,
       setEditSpecificationStatus,
+      editSpecificationTags,
+      setEditSpecificationTags,
       editSpecificationExternalRefsText,
       setEditSpecificationExternalRefsText,
       editSpecificationAttachmentRefsText,
@@ -947,6 +1009,8 @@ function App() {
       unlinkNoteFromSpecificationMutation,
       searchStatus,
       setSearchStatus,
+      searchSpecificationStatus,
+      setSearchSpecificationStatus,
       searchPriority,
       setSearchPriority,
       searchArchived,

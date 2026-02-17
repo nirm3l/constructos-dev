@@ -48,8 +48,9 @@ def list_notes_read_model(db: Session, user: User, query: NoteListQuery) -> dict
             like = f"%{q}%"
             stmt = stmt.where(or_(Note.title.ilike(like), Note.body.ilike(like)))
     if query.tags:
-        for tag in query.tags:
-            stmt = stmt.where(Note.tags.ilike(f'%"{tag}"%'))
+        tag_filters = [Note.tags.ilike(f'%"{tag}"%') for tag in query.tags]
+        if tag_filters:
+            stmt = stmt.where(or_(*tag_filters))
     total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0
     items = (
         db.execute(

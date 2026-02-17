@@ -13,7 +13,7 @@ import {
   unlinkNoteFromSpecification,
   unlinkTaskFromSpecification,
 } from '../../api'
-import { toErrorMessage } from '../../utils/ui'
+import { parseCommaTags, toErrorMessage } from '../../utils/ui'
 
 export function useSpecificationMutations(c: any) {
   const saveSpecificationMutation = useMutation({
@@ -23,6 +23,7 @@ export function useSpecificationMutations(c: any) {
         title: c.editSpecificationTitle.trim() || 'Untitled',
         body: c.editSpecificationBody,
         status: c.editSpecificationStatus,
+        tags: parseCommaTags(c.editSpecificationTags),
         external_refs: c.parseExternalRefsText(c.editSpecificationExternalRefsText),
         attachment_refs: c.parseAttachmentRefsText(c.editSpecificationAttachmentRefsText),
       })
@@ -42,6 +43,7 @@ export function useSpecificationMutations(c: any) {
         title: 'Untitled spec',
         body: '',
         status: 'Draft',
+        tags: [],
       }),
     onSuccess: async (specification) => {
       c.setUiError(null)
