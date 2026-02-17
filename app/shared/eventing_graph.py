@@ -215,13 +215,42 @@ def _sync_tags(*, source_label: str, source_id: str | None, tags: list[str]) -> 
     )
 
 
-def _toggle_task_watcher(task_id: str | None, user_id: str | None) -> None:
+def _toggle_task_watcher(task_id: str | None, user_id: str | None, watched: bool | None = None) -> None:
     tid = _as_str(task_id)
     uid = _as_str(user_id)
     if not tid or not uid:
         return
     _merge_node("Task", tid, {})
     _merge_node("User", uid, {})
+    if watched is True:
+        run_graph_query(
+            """
+            MATCH (t:Task {id:$task_id})
+            MATCH (u:User {id:$user_id})
+            MERGE (t)-[:WATCHED_BY]->(u)
+            """,
+            {
+                "task_id": tid,
+                "user_id": uid,
+            },
+            write=True,
+        )
+        return
+    if watched is False:
+        run_graph_query(
+            """
+            MATCH (t:Task {id:$task_id})
+            MATCH (u:User {id:$user_id})
+            OPTIONAL MATCH (t)-[w:WATCHED_BY]->(u)
+            DELETE w
+            """,
+            {
+                "task_id": tid,
+                "user_id": uid,
+            },
+            write=True,
+        )
+        return
     run_graph_query(
         """
         MATCH (t:Task {id:$task_id})
@@ -457,7 +486,9 @@ def _project_task_event(ev: EventEnvelope, commit_position: int) -> None:
         _sync_tags(source_label="Task", source_id=task_id, tags=_as_tag_list(props.get("labels")))
 
     if ev.event_type == TASK_EVENT_WATCH_TOGGLED:
-        _toggle_task_watcher(task_id, _as_str(p.get("user_id")))
+        watched_payload = p.get("watched")
+        watched_value = None if watched_payload is None else bool(watched_payload)
+        _toggle_task_watcher(task_id, _as_str(p.get("user_id")), watched_value)
 
     if ev.event_type == TASK_EVENT_COMMENT_ADDED:
         _register_task_comment(task_id, _as_str(p.get("user_id")), ev.version)

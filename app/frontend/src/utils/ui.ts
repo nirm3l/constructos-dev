@@ -191,6 +191,28 @@ export function parseCommaTags(raw: string): string[] {
   return out
 }
 
+export const DEFAULT_PROJECT_STATUSES: string[] = ['To do', 'In progress', 'Done']
+
+export function parseProjectStatusesText(raw: string): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const value of String(raw || '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)) {
+    const key = value.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(value)
+  }
+  return out.length > 0 ? out : [...DEFAULT_PROJECT_STATUSES]
+}
+
+export function projectStatusesToText(statuses: string[] | undefined | null): string {
+  const items = Array.isArray(statuses) && statuses.length > 0 ? statuses : DEFAULT_PROJECT_STATUSES
+  return items.join(', ')
+}
+
 export function parseExternalRefsText(raw: string): ExternalRef[] {
   return String(raw || '')
     .split('\n')

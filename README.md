@@ -159,6 +159,24 @@ curl -sS http://localhost:8091/mcp \
 ./scripts/deploy.sh
 ```
 
+## Advanced Knowledge Graph Demo Seed
+For a larger, realistic GraphRAG demo project (rules + specs + tasks + notes + comments + graph artifacts):
+
+```bash
+./scripts/seed_graph_power_demo.sh
+```
+
+The script writes outputs to `data/graph-power-demo/<project_id>/` including:
+- `manifest.json`
+- `overview.json`
+- `context-pack.json`
+- focused context packs
+- `subgraph.json`
+- `demo-questions.md`
+
+Walkthrough guide:
+- `docs/knowledge-graph-power-demo-playbook.md`
+
 `./scripts/deploy.sh` auto-increments app version (`VERSION` + frontend `package.json`), writes deploy metadata to `.deploy.env`, then rebuilds and restarts Docker Compose services.
 
 App URLs:

@@ -133,6 +133,7 @@ class ProjectCreate(BaseModel):
 class ProjectPatch(BaseModel):
     name: str | None = None
     description: str | None = None
+    custom_statuses: list[str] | None = None
     external_refs: list[ExternalRef] | None = None
     attachment_refs: list[AttachmentRef] | None = None
 

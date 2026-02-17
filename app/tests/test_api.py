@@ -237,6 +237,47 @@ def test_patch_project_name_and_description(tmp_path):
     assert payload['description'] == '## Overview\n\nUpdated project description.'
 
 
+def test_project_custom_statuses_can_be_configured_and_patched(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    created = client.post(
+        '/api/projects',
+        json={
+            'workspace_id': ws_id,
+            'name': 'Workflow project',
+            'custom_statuses': ['Backlog', 'In progress', 'Blocked', 'backlog'],
+        },
+    )
+    assert created.status_code == 200
+    project = created.json()
+    assert project['custom_statuses'] == ['Backlog', 'In progress', 'Blocked', 'Done']
+
+    board = client.get(f"/api/projects/{project['id']}/board")
+    assert board.status_code == 200
+    assert board.json()['statuses'] == ['Backlog', 'In progress', 'Blocked', 'Done']
+
+    task = client.post(
+        '/api/tasks',
+        json={'title': 'Status seed', 'workspace_id': ws_id, 'project_id': project['id']},
+    )
+    assert task.status_code == 200
+    assert task.json()['status'] == 'Backlog'
+
+    patched = client.patch(
+        f"/api/projects/{project['id']}",
+        json={'custom_statuses': ['Backlog', 'In progress', 'Ready for QA', 'Done']},
+    )
+    assert patched.status_code == 200
+    patched_payload = patched.json()
+    assert patched_payload['custom_statuses'] == ['Backlog', 'In progress', 'Ready for QA', 'Done']
+
+    board_after = client.get(f"/api/projects/{project['id']}/board")
+    assert board_after.status_code == 200
+    assert board_after.json()['statuses'] == ['Backlog', 'In progress', 'Ready for QA', 'Done']
+
+
 def test_project_members_assignment_and_user_types(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -1152,3 +1193,48 @@ def test_task_comment_projection_is_idempotent(tmp_path):
         rows = db.query(TaskComment).filter(TaskComment.task_id == task['id']).all()
         same_rows = [r for r in rows if r.body == 'same']
         assert len(same_rows) == 1
+
+
+def test_task_watch_projection_is_idempotent_and_dedupes(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    user_id = bootstrap['current_user']['id']
+
+    task = client.post('/api/tasks', json={'title': 'Watch idempotency', 'workspace_id': ws_id, 'project_id': project_id}).json()
+
+    from shared.eventing_rebuild import project_event
+    from shared.models import SessionLocal, TaskWatcher
+    from shared.core import EventEnvelope
+
+    with SessionLocal() as db:
+        ev_watch_on = EventEnvelope(
+            aggregate_type='Task',
+            aggregate_id=task['id'],
+            version=2,
+            event_type='TaskWatchToggled',
+            payload={'task_id': task['id'], 'user_id': user_id, 'watched': True},
+            metadata={'actor_id': user_id, 'workspace_id': ws_id, 'project_id': project_id, 'task_id': task['id']},
+        )
+        project_event(db, ev_watch_on)
+        project_event(db, ev_watch_on)
+        db.commit()
+
+        after_on = db.query(TaskWatcher).filter(TaskWatcher.task_id == task['id'], TaskWatcher.user_id == user_id).all()
+        assert len(after_on) == 1
+
+        ev_watch_off = EventEnvelope(
+            aggregate_type='Task',
+            aggregate_id=task['id'],
+            version=3,
+            event_type='TaskWatchToggled',
+            payload={'task_id': task['id'], 'user_id': user_id, 'watched': False},
+            metadata={'actor_id': user_id, 'workspace_id': ws_id, 'project_id': project_id, 'task_id': task['id']},
+        )
+        project_event(db, ev_watch_off)
+        project_event(db, ev_watch_off)
+        db.commit()
+
+        after_off = db.query(TaskWatcher).filter(TaskWatcher.task_id == task['id'], TaskWatcher.user_id == user_id).all()
+        assert len(after_off) == 0

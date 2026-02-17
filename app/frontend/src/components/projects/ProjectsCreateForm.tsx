@@ -15,6 +15,8 @@ export function ProjectsCreateForm({
   projectName,
   setProjectName,
   createProjectMutation,
+  projectCustomStatusesText,
+  setProjectCustomStatusesText,
   projectDescriptionView,
   setProjectDescriptionView,
   projectDescriptionRef,
@@ -39,6 +41,8 @@ export function ProjectsCreateForm({
   projectName: string
   setProjectName: React.Dispatch<React.SetStateAction<string>>
   createProjectMutation: { mutate: () => void; isPending: boolean }
+  projectCustomStatusesText: string
+  setProjectCustomStatusesText: React.Dispatch<React.SetStateAction<string>>
   projectDescriptionView: 'write' | 'preview'
   setProjectDescriptionView: React.Dispatch<React.SetStateAction<'write' | 'preview'>>
   projectDescriptionRef: React.RefObject<HTMLTextAreaElement | null>
@@ -84,6 +88,14 @@ export function ProjectsCreateForm({
           <Icon path="M12 5v14M5 12h14" />
         </button>
       </div>
+      <label className="field-control" style={{ marginBottom: 10 }}>
+        <span className="field-label">Board statuses (comma-separated)</span>
+        <input
+          value={projectCustomStatusesText}
+          onChange={(e) => setProjectCustomStatusesText(e.target.value)}
+          placeholder="To do, In progress, Blocked, Ready for QA, Done"
+        />
+      </label>
       <div className="md-editor-surface">
         <MarkdownModeToggle
           view={projectDescriptionView}

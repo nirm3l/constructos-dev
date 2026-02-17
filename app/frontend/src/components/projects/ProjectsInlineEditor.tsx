@@ -47,6 +47,8 @@ export function ProjectsInlineEditor({
   projectIsDirty,
   editProjectName,
   setEditProjectName,
+  editProjectCustomStatusesText,
+  setEditProjectCustomStatusesText,
   saveProjectMutation,
   deleteProjectMutation,
   editProjectDescriptionView,
@@ -91,6 +93,8 @@ export function ProjectsInlineEditor({
   projectIsDirty: boolean
   editProjectName: string
   setEditProjectName: React.Dispatch<React.SetStateAction<string>>
+  editProjectCustomStatusesText: string
+  setEditProjectCustomStatusesText: React.Dispatch<React.SetStateAction<string>>
   saveProjectMutation: ProjectMutation
   deleteProjectMutation: ProjectMutation
   editProjectDescriptionView: 'write' | 'preview'
@@ -162,6 +166,14 @@ export function ProjectsInlineEditor({
           <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
         </button>
       </div>
+      <label className="field-control" style={{ marginBottom: 10 }}>
+        <span className="field-label">Board statuses (comma-separated)</span>
+        <input
+          value={editProjectCustomStatusesText}
+          onChange={(e) => setEditProjectCustomStatusesText(e.target.value)}
+          placeholder="To do, In progress, Blocked, Ready for QA, Done"
+        />
+      </label>
       <div className="md-editor-surface">
         <MarkdownModeToggle
           view={editProjectDescriptionView}

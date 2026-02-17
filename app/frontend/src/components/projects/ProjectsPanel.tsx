@@ -25,6 +25,8 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
           projectName={state.projectName}
           setProjectName={state.setProjectName}
           createProjectMutation={state.createProjectMutation}
+          projectCustomStatusesText={state.projectCustomStatusesText}
+          setProjectCustomStatusesText={state.setProjectCustomStatusesText}
           projectDescriptionView={state.projectDescriptionView}
           setProjectDescriptionView={state.setProjectDescriptionView}
           projectDescriptionRef={state.projectDescriptionRef}
@@ -67,6 +69,8 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
             projectIsDirty={state.projectIsDirty}
             editProjectName={state.editProjectName}
             setEditProjectName={state.setEditProjectName}
+            editProjectCustomStatusesText={state.editProjectCustomStatusesText}
+            setEditProjectCustomStatusesText={state.setEditProjectCustomStatusesText}
             saveProjectMutation={state.saveProjectMutation}
             deleteProjectMutation={state.deleteProjectMutation}
             editProjectDescriptionView={state.editProjectDescriptionView}

@@ -1,11 +1,12 @@
 import React from 'react'
-import { attachmentRefsToText, externalRefsToText } from '../utils/ui'
+import { attachmentRefsToText, externalRefsToText, projectStatusesToText } from '../utils/ui'
 
 export function useProjectEditorEffects(c: any) {
   React.useEffect(() => {
     if (!c.selectedProject) {
       c.setEditProjectName('')
       c.setEditProjectDescription('')
+      c.setEditProjectCustomStatusesText('')
       c.setEditProjectExternalRefsText('')
       c.setEditProjectAttachmentRefsText('')
       c.setEditProjectDescriptionView('write')
@@ -18,6 +19,7 @@ export function useProjectEditorEffects(c: any) {
     }
     c.setEditProjectName(c.selectedProject.name ?? '')
     c.setEditProjectDescription(c.selectedProject.description ?? '')
+    c.setEditProjectCustomStatusesText(projectStatusesToText(c.selectedProject.custom_statuses))
     c.setEditProjectExternalRefsText(externalRefsToText(c.selectedProject.external_refs))
     c.setEditProjectAttachmentRefsText(attachmentRefsToText(c.selectedProject.attachment_refs))
     const hasDescription = Boolean((c.selectedProject.description ?? '').trim())
@@ -33,6 +35,12 @@ export function useProjectEditorEffects(c: any) {
     const hasDescription = Boolean(c.projectDescription.trim())
     c.setProjectDescriptionView(hasDescription ? 'preview' : 'write')
   }, [c.showProjectCreateForm])
+
+  React.useEffect(() => {
+    if (!c.showProjectCreateForm) return
+    if (String(c.projectCustomStatusesText || '').trim()) return
+    c.setProjectCustomStatusesText(projectStatusesToText(null))
+  }, [c.projectCustomStatusesText, c.setProjectCustomStatusesText, c.showProjectCreateForm])
 
   React.useEffect(() => {
     if (!c.selectedProjectRule) return

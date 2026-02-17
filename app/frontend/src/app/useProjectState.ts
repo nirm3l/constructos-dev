@@ -5,6 +5,7 @@ import type { DraftProjectRule } from '../components/projects/ProjectsCreateForm
 export function useProjectState() {
   const [projectName, setProjectName] = React.useState('')
   const [projectDescription, setProjectDescription] = React.useState('')
+  const [projectCustomStatusesText, setProjectCustomStatusesText] = React.useState('')
   const [projectExternalRefsText, setProjectExternalRefsText] = React.useState('')
   const [projectAttachmentRefsText, setProjectAttachmentRefsText] = React.useState('')
   const [projectDescriptionView, setProjectDescriptionView] = React.useState<'write' | 'preview'>('write')
@@ -12,6 +13,7 @@ export function useProjectState() {
   const [showProjectEditForm, setShowProjectEditForm] = React.useState(false)
   const [editProjectName, setEditProjectName] = React.useState('')
   const [editProjectDescription, setEditProjectDescription] = React.useState('')
+  const [editProjectCustomStatusesText, setEditProjectCustomStatusesText] = React.useState('')
   const [editProjectExternalRefsText, setEditProjectExternalRefsText] = React.useState('')
   const [editProjectAttachmentRefsText, setEditProjectAttachmentRefsText] = React.useState('')
   const [createProjectMemberIds, setCreateProjectMemberIds] = React.useState<string[]>([])
@@ -42,6 +44,8 @@ export function useProjectState() {
     setProjectName,
     projectDescription,
     setProjectDescription,
+    projectCustomStatusesText,
+    setProjectCustomStatusesText,
     projectExternalRefsText,
     setProjectExternalRefsText,
     projectAttachmentRefsText,
@@ -56,6 +60,8 @@ export function useProjectState() {
     setEditProjectName,
     editProjectDescription,
     setEditProjectDescription,
+    editProjectCustomStatusesText,
+    setEditProjectCustomStatusesText,
     editProjectExternalRefsText,
     setEditProjectExternalRefsText,
     editProjectAttachmentRefsText,

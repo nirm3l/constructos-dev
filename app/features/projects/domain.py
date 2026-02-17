@@ -40,6 +40,7 @@ class ProjectAggregate(Aggregate):
         *,
         name: str | None = None,
         description: str | None = None,
+        custom_statuses: list[str] | None = None,
         external_refs: list[dict[str, Any]] | None = None,
         attachment_refs: list[dict[str, Any]] | None = None,
     ) -> None:
@@ -47,6 +48,8 @@ class ProjectAggregate(Aggregate):
             self.name = name
         if description is not None:
             self.description = description
+        if custom_statuses is not None:
+            self.custom_statuses = custom_statuses
         if external_refs is not None:
             self.external_refs = external_refs
         if attachment_refs is not None:

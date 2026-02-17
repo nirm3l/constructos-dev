@@ -21,6 +21,7 @@ import { useCodexChatState } from './useCodexChatState'
 import { useTaskEditorState } from './useTaskEditorState'
 import { AppContent } from '../components/layout/AppContent'
 import {
+  DEFAULT_PROJECT_STATUSES,
   activityTone,
   attachmentRefsToText,
   externalRefsToText,
@@ -87,14 +88,16 @@ function App() {
   const [quickDueDate, setQuickDueDate] = React.useState('')
   const [quickDueDateFocused, setQuickDueDateFocused] = React.useState(false)
   const {
-    projectName, setProjectName, projectDescription, setProjectDescription, projectExternalRefsText, setProjectExternalRefsText,
-    projectAttachmentRefsText, setProjectAttachmentRefsText, projectDescriptionView, setProjectDescriptionView, showProjectCreateForm,
+    projectName, setProjectName, projectDescription, setProjectDescription, projectCustomStatusesText, setProjectCustomStatusesText,
+    projectExternalRefsText, setProjectExternalRefsText, projectAttachmentRefsText, setProjectAttachmentRefsText,
+    projectDescriptionView, setProjectDescriptionView, showProjectCreateForm,
     setShowProjectCreateForm, showProjectEditForm, setShowProjectEditForm, editProjectName, setEditProjectName, editProjectDescription,
-    setEditProjectDescription, editProjectExternalRefsText, setEditProjectExternalRefsText, editProjectAttachmentRefsText,
-    setEditProjectAttachmentRefsText, createProjectMemberIds, setCreateProjectMemberIds, editProjectMemberIds, setEditProjectMemberIds,
-    editProjectDescriptionView, setEditProjectDescriptionView, selectedProjectRuleId, setSelectedProjectRuleId, projectRuleTitle,
-    setProjectRuleTitle, projectRuleBody, setProjectRuleBody, projectRuleView, setProjectRuleView, draftProjectRules,
-    setDraftProjectRules, selectedDraftProjectRuleId, setSelectedDraftProjectRuleId, draftProjectRuleTitle, setDraftProjectRuleTitle,
+    setEditProjectDescription, editProjectCustomStatusesText, setEditProjectCustomStatusesText, editProjectExternalRefsText,
+    setEditProjectExternalRefsText, editProjectAttachmentRefsText, setEditProjectAttachmentRefsText, createProjectMemberIds,
+    setCreateProjectMemberIds, editProjectMemberIds, setEditProjectMemberIds, editProjectDescriptionView,
+    setEditProjectDescriptionView, selectedProjectRuleId, setSelectedProjectRuleId, projectRuleTitle, setProjectRuleTitle,
+    projectRuleBody, setProjectRuleBody, projectRuleView, setProjectRuleView, draftProjectRules, setDraftProjectRules,
+    selectedDraftProjectRuleId, setSelectedDraftProjectRuleId, draftProjectRuleTitle, setDraftProjectRuleTitle,
     draftProjectRuleBody, setDraftProjectRuleBody, draftProjectRuleView, setDraftProjectRuleView, selectedProjectId,
     setSelectedProjectId, projectsMode, setProjectsMode,
   } = useProjectState()
@@ -306,6 +309,24 @@ function App() {
       selectedProjectId,
       notifications: notifications.data ?? [],
     })
+  const taskStatusOptions = React.useMemo(() => {
+    const projectIdForStatus = editProjectId || selectedTask?.project_id || selectedProjectId
+    const project = (bootstrap.data?.projects ?? []).find((item: any) => item.id === projectIdForStatus)
+    const base = Array.isArray(project?.custom_statuses) && project.custom_statuses.length > 0
+      ? project.custom_statuses
+      : DEFAULT_PROJECT_STATUSES
+    const out: string[] = []
+    const seen = new Set<string>()
+    for (const raw of [...base, editStatus, selectedTask?.status]) {
+      const status = String(raw || '').trim()
+      if (!status) continue
+      const key = status.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(status)
+    }
+    return out.length > 0 ? out : [...DEFAULT_PROJECT_STATUSES]
+  }, [bootstrap.data?.projects, editProjectId, editStatus, selectedProjectId, selectedTask?.project_id, selectedTask?.status])
   const specificationNameMap = React.useMemo(() => {
     const out: Record<string, string> = {}
     const attach = (items: any[] | undefined) => {
@@ -403,6 +424,7 @@ function App() {
     selectedProject,
     editProjectName,
     editProjectDescription,
+    editProjectCustomStatusesText,
     parseExternalRefsText,
     editProjectExternalRefsText,
     parseAttachmentRefsText,
@@ -545,6 +567,7 @@ function App() {
     editProjectName,
     editProjectMemberIds,
     editProjectDescription,
+    editProjectCustomStatusesText,
     editProjectExternalRefsText,
     parseExternalRefsText,
     editProjectAttachmentRefsText,
@@ -643,12 +666,14 @@ function App() {
     setSelectedTaskId,
     projectName,
     projectDescription,
+    projectCustomStatusesText,
     projectExternalRefsText,
     projectAttachmentRefsText,
     createProjectMemberIds,
     draftProjectRules,
     setProjectName,
     setProjectDescription,
+    setProjectCustomStatusesText,
     setProjectExternalRefsText,
     setProjectAttachmentRefsText,
     setProjectDescriptionView,
@@ -696,6 +721,7 @@ function App() {
     selectedProject,
     setEditProjectName,
     setEditProjectDescription,
+    setEditProjectCustomStatusesText,
     setEditProjectExternalRefsText,
     setEditProjectAttachmentRefsText,
     setEditProjectDescriptionView,
@@ -706,6 +732,8 @@ function App() {
     setProjectRuleView,
     showProjectCreateForm,
     projectDescription,
+    projectCustomStatusesText,
+    setProjectCustomStatusesText,
     setProjectDescriptionView,
     selectedProjectRule,
     selectedDraftProjectRuleId,
@@ -856,6 +884,8 @@ function App() {
       projectName,
       setProjectName,
       createProjectMutation,
+      projectCustomStatusesText,
+      setProjectCustomStatusesText,
       projectDescriptionView,
       setProjectDescriptionView,
       projectDescriptionRef,
@@ -887,6 +917,8 @@ function App() {
       copyShareLink,
       editProjectName,
       setEditProjectName,
+      editProjectCustomStatusesText,
+      setEditProjectCustomStatusesText,
       saveProjectMutation,
       deleteProjectMutation,
       editProjectDescriptionView,
@@ -1045,6 +1077,7 @@ function App() {
       setEditTitle,
       editStatus,
       setEditStatus,
+      taskStatusOptions,
       editPriority,
       setEditPriority,
       editDueDate,

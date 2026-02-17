@@ -237,6 +237,7 @@ export const createProject = (
     workspace_id: string
     name: string
     description?: string
+    custom_statuses?: string[]
     member_user_ids?: string[]
     external_refs?: ExternalRef[]
     attachment_refs?: AttachmentRef[]
@@ -247,7 +248,7 @@ export const createProject = (
 export const patchProject = (
   userId: string,
   projectId: string,
-  payload: Partial<Pick<Project, 'name' | 'description' | 'external_refs' | 'attachment_refs'>>
+  payload: Partial<Pick<Project, 'name' | 'description' | 'custom_statuses' | 'external_refs' | 'attachment_refs'>>
 ) => api<Project>(`/api/projects/${projectId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })
 
 export const deleteProject = (userId: string, projectId: string) =>

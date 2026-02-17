@@ -48,6 +48,7 @@ export function AppOverlays({ state }: { state: any }) {
           projectNames: state.projectNames,
           editStatus: state.editStatus,
           setEditStatus: state.setEditStatus,
+          taskStatusOptions: state.taskStatusOptions,
           editPriority: state.editPriority,
           setEditPriority: state.setEditPriority,
           editDueDate: state.editDueDate,

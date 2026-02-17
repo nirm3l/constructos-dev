@@ -607,19 +607,26 @@ class ToggleWatchHandler:
 
     def __call__(self) -> dict:
         workspace_id, project_id, _, _ = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member", "Guest"})
+        currently_watched = (
+            self.ctx.db.execute(
+                select(func.count()).select_from(TaskWatcher).where(
+                    TaskWatcher.task_id == self.task_id,
+                    TaskWatcher.user_id == self.ctx.user.id,
+                )
+            ).scalar_one()
+            or 0
+        ) > 0
+        next_watched = not currently_watched
         append_event(
             self.ctx.db,
             aggregate_type="Task",
             aggregate_id=self.task_id,
             event_type=EVENT_WATCH_TOGGLED,
-            payload={"task_id": self.task_id, "user_id": self.ctx.user.id},
+            payload={"task_id": self.task_id, "user_id": self.ctx.user.id, "watched": next_watched},
             metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": self.task_id},
         )
         self.ctx.db.commit()
-        watched = self.ctx.db.execute(
-            select(TaskWatcher).where(TaskWatcher.task_id == self.task_id, TaskWatcher.user_id == self.ctx.user.id)
-        ).scalar_one_or_none() is not None
-        return {"watched": watched}
+        return {"watched": next_watched}
 
 
 @dataclass(frozen=True, slots=True)

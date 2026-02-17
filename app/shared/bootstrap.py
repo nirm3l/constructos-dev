@@ -16,7 +16,22 @@ from features.projects.domain import EVENT_CREATED as PROJECT_EVENT_CREATED
 from features.rules.domain import EVENT_CREATED as PROJECT_RULE_EVENT_CREATED
 from features.specifications.domain import EVENT_CREATED as SPECIFICATION_EVENT_CREATED
 from features.tasks.domain import EVENT_CREATED as TASK_EVENT_CREATED
-from .models import Base, Note, Project, ProjectMember, ProjectRule, ProjectTagIndex, SessionLocal, Specification, Task, User, Workspace, WorkspaceMember, engine
+from .models import (
+    Base,
+    Note,
+    Project,
+    ProjectMember,
+    ProjectRule,
+    ProjectTagIndex,
+    SessionLocal,
+    Specification,
+    Task,
+    TaskWatcher,
+    User,
+    Workspace,
+    WorkspaceMember,
+    engine,
+)
 from .serializers import to_iso_utc
 from .settings import (
     AGENT_SYSTEM_FULL_NAME,
@@ -154,6 +169,25 @@ def ensure_task_comment_table_columns(db: Session):
     db.commit()
 
 
+def ensure_task_watcher_table_constraints(db: Session):
+    duplicates = db.execute(
+        select(TaskWatcher.task_id, TaskWatcher.user_id)
+        .group_by(TaskWatcher.task_id, TaskWatcher.user_id)
+        .having(func.count(TaskWatcher.id) > 1)
+    ).all()
+    for task_id, user_id in duplicates:
+        rows = db.execute(
+            select(TaskWatcher)
+            .where(TaskWatcher.task_id == task_id, TaskWatcher.user_id == user_id)
+            .order_by(TaskWatcher.id.asc())
+        ).scalars().all()
+        for row in rows[1:]:
+            db.delete(row)
+    db.flush()
+    db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_task_watchers_task_user ON task_watchers(task_id, user_id)"))
+    db.commit()
+
+
 def bootstrap_data():
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
@@ -165,6 +199,7 @@ def bootstrap_data():
         ensure_task_table_columns(db)
         ensure_saved_view_table_columns(db)
         ensure_task_comment_table_columns(db)
+        ensure_task_watcher_table_constraints(db)
         ensure_system_users(db)
         default_user = db.get(User, DEFAULT_USER_ID)
         if not default_user:

@@ -85,6 +85,26 @@ def _normalize_attachment_refs(values: list[dict] | None) -> list[dict]:
     return out
 
 
+def _normalize_project_statuses(values: list[str] | None) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in values or []:
+        status = str(raw or "").strip()
+        if not status:
+            continue
+        key = status.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(status)
+    if not out:
+        out = list(DEFAULT_STATUSES)
+        seen = {status.lower() for status in out}
+    if "done" not in seen:
+        out.append("Done")
+    return out
+
+
 @dataclass(frozen=True, slots=True)
 class CreateProjectHandler:
     ctx: CommandContext
@@ -114,7 +134,7 @@ class CreateProjectHandler:
                 "workspace_id": self.payload.workspace_id,
                 "name": self.payload.name.strip(),
                 "description": self.payload.description,
-                "custom_statuses": self.payload.custom_statuses or DEFAULT_STATUSES,
+                "custom_statuses": _normalize_project_statuses(self.payload.custom_statuses),
                 "external_refs": _normalize_external_refs([r.model_dump() for r in self.payload.external_refs]),
                 "attachment_refs": _normalize_attachment_refs([r.model_dump() for r in self.payload.attachment_refs]),
                 "status": "Active",
@@ -242,6 +262,8 @@ class PatchProjectHandler:
             event_payload["name"] = name
         if "description" in data and data["description"] is not None:
             event_payload["description"] = str(data["description"])
+        if "custom_statuses" in data and data["custom_statuses"] is not None:
+            event_payload["custom_statuses"] = _normalize_project_statuses(data["custom_statuses"])
         if "external_refs" in data and data["external_refs"] is not None:
             event_payload["external_refs"] = _normalize_external_refs(data["external_refs"])
         if "attachment_refs" in data and data["attachment_refs"] is not None:

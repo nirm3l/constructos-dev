@@ -1,5 +1,5 @@
 import React from 'react'
-import { parseCommaTags, stableJson, toLocalDateTimeInput } from '../utils/ui'
+import { parseCommaTags, parseProjectStatusesText, stableJson, toLocalDateTimeInput } from '../utils/ui'
 
 export function useEditorGuards(c: any) {
   const toggleCreateProjectMember = React.useCallback((userIdToToggle: string) => {
@@ -31,12 +31,15 @@ export function useEditorGuards(c: any) {
     return (
       c.editProjectName.trim() !== (c.selectedProject.name ?? '').trim() ||
       c.editProjectDescription !== (c.selectedProject.description ?? '') ||
+      stableJson(parseProjectStatusesText(c.editProjectCustomStatusesText)) !==
+        stableJson(c.selectedProject.custom_statuses ?? []) ||
       stableJson(c.parseExternalRefsText(c.editProjectExternalRefsText)) !== stableJson(c.selectedProject.external_refs ?? []) ||
       stableJson(c.parseAttachmentRefsText(c.editProjectAttachmentRefsText)) !== stableJson(c.selectedProject.attachment_refs ?? []) ||
       stableJson(Array.from(new Set(c.editProjectMemberIds.filter(Boolean))).sort()) !== stableJson(selectedProjectMemberIds)
     )
   }, [
     c.editProjectAttachmentRefsText,
+    c.editProjectCustomStatusesText,
     c.editProjectDescription,
     c.editProjectExternalRefsText,
     c.editProjectMemberIds,

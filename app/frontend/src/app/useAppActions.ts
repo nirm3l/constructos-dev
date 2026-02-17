@@ -8,7 +8,7 @@ import {
   removeProjectMember,
   uploadAttachment,
 } from '../api'
-import { parseCommaTags, toErrorMessage } from '../utils/ui'
+import { parseCommaTags, parseProjectStatusesText, toErrorMessage } from '../utils/ui'
 
 type SharePayload = {
   tab?: string
@@ -157,6 +157,7 @@ export function useAppActions(c: any) {
     await patchProject(c.userId, c.selectedProjectId, {
       name,
       description: c.editProjectDescription,
+      custom_statuses: parseProjectStatusesText(c.editProjectCustomStatusesText),
       external_refs: c.parseExternalRefsText(c.editProjectExternalRefsText),
       attachment_refs: c.parseAttachmentRefsText(c.editProjectAttachmentRefsText),
     })
@@ -164,6 +165,7 @@ export function useAppActions(c: any) {
     await c.qc.invalidateQueries({ queryKey: ['bootstrap'] })
   }, [
     c.editProjectAttachmentRefsText,
+    c.editProjectCustomStatusesText,
     c.editProjectDescription,
     c.editProjectExternalRefsText,
     c.editProjectMemberIds,

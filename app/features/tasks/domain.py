@@ -108,8 +108,8 @@ class TaskAggregate(Aggregate):
         _ = (task_id, comment_id)
 
     @event("WatchToggled")
-    def watch_toggled(self, *, task_id: str, user_id: str) -> None:
-        _ = (task_id, user_id)
+    def watch_toggled(self, *, task_id: str, user_id: str, watched: bool | None = None) -> None:
+        _ = (task_id, user_id, watched)
 
 
 EVENT_CREATED = "TaskCreated"

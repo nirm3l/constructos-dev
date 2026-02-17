@@ -6,6 +6,9 @@ import { TaskDrawerInsights } from './TaskDrawerInsights'
 export function TaskDrawer({ state }: { state: any }) {
   if (!state.selectedTask) return null
   const linkedNotes: Note[] = state.taskNotes?.data?.items ?? []
+  const statusOptions: string[] = (state.taskStatusOptions ?? []).length > 0
+    ? state.taskStatusOptions
+    : ['To do', 'In progress', 'Done']
 
   return (
     <div className="drawer open" onClick={() => state.closeTaskEditor()}>
@@ -104,9 +107,11 @@ export function TaskDrawer({ state }: { state: any }) {
           <label className="field-control task-field-half">
             <span className="field-label">Status</span>
             <select value={state.editStatus} onChange={(e) => state.setEditStatus(e.target.value)}>
-              <option value="To do">To do</option>
-              <option value="In progress">In progress</option>
-              <option value="Done">Done</option>
+              {statusOptions.map((status) => (
+                <option key={status} value={status}>
+                  {status}
+                </option>
+              ))}
             </select>
           </label>
           <label className="field-control task-field-half">

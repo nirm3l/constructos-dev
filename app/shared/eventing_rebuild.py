@@ -376,7 +376,7 @@ def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str
             "name": p["name"],
             "description": p.get("description", ""),
             "status": p.get("status", "Active"),
-            "custom_statuses": p.get("custom_statuses", DEFAULT_STATUSES),
+            "custom_statuses": p.get("custom_statuses", DEFAULT_STATUSES) or DEFAULT_STATUSES,
             "external_refs": p.get("external_refs", []),
             "attachment_refs": p.get("attachment_refs", []),
             "is_deleted": False,
@@ -388,6 +388,9 @@ def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str
             s["name"] = p.get("name")
         if "description" in p:
             s["description"] = p.get("description", "")
+        if "custom_statuses" in p:
+            statuses = p.get("custom_statuses")
+            s["custom_statuses"] = statuses if statuses else DEFAULT_STATUSES
         if "external_refs" in p:
             s["external_refs"] = p.get("external_refs", [])
         if "attachment_refs" in p:
@@ -564,7 +567,7 @@ def project_event(db: Session, ev: EventEnvelope):
         project.name = p["name"]
         project.description = p.get("description", "") or ""
         project.status = p.get("status", "Active")
-        project.custom_statuses = json.dumps(p.get("custom_statuses", DEFAULT_STATUSES))
+        project.custom_statuses = json.dumps(p.get("custom_statuses", DEFAULT_STATUSES) or DEFAULT_STATUSES)
         project.external_refs = json.dumps(p.get("external_refs", []))
         project.attachment_refs = json.dumps(p.get("attachment_refs", []))
     elif ev.event_type == PROJECT_EVENT_DELETED:
@@ -579,6 +582,8 @@ def project_event(db: Session, ev: EventEnvelope):
                 project.name = p.get("name") or project.name
             if "description" in p:
                 project.description = p.get("description", "") or ""
+            if "custom_statuses" in p:
+                project.custom_statuses = json.dumps(p.get("custom_statuses", DEFAULT_STATUSES) or DEFAULT_STATUSES)
             if "external_refs" in p:
                 project.external_refs = json.dumps(p.get("external_refs", []))
             if "attachment_refs" in p:
@@ -850,16 +855,31 @@ def project_event(db: Session, ev: EventEnvelope):
         if comment and comment.task_id == p["task_id"]:
             db.delete(comment)
     elif ev.event_type == TASK_EVENT_WATCH_TOGGLED:
-        existing = db.execute(
-            select(TaskWatcher).where(
-                TaskWatcher.task_id == p["task_id"],
-                TaskWatcher.user_id == p["user_id"],
-            )
-        ).scalar_one_or_none()
-        if existing:
-            db.delete(existing)
-        else:
-            db.add(TaskWatcher(task_id=p["task_id"], user_id=p["user_id"]))
+        task_id = p.get("task_id")
+        user_id = p.get("user_id")
+        if task_id and user_id:
+            rows = db.execute(
+                select(TaskWatcher)
+                .where(TaskWatcher.task_id == task_id, TaskWatcher.user_id == user_id)
+                .order_by(TaskWatcher.id.asc())
+            ).scalars().all()
+            watched_payload = p.get("watched")
+            if watched_payload is None:
+                # Legacy event shape: toggle.
+                if rows:
+                    for row in rows:
+                        db.delete(row)
+                else:
+                    db.add(TaskWatcher(task_id=task_id, user_id=user_id))
+            elif bool(watched_payload):
+                if not rows:
+                    db.add(TaskWatcher(task_id=task_id, user_id=user_id))
+                else:
+                    for row in rows[1:]:
+                        db.delete(row)
+            else:
+                for row in rows:
+                    db.delete(row)
     elif ev.event_type == NOTIFICATION_EVENT_MARKED_READ:
         n = db.get(Notification, p["notification_id"])
         if n and n.user_id == p["user_id"]:

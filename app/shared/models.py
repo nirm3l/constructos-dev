@@ -110,6 +110,7 @@ class Task(Base, TimeMixin):
 
 class TaskWatcher(Base):
     __tablename__ = "task_watchers"
+    __table_args__ = (UniqueConstraint("task_id", "user_id", name="ux_task_watchers_task_user"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id"))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
