@@ -72,6 +72,32 @@ export function NotesPanel({
                   {n.archived && <span className="badge">Archived</span>}
                   <strong>{displayTitle}</strong>
                 </div>
+                {(n.specification_id || n.task_id) && (
+                  <div className="row wrap" onClick={(e) => e.stopPropagation()}>
+                    {n.task_id && (
+                      <button
+                        className="pill subtle task-project-pill"
+                        onClick={() => state.openTask(n.task_id as string, n.project_id)}
+                        title="Open linked task"
+                        aria-label="Open linked task"
+                      >
+                        <Icon path="M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+                        <span>{state.taskNameMap[n.task_id] || `Task ${String(n.task_id).slice(0, 8)}`}</span>
+                      </button>
+                    )}
+                    {n.specification_id && (
+                      <button
+                        className="pill subtle task-project-pill task-spec-pill"
+                        onClick={() => state.openSpecification(n.specification_id as string, n.project_id)}
+                        title="Open linked specification"
+                        aria-label="Open linked specification"
+                      >
+                        <Icon path="M6 2h12a2 2 0 0 1 2 2v16l-4 2-4-2-4 2-4-2V4a2 2 0 0 1 2-2zm3 5h6m-6 4h6m-6 4h4" />
+                        <span>{state.specificationNameMap[n.specification_id] || `Specification ${String(n.specification_id).slice(0, 8)}`}</span>
+                      </button>
+                    )}
+                  </div>
+                )}
                 {(n.tags ?? []).length > 0 && (
                   <div className="note-tags">
                     {(n.tags ?? []).map((t) => (

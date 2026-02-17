@@ -233,6 +233,11 @@ class NotificationDTO:
     message: str
     is_read: bool
     created_at: str | None
+    workspace_id: str | None = None
+    project_id: str | None = None
+    task_id: str | None = None
+    note_id: str | None = None
+    specification_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

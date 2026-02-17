@@ -16,6 +16,10 @@ def _maybe_append_system_notification_event(
     *,
     user_id: str,
     workspace_id: str,
+    project_id: str | None = None,
+    task_id: str | None = None,
+    note_id: str | None = None,
+    specification_id: str | None = None,
     message: str,
     lookback_hours: int,
     append_event_fn,
@@ -32,13 +36,29 @@ def _maybe_append_system_notification_event(
         return False
 
     nid = allocate_id(db)
+    payload = {
+        "user_id": user_id,
+        "message": message,
+        "workspace_id": workspace_id,
+        "project_id": project_id,
+        "task_id": task_id,
+        "note_id": note_id,
+        "specification_id": specification_id,
+    }
     append_event_fn(
         db,
         aggregate_type="Notification",
         aggregate_id=nid,
         event_type=NOTIFICATION_EVENT_CREATED,
-        payload={"user_id": user_id, "message": message},
-        metadata={"actor_id": user_id, "workspace_id": workspace_id},
+        payload=payload,
+        metadata={
+            "actor_id": user_id,
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "task_id": task_id,
+            "note_id": note_id,
+            "specification_id": specification_id,
+        },
         expected_version=0,
     )
     db.flush()
@@ -87,6 +107,8 @@ def emit_system_notifications(db: Session, user, append_event_fn) -> int:
                 db,
                 user_id=user.id,
                 workspace_id=task.workspace_id or first_workspace_id,
+                project_id=task.project_id,
+                task_id=task.id,
                 message=f'Task "{task.title}" is due within 1 hour.',
                 lookback_hours=6,
                 append_event_fn=append_event_fn,
@@ -97,6 +119,8 @@ def emit_system_notifications(db: Session, user, append_event_fn) -> int:
                 db,
                 user_id=user.id,
                 workspace_id=task.workspace_id or first_workspace_id,
+                project_id=task.project_id,
+                task_id=task.id,
                 message=f'Overdue today ({local_today}): "{task.title}"',
                 lookback_hours=28,
                 append_event_fn=append_event_fn,

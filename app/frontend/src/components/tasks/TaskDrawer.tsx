@@ -1,9 +1,11 @@
 import React from 'react'
+import type { Note } from '../../types'
 import { AttachmentRefList, ExternalRefEditor, Icon } from '../shared/uiHelpers'
 import { TaskDrawerInsights } from './TaskDrawerInsights'
 
 export function TaskDrawer({ state }: { state: any }) {
   if (!state.selectedTask) return null
+  const linkedNotes: Note[] = state.taskNotes?.data?.items ?? []
 
   return (
     <div className="drawer open" onClick={() => state.closeTaskEditor()}>
@@ -70,8 +72,9 @@ export function TaskDrawer({ state }: { state: any }) {
           <button
             className="pill subtle task-project-pill"
             onClick={() => {
+              if (!state.closeTaskEditor()) return
               state.setSelectedProjectId(state.selectedTask.project_id)
-              state.setTab('tasks')
+              state.setTab('projects')
             }}
             title="Open project"
             aria-label="Open project"
@@ -80,6 +83,23 @@ export function TaskDrawer({ state }: { state: any }) {
             <span>{state.projectNames[state.selectedTask.project_id] || state.selectedTask.project_id}</span>
           </button>
         </div>
+        {state.selectedTask.specification_id && (
+          <div className="field-control" style={{ marginBottom: 8 }}>
+            <span className="field-label">Specification</span>
+            <button
+              className="pill subtle task-project-pill task-spec-pill"
+              onClick={() => state.openSpecification(state.selectedTask.specification_id as string, state.selectedTask.project_id)}
+              title="Open linked specification"
+              aria-label="Open linked specification"
+            >
+              <Icon path="M6 2h12a2 2 0 0 1 2 2v16l-4 2-4-2-4 2-4-2V4a2 2 0 0 1 2-2zm3 5h6m-6 4h6m-6 4h4" />
+              <span>
+                {state.specificationNameMap[state.selectedTask.specification_id] ||
+                  `Specification ${String(state.selectedTask.specification_id).slice(0, 8)}`}
+              </span>
+            </button>
+          </div>
+        )}
         <div className="task-edit-grid task-main-fields" style={{ marginBottom: 8 }}>
           <label className="field-control task-field-half">
             <span className="field-label">Status</span>
@@ -261,6 +281,53 @@ export function TaskDrawer({ state }: { state: any }) {
             Created by: {state.selectedTaskCreator}
             {state.selectedTaskTimeMeta ? ` | ${state.selectedTaskTimeMeta.label}: ${state.toUserDateTime(state.selectedTaskTimeMeta.value, state.userTimezone)}` : ''}
           </div>
+        </div>
+        <div className="spec-links-section" style={{ marginBottom: 10 }}>
+          <div className="spec-links-head">
+            <h3 style={{ margin: 0 }}>Linked notes ({linkedNotes.length})</h3>
+            <button
+              className="status-chip"
+              type="button"
+              onClick={() => {
+                if (!state.closeTaskEditor()) return
+                state.createNoteMutation.mutate({
+                  title: 'Untitled note',
+                  body: '',
+                  project_id: state.selectedTask.project_id,
+                  task_id: state.selectedTask.id,
+                })
+              }}
+              disabled={state.createNoteMutation.isPending}
+            >
+              + New
+            </button>
+          </div>
+          {state.taskNotes?.isLoading ? (
+            <div className="meta">Loading linked notes...</div>
+          ) : linkedNotes.length === 0 ? (
+            <div className="meta">No linked notes yet.</div>
+          ) : (
+            <div className="spec-linked-list">
+              {linkedNotes.map((note) => (
+                <div key={note.id} className="spec-linked-row">
+                  <div style={{ minWidth: 0 }}>
+                    <strong>{note.title || 'Untitled note'}</strong>
+                    <div className="meta">{(note.body || '').replace(/\s+/g, ' ').slice(0, 120) || '(empty)'}</div>
+                  </div>
+                  <button
+                    className="status-chip"
+                    type="button"
+                    onClick={() => {
+                      if (!state.closeTaskEditor()) return
+                      state.openNote(note.id, note.project_id)
+                    }}
+                  >
+                    Open
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
         {state.showTaskTagPicker && (
           <div className="drawer open" onClick={() => state.setShowTaskTagPicker(false)}>

@@ -20,6 +20,13 @@ export function AppContent({ state }: { state: any }) {
         notifications={state.notifications.data ?? []}
         unreadCount={state.unreadCount}
         onMarkRead={(notificationId) => state.markReadMutation.mutate(notificationId)}
+        onOpenTask={state.openTask}
+        onOpenNote={state.openNote}
+        onOpenSpecification={state.openSpecification}
+        onOpenProject={(projectId) => {
+          state.setSelectedProjectId(projectId)
+          state.setTab('projects')
+        }}
       />
 
       <AppNotices state={state} />

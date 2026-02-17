@@ -568,6 +568,20 @@ button.danger {
   height: 15px;
 }
 
+.task-spec-pill {
+  font-size: 12px;
+  padding: 5px 10px;
+  min-height: 30px;
+  border-color: color-mix(in srgb, var(--brand), var(--line) 45%);
+  background: color-mix(in srgb, var(--brand), var(--surface) 92%);
+  color: color-mix(in srgb, var(--text), var(--brand-strong) 22%);
+}
+
+.task-spec-pill .icon {
+  width: 14px;
+  height: 14px;
+}
+
 button.primary .icon,
 button.danger .icon,
 button.pill .icon {
@@ -1001,6 +1015,111 @@ button:disabled {
 .tag-picker-create {
   width: 100%;
   margin-top: 10px;
+}
+
+.spec-links-shell {
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.spec-links-section {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 20%);
+  display: grid;
+  gap: 8px;
+}
+
+.spec-links-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.spec-links-inline input {
+  width: 100%;
+}
+
+.spec-linked-list {
+  display: grid;
+  gap: 6px;
+}
+
+.spec-linked-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--line), transparent 8%);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.spec-linked-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.spec-linked-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.spec-link-body {
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+.spec-link-list {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+  max-height: 52vh;
+  overflow: auto;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 18%);
+}
+
+.spec-link-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
+  border-radius: 12px;
+  padding: 9px 10px;
+  background: var(--surface);
+}
+
+.spec-link-item > span:first-child {
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .spec-linked-row {
+    flex-wrap: wrap;
+  }
+
+  .spec-linked-actions {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-end;
+  }
 }
 
 .note-editor textarea {

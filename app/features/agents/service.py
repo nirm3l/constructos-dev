@@ -292,6 +292,64 @@ class AgentTaskService:
                 ),
             )
 
+    def list_spec_tasks(
+        self,
+        *,
+        specification_id: str,
+        auth_token: str | None = None,
+        archived: bool = False,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            spec_state = self._assert_specification_allowed(db=db, specification_id=specification_id)
+            assert spec_state is not None
+            ensure_role(db, spec_state.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            return list_tasks_read_model(
+                db,
+                user,
+                TaskListQuery(
+                    workspace_id=spec_state.workspace_id,
+                    project_id=spec_state.project_id,
+                    specification_id=specification_id,
+                    archived=archived,
+                    limit=limit,
+                    offset=offset,
+                ),
+            )
+
+    def list_spec_notes(
+        self,
+        *,
+        specification_id: str,
+        auth_token: str | None = None,
+        archived: bool = False,
+        pinned: bool | None = None,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            spec_state = self._assert_specification_allowed(db=db, specification_id=specification_id)
+            assert spec_state is not None
+            ensure_role(db, spec_state.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            return list_notes_read_model(
+                db,
+                user,
+                NoteListQuery(
+                    workspace_id=spec_state.workspace_id,
+                    project_id=spec_state.project_id,
+                    specification_id=specification_id,
+                    archived=archived,
+                    pinned=pinned,
+                    limit=limit,
+                    offset=offset,
+                ),
+            )
+
     def get_note(self, *, note_id: str, auth_token: str | None = None) -> dict:
         self._require_token(auth_token)
         user = self._resolve_actor_user()
@@ -519,6 +577,109 @@ class AgentTaskService:
             return SpecificationApplicationService(
                 db, user, command_id=command_id or f"mcp-specification-create-{uuid.uuid4()}"
             ).create_specification(payload)
+
+    def create_tasks_from_spec(
+        self,
+        *,
+        specification_id: str,
+        titles: list[str],
+        auth_token: str | None = None,
+        description: str = "",
+        priority: str = "Med",
+        due_date: str | None = None,
+        assignee_id: str | None = None,
+        labels: list[str] | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            self._assert_specification_allowed(db=db, specification_id=specification_id)
+            return SpecificationApplicationService(
+                db,
+                user,
+                command_id=command_id or f"mcp-spec-tasks-bulk-{uuid.uuid4()}",
+            ).create_tasks_from_specification(
+                specification_id,
+                titles=titles,
+                description=description,
+                priority=priority,
+                due_date=due_date,
+                assignee_id=assignee_id,
+                labels=labels or [],
+            )
+
+    def link_task_to_spec(
+        self,
+        *,
+        specification_id: str,
+        task_id: str,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            self._assert_specification_allowed(db=db, specification_id=specification_id)
+            return SpecificationApplicationService(
+                db,
+                user,
+                command_id=command_id or f"mcp-spec-task-link-{uuid.uuid4()}",
+            ).link_task_to_specification(specification_id, task_id)
+
+    def unlink_task_from_spec(
+        self,
+        *,
+        specification_id: str,
+        task_id: str,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            self._assert_specification_allowed(db=db, specification_id=specification_id)
+            return SpecificationApplicationService(
+                db,
+                user,
+                command_id=command_id or f"mcp-spec-task-unlink-{uuid.uuid4()}",
+            ).unlink_task_from_specification(specification_id, task_id)
+
+    def link_note_to_spec(
+        self,
+        *,
+        specification_id: str,
+        note_id: str,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            self._assert_specification_allowed(db=db, specification_id=specification_id)
+            return SpecificationApplicationService(
+                db,
+                user,
+                command_id=command_id or f"mcp-spec-note-link-{uuid.uuid4()}",
+            ).link_note_to_specification(specification_id, note_id)
+
+    def unlink_note_from_spec(
+        self,
+        *,
+        specification_id: str,
+        note_id: str,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            self._assert_specification_allowed(db=db, specification_id=specification_id)
+            return SpecificationApplicationService(
+                db,
+                user,
+                command_id=command_id or f"mcp-spec-note-unlink-{uuid.uuid4()}",
+            ).unlink_note_from_specification(specification_id, note_id)
 
     def update_project_rule(self, *, rule_id: str, patch: dict, auth_token: str | None = None, command_id: str | None = None) -> dict:
         self._require_token(auth_token)

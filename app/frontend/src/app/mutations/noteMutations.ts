@@ -12,12 +12,20 @@ export function useNoteMutations(c: any) {
   })
 
   const createNoteMutation = useMutation({
-    mutationFn: () =>
+    mutationFn: (payload?: {
+      title?: string
+      body?: string
+      project_id?: string
+      task_id?: string | null
+      specification_id?: string | null
+    }) =>
       createNote(c.userId, {
-        title: 'Untitled',
+        title: payload?.title?.trim() || 'Untitled',
         workspace_id: c.workspaceId,
-        project_id: c.selectedProjectId,
-        body: '',
+        project_id: payload?.project_id || c.selectedProjectId,
+        task_id: payload?.task_id ?? null,
+        specification_id: payload?.specification_id ?? null,
+        body: payload?.body ?? '',
         external_refs: [],
         attachment_refs: [],
       }),
@@ -38,6 +46,7 @@ export function useNoteMutations(c: any) {
     onSuccess: async () => {
       c.setUiError(null)
       await c.qc.invalidateQueries({ queryKey: ['notes'] })
+      await c.qc.invalidateQueries({ queryKey: ['task-notes'] })
     },
     onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Pin failed')
   })
@@ -47,6 +56,7 @@ export function useNoteMutations(c: any) {
     onSuccess: async () => {
       c.setUiError(null)
       await c.qc.invalidateQueries({ queryKey: ['notes'] })
+      await c.qc.invalidateQueries({ queryKey: ['task-notes'] })
     },
     onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Unpin failed')
   })
@@ -56,6 +66,7 @@ export function useNoteMutations(c: any) {
     onSuccess: async () => {
       c.setUiError(null)
       await c.qc.invalidateQueries({ queryKey: ['notes'] })
+      await c.qc.invalidateQueries({ queryKey: ['task-notes'] })
     },
     onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Archive note failed')
   })
@@ -65,6 +76,7 @@ export function useNoteMutations(c: any) {
     onSuccess: async () => {
       c.setUiError(null)
       await c.qc.invalidateQueries({ queryKey: ['notes'] })
+      await c.qc.invalidateQueries({ queryKey: ['task-notes'] })
     },
     onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Restore note failed')
   })
@@ -75,6 +87,7 @@ export function useNoteMutations(c: any) {
       c.setUiError(null)
       c.setSelectedNoteId(null)
       await c.qc.invalidateQueries({ queryKey: ['notes'] })
+      await c.qc.invalidateQueries({ queryKey: ['task-notes'] })
     },
     onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Delete note failed')
   })

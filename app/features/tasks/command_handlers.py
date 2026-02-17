@@ -318,7 +318,8 @@ class PatchTaskHandler:
         effective_project_id = str(data.get("project_id", project_id) or "")
         if not effective_project_id:
             raise HTTPException(status_code=422, detail="project_id is required")
-        if "project_id" in data and current_specification_id and "specification_id" not in data:
+        project_id_changed = "project_id" in data and str(data.get("project_id") or "") != str(project_id or "")
+        if project_id_changed and current_specification_id and "specification_id" not in data:
             raise HTTPException(status_code=409, detail="Cannot change project while task is linked to specification")
         if "specification_id" in data:
             specification_id = data.get("specification_id")

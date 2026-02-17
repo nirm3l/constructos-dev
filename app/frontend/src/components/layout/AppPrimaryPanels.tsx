@@ -45,6 +45,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           toggleSearchTag={state.toggleSearchTag}
           boardData={state.board.data}
           onOpenTaskEditor={state.openTaskEditor}
+          onOpenSpecification={state.openSpecification}
+          specificationNames={state.specificationNameMap}
           onMoveTaskStatus={state.moveTaskToStatus}
           tasks={state.tasks.data?.items ?? []}
           onRestoreTask={(taskId) => state.restoreTaskMutation.mutate(taskId)}
@@ -138,6 +140,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
         <SpecificationsPanel
           state={{
             specifications: state.specifications,
+            specTasks: state.specTasks,
+            specNotes: state.specNotes,
             specificationQ: state.specificationQ,
             setSpecificationQ: state.setSpecificationQ,
             specificationStatus: state.specificationStatus,
@@ -164,14 +168,24 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             archiveSpecificationMutation: state.archiveSpecificationMutation,
             restoreSpecificationMutation: state.restoreSpecificationMutation,
             deleteSpecificationMutation: state.deleteSpecificationMutation,
+            createSpecificationTaskMutation: state.createSpecificationTaskMutation,
+            bulkCreateSpecificationTasksMutation: state.bulkCreateSpecificationTasksMutation,
+            createSpecificationNoteMutation: state.createSpecificationNoteMutation,
+            linkTaskToSpecificationMutation: state.linkTaskToSpecificationMutation,
+            unlinkTaskFromSpecificationMutation: state.unlinkTaskFromSpecificationMutation,
+            linkNoteToSpecificationMutation: state.linkNoteToSpecificationMutation,
+            unlinkNoteFromSpecificationMutation: state.unlinkNoteFromSpecificationMutation,
             parseExternalRefsText: state.parseExternalRefsText,
             removeExternalRefByIndex: state.removeExternalRefByIndex,
             externalRefsToText: state.externalRefsToText,
             parseAttachmentRefsText: state.parseAttachmentRefsText,
             removeAttachmentByPath: state.removeAttachmentByPath,
             attachmentRefsToText: state.attachmentRefsToText,
+            selectedProjectId: state.selectedProjectId,
             workspaceId: state.workspaceId,
             userId: state.userId,
+            openTask: state.openTask,
+            openNote: state.openNote,
             specFileInputRef: state.specFileInputRef,
             uploadAttachmentRef: state.uploadAttachmentRef,
             toErrorMessage: state.toErrorMessage,
@@ -238,6 +252,10 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             canCreateTag: state.canCreateTag,
             addNoteTag: state.addNoteTag,
             setEditNoteTitle: state.setEditNoteTitle,
+            openSpecification: state.openSpecification,
+            specificationNameMap: state.specificationNameMap,
+            openTask: state.openTask,
+            taskNameMap: state.taskNameMap,
           }}
           actions={{
             copyShareLink: state.copyShareLink,
@@ -283,6 +301,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           total={state.tasks.data?.total ?? 0}
           showProject={state.tab === 'search'}
           projectNames={state.projectNames}
+          specificationNames={state.specificationNameMap}
+          onOpenSpecification={state.openSpecification}
           onOpen={state.openTaskEditor}
           onRestore={(taskId) => state.restoreTaskMutation.mutate(taskId)}
           onReopen={(taskId) => state.reopenTaskMutation.mutate(taskId)}

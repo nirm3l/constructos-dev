@@ -119,6 +119,26 @@ def ensure_note_table_columns(db: Session):
     db.commit()
 
 
+def ensure_notification_table_columns(db: Session):
+    existing = {column["name"] for column in inspect(db.bind).get_columns("notifications")}
+    if "workspace_id" not in existing:
+        db.execute(text("ALTER TABLE notifications ADD COLUMN workspace_id VARCHAR(36)"))
+    if "project_id" not in existing:
+        db.execute(text("ALTER TABLE notifications ADD COLUMN project_id VARCHAR(36)"))
+    if "task_id" not in existing:
+        db.execute(text("ALTER TABLE notifications ADD COLUMN task_id VARCHAR(36)"))
+    if "note_id" not in existing:
+        db.execute(text("ALTER TABLE notifications ADD COLUMN note_id VARCHAR(36)"))
+    if "specification_id" not in existing:
+        db.execute(text("ALTER TABLE notifications ADD COLUMN specification_id VARCHAR(36)"))
+    db.execute(text("CREATE INDEX IF NOT EXISTS ix_notifications_workspace_id ON notifications(workspace_id)"))
+    db.execute(text("CREATE INDEX IF NOT EXISTS ix_notifications_project_id ON notifications(project_id)"))
+    db.execute(text("CREATE INDEX IF NOT EXISTS ix_notifications_task_id ON notifications(task_id)"))
+    db.execute(text("CREATE INDEX IF NOT EXISTS ix_notifications_note_id ON notifications(note_id)"))
+    db.execute(text("CREATE INDEX IF NOT EXISTS ix_notifications_specification_id ON notifications(specification_id)"))
+    db.commit()
+
+
 def ensure_task_comment_table_columns(db: Session):
     existing = {column["name"] for column in inspect(db.bind).get_columns("task_comments")}
     if "event_version" not in existing:
@@ -133,6 +153,7 @@ def bootstrap_data():
         ensure_user_table_columns(db)
         ensure_project_table_columns(db)
         ensure_note_table_columns(db)
+        ensure_notification_table_columns(db)
         ensure_task_table_columns(db)
         ensure_saved_view_table_columns(db)
         ensure_task_comment_table_columns(db)

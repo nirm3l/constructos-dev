@@ -1,10 +1,17 @@
 import { useMutation } from '@tanstack/react-query'
 import {
   archiveSpecification,
+  bulkCreateSpecificationTasks,
   createSpecification,
+  createSpecificationNote,
+  createSpecificationTask,
   deleteSpecification,
+  linkNoteToSpecification,
+  linkTaskToSpecification,
   patchSpecification,
   restoreSpecification,
+  unlinkNoteFromSpecification,
+  unlinkTaskFromSpecification,
 } from '../../api'
 import { toErrorMessage } from '../../utils/ui'
 
@@ -73,11 +80,102 @@ export function useSpecificationMutations(c: any) {
     onError: (err) => c.setUiError(toErrorMessage(err, 'Specification delete failed')),
   })
 
+  const createSpecificationTaskMutation = useMutation({
+    mutationFn: (payload: { title: string }) => {
+      if (!c.selectedSpecificationId) throw new Error('No specification selected')
+      return createSpecificationTask(c.userId, c.selectedSpecificationId, { title: payload.title })
+    },
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.invalidateAll()
+    },
+    onError: (err) => c.setUiError(toErrorMessage(err, 'Specification task create failed')),
+  })
+
+  const bulkCreateSpecificationTasksMutation = useMutation({
+    mutationFn: (payload: { titles: string[] }) => {
+      if (!c.selectedSpecificationId) throw new Error('No specification selected')
+      return bulkCreateSpecificationTasks(c.userId, c.selectedSpecificationId, { titles: payload.titles })
+    },
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.invalidateAll()
+    },
+    onError: (err) => c.setUiError(toErrorMessage(err, 'Specification bulk create failed')),
+  })
+
+  const createSpecificationNoteMutation = useMutation({
+    mutationFn: (payload: { title: string; body?: string }) => {
+      if (!c.selectedSpecificationId) throw new Error('No specification selected')
+      return createSpecificationNote(c.userId, c.selectedSpecificationId, payload)
+    },
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.invalidateAll()
+    },
+    onError: (err) => c.setUiError(toErrorMessage(err, 'Specification note create failed')),
+  })
+
+  const linkTaskToSpecificationMutation = useMutation({
+    mutationFn: (taskId: string) => {
+      if (!c.selectedSpecificationId) throw new Error('No specification selected')
+      return linkTaskToSpecification(c.userId, c.selectedSpecificationId, taskId)
+    },
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.invalidateAll()
+    },
+    onError: (err) => c.setUiError(toErrorMessage(err, 'Task link failed')),
+  })
+
+  const unlinkTaskFromSpecificationMutation = useMutation({
+    mutationFn: (taskId: string) => {
+      if (!c.selectedSpecificationId) throw new Error('No specification selected')
+      return unlinkTaskFromSpecification(c.userId, c.selectedSpecificationId, taskId)
+    },
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.invalidateAll()
+    },
+    onError: (err) => c.setUiError(toErrorMessage(err, 'Task unlink failed')),
+  })
+
+  const linkNoteToSpecificationMutation = useMutation({
+    mutationFn: (noteId: string) => {
+      if (!c.selectedSpecificationId) throw new Error('No specification selected')
+      return linkNoteToSpecification(c.userId, c.selectedSpecificationId, noteId)
+    },
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.invalidateAll()
+    },
+    onError: (err) => c.setUiError(toErrorMessage(err, 'Note link failed')),
+  })
+
+  const unlinkNoteFromSpecificationMutation = useMutation({
+    mutationFn: (noteId: string) => {
+      if (!c.selectedSpecificationId) throw new Error('No specification selected')
+      return unlinkNoteFromSpecification(c.userId, c.selectedSpecificationId, noteId)
+    },
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.invalidateAll()
+    },
+    onError: (err) => c.setUiError(toErrorMessage(err, 'Note unlink failed')),
+  })
+
   return {
     saveSpecificationMutation,
     createSpecificationMutation,
     archiveSpecificationMutation,
     restoreSpecificationMutation,
     deleteSpecificationMutation,
+    createSpecificationTaskMutation,
+    bulkCreateSpecificationTasksMutation,
+    createSpecificationNoteMutation,
+    linkTaskToSpecificationMutation,
+    unlinkTaskFromSpecificationMutation,
+    linkNoteToSpecificationMutation,
+    unlinkNoteFromSpecificationMutation,
   }
 }

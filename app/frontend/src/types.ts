@@ -77,6 +77,11 @@ export type Notification = {
   message: string
   is_read: boolean
   created_at: string | null
+  workspace_id?: string | null
+  project_id?: string | null
+  task_id?: string | null
+  note_id?: string | null
+  specification_id?: string | null
 }
 
 export type AppVersionPayload = {
@@ -245,4 +250,20 @@ export type SpecificationsPage = {
   total: number
   limit: number
   offset: number
+}
+
+export type SpecificationBulkTaskResult = {
+  index: number
+  title: string
+  ok: boolean
+  task_id?: string
+  error?: string
+}
+
+export type SpecificationBulkTaskCreateResponse = {
+  items: Task[]
+  results: SpecificationBulkTaskResult[]
+  created: number
+  failed: number
+  total: number
 }

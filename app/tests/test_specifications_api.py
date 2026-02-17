@@ -141,6 +141,202 @@ def test_cannot_link_task_to_specification_from_other_project(tmp_path: Path):
     assert bad.status_code == 400
 
 
+def test_create_and_bulk_create_tasks_from_specification_endpoint(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+
+    spec = client.post(
+        "/api/specifications",
+        json={"workspace_id": ws_id, "project_id": project_id, "title": "Spec wrappers", "status": "Ready"},
+    ).json()
+
+    created_single = client.post(
+        f"/api/specifications/{spec['id']}/tasks",
+        json={"title": "Create one"},
+    )
+    assert created_single.status_code == 200
+    single_payload = created_single.json()
+    assert single_payload["specification_id"] == spec["id"]
+
+    created_bulk = client.post(
+        f"/api/specifications/{spec['id']}/tasks/bulk",
+        json={"titles": ["Bulk one", "", "Bulk two"]},
+    )
+    assert created_bulk.status_code == 200
+    bulk_payload = created_bulk.json()
+    assert bulk_payload["created"] == 2
+    assert bulk_payload["failed"] == 0
+    assert bulk_payload["total"] == 2
+    assert len(bulk_payload["items"]) == 2
+    assert all(item["specification_id"] == spec["id"] for item in bulk_payload["items"])
+
+    listed = client.get(f"/api/tasks?workspace_id={ws_id}&project_id={project_id}&specification_id={spec['id']}")
+    assert listed.status_code == 200
+    task_ids = {item["id"] for item in listed.json()["items"]}
+    assert single_payload["id"] in task_ids
+    assert {item["id"] for item in bulk_payload["items"]}.issubset(task_ids)
+
+
+def test_link_and_unlink_task_and_note_using_specification_wrappers(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+
+    spec = client.post(
+        "/api/specifications",
+        json={"workspace_id": ws_id, "project_id": project_id, "title": "Linking spec", "status": "Ready"},
+    ).json()
+
+    task = client.post(
+        "/api/tasks",
+        json={"title": "Unlinked task", "workspace_id": ws_id, "project_id": project_id},
+    ).json()
+    note = client.post(
+        "/api/notes",
+        json={"title": "Unlinked note", "workspace_id": ws_id, "project_id": project_id},
+    ).json()
+
+    task_link = client.post(f"/api/specifications/{spec['id']}/tasks/{task['id']}/link")
+    assert task_link.status_code == 200
+    assert task_link.json()["specification_id"] == spec["id"]
+
+    note_link = client.post(f"/api/specifications/{spec['id']}/notes/{note['id']}/link")
+    assert note_link.status_code == 200
+    assert note_link.json()["specification_id"] == spec["id"]
+
+    task_unlink = client.post(f"/api/specifications/{spec['id']}/tasks/{task['id']}/unlink")
+    assert task_unlink.status_code == 200
+    assert task_unlink.json()["id"] == task["id"]
+    assert task_unlink.json()["specification_id"] is None
+
+    note_unlink = client.post(f"/api/specifications/{spec['id']}/notes/{note['id']}/unlink")
+    assert note_unlink.status_code == 200
+    assert note_unlink.json()["id"] == note["id"]
+    assert note_unlink.json()["specification_id"] is None
+
+    task_still_exists = client.get(f"/api/tasks?workspace_id={ws_id}&project_id={project_id}&q=Unlinked task")
+    assert task_still_exists.status_code == 200
+    assert any(item["id"] == task["id"] and item["specification_id"] is None for item in task_still_exists.json()["items"])
+
+    note_still_exists = client.get(f"/api/notes/{note['id']}")
+    assert note_still_exists.status_code == 200
+    assert note_still_exists.json()["specification_id"] is None
+
+
+def test_patch_linked_task_allows_same_project_but_blocks_project_change(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+    project_a = bootstrap["projects"][0]["id"]
+    project_b = client.post("/api/projects", json={"workspace_id": ws_id, "name": "Second"}).json()["id"]
+
+    spec = client.post(
+        "/api/specifications",
+        json={"workspace_id": ws_id, "project_id": project_a, "title": "Patch guard spec", "status": "Ready"},
+    ).json()
+    task = client.post(
+        "/api/tasks",
+        json={
+            "title": "Linked task",
+            "workspace_id": ws_id,
+            "project_id": project_a,
+            "specification_id": spec["id"],
+        },
+    ).json()
+
+    same_project_patch = client.patch(
+        f"/api/tasks/{task['id']}",
+        json={"description": "Updated safely", "project_id": project_a},
+    )
+    assert same_project_patch.status_code == 200
+    assert same_project_patch.json()["description"] == "Updated safely"
+    assert same_project_patch.json()["specification_id"] == spec["id"]
+    assert same_project_patch.json()["project_id"] == project_a
+
+    change_project_patch = client.patch(
+        f"/api/tasks/{task['id']}",
+        json={"project_id": project_b},
+    )
+    assert change_project_patch.status_code == 409
+    assert "Cannot change project while task is linked to specification" in change_project_patch.text
+
+
+def test_link_existing_wrapper_rejects_cross_project_scope(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+    project_a = bootstrap["projects"][0]["id"]
+    project_b = client.post("/api/projects", json={"workspace_id": ws_id, "name": "Second"}).json()["id"]
+
+    spec = client.post(
+        "/api/specifications",
+        json={"workspace_id": ws_id, "project_id": project_a, "title": "Project A spec", "status": "Ready"},
+    ).json()
+    task_b = client.post(
+        "/api/tasks",
+        json={"title": "Project B task", "workspace_id": ws_id, "project_id": project_b},
+    ).json()
+    note_b = client.post(
+        "/api/notes",
+        json={"title": "Project B note", "workspace_id": ws_id, "project_id": project_b},
+    ).json()
+
+    bad_task_link = client.post(f"/api/specifications/{spec['id']}/tasks/{task_b['id']}/link")
+    assert bad_task_link.status_code == 400
+
+    bad_note_link = client.post(f"/api/specifications/{spec['id']}/notes/{note_b['id']}/link")
+    assert bad_note_link.status_code == 400
+
+
+def test_specification_wrapper_endpoints_are_idempotent_with_command_id(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+
+    spec = client.post(
+        "/api/specifications",
+        json={"workspace_id": ws_id, "project_id": project_id, "title": "Idempotent spec", "status": "Ready"},
+    ).json()
+
+    single_command = "cmd-spec-single-001"
+    first_single = client.post(
+        f"/api/specifications/{spec['id']}/tasks",
+        json={"title": "Idempotent wrapper task"},
+        headers={"X-Command-Id": single_command},
+    )
+    second_single = client.post(
+        f"/api/specifications/{spec['id']}/tasks",
+        json={"title": "Idempotent wrapper task"},
+        headers={"X-Command-Id": single_command},
+    )
+    assert first_single.status_code == 200
+    assert second_single.status_code == 200
+    assert first_single.json()["id"] == second_single.json()["id"]
+
+    bulk_command = "cmd-spec-bulk-001"
+    first_bulk = client.post(
+        f"/api/specifications/{spec['id']}/tasks/bulk",
+        json={"titles": ["Bulk idempotent one", "Bulk idempotent two"]},
+        headers={"X-Command-Id": bulk_command},
+    )
+    second_bulk = client.post(
+        f"/api/specifications/{spec['id']}/tasks/bulk",
+        json={"titles": ["Bulk idempotent one", "Bulk idempotent two"]},
+        headers={"X-Command-Id": bulk_command},
+    )
+    assert first_bulk.status_code == 200
+    assert second_bulk.status_code == 200
+    assert [item["id"] for item in first_bulk.json()["items"]] == [item["id"] for item in second_bulk.json()["items"]]
+
+    listed = client.get(f"/api/tasks?workspace_id={ws_id}&project_id={project_id}&specification_id={spec['id']}")
+    assert listed.status_code == 200
+    assert len([item for item in listed.json()["items"] if "Idempotent" in item["title"] or "Bulk idempotent" in item["title"]]) == 3
+
+
 def test_delete_project_deletes_specifications(tmp_path: Path):
     client = build_client(tmp_path)
     bootstrap = client.get("/api/bootstrap").json()

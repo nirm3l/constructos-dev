@@ -1,5 +1,7 @@
 import React from 'react'
-import type { Specification } from '../../types'
+import { useQuery } from '@tanstack/react-query'
+import { getNotes, getTasks } from '../../api'
+import type { Note, Specification, Task } from '../../types'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import {
   AttachmentRefList,
@@ -10,6 +12,77 @@ import {
 
 export function SpecificationsPanel({ state }: { state: any }) {
   const items: Specification[] = state.specifications.data?.items ?? []
+  const linkedTasks: Task[] = state.specTasks.data?.items ?? []
+  const linkedNotes: Note[] = state.specNotes.data?.items ?? []
+  const selectedSpecificationId: string | null = state.selectedSpecificationId ?? null
+  const [newTaskTitle, setNewTaskTitle] = React.useState('')
+  const [bulkTaskText, setBulkTaskText] = React.useState('')
+  const [newNoteTitle, setNewNoteTitle] = React.useState('')
+  const [newNoteBody, setNewNoteBody] = React.useState('')
+  const [taskLinkOpen, setTaskLinkOpen] = React.useState(false)
+  const [noteLinkOpen, setNoteLinkOpen] = React.useState(false)
+  const [taskLinkQuery, setTaskLinkQuery] = React.useState('')
+  const [noteLinkQuery, setNoteLinkQuery] = React.useState('')
+
+  React.useEffect(() => {
+    setNewTaskTitle('')
+    setBulkTaskText('')
+    setNewNoteTitle('')
+    setNewNoteBody('')
+    setTaskLinkOpen(false)
+    setNoteLinkOpen(false)
+    setTaskLinkQuery('')
+    setNoteLinkQuery('')
+  }, [selectedSpecificationId])
+
+  const taskLinkCandidates = useQuery({
+    queryKey: [
+      'spec-link-task-candidates',
+      state.userId,
+      state.workspaceId,
+      state.selectedProjectId,
+      selectedSpecificationId,
+      taskLinkQuery,
+    ],
+    queryFn: () =>
+      getTasks(state.userId, state.workspaceId, {
+        project_id: state.selectedProjectId,
+        q: taskLinkQuery || undefined,
+        limit: 200,
+        offset: 0,
+      }),
+    enabled: Boolean(taskLinkOpen && state.workspaceId && state.selectedProjectId && selectedSpecificationId),
+  })
+
+  const noteLinkCandidates = useQuery({
+    queryKey: [
+      'spec-link-note-candidates',
+      state.userId,
+      state.workspaceId,
+      state.selectedProjectId,
+      selectedSpecificationId,
+      noteLinkQuery,
+    ],
+    queryFn: () =>
+      getNotes(state.userId, state.workspaceId, {
+        project_id: state.selectedProjectId,
+        q: noteLinkQuery || undefined,
+        limit: 200,
+        offset: 0,
+      }),
+    enabled: Boolean(noteLinkOpen && state.workspaceId && state.selectedProjectId && selectedSpecificationId),
+  })
+
+  const availableTaskCandidates = React.useMemo(
+    () => ((taskLinkCandidates.data?.items ?? []) as Task[]).filter((item) => !item.specification_id),
+    [taskLinkCandidates.data?.items]
+  )
+  const availableNoteCandidates = React.useMemo(
+    () => ((noteLinkCandidates.data?.items ?? []) as Note[]).filter((item) => !item.specification_id),
+    [noteLinkCandidates.data?.items]
+  )
+
+  const bulkResult = state.bulkCreateSpecificationTasksMutation.data
 
   return (
     <section className="card">
@@ -220,6 +293,192 @@ export function SpecificationsPanel({ state }: { state: any }) {
                         )
                       }
                     />
+                    <div className="spec-links-shell">
+                      <section className="spec-links-section">
+                        <div className="spec-links-head">
+                          <h3 style={{ margin: 0 }}>Implementation tasks ({linkedTasks.length})</h3>
+                          <div className="row wrap" style={{ gap: 6 }}>
+                            <button
+                              className="status-chip"
+                              type="button"
+                              onClick={() => {
+                                const title = (newTaskTitle || '').trim() || 'Untitled task'
+                                state.createSpecificationTaskMutation.mutate(
+                                  { title },
+                                  { onSuccess: () => setNewTaskTitle('') }
+                                )
+                              }}
+                              disabled={state.createSpecificationTaskMutation.isPending}
+                            >
+                              + New
+                            </button>
+                            <button
+                              className="status-chip"
+                              type="button"
+                              onClick={() => {
+                                const titles = bulkTaskText
+                                  .split('\n')
+                                  .map((value) => value.trim())
+                                  .filter(Boolean)
+                                if (titles.length === 0) {
+                                  state.setUiError('Add at least one task title for bulk create.')
+                                  return
+                                }
+                                state.bulkCreateSpecificationTasksMutation.mutate(
+                                  { titles },
+                                  { onSuccess: () => setBulkTaskText('') }
+                                )
+                              }}
+                              disabled={state.bulkCreateSpecificationTasksMutation.isPending}
+                            >
+                              Create multiple
+                            </button>
+                            <button
+                              className="status-chip"
+                              type="button"
+                              onClick={() => setTaskLinkOpen(true)}
+                              disabled={!selectedSpecificationId}
+                            >
+                              Link existing
+                            </button>
+                          </div>
+                        </div>
+                        <div className="spec-links-inline">
+                          <input
+                            value={newTaskTitle}
+                            onChange={(e) => setNewTaskTitle(e.target.value)}
+                            placeholder="Task title"
+                          />
+                        </div>
+                        <textarea
+                          className="md-textarea"
+                          value={bulkTaskText}
+                          onChange={(e) => setBulkTaskText(e.target.value)}
+                          placeholder="One task title per line"
+                          style={{ minHeight: 84 }}
+                        />
+                        {bulkResult && (
+                          <div className="meta">
+                            Bulk result: created {bulkResult.created}, failed {bulkResult.failed}
+                          </div>
+                        )}
+                        {state.specTasks.isLoading ? (
+                          <div className="meta">Loading linked tasks...</div>
+                        ) : linkedTasks.length === 0 ? (
+                          <div className="meta">No linked tasks yet.</div>
+                        ) : (
+                          <div className="spec-linked-list">
+                            {linkedTasks.map((task) => (
+                              <div key={task.id} className="spec-linked-row">
+                                <div className="spec-linked-main">
+                                  <strong>{task.title || 'Untitled task'}</strong>
+                                  <div className="meta">{task.status}</div>
+                                </div>
+                                <div className="spec-linked-actions">
+                                  <button
+                                    className="status-chip"
+                                    type="button"
+                                    onClick={() => state.openTask(task.id, task.project_id)}
+                                  >
+                                    Open
+                                  </button>
+                                  <button
+                                    className="status-chip"
+                                    type="button"
+                                    onClick={() => state.unlinkTaskFromSpecificationMutation.mutate(task.id)}
+                                    disabled={state.unlinkTaskFromSpecificationMutation.isPending}
+                                  >
+                                    Unlink
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </section>
+
+                      <section className="spec-links-section">
+                        <div className="spec-links-head">
+                          <h3 style={{ margin: 0 }}>Notes ({linkedNotes.length})</h3>
+                          <div className="row wrap" style={{ gap: 6 }}>
+                            <button
+                              className="status-chip"
+                              type="button"
+                              onClick={() => {
+                                const title = (newNoteTitle || '').trim() || 'Untitled note'
+                                state.createSpecificationNoteMutation.mutate(
+                                  { title, body: newNoteBody || '' },
+                                  {
+                                    onSuccess: () => {
+                                      setNewNoteTitle('')
+                                      setNewNoteBody('')
+                                    },
+                                  }
+                                )
+                              }}
+                              disabled={state.createSpecificationNoteMutation.isPending}
+                            >
+                              + New
+                            </button>
+                            <button
+                              className="status-chip"
+                              type="button"
+                              onClick={() => setNoteLinkOpen(true)}
+                              disabled={!selectedSpecificationId}
+                            >
+                              Link existing
+                            </button>
+                          </div>
+                        </div>
+                        <div className="spec-links-inline">
+                          <input
+                            value={newNoteTitle}
+                            onChange={(e) => setNewNoteTitle(e.target.value)}
+                            placeholder="Note title"
+                          />
+                        </div>
+                        <textarea
+                          className="md-textarea"
+                          value={newNoteBody}
+                          onChange={(e) => setNewNoteBody(e.target.value)}
+                          placeholder="Optional note body"
+                          style={{ minHeight: 84 }}
+                        />
+                        {state.specNotes.isLoading ? (
+                          <div className="meta">Loading linked notes...</div>
+                        ) : linkedNotes.length === 0 ? (
+                          <div className="meta">No linked notes yet.</div>
+                        ) : (
+                          <div className="spec-linked-list">
+                            {linkedNotes.map((note) => (
+                              <div key={note.id} className="spec-linked-row">
+                                <div className="spec-linked-main">
+                                  <strong>{note.title || 'Untitled note'}</strong>
+                                  <div className="meta">{(note.body || '').replace(/\s+/g, ' ').slice(0, 120) || '(empty)'}</div>
+                                </div>
+                                <div className="spec-linked-actions">
+                                  <button
+                                    className="status-chip"
+                                    type="button"
+                                    onClick={() => state.openNote(note.id, note.project_id)}
+                                  >
+                                    Open
+                                  </button>
+                                  <button
+                                    className="status-chip"
+                                    type="button"
+                                    onClick={() => state.unlinkNoteFromSpecificationMutation.mutate(note.id)}
+                                    disabled={state.unlinkNoteFromSpecificationMutation.isPending}
+                                  >
+                                    Unlink
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </section>
+                    </div>
                   </div>
                 )}
               </div>
@@ -227,6 +486,86 @@ export function SpecificationsPanel({ state }: { state: any }) {
           })}
         </div>
       </div>
+
+      {taskLinkOpen && (
+        <div className="drawer open" onClick={() => setTaskLinkOpen(false)}>
+          <div className="drawer-body spec-link-body" onClick={(e) => e.stopPropagation()}>
+            <div className="row" style={{ justifyContent: 'space-between', marginBottom: 10 }}>
+              <h3 style={{ margin: 0 }}>Link Existing Task</h3>
+              <button className="action-icon" onClick={() => setTaskLinkOpen(false)} title="Close" aria-label="Close">
+                <Icon path="M6 6l12 12M18 6 6 18" />
+              </button>
+            </div>
+            <input
+              value={taskLinkQuery}
+              onChange={(e) => setTaskLinkQuery(e.target.value)}
+              placeholder="Search tasks in project"
+              autoFocus
+            />
+            <div className="spec-link-list">
+              {taskLinkCandidates.isLoading && <div className="meta">Loading tasks...</div>}
+              {!taskLinkCandidates.isLoading && availableTaskCandidates.length === 0 && (
+                <div className="meta">No unlinked tasks found.</div>
+              )}
+              {availableTaskCandidates.map((task) => (
+                <button
+                  key={task.id}
+                  className="spec-link-item"
+                  onClick={() =>
+                    state.linkTaskToSpecificationMutation.mutate(task.id, {
+                      onSuccess: () => setTaskLinkOpen(false),
+                    })
+                  }
+                  disabled={state.linkTaskToSpecificationMutation.isPending}
+                >
+                  <span>{task.title || 'Untitled task'}</span>
+                  <span className="meta">{task.status}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {noteLinkOpen && (
+        <div className="drawer open" onClick={() => setNoteLinkOpen(false)}>
+          <div className="drawer-body spec-link-body" onClick={(e) => e.stopPropagation()}>
+            <div className="row" style={{ justifyContent: 'space-between', marginBottom: 10 }}>
+              <h3 style={{ margin: 0 }}>Link Existing Note</h3>
+              <button className="action-icon" onClick={() => setNoteLinkOpen(false)} title="Close" aria-label="Close">
+                <Icon path="M6 6l12 12M18 6 6 18" />
+              </button>
+            </div>
+            <input
+              value={noteLinkQuery}
+              onChange={(e) => setNoteLinkQuery(e.target.value)}
+              placeholder="Search notes in project"
+              autoFocus
+            />
+            <div className="spec-link-list">
+              {noteLinkCandidates.isLoading && <div className="meta">Loading notes...</div>}
+              {!noteLinkCandidates.isLoading && availableNoteCandidates.length === 0 && (
+                <div className="meta">No unlinked notes found.</div>
+              )}
+              {availableNoteCandidates.map((note) => (
+                <button
+                  key={note.id}
+                  className="spec-link-item"
+                  onClick={() =>
+                    state.linkNoteToSpecificationMutation.mutate(note.id, {
+                      onSuccess: () => setNoteLinkOpen(false),
+                    })
+                  }
+                  disabled={state.linkNoteToSpecificationMutation.isPending}
+                >
+                  <span>{note.title || 'Untitled note'}</span>
+                  <span className="meta">{(note.body || '').replace(/\s+/g, ' ').slice(0, 90) || '(empty)'}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   )
 }

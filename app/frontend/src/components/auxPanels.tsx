@@ -108,6 +108,8 @@ export function TaskResultsPanel({
   total,
   showProject,
   projectNames,
+  specificationNames,
+  onOpenSpecification,
   onOpen,
   onRestore,
   onReopen,
@@ -117,6 +119,8 @@ export function TaskResultsPanel({
   total: number
   showProject: boolean
   projectNames: Record<string, string>
+  specificationNames: Record<string, string>
+  onOpenSpecification: (specificationId: string, projectId: string) => void
   onOpen: (taskId: string) => void
   onRestore: (taskId: string) => void
   onReopen: (taskId: string) => void
@@ -131,11 +135,13 @@ export function TaskResultsPanel({
             key={task.id}
             task={task}
             onOpen={onOpen}
+            onOpenSpecification={onOpenSpecification}
             onRestore={onRestore}
             onReopen={onReopen}
             onComplete={onComplete}
             showProject={showProject}
             projectName={projectNames[task.project_id]}
+            specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
           />
         ))}
       </div>

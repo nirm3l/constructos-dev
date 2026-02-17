@@ -2,33 +2,45 @@ import React from 'react'
 import { parseUrlTab } from '../utils/ui'
 
 export function useUiPersistenceEffects(c: any) {
+  const applyingHistoryRef = React.useRef(false)
+  const lastSyncedSearchRef = React.useRef<string>('')
+
+  const applyUrlState = React.useCallback((search: string, fromHistory: boolean) => {
+    const params = new URLSearchParams(search)
+    const normalizedSearch = search || ''
+    lastSyncedSearchRef.current = normalizedSearch
+    if (fromHistory) applyingHistoryRef.current = true
+
+    const urlTab = parseUrlTab(params.get('tab'))
+    if (urlTab) c.setTab(urlTab)
+
+    const projectId = params.get('project')
+    if (projectId) c.setSelectedProjectId(projectId)
+
+    const taskId = params.get('task')
+    c.setSelectedTaskId(taskId || null)
+    if (taskId) c.setTab('tasks')
+
+    const noteId = params.get('note')
+    c.setSelectedNoteId(noteId || null)
+    if (noteId) c.setTab('notes')
+
+    const specificationId = params.get('specification')
+    c.setSelectedSpecificationId(specificationId || null)
+    if (specificationId) c.setTab('specifications')
+  }, [c.setSelectedNoteId, c.setSelectedProjectId, c.setSelectedSpecificationId, c.setSelectedTaskId, c.setTab])
+
   React.useEffect(() => {
     localStorage.setItem('ui_tab', c.tab)
   }, [c.tab])
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return
-    const params = new URLSearchParams(window.location.search)
-    const urlTab = parseUrlTab(params.get('tab'))
-    if (urlTab) c.setTab(urlTab)
-    const projectId = params.get('project')
-    if (projectId) c.setSelectedProjectId(projectId)
-    const taskId = params.get('task')
-    if (taskId) {
-      c.setSelectedTaskId(taskId)
-      c.setTab('tasks')
-    }
-    const noteId = params.get('note')
-    if (noteId) {
-      c.setSelectedNoteId(noteId)
-      c.setTab('notes')
-    }
-    const specificationId = params.get('specification')
-    if (specificationId) {
-      c.setSelectedSpecificationId(specificationId)
-      c.setTab('specifications')
-    }
-  }, [c.setSelectedNoteId, c.setSelectedProjectId, c.setSelectedSpecificationId, c.setSelectedTaskId, c.setTab])
+    applyUrlState(window.location.search, true)
+    const onPopState = () => applyUrlState(window.location.search, true)
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [applyUrlState])
 
   React.useEffect(() => {
     localStorage.setItem('ui_selected_project_id', c.selectedProjectId)
@@ -79,7 +91,7 @@ export function useUiPersistenceEffects(c: any) {
     document.documentElement.setAttribute('data-theme', c.theme)
   }, [c.theme])
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     if (typeof window === 'undefined') return
     const params = new URLSearchParams(window.location.search)
     params.set('tab', c.tab)
@@ -92,6 +104,23 @@ export function useUiPersistenceEffects(c: any) {
     if (c.selectedSpecificationId) params.set('specification', c.selectedSpecificationId)
     else params.delete('specification')
     const next = params.toString()
-    window.history.replaceState(null, '', next ? `?${next}` : window.location.pathname)
+    const nextSearch = next ? `?${next}` : ''
+    if (lastSyncedSearchRef.current === nextSearch) {
+      if (applyingHistoryRef.current) applyingHistoryRef.current = false
+      return
+    }
+    if (window.location.search === nextSearch) {
+      lastSyncedSearchRef.current = nextSearch
+      if (applyingHistoryRef.current) applyingHistoryRef.current = false
+      return
+    }
+    if (applyingHistoryRef.current) {
+      window.history.replaceState(null, '', `${window.location.pathname}${nextSearch}`)
+      lastSyncedSearchRef.current = nextSearch
+      applyingHistoryRef.current = false
+      return
+    }
+    window.history.pushState(null, '', `${window.location.pathname}${nextSearch}`)
+    lastSyncedSearchRef.current = nextSearch
   }, [c.tab, c.selectedProjectId, c.selectedTaskId, c.selectedNoteId, c.selectedSpecificationId])
 }

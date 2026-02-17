@@ -28,10 +28,13 @@ export function AppOverlays({ state }: { state: any }) {
       <TaskDrawer
         state={{
           selectedTask: state.selectedTask,
+          taskNotes: state.taskNotes,
           closeTaskEditor: state.closeTaskEditor,
           taskIsDirty: state.taskIsDirty,
           saveTaskMutation: state.saveTaskMutation,
+          createNoteMutation: state.createNoteMutation,
           copyShareLink: state.copyShareLink,
+          openNote: state.openNote,
           reopenTaskMutation: state.reopenTaskMutation,
           completeTaskMutation: state.completeTaskMutation,
           restoreTaskMutation: state.restoreTaskMutation,
@@ -39,6 +42,8 @@ export function AppOverlays({ state }: { state: any }) {
           editTitle: state.editTitle,
           setEditTitle: state.setEditTitle,
           setSelectedProjectId: state.setSelectedProjectId,
+          openSpecification: state.openSpecification,
+          specificationNameMap: state.specificationNameMap,
           setTab: state.setTab,
           projectNames: state.projectNames,
           editStatus: state.editStatus,

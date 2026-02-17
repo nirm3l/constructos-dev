@@ -13,6 +13,7 @@ import type {
   ProjectRule,
   ProjectRulesPage,
   Specification,
+  SpecificationBulkTaskCreateResponse,
   SpecificationsPage,
   ProjectTags,
   Task,
@@ -400,6 +401,68 @@ export const patchSpecification = (
   specificationId: string,
   payload: Partial<Pick<Specification, 'title' | 'body' | 'status' | 'external_refs' | 'attachment_refs' | 'archived'>>
 ) => api<Specification>(`/api/specifications/${specificationId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })
+
+export const createSpecificationTask = (
+  userId: string,
+  specificationId: string,
+  payload: {
+    title: string
+    description?: string
+    priority?: string
+    due_date?: string | null
+    assignee_id?: string | null
+    labels?: string[]
+    external_refs?: ExternalRef[]
+    attachment_refs?: AttachmentRef[]
+    recurring_rule?: string | null
+    task_type?: 'manual' | 'scheduled_instruction'
+    scheduled_instruction?: string | null
+    scheduled_at_utc?: string | null
+    schedule_timezone?: string | null
+  }
+) => api<Task>(`/api/specifications/${specificationId}/tasks`, userId, { method: 'POST', body: JSON.stringify(payload) })
+
+export const bulkCreateSpecificationTasks = (
+  userId: string,
+  specificationId: string,
+  payload: {
+    titles: string[]
+    description?: string
+    priority?: string
+    due_date?: string | null
+    assignee_id?: string | null
+    labels?: string[]
+  }
+) =>
+  api<SpecificationBulkTaskCreateResponse>(`/api/specifications/${specificationId}/tasks/bulk`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const createSpecificationNote = (
+  userId: string,
+  specificationId: string,
+  payload: {
+    title: string
+    body?: string
+    tags?: string[]
+    pinned?: boolean
+    external_refs?: ExternalRef[]
+    attachment_refs?: AttachmentRef[]
+  }
+) => api<Note>(`/api/specifications/${specificationId}/notes`, userId, { method: 'POST', body: JSON.stringify(payload) })
+
+export const linkTaskToSpecification = (userId: string, specificationId: string, taskId: string) =>
+  api<Task>(`/api/specifications/${specificationId}/tasks/${taskId}/link`, userId, { method: 'POST' })
+
+export const unlinkTaskFromSpecification = (userId: string, specificationId: string, taskId: string) =>
+  api<Task>(`/api/specifications/${specificationId}/tasks/${taskId}/unlink`, userId, { method: 'POST' })
+
+export const linkNoteToSpecification = (userId: string, specificationId: string, noteId: string) =>
+  api<Note>(`/api/specifications/${specificationId}/notes/${noteId}/link`, userId, { method: 'POST' })
+
+export const unlinkNoteFromSpecification = (userId: string, specificationId: string, noteId: string) =>
+  api<Note>(`/api/specifications/${specificationId}/notes/${noteId}/unlink`, userId, { method: 'POST' })
 
 export const archiveSpecification = (userId: string, specificationId: string) =>
   api<{ ok: true }>(`/api/specifications/${specificationId}/archive`, userId, { method: 'POST' })

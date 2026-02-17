@@ -16,7 +16,14 @@ INDEX_HTML = BASE_DIR / "static" / "index.html"
 
 @router.get("/")
 def root():
-    return FileResponse(str(INDEX_HTML))
+    return FileResponse(
+        str(INDEX_HTML),
+        headers={
+            "Cache-Control": "no-store, max-age=0, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @router.get("/api/health")

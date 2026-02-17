@@ -193,8 +193,13 @@ function App() {
 
   const {
     tasks,
+    taskLookup,
     notes,
+    taskNotes,
     specifications,
+    specificationLookup,
+    specTasks,
+    specNotes,
     projectTags,
     projectRules,
     projectTaskCountQueries,
@@ -207,6 +212,8 @@ function App() {
     workspaceId,
     tab,
     selectedProjectId,
+    selectedTaskId,
+    selectedSpecificationId,
     searchQ,
     searchStatus,
     searchPriority,
@@ -254,6 +261,40 @@ function App() {
       selectedProjectId,
       notifications: notifications.data ?? [],
     })
+  const specificationNameMap = React.useMemo(() => {
+    const out: Record<string, string> = {}
+    const attach = (items: any[] | undefined) => {
+      for (const item of items ?? []) {
+        if (!item?.id) continue
+        out[String(item.id)] = String(item.title || 'Untitled spec')
+      }
+    }
+    attach(specificationLookup.data?.items)
+    attach(specifications.data?.items)
+    return out
+  }, [specificationLookup.data?.items, specifications.data?.items])
+
+  const taskNameMap = React.useMemo(() => {
+    const out: Record<string, string> = {}
+    const attach = (items: any[] | undefined) => {
+      for (const item of items ?? []) {
+        if (!item?.id) continue
+        out[String(item.id)] = String(item.title || 'Untitled task')
+      }
+    }
+    attach(taskLookup.data?.items)
+    attach(tasks.data?.items)
+    return out
+  }, [taskLookup.data?.items, tasks.data?.items])
+
+  const openSpecification = React.useCallback((specificationId: string, projectId?: string | null) => {
+    if (projectId) setSelectedProjectId(projectId)
+    setSpecificationQ('')
+    setSpecificationStatus('')
+    setSpecificationArchived(false)
+    setSelectedSpecificationId(specificationId)
+    setTab('specifications')
+  }, [setSelectedProjectId, setSpecificationQ, setSpecificationStatus, setSpecificationArchived, setSelectedSpecificationId, setTab])
 
   const {
     taskTagSuggestions,
@@ -354,6 +395,29 @@ function App() {
     setShowProjectEditForm,
     setSelectedProjectId,
   })
+
+  const openTask = React.useCallback((taskId: string, projectId?: string | null) => {
+    if (!taskId) return false
+    const opened = openTaskEditor(taskId)
+    if (!opened) return false
+    if (projectId) setSelectedProjectId(projectId)
+    setTab('tasks')
+    return true
+  }, [openTaskEditor, setSelectedProjectId, setTab])
+
+  const openNote = React.useCallback((noteId: string, projectId?: string | null) => {
+    if (!noteId) return false
+    if (selectedNoteId === noteId) {
+      if (projectId) setSelectedProjectId(projectId)
+      setTab('notes')
+      return true
+    }
+    const changed = toggleNoteEditor(noteId)
+    if (!changed) return false
+    if (projectId) setSelectedProjectId(projectId)
+    setTab('notes')
+    return true
+  }, [selectedNoteId, toggleNoteEditor, setSelectedProjectId, setTab])
 
   
 
@@ -482,6 +546,13 @@ function App() {
     archiveSpecificationMutation,
     restoreSpecificationMutation,
     deleteSpecificationMutation,
+    createSpecificationTaskMutation,
+    bulkCreateSpecificationTasksMutation,
+    createSpecificationNoteMutation,
+    linkTaskToSpecificationMutation,
+    unlinkTaskFromSpecificationMutation,
+    linkNoteToSpecificationMutation,
+    unlinkNoteFromSpecificationMutation,
     markReadMutation,
     themeMutation,
     addCommentMutation,
@@ -788,7 +859,10 @@ function App() {
       selectedProjectTimeMeta,
       noteQ,
       notes,
+      taskNotes,
       specifications,
+      specTasks,
+      specNotes,
       setNoteQ,
       createNoteMutation,
       noteArchived,
@@ -864,6 +938,13 @@ function App() {
       archiveSpecificationMutation,
       restoreSpecificationMutation,
       deleteSpecificationMutation,
+      createSpecificationTaskMutation,
+      bulkCreateSpecificationTasksMutation,
+      createSpecificationNoteMutation,
+      linkTaskToSpecificationMutation,
+      unlinkTaskFromSpecificationMutation,
+      linkNoteToSpecificationMutation,
+      unlinkNoteFromSpecificationMutation,
       searchStatus,
       setSearchStatus,
       searchPriority,
@@ -874,6 +955,11 @@ function App() {
       setTheme,
       themeMutation,
       projectNames,
+      taskNameMap,
+      specificationNameMap,
+      openSpecification,
+      openTask,
+      openNote,
       fabHidden,
       setQuickTaskExternalRefsText,
       setQuickTaskAttachmentRefsText,

@@ -13,6 +13,8 @@ import { parseCommaTags, toErrorMessage } from '../utils/ui'
 export function useAppActions(c: any) {
   const invalidateAll = React.useCallback(async () => {
     await c.qc.invalidateQueries({ queryKey: ['tasks'] })
+    await c.qc.invalidateQueries({ queryKey: ['task-lookup'] })
+    await c.qc.invalidateQueries({ queryKey: ['task-notes'] })
     await c.qc.invalidateQueries({ queryKey: ['notes'] })
     await c.qc.invalidateQueries({ queryKey: ['project-tags'] })
     await c.qc.invalidateQueries({ queryKey: ['board'] })
@@ -20,6 +22,9 @@ export function useAppActions(c: any) {
     await c.qc.invalidateQueries({ queryKey: ['notifications'] })
     await c.qc.invalidateQueries({ queryKey: ['project-rules'] })
     await c.qc.invalidateQueries({ queryKey: ['specifications'] })
+    await c.qc.invalidateQueries({ queryKey: ['specification-lookup'] })
+    await c.qc.invalidateQueries({ queryKey: ['spec-tasks'] })
+    await c.qc.invalidateQueries({ queryKey: ['spec-notes'] })
   }, [c.qc])
 
   const moveTaskToStatus = React.useCallback(
@@ -168,6 +173,7 @@ export function useAppActions(c: any) {
     }
     await patchNote(c.userId, c.selectedNoteId, payload)
     await c.qc.invalidateQueries({ queryKey: ['notes'] })
+    await c.qc.invalidateQueries({ queryKey: ['task-notes'] })
     await c.qc.invalidateQueries({ queryKey: ['project-tags'] })
   }, [
     c.editNoteAttachmentRefsText,

@@ -160,7 +160,10 @@ def test_comment_mention_creates_notification(tmp_path):
 
     notes = client.get('/api/notifications', headers={'X-User-Id': current_user['id']})
     assert notes.status_code == 200
-    assert any('mentioned' in n['message'] for n in notes.json())
+    mentioned = [n for n in notes.json() if 'mentioned' in n['message']]
+    assert mentioned
+    assert any(n.get('task_id') == task['id'] for n in mentioned)
+    assert any(n.get('project_id') == project_id for n in mentioned)
 
 
 def test_delete_comment(tmp_path):
@@ -356,7 +359,10 @@ def test_due_soon_system_notification(tmp_path):
 
     notes = client.get('/api/notifications')
     assert notes.status_code == 200
-    assert any('due within 1 hour' in n['message'] for n in notes.json())
+    due_soon = [n for n in notes.json() if 'due within 1 hour' in n['message']]
+    assert due_soon
+    assert any(n.get('task_id') == created.json()['id'] for n in due_soon)
+    assert any(n.get('project_id') == project_id for n in due_soon)
 
 
 def test_daily_digest_is_emitted_once_per_day(tmp_path):

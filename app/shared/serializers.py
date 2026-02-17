@@ -151,6 +151,11 @@ def serialize_notification(notification: Notification) -> dict[str, Any]:
         message=notification.message,
         is_read=notification.is_read,
         created_at=to_iso_utc(notification.created_at),
+        workspace_id=notification.workspace_id,
+        project_id=notification.project_id,
+        task_id=notification.task_id,
+        note_id=notification.note_id,
+        specification_id=notification.specification_id,
     )
     return asdict(dto)
 

@@ -16,6 +16,15 @@ type AppHeaderProps = {
   notifications: Notification[]
   unreadCount: number
   onMarkRead: (notificationId: string) => void
+  onOpenTask: (taskId: string, projectId?: string | null) => boolean
+  onOpenNote: (noteId: string, projectId?: string | null) => boolean
+  onOpenSpecification: (specificationId: string, projectId?: string | null) => void
+  onOpenProject: (projectId: string) => void
+}
+
+function parseLegacyTaskId(message: string): string | null {
+  const match = message.match(/\btask\s+#([0-9a-fA-F-]{8,})\b/i)
+  return match?.[1] ?? null
 }
 
 export function AppHeader({
@@ -31,6 +40,10 @@ export function AppHeader({
   notifications,
   unreadCount,
   onMarkRead,
+  onOpenTask,
+  onOpenNote,
+  onOpenSpecification,
+  onOpenProject,
 }: AppHeaderProps) {
   return (
     <header className="header card">
@@ -111,21 +124,68 @@ export function AppHeader({
             {notifications.length === 0 ? (
               <div className="meta">No notifications.</div>
             ) : (
-              notifications.map((n) => (
-                <div key={n.id} className={`notif ${n.is_read ? 'read' : 'unread'}`}>
-                  <div className="notif-dotline" aria-hidden="true" />
-                  <div className="notif-main">
-                    <div className="notif-message">{n.message}</div>
-                    <div className="notif-actions">
-                      {!n.is_read && (
-                        <button className="status-chip" onClick={() => onMarkRead(n.id)}>
-                          Mark read
-                        </button>
-                      )}
+              notifications.map((n) => {
+                const taskId = n.task_id || parseLegacyTaskId(n.message)
+                return (
+                  <div key={n.id} className={`notif ${n.is_read ? 'read' : 'unread'}`}>
+                    <div className="notif-dotline" aria-hidden="true" />
+                    <div className="notif-main">
+                      <div className="notif-message">{n.message}</div>
+                      <div className="notif-actions">
+                        {taskId && (
+                          <button
+                            className="status-chip"
+                            onClick={() => {
+                              onOpenTask(taskId, n.project_id)
+                              if (!n.is_read) onMarkRead(n.id)
+                            }}
+                          >
+                            Open task
+                          </button>
+                        )}
+                        {n.note_id && (
+                          <button
+                            className="status-chip"
+                            onClick={() => {
+                              onOpenNote(n.note_id as string, n.project_id)
+                              if (!n.is_read) onMarkRead(n.id)
+                            }}
+                          >
+                            Open note
+                          </button>
+                        )}
+                        {n.specification_id && (
+                          <button
+                            className="status-chip"
+                            onClick={() => {
+                              onOpenSpecification(n.specification_id as string, n.project_id)
+                              if (!n.is_read) onMarkRead(n.id)
+                            }}
+                          >
+                            Open specification
+                          </button>
+                        )}
+                        {!taskId && !n.note_id && !n.specification_id && n.project_id && (
+                          <button
+                            className="status-chip"
+                            onClick={() => {
+                              onOpenProject(n.project_id as string)
+                              if (!n.is_read) onMarkRead(n.id)
+                            }}
+                          >
+                            Open project
+                          </button>
+                        )}
+                        {!n.is_read && (
+                          <button className="status-chip" onClick={() => onMarkRead(n.id)}>
+                            Mark read
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))
+                )
+              })
             )}
           </div>
         </div>

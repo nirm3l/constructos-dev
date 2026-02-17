@@ -810,13 +810,22 @@ def project_event(db: Session, ev: EventEnvelope):
         ).scalar_one_or_none()
         if existing_comment is None and not pending_exists:
             db.add(TaskComment(task_id=p["task_id"], user_id=p["user_id"], body=p["body"], event_version=ev.version))
+        task = db.get(Task, p["task_id"])
         mentions = re.findall(r"@([A-Za-z0-9_\-]+)", p["body"])
         if mentions:
             users = db.execute(select(User).where(User.username.in_(mentions))).scalars().all()
             actor = db.get(User, p["user_id"])
             actor_username = actor.username if actor else "Someone"
             for mentioned in users:
-                db.add(Notification(user_id=mentioned.id, message=f"{actor_username} mentioned you on task #{p['task_id']}"))
+                db.add(
+                    Notification(
+                        user_id=mentioned.id,
+                        workspace_id=task.workspace_id if task else m.get("workspace_id"),
+                        project_id=task.project_id if task else m.get("project_id"),
+                        task_id=p["task_id"],
+                        message=f"{actor_username} mentioned you on task #{p['task_id']}",
+                    )
+                )
     elif ev.event_type == TASK_EVENT_COMMENT_DELETED:
         comment = db.get(TaskComment, p["comment_id"])
         if comment and comment.task_id == p["task_id"]:
@@ -841,10 +850,25 @@ def project_event(db: Session, ev: EventEnvelope):
         # via write-through append + later catch-up, so inserts must be safe.
         n = db.get(Notification, ev.aggregate_id)
         if n is None:
-            n = Notification(id=ev.aggregate_id, user_id=p["user_id"], message=p["message"], is_read=False)
+            n = Notification(
+                id=ev.aggregate_id,
+                user_id=p["user_id"],
+                workspace_id=p.get("workspace_id") or m.get("workspace_id"),
+                project_id=p.get("project_id") or m.get("project_id"),
+                task_id=p.get("task_id") or m.get("task_id"),
+                note_id=p.get("note_id") or m.get("note_id"),
+                specification_id=p.get("specification_id") or m.get("specification_id"),
+                message=p["message"],
+                is_read=False,
+            )
             db.add(n)
         else:
             n.user_id = p["user_id"]
+            n.workspace_id = p.get("workspace_id") or m.get("workspace_id")
+            n.project_id = p.get("project_id") or m.get("project_id")
+            n.task_id = p.get("task_id") or m.get("task_id")
+            n.note_id = p.get("note_id") or m.get("note_id")
+            n.specification_id = p.get("specification_id") or m.get("specification_id")
             n.message = p["message"]
             # Preserve any existing read state; newly created events are unread.
             if n.is_read is None:

@@ -12,6 +12,8 @@ type TasksPanelProps = {
   toggleSearchTag: (tag: string) => void
   boardData: ProjectBoard | undefined
   onOpenTaskEditor: (taskId: string) => void
+  onOpenSpecification: (specificationId: string, projectId: string) => void
+  specificationNames: Record<string, string>
   onMoveTaskStatus: (taskId: string, nextStatus: string) => void
   tasks: Task[]
   onRestoreTask: (taskId: string) => void
@@ -27,6 +29,8 @@ export function TasksPanel({
   toggleSearchTag,
   boardData,
   onOpenTaskEditor,
+  onOpenSpecification,
+  specificationNames,
   onMoveTaskStatus,
   tasks,
   onRestoreTask,
@@ -116,9 +120,11 @@ export function TasksPanel({
               key={task.id}
               task={task}
               onOpen={onOpenTaskEditor}
+              onOpenSpecification={onOpenSpecification}
               onRestore={onRestoreTask}
               onReopen={onReopenTask}
               onComplete={onCompleteTask}
+              specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
             />
           ))}
           {tasks.length === 0 && <div className="notice" style={{ marginTop: 10 }}>No tasks in this project.</div>}

@@ -139,6 +139,42 @@ def create_mcp():
             offset=offset,
         )
 
+    @mcp.tool(description="List tasks linked to one specification.")
+    def list_spec_tasks(
+        specification_id: str,
+        auth_token: str | None = None,
+        archived: bool = False,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.list_spec_tasks(
+            specification_id=specification_id,
+            auth_token=auth_token,
+            archived=archived,
+            limit=limit,
+            offset=offset,
+        )
+
+    @mcp.tool(description="List notes linked to one specification.")
+    def list_spec_notes(
+        specification_id: str,
+        auth_token: str | None = None,
+        archived: bool = False,
+        pinned: bool | None = None,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.list_spec_notes(
+            specification_id=specification_id,
+            auth_token=auth_token,
+            archived=archived,
+            pinned=pinned,
+            limit=limit,
+            offset=offset,
+        )
+
     @mcp.tool(description="Get one project rule by id.")
     def get_project_rule(rule_id: str, auth_token: str | None = None) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
@@ -379,6 +415,91 @@ def create_mcp():
             workspace_id=workspace_id,
             body=body,
             status=status,
+            auth_token=auth_token,
+            command_id=command_id,
+        )
+
+    @mcp.tool(description="Create multiple tasks linked to one specification.")
+    def create_tasks_from_spec(
+        specification_id: str,
+        titles: list[str],
+        auth_token: str | None = None,
+        description: str = "",
+        priority: str = "Med",
+        due_date: str | None = None,
+        assignee_id: str | None = None,
+        labels: list[str] | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.create_tasks_from_spec(
+            specification_id=specification_id,
+            titles=titles,
+            auth_token=auth_token,
+            description=description,
+            priority=priority,
+            due_date=due_date,
+            assignee_id=assignee_id,
+            labels=labels,
+            command_id=command_id,
+        )
+
+    @mcp.tool(description="Link an existing task to a specification.")
+    def link_task_to_spec(
+        specification_id: str,
+        task_id: str,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.link_task_to_spec(
+            specification_id=specification_id,
+            task_id=task_id,
+            auth_token=auth_token,
+            command_id=command_id,
+        )
+
+    @mcp.tool(description="Unlink a task from a specification.")
+    def unlink_task_from_spec(
+        specification_id: str,
+        task_id: str,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.unlink_task_from_spec(
+            specification_id=specification_id,
+            task_id=task_id,
+            auth_token=auth_token,
+            command_id=command_id,
+        )
+
+    @mcp.tool(description="Link an existing note to a specification.")
+    def link_note_to_spec(
+        specification_id: str,
+        note_id: str,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.link_note_to_spec(
+            specification_id=specification_id,
+            note_id=note_id,
+            auth_token=auth_token,
+            command_id=command_id,
+        )
+
+    @mcp.tool(description="Unlink a note from a specification.")
+    def unlink_note_from_spec(
+        specification_id: str,
+        note_id: str,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.unlink_note_from_spec(
+            specification_id=specification_id,
+            note_id=note_id,
             auth_token=auth_token,
             command_id=command_id,
         )

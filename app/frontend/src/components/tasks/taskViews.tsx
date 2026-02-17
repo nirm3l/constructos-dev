@@ -7,19 +7,23 @@ import { Icon } from '../shared/uiHelpers'
 export function TaskListItem({
   task,
   onOpen,
+  onOpenSpecification,
   onRestore,
   onReopen,
   onComplete,
   showProject = false,
   projectName,
+  specificationName,
 }: {
   task: Task
   onOpen: (taskId: string) => void
+  onOpenSpecification?: (specificationId: string, projectId: string) => void
   onRestore: (taskId: string) => void
   onReopen: (taskId: string) => void
   onComplete: (taskId: string) => void
   showProject?: boolean
   projectName?: string
+  specificationName?: string
 }) {
   return (
     <div key={task.id} className={`task-item ${task.task_type === 'scheduled_instruction' ? 'scheduled' : ''}`}>
@@ -46,6 +50,22 @@ export function TaskListItem({
                 {t}
               </span>
             ))}
+          </div>
+        )}
+        {task.specification_id && (
+          <div className="row wrap" style={{ marginTop: 2 }}>
+            <button
+              className="pill subtle task-project-pill task-spec-pill"
+              onClick={(e) => {
+                e.stopPropagation()
+                onOpenSpecification?.(task.specification_id as string, task.project_id)
+              }}
+              title="Open linked specification"
+              aria-label="Open linked specification"
+            >
+              <Icon path="M6 2h12a2 2 0 0 1 2 2v16l-4 2-4-2-4 2-4-2V4a2 2 0 0 1 2-2zm3 5h6m-6 4h6m-6 4h4" />
+              <span>{specificationName || `Specification ${String(task.specification_id).slice(0, 8)}`}</span>
+            </button>
           </div>
         )}
         {task.task_type === 'scheduled_instruction' && (
