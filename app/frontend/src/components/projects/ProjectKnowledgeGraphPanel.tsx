@@ -269,7 +269,7 @@ export function ProjectKnowledgeGraphPanel({
       {isLoading ? (
         <div className="meta">Loading graph snapshot for this project...</div>
       ) : hasError ? (
-        <div className="notice">
+        <div className="notice notice-error">
           <strong>Knowledge graph unavailable.</strong>
           <div className="meta" style={{ color: 'inherit', marginTop: 4 }}>{toErrorMessage(error)}</div>
         </div>

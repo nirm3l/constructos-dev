@@ -806,7 +806,7 @@ function App() {
   ])
 
   if (bootstrap.isLoading) return <div className="page"><div className="card skeleton">Loading workspace...</div></div>
-  if (bootstrap.isError || !bootstrap.data) return <div className="page"><div className="notice">Unable to load bootstrap data.</div></div>
+  if (bootstrap.isError || !bootstrap.data) return <div className="page"><div className="notice notice-error">Unable to load bootstrap data.</div></div>
 
   const {
     selectedTaskTimeMeta,

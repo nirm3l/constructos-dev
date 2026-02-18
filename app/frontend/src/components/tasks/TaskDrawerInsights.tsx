@@ -121,7 +121,7 @@ export function TaskDrawerInsights({ state }: { state: any }) {
           )}
         </div>
         {state.automationStatus.data?.last_agent_comment && <div className="note">{state.automationStatus.data.last_agent_comment}</div>}
-        {state.automationStatus.data?.last_agent_error && <div className="notice">Runner error: {state.automationStatus.data.last_agent_error}</div>}
+        {state.automationStatus.data?.last_agent_error && <div className="notice notice-error">Runner error: {state.automationStatus.data.last_agent_error}</div>}
         <div className="row wrap" style={{ marginTop: 8 }}>
           <textarea
             value={state.automationInstruction}

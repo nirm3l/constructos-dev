@@ -164,7 +164,7 @@ export function TaskDrawer({ state }: { state: any }) {
             </select>
           </label>
         </div>
-        {state.taskEditorError && <div className="notice" role="alert" style={{ marginBottom: 8 }}>{state.taskEditorError}</div>}
+        {state.taskEditorError && <div className="notice notice-error" role="alert" style={{ marginBottom: 8 }}>{state.taskEditorError}</div>}
         {state.editTaskType === 'scheduled_instruction' && (
           <>
             <div className="task-edit-grid" style={{ marginBottom: 8 }}>

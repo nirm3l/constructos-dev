@@ -2177,11 +2177,29 @@ button:disabled {
 }
 
 .notice {
-  border: 1px solid #f0d2d2;
-  background: #fff5f5;
-  color: #8d1f1f;
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 16%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 34%);
+  color: color-mix(in srgb, var(--text), var(--muted) 24%);
   border-radius: 12px;
   padding: 10px;
+}
+
+.notice-error {
+  border-color: color-mix(in srgb, #ff5a5a, var(--line) 50%);
+  background: color-mix(in srgb, #ff5a5a, var(--surface) 90%);
+  color: color-mix(in srgb, #8d1f1f, var(--text) 18%);
+}
+
+[data-theme="dark"] .notice {
+  border-color: color-mix(in srgb, var(--line), var(--brand) 24%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 42%);
+  color: color-mix(in srgb, var(--text), var(--muted) 20%);
+}
+
+[data-theme="dark"] .notice-error {
+  border-color: color-mix(in srgb, #ff7b7b, var(--line) 42%);
+  background: color-mix(in srgb, #ff6464, var(--surface) 84%);
+  color: #ffd9d9;
 }
 
 .notice-global {
