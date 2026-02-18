@@ -62,6 +62,24 @@ def test_create_and_complete_task(tmp_path):
     assert done.json()['status'] == 'Done'
 
 
+def test_create_task_is_case_insensitive_idempotent_by_title(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    first = client.post('/api/tasks', json={'title': 'FK Sarajevo Plan', 'workspace_id': ws_id, 'project_id': project_id})
+    second = client.post('/api/tasks', json={'title': 'fk sarajevo plan', 'workspace_id': ws_id, 'project_id': project_id})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()['id'] == second.json()['id']
+
+    listed = client.get(f"/api/tasks?workspace_id={ws_id}&project_id={project_id}&q=fk sarajevo plan")
+    assert listed.status_code == 200
+    assert len([item for item in listed.json()['items'] if item['title'].strip().lower() == 'fk sarajevo plan']) == 1
+
+
 def test_search_filter(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -72,6 +90,24 @@ def test_search_filter(tmp_path):
     res = client.get(f'/api/tasks?workspace_id={ws_id}&project_id={project_id}&priority=High')
     assert res.status_code == 200
     assert any(t['priority'] == 'High' for t in res.json()['items'])
+
+
+def test_create_note_is_case_insensitive_idempotent_by_title(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    first = client.post('/api/notes', json={'title': 'FK Sarajevo Note', 'workspace_id': ws_id, 'project_id': project_id, 'body': 'one'})
+    second = client.post('/api/notes', json={'title': 'fk sarajevo note', 'workspace_id': ws_id, 'project_id': project_id, 'body': 'two'})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()['id'] == second.json()['id']
+
+    listed = client.get(f"/api/notes?workspace_id={ws_id}&project_id={project_id}&q=fk sarajevo note")
+    assert listed.status_code == 200
+    assert len([item for item in listed.json()['items'] if item['title'].strip().lower() == 'fk sarajevo note']) == 1
 
 
 def test_project_and_task_refs_roundtrip(tmp_path):
@@ -218,6 +254,24 @@ def test_create_project(tmp_path):
     payload = res.json()
     assert payload['name'] == 'Mobile Redesign'
     assert payload['workspace_id'] == ws_id
+
+
+def test_create_project_is_case_insensitive_idempotent_by_name(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    first = client.post('/api/projects', json={'workspace_id': ws_id, 'name': 'FK Sarajevo'})
+    second = client.post('/api/projects', json={'workspace_id': ws_id, 'name': 'fk sarajevo'})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()['id'] == second.json()['id']
+    assert first.json()['workspace_id'] == second.json()['workspace_id'] == ws_id
+
+    projects = client.get('/api/bootstrap').json()['projects']
+    matching = [p for p in projects if p['name'].strip().lower() == 'fk sarajevo']
+    assert len(matching) == 1
 
 
 def test_patch_project_name_and_description(tmp_path):
@@ -816,6 +870,82 @@ def test_agent_service_create_task_infers_workspace_from_project(tmp_path):
     assert created['recurring_rule'] == 'every:1m'
 
 
+def test_agent_service_create_task_is_idempotent_without_explicit_command_id(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    first = service.create_task(
+        title='Idempotent MCP task',
+        workspace_id=ws_id,
+        project_id=project_id,
+        description='same payload',
+        priority='High',
+        labels=['mcp', 'idempotent'],
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    second = service.create_task(
+        title='Idempotent MCP task',
+        workspace_id=ws_id,
+        project_id=project_id,
+        description='same payload',
+        priority='High',
+        labels=['mcp', 'idempotent'],
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+
+    assert first['id'] == second['id']
+    listed = service.list_tasks(
+        workspace_id=ws_id,
+        project_id=project_id,
+        q='Idempotent MCP task',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert len([item for item in listed['items'] if item['title'] == 'Idempotent MCP task']) == 1
+
+
+def test_agent_service_create_note_is_idempotent_without_explicit_command_id(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    first = service.create_note(
+        title='Idempotent MCP note',
+        body='same payload',
+        workspace_id=ws_id,
+        project_id=project_id,
+        tags=['mcp', 'idempotent'],
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    second = service.create_note(
+        title='Idempotent MCP note',
+        body='same payload',
+        workspace_id=ws_id,
+        project_id=project_id,
+        tags=['mcp', 'idempotent'],
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+
+    assert first['id'] == second['id']
+    listed = service.list_notes(
+        workspace_id=ws_id,
+        project_id=project_id,
+        q='Idempotent MCP note',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert len([item for item in listed['items'] if item['title'] == 'Idempotent MCP note']) == 1
+
+
 def test_agent_service_create_task_requires_project_id(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
@@ -891,6 +1021,165 @@ def test_agents_chat_endpoint_returns_executor_response(tmp_path):
     assert payload['action'] in {'complete', 'comment'}
     assert isinstance(payload['summary'], str)
     assert payload['session_id'] == 'test-session-1'
+
+
+def test_agents_chat_endpoint_includes_usage_when_available(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    monkeypatch.setattr(
+        agents_api,
+        'execute_task_automation',
+        lambda **_: AutomationOutcome(
+            action='comment',
+            summary='Usage captured',
+            comment=None,
+            usage={
+                'input_tokens': 1234,
+                'cached_input_tokens': 456,
+                'output_tokens': 78,
+                'context_limit_tokens': 128000,
+            },
+        ),
+    )
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'usage check',
+            'session_id': 'usage-session-1',
+            'history': [],
+        },
+    )
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload['ok'] is True
+    assert payload['usage']['input_tokens'] == 1234
+    assert payload['usage']['cached_input_tokens'] == 456
+    assert payload['usage']['output_tokens'] == 78
+    assert payload['usage']['context_limit_tokens'] == 128000
+
+
+def test_agents_chat_endpoint_auto_compacts_history_with_codex(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    calls = []
+
+    def _fake_execute_task_automation(**kwargs):
+        calls.append(kwargs)
+        if "History Compaction" in str(kwargs.get("title")):
+            return AutomationOutcome(action='comment', summary='Compacted context summary', comment=None)
+        return AutomationOutcome(action='comment', summary='Main answer', comment='done', usage=None)
+
+    monkeypatch.setattr(agents_api, 'AGENT_CHAT_HISTORY_COMPACT_THRESHOLD', 2)
+    monkeypatch.setattr(agents_api, 'AGENT_CHAT_HISTORY_RECENT_TAIL', 1)
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Do next step',
+            'history': [
+                {'role': 'user', 'content': 'First request'},
+                {'role': 'assistant', 'content': 'First response'},
+                {'role': 'user', 'content': 'Second request'},
+            ],
+        },
+    )
+    assert res.status_code == 200
+    assert len(calls) == 2
+    assert calls[0]['allow_mutations'] is False
+    assert "Compact this conversation history" in calls[0]['instruction']
+    assert calls[1]['allow_mutations'] is True
+    assert "[Compacted conversation context]" in calls[1]['instruction']
+
+
+def test_agents_chat_endpoint_respects_allow_mutations_flag(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    captured = {}
+
+    def _fake_execute_task_automation(**kwargs):
+        captured.update(kwargs)
+        return AutomationOutcome(action='comment', summary='Read-only answer', comment=None, usage=None)
+
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Analyze only',
+            'allow_mutations': False,
+            'history': [],
+        },
+    )
+    assert res.status_code == 200
+    assert captured['allow_mutations'] is False
+
+
+def test_agents_chat_endpoint_force_compacts_on_slash_command(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    calls = []
+
+    def _fake_execute_task_automation(**kwargs):
+        calls.append(kwargs)
+        return AutomationOutcome(action='comment', summary='Forced compact summary', comment=None, usage=None)
+
+    monkeypatch.setattr(agents_api, 'AGENT_CHAT_HISTORY_COMPACT_THRESHOLD', 999)
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': '/compact',
+            'history': [
+                {'role': 'user', 'content': 'Old question'},
+                {'role': 'assistant', 'content': 'Old answer'},
+                {'role': 'user', 'content': '/compact'},
+            ],
+        },
+    )
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload['ok'] is True
+    assert payload['summary'] == 'Chat history compacted.'
+    assert payload['comment'] is None
+    assert payload['usage'] is None
+    assert len(calls) == 1
+    assert calls[0]['allow_mutations'] is False
+    assert 'Compact this conversation history' in calls[0]['instruction']
 
 
 def test_create_scheduled_task_requires_instruction_and_time(tmp_path):

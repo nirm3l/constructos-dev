@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -23,7 +24,6 @@ from shared.core import (
     TaskWatcher,
     User,
     append_event,
-    allocate_id,
     ensure_role,
     get_kurrent_client,
     get_user_zoneinfo,
@@ -109,6 +109,19 @@ def _normalize_attachment_refs(values: list[dict] | None) -> list[dict]:
     return out
 
 
+def _normalize_task_title(value: str) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _task_title_key(value: str) -> str:
+    return _normalize_task_title(value).casefold()
+
+
+def _task_aggregate_id(project_id: str, title: str) -> str:
+    key = _task_title_key(title)
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"task:{project_id}:{key}"))
+
+
 def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> Project:
     project = db.get(Project, project_id)
     if not project or project.is_deleted:
@@ -168,6 +181,22 @@ class CreateTaskHandler:
     def __call__(self) -> dict:
         ensure_role(self.ctx.db, self.payload.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
         project = _require_project_scope(self.ctx.db, workspace_id=self.payload.workspace_id, project_id=self.payload.project_id)
+        title = _normalize_task_title(self.payload.title)
+        if not title:
+            raise HTTPException(status_code=422, detail="title cannot be empty")
+        tid = _task_aggregate_id(self.payload.project_id, title)
+        existing_task = self.ctx.db.get(Task, tid)
+        if existing_task and not existing_task.is_deleted:
+            task_view = load_task_view(self.ctx.db, tid)
+            if task_view is None:
+                raise HTTPException(status_code=404, detail="Task not found")
+            return task_view
+        if existing_task and existing_task.is_deleted:
+            raise HTTPException(
+                status_code=409,
+                detail="Task with this title already exists in deleted state; restore is not supported",
+            )
+
         if self.payload.specification_id:
             _require_specification_scope(
                 self.ctx.db,
@@ -193,7 +222,6 @@ class CreateTaskHandler:
             scheduled_instruction=scheduled_instruction,
             scheduled_at_utc=to_iso_utc(scheduled_at),
         )
-        tid = allocate_id(self.ctx.db)
         max_order = self.ctx.db.execute(
             select(func.max(Task.order_index)).where(Task.workspace_id == self.payload.workspace_id, Task.project_id == self.payload.project_id)
         ).scalar() or 0
@@ -206,7 +234,7 @@ class CreateTaskHandler:
                 "workspace_id": self.payload.workspace_id,
                 "project_id": self.payload.project_id,
                 "specification_id": self.payload.specification_id,
-                "title": self.payload.title.strip(),
+                "title": title,
                 "description": self.payload.description,
                 "status": initial_status,
                 "priority": self.payload.priority,

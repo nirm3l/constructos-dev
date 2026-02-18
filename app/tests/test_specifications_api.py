@@ -66,6 +66,72 @@ def test_specification_crud_and_filters(tmp_path: Path):
     assert restored.json()["ok"] is True
 
 
+def test_create_specification_is_case_insensitive_idempotent_by_title(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+
+    first = client.post(
+        "/api/specifications",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "FK Sarajevo Spec",
+            "status": "Draft",
+        },
+    )
+    second = client.post(
+        "/api/specifications",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "fk sarajevo spec",
+            "status": "Ready",
+        },
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["id"] == second.json()["id"]
+
+    listed = client.get(f"/api/specifications?workspace_id={ws_id}&project_id={project_id}&q=fk sarajevo spec")
+    assert listed.status_code == 200
+    assert len([item for item in listed.json()["items"] if item["title"].strip().lower() == "fk sarajevo spec"]) == 1
+
+
+def test_specification_status_aliases_are_normalized(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+
+    created = client.post(
+        "/api/specifications",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Alias status create",
+            "status": "in_progress",
+        },
+    )
+    assert created.status_code == 200
+    spec = created.json()
+    assert spec["status"] == "In progress"
+
+    patched_done = client.patch(f"/api/specifications/{spec['id']}", json={"status": "done"})
+    assert patched_done.status_code == 200
+    assert patched_done.json()["status"] == "Implemented"
+
+    patched_ready = client.patch(f"/api/specifications/{spec['id']}", json={"status": "READY"})
+    assert patched_ready.status_code == 200
+    assert patched_ready.json()["status"] == "Ready"
+
+    bad = client.patch(f"/api/specifications/{spec['id']}", json={"status": "something-else"})
+    assert bad.status_code == 422
+    assert "status must be one of" in bad.text
+
+
 def test_specification_tags_are_normalized_and_filterable(tmp_path: Path):
     client = build_client(tmp_path)
     bootstrap = client.get("/api/bootstrap").json()

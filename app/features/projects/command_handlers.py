@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import uuid
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -21,7 +22,6 @@ from shared.core import (
     User,
     WorkspaceMember,
     append_event,
-    allocate_id,
     ensure_role,
     load_project_view,
 )
@@ -105,6 +105,19 @@ def _normalize_project_statuses(values: list[str] | None) -> list[str]:
     return out
 
 
+def _normalize_project_name(value: str) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _project_name_key(value: str) -> str:
+    return _normalize_project_name(value).casefold()
+
+
+def _project_aggregate_id(workspace_id: str, name: str) -> str:
+    key = _project_name_key(name)
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"project:{workspace_id}:{key}"))
+
+
 @dataclass(frozen=True, slots=True)
 class CreateProjectHandler:
     ctx: CommandContext
@@ -112,6 +125,22 @@ class CreateProjectHandler:
 
     def __call__(self) -> dict:
         ensure_role(self.ctx.db, self.payload.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
+        name = _normalize_project_name(self.payload.name)
+        if not name:
+            raise HTTPException(status_code=422, detail="name cannot be empty")
+        pid = _project_aggregate_id(self.payload.workspace_id, name)
+        existing_project = self.ctx.db.get(Project, pid)
+        if existing_project and not existing_project.is_deleted:
+            existing_view = load_project_view(self.ctx.db, pid)
+            if existing_view is None:
+                raise HTTPException(status_code=404, detail="Project not found")
+            return existing_view
+        if existing_project and existing_project.is_deleted:
+            raise HTTPException(
+                status_code=409,
+                detail="Project with this name already exists in deleted state; restore is not supported",
+            )
+
         member_ids: list[str] = [self.ctx.user.id]
         member_ids.extend([str(uid).strip() for uid in self.payload.member_user_ids if str(uid).strip()])
         deduped_member_ids = list(dict.fromkeys(member_ids))
@@ -124,7 +153,6 @@ class CreateProjectHandler:
             if uid not in workspace_users:
                 raise HTTPException(status_code=422, detail=f"user_id {uid} is not a member of this workspace")
 
-        pid = allocate_id(self.ctx.db)
         append_event(
             self.ctx.db,
             aggregate_type="Project",
@@ -132,7 +160,7 @@ class CreateProjectHandler:
             event_type=PROJECT_EVENT_CREATED,
             payload={
                 "workspace_id": self.payload.workspace_id,
-                "name": self.payload.name.strip(),
+                "name": name,
                 "description": self.payload.description,
                 "custom_statuses": _normalize_project_statuses(self.payload.custom_statuses),
                 "external_refs": _normalize_external_refs([r.model_dump() for r in self.payload.external_refs]),

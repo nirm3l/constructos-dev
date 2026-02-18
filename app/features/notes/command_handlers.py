@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -17,7 +18,6 @@ from shared.core import (
     Task,
     User,
     append_event,
-    allocate_id,
     ensure_role,
     load_note_command_state,
     load_note_view,
@@ -103,6 +103,19 @@ def _normalize_attachment_refs(values: list[dict] | None) -> list[dict]:
     return out
 
 
+def _normalize_note_title(value: str) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _note_title_key(value: str) -> str:
+    return _normalize_note_title(value).casefold()
+
+
+def _note_aggregate_id(project_id: str, title: str) -> str:
+    key = _note_title_key(title)
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"note:{project_id}:{key}"))
+
+
 def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> Project:
     project = db.get(Project, project_id)
     if not project or project.is_deleted:
@@ -150,6 +163,22 @@ class CreateNoteHandler:
     def __call__(self) -> dict:
         ensure_role(self.ctx.db, self.payload.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
         _require_project_scope(self.ctx.db, workspace_id=self.payload.workspace_id, project_id=self.payload.project_id)
+        title = _normalize_note_title(self.payload.title)
+        if not title:
+            raise HTTPException(status_code=422, detail="title cannot be empty")
+        nid = _note_aggregate_id(self.payload.project_id, title)
+        existing_note = self.ctx.db.get(Note, nid)
+        if existing_note and not existing_note.is_deleted:
+            view = load_note_view(self.ctx.db, nid)
+            if view is None:
+                raise HTTPException(status_code=404, detail="Note not found")
+            return view
+        if existing_note and existing_note.is_deleted:
+            raise HTTPException(
+                status_code=409,
+                detail="Note with this title already exists in deleted state; restore is not supported",
+            )
+
         if self.payload.specification_id:
             _require_specification_scope(
                 self.ctx.db,
@@ -164,7 +193,6 @@ class CreateNoteHandler:
                 project_id=self.payload.project_id,
                 task_id=self.payload.task_id,
             )
-        nid = allocate_id(self.ctx.db)
         append_event(
             self.ctx.db,
             aggregate_type="Note",
@@ -175,7 +203,7 @@ class CreateNoteHandler:
                 "project_id": self.payload.project_id,
                 "task_id": self.payload.task_id,
                 "specification_id": self.payload.specification_id,
-                "title": self.payload.title.strip(),
+                "title": title,
                 "body": self.payload.body or "",
                 "tags": _normalize_tags(self.payload.tags),
                 "external_refs": _normalize_external_refs([r.model_dump() for r in self.payload.external_refs]),

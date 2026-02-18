@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import uuid
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from shared.core import (
     Project,
+    Specification,
     SpecificationCreate,
     SpecificationPatch,
     User,
     append_event,
-    allocate_id,
     ensure_role,
     load_specification_command_state,
     load_specification_view,
@@ -20,6 +21,23 @@ from shared.core import (
 from .domain import EVENT_ARCHIVED, EVENT_CREATED, EVENT_DELETED, EVENT_RESTORED, EVENT_UPDATED
 
 ALLOWED_SPEC_STATUSES = {"Draft", "Ready", "In progress", "Implemented", "Archived"}
+SPEC_STATUS_ALIASES = {
+    "draft": "Draft",
+    "todo": "Draft",
+    "to do": "Draft",
+    "planned": "Draft",
+    "plan": "Draft",
+    "ready": "Ready",
+    "in progress": "In progress",
+    "inprogress": "In progress",
+    "wip": "In progress",
+    "implemented": "Implemented",
+    "done": "Implemented",
+    "complete": "Implemented",
+    "completed": "Implemented",
+    "archived": "Archived",
+    "archive": "Archived",
+}
 
 
 def _normalize_tags(values: list[str] | None) -> list[str]:
@@ -81,11 +99,29 @@ def _normalize_attachment_refs(values: list[dict] | None) -> list[dict]:
     return out
 
 
+def _normalize_specification_title(value: str) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _specification_title_key(value: str) -> str:
+    return _normalize_specification_title(value).casefold()
+
+
+def _specification_aggregate_id(project_id: str, title: str) -> str:
+    key = _specification_title_key(title)
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"specification:{project_id}:{key}"))
+
+
 def _normalize_status(value: str | None) -> str:
     status = str(value or "").strip()
-    if status not in ALLOWED_SPEC_STATUSES:
-        raise HTTPException(status_code=422, detail=f"status must be one of: {', '.join(sorted(ALLOWED_SPEC_STATUSES))}")
-    return status
+    if status in ALLOWED_SPEC_STATUSES:
+        return status
+
+    normalized = " ".join(status.lower().replace("_", " ").replace("-", " ").split())
+    if normalized in SPEC_STATUS_ALIASES:
+        return SPEC_STATUS_ALIASES[normalized]
+
+    raise HTTPException(status_code=422, detail=f"status must be one of: {', '.join(sorted(ALLOWED_SPEC_STATUSES))}")
 
 
 def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> Project:
@@ -122,12 +158,24 @@ class CreateSpecificationHandler:
         ensure_role(self.ctx.db, self.payload.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
         _require_project_scope(self.ctx.db, workspace_id=self.payload.workspace_id, project_id=self.payload.project_id)
 
-        title = self.payload.title.strip()
+        title = _normalize_specification_title(self.payload.title)
         if not title:
             raise HTTPException(status_code=422, detail="title cannot be empty")
 
         status = _normalize_status(self.payload.status)
-        sid = allocate_id(self.ctx.db)
+        sid = _specification_aggregate_id(self.payload.project_id, title)
+        existing_specification = self.ctx.db.get(Specification, sid)
+        if existing_specification and not existing_specification.is_deleted:
+            view = load_specification_view(self.ctx.db, sid)
+            if view is None:
+                raise HTTPException(status_code=404, detail="Specification not found")
+            return view
+        if existing_specification and existing_specification.is_deleted:
+            raise HTTPException(
+                status_code=409,
+                detail="Specification with this title already exists in deleted state; restore is not supported",
+            )
+
         append_event(
             self.ctx.db,
             aggregate_type="Specification",

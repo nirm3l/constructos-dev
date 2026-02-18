@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import hmac
+import json
 import uuid
+from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -124,6 +127,38 @@ class AgentTaskService:
         raise HTTPException(
             status_code=400,
             detail="workspace_id is required for project creation when MCP default workspace is not configured",
+        )
+
+    def _normalize_command_payload(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            return [self._normalize_command_payload(item) for item in value]
+        if isinstance(value, tuple):
+            return [self._normalize_command_payload(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                str(key): self._normalize_command_payload(value[key])
+                for key in sorted(value.keys(), key=lambda item: str(item))
+            }
+        return value
+
+    def _fallback_command_id(self, *, prefix: str, payload: dict[str, Any]) -> str:
+        normalized_payload = self._normalize_command_payload(payload)
+        encoded = json.dumps(normalized_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
+        digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
+        return f"{prefix}-{digest}"
+
+    def _normalize_project_name(self, value: str) -> str:
+        return " ".join(str(value or "").split())
+
+    def _fallback_project_create_command_id(self, *, workspace_id: str, name: str) -> str:
+        return self._fallback_command_id(
+            prefix="mcp-project-create",
+            payload={
+                "workspace_id": workspace_id,
+                "name_key": self._normalize_project_name(name).casefold(),
+            },
         )
 
     def _resolve_workspace_for_note_create(
@@ -581,6 +616,25 @@ class AgentTaskService:
                 explicit_workspace_id=workspace_id,
                 project_id=project_id,
             )
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-task-create",
+                payload={
+                    "workspace_id": resolved_workspace_id,
+                    "project_id": resolved_project_id,
+                    "title": title,
+                    "description": description,
+                    "priority": priority,
+                    "due_date": due_date,
+                    "recurring_rule": recurring_rule,
+                    "specification_id": specification_id,
+                    "task_type": task_type,
+                    "scheduled_instruction": scheduled_instruction,
+                    "scheduled_at_utc": scheduled_at_utc,
+                    "schedule_timezone": schedule_timezone,
+                    "assignee_id": assignee_id,
+                    "labels": labels or [],
+                },
+            )
             payload = TaskCreate(
                 workspace_id=resolved_workspace_id,
                 project_id=resolved_project_id,
@@ -597,7 +651,7 @@ class AgentTaskService:
                 assignee_id=assignee_id,
                 labels=labels or [],
             )
-            return TaskApplicationService(db, user, command_id=command_id or f"mcp-create-{uuid.uuid4()}").create_task(payload)
+            return TaskApplicationService(db, user, command_id=effective_command_id).create_task(payload)
 
     def create_note(
         self,
@@ -622,6 +676,19 @@ class AgentTaskService:
                 project_id=project_id,
                 task_id=task_id,
             )
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-note-create",
+                payload={
+                    "workspace_id": ws_id,
+                    "project_id": proj_id,
+                    "task_id": resolved_task_id,
+                    "specification_id": specification_id,
+                    "title": title,
+                    "body": body or "",
+                    "tags": tags or [],
+                    "pinned": bool(pinned),
+                },
+            )
             payload = NoteCreate(
                 workspace_id=ws_id,
                 project_id=proj_id,
@@ -632,7 +699,7 @@ class AgentTaskService:
                 tags=tags or [],
                 pinned=bool(pinned),
             )
-            return NoteApplicationService(db, user, command_id=command_id or f"mcp-note-create-{uuid.uuid4()}").create_note(payload)
+            return NoteApplicationService(db, user, command_id=effective_command_id).create_note(payload)
 
     def create_project(
         self,
@@ -648,13 +715,17 @@ class AgentTaskService:
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             resolved_workspace_id = self._resolve_workspace_for_project_create(explicit_workspace_id=workspace_id)
+            effective_command_id = command_id or self._fallback_project_create_command_id(
+                workspace_id=resolved_workspace_id,
+                name=name,
+            )
             payload = ProjectCreate(
                 workspace_id=resolved_workspace_id,
                 name=name,
                 description=description,
                 custom_statuses=custom_statuses,
             )
-            return ProjectApplicationService(db, user, command_id=command_id or f"mcp-project-create-{uuid.uuid4()}").create_project(payload)
+            return ProjectApplicationService(db, user, command_id=effective_command_id).create_project(payload)
 
     def create_project_rule(
         self,
@@ -674,6 +745,15 @@ class AgentTaskService:
                 explicit_workspace_id=workspace_id,
                 project_id=project_id,
             )
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-project-rule-create",
+                payload={
+                    "workspace_id": resolved_workspace_id,
+                    "project_id": resolved_project_id,
+                    "title": title,
+                    "body": body or "",
+                },
+            )
             payload = ProjectRuleCreate(
                 workspace_id=resolved_workspace_id,
                 project_id=resolved_project_id,
@@ -681,7 +761,7 @@ class AgentTaskService:
                 body=body or "",
             )
             return ProjectRuleApplicationService(
-                db, user, command_id=command_id or f"mcp-project-rule-create-{uuid.uuid4()}"
+                db, user, command_id=effective_command_id
             ).create_project_rule(payload)
 
     def create_specification(
@@ -703,6 +783,16 @@ class AgentTaskService:
                 explicit_workspace_id=workspace_id,
                 project_id=project_id,
             )
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-specification-create",
+                payload={
+                    "workspace_id": resolved_workspace_id,
+                    "project_id": resolved_project_id,
+                    "title": title,
+                    "body": body or "",
+                    "status": status,
+                },
+            )
             payload = SpecificationCreate(
                 workspace_id=resolved_workspace_id,
                 project_id=resolved_project_id,
@@ -711,7 +801,7 @@ class AgentTaskService:
                 status=status,
             )
             return SpecificationApplicationService(
-                db, user, command_id=command_id or f"mcp-specification-create-{uuid.uuid4()}"
+                db, user, command_id=effective_command_id
             ).create_specification(payload)
 
     def create_tasks_from_spec(
@@ -731,10 +821,22 @@ class AgentTaskService:
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             self._assert_specification_allowed(db=db, specification_id=specification_id)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-spec-tasks-bulk-create",
+                payload={
+                    "specification_id": specification_id,
+                    "titles": titles,
+                    "description": description,
+                    "priority": priority,
+                    "due_date": due_date,
+                    "assignee_id": assignee_id,
+                    "labels": labels or [],
+                },
+            )
             return SpecificationApplicationService(
                 db,
                 user,
-                command_id=command_id or f"mcp-spec-tasks-bulk-{uuid.uuid4()}",
+                command_id=effective_command_id,
             ).create_tasks_from_specification(
                 specification_id,
                 titles=titles,

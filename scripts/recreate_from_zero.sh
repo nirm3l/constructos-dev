@@ -8,7 +8,8 @@ echo "[1/5] Stopping Docker Compose stack and removing volumes..."
 docker compose down -v --remove-orphans || true
 
 echo "[2/5] Cleaning local projection DB and uploaded files..."
-rm -f data/app.db
+rm -f data/*.db
+rm -f app/*.db
 rm -rf data/uploads
 rm -rf app/uploads
 mkdir -p data

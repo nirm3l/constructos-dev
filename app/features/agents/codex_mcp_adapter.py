@@ -6,7 +6,12 @@ import subprocess
 import sys
 import tempfile
 
-from shared.settings import AGENT_CODEX_MCP_URL, AGENT_CODEX_MODEL, AGENT_EXECUTOR_TIMEOUT_SECONDS
+from shared.settings import (
+    AGENT_CHAT_CONTEXT_LIMIT_TOKENS,
+    AGENT_CODEX_MCP_URL,
+    AGENT_CODEX_MODEL,
+    AGENT_EXECUTOR_TIMEOUT_SECONDS,
+)
 
 
 def _build_prompt(ctx: dict) -> str:
@@ -21,6 +26,7 @@ def _build_prompt(ctx: dict) -> str:
     project_description = str(ctx.get("project_description") or "")
     project_rules = ctx.get("project_rules") or []
     graph_context_markdown = str(ctx.get("graph_context_markdown") or "").strip()
+    allow_mutations = bool(ctx.get("allow_mutations", True))
     soul_md = project_description.strip() or "_(empty)_"
     graph_md = graph_context_markdown or "_(knowledge graph unavailable)_"
     rules_md_lines: list[str] = []
@@ -42,6 +48,14 @@ def _build_prompt(ctx: dict) -> str:
         "- First call MCP tool get_task(task_id) to validate current task data.\n"
         if has_task_context
         else "- This is a general chat request (not bound to a single task). Use workspace/project context and MCP tools as needed.\n"
+    )
+    mutation_policy = (
+        "- Mutating tools are allowed for this request.\n"
+        "- Apply requested changes via MCP tools directly when possible.\n"
+        if allow_mutations
+        else "- Mutating tools are NOT allowed for this request.\n"
+        "- Do not create/update/delete/archive/complete entities.\n"
+        "- Do not call mutating MCP tools; produce analysis/summary only.\n"
     )
     return (
         "You are an automation agent for task management.\n"
@@ -72,17 +86,59 @@ def _build_prompt(ctx: dict) -> str:
         "- Use graph_* MCP tools when you need relation-aware lookup across project resources.\n"
         "- Prefer bulk tools when operating on many tasks (avoid per-task loops when possible).\n"
         "- Prefer archive_all_notes/archive_all_tasks for 'archive everything' requests.\n"
+        "- For mutating MCP tool calls, always provide command_id.\n"
+        "- If retrying the same mutation, reuse the exact same command_id.\n"
         "- If the user asks for a plan/spec/design doc, prefer creating a Note (Markdown) via MCP tools so it is visible in the UI.\n"
         "- When creating a plan note: use a clear title starting with 'Plan:' and include actionable steps.\n"
         "- If you are in task context, link the note to the task by setting task_id when creating the note.\n"
-        "- Mutating tools are allowed for this request.\n"
-        "- Apply requested changes via MCP tools directly when possible.\n"
+        f"{mutation_policy}"
         "- For recurring schedules, set task.recurring_rule explicitly using canonical format: every:<number><m|h|d> (example: every:1m).\n"
         "- After scheduling changes, verify by reading the task and confirming scheduled_at_utc + recurring_rule values.\n"
         "- Return action=complete only if this task should be completed; otherwise return action=comment.\n"
         "- summary must state what was actually done.\n"
         "- comment should be concise and optional; use null when no extra runner comment is needed.\n"
     )
+
+
+def _safe_non_negative_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_turn_usage(stdout: str) -> dict[str, int] | None:
+    usage_raw: dict | None = None
+    for raw_line in (stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") != "turn.completed":
+            continue
+        maybe_usage = event.get("usage")
+        if isinstance(maybe_usage, dict):
+            usage_raw = maybe_usage
+    if usage_raw is None:
+        return None
+    input_tokens = _safe_non_negative_int(usage_raw.get("input_tokens")) or 0
+    cached_input_tokens = _safe_non_negative_int(usage_raw.get("cached_input_tokens")) or 0
+    output_tokens = _safe_non_negative_int(usage_raw.get("output_tokens")) or 0
+    usage = {
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "output_tokens": output_tokens,
+    }
+    if AGENT_CHAT_CONTEXT_LIMIT_TOKENS > 0:
+        usage["context_limit_tokens"] = int(AGENT_CHAT_CONTEXT_LIMIT_TOKENS)
+    return usage
 
 
 def main() -> int:
@@ -116,6 +172,7 @@ def main() -> int:
             "exec",
             "--skip-git-repo-check",
             "--dangerously-bypass-approvals-and-sandbox",
+            "--json",
             "--output-schema",
             schema_path,
             "--output-last-message",
@@ -137,6 +194,7 @@ def main() -> int:
         if proc.returncode != 0:
             err = (proc.stderr or proc.stdout or "").strip()
             raise RuntimeError(f"codex exec failed (exit={proc.returncode}): {err[:600]}")
+        usage = _extract_turn_usage(proc.stdout or "")
 
         with open(output_path, "r", encoding="utf-8") as f:
             out = json.loads(f.read().strip() or "{}")
@@ -150,7 +208,7 @@ def main() -> int:
         summary = "Codex execution completed."
     if comment is not None:
         comment = str(comment)
-    print(json.dumps({"action": action, "summary": summary, "comment": comment}))
+    print(json.dumps({"action": action, "summary": summary, "comment": comment, "usage": usage}))
     return 0
 
 
