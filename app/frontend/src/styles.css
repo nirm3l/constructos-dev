@@ -1149,39 +1149,39 @@ button:disabled {
 }
 
 .prio-low {
-  background: color-mix(in srgb, #22c55e, var(--surface) 85%);
-  border-color: color-mix(in srgb, #22c55e, var(--line) 70%);
-  color: color-mix(in srgb, #0b3d1d, var(--text) 35%);
+  background: color-mix(in srgb, var(--surface-alt), var(--surface) 42%);
+  border-color: color-mix(in srgb, var(--line), var(--brand) 18%);
+  color: color-mix(in srgb, var(--muted), var(--text) 24%);
 }
 
 .prio-med {
-  background: color-mix(in srgb, #f59e0b, var(--surface) 87%);
-  border-color: color-mix(in srgb, #f59e0b, var(--line) 70%);
-  color: color-mix(in srgb, #4a2a00, var(--text) 35%);
+  background: color-mix(in srgb, var(--brand), var(--surface) 88%);
+  border-color: color-mix(in srgb, var(--brand), var(--line) 48%);
+  color: color-mix(in srgb, var(--text), var(--brand-strong) 22%);
 }
 
 .prio-high {
-  background: color-mix(in srgb, #ef4444, var(--surface) 86%);
-  border-color: color-mix(in srgb, #ef4444, var(--line) 70%);
-  color: color-mix(in srgb, #4a0f0f, var(--text) 35%);
+  background: color-mix(in srgb, var(--brand-strong), var(--surface) 80%);
+  border-color: color-mix(in srgb, var(--brand-strong), var(--line) 36%);
+  color: color-mix(in srgb, var(--text), #0e2c1a 44%);
 }
 
 [data-theme="dark"] .prio-low {
-  background: rgba(34, 197, 94, 0.18);
-  border-color: rgba(34, 197, 94, 0.36);
-  color: #b7f7cf;
+  background: rgba(79, 215, 127, 0.14);
+  border-color: rgba(79, 215, 127, 0.26);
+  color: #9ef2bc;
 }
 
 [data-theme="dark"] .prio-med {
-  background: rgba(245, 158, 11, 0.18);
-  border-color: rgba(245, 158, 11, 0.36);
-  color: #ffe1ad;
+  background: rgba(79, 215, 127, 0.2);
+  border-color: rgba(79, 215, 127, 0.38);
+  color: #c1ffd4;
 }
 
 [data-theme="dark"] .prio-high {
-  background: rgba(239, 68, 68, 0.18);
-  border-color: rgba(239, 68, 68, 0.36);
-  color: #ffc0c0;
+  background: rgba(115, 255, 157, 0.24);
+  border-color: rgba(115, 255, 157, 0.5);
+  color: #e6ffee;
 }
 
 .kanban-actions {
