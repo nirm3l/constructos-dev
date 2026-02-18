@@ -3,19 +3,28 @@ from __future__ import annotations
 import json
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from shared.core import ActivityLog, DEFAULT_STATUSES, Project, ProjectMember, ProjectTagIndex, Task, User, ensure_role, serialize_task, to_iso_utc
 
 
-def get_project_board_read_model(db: Session, user, project_id: str) -> dict:
+def get_project_board_read_model(db: Session, user, project_id: str, tags: list[str] | None = None) -> dict:
     project = db.get(Project, project_id)
     if not project or project.is_deleted:
         raise HTTPException(status_code=404, detail="Project not found")
     ensure_role(db, project.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     statuses = json.loads(project.custom_statuses or json.dumps(DEFAULT_STATUSES))
-    tasks = db.execute(select(Task).where(Task.project_id == project_id, Task.is_deleted == False, Task.archived == False).order_by(Task.order_index.asc())).scalars().all()
+    stmt = select(Task).where(
+        Task.project_id == project_id,
+        Task.is_deleted == False,
+        Task.archived == False,
+    )
+    if tags:
+        tag_filters = [Task.labels.ilike(f'%"{tag}"%') for tag in tags]
+        if tag_filters:
+            stmt = stmt.where(or_(*tag_filters))
+    tasks = db.execute(stmt.order_by(Task.order_index.asc())).scalars().all()
     lanes = {s: [] for s in statuses}
     for task in tasks:
         lanes.setdefault(task.status, [])

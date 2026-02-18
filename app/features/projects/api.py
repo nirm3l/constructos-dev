@@ -54,8 +54,14 @@ def patch_project(
 
 
 @router.get("/api/projects/{project_id}/board")
-def project_board(project_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    return get_project_board_read_model(db, user, project_id)
+def project_board(
+    project_id: str,
+    tags: str | None = None,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    parsed_tags = [t.strip().lower() for t in tags.split(",") if t.strip()] if tags else None
+    return get_project_board_read_model(db, user, project_id, tags=parsed_tags)
 
 
 @router.get("/api/projects/{project_id}/activity")

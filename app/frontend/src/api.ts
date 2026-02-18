@@ -254,8 +254,19 @@ export const patchProject = (
 export const deleteProject = (userId: string, projectId: string) =>
   api<{ ok: true }>(`/api/projects/${projectId}`, userId, { method: 'DELETE' })
 
-export const getProjectBoard = (userId: string, projectId: string) =>
-  api<ProjectBoard>(`/api/projects/${projectId}/board`, userId)
+export const getProjectBoard = (
+  userId: string,
+  projectId: string,
+  params?: {
+    tags?: string[]
+  }
+) =>
+  api<ProjectBoard>(
+    `/api/projects/${projectId}/board${queryString({
+      tags: params?.tags?.join(',') || undefined,
+    })}`,
+    userId
+  )
 
 export const getProjectTags = (userId: string, projectId: string) =>
   api<ProjectTags>(`/api/projects/${projectId}/tags`, userId)

@@ -206,8 +206,8 @@ export function useCoreQueries(c: any) {
   })
 
   const board = useQuery({
-    queryKey: ['board', c.userId, c.selectedProjectId],
-    queryFn: () => getProjectBoard(c.userId, c.selectedProjectId),
+    queryKey: ['board', c.userId, c.selectedProjectId, c.searchTags.join(',')],
+    queryFn: () => getProjectBoard(c.userId, c.selectedProjectId, { tags: c.searchTags }),
     enabled: Boolean(c.selectedProjectId && c.tab === 'tasks' && c.projectsMode === 'board')
   })
 

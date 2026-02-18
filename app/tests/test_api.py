@@ -332,6 +332,44 @@ def test_project_custom_statuses_can_be_configured_and_patched(tmp_path):
     assert board_after.json()['statuses'] == ['Backlog', 'In progress', 'Ready for QA', 'Done']
 
 
+def test_project_board_supports_tag_filtering(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    project = client.post('/api/projects', json={'workspace_id': ws_id, 'name': 'Board tag filter'}).json()
+
+    task_alpha = client.post(
+        '/api/tasks',
+        json={'title': 'Alpha task', 'workspace_id': ws_id, 'project_id': project['id'], 'labels': ['alpha']},
+    )
+    assert task_alpha.status_code == 200
+    alpha_id = task_alpha.json()['id']
+
+    task_beta = client.post(
+        '/api/tasks',
+        json={'title': 'Beta task', 'workspace_id': ws_id, 'project_id': project['id'], 'labels': ['beta']},
+    )
+    assert task_beta.status_code == 200
+    beta_id = task_beta.json()['id']
+
+    board_all = client.get(f"/api/projects/{project['id']}/board")
+    assert board_all.status_code == 200
+    all_ids = {task['id'] for lane in board_all.json()['lanes'].values() for task in lane}
+    assert {alpha_id, beta_id}.issubset(all_ids)
+
+    board_alpha = client.get(f"/api/projects/{project['id']}/board?tags=ALPHA")
+    assert board_alpha.status_code == 200
+    alpha_ids = {task['id'] for lane in board_alpha.json()['lanes'].values() for task in lane}
+    assert alpha_id in alpha_ids
+    assert beta_id not in alpha_ids
+
+    board_alpha_beta = client.get(f"/api/projects/{project['id']}/board?tags=alpha,beta")
+    assert board_alpha_beta.status_code == 200
+    alpha_beta_ids = {task['id'] for lane in board_alpha_beta.json()['lanes'].values() for task in lane}
+    assert {alpha_id, beta_id}.issubset(alpha_beta_ids)
+
+
 def test_project_members_assignment_and_user_types(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
