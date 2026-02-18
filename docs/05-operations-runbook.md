@@ -1,33 +1,33 @@
 # 05 Operations Runbook
 
-## 1. Runtime Komponente
-Docker compose stack pokrece:
-- `task-app` (FastAPI + runner)
+## 1. Runtime Components
+The default Docker Compose stack includes:
+- `task-app` (FastAPI + automation runner)
 - `mcp-tools` (FastMCP server)
 - `postgres`
 - `kurrentdb`
 - `neo4j`
 
-## 2. Standardni Operativni Tok
+## 2. Standard Operating Flow
 ### 2.1 Deploy
 ```bash
 ./scripts/deploy.sh
 ```
-Efekat:
-- bump patch verzije (`VERSION` + frontend package version),
-- generisanje `.deploy.env` (`APP_VERSION`, `APP_BUILD`, `APP_DEPLOYED_AT_UTC`),
-- `docker compose up -d --build`.
+Effects:
+- bumps patch version (`VERSION` + frontend package version),
+- generates `.deploy.env` (`APP_VERSION`, `APP_BUILD`, `APP_DEPLOYED_AT_UTC`),
+- runs `docker compose up -d --build`.
 
 ### 2.2 Full Reset
 ```bash
 ./scripts/recreate_from_zero.sh
 ```
-Radi:
+Does:
 - `docker compose down -v`,
-- ciscenje lokalnih db/upload path-ova,
-- fresh deploy + health/version check.
+- clears local DB/upload paths,
+- performs fresh deploy + health/version checks.
 
-## 3. Kriticne Env Varijable
+## 3. Critical Environment Variables
 
 ### 3.1 Core
 - `DATABASE_URL`
@@ -62,14 +62,14 @@ Radi:
 - `MCP_EMAIL_ALLOWED_RECIPIENTS`
 - `MCP_EMAIL_ALLOWED_DOMAINS`
 
-## 4. Bootstrap i Migration Behavior
-`startup_bootstrap()` radi:
+## 4. Bootstrap and Migration Behavior
+`startup_bootstrap()` performs:
 - schema/table create/update,
 - default user/workspace/project/task seed,
-- sistemskog agent user-a,
-- backfill event stream-a iz read modela ako je event store resetovan,
-- rebuild project tag index-a,
-- backfill project member-a za postojeci projekat.
+- system agent user setup,
+- event stream backfill from read models if event store was reset,
+- project tag index rebuild,
+- project member backfill for existing projects.
 
 ## 5. Observability
 
@@ -80,39 +80,39 @@ Radi:
 - `GET /api/events/{aggregate_type}/{aggregate_id}`
 
 ### 5.2 Runtime Metrics
-`/api/metrics` trenutno iznosi:
+`/api/metrics` currently exposes:
 - `commands_total`, `commands_retried`, `command_conflicts`
 - `sse_connections`, `notifications_emitted`
 - `graph_projection_events_processed`, `graph_projection_failures`, `graph_projection_lag_commits`
 - `graph_context_requests`, `graph_context_failures`
 
-## 6. Test Strategija
-Postojece test pokrice (unit + API integration):
-- ukupno: `87` test funkcija (`app/tests/*`).
-- fokus:
+## 6. Test Strategy
+Current test coverage (unit + API integration):
+- total: `87` test functions (`app/tests/*`).
+- focus areas:
   - task/project/note/spec lifecycle,
-  - idempotency i concurrency,
-  - graph endpoint-i i context pack,
-  - agent runner i MCP security pravila,
-  - scheduled/recurring automation tokovi.
+  - idempotency and concurrency,
+  - graph endpoints and context pack,
+  - runner behavior and MCP security checks,
+  - scheduled/recurring automation flows.
 
-Pokretanje:
+Run tests:
 ```bash
 docker compose run --rm --build task-app pytest
 ```
 
 ## 7. Troubleshooting
-| Problem | Simptom | Brza provera | Akcija |
+| Problem | Symptom | Quick check | Action |
 |---|---|---|---|
-| Graph endpoint vraca 503 | `/knowledge-graph/*` error | proveri `KNOWLEDGE_GRAPH_ENABLED`, neo4j health, creds | restart neo4j + proveri env |
-| Mutacije dupliraju side-effect | isti zahtev vise puta menja stanje | proveri da li je `X-Command-Id` stabilan | uvedi/reuse command_id |
-| Runner ne obradjuje queued taskove | automation ostaje `queued` | proveri `AGENT_RUNNER_ENABLED`, runner logs | proveri `AGENT_CODEX_COMMAND`, timeout |
-| SSE ne isporucuje evente | UI notifikacije stale | proveri `/api/notifications/stream` i mrezu | proveri reverse proxy idle timeout |
-| Attachment download 404 | upload uspeo ali nema fajla | proveri `ATTACHMENTS_DIR` i path scope | proveri volume mount i workspace path |
+| Graph endpoints return 503 | `/knowledge-graph/*` errors | verify `KNOWLEDGE_GRAPH_ENABLED`, Neo4j health, credentials | restart Neo4j + verify env |
+| Duplicate side effects on retries | same request mutates state multiple times | verify stable `X-Command-Id` reuse | enforce command_id reuse |
+| Runner does not process queued tasks | automation stays `queued` | verify `AGENT_RUNNER_ENABLED`, runner logs | verify `AGENT_CODEX_COMMAND`, timeout |
+| SSE does not deliver updates | stale notifications/activity in UI | check `/api/notifications/stream` connectivity | verify proxy idle timeout |
+| Attachment download returns 404 | upload succeeded but file not found | verify `ATTACHMENTS_DIR` and scoped path | verify volume mounts and workspace path |
 
-## 8. Hardening Checklist (Pre-Prod)
-1. Ukloniti default tokene i staticke credential-e iz compose-a.
-2. Zakljucati CORS origin-e (`CORS_ORIGINS`).
-3. Ograniciti MCP workspace/project allowlist.
-4. Uvesti secret manager za SMTP/Neo4j/EventStore kredencijale.
-5. Dodati centralizovan log shipping i alerting na `graph_projection_failures` + runner failure rate.
+## 8. Pre-Production Hardening Checklist
+1. Remove default tokens and static credentials from compose/env.
+2. Restrict CORS origins (`CORS_ORIGINS`).
+3. Tighten MCP workspace/project allowlists.
+4. Use secret manager for SMTP/Neo4j/EventStore credentials.
+5. Add centralized logging and alerting on `graph_projection_failures` and runner failure rates.

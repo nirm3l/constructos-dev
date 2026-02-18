@@ -1,21 +1,21 @@
 # m4tr1x Task Management Platform
 
-Aktivna dokumentacija za projekat bazirana na trenutnom kodu (snapshot: 2026-02-18).
+Active documentation for the project, based on the current codebase snapshot (2026-02-18).
 
-m4tr1x je task/project sistem koji kombinuje:
-- `CQRS + Event Sourcing` za write tok i auditabilnost,
-- SQL read modele za brz UI i filtriranje,
-- `Neo4j` knowledge graph za kontekst i GraphRAG,
-- `MCP` sloj i Codex automatizaciju za AI-assisted execution.
+m4tr1x is a task/project platform that combines:
+- `CQRS + Event Sourcing` for the write path and auditability.
+- SQL read models for fast UI queries and filtering.
+- `Neo4j` knowledge graph for relation-aware context and GraphRAG flows.
+- `MCP` tools plus Codex automation for AI-assisted execution.
 
-## Dokumentacija
-- `docs/01-business-overview.md` - biznis arhitektura, value model, KPI okvir.
-- `docs/02-technical-architecture.md` - tehnicka arhitektura, tok komandi i projekcija.
-- `docs/03-domain-model-and-workflows.md` - domen, lifecycle modeli i glavna pravila.
-- `docs/04-api-and-mcp-map.md` - REST povrsina, SSE i MCP alati.
-- `docs/05-operations-runbook.md` - deploy, env varijable, observability i troubleshooting.
+## Documentation
+- `docs/01-business-overview.md` - business architecture, value model, KPI framework.
+- `docs/02-technical-architecture.md` - technical architecture, command flow, projection model.
+- `docs/03-domain-model-and-workflows.md` - domain model, lifecycle logic, key workflows.
+- `docs/04-api-and-mcp-map.md` - REST surface, SSE behavior, MCP tools map.
+- `docs/05-operations-runbook.md` - deployment, env config, observability, troubleshooting.
 
-## Sistem Na Jednoj Strani
+## System At A Glance
 ```mermaid
 graph LR
   UI[React SPA]
@@ -39,49 +39,49 @@ graph LR
   API -->|runner command mode| COD
 ```
 
-## Kljucne Funkcionalnosti
-- Multi-project task management sa custom statusima i board/list prikazom.
-- Specification-driven rad: specifikacije povezane sa taskovima i notes.
-- Notes i project rules kao trajna projektna memorija.
-- Scheduled instruction taskovi (jednokratni i recurring).
-- AI automation loop: request -> queued -> runner -> completion/failure eventi.
-- Real-time notifikacije preko SSE (`notification`, `task_event`, `ping`).
-- Knowledge graph endpointi + MCP alati za dependency-aware kontekst.
-- Command idempotency preko `X-Command-Id` i `command_executions` read modela.
+## Core Capabilities
+- Multi-project task management with custom statuses and board/list views.
+- Specification-driven workflow: specifications linked to tasks and notes.
+- Notes and project rules as long-lived project memory.
+- Scheduled instruction tasks (one-shot and recurring).
+- AI automation loop: request -> queued -> runner -> completion/failure events.
+- Real-time notifications over SSE (`notification`, `task_event`, `ping`).
+- Knowledge graph endpoints and MCP tools for dependency-aware context.
+- Command idempotency via `X-Command-Id` and `command_executions`.
 
-## Brzi Start
-1. Pokreni stack:
+## Quick Start
+1. Start the stack:
 ```bash
 ./scripts/deploy.sh
 ```
-2. Proveri health:
+2. Check health:
 ```bash
 curl -sS http://localhost:8080/api/health
 ```
-3. Otvori UI i API:
-- UI/API: `http://localhost:8080`
+3. Open app and APIs:
+- App/API: `http://localhost:8080`
 - Version: `http://localhost:8080/api/version`
 - MCP endpoint (docker): `http://localhost:8091/mcp`
 
-## Development Komande
+## Development Commands
 ```bash
-# clean redeploy od nule (db + volumes reset)
+# Full clean redeploy (DB + volumes reset)
 ./scripts/recreate_from_zero.sh
 
-# backend testovi
+# Backend tests
 docker compose run --rm --build task-app pytest
 ```
 
-## Tehnoloski Stack
+## Technology Stack
 - Backend: FastAPI, SQLAlchemy, Pydantic.
-- Eventing: KurrentDB/EventStore, custom projection worker-i.
-- Datastores: PostgreSQL (read), KurrentDB (source of truth), Neo4j (graph).
+- Eventing: KurrentDB/EventStore + custom projection workers.
+- Datastores: PostgreSQL (read), KurrentDB (event source), Neo4j (graph).
 - Frontend: React + TypeScript + TanStack Query.
-- AI integracija: FastMCP server + Codex command adapter.
+- AI integration: FastMCP server + Codex command adapter.
 
-## Repo Mapa
-- `app/main.py` - app bootstrap, lifecycle i router wiring.
+## Repository Layout
+- `app/main.py` - app bootstrap, lifecycle, router wiring.
 - `app/features/*` - vertical slices (tasks, projects, specs, notes, rules, agents...).
-- `app/shared/*` - eventing, projekcije, modeli, settings, bootstrap, graph.
-- `app/frontend/*` - SPA i UI state management.
-- `scripts/*` - deploy, reset i seed utility skripte.
+- `app/shared/*` - eventing, projections, models, settings, bootstrap, graph.
+- `app/frontend/*` - SPA and UI state management.
+- `scripts/*` - deploy, reset, and helper scripts.

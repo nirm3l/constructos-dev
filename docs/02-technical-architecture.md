@@ -1,11 +1,11 @@
 # 02 Technical Architecture
 
-## 1. Arhitekturni Stil
-Sistem koristi kombinaciju:
-- Vertical Slice organizacije (`app/features/*`).
-- CQRS obrasca (command handler-i + odvojeni read modeli).
-- Event sourcing write modela (KurrentDB kao source of truth kada je ukljucen).
-- Projekcionih worker-a za SQL i Neo4j read strane.
+## 1. Architectural Style
+The system combines:
+- Vertical Slice organization (`app/features/*`).
+- CQRS pattern (commands via handlers, queries via read models).
+- Event sourcing on the write side (KurrentDB as event source when enabled).
+- Dedicated projection workers for SQL read models and Neo4j graph models.
 
 ## 2. Layering
 ```mermaid
@@ -27,7 +27,7 @@ graph TD
   K --> A
 ```
 
-## 3. Command Tok (Write Path)
+## 3. Command Flow (Write Path)
 ```mermaid
 sequenceDiagram
   participant UI as Client/UI
@@ -39,7 +39,7 @@ sequenceDiagram
   participant PROJ as SQL Projection
 
   UI->>API: POST/PATCH + X-Command-Id
-  API->>APP: DTO payload
+  API->>APP: Typed payload
   APP->>CMD: command_name, handler, command_id
   CMD->>CMD: idempotency lookup (command_executions)
   alt replay
@@ -53,56 +53,56 @@ sequenceDiagram
   APP-->>UI: serialized view
 ```
 
-## 4. Projection Model i Konzistentnost
-Postoje 2 asinhrona projection pipeline-a:
-- `read-model` checkpoint -> SQL read strane.
-- `knowledge-graph` checkpoint -> Neo4j.
+## 4. Projection Model and Consistency
+There are two asynchronous projection pipelines:
+- `read-model` checkpoint -> SQL read side.
+- `knowledge-graph` checkpoint -> Neo4j read side.
 
-Write-through projekcija u `append_event()` drzi SQL read model sveze i kada background checkpoint zaostaje.
+`append_event()` also performs write-through SQL projection so UI reads remain fresh even when background projection lag exists.
 
-Konzistentnost po store-u:
-- Event store: append-only, optimistic concurrency po stream version.
+Consistency by store:
+- Event store: append-only, optimistic concurrency per stream version.
 - SQL read model: eventual consistency + write-through shortcut.
-- Neo4j graph: eventual consistency kroz poseban worker.
+- Neo4j graph: eventual consistency via dedicated graph worker.
 
-## 5. Data Store Uloge
-| Store | Uloga | Kriticni moduli |
+## 5. Datastore Responsibilities
+| Store | Responsibility | Key modules |
 |---|---|---|
 | KurrentDB/EventStore | Event source of truth | `shared/eventing_store.py`, `shared/eventing.py` |
-| PostgreSQL | Read modeli, command replay log, checkpoints | `shared/models.py`, `shared/eventing_rebuild.py` |
-| Neo4j | Knowledge graph i context retrieval | `shared/eventing_graph.py`, `shared/knowledge_graph.py` |
-| Filesystem uploads | Attachments blob storage | `features/attachments/api.py` |
+| PostgreSQL | Read models, command replay log, checkpoints | `shared/models.py`, `shared/eventing_rebuild.py` |
+| Neo4j | Knowledge graph and context retrieval | `shared/eventing_graph.py`, `shared/knowledge_graph.py` |
+| Filesystem uploads | Attachment object storage | `features/attachments/api.py` |
 
-## 6. Glavne Tehnicke Karakteristike
-- Concurrency: `expected_version` + retry/backoff (`run_command_with_retry`).
+## 6. Notable Technical Properties
+- Concurrency control: `expected_version` and retry/backoff (`run_command_with_retry`).
 - Idempotency:
-  - explicitno: `X-Command-Id`,
-  - implicitno: deterministic aggregate IDs za create (project/task/note/spec po normalized title/name).
-- Audit trail: activity log zapis po event-u sa `_event_key` dedupe signalom.
-- Schema evolution: `schema_version` metadata + upcaster hook (`event_upcasters.py`).
-- Multi-runtime: isti core domenski kod izlozen kroz REST i MCP server.
+  - explicit: `X-Command-Id`,
+  - implicit: deterministic aggregate IDs for create flows (project/task/note/spec).
+- Audit trail: activity log per projected event with `_event_key` dedupe marker.
+- Schema evolution: event metadata `schema_version` + upcaster hook (`event_upcasters.py`).
+- Multi-runtime domain reuse: same core services exposed via REST and MCP.
 
-## 7. Security i Access Model
-- User context preko `X-User-Id` (ili query fallback).
-- Workspace role checks (`Owner/Admin/Member/Guest`) na read i write endpointima.
-- MCP zaštita:
+## 7. Security and Access Model
+- User context from `X-User-Id` (or query fallback).
+- Workspace role checks (`Owner/Admin/Member/Guest`) on read/write flows.
+- MCP controls:
   - optional token (`MCP_AUTH_TOKEN`),
-  - workspace/project allowlist,
+  - workspace/project allowlists,
   - dedicated actor user (`MCP_ACTOR_USER_ID`).
-- Email tool ima recipient/domain allowlist mehanizam.
+- Email tool enforces recipient/domain allowlists when configured.
 
-## 8. Reliability i Failure Behavior
-- Projection worker-i rade catch-up + subscribe loop i retry na error.
-- Graph pipeline degradira "soft" (API vraca 503 za graph endpoint-e, ostatak sistema radi).
-- Agent runner ima stale recovery logiku i failed state evente.
-- Notification emit logic koristi lookback i dedupe semantiku.
+## 8. Reliability and Failure Handling
+- Projection workers run catch-up + subscription loops with retry behavior.
+- Graph failures degrade gracefully (graph endpoints may return 503; core system keeps running).
+- Agent runner has stale-run recovery and explicit failed-state events.
+- Notification emission uses lookback windows and duplicate suppression.
 
-## 9. Tehnicki Rizici
-- Operational complexity zbog 3 datastore-a + 2 worker-a + runner-a.
-- Potreban je oprez kod manualnih mutacija bez command_id discipline.
-- SSE i long-running worker-i zahtevaju stabilan deployment setup (timeouts, restart policy).
+## 9. Technical Risk Areas
+- Operational complexity from multi-store architecture + workers + runner.
+- Safe retries depend on strong command_id discipline.
+- SSE and long-running worker lifecycles require reliable infra timeouts/restarts.
 
-## 10. Snage Arhitekture
-- Cist separation write/read concerns.
-- Jedinstven event model za API, automation i graph.
-- Dobar temelj za "explainable AI actions" jer mutacije ostaju event-ovane.
+## 10. Architecture Strengths
+- Clean write/read separation.
+- Single event model powering API, automation, and graph projections.
+- Strong foundation for explainable AI actions because all mutations are evented.

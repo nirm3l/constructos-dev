@@ -1,8 +1,8 @@
 # 04 API and MCP Map
 
-## 1. REST API Grupe
+## 1. REST API Groups
 
-### 1.1 Bootstrap i Meta
+### 1.1 Bootstrap and Meta
 - `GET /`
 - `GET /api/health`
 - `GET /api/version`
@@ -59,17 +59,17 @@
 - `POST /api/specifications/{specification_id}/delete`
 
 ### 1.5 Notes, Rules, Views, Users
-- `GET/POST/PATCH` + archive/restore/pin/unpin/delete za notes (`/api/notes*`).
-- `GET/POST/PATCH/delete` za project rules (`/api/project-rules*`).
+- `GET/POST/PATCH` plus archive/restore/pin/unpin/delete for notes (`/api/notes*`).
+- `GET/POST/PATCH/delete` for project rules (`/api/project-rules*`).
 - `POST /api/saved-views`.
 - `PATCH /api/me/preferences`.
 
-### 1.6 Notifications i Realtime
+### 1.6 Notifications and Realtime
 - `GET /api/notifications`
 - `POST /api/notifications/{notification_id}/read`
 - `GET /api/notifications/stream` (SSE)
 
-SSE event tipovi:
+SSE event types:
 - `notification`
 - `task_event`
 - `ping`
@@ -83,12 +83,12 @@ SSE event tipovi:
 - `GET /api/events/{aggregate_type}/{aggregate_id}`
 - `GET /api/metrics`
 
-## 2. API Konvencije
+## 2. API Conventions
 - Auth context: `X-User-Id` header.
-- Idempotency za mutacije: `X-Command-Id`.
-- Query endpoint-i su read-only i ne append-uju evente.
+- Idempotency for mutations: `X-Command-Id`.
+- Query endpoints are read-only and do not append events.
 
-Primer mutacije sa command_id:
+Example mutation with `command_id`:
 ```bash
 curl -X POST http://localhost:8080/api/tasks \
   -H 'Content-Type: application/json' \
@@ -98,16 +98,16 @@ curl -X POST http://localhost:8080/api/tasks \
 ```
 
 ## 3. MCP Tool Surface (FastMCP)
-MCP server (`features/agents/mcp_server.py`) izlaže read i write alate nad istim domenom.
+MCP server (`features/agents/mcp_server.py`) exposes both read and write tools over the same domain model.
 
-Tool grupe:
+Tool categories:
 - Read: `list_*`, `get_*`, `graph_*`.
-- Mutacije: `create_*`, `update_*`, `archive_*`, `restore_*`, `delete_*`, `bulk_task_action`.
-- Spec linking: `link_*_to_spec`, `unlink_*_from_spec`, `create_tasks_from_spec`.
+- Mutations: `create_*`, `update_*`, `archive_*`, `restore_*`, `delete_*`, `bulk_task_action`.
+- Specification linking: `link_*_to_spec`, `unlink_*_from_spec`, `create_tasks_from_spec`.
 - Automation: `run_task_with_codex`, `get_task_automation_status`.
 - Utility: `send_email` (SMTP).
 
-## 4. Integracioni Tok (Codex -> MCP -> Domain)
+## 4. Integration Flow (Codex -> MCP -> Domain)
 ```mermaid
 sequenceDiagram
   participant C as Codex
@@ -125,15 +125,15 @@ sequenceDiagram
   M-->>C: JSON-RPC response
 ```
 
-## 5. Guardrail-i u MCP sloju
+## 5. MCP Guardrails
 - Optional token enforcement (`MCP_AUTH_TOKEN`).
-- Workspace/project allowlist (`MCP_ALLOWED_*`).
-- Auto fallback command_id za create mutacije kada nije eksplicitno prosledjen.
-- Workspace inference iz project/task scope-a za bezbedniji create flow.
-- SMTP allowlist za email tool.
+- Workspace/project allowlists (`MCP_ALLOWED_*`).
+- Automatic fallback command_id generation for create mutations.
+- Workspace inference from project/task scope for safer create flows.
+- SMTP allowlist controls for email sending.
 
-## 6. Frontend API Potrosnja
-Frontend (`app/frontend/src/api.ts`) koristi:
-- `fetch` wrapper sa automatskim `X-Command-Id` za non-GET pozive.
-- TanStack Query za cache i invalidation.
-- URL query state za tab/project/task/specification deep-linking.
+## 6. Frontend API Consumption
+Frontend (`app/frontend/src/api.ts`) uses:
+- a `fetch` wrapper that auto-attaches `X-Command-Id` on non-GET requests,
+- TanStack Query for cache and invalidation,
+- URL query state for tab/project/task/specification deep links.

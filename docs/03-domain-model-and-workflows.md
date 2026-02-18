@@ -1,6 +1,6 @@
 # 03 Domain Model and Workflows
 
-## 1. Glavni Entiteti i Relacije
+## 1. Core Entities and Relationships
 ```mermaid
 erDiagram
   WORKSPACE ||--o{ WORKSPACE_MEMBER : has
@@ -38,7 +38,7 @@ stateDiagram-v2
   Archived --> Deleted: TaskDeleted
 ```
 
-## 3. Scheduled Task i Automation Substates
+## 3. Scheduled Task and Automation Substates
 ```mermaid
 stateDiagram-v2
   [*] --> idle
@@ -66,15 +66,15 @@ stateDiagram-v2
   Archived --> Deleted: SpecificationDeleted
 ```
 
-## 5. Kljucna Domenska Pravila
-- Task, Note i Specification create su case-insensitive idempotent po title/name unutar projekt scope-a.
-- Cross-project linking nije dozvoljen (`task/spec/note` moraju deliti workspace + project).
-- Ako je task ili note vezan za specification, project change je ogranicen dok se link ne razresi.
-- Scheduled instruction task zahteva:
+## 5. Key Domain Rules
+- Task, Note, and Specification create flows are case-insensitive idempotent by title/name within project scope.
+- Cross-project linking is blocked (`task/spec/note` must share workspace + project).
+- If a task or note is linked to a specification, project changes are constrained until the link is resolved.
+- Scheduled instruction tasks require:
   - `task_type=scheduled_instruction`,
   - `scheduled_instruction`,
   - `scheduled_at_utc`.
-- `Project.Delete` kaskadno soft-delete-uje taskove, notes, rules i specifications.
+- `Project.Delete` cascades soft deletes for tasks, notes, rules, and specifications.
 
 ## 6. End-to-End Workflow: Specification -> Execution
 ```mermaid
@@ -112,12 +112,12 @@ flowchart TD
   F --> G
 ```
 
-## 8. Domen + Graph Perspektiva
-Neo4j projekcija pravi relacije tipa:
+## 8. Domain + Graph Perspective
+Neo4j projection creates relationship types such as:
 - `IN_WORKSPACE`, `IN_PROJECT`
 - `IMPLEMENTS` (Task -> Specification)
 - `ABOUT_TASK`, `ABOUT_SPECIFICATION` (Note links)
 - `ASSIGNED_TO`, `WATCHED_BY`, `COMMENTED_BY`
 - `TAGGED_WITH`
 
-Ovo omogucava context pack i dependency-aware pretragu bez menjanja write modela.
+This enables context packs and dependency-aware retrieval without changing the write model.
