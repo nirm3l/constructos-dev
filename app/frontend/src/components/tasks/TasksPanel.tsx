@@ -39,6 +39,10 @@ export function TasksPanel({
   onReopenTask,
   onCompleteTask,
 }: TasksPanelProps) {
+  const visibleBoardStatuses = boardData
+    ? boardData.statuses.filter((status) => (boardData.lanes[status] ?? []).length > 0)
+    : []
+
   return (
     <section className="card">
       <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
@@ -89,42 +93,48 @@ export function TasksPanel({
       </div>
 
       {projectsMode === 'board' && boardData && (
-        <div className="kanban">
-          {boardData.statuses.map((status) => (
-            <div key={status} className="kanban-col">
-              <div className="kanban-head">
-                <strong>{status}</strong>
-                <span className="meta">{(boardData.lanes[status] ?? []).length}</span>
-              </div>
-              <div className="kanban-list">
-                {(boardData.lanes[status] ?? []).map((task) => (
-                  <div key={task.id} className="kanban-card" onClick={() => onOpenTaskEditor(task.id)} role="button">
-                    <div className="kanban-title">
-                      <strong>{task.title}</strong>
-                      <span className={`prio prio-${priorityTone(task.priority)}`} title={`Priority: ${task.priority}`}>
-                        {task.priority}
-                      </span>
-                    </div>
-                    <div className="kanban-actions">
-                      {boardData.statuses.filter((s) => s !== status).slice(0, 3).map((nextStatus) => (
-                        <button
-                          key={nextStatus}
-                          className="status-chip"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onMoveTaskStatus(task.id, nextStatus)
-                          }}
-                        >
-                          {nextStatus}
-                        </button>
-                      ))}
-                    </div>
+        <>
+          {visibleBoardStatuses.length > 0 ? (
+            <div className="kanban">
+              {visibleBoardStatuses.map((status) => (
+                <div key={status} className="kanban-col">
+                  <div className="kanban-head">
+                    <strong>{status}</strong>
+                    <span className="meta">{(boardData.lanes[status] ?? []).length}</span>
                   </div>
-                ))}
-              </div>
+                  <div className="kanban-list">
+                    {(boardData.lanes[status] ?? []).map((task) => (
+                      <div key={task.id} className="kanban-card" onClick={() => onOpenTaskEditor(task.id)} role="button">
+                        <div className="kanban-title">
+                          <strong>{task.title}</strong>
+                          <span className={`prio prio-${priorityTone(task.priority)}`} title={`Priority: ${task.priority}`}>
+                            {task.priority}
+                          </span>
+                        </div>
+                        <div className="kanban-actions">
+                          {boardData.statuses.filter((s) => s !== status).slice(0, 3).map((nextStatus) => (
+                            <button
+                              key={nextStatus}
+                              className="status-chip"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                onMoveTaskStatus(task.id, nextStatus)
+                              }}
+                            >
+                              {nextStatus}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          ) : (
+            <div className="notice" style={{ marginTop: 12 }}>No tasks in this project.</div>
+          )}
+        </>
       )}
 
       {projectsMode === 'list' && (

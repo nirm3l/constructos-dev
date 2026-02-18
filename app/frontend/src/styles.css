@@ -379,6 +379,22 @@ body {
   font-size: 12px;
 }
 
+.md-mode-toggle .md-fullscreen-btn {
+  padding-inline: 7px;
+  gap: 6px;
+}
+
+.md-mode-toggle .md-fullscreen-btn .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.md-mode-toggle .md-fullscreen-label {
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
 .md-editor-content {
   padding-top: 0;
 }
@@ -389,6 +405,40 @@ body {
 
 .md-editor-content .markdown {
   padding-top: 44px;
+}
+
+body.md-fullscreen-open {
+  overflow: hidden;
+}
+
+.md-editor-surface.md-editor-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  margin: 0;
+  padding: 12px;
+  border-radius: 0;
+  border: none;
+  background: var(--surface);
+}
+
+.md-editor-surface.md-editor-fullscreen .md-mode-toggle {
+  top: 12px;
+  right: 12px;
+}
+
+.md-editor-surface.md-editor-fullscreen .md-editor-content {
+  height: calc(100vh - 24px);
+}
+
+.md-editor-surface.md-editor-fullscreen .md-editor-content .md-textarea {
+  min-height: calc(100vh - 80px);
+  max-height: calc(100vh - 80px);
+  resize: none;
+}
+
+.md-editor-surface.md-editor-fullscreen .md-editor-content .markdown {
+  max-height: calc(100vh - 80px);
 }
 
 @media (max-width: 560px) {
@@ -406,6 +456,32 @@ body {
   .md-chip {
     min-height: 24px;
     min-width: 24px;
+  }
+
+  .md-mode-toggle .md-fullscreen-label {
+    display: none;
+  }
+
+  .md-editor-surface.md-editor-fullscreen {
+    padding: 8px;
+  }
+
+  .md-editor-surface.md-editor-fullscreen .md-mode-toggle {
+    top: 8px;
+    right: 8px;
+  }
+
+  .md-editor-surface.md-editor-fullscreen .md-editor-content {
+    height: calc(100vh - 16px);
+  }
+
+  .md-editor-surface.md-editor-fullscreen .md-editor-content .md-textarea {
+    min-height: calc(100vh - 70px);
+    max-height: calc(100vh - 70px);
+  }
+
+  .md-editor-surface.md-editor-fullscreen .md-editor-content .markdown {
+    max-height: calc(100vh - 70px);
   }
 }
 
@@ -787,9 +863,8 @@ button:disabled {
 .kanban {
   margin-top: 12px;
   display: grid;
-  grid-template-columns: repeat(3, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
   gap: 10px;
-  overflow-x: auto;
   padding-bottom: 4px;
 }
 
@@ -2003,11 +2078,37 @@ button:disabled {
   min-height: 1em; /* keep toolbar height stable when empty */
 }
 
+.codex-chat-session-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  max-width: 100%;
+}
+
+.codex-chat-session-label {
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.codex-chat-session-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.codex-chat-session-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
 .codex-chat-context {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 8px;
+  margin-bottom: 4px;
   max-width: 100%;
 }
 
@@ -2019,6 +2120,34 @@ button:disabled {
 .codex-chat-context-select {
   width: min(280px, 100%);
   min-width: 0;
+}
+
+.codex-chat-usage {
+  margin-bottom: 6px;
+  display: grid;
+  gap: 6px;
+}
+
+.codex-chat-usage-text {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.codex-chat-usage-bar {
+  width: 100%;
+  height: 7px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--line), white 40%);
+}
+
+.codex-chat-usage-bar > span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--primary), white 28%), var(--primary));
+  transition: width 0.25s ease;
 }
 
 .quickadd-form {
@@ -2126,8 +2255,25 @@ button:disabled {
     width: 100%;
   }
 
+  .codex-chat-session-row {
+    width: 100%;
+    gap: 6px;
+  }
+
+  .codex-chat-session-label {
+    display: none;
+  }
+
+  .codex-chat-session-select {
+    width: 100%;
+  }
+
   .codex-chat-context-select {
     width: 100%;
+  }
+
+  .codex-chat-usage-text {
+    gap: 6px;
   }
 }
 
@@ -2635,10 +2781,6 @@ textarea {
 @media (max-width: 900px) {
   .shell {
     grid-template-columns: 1fr;
-  }
-
-  .kanban {
-    grid-template-columns: repeat(3, minmax(200px, 78vw));
   }
 
   .due-input {
