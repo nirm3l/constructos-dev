@@ -3,8 +3,8 @@
   --surface: #ffffff;
   --surface-alt: #e6f1e9;
   --line: #c8d9cc;
-  --text: #15231a;
-  --muted: #5c7262;
+  --text: #2f8c4f;
+  --muted: #4f7e5f;
   --brand: #2f8f4d;
   --brand-strong: #1f6b39;
   --ok: #218a49;
@@ -16,8 +16,8 @@
   --surface: #0f1b14;
   --surface-alt: #13241a;
   --line: #2a4534;
-  --text: #e8f3ea;
-  --muted: #9cb8a3;
+  --text: #73ff9d;
+  --muted: #4fd77f;
   --brand: #4db975;
   --brand-strong: #2f8a53;
   --ok: #5fd18b;
@@ -74,7 +74,7 @@ body {
   min-width: 0;
   flex-shrink: 0;
   --brand-terminal-text: #2f8c4f;
-  --brand-mark-text: var(--brand-terminal-text);
+  --brand-mark-text: var(--surface-alt);
   --brand-terminal-glow: rgba(47, 140, 79, 0.26);
   --brand-scan-base: #2f9352;
   --brand-scan-highlight: #e9ffef;
@@ -162,10 +162,10 @@ body {
   text-rendering: geometricPrecision;
   color: var(--brand-mark-text);
   text-shadow: none;
-  background: linear-gradient(180deg, #3e6d56 0%, #365f4c 100%);
+  background: linear-gradient(180deg, #4a7d64 0%, #417058 100%);
   box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.28),
-    0 2px 5px rgba(8, 20, 13, 0.18);
+    0 2px 5px rgba(8, 20, 13, 0.12);
   border: 1px solid color-mix(in srgb, var(--line), white 34%);
 }
 
@@ -354,6 +354,12 @@ body {
 .top-notif-btn .icon {
   width: 16px;
   height: 16px;
+}
+
+.top-notif-btn.active {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 50%);
+  background: color-mix(in srgb, var(--brand), var(--surface) 92%);
+  color: color-mix(in srgb, var(--text), var(--brand-strong) 24%);
 }
 
 .top-profile-btn .icon {
@@ -596,6 +602,15 @@ body.md-fullscreen-open {
   box-shadow: none;
 }
 
+.top-search::placeholder {
+  color: color-mix(in srgb, var(--muted), var(--text) 20%);
+  opacity: 1;
+}
+
+[data-theme="dark"] .top-search::placeholder {
+  color: color-mix(in srgb, var(--muted), var(--text) 28%);
+}
+
 @media (max-width: 560px) {
   .top-search {
     min-width: 0;
@@ -629,7 +644,7 @@ body.md-fullscreen-open {
 
   .brand-name {
     font-size: 17px;
-    gap: 17px;
+    gap: 12px;
     transform: translateY(0.5px);
   }
 
@@ -656,7 +671,7 @@ body.md-fullscreen-open {
 
   .brand-name {
     font-size: 14px;
-    gap: 13px;
+    gap: 9px;
     transform: translateY(0px);
   }
 
@@ -672,6 +687,25 @@ body.md-fullscreen-open {
     max-width: 110px;
     font-size: 11px;
     padding: 0 8px;
+  }
+}
+
+@media (orientation: portrait) and (min-width: 721px) {
+  .brand-badge {
+    max-width: 320px;
+    gap: 3px;
+    padding: 4px 9px 4px 5px;
+  }
+
+  .brand-name {
+    font-size: 16px;
+    gap: 11px;
+    transform: translateY(0.25px);
+  }
+
+  .brand-sub {
+    font-size: 7.2px;
+    letter-spacing: 0.06em;
   }
 }
 
@@ -830,7 +864,8 @@ body.md-fullscreen-open {
 
 [data-theme="dark"] input::placeholder,
 [data-theme="dark"] textarea::placeholder {
-  color: #8ea4cf;
+  color: color-mix(in srgb, var(--muted), var(--text) 28%);
+  opacity: 1;
 }
 
 [data-theme="dark"] button {
@@ -893,10 +928,34 @@ input, select, button {
   min-height: 40px;
 }
 
-input, select {
+input, select, textarea {
   background: var(--surface);
   color: var(--text);
   min-width: 0;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background-color 0.16s ease;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: color-mix(in srgb, var(--muted), var(--text) 20%);
+  opacity: 1;
+}
+
+input:focus,
+input:focus-visible,
+select:focus,
+select:focus-visible,
+textarea:focus,
+textarea:focus-visible {
+  outline: none;
+  border-color: color-mix(in srgb, var(--brand), var(--line) 45%);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand), transparent 78%);
+}
+
+.top-search:focus,
+.top-search:focus-visible {
+  border-color: transparent;
+  box-shadow: none;
 }
 
 button {
@@ -2206,6 +2265,23 @@ button:disabled {
   gap: 8px;
 }
 
+.codex-chat-input {
+  width: 100%;
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 18%);
+  color: var(--text);
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background-color 0.16s ease;
+}
+
+.codex-chat-input:focus,
+.codex-chat-input:focus-visible {
+  outline: none;
+  border-color: color-mix(in srgb, var(--brand), var(--line) 45%);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand), transparent 78%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 12%);
+}
+
 .codex-chat-status {
   flex: 1;
   text-align: center;
@@ -2333,7 +2409,7 @@ button:disabled {
   top: 50%;
   transform: translateY(-50%);
   font-size: 13px;
-  color: var(--muted);
+  color: color-mix(in srgb, var(--muted), var(--text) 20%);
   pointer-events: none;
 }
 
