@@ -45,12 +45,15 @@ export function AppHeader({
   onOpenSpecification,
   onOpenProject,
 }: AppHeaderProps) {
+  const brandSubTop = '3m0ry b3h1nd th3 c0d3'
+  const brandSubBottom = 'c0nt3xt und3r c0ntr0l...'
+
   return (
     <header className="header card">
       <div className="title-row">
         <div className="brand" role="banner">
           <div className="brand-badge" role="img" aria-label="m4tr1x logo">
-            <div className="brand-mark" aria-hidden="true">m</div>
+            <div className="brand-mark" data-text="m" aria-hidden="true">m</div>
             <div className="brand-lockup">
               <div className="brand-name" aria-hidden="true">
                 <span className="brand-glyph brand-glyph-1">4</span>
@@ -60,34 +63,22 @@ export function AppHeader({
                 <span className="brand-glyph brand-glyph-5">x</span>
               </div>
               <div className="brand-sub-stack">
-                <div className="brand-sub brand-sub-top">3m0ry b3h1nd th3 c0d3</div>
-                <div className="brand-sub brand-sub-bottom">c0nt3xt und3r c0ntr0l...</div>
+                <div className="brand-sub brand-sub-top" data-text={brandSubTop}>{brandSubTop}</div>
+                <div className="brand-sub brand-sub-bottom" data-text={brandSubBottom}>{brandSubBottom}</div>
               </div>
             </div>
           </div>
         </div>
 
-        <div className="brand-meta" aria-label="Context">
-          <div className="brand-meta-row">
-            <Icon path="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8M4 20a8 8 0 0 1 16 0" />
-            <span className="brand-meta-text">
-              <strong>{bootstrapData.current_user.username}</strong>
-            </span>
-          </div>
-          <div className="brand-meta-row">
-            <Icon path="M3 7h7l2 2h9v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 7V5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2" />
-            <span className="brand-meta-text">
-              <strong>{bootstrapData.workspaces[0]?.name}</strong>
-            </span>
-          </div>
-        </div>
-
         <div className="top-actions">
-          <button onClick={() => setTab('profile')} title="Profile" aria-label="Profile">
+          <button className="top-profile-btn" onClick={() => setTab('profile')} title="Profile" aria-label="Profile">
             <Icon path="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8M4 20a8 8 0 0 1 16 0" />
+            <span className="top-profile-name" title={bootstrapData.current_user.username}>
+              {bootstrapData.current_user.username}
+            </span>
           </button>
           <button
-            className={showNotificationsPanel ? 'primary' : ''}
+            className={`top-notif-btn ${showNotificationsPanel ? 'primary' : ''}`.trim()}
             onClick={() => setShowNotificationsPanel((v) => !v)}
             title="Notifications"
             aria-label="Notifications"

@@ -73,6 +73,19 @@ body {
   align-items: center;
   min-width: 0;
   flex-shrink: 0;
+  --brand-terminal-text: #2f8c4f;
+  --brand-mark-text: var(--brand-terminal-text);
+  --brand-terminal-glow: rgba(47, 140, 79, 0.26);
+  --brand-scan-base: #2f9352;
+  --brand-scan-highlight: #e9ffef;
+}
+
+[data-theme="dark"] .brand {
+  --brand-terminal-text: #73ff9d;
+  --brand-mark-text: var(--brand-terminal-text);
+  --brand-terminal-glow: rgba(115, 255, 157, 0.42);
+  --brand-scan-base: #65f59a;
+  --brand-scan-highlight: #f5fff8;
 }
 
 .brand-badge {
@@ -84,27 +97,19 @@ body {
   max-width: 390px;
   padding: 5px 10px 5px 6px;
   border-radius: 16px;
-  background:
-    radial-gradient(circle at 24% 22%, rgba(255,255,255,0.36), transparent 48%),
-    linear-gradient(
-      160deg,
-      color-mix(in srgb, var(--surface), var(--surface-alt) 34%),
-      color-mix(in srgb, var(--surface-alt), var(--brand) 14%)
-    );
-  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 24%);
-  box-shadow: 0 10px 18px color-mix(in srgb, var(--brand), transparent 88%);
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+  box-shadow: 0 8px 16px rgba(9, 22, 15, 0.18);
 }
 
 [data-theme="dark"] .brand-badge {
   background:
-    radial-gradient(circle at 24% 22%, rgba(255,255,255,0.1), transparent 46%),
-    linear-gradient(
-      160deg,
-      color-mix(in srgb, var(--surface), var(--surface-alt) 34%),
-      color-mix(in srgb, var(--surface-alt), var(--brand) 16%)
-    );
-  border-color: color-mix(in srgb, var(--line), var(--brand) 30%);
-  box-shadow: 0 10px 18px color-mix(in srgb, var(--brand), transparent 90%);
+    radial-gradient(circle at 18% 20%, rgba(126, 255, 178, 0.14), transparent 45%),
+    linear-gradient(180deg, #090f0b 0%, #050905 100%);
+  border: 1px solid #244f34;
+  box-shadow:
+    inset 0 0 0 1px rgba(118, 255, 175, 0.12),
+    0 10px 18px rgba(3, 15, 8, 0.44);
 }
 
 .brand-meta {
@@ -144,34 +149,34 @@ body {
   width: 40px;
   height: 40px;
   border-radius: 13px;
+  position: relative;
   display: grid;
   place-items: center;
+  font-family: "JetBrains Mono", "Fira Code", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0, "zero" 1;
   font-weight: 900;
-  font-size: 21px;
+  font-size: 23px;
   letter-spacing: 0.02em;
-  color: #0f1611;
-  -webkit-text-stroke: 0.35px rgba(255, 255, 255, 0.2);
-  text-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.18),
-    0 0 4px rgba(10, 20, 14, 0.12);
-  background:
-    radial-gradient(circle at 30% 25%, rgba(255,255,255,0.3), transparent 45%),
-    linear-gradient(165deg, color-mix(in srgb, var(--brand), white 12%), color-mix(in srgb, var(--brand-strong), black 8%));
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+  color: var(--brand-mark-text);
+  text-shadow: none;
+  background: linear-gradient(180deg, #3e6d56 0%, #365f4c 100%);
   box-shadow:
-    inset 0 1px 2px rgba(255, 255, 255, 0.2),
-    0 6px 12px rgba(7, 27, 15, 0.2);
-  border: 1px solid rgba(255, 255, 255, 0.24);
+    inset 0 0 0 1px rgba(255, 255, 255, 0.28),
+    0 2px 5px rgba(8, 20, 13, 0.18);
+  border: 1px solid color-mix(in srgb, var(--line), white 34%);
 }
 
 [data-theme="dark"] .brand-mark {
-  color: #eaf8ef;
-  -webkit-text-stroke: 0.38px rgba(0, 0, 0, 0.5);
-  text-shadow:
-    0 1px 0 rgba(0, 0, 0, 0.42),
-    0 0 7px rgba(255, 255, 255, 0.16);
+  background:
+    radial-gradient(circle at 30% 25%, rgba(137, 255, 186, 0.12), transparent 48%),
+    linear-gradient(180deg, #0d1710 0%, #08110c 100%);
   box-shadow:
-    inset 0 1px 2px rgba(255, 255, 255, 0.12),
-    0 8px 16px rgba(2, 8, 20, 0.45);
+    inset 0 0 0 1px rgba(113, 255, 154, 0.1),
+    0 6px 12px rgba(3, 18, 10, 0.55);
+  border: 1px solid #2f6f46;
 }
 
 .brand-lockup {
@@ -187,62 +192,41 @@ body {
 .brand-name {
   display: inline-flex;
   align-items: center;
-  gap: 12px;
+  gap: 26px;
+  font-family: "JetBrains Mono", "Fira Code", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0, "zero" 1;
   font-size: 20px;
   font-weight: 900;
-  letter-spacing: 0.01em;
+  letter-spacing: 0.03em;
   line-height: 1;
-  color: #0f1611;
+  color: var(--brand-terminal-text);
   transform: translateY(1px);
-  text-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.16),
-    0 0 3px rgba(10, 20, 14, 0.1);
+  text-shadow: 0 0 8px var(--brand-terminal-glow);
 }
 
 .brand-glyph {
   display: inline-block;
-  color: #0f1611;
-  -webkit-text-stroke: 0.35px rgba(255, 255, 255, 0.18);
-  text-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.16),
-    0 0 3px rgba(10, 20, 14, 0.12);
+  color: inherit;
+  text-shadow: 0 0 7px var(--brand-terminal-glow);
 }
 
-.brand-glyph-1 { color: #0f1611; }
-.brand-glyph-2 { color: #0f1611; }
-.brand-glyph-3 { color: #0f1611; }
-.brand-glyph-4 { color: #0f1611; }
-.brand-glyph-5 { color: #0f1611; }
-
-[data-theme="dark"] .brand-name {
-  color: #eefcf2;
-  text-shadow:
-    0 1px 0 rgba(0, 0, 0, 0.42),
-    0 0 7px rgba(255, 255, 255, 0.12);
-}
-[data-theme="dark"] .brand-glyph-1 { color: #eefcf2; }
-[data-theme="dark"] .brand-glyph-2 { color: #eefcf2; }
-[data-theme="dark"] .brand-glyph-3 { color: #eefcf2; }
-[data-theme="dark"] .brand-glyph-4 { color: #eefcf2; }
-[data-theme="dark"] .brand-glyph-5 { color: #eefcf2; }
-[data-theme="dark"] .brand-glyph {
-  -webkit-text-stroke: 0.42px rgba(0, 0, 0, 0.56);
-  text-shadow:
-    0 1px 0 rgba(0, 0, 0, 0.46),
-    0 0 6px rgba(255, 255, 255, 0.1);
-}
-[data-theme="dark"] .brand-sub {
-  color: #d6ebdc;
-  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.42);
-}
+.brand-glyph-1 { color: inherit; }
+.brand-glyph-2 { color: inherit; }
+.brand-glyph-3 { color: inherit; }
+.brand-glyph-4 { color: inherit; }
+.brand-glyph-5 { color: inherit; }
 
 .brand-sub {
+  font-family: "JetBrains Mono", "Fira Code", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0, "zero" 1;
   font-size: 8px;
-  letter-spacing: 0.09em;
+  letter-spacing: 0.07em;
   line-height: 1.15;
   font-weight: 700;
-  color: #0f1611;
-  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.14);
+  color: var(--brand-scan-base);
+  text-shadow: 0 0 6px color-mix(in srgb, var(--brand-scan-base), transparent 55%);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -255,11 +239,76 @@ body {
 }
 
 .brand-sub-top {
+  position: relative;
+  display: block;
   align-self: start;
 }
 
 .brand-sub-bottom {
+  position: relative;
+  display: block;
   align-self: start;
+}
+
+.brand-sub-top::after,
+.brand-sub-bottom::after {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  color: transparent;
+  background-image: linear-gradient(
+    100deg,
+    transparent 0%,
+    transparent 42%,
+    var(--brand-scan-highlight) 50%,
+    transparent 58%,
+    transparent 100%
+  );
+  background-size: 230% 100%;
+  background-repeat: no-repeat;
+  background-position: -140% 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  text-shadow: 0 0 7px color-mix(in srgb, var(--brand-scan-highlight), transparent 58%);
+  animation: brand-slogan-scan 8.4s linear infinite;
+  animation-fill-mode: both;
+  animation-delay: 0.4s;
+}
+
+.brand-mark::after {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  color: transparent;
+  background-image: linear-gradient(
+    100deg,
+    transparent 0%,
+    transparent 46%,
+    var(--brand-scan-highlight) 50%,
+    transparent 54%,
+    transparent 100%
+  );
+  background-size: 230% 100%;
+  background-repeat: no-repeat;
+  background-position: -140% 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  text-shadow: none;
+  animation: brand-slogan-scan 8.4s linear infinite;
+  animation-fill-mode: both;
+  animation-delay: 0s;
+}
+
+@keyframes brand-slogan-scan {
+  0% { background-position: 140% 0; }
+  28% { background-position: -140% 0; }
+  100% { background-position: -140% 0; }
 }
 
 .top-actions {
@@ -268,6 +317,56 @@ body {
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.top-profile-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 180px;
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 28%);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.top-notif-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  min-width: 34px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 28%);
+  color: var(--text);
+}
+
+.top-notif-btn .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.top-profile-btn .icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.top-profile-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .header-lower {
@@ -525,12 +624,12 @@ body.md-fullscreen-open {
     width: 34px;
     height: 34px;
     border-radius: 11px;
-    font-size: 18px;
+    font-size: 19px;
   }
 
   .brand-name {
     font-size: 17px;
-    gap: 9px;
+    gap: 17px;
     transform: translateY(0.5px);
   }
 
@@ -557,7 +656,7 @@ body.md-fullscreen-open {
 
   .brand-name {
     font-size: 14px;
-    gap: 6.5px;
+    gap: 13px;
     transform: translateY(0px);
   }
 
@@ -569,9 +668,46 @@ body.md-fullscreen-open {
     font-size: 6.5px;
   }
 
-  /* Keep header readable on narrow screens: show user, hide workspace line. */
-  .brand-meta-row:last-child {
-    display: none;
+  .top-profile-btn {
+    max-width: 110px;
+    font-size: 11px;
+    padding: 0 8px;
+  }
+}
+
+@media (orientation: landscape) and (max-height: 520px) {
+  .brand-badge {
+    max-width: 250px;
+    padding: 4px 8px 4px 5px;
+    gap: 3px;
+  }
+
+  .brand-mark {
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+    font-size: 18px;
+  }
+
+  .brand-name {
+    font-size: 14px;
+    gap: 13px;
+    transform: translateY(0);
+  }
+
+  .brand-lockup {
+    margin-left: 2px;
+  }
+
+  .brand-sub {
+    font-size: 6.3px;
+    letter-spacing: 0.06em;
+  }
+
+  .top-profile-btn {
+    max-width: 100px;
+    font-size: 11px;
+    padding: 0 8px;
   }
 }
 
