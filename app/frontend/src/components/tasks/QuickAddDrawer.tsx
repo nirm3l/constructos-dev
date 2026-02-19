@@ -96,7 +96,7 @@ export function QuickAddDrawer({ state }: { state: any }) {
               </button>
             </div>
             <div className="meta" style={{ marginTop: 10 }}>
-              Tip: you can also ask Codex Chat to create tasks in bulk.
+              Tip: you can also ask Chat to create tasks in bulk.
             </div>
           </div>
         </div>

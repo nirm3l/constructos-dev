@@ -127,6 +127,9 @@ class ProjectCreate(BaseModel):
     custom_statuses: list[str] | None = None
     external_refs: list[ExternalRef] = Field(default_factory=list)
     attachment_refs: list[AttachmentRef] = Field(default_factory=list)
+    embedding_enabled: bool = False
+    embedding_model: str | None = None
+    context_pack_evidence_top_k: int | None = Field(default=None, ge=1, le=40)
     member_user_ids: list[str] = Field(default_factory=list)
 
 
@@ -136,6 +139,9 @@ class ProjectPatch(BaseModel):
     custom_statuses: list[str] | None = None
     external_refs: list[ExternalRef] | None = None
     attachment_refs: list[AttachmentRef] | None = None
+    embedding_enabled: bool | None = None
+    embedding_model: str | None = None
+    context_pack_evidence_top_k: int | None = Field(default=None, ge=1, le=40)
 
 
 class ProjectMemberUpsert(BaseModel):

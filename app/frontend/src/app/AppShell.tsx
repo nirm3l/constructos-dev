@@ -1,6 +1,6 @@
 import React from 'react'
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
-import { getBootstrap } from '../api'
+import { getBootstrap, linkTaskToSpecification } from '../api'
 import { useCoreQueries } from './useCoreQueries'
 import { useAppMutations } from './useAppMutations'
 import { useProjectEditorEffects } from './useProjectEditorEffects'
@@ -90,10 +90,15 @@ function App() {
   const {
     projectName, setProjectName, projectDescription, setProjectDescription, projectCustomStatusesText, setProjectCustomStatusesText,
     projectExternalRefsText, setProjectExternalRefsText, projectAttachmentRefsText, setProjectAttachmentRefsText,
+    projectEmbeddingEnabled, setProjectEmbeddingEnabled, projectEmbeddingModel, setProjectEmbeddingModel,
+    projectContextPackEvidenceTopKText, setProjectContextPackEvidenceTopKText,
     projectDescriptionView, setProjectDescriptionView, showProjectCreateForm,
     setShowProjectCreateForm, showProjectEditForm, setShowProjectEditForm, editProjectName, setEditProjectName, editProjectDescription,
     setEditProjectDescription, editProjectCustomStatusesText, setEditProjectCustomStatusesText, editProjectExternalRefsText,
-    setEditProjectExternalRefsText, editProjectAttachmentRefsText, setEditProjectAttachmentRefsText, createProjectMemberIds,
+    setEditProjectExternalRefsText, editProjectAttachmentRefsText, setEditProjectAttachmentRefsText,
+    editProjectEmbeddingEnabled, setEditProjectEmbeddingEnabled, editProjectEmbeddingModel, setEditProjectEmbeddingModel,
+    editProjectContextPackEvidenceTopKText, setEditProjectContextPackEvidenceTopKText,
+    createProjectMemberIds,
     setCreateProjectMemberIds, editProjectMemberIds, setEditProjectMemberIds, editProjectDescriptionView,
     setEditProjectDescriptionView, selectedProjectRuleId, setSelectedProjectRuleId, projectRuleTitle, setProjectRuleTitle,
     projectRuleBody, setProjectRuleBody, projectRuleView, setProjectRuleView, draftProjectRules, setDraftProjectRules,
@@ -148,9 +153,13 @@ function App() {
     uiError, setUiError, uiInfo, setUiInfo, taskEditorError, setTaskEditorError,
   } = useTaskEditorState()
   const {
-    showCodexChat, setShowCodexChat, codexChatProjectId, setCodexChatProjectId, codexChatInstruction, setCodexChatInstruction,
-    codexChatTurns, setCodexChatTurns, codexChatSessionId, isCodexChatRunning, setIsCodexChatRunning, codexChatRunStartedAt,
-    setCodexChatRunStartedAt, codexChatElapsedSeconds, setCodexChatElapsedSeconds, codexChatLastTaskEventAt, setCodexChatLastTaskEventAt,
+    showCodexChat, setShowCodexChat, codexChatSessions, codexChatProjectSessions, codexChatActiveSessionId,
+    setCodexChatActiveSessionId, codexChatActiveSessionTitle, createCodexChatSession, selectCodexChatProject,
+    deleteCodexChatSession, codexChatProjectId, setCodexChatProjectId, codexChatInstruction, setCodexChatInstruction,
+    codexChatTurns, setCodexChatTurns, setCodexChatTurnsForSession, codexChatSessionId, isCodexChatRunning,
+    setIsCodexChatRunning, codexChatRunStartedAt, setCodexChatRunStartedAt, codexChatElapsedSeconds,
+    setCodexChatElapsedSeconds, codexChatLastTaskEventAt, setCodexChatLastTaskEventAt, codexChatUsage,
+    setCodexChatUsage, setCodexChatUsageForSession,
   } = useCodexChatState()
   const [fabHidden, setFabHidden] = React.useState(false)
   const [showNotificationsPanel, setShowNotificationsPanel] = React.useState(false)
@@ -203,7 +212,7 @@ function App() {
   const bootstrap = useQuery({
     queryKey: ['bootstrap', userId],
     queryFn: () => getBootstrap(userId),
-    retry: 1
+    retry: 1,
   })
   const { frontendVersion, backendVersion, backendBuild, backendDeployedAtUtc } = useAppVersion()
   const workspaceId = bootstrap.data?.workspaces[0]?.id ?? ''
@@ -281,6 +290,8 @@ function App() {
   useRealtimeEffects({
     qc,
     realtimeRefreshTimerRef,
+    tab,
+    selectedProjectId,
     selectedTaskId,
     userId,
     workspaceId,
@@ -425,6 +436,9 @@ function App() {
     editProjectName,
     editProjectDescription,
     editProjectCustomStatusesText,
+    editProjectEmbeddingEnabled,
+    editProjectEmbeddingModel,
+    editProjectContextPackEvidenceTopKText,
     parseExternalRefsText,
     editProjectExternalRefsText,
     parseAttachmentRefsText,
@@ -568,6 +582,9 @@ function App() {
     editProjectMemberIds,
     editProjectDescription,
     editProjectCustomStatusesText,
+    editProjectEmbeddingEnabled,
+    editProjectEmbeddingModel,
+    editProjectContextPackEvidenceTopKText,
     editProjectExternalRefsText,
     parseExternalRefsText,
     editProjectAttachmentRefsText,
@@ -669,6 +686,9 @@ function App() {
     projectCustomStatusesText,
     projectExternalRefsText,
     projectAttachmentRefsText,
+    projectEmbeddingEnabled,
+    projectEmbeddingModel,
+    projectContextPackEvidenceTopKText,
     createProjectMemberIds,
     draftProjectRules,
     setProjectName,
@@ -676,6 +696,9 @@ function App() {
     setProjectCustomStatusesText,
     setProjectExternalRefsText,
     setProjectAttachmentRefsText,
+    setProjectEmbeddingEnabled,
+    setProjectEmbeddingModel,
+    setProjectContextPackEvidenceTopKText,
     setProjectDescriptionView,
     setCreateProjectMemberIds,
     setDraftProjectRules,
@@ -703,6 +726,9 @@ function App() {
     setAutomationInstruction,
     codexChatSessionId,
     setCodexChatTurns,
+    setCodexChatTurnsForSession,
+    setCodexChatUsage,
+    setCodexChatUsageForSession,
     setIsCodexChatRunning,
     setCodexChatRunStartedAt,
     setCodexChatElapsedSeconds,
@@ -717,6 +743,41 @@ function App() {
     editSpecificationAttachmentRefsText,
   })
 
+  const createTaskFromGraphSummary = React.useCallback(async (payload: { title: string; description: string }) => {
+    if (!selectedProjectId) throw new Error('No project selected')
+    await createTaskMutation.mutateAsync({
+      title: payload.title,
+      description: payload.description,
+      project_id: selectedProjectId,
+      open_task: true,
+    })
+  }, [createTaskMutation, selectedProjectId])
+
+  const createNoteFromGraphSummary = React.useCallback(async (payload: { title: string; body: string }) => {
+    if (!selectedProjectId) throw new Error('No project selected')
+    await createNoteMutation.mutateAsync({
+      title: payload.title,
+      body: payload.body,
+      project_id: selectedProjectId,
+      task_id: null,
+      specification_id: null,
+    })
+  }, [createNoteMutation, selectedProjectId])
+
+  const linkFocusTaskToSpecification = React.useCallback(
+    async (taskId: string, specificationId: string) => {
+      const tid = String(taskId || '').trim()
+      const sid = String(specificationId || '').trim()
+      if (!tid || !sid) throw new Error('Task and specification are required')
+      await linkTaskToSpecification(userId, sid, tid)
+      await invalidateAll()
+      setUiError(null)
+      setUiInfo('Task linked to specification')
+      setTimeout(() => setUiInfo(null), 1800)
+    },
+    [invalidateAll, setUiError, setUiInfo, userId]
+  )
+
   useProjectEditorEffects({
     selectedProject,
     setEditProjectName,
@@ -724,6 +785,9 @@ function App() {
     setEditProjectCustomStatusesText,
     setEditProjectExternalRefsText,
     setEditProjectAttachmentRefsText,
+    setEditProjectEmbeddingEnabled,
+    setEditProjectEmbeddingModel,
+    setEditProjectContextPackEvidenceTopKText,
     setEditProjectDescriptionView,
     setShowProjectEditForm,
     setSelectedProjectRuleId,
@@ -886,6 +950,12 @@ function App() {
       createProjectMutation,
       projectCustomStatusesText,
       setProjectCustomStatusesText,
+      projectEmbeddingEnabled,
+      setProjectEmbeddingEnabled,
+      projectEmbeddingModel,
+      setProjectEmbeddingModel,
+      projectContextPackEvidenceTopKText,
+      setProjectContextPackEvidenceTopKText,
       projectDescriptionView,
       setProjectDescriptionView,
       projectDescriptionRef,
@@ -914,6 +984,9 @@ function App() {
       workspaceId,
       userId,
       toggleProjectEditor,
+      createTaskFromGraphSummary,
+      createNoteFromGraphSummary,
+      linkFocusTaskToSpecification,
       copyShareLink,
       editProjectName,
       setEditProjectName,
@@ -949,6 +1022,16 @@ function App() {
       uploadAttachmentRef,
       editProjectAttachmentRefsText,
       setEditProjectAttachmentRefsText,
+      editProjectEmbeddingEnabled,
+      setEditProjectEmbeddingEnabled,
+      editProjectEmbeddingModel,
+      setEditProjectEmbeddingModel,
+      editProjectContextPackEvidenceTopKText,
+      setEditProjectContextPackEvidenceTopKText,
+      embeddingAllowedModels: bootstrap.data.embedding_allowed_models ?? [],
+      embeddingDefaultModel: String(bootstrap.data.embedding_default_model || '').trim(),
+      vectorStoreEnabled: Boolean(bootstrap.data.vector_store_enabled),
+      contextPackEvidenceTopKDefault: Number(bootstrap.data.context_pack_evidence_top_k_default || 10),
       editProjectMemberIds,
       toggleEditProjectMember,
       selectedProjectCreator,
@@ -1143,14 +1226,26 @@ function App() {
       backendBuild,
       backendDeployedAtUtc,
       showCodexChat,
+      codexChatSessions,
+      codexChatProjectSessions,
+      codexChatActiveSessionId,
+      setCodexChatActiveSessionId,
+      codexChatActiveSessionTitle,
+      createCodexChatSession,
+      selectCodexChatProject,
+      deleteCodexChatSession,
       codexChatSessionId,
       codexChatProjectId,
+      codexChatUsage,
       runAgentChatMutation,
       codexChatHistoryRef,
       codexChatTurns,
       codexChatInstruction,
       setCodexChatInstruction,
       setCodexChatTurns,
+      setCodexChatTurnsForSession,
+      setCodexChatUsage,
+      setCodexChatUsageForSession,
       setIsCodexChatRunning,
       setCodexChatRunStartedAt,
       setCodexChatElapsedSeconds,

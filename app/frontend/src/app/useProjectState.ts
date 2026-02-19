@@ -8,6 +8,9 @@ export function useProjectState() {
   const [projectCustomStatusesText, setProjectCustomStatusesText] = React.useState('')
   const [projectExternalRefsText, setProjectExternalRefsText] = React.useState('')
   const [projectAttachmentRefsText, setProjectAttachmentRefsText] = React.useState('')
+  const [projectEmbeddingEnabled, setProjectEmbeddingEnabled] = React.useState(false)
+  const [projectEmbeddingModel, setProjectEmbeddingModel] = React.useState('')
+  const [projectContextPackEvidenceTopKText, setProjectContextPackEvidenceTopKText] = React.useState('')
   const [projectDescriptionView, setProjectDescriptionView] = React.useState<'write' | 'preview'>('write')
   const [showProjectCreateForm, setShowProjectCreateForm] = React.useState(false)
   const [showProjectEditForm, setShowProjectEditForm] = React.useState(false)
@@ -16,6 +19,9 @@ export function useProjectState() {
   const [editProjectCustomStatusesText, setEditProjectCustomStatusesText] = React.useState('')
   const [editProjectExternalRefsText, setEditProjectExternalRefsText] = React.useState('')
   const [editProjectAttachmentRefsText, setEditProjectAttachmentRefsText] = React.useState('')
+  const [editProjectEmbeddingEnabled, setEditProjectEmbeddingEnabled] = React.useState(false)
+  const [editProjectEmbeddingModel, setEditProjectEmbeddingModel] = React.useState('')
+  const [editProjectContextPackEvidenceTopKText, setEditProjectContextPackEvidenceTopKText] = React.useState('')
   const [createProjectMemberIds, setCreateProjectMemberIds] = React.useState<string[]>([])
   const [editProjectMemberIds, setEditProjectMemberIds] = React.useState<string[]>([])
   const [editProjectDescriptionView, setEditProjectDescriptionView] = React.useState<'write' | 'preview'>('write')
@@ -50,6 +56,12 @@ export function useProjectState() {
     setProjectExternalRefsText,
     projectAttachmentRefsText,
     setProjectAttachmentRefsText,
+    projectEmbeddingEnabled,
+    setProjectEmbeddingEnabled,
+    projectEmbeddingModel,
+    setProjectEmbeddingModel,
+    projectContextPackEvidenceTopKText,
+    setProjectContextPackEvidenceTopKText,
     projectDescriptionView,
     setProjectDescriptionView,
     showProjectCreateForm,
@@ -66,6 +78,12 @@ export function useProjectState() {
     setEditProjectExternalRefsText,
     editProjectAttachmentRefsText,
     setEditProjectAttachmentRefsText,
+    editProjectEmbeddingEnabled,
+    setEditProjectEmbeddingEnabled,
+    editProjectEmbeddingModel,
+    setEditProjectEmbeddingModel,
+    editProjectContextPackEvidenceTopKText,
+    setEditProjectContextPackEvidenceTopKText,
     createProjectMemberIds,
     setCreateProjectMemberIds,
     editProjectMemberIds,

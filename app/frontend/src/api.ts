@@ -150,6 +150,7 @@ export const createTask = (
     title: string
     workspace_id: string
     project_id: string
+    description?: string
     specification_id?: string | null
     due_date?: string | null
     labels?: string[]
@@ -238,6 +239,9 @@ export const createProject = (
     name: string
     description?: string
     custom_statuses?: string[]
+    embedding_enabled?: boolean
+    embedding_model?: string | null
+    context_pack_evidence_top_k?: number | null
     member_user_ids?: string[]
     external_refs?: ExternalRef[]
     attachment_refs?: AttachmentRef[]
@@ -248,7 +252,7 @@ export const createProject = (
 export const patchProject = (
   userId: string,
   projectId: string,
-  payload: Partial<Pick<Project, 'name' | 'description' | 'custom_statuses' | 'external_refs' | 'attachment_refs'>>
+  payload: Partial<Pick<Project, 'name' | 'description' | 'custom_statuses' | 'external_refs' | 'attachment_refs' | 'embedding_enabled' | 'embedding_model' | 'context_pack_evidence_top_k'>>
 ) => api<Project>(`/api/projects/${projectId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })
 
 export const deleteProject = (userId: string, projectId: string) =>

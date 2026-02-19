@@ -16,21 +16,19 @@ from features.projects.domain import EVENT_CREATED as PROJECT_EVENT_CREATED
 from features.rules.domain import EVENT_CREATED as PROJECT_RULE_EVENT_CREATED
 from features.specifications.domain import EVENT_CREATED as SPECIFICATION_EVENT_CREATED
 from features.tasks.domain import EVENT_CREATED as TASK_EVENT_CREATED
+from . import models as shared_models
 from .models import (
-    Base,
     Note,
     Project,
     ProjectMember,
     ProjectRule,
     ProjectTagIndex,
-    SessionLocal,
     Specification,
     Task,
     TaskWatcher,
     User,
     Workspace,
     WorkspaceMember,
-    engine,
 )
 from .serializers import to_iso_utc
 from .settings import (
@@ -42,8 +40,6 @@ from .settings import (
     BOOTSTRAP_FULL_NAME,
     BOOTSTRAP_USERNAME,
     BOOTSTRAP_WORKSPACE_ID,
-    DB_PATH,
-    DATABASE_URL,
     DEFAULT_USER_ID,
     DEFAULT_STATUSES,
 )
@@ -120,6 +116,12 @@ def ensure_project_table_columns(db: Session):
         db.execute(text("ALTER TABLE projects ADD COLUMN external_refs TEXT DEFAULT '[]'"))
     if "attachment_refs" not in existing:
         db.execute(text("ALTER TABLE projects ADD COLUMN attachment_refs TEXT DEFAULT '[]'"))
+    if "embedding_enabled" not in existing:
+        db.execute(text("ALTER TABLE projects ADD COLUMN embedding_enabled BOOLEAN DEFAULT FALSE"))
+    if "embedding_model" not in existing:
+        db.execute(text("ALTER TABLE projects ADD COLUMN embedding_model VARCHAR(128)"))
+    if "context_pack_evidence_top_k" not in existing:
+        db.execute(text("ALTER TABLE projects ADD COLUMN context_pack_evidence_top_k INTEGER"))
     db.commit()
 
 
@@ -189,8 +191,9 @@ def ensure_task_watcher_table_constraints(db: Session):
 
 
 def bootstrap_data():
-    Base.metadata.create_all(bind=engine)
-    with SessionLocal() as db:
+    shared_models.ensure_engine()
+    shared_models.Base.metadata.create_all(bind=shared_models.engine)
+    with shared_models.SessionLocal() as db:
         ensure_user_table_columns(db)
         ensure_project_table_columns(db)
         ensure_note_table_columns(db)
@@ -307,8 +310,11 @@ def bootstrap_data():
 
 
 def startup_bootstrap():
-    if DATABASE_URL.startswith("sqlite"):
-        os.makedirs(Path(DB_PATH).parent, exist_ok=True)
+    active_database_url = shared_models.ensure_engine()
+    if active_database_url.startswith("sqlite"):
+        db_path = active_database_url.removeprefix("sqlite:///")
+        if db_path:
+            os.makedirs(Path(db_path).parent, exist_ok=True)
     last_exc: Exception | None = None
     for _ in range(20):
         try:

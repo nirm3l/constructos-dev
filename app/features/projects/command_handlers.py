@@ -25,6 +25,7 @@ from shared.core import (
     ensure_role,
     load_project_view,
 )
+from shared.settings import ALLOWED_EMBEDDING_MODELS, DEFAULT_EMBEDDING_MODEL
 from ..notes.domain import EVENT_DELETED as NOTE_EVENT_DELETED
 from ..rules.domain import EVENT_DELETED as PROJECT_RULE_EVENT_DELETED
 from ..specifications.domain import EVENT_DELETED as SPECIFICATION_EVENT_DELETED
@@ -118,6 +119,38 @@ def _project_aggregate_id(workspace_id: str, name: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"project:{workspace_id}:{key}"))
 
 
+def _normalize_embedding_model(value: str | None) -> str | None:
+    model = str(value or "").strip()
+    return model or None
+
+
+def _resolve_project_embedding_config(*, embedding_enabled: bool, embedding_model: str | None) -> tuple[bool, str | None]:
+    normalized_model = _normalize_embedding_model(embedding_model)
+    allowed_map = {model.casefold(): model for model in ALLOWED_EMBEDDING_MODELS if str(model).strip()}
+    default_model = _normalize_embedding_model(DEFAULT_EMBEDDING_MODEL) or next(iter(allowed_map.values()), None)
+    if embedding_enabled and not normalized_model:
+        normalized_model = default_model
+    if normalized_model:
+        canonical = allowed_map.get(normalized_model.casefold())
+        if canonical is None:
+            allowed = ", ".join(sorted(allowed_map.values()))
+            raise HTTPException(
+                status_code=422,
+                detail=f"embedding_model must be one of: {allowed}",
+            )
+        normalized_model = canonical
+    return bool(embedding_enabled), normalized_model
+
+
+def _normalize_context_pack_evidence_top_k(value: int | None) -> int | None:
+    if value is None:
+        return None
+    out = int(value)
+    if out < 1 or out > 40:
+        raise HTTPException(status_code=422, detail="context_pack_evidence_top_k must be between 1 and 40")
+    return out
+
+
 @dataclass(frozen=True, slots=True)
 class CreateProjectHandler:
     ctx: CommandContext
@@ -153,6 +186,11 @@ class CreateProjectHandler:
             if uid not in workspace_users:
                 raise HTTPException(status_code=422, detail=f"user_id {uid} is not a member of this workspace")
 
+        embedding_enabled, embedding_model = _resolve_project_embedding_config(
+            embedding_enabled=bool(self.payload.embedding_enabled),
+            embedding_model=self.payload.embedding_model,
+        )
+
         append_event(
             self.ctx.db,
             aggregate_type="Project",
@@ -165,6 +203,9 @@ class CreateProjectHandler:
                 "custom_statuses": _normalize_project_statuses(self.payload.custom_statuses),
                 "external_refs": _normalize_external_refs([r.model_dump() for r in self.payload.external_refs]),
                 "attachment_refs": _normalize_attachment_refs([r.model_dump() for r in self.payload.attachment_refs]),
+                "embedding_enabled": embedding_enabled,
+                "embedding_model": embedding_model,
+                "context_pack_evidence_top_k": _normalize_context_pack_evidence_top_k(self.payload.context_pack_evidence_top_k),
                 "status": "Active",
             },
             metadata={"actor_id": self.ctx.user.id, "workspace_id": self.payload.workspace_id, "project_id": pid},
@@ -296,6 +337,23 @@ class PatchProjectHandler:
             event_payload["external_refs"] = _normalize_external_refs(data["external_refs"])
         if "attachment_refs" in data and data["attachment_refs"] is not None:
             event_payload["attachment_refs"] = _normalize_attachment_refs(data["attachment_refs"])
+        if "embedding_enabled" in data and data["embedding_enabled"] is None:
+            raise HTTPException(status_code=422, detail="embedding_enabled cannot be null")
+
+        if "embedding_enabled" in data or "embedding_model" in data:
+            next_enabled = bool(data.get("embedding_enabled", project.embedding_enabled))
+            next_model = data.get("embedding_model", project.embedding_model)
+            resolved_enabled, resolved_model = _resolve_project_embedding_config(
+                embedding_enabled=next_enabled,
+                embedding_model=next_model,
+            )
+            event_payload["embedding_enabled"] = resolved_enabled
+            event_payload["embedding_model"] = resolved_model
+
+        if "context_pack_evidence_top_k" in data:
+            event_payload["context_pack_evidence_top_k"] = _normalize_context_pack_evidence_top_k(
+                data.get("context_pack_evidence_top_k")
+            )
 
         if not event_payload:
             view = load_project_view(self.ctx.db, self.project_id)

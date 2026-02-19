@@ -43,20 +43,36 @@ function getLinkNodeId(value: unknown): string {
   return ''
 }
 
+function formatEvidenceUpdated(value: string | null | undefined): string {
+  if (!value) return 'Unknown'
+  const dt = new Date(value)
+  if (Number.isNaN(dt.getTime())) return value
+  return dt.toLocaleString()
+}
+
 export function ProjectKnowledgeGraphPanel({
   projectName,
   overviewQuery,
   contextPackQuery,
   subgraphQuery,
+  onCreateTaskFromSummary,
+  onCreateNoteFromSummary,
+  onLinkFocusTaskToSpecification,
 }: {
   projectName: string
   overviewQuery: QueryLike<GraphProjectOverview>
   contextPackQuery: QueryLike<GraphContextPack>
   subgraphQuery: QueryLike<GraphProjectSubgraph>
+  onCreateTaskFromSummary?: (payload: { title: string; description: string }) => Promise<void> | void
+  onCreateNoteFromSummary?: (payload: { title: string; body: string }) => Promise<void> | void
+  onLinkFocusTaskToSpecification?: (taskId: string, specificationId: string) => Promise<void> | void
 }) {
   const [selectedNodeId, setSelectedNodeId] = React.useState<string | null>(null)
   const [hoveredNodeId, setHoveredNodeId] = React.useState<string | null>(null)
   const [isGraphFullscreen, setIsGraphFullscreen] = React.useState(false)
+  const [selectedEvidenceId, setSelectedEvidenceId] = React.useState<string | null>(null)
+  const [actionBusy, setActionBusy] = React.useState<string | null>(null)
+  const [actionError, setActionError] = React.useState<string | null>(null)
 
   const graphRef = React.useRef<any>(null)
   const graphShellRef = React.useRef<HTMLDivElement | null>(null)
@@ -85,9 +101,74 @@ export function ProjectKnowledgeGraphPanel({
 
   const overview = overviewQuery.data
   const contextPack = contextPackQuery.data
+  const structure = contextPack?.structure
+  const evidenceItems = contextPack?.evidence ?? []
+  const summary = contextPack?.summary
+  const focusNeighbors = structure?.focus_neighbors ?? []
+  const dependencyPaths = structure?.dependency_paths ?? []
   const subgraph = subgraphQuery.data
   const graphNodes = subgraph?.nodes ?? []
   const graphEdges = subgraph?.edges ?? []
+  const evidenceById = React.useMemo(
+    () => new Map(evidenceItems.map((item) => [item.evidence_id, item])),
+    [evidenceItems]
+  )
+  const focusTaskId =
+    String(contextPack?.focus?.entity_type || '').toLowerCase() === 'task'
+      ? String(contextPack?.focus?.entity_id || '').trim()
+      : ''
+  const focusSpecificationId =
+    String(contextPack?.focus?.entity_type || '').toLowerCase() === 'specification'
+      ? String(contextPack?.focus?.entity_id || '').trim()
+      : ''
+  const dependencySpecificationId = React.useMemo(
+    () =>
+      String(
+        (dependencyPaths.find((item) => String(item.to_entity_type || '').toLowerCase() === 'specification')?.to_entity_id || '')
+      ).trim(),
+    [dependencyPaths]
+  )
+  const taskToLinkId = focusTaskId || String(evidenceItems.find((item) => String(item.entity_type || '').toLowerCase() === 'task')?.entity_id || '').trim()
+  const specificationToLinkId =
+    focusSpecificationId ||
+    dependencySpecificationId ||
+    String(evidenceItems.find((item) => String(item.entity_type || '').toLowerCase() === 'specification')?.entity_id || '').trim()
+  const canLinkTaskToSpecification = Boolean(taskToLinkId && specificationToLinkId && onLinkFocusTaskToSpecification)
+
+  const summaryTaskTitle = React.useMemo(() => {
+    const seed = String(summary?.key_points?.[0]?.claim || summary?.executive || '').trim()
+    const compact = seed.replace(/\s+/g, ' ').trim()
+    if (!compact) return `Follow-up: ${projectName}`
+    const clipped = compact.length > 72 ? `${compact.slice(0, 72).trim()}...` : compact
+    return `Follow-up: ${clipped}`
+  }, [projectName, summary?.executive, summary?.key_points])
+  const summaryTaskDescription = React.useMemo(() => {
+    const lines: string[] = []
+    lines.push(`Project: ${projectName}`)
+    if (summary?.executive) lines.push(`Executive: ${summary.executive}`)
+    const keyPoints = summary?.key_points ?? []
+    if (keyPoints.length > 0) {
+      lines.push('Key points:')
+      for (const point of keyPoints.slice(0, 4)) {
+        const ids = (point.evidence_ids ?? []).filter(Boolean)
+        lines.push(`- ${point.claim}${ids.length ? ` [${ids.join(', ')}]` : ''}`)
+      }
+    }
+    const gaps = summary?.gaps ?? contextPack?.gaps ?? []
+    if (gaps.length > 0) {
+      lines.push('Gaps:')
+      for (const gap of gaps.slice(0, 4)) lines.push(`- ${gap}`)
+    }
+    return lines.join('\n').trim()
+  }, [contextPack?.gaps, projectName, summary?.executive, summary?.gaps, summary?.key_points])
+  const summaryNoteTitle = React.useMemo(() => {
+    const base = String(summaryTaskTitle || '').trim()
+    return base ? `${base} (Note)` : `Summary note: ${projectName}`
+  }, [projectName, summaryTaskTitle])
+  const summaryNoteBody = React.useMemo(() => {
+    const head = ['## Summary with citations', '', summaryTaskDescription]
+    return head.join('\n')
+  }, [summaryTaskDescription])
 
   const counts = overview?.counts ?? {
     tasks: 0,
@@ -116,6 +197,15 @@ export function ProjectKnowledgeGraphPanel({
     if (selectedNodeId && nodes.some((node) => node.entity_id === selectedNodeId)) return
     setSelectedNodeId(nodes[0]?.entity_id ?? null)
   }, [filteredGraph.nodes, selectedNodeId])
+
+  React.useEffect(() => {
+    if (!evidenceItems.length) {
+      setSelectedEvidenceId(null)
+      return
+    }
+    if (selectedEvidenceId && evidenceItems.some((item) => item.evidence_id === selectedEvidenceId)) return
+    setSelectedEvidenceId(evidenceItems[0]?.evidence_id ?? null)
+  }, [evidenceItems, selectedEvidenceId])
 
   const nodeColor = React.useCallback((entityType: string) => {
     const key = String(entityType || '').toLowerCase()
@@ -174,6 +264,18 @@ export function ProjectKnowledgeGraphPanel({
       // no-op
     }
   }, [isGraphFullscreen])
+
+  const runAction = React.useCallback(async (actionKey: string, fn: () => Promise<void> | void) => {
+    setActionBusy(actionKey)
+    setActionError(null)
+    try {
+      await Promise.resolve(fn())
+    } catch (err) {
+      setActionError(toErrorMessage(err))
+    } finally {
+      setActionBusy((current) => (current === actionKey ? null : current))
+    }
+  }, [])
 
   React.useEffect(() => {
     const el = graphCanvasRef.current
@@ -251,7 +353,7 @@ export function ProjectKnowledgeGraphPanel({
         <div className="row" style={{ gap: 6 }}>
           {isRefreshing && <span className="badge">Refreshing</span>}
           <button
-            className="action-icon"
+            className="action-icon graph-refresh-btn"
             type="button"
             title="Refresh graph insights"
             aria-label="Refresh graph insights"
@@ -277,6 +379,10 @@ export function ProjectKnowledgeGraphPanel({
         <>
           <div className="meta" style={{ marginBottom: 8 }}>
             Project scope: {String(overview?.project_name || projectName || 'Unknown project')}
+          </div>
+
+          <div className="meta" style={{ marginBottom: 8 }}>
+            Retrieval mode: {contextPack?.mode ?? 'graph-only'}
           </div>
 
           <div className="graph-count-grid">
@@ -333,19 +439,85 @@ export function ProjectKnowledgeGraphPanel({
           </div>
 
           <div className="graph-connected-block">
-            <div className="meta">Most connected resources</div>
-            {(contextPack?.connected_resources ?? []).length === 0 ? (
-              <div className="meta">No connected resources yet.</div>
+            <div className="meta">Focus neighbors</div>
+            {focusNeighbors.length === 0 ? (
+              <div className="meta">No focus neighbors for current selection.</div>
             ) : (
               <div className="graph-connected-list">
-                {(contextPack?.connected_resources ?? []).slice(0, 8).map((item) => (
-                  <div key={`kg-node-${item.entity_type}-${item.entity_id}`} className="graph-connected-row">
+                {focusNeighbors.slice(0, 8).map((item) => (
+                  <div key={`kg-focus-${item.entity_type}-${item.entity_id}`} className="graph-connected-row">
                     <span>
                       <strong>{item.entity_type}</strong> {item.title || item.entity_id}
                     </span>
-                    <span className="meta">degree {item.degree}</span>
+                    <span className="meta">{(item.path_types ?? []).join(' -> ') || 'RELATED'}</span>
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+
+          <div className="graph-connected-block">
+            <div className="meta">Dependency paths</div>
+            {dependencyPaths.length === 0 ? (
+              <div className="meta">No dependency paths available.</div>
+            ) : (
+              <div className="graph-connected-list">
+                {dependencyPaths.slice(0, 8).map((item) => (
+                  <div key={`kg-path-${item.to_entity_type}-${item.to_entity_id}`} className="graph-connected-row">
+                    <span>
+                      <strong>{item.to_entity_type}</strong> {item.to_entity_id}
+                    </span>
+                    <span className="meta">{(item.path ?? []).join(' -> ') || 'RELATED'}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="graph-connected-block">
+            <div className="meta">Evidence (sorted by score)</div>
+            <div className="meta" style={{ marginTop: 4 }}>
+              Click an evidence item to focus its node in the visual graph.
+            </div>
+            {evidenceItems.length === 0 ? (
+              <div className="meta">No evidence available for this context pack.</div>
+            ) : (
+              <div className="graph-evidence-list">
+                {evidenceItems.map((item) => {
+                  const isSelected = selectedEvidenceId === item.evidence_id
+                  const graphPath = (item.graph_path ?? []).filter(Boolean).join(' -> ')
+                  return (
+                    <button
+                      key={item.evidence_id}
+                      type="button"
+                      className={`graph-evidence-item ${isSelected ? 'selected' : ''}`.trim()}
+                      onClick={() => {
+                        setSelectedEvidenceId(item.evidence_id)
+                        focusNodeOnCanvas(item.entity_id, 2.4)
+                      }}
+                    >
+                      <div className="graph-evidence-head">
+                        <div className="graph-evidence-badges">
+                          <span className="graph-evidence-id">{item.evidence_id}</span>
+                          <span className="status-chip">{item.entity_type}</span>
+                          <span className="status-chip">{item.source_type}</span>
+                        </div>
+                        <span className="graph-evidence-score">Score {item.final_score.toFixed(3)}</span>
+                      </div>
+                      <div className="graph-evidence-snippet">{item.snippet}</div>
+                      <div className="graph-evidence-meta">
+                        <span className="meta">Entity {item.entity_id}</span>
+                        <span className="meta">Graph {item.graph_score.toFixed(3)}</span>
+                        <span className="meta">
+                          Vector {item.vector_similarity === null ? 'n/a' : item.vector_similarity.toFixed(3)}
+                        </span>
+                        <span className="meta">Updated {formatEvidenceUpdated(item.updated_at)}</span>
+                      </div>
+                      {graphPath ? <div className="graph-evidence-path">Path {graphPath}</div> : null}
+                      <div className="graph-evidence-why">Why selected: {item.why_selected}</div>
+                    </button>
+                  )
+                })}
               </div>
             )}
           </div>
@@ -489,6 +661,134 @@ export function ProjectKnowledgeGraphPanel({
                   </div>
                 )}
               </>
+            )}
+          </div>
+
+          <div className="graph-markdown-block">
+            <div className="meta">Summary with citations</div>
+            <div className="row wrap" style={{ gap: 8, marginTop: 6, marginBottom: 8 }}>
+              {onCreateTaskFromSummary ? (
+                <button
+                  type="button"
+                  className="status-chip"
+                  disabled={Boolean(actionBusy)}
+                  onClick={() =>
+                    runAction('summary-create-task', () =>
+                      onCreateTaskFromSummary({
+                        title: summaryTaskTitle,
+                        description: summaryTaskDescription,
+                      })
+                    )
+                  }
+                >
+                  Create task
+                </button>
+              ) : null}
+              {onCreateNoteFromSummary ? (
+                <button
+                  type="button"
+                  className="status-chip"
+                  disabled={Boolean(actionBusy)}
+                  onClick={() =>
+                    runAction('summary-create-note', () =>
+                      onCreateNoteFromSummary({
+                        title: summaryNoteTitle,
+                        body: summaryNoteBody,
+                      })
+                    )
+                  }
+                >
+                  Create note
+                </button>
+              ) : null}
+              {canLinkTaskToSpecification ? (
+                <button
+                  type="button"
+                  className="status-chip"
+                  disabled={Boolean(actionBusy)}
+                  onClick={() =>
+                    runAction('summary-link-task-spec', () =>
+                      onLinkFocusTaskToSpecification?.(taskToLinkId, specificationToLinkId)
+                    )
+                  }
+                >
+                  Link task/spec
+                </button>
+              ) : null}
+              {actionBusy ? <span className="meta">Running action...</span> : null}
+            </div>
+            {actionError ? <div className="notice notice-error">{actionError}</div> : null}
+            {!summary ? (
+              <div className="meta">
+                Summary is unavailable for this response.
+                {(contextPack?.gaps ?? []).length > 0 ? ` ${contextPack?.gaps?.join(' | ')}` : ''}
+              </div>
+            ) : (
+              <div className="graph-summary-layout">
+                <div className="graph-summary-card">
+                  <div className="meta">Executive</div>
+                  <div className="graph-summary-executive">
+                    {summary.executive || 'No executive summary available.'}
+                  </div>
+                </div>
+
+                <div className="graph-summary-card">
+                  <div className="meta">Key points</div>
+                  {(summary.key_points ?? []).length === 0 ? (
+                    <div className="meta">No grounded key points available.</div>
+                  ) : (
+                    <div className="graph-summary-points">
+                      {(summary.key_points ?? []).map((point, idx) => (
+                        <div key={`summary-point-${idx}`} className="graph-summary-point">
+                          <div className="graph-summary-point-head">
+                            <span className="graph-summary-point-index">{idx + 1}</span>
+                            <span className="graph-summary-point-claim">{point.claim}</span>
+                          </div>
+                          <div className="graph-summary-point-evidence">
+                            <span className="meta">Evidence</span>
+                            <div className="graph-summary-evidence-links">
+                              {(point.evidence_ids ?? []).length === 0
+                                ? <span className="meta">none</span>
+                                : (point.evidence_ids ?? []).map((evidenceId) => {
+                                    const evidence = evidenceById.get(evidenceId)
+                                    return (
+                                      <button
+                                        key={evidenceId}
+                                        type="button"
+                                        className="graph-summary-evidence-link"
+                                        onClick={() => {
+                                          setSelectedEvidenceId(evidenceId)
+                                          if (evidence?.entity_id) {
+                                            focusNodeOnCanvas(evidence.entity_id, 2.4)
+                                          }
+                                        }}
+                                        title={evidence?.snippet || `Open ${evidenceId}`}
+                                      >
+                                        {evidenceId}
+                                      </button>
+                                    )
+                                  })}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {(summary.gaps ?? []).length > 0 ? (
+                  <div className="graph-summary-card">
+                    <div className="meta">Gaps</div>
+                    <div className="graph-summary-gaps">
+                      {(summary.gaps ?? []).map((gap, idx) => (
+                        <div key={`summary-gap-${idx}`} className="graph-summary-gap-item">
+                          {gap}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             )}
           </div>
 

@@ -25,6 +25,7 @@ from .contracts import (
 )
 from .models import Note, Notification, Project, ProjectRule, SavedView, Specification, StoredEvent, Task
 from .settings import DEFAULT_STATUSES
+from .vector_store import project_embedding_index_status
 
 
 def to_iso_utc(value: datetime | None) -> str | None:
@@ -341,6 +342,12 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
     project = db.get(Project, project_id)
     if project and not project.is_deleted:
         created_by = load_created_by(db, "Project", project.id)
+        index_status = project_embedding_index_status(
+            db,
+            project_id=project.id,
+            embedding_enabled=bool(project.embedding_enabled),
+            embedding_model=project.embedding_model,
+        )
         return {
             "id": project.id,
             "workspace_id": project.workspace_id,
@@ -350,6 +357,10 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
             "custom_statuses": json.loads(project.custom_statuses or "[]"),
             "external_refs": json.loads(project.external_refs or "[]"),
             "attachment_refs": json.loads(project.attachment_refs or "[]"),
+            "embedding_enabled": bool(project.embedding_enabled),
+            "embedding_model": project.embedding_model,
+            "context_pack_evidence_top_k": project.context_pack_evidence_top_k,
+            "embedding_index_status": index_status,
             "created_by": created_by,
             "created_at": to_iso_utc(project.created_at),
             "updated_at": to_iso_utc(project.updated_at),
@@ -363,6 +374,12 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
     if not state or state.get("is_deleted"):
         return None
     created_by = str(state.get("created_by") or "") or load_created_by(db, "Project", project_id)
+    index_status = project_embedding_index_status(
+        db,
+        project_id=project_id,
+        embedding_enabled=bool(state.get("embedding_enabled", False)),
+        embedding_model=state.get("embedding_model"),
+    )
     return {
         "id": project_id,
         "workspace_id": state.get("workspace_id"),
@@ -372,6 +389,10 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
         "custom_statuses": state.get("custom_statuses", DEFAULT_STATUSES),
         "external_refs": state.get("external_refs", []),
         "attachment_refs": state.get("attachment_refs", []),
+        "embedding_enabled": bool(state.get("embedding_enabled", False)),
+        "embedding_model": state.get("embedding_model"),
+        "context_pack_evidence_top_k": state.get("context_pack_evidence_top_k"),
+        "embedding_index_status": index_status,
         "created_by": created_by,
         "created_at": None,
         "updated_at": None,

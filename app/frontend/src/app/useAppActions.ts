@@ -8,7 +8,7 @@ import {
   removeProjectMember,
   uploadAttachment,
 } from '../api'
-import { parseCommaTags, parseProjectStatusesText, toErrorMessage } from '../utils/ui'
+import { parseCommaTags, parseProjectEvidenceTopKInput, parseProjectStatusesText, toErrorMessage } from '../utils/ui'
 
 type SharePayload = {
   tab?: string
@@ -154,19 +154,35 @@ export function useAppActions(c: any) {
       .map((value: any) => String(value))
       .filter((value: string) => Boolean(value))
     const memberIds: string[] = Array.from(new Set<string>(rawMemberIds)).sort()
-    await patchProject(c.userId, c.selectedProjectId, {
+    const contextPackEvidenceTopK = parseProjectEvidenceTopKInput(c.editProjectContextPackEvidenceTopKText)
+    const patchedProject = await patchProject(c.userId, c.selectedProjectId, {
       name,
       description: c.editProjectDescription,
       custom_statuses: parseProjectStatusesText(c.editProjectCustomStatusesText),
       external_refs: c.parseExternalRefsText(c.editProjectExternalRefsText),
       attachment_refs: c.parseAttachmentRefsText(c.editProjectAttachmentRefsText),
+      embedding_enabled: Boolean(c.editProjectEmbeddingEnabled),
+      embedding_model: String(c.editProjectEmbeddingModel || '').trim() || null,
+      context_pack_evidence_top_k: contextPackEvidenceTopK,
     })
     await syncProjectMembers(c.selectedProjectId, memberIds)
-    await c.qc.invalidateQueries({ queryKey: ['bootstrap'] })
+    c.qc.setQueryData(['bootstrap', c.userId], (prev: any) => {
+      if (!prev || !Array.isArray(prev.projects)) return prev
+      return {
+        ...prev,
+        projects: prev.projects.map((project: any) =>
+          project?.id === patchedProject.id ? { ...project, ...patchedProject } : project
+        ),
+      }
+    })
+    await c.qc.invalidateQueries({ queryKey: ['bootstrap', c.userId] })
   }, [
     c.editProjectAttachmentRefsText,
     c.editProjectCustomStatusesText,
     c.editProjectDescription,
+    c.editProjectEmbeddingEnabled,
+    c.editProjectEmbeddingModel,
+    c.editProjectContextPackEvidenceTopKText,
     c.editProjectExternalRefsText,
     c.editProjectMemberIds,
     c.editProjectName,

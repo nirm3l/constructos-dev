@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 
 def build_client(tmp_path: Path):
@@ -254,6 +255,116 @@ def test_create_project(tmp_path):
     payload = res.json()
     assert payload['name'] == 'Mobile Redesign'
     assert payload['workspace_id'] == ws_id
+
+
+def test_bootstrap_exposes_embedding_runtime_config(tmp_path):
+    client = build_client(tmp_path)
+    payload = client.get('/api/bootstrap').json()
+
+    assert isinstance(payload.get('embedding_allowed_models'), list)
+    assert len(payload['embedding_allowed_models']) >= 1
+    assert isinstance(payload.get('embedding_default_model'), str)
+    assert payload['embedding_default_model'] in payload['embedding_allowed_models']
+    assert isinstance(payload.get('vector_store_enabled'), bool)
+    assert isinstance(payload.get('context_pack_evidence_top_k_default'), int)
+
+
+def test_project_embedding_config_and_index_status_roundtrip(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    allowed_models = bootstrap['embedding_allowed_models']
+
+    created = client.post(
+        '/api/projects',
+        json={
+            'workspace_id': ws_id,
+            'name': 'Embeddings project',
+            'embedding_enabled': True,
+            'context_pack_evidence_top_k': 9,
+        },
+    )
+    assert created.status_code == 200
+    project = created.json()
+    assert project['embedding_enabled'] is True
+    assert project['embedding_model'] in allowed_models
+    assert project['context_pack_evidence_top_k'] == 9
+    assert project['embedding_index_status'] == 'not_indexed'
+
+    patched = client.patch(
+        f"/api/projects/{project['id']}",
+        json={'embedding_enabled': False, 'context_pack_evidence_top_k': None},
+    )
+    assert patched.status_code == 200
+    patched_payload = patched.json()
+    assert patched_payload['embedding_enabled'] is False
+    assert patched_payload['context_pack_evidence_top_k'] is None
+    assert patched_payload['embedding_index_status'] == 'not_indexed'
+
+    invalid = client.patch(
+        f"/api/projects/{project['id']}",
+        json={'embedding_model': 'not-allowed-model'},
+    )
+    assert invalid.status_code == 422
+    assert 'embedding_model must be one of' in invalid.text
+
+    invalid_top_k = client.patch(
+        f"/api/projects/{project['id']}",
+        json={'context_pack_evidence_top_k': 99},
+    )
+    assert invalid_top_k.status_code == 422
+
+
+def test_reindex_project_uses_runtime_override_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALLOWED_EMBEDDING_MODELS", "nomic-embed-text,mxbai-embed-large")
+    monkeypatch.setenv("DEFAULT_EMBEDDING_MODEL", "nomic-embed-text")
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created = client.post(
+        '/api/tasks',
+        json={'title': 'Vector test task', 'workspace_id': ws_id, 'project_id': project_id, 'description': 'Body'},
+    )
+    assert created.status_code == 200
+
+    from shared import vector_store
+    from shared.models import Project, SessionLocal, VectorChunk
+
+    monkeypatch.setattr(vector_store, "vector_store_enabled", lambda: True)
+    monkeypatch.setattr(
+        vector_store,
+        "normalize_embedding_model",
+        lambda value: str(value or "nomic-embed-text").strip() or "nomic-embed-text",
+    )
+    monkeypatch.setattr(vector_store, "_ollama_embed_text", lambda _text, _model: [0.11, 0.22, 0.33])
+
+    with SessionLocal() as db:
+        project = db.get(Project, project_id)
+        assert project is not None
+        project.embedding_enabled = True
+        project.embedding_model = "nomic-embed-text"
+        db.commit()
+
+        indexed = vector_store.maybe_reindex_project(
+            db,
+            project_id=project_id,
+            embedding_enabled=True,
+            embedding_model="mxbai-embed-large",
+        )
+        db.commit()
+
+        models = db.execute(
+            select(VectorChunk.embedding_model).where(
+                VectorChunk.project_id == project_id,
+                VectorChunk.is_deleted == False,
+            )
+        ).scalars().all()
+
+    assert indexed >= 1
+    assert models
+    assert set(models) == {"mxbai-embed-large"}
 
 
 def test_create_project_is_case_insensitive_idempotent_by_name(tmp_path):
@@ -667,6 +778,15 @@ def test_metrics_endpoint_available(tmp_path):
     payload = res.json()
     assert 'commands_total' in payload
     assert 'command_conflicts' in payload
+
+    rag = client.get('/api/metrics/graph-rag')
+    assert rag.status_code == 200
+    rag_payload = rag.json()
+    assert 'requests' in rag_payload
+    assert 'grounded_claim_ratio_pct' in rag_payload
+    assert 'context_latency_ms' in rag_payload
+    assert 'with_summary' in rag_payload['context_latency_ms']
+    assert 'without_summary' in rag_payload['context_latency_ms']
 
 
 def test_local_snapshot_payload_has_schema_version(tmp_path):

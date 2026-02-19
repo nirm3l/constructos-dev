@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from shared.models import Notification, Project, ProjectMember, SavedView, User, Workspace, WorkspaceMember
 from shared.serializers import load_created_by_map, serialize_notification, to_iso_utc
+from shared.settings import ALLOWED_EMBEDDING_MODELS, CONTEXT_PACK_EVIDENCE_TOP_K, DEFAULT_EMBEDDING_MODEL
+from shared.vector_store import normalize_embedding_model, project_embedding_index_status, vector_store_enabled
 
 
 def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
@@ -37,6 +39,39 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
         )
     ).scalars().all()
     project_creator_map = load_created_by_map(db, "Project", project_ids)
+    projects_payload = []
+    for p in projects:
+        projects_payload.append(
+            {
+                "id": p.id,
+                "workspace_id": p.workspace_id,
+                "name": p.name,
+                "description": p.description,
+                "status": p.status,
+                "custom_statuses": json.loads(p.custom_statuses),
+                "external_refs": json.loads(p.external_refs or "[]"),
+                "attachment_refs": json.loads(p.attachment_refs or "[]"),
+                "embedding_enabled": bool(p.embedding_enabled),
+                "embedding_model": p.embedding_model,
+                "context_pack_evidence_top_k": p.context_pack_evidence_top_k,
+                "embedding_index_status": project_embedding_index_status(
+                    db,
+                    project_id=p.id,
+                    embedding_enabled=bool(p.embedding_enabled),
+                    embedding_model=p.embedding_model,
+                ),
+                "created_by": project_creator_map.get(p.id, ""),
+                "created_at": to_iso_utc(p.created_at),
+                "updated_at": to_iso_utc(p.updated_at),
+            }
+        )
+    vector_enabled = bool(vector_store_enabled())
+    embedding_models = list(ALLOWED_EMBEDDING_MODELS)
+    default_embedding_model = normalize_embedding_model(DEFAULT_EMBEDDING_MODEL)
+    if embedding_models and default_embedding_model not in embedding_models:
+        default_embedding_model = embedding_models[0]
+    if not embedding_models and default_embedding_model:
+        embedding_models = [default_embedding_model]
     return {
         "current_user": {
             "id": user.id,
@@ -48,22 +83,18 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
         },
         "workspaces": [{"id": w.id, "name": w.name, "type": w.type} for w in workspaces],
         "memberships": [{"workspace_id": m.workspace_id, "role": m.role} for m in memberships],
-        "projects": [
-            {
-                "id": p.id,
-                "workspace_id": p.workspace_id,
-                "name": p.name,
-                "description": p.description,
-                "status": p.status,
-                "custom_statuses": json.loads(p.custom_statuses),
-                "external_refs": json.loads(p.external_refs or "[]"),
-                "attachment_refs": json.loads(p.attachment_refs or "[]"),
-                "created_by": project_creator_map.get(p.id, ""),
-                "created_at": to_iso_utc(p.created_at),
-                "updated_at": to_iso_utc(p.updated_at),
-            }
-            for p in projects
-        ],
+        "projects": projects_payload,
+        "embedding_allowed_models": embedding_models,
+        "embedding_default_model": default_embedding_model,
+        "vector_store_enabled": vector_enabled,
+        "context_pack_evidence_top_k_default": int(CONTEXT_PACK_EVIDENCE_TOP_K or 10),
+        # Backward-compatible mirror for older UI bundles reading bootstrap.config.*
+        "config": {
+            "embedding_allowed_models": embedding_models,
+            "embedding_default_model": default_embedding_model,
+            "vector_store_enabled": vector_enabled,
+            "context_pack_evidence_top_k_default": int(CONTEXT_PACK_EVIDENCE_TOP_K or 10),
+        },
         "users": [{"id": u.id, "username": u.username, "full_name": u.full_name, "user_type": u.user_type} for u in users],
         "project_members": [
             {

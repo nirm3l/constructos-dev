@@ -2,9 +2,9 @@ import type { AttachmentRef, ExternalRef } from '../types'
 
 const DEFAULT_USER_ID = '00000000-0000-0000-0000-000000000001'
 
-export type Tab = 'today' | 'tasks' | 'notes' | 'specifications' | 'projects' | 'search' | 'profile'
+export type Tab = 'today' | 'tasks' | 'notes' | 'specifications' | 'projects' | 'knowledge-graph' | 'search' | 'profile'
 
-export const TAB_ORDER: Tab[] = ['today', 'tasks', 'notes', 'specifications', 'projects', 'search', 'profile']
+export const TAB_ORDER: Tab[] = ['today', 'tasks', 'notes', 'specifications', 'projects', 'knowledge-graph', 'search', 'profile']
 
 export function normalizeStoredUserId(raw: string | null): string {
   if (!raw || raw === '1' || raw === '2') return DEFAULT_USER_ID
@@ -192,6 +192,8 @@ export function parseCommaTags(raw: string): string[] {
 }
 
 export const DEFAULT_PROJECT_STATUSES: string[] = ['To do', 'In progress', 'Done']
+export const PROJECT_EVIDENCE_TOP_K_MIN = 1
+export const PROJECT_EVIDENCE_TOP_K_MAX = 40
 
 export function parseProjectStatusesText(raw: string): string[] {
   const seen = new Set<string>()
@@ -211,6 +213,19 @@ export function parseProjectStatusesText(raw: string): string[] {
 export function projectStatusesToText(statuses: string[] | undefined | null): string {
   const items = Array.isArray(statuses) && statuses.length > 0 ? statuses : DEFAULT_PROJECT_STATUSES
   return items.join(', ')
+}
+
+export function parseProjectEvidenceTopKInput(raw: string): number | null {
+  const text = String(raw || '').trim()
+  if (!text) return null
+  if (!/^\d+$/.test(text)) {
+    throw new Error('Evidence top K must be a whole number.')
+  }
+  const value = Number(text)
+  if (!Number.isInteger(value) || value < PROJECT_EVIDENCE_TOP_K_MIN || value > PROJECT_EVIDENCE_TOP_K_MAX) {
+    throw new Error(`Evidence top K must be between ${PROJECT_EVIDENCE_TOP_K_MIN} and ${PROJECT_EVIDENCE_TOP_K_MAX}.`)
+  }
+  return value
 }
 
 export function parseExternalRefsText(raw: string): ExternalRef[] {

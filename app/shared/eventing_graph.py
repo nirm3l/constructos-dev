@@ -58,7 +58,6 @@ from features.tasks.domain import (
 from .contracts import EventEnvelope
 from .eventing_store import get_kurrent_client
 from .knowledge_graph import ensure_graph_schema, graph_enabled, run_graph_query
-from .models import ProjectionCheckpoint, SessionLocal
 from .observability import incr, set_value
 from .settings import (
     GRAPH_PROJECTION_BATCH_SIZE,
@@ -80,7 +79,9 @@ def _extract_aggregate_from_stream(stream_name: str) -> tuple[str, str] | None:
     return base, raw_id
 
 
-def _get_graph_checkpoint(db, name: str = _GRAPH_CHECKPOINT_NAME) -> ProjectionCheckpoint:
+def _get_graph_checkpoint(db, name: str = _GRAPH_CHECKPOINT_NAME):
+    from .models import ProjectionCheckpoint
+
     checkpoint = db.get(ProjectionCheckpoint, name)
     if checkpoint is None:
         checkpoint = ProjectionCheckpoint(name=name, commit_position=0)
@@ -116,7 +117,36 @@ def _recorded_to_envelope(event: Any) -> tuple[int, EventEnvelope] | None:
 
 
 def _clean_props(data: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in data.items() if k and k != "id"}
+    cleaned: dict[str, Any] = {}
+    for key, value in data.items():
+        if not key or key == "id":
+            continue
+        cleaned[key] = _to_neo4j_property(value)
+    return cleaned
+
+
+def _is_scalar(value: Any) -> bool:
+    return isinstance(value, (str, int, float, bool))
+
+
+def _to_neo4j_property(value: Any) -> Any:
+    if value is None:
+        return None
+    if _is_scalar(value):
+        return value
+    if isinstance(value, dict):
+        # Neo4j node properties cannot be maps; preserve data as JSON text.
+        return json.dumps(value, separators=(",", ":"))
+    if isinstance(value, tuple):
+        value = list(value)
+    if isinstance(value, list):
+        if not value:
+            return []
+        if all(_is_scalar(item) for item in value):
+            return value
+        # Nested values (map/list) are unsupported in Neo4j properties.
+        return json.dumps(value, separators=(",", ":"))
+    return str(value)
 
 
 def _as_str(value: Any) -> str | None:
@@ -303,7 +333,17 @@ def _project_project_event(ev: EventEnvelope, commit_position: int) -> None:
         "last_event_version": ev.version,
         "last_commit_position": commit_position,
     }
-    for key in ("name", "description", "status", "custom_statuses", "external_refs", "attachment_refs"):
+    for key in (
+        "name",
+        "description",
+        "status",
+        "custom_statuses",
+        "external_refs",
+        "attachment_refs",
+        "embedding_enabled",
+        "embedding_model",
+        "context_pack_evidence_top_k",
+    ):
         if key in p:
             props[key] = p.get(key)
     if ev.event_type == PROJECT_EVENT_CREATED:
@@ -785,6 +825,8 @@ def project_kurrent_graph_once(limit: int | None = None) -> int:
 
     batch_limit = max(1, int(limit or GRAPH_PROJECTION_BATCH_SIZE))
     try:
+        from .models import SessionLocal
+
         with SessionLocal() as db:
             checkpoint = _get_graph_checkpoint(db)
             start_position = checkpoint.commit_position if checkpoint.commit_position > 0 else None
@@ -817,6 +859,8 @@ def _graph_worker_loop() -> None:
     client = get_kurrent_client()
     if client is None:
         return
+    from .models import SessionLocal
+
     while not _graph_stop_event.is_set():
         try:
             ensure_graph_schema()

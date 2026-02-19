@@ -2,9 +2,6 @@ import React from 'react'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import type {
   AttachmentRef,
-  GraphContextPack,
-  GraphProjectOverview,
-  GraphProjectSubgraph,
   Project,
   ProjectRule,
   ProjectRulesPage,
@@ -19,20 +16,10 @@ import {
   removeExternalRefByIndex,
   toErrorMessage,
 } from '../../utils/ui'
-import { ProjectKnowledgeGraphPanel } from './ProjectKnowledgeGraphPanel'
 
 type ProjectMutation = {
   isPending: boolean
   mutate: (...args: any[]) => void
-}
-
-type QueryLike<T> = {
-  data?: T
-  isLoading?: boolean
-  isFetching?: boolean
-  isError?: boolean
-  error?: unknown
-  refetch?: () => void
 }
 
 type WorkspaceUser = {
@@ -49,6 +36,16 @@ export function ProjectsInlineEditor({
   setEditProjectName,
   editProjectCustomStatusesText,
   setEditProjectCustomStatusesText,
+  editProjectEmbeddingEnabled,
+  setEditProjectEmbeddingEnabled,
+  editProjectEmbeddingModel,
+  setEditProjectEmbeddingModel,
+  editProjectContextPackEvidenceTopKText,
+  setEditProjectContextPackEvidenceTopKText,
+  embeddingAllowedModels,
+  embeddingDefaultModel,
+  vectorStoreEnabled,
+  contextPackEvidenceTopKDefault,
   saveProjectMutation,
   deleteProjectMutation,
   editProjectDescriptionView,
@@ -57,9 +54,6 @@ export function ProjectsInlineEditor({
   editProjectDescription,
   setEditProjectDescription,
   projectRules,
-  projectGraphOverview,
-  projectGraphContextPack,
-  projectGraphSubgraph,
   selectedProjectRuleId,
   setSelectedProjectRuleId,
   projectRuleTitle,
@@ -95,6 +89,16 @@ export function ProjectsInlineEditor({
   setEditProjectName: React.Dispatch<React.SetStateAction<string>>
   editProjectCustomStatusesText: string
   setEditProjectCustomStatusesText: React.Dispatch<React.SetStateAction<string>>
+  editProjectEmbeddingEnabled: boolean
+  setEditProjectEmbeddingEnabled: React.Dispatch<React.SetStateAction<boolean>>
+  editProjectEmbeddingModel: string
+  setEditProjectEmbeddingModel: React.Dispatch<React.SetStateAction<string>>
+  editProjectContextPackEvidenceTopKText: string
+  setEditProjectContextPackEvidenceTopKText: React.Dispatch<React.SetStateAction<string>>
+  embeddingAllowedModels: string[]
+  embeddingDefaultModel: string
+  vectorStoreEnabled: boolean
+  contextPackEvidenceTopKDefault: number
   saveProjectMutation: ProjectMutation
   deleteProjectMutation: ProjectMutation
   editProjectDescriptionView: 'write' | 'preview'
@@ -103,9 +107,6 @@ export function ProjectsInlineEditor({
   editProjectDescription: string
   setEditProjectDescription: React.Dispatch<React.SetStateAction<string>>
   projectRules: { data?: ProjectRulesPage }
-  projectGraphOverview: QueryLike<GraphProjectOverview>
-  projectGraphContextPack: QueryLike<GraphContextPack>
-  projectGraphSubgraph: QueryLike<GraphProjectSubgraph>
   selectedProjectRuleId: string | null
   setSelectedProjectRuleId: React.Dispatch<React.SetStateAction<string | null>>
   projectRuleTitle: string
@@ -134,6 +135,38 @@ export function ProjectsInlineEditor({
   selectedProjectCreator: string
   selectedProjectTimeMeta: { label: 'Created' | 'Updated'; value: string } | null
 }) {
+  const modelOptions = React.useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (embeddingAllowedModels ?? [])
+            .map((model) => String(model || '').trim())
+            .filter(Boolean)
+        )
+      ),
+    [embeddingAllowedModels]
+  )
+  const defaultModel = React.useMemo(() => {
+    const normalized = String(embeddingDefaultModel || '').trim()
+    if (normalized && modelOptions.includes(normalized)) return normalized
+    return modelOptions[0] ?? ''
+  }, [embeddingDefaultModel, modelOptions])
+  const selectedModel = React.useMemo(() => {
+    const current = String(editProjectEmbeddingModel || '').trim()
+    if (current && modelOptions.includes(current)) return current
+    return defaultModel
+  }, [defaultModel, editProjectEmbeddingModel, modelOptions])
+  const embeddingStatus = String(selectedProject.embedding_index_status || 'not_indexed')
+  const embeddingStatusLabel =
+    embeddingStatus === 'ready'
+      ? 'Ready'
+      : embeddingStatus === 'indexing'
+        ? 'Indexing'
+        : embeddingStatus === 'stale'
+          ? 'Stale'
+          : 'Not indexed'
+  const vectorAvailable = Boolean(vectorStoreEnabled)
+
   return (
     <div className="project-inline-editor" style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
       <div className="row wrap" style={{ marginBottom: 10 }}>
@@ -147,7 +180,7 @@ export function ProjectsInlineEditor({
         <button
           className="action-icon primary"
           onClick={() => saveProjectMutation.mutate()}
-          disabled={saveProjectMutation.isPending || !editProjectName.trim() || !projectIsDirty}
+          disabled={saveProjectMutation.isPending || !editProjectName.trim()}
           title="Save project"
           aria-label="Save project"
         >
@@ -166,14 +199,6 @@ export function ProjectsInlineEditor({
           <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
         </button>
       </div>
-      <label className="field-control" style={{ marginBottom: 10 }}>
-        <span className="field-label">Board statuses (comma-separated)</span>
-        <input
-          value={editProjectCustomStatusesText}
-          onChange={(e) => setEditProjectCustomStatusesText(e.target.value)}
-          placeholder="To do, In progress, Blocked, Ready for QA, Done"
-        />
-      </label>
       <div className="md-editor-surface">
         <MarkdownModeToggle
           view={editProjectDescriptionView}
@@ -194,6 +219,70 @@ export function ProjectsInlineEditor({
             <MarkdownView value={editProjectDescription} />
           )}
         </div>
+      </div>
+      <label className="field-control" style={{ marginTop: 10, marginBottom: 10 }}>
+        <span className="field-label">Board statuses (comma-separated)</span>
+        <input
+          value={editProjectCustomStatusesText}
+          onChange={(e) => setEditProjectCustomStatusesText(e.target.value)}
+          placeholder="To do, In progress, Blocked, Ready for QA, Done"
+        />
+      </label>
+      <div className="field-control" style={{ marginBottom: 10 }}>
+        <span className="field-label">Embeddings</span>
+        <div className="row wrap" style={{ gap: 10, alignItems: 'center' }}>
+          <label className="row" style={{ gap: 6, alignItems: 'center' }}>
+            <input
+              type="checkbox"
+              checked={editProjectEmbeddingEnabled}
+              onChange={(e) => {
+                const next = e.target.checked
+                setEditProjectEmbeddingEnabled(next)
+                if (next && !String(editProjectEmbeddingModel || '').trim() && defaultModel) {
+                  setEditProjectEmbeddingModel(defaultModel)
+                }
+              }}
+            />
+            <span>Embedding enabled</span>
+          </label>
+          <select
+            value={selectedModel}
+            disabled={!editProjectEmbeddingEnabled || modelOptions.length === 0}
+            onChange={(e) => setEditProjectEmbeddingModel(e.target.value)}
+          >
+            {modelOptions.map((model) => (
+              <option key={`embedding-model-${model}`} value={model}>
+                {model === defaultModel ? `${model} (default)` : model}
+              </option>
+            ))}
+          </select>
+          <span className="badge">Index: {embeddingStatusLabel}</span>
+        </div>
+        <label className="field-control" style={{ marginTop: 8 }}>
+          <span className="field-label">Context pack evidence top K (optional override)</span>
+          <input
+            type="number"
+            min={1}
+            max={40}
+            step={1}
+            value={editProjectContextPackEvidenceTopKText}
+            onChange={(e) => setEditProjectContextPackEvidenceTopKText(e.target.value)}
+            placeholder={String(contextPackEvidenceTopKDefault || 10)}
+            inputMode="numeric"
+          />
+        </label>
+        <div className="meta" style={{ marginTop: 6 }}>
+          Leave empty to use global default ({contextPackEvidenceTopKDefault || 10}).
+        </div>
+        {!vectorAvailable ? (
+          <div className="meta" style={{ marginTop: 6 }}>
+            Vector store is currently unavailable. Project retrieval runs in graph-only mode.
+          </div>
+        ) : !editProjectEmbeddingEnabled ? (
+          <div className="meta" style={{ marginTop: 6 }}>
+            Vector store is enabled globally. Enable embeddings for this project to use graph+vector retrieval.
+          </div>
+        ) : null}
       </div>
       <div className="rules-studio" style={{ marginTop: 10, marginBottom: 14 }}>
         <div className="row wrap rules-head-row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
@@ -363,12 +452,6 @@ export function ProjectsInlineEditor({
           })}
         </div>
       </div>
-      <ProjectKnowledgeGraphPanel
-        projectName={project.name}
-        overviewQuery={projectGraphOverview}
-        contextPackQuery={projectGraphContextPack}
-        subgraphQuery={projectGraphSubgraph}
-      />
       <div className="row wrap resource-meta-row" style={{ marginTop: 10 }}>
         <div className="meta">Created by: {selectedProjectCreator}</div>
         {selectedProjectTimeMeta && <div className="meta">{selectedProjectTimeMeta.label}: {toUserDateTime(selectedProjectTimeMeta.value, userTimezone)}</div>}

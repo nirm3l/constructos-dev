@@ -2,9 +2,12 @@ import React from 'react'
 import type { Notification } from '../types'
 
 export function useRealtimeEffects(c: any) {
+  const PROJECT_EMBEDDING_INDEX_UPDATED = 'ProjectEmbeddingIndexUpdated'
   const {
     qc,
     realtimeRefreshTimerRef,
+    tab,
+    selectedProjectId,
     selectedTaskId,
     userId,
     workspaceId,
@@ -69,13 +72,26 @@ export function useRealtimeEffects(c: any) {
     }
 
     const onTaskEvent = (evt: MessageEvent) => {
+      let payload: { created_at?: string; action?: string; project_id?: string } = {}
+      try {
+        payload = JSON.parse(evt.data) as { created_at?: string; action?: string; project_id?: string }
+      } catch {
+        payload = {}
+      }
       if (showCodexChat) {
-        try {
-          const payload = JSON.parse(evt.data) as { created_at?: string }
-          setCodexChatLastTaskEventAt(payload.created_at ? Date.parse(payload.created_at) : Date.now())
-        } catch {
-          setCodexChatLastTaskEventAt(Date.now())
-        }
+        setCodexChatLastTaskEventAt(payload.created_at ? Date.parse(payload.created_at) : Date.now())
+      }
+      const action = String(payload.action || '').trim()
+      const projectId = String(payload.project_id || '').trim()
+      if (
+        action === PROJECT_EMBEDDING_INDEX_UPDATED &&
+        tab === 'projects' &&
+        userId &&
+        selectedProjectId &&
+        projectId === selectedProjectId
+      ) {
+        qc.invalidateQueries({ queryKey: ['bootstrap', userId] })
+        return
       }
       scheduleRealtimeRefresh()
     }
@@ -88,7 +104,7 @@ export function useRealtimeEffects(c: any) {
       es.removeEventListener('task_event', onTaskEvent as EventListener)
       es.close()
     }
-  }, [qc, scheduleRealtimeRefresh, setCodexChatLastTaskEventAt, showCodexChat, userId, workspaceId])
+  }, [qc, scheduleRealtimeRefresh, selectedProjectId, setCodexChatLastTaskEventAt, showCodexChat, tab, userId, workspaceId])
 
   React.useEffect(() => {
     if (!isCodexChatRunning || !codexChatRunStartedAt) return

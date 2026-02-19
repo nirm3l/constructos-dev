@@ -1,6 +1,6 @@
 import { useMutation } from '@tanstack/react-query'
 import { createProject, createProjectRule, deleteProject, deleteProjectRule, patchProjectRule } from '../../api'
-import { parseProjectStatusesText, toErrorMessage } from '../../utils/ui'
+import { parseProjectEvidenceTopKInput, parseProjectStatusesText, toErrorMessage } from '../../utils/ui'
 
 export function useProjectMutations(c: any) {
   const saveProjectMutation = useMutation({
@@ -12,16 +12,21 @@ export function useProjectMutations(c: any) {
   })
 
   const createProjectMutation = useMutation({
-    mutationFn: () =>
-      createProject(c.userId, {
+    mutationFn: () => {
+      const contextPackEvidenceTopK = parseProjectEvidenceTopKInput(c.projectContextPackEvidenceTopKText)
+      return createProject(c.userId, {
         workspace_id: c.workspaceId,
         name: c.projectName.trim(),
         description: c.projectDescription,
         custom_statuses: parseProjectStatusesText(c.projectCustomStatusesText),
         external_refs: c.parseExternalRefsText(c.projectExternalRefsText),
         attachment_refs: c.parseAttachmentRefsText(c.projectAttachmentRefsText),
+        embedding_enabled: Boolean(c.projectEmbeddingEnabled),
+        embedding_model: String(c.projectEmbeddingModel || '').trim() || null,
+        context_pack_evidence_top_k: contextPackEvidenceTopK,
         member_user_ids: Array.from(new Set(c.createProjectMemberIds)),
-      }),
+      })
+    },
     onSuccess: async (createdProject) => {
       c.setUiError(null)
       if (c.draftProjectRules.length > 0) {
@@ -44,6 +49,9 @@ export function useProjectMutations(c: any) {
       c.setProjectCustomStatusesText('')
       c.setProjectExternalRefsText('')
       c.setProjectAttachmentRefsText('')
+      c.setProjectEmbeddingEnabled(false)
+      c.setProjectEmbeddingModel('')
+      c.setProjectContextPackEvidenceTopKText('')
       c.setProjectDescriptionView('write')
       c.setCreateProjectMemberIds([])
       c.setDraftProjectRules([])

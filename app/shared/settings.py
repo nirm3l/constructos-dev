@@ -9,11 +9,26 @@ def _parse_csv_env(name: str) -> set[str]:
     raw = os.getenv(name, "")
     return {item.strip() for item in raw.split(",") if item.strip()}
 
+
+def _parse_csv_list_env(name: str) -> list[str]:
+    raw = os.getenv(name, "")
+    out: list[str] = []
+    for item in raw.split(","):
+        value = item.strip()
+        if not value:
+            continue
+        if value in out:
+            continue
+        out.append(value)
+    return out
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
 
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
@@ -23,6 +38,16 @@ def _env_int(name: str, default: int) -> int:
     if not raw:
         return default
     return int(raw)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    raw = raw.strip()
+    if not raw:
+        return default
+    return float(raw)
 
 
 DB_PATH = os.getenv("DB_PATH", "/data/app.db")
@@ -55,6 +80,9 @@ AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS = os.getenv("AGENT_RUNNER_APPLY_OUTCOME_MUT
 }
 AGENT_EXECUTOR_MODE = os.getenv("AGENT_EXECUTOR_MODE", "placeholder").strip().lower() or "placeholder"
 AGENT_EXECUTOR_TIMEOUT_SECONDS = float(os.getenv("AGENT_EXECUTOR_TIMEOUT_SECONDS", "180"))
+AGENT_CHAT_CONTEXT_LIMIT_TOKENS = _env_int("AGENT_CHAT_CONTEXT_LIMIT_TOKENS", 0)
+AGENT_CHAT_HISTORY_COMPACT_THRESHOLD = _env_int("AGENT_CHAT_HISTORY_COMPACT_THRESHOLD", 24)
+AGENT_CHAT_HISTORY_RECENT_TAIL = _env_int("AGENT_CHAT_HISTORY_RECENT_TAIL", 8)
 AGENT_CODEX_COMMAND = os.getenv("AGENT_CODEX_COMMAND", "").strip()
 AGENT_CODEX_MCP_URL = os.getenv("AGENT_CODEX_MCP_URL", "http://mcp-tools:8090/mcp").strip()
 AGENT_CODEX_MODEL = os.getenv("AGENT_CODEX_MODEL", "").strip()
@@ -85,5 +113,21 @@ GRAPH_PROJECTION_BATCH_SIZE = _env_int("GRAPH_PROJECTION_BATCH_SIZE", 500)
 GRAPH_PROJECTION_POLL_INTERVAL_SECONDS = float(os.getenv("GRAPH_PROJECTION_POLL_INTERVAL_SECONDS", "1"))
 GRAPH_CONTEXT_MAX_HOPS = _env_int("GRAPH_CONTEXT_MAX_HOPS", 2)
 GRAPH_CONTEXT_MAX_TOKENS = _env_int("GRAPH_CONTEXT_MAX_TOKENS", 1600)
+GRAPH_RAG_ENABLED = _env_bool("GRAPH_RAG_ENABLED", False)
+GRAPH_RAG_CANARY_WORKSPACE_IDS = _parse_csv_env("GRAPH_RAG_CANARY_WORKSPACE_IDS")
+GRAPH_RAG_CANARY_PROJECT_IDS = _parse_csv_env("GRAPH_RAG_CANARY_PROJECT_IDS")
+GRAPH_RAG_SUMMARY_MODEL = os.getenv("GRAPH_RAG_SUMMARY_MODEL", "").strip()
+GRAPH_RAG_SLO_CONTEXT_NO_SUMMARY_MS = _env_int("GRAPH_RAG_SLO_CONTEXT_NO_SUMMARY_MS", 1200)
+GRAPH_RAG_SLO_CONTEXT_WITH_SUMMARY_MS = _env_int("GRAPH_RAG_SLO_CONTEXT_WITH_SUMMARY_MS", 2500)
+GRAPH_RAG_SLO_EMBED_INGEST_P95_MS = _env_int("GRAPH_RAG_SLO_EMBED_INGEST_P95_MS", 800)
+GRAPH_RAG_SLO_EMBED_CONTEXT_ERROR_RATE_PCT = _env_float("GRAPH_RAG_SLO_EMBED_CONTEXT_ERROR_RATE_PCT", 0.1)
+VECTOR_STORE_ENABLED = _env_bool("VECTOR_STORE_ENABLED", False)
+CONTEXT_PACK_EVIDENCE_TOP_K = _env_int("CONTEXT_PACK_EVIDENCE_TOP_K", 10)
+
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "ollama").strip().lower() or "ollama"
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434").strip() or "http://ollama:11434"
+DEFAULT_EMBEDDING_MODEL = os.getenv("DEFAULT_EMBEDDING_MODEL", "nomic-embed-text").strip() or "nomic-embed-text"
+ALLOWED_EMBEDDING_MODELS = _parse_csv_list_env("ALLOWED_EMBEDDING_MODELS") or [DEFAULT_EMBEDDING_MODEL]
+OLLAMA_EMBED_GPU_ENABLED = _env_bool("OLLAMA_EMBED_GPU_ENABLED", True)
 
 logger = logging.getLogger(__name__)

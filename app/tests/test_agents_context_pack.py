@@ -106,3 +106,33 @@ def test_codex_prompt_includes_soul_md_section():
     assert "Quality: Do not skip tests." in prompt
     assert "File: GraphContext.md (source: knowledge_graph)" in prompt
     assert "Task A IMPLEMENTS Spec B" in prompt
+
+
+def test_codex_usage_extraction_from_json_stream():
+    from features.agents.codex_mcp_adapter import _extract_turn_usage
+
+    stream = "\n".join(
+        [
+            '{"type":"turn.started"}',
+            '{"type":"turn.completed","usage":{"input_tokens":321,"cached_input_tokens":111,"output_tokens":45}}',
+        ]
+    )
+    usage = _extract_turn_usage(stream)
+    assert usage is not None
+    assert usage["input_tokens"] == 321
+    assert usage["cached_input_tokens"] == 111
+    assert usage["output_tokens"] == 45
+
+
+def test_executor_parses_usage_payload():
+    from features.agents.executor import _parse_command_outcome
+
+    outcome = _parse_command_outcome(
+        '{"action":"comment","summary":"ok","comment":null,"usage":{"input_tokens":25,"cached_input_tokens":9,"output_tokens":7,"context_limit_tokens":4096}}'
+    )
+    assert outcome.summary == "ok"
+    assert outcome.usage is not None
+    assert outcome.usage["input_tokens"] == 25
+    assert outcome.usage["cached_input_tokens"] == 9
+    assert outcome.usage["output_tokens"] == 7
+    assert outcome.usage["context_limit_tokens"] == 4096

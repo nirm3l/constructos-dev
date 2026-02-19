@@ -26,9 +26,13 @@ def _build_prompt(ctx: dict) -> str:
     project_description = str(ctx.get("project_description") or "")
     project_rules = ctx.get("project_rules") or []
     graph_context_markdown = str(ctx.get("graph_context_markdown") or "").strip()
+    graph_evidence_json = str(ctx.get("graph_evidence_json") or "").strip()
+    graph_summary_markdown = str(ctx.get("graph_summary_markdown") or "").strip()
     allow_mutations = bool(ctx.get("allow_mutations", True))
     soul_md = project_description.strip() or "_(empty)_"
     graph_md = graph_context_markdown or "_(knowledge graph unavailable)_"
+    graph_evidence = graph_evidence_json or "[]"
+    graph_summary = graph_summary_markdown or "_(summary unavailable)_"
     rules_md_lines: list[str] = []
     for item in project_rules:
         if not isinstance(item, dict):
@@ -76,11 +80,18 @@ def _build_prompt(ctx: dict) -> str:
         f"{rules_md}\n\n"
         "File: GraphContext.md (source: knowledge_graph)\n"
         f"{graph_md}\n\n"
+        "File: GraphEvidence.json (source: knowledge_graph.evidence)\n"
+        f"{graph_evidence}\n\n"
+        "File: GraphSummary.md (source: knowledge_graph.summary)\n"
+        f"{graph_summary}\n\n"
         "Guidance:\n"
         f"{context_guidance}"
-        "- Treat Soul.md, ProjectRules.md, and GraphContext.md as durable project-level context.\n"
+        "- Treat Soul.md, ProjectRules.md, GraphContext.md, GraphEvidence.json, and GraphSummary.md as durable project-level context.\n"
         "- ProjectRules.md defines how you should behave within this project.\n"
         "- GraphContext.md captures resource relations and should guide dependency-aware decisions.\n"
+        "- GraphEvidence.json is the canonical evidence source for grounded claims.\n"
+        "- GraphSummary.md can be used as a concise overview, but validate against GraphEvidence.json before acting.\n"
+        "- Treat claims without an evidence_id as low confidence.\n"
         "- If project context conflicts with the latest explicit user instruction, follow the latest explicit user instruction.\n"
         "- You may call task-management MCP tools relevant to the request.\n"
         "- Use graph_* MCP tools when you need relation-aware lookup across project resources.\n"
@@ -91,6 +102,14 @@ def _build_prompt(ctx: dict) -> str:
         "- If the user asks for a plan/spec/design doc, prefer creating a Note (Markdown) via MCP tools so it is visible in the UI.\n"
         "- When creating a plan note: use a clear title starting with 'Plan:' and include actionable steps.\n"
         "- If you are in task context, link the note to the task by setting task_id when creating the note.\n"
+        "- When mentioning created/updated entities in summary/comment, include clickable Markdown links (not raw IDs).\n"
+        "- Never return generic phrases like 'otvori task' or 'open note' without a concrete link target.\n"
+        "- For each created entity, include at least one explicit link that can be clicked in chat.\n"
+        "- Link format in this app:\n"
+        "  - Note: ?tab=notes&project=<project_id>&note=<note_id>\n"
+        "  - Task: ?tab=tasks&project=<project_id>&task=<task_id>\n"
+        "  - Specification: ?tab=specifications&project=<project_id>&specification=<specification_id>\n"
+        "  - Project: ?tab=projects&project=<project_id>\n"
         f"{mutation_policy}"
         "- For recurring schedules, set task.recurring_rule explicitly using canonical format: every:<number><m|h|d> (example: every:1m).\n"
         "- After scheduling changes, verify by reading the task and confirming scheduled_at_utc + recurring_rule values.\n"

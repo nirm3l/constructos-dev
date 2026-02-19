@@ -21,6 +21,7 @@ from features.notes.api import router as notes_router
 from features.agents.runner import start_automation_runner, stop_automation_runner
 from shared.core import bootstrap_data, project_kurrent_events_once, start_projection_worker, startup_bootstrap, stop_projection_worker
 from shared.eventing_graph import project_kurrent_graph_once, start_graph_projection_worker, stop_graph_projection_worker
+from shared.eventing_vector import project_kurrent_vector_once, start_vector_projection_worker, stop_vector_projection_worker
 from shared.knowledge_graph import close_knowledge_graph_driver
 from shared.settings import AGENT_RUNNER_ENABLED
 
@@ -34,13 +35,16 @@ async def lifespan(_app: FastAPI):
     startup_bootstrap()
     project_kurrent_events_once(limit=5000)
     project_kurrent_graph_once(limit=5000)
+    project_kurrent_vector_once(limit=5000)
     start_projection_worker()
     start_graph_projection_worker()
+    start_vector_projection_worker()
     if AGENT_RUNNER_ENABLED:
         start_automation_runner()
     yield
     if AGENT_RUNNER_ENABLED:
         stop_automation_runner()
+    stop_vector_projection_worker()
     stop_graph_projection_worker()
     stop_projection_worker()
     close_knowledge_graph_driver()

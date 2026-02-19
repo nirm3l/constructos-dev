@@ -9,7 +9,6 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .contracts import EventEnvelope
-from .models import StoredEvent
 from .settings import EVENTSTORE_URI
 
 try:
@@ -102,6 +101,8 @@ def kurrent_read_stream(stream: str, *, backwards: bool = False, limit: int | No
 
 
 def current_version(db: Session, aggregate_type: str, aggregate_id: str) -> int:
+    from .models import StoredEvent
+
     client = get_kurrent_client()
     if client is not None:
         try:

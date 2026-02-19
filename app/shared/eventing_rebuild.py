@@ -379,6 +379,9 @@ def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str
             "custom_statuses": p.get("custom_statuses", DEFAULT_STATUSES) or DEFAULT_STATUSES,
             "external_refs": p.get("external_refs", []),
             "attachment_refs": p.get("attachment_refs", []),
+            "embedding_enabled": bool(p.get("embedding_enabled", False)),
+            "embedding_model": p.get("embedding_model"),
+            "context_pack_evidence_top_k": p.get("context_pack_evidence_top_k"),
             "is_deleted": False,
         }
     elif event.event_type == PROJECT_EVENT_DELETED:
@@ -395,6 +398,12 @@ def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str
             s["external_refs"] = p.get("external_refs", [])
         if "attachment_refs" in p:
             s["attachment_refs"] = p.get("attachment_refs", [])
+        if "embedding_enabled" in p:
+            s["embedding_enabled"] = bool(p.get("embedding_enabled", False))
+        if "embedding_model" in p:
+            s["embedding_model"] = p.get("embedding_model")
+        if "context_pack_evidence_top_k" in p:
+            s["context_pack_evidence_top_k"] = p.get("context_pack_evidence_top_k")
     return s
 
 
@@ -570,6 +579,9 @@ def project_event(db: Session, ev: EventEnvelope):
         project.custom_statuses = json.dumps(p.get("custom_statuses", DEFAULT_STATUSES) or DEFAULT_STATUSES)
         project.external_refs = json.dumps(p.get("external_refs", []))
         project.attachment_refs = json.dumps(p.get("attachment_refs", []))
+        project.embedding_enabled = bool(p.get("embedding_enabled", False))
+        project.embedding_model = p.get("embedding_model")
+        project.context_pack_evidence_top_k = p.get("context_pack_evidence_top_k")
     elif ev.event_type == PROJECT_EVENT_DELETED:
         project = db.get(Project, ev.aggregate_id)
         if project:
@@ -588,6 +600,12 @@ def project_event(db: Session, ev: EventEnvelope):
                 project.external_refs = json.dumps(p.get("external_refs", []))
             if "attachment_refs" in p:
                 project.attachment_refs = json.dumps(p.get("attachment_refs", []))
+            if "embedding_enabled" in p:
+                project.embedding_enabled = bool(p.get("embedding_enabled", False))
+            if "embedding_model" in p:
+                project.embedding_model = p.get("embedding_model")
+            if "context_pack_evidence_top_k" in p:
+                project.context_pack_evidence_top_k = p.get("context_pack_evidence_top_k")
     elif ev.event_type == NOTE_EVENT_CREATED:
         note = db.get(Note, ev.aggregate_id)
         if note is None:

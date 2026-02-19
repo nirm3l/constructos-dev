@@ -1,4 +1,5 @@
 import React from 'react'
+import { ProjectKnowledgeGraphPage } from '../projects/ProjectKnowledgeGraphPage'
 import { ProjectsPanel } from '../projects/ProjectsPanel'
 import { SpecificationsPanel } from '../specifications/SpecificationsPanel'
 import { NotesPanel } from '../notes/NotesPanel'
@@ -88,6 +89,13 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             setDraftProjectRuleView: state.setDraftProjectRuleView,
             projectExternalRefsText: state.projectExternalRefsText,
             setProjectExternalRefsText: state.setProjectExternalRefsText,
+            projectEmbeddingEnabled: state.projectEmbeddingEnabled,
+            setProjectEmbeddingEnabled: state.setProjectEmbeddingEnabled,
+            projectEmbeddingModel: state.projectEmbeddingModel,
+            setProjectEmbeddingModel: state.setProjectEmbeddingModel,
+            embeddingAllowedModels: state.embeddingAllowedModels,
+            embeddingDefaultModel: state.embeddingDefaultModel,
+            vectorStoreEnabled: state.vectorStoreEnabled,
             workspaceUsers: state.workspaceUsers,
             createProjectMemberIds: state.createProjectMemberIds,
             toggleCreateProjectMember: state.toggleCreateProjectMember,
@@ -136,11 +144,31 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             setUiError: state.setUiError,
             editProjectAttachmentRefsText: state.editProjectAttachmentRefsText,
             setEditProjectAttachmentRefsText: state.setEditProjectAttachmentRefsText,
+            createTaskFromGraphSummary: state.createTaskFromGraphSummary,
+            createNoteFromGraphSummary: state.createNoteFromGraphSummary,
+            linkFocusTaskToSpecification: state.linkFocusTaskToSpecification,
+            editProjectEmbeddingEnabled: state.editProjectEmbeddingEnabled,
+            setEditProjectEmbeddingEnabled: state.setEditProjectEmbeddingEnabled,
+            editProjectEmbeddingModel: state.editProjectEmbeddingModel,
+            setEditProjectEmbeddingModel: state.setEditProjectEmbeddingModel,
             editProjectMemberIds: state.editProjectMemberIds,
             toggleEditProjectMember: state.toggleEditProjectMember,
             selectedProjectCreator: state.selectedProjectCreator,
             selectedProjectTimeMeta: state.selectedProjectTimeMeta,
           }}
+        />
+      )}
+
+      {state.tab === 'knowledge-graph' && (
+        <ProjectKnowledgeGraphPage
+          selectedProjectId={state.selectedProjectId}
+          selectedProjectName={state.selectedProject?.name || ''}
+          overviewQuery={state.projectGraphOverview}
+          contextPackQuery={state.projectGraphContextPack}
+          subgraphQuery={state.projectGraphSubgraph}
+          onCreateTaskFromSummary={state.createTaskFromGraphSummary}
+          onCreateNoteFromSummary={state.createNoteFromGraphSummary}
+          onLinkFocusTaskToSpecification={state.linkFocusTaskToSpecification}
         />
       )}
 

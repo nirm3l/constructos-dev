@@ -71,20 +71,28 @@ export function AppHeader({
         </div>
 
         <div className="top-actions">
-          <button className="top-profile-btn" onClick={() => setTab('profile')} title="Profile" aria-label="Profile">
-            <Icon path="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8M4 20a8 8 0 0 1 16 0" />
-            <span className="top-profile-name" title={bootstrapData.current_user.username}>
-              {bootstrapData.current_user.username}
-            </span>
-          </button>
           <button
-            className={`top-notif-btn ${showNotificationsPanel ? 'primary' : ''}`.trim()}
+            className={`top-notif-btn ${showNotificationsPanel ? 'active' : ''}`.trim()}
             onClick={() => setShowNotificationsPanel((v) => !v)}
             title="Notifications"
             aria-label="Notifications"
           >
             <Icon path="M12 22a2 2 0 0 0 2-2H10a2 2 0 0 0 2 2zm6-6V11a6 6 0 1 0-12 0v5L4 18v1h16v-1l-2-2z" />
             {unreadCount > 0 && <span className="notif-dot">{Math.min(99, unreadCount)}</span>}
+          </button>
+          <button
+            className={`top-graph-btn ${tab === 'knowledge-graph' ? 'active' : ''}`.trim()}
+            onClick={() => setTab('knowledge-graph')}
+            title="Knowledge Graph"
+            aria-label="Knowledge Graph"
+          >
+            <Icon path="M6 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm12 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm-6 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM7.4 6.6l3.9 10.8M16.6 6.6l-3.9 10.8" />
+          </button>
+          <button className="top-profile-btn" onClick={() => setTab('profile')} title="Profile" aria-label="Profile">
+            <Icon path="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8M4 20a8 8 0 0 1 16 0" />
+            <span className="top-profile-name" title={bootstrapData.current_user.username}>
+              {bootstrapData.current_user.username}
+            </span>
           </button>
         </div>
       </div>

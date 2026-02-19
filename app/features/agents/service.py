@@ -709,6 +709,9 @@ class AgentTaskService:
         auth_token: str | None = None,
         description: str = "",
         custom_statuses: list[str] | None = None,
+        embedding_enabled: bool = False,
+        embedding_model: str | None = None,
+        context_pack_evidence_top_k: int | None = None,
         command_id: str | None = None,
     ) -> dict:
         self._require_token(auth_token)
@@ -724,6 +727,9 @@ class AgentTaskService:
                 name=name,
                 description=description,
                 custom_statuses=custom_statuses,
+                embedding_enabled=bool(embedding_enabled),
+                embedding_model=embedding_model,
+                context_pack_evidence_top_k=context_pack_evidence_top_k,
             )
             return ProjectApplicationService(db, user, command_id=effective_command_id).create_project(payload)
 

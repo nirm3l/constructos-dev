@@ -17,6 +17,16 @@ export function ProjectsCreateForm({
   createProjectMutation,
   projectCustomStatusesText,
   setProjectCustomStatusesText,
+  projectEmbeddingEnabled,
+  setProjectEmbeddingEnabled,
+  projectEmbeddingModel,
+  setProjectEmbeddingModel,
+  projectContextPackEvidenceTopKText,
+  setProjectContextPackEvidenceTopKText,
+  embeddingAllowedModels,
+  embeddingDefaultModel,
+  vectorStoreEnabled,
+  contextPackEvidenceTopKDefault,
   projectDescriptionView,
   setProjectDescriptionView,
   projectDescriptionRef,
@@ -43,6 +53,16 @@ export function ProjectsCreateForm({
   createProjectMutation: { mutate: () => void; isPending: boolean }
   projectCustomStatusesText: string
   setProjectCustomStatusesText: React.Dispatch<React.SetStateAction<string>>
+  projectEmbeddingEnabled: boolean
+  setProjectEmbeddingEnabled: React.Dispatch<React.SetStateAction<boolean>>
+  projectEmbeddingModel: string
+  setProjectEmbeddingModel: React.Dispatch<React.SetStateAction<string>>
+  projectContextPackEvidenceTopKText: string
+  setProjectContextPackEvidenceTopKText: React.Dispatch<React.SetStateAction<string>>
+  embeddingAllowedModels: string[]
+  embeddingDefaultModel: string
+  vectorStoreEnabled: boolean
+  contextPackEvidenceTopKDefault: number
   projectDescriptionView: 'write' | 'preview'
   setProjectDescriptionView: React.Dispatch<React.SetStateAction<'write' | 'preview'>>
   projectDescriptionRef: React.RefObject<HTMLTextAreaElement | null>
@@ -64,6 +84,28 @@ export function ProjectsCreateForm({
   createProjectMemberIds: string[]
   toggleCreateProjectMember: (userIdToToggle: string) => void
 }) {
+  const modelOptions = React.useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (embeddingAllowedModels ?? [])
+            .map((model) => String(model || '').trim())
+            .filter(Boolean)
+        )
+      ),
+    [embeddingAllowedModels]
+  )
+  const defaultModel = React.useMemo(() => {
+    const normalized = String(embeddingDefaultModel || '').trim()
+    if (normalized && modelOptions.includes(normalized)) return normalized
+    return modelOptions[0] ?? ''
+  }, [embeddingDefaultModel, modelOptions])
+  const selectedModel = React.useMemo(() => {
+    const current = String(projectEmbeddingModel || '').trim()
+    if (current && modelOptions.includes(current)) return current
+    return defaultModel
+  }, [defaultModel, modelOptions, projectEmbeddingModel])
+
   return (
     <div style={{ marginBottom: 10 }}>
       <h3 style={{ margin: '0 0 8px 0' }}>Create project</h3>
@@ -96,6 +138,66 @@ export function ProjectsCreateForm({
           placeholder="To do, In progress, Blocked, Ready for QA, Done"
         />
       </label>
+      <div className="field-control" style={{ marginBottom: 10 }}>
+        <span className="field-label">Embeddings</span>
+        <div className="row wrap" style={{ gap: 10, alignItems: 'center' }}>
+          <label className="row" style={{ gap: 6, alignItems: 'center' }}>
+            <input
+              type="checkbox"
+              checked={projectEmbeddingEnabled}
+              onChange={(e) => {
+                const next = e.target.checked
+                setProjectEmbeddingEnabled(next)
+                if (next && !String(projectEmbeddingModel || '').trim() && defaultModel) {
+                  setProjectEmbeddingModel(defaultModel)
+                }
+              }}
+            />
+            <span>Embedding enabled</span>
+          </label>
+          <select
+            value={selectedModel}
+            disabled={!projectEmbeddingEnabled || modelOptions.length === 0}
+            onChange={(e) => setProjectEmbeddingModel(e.target.value)}
+          >
+            {modelOptions.map((model) => (
+              <option key={`create-embedding-model-${model}`} value={model}>
+                {model === defaultModel ? `${model} (default)` : model}
+              </option>
+            ))}
+          </select>
+          <span className="badge">Index: Not indexed</span>
+        </div>
+        <label className="field-control" style={{ marginTop: 8 }}>
+          <span className="field-label">Context pack evidence top K (optional override)</span>
+          <input
+            type="number"
+            min={1}
+            max={40}
+            step={1}
+            value={projectContextPackEvidenceTopKText}
+            onChange={(e) => setProjectContextPackEvidenceTopKText(e.target.value)}
+            placeholder={String(contextPackEvidenceTopKDefault || 10)}
+            inputMode="numeric"
+          />
+        </label>
+        <div className="meta" style={{ marginTop: 6 }}>
+          Leave empty to use global default ({contextPackEvidenceTopKDefault || 10}).
+        </div>
+        {!vectorStoreEnabled ? (
+          <div className="meta" style={{ marginTop: 6 }}>
+            Vector store is currently unavailable. Project retrieval runs in graph-only mode.
+          </div>
+        ) : !projectEmbeddingEnabled ? (
+          <div className="meta" style={{ marginTop: 6 }}>
+            Vector store is enabled globally. Enable embeddings for this project to use graph+vector retrieval.
+          </div>
+        ) : (
+          <div className="meta" style={{ marginTop: 6 }}>
+            Indexing starts after project creation.
+          </div>
+        )}
+      </div>
       <div className="md-editor-surface">
         <MarkdownModeToggle
           view={projectDescriptionView}

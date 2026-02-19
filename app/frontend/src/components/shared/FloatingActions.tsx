@@ -21,11 +21,12 @@ export function FloatingActions({ state }: { state: any }) {
       <button
         className={`fab ${state.isCodexChatRunning ? 'busy' : ''} ${state.fabHidden ? 'fab-hide' : ''}`}
         onClick={() => {
-          state.setCodexChatProjectId(state.selectedProjectId || '')
+          const targetProjectId = state.selectedProjectId || state.codexChatProjectId || ''
+          state.selectCodexChatProject(targetProjectId)
           state.setShowCodexChat(true)
         }}
-        title="Codex Chat"
-        aria-label="Codex Chat"
+        title="Chat"
+        aria-label="Chat"
       >
         <Icon path="M4 4h16v11H7l-3 3V4z" />
         <span>{state.isCodexChatRunning ? `Chat (${state.codexChatElapsedSeconds}s)` : 'Chat'}</span>

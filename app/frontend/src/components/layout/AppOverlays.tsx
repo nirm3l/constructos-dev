@@ -12,6 +12,7 @@ export function AppOverlays({ state }: { state: any }) {
       <FloatingActions
         state={{
           fabHidden: state.fabHidden,
+          codexChatProjectId: state.codexChatProjectId,
           setQuickProjectId: state.setQuickProjectId,
           selectedProjectId: state.selectedProjectId,
           bootstrap: state.bootstrap,
@@ -20,6 +21,7 @@ export function AppOverlays({ state }: { state: any }) {
           setShowQuickAdd: state.setShowQuickAdd,
           isCodexChatRunning: state.isCodexChatRunning,
           codexChatElapsedSeconds: state.codexChatElapsedSeconds,
+          selectCodexChatProject: state.selectCodexChatProject,
           setCodexChatProjectId: state.setCodexChatProjectId,
           setShowCodexChat: state.setShowCodexChat,
         }}
@@ -130,8 +132,17 @@ export function AppOverlays({ state }: { state: any }) {
         state={{
           showCodexChat: state.showCodexChat,
           setShowCodexChat: state.setShowCodexChat,
+          codexChatSessions: state.codexChatSessions,
+          codexChatProjectSessions: state.codexChatProjectSessions,
+          codexChatActiveSessionId: state.codexChatActiveSessionId,
+          setCodexChatActiveSessionId: state.setCodexChatActiveSessionId,
+          codexChatActiveSessionTitle: state.codexChatActiveSessionTitle,
+          createCodexChatSession: state.createCodexChatSession,
+          selectCodexChatProject: state.selectCodexChatProject,
+          deleteCodexChatSession: state.deleteCodexChatSession,
           codexChatSessionId: state.codexChatSessionId,
           codexChatProjectId: state.codexChatProjectId,
+          codexChatUsage: state.codexChatUsage,
           setCodexChatProjectId: state.setCodexChatProjectId,
           runAgentChatMutation: state.runAgentChatMutation,
           bootstrap: state.bootstrap,
@@ -140,6 +151,7 @@ export function AppOverlays({ state }: { state: any }) {
           codexChatInstruction: state.codexChatInstruction,
           setCodexChatInstruction: state.setCodexChatInstruction,
           setCodexChatTurns: state.setCodexChatTurns,
+          setCodexChatUsage: state.setCodexChatUsage,
           isCodexChatRunning: state.isCodexChatRunning,
           codexChatElapsedSeconds: state.codexChatElapsedSeconds,
           setIsCodexChatRunning: state.setIsCodexChatRunning,

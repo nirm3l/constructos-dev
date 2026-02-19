@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -33,10 +34,13 @@ def health():
 
 @router.get("/api/version")
 def version():
+    backend_version = os.getenv("APP_VERSION", "").strip() or APP_VERSION
+    backend_build = os.getenv("APP_BUILD", "").strip() or APP_BUILD
+    deployed_at_utc = os.getenv("APP_DEPLOYED_AT_UTC", "").strip() or APP_DEPLOYED_AT_UTC
     return {
-        "backend_version": APP_VERSION,
-        "backend_build": APP_BUILD or None,
-        "deployed_at_utc": APP_DEPLOYED_AT_UTC,
+        "backend_version": backend_version,
+        "backend_build": backend_build or None,
+        "deployed_at_utc": deployed_at_utc,
     }
 
 

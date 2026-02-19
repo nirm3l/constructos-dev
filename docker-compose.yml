@@ -46,6 +46,24 @@ services:
       - neo4j-data:/data
     restart: unless-stopped
 
+  ollama:
+    image: ollama/ollama:0.16.2
+    container_name: ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: "30m"
+      OLLAMA_NUM_PARALLEL: "2"
+      OLLAMA_VULKAN: "1"
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "44"
+      - "992"
+    ports:
+      - "${OLLAMA_HOST_PORT:-11435}:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+
   task-app:
     build: ./app
     container_name: task-app
@@ -53,6 +71,7 @@ services:
       - postgres
       - kurrentdb
       - neo4j
+      - ollama
       - mcp-tools
     environment:
       DATABASE_URL: postgresql+psycopg://m4tr1x:m4tr1x@postgres:5432/task_management
@@ -65,6 +84,7 @@ services:
       AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS: "true"
       AGENT_EXECUTOR_MODE: "command"
       AGENT_EXECUTOR_TIMEOUT_SECONDS: "180"
+      AGENT_CHAT_CONTEXT_LIMIT_TOKENS: "${AGENT_CHAT_CONTEXT_LIMIT_TOKENS:-400000}"
       AGENT_CODEX_COMMAND: "python -m features.agents.codex_mcp_adapter"
       AGENT_CODEX_MCP_URL: "http://mcp-tools:8090/mcp"
       MCP_AUTH_TOKEN: "dev-mcp-token"
@@ -74,6 +94,21 @@ services:
       NEO4J_USERNAME: "neo4j"
       NEO4J_PASSWORD: "task-management-neo4j"
       NEO4J_DATABASE: "neo4j"
+      GRAPH_RAG_ENABLED: "true"
+      GRAPH_RAG_CANARY_WORKSPACE_IDS: "${GRAPH_RAG_CANARY_WORKSPACE_IDS:-}"
+      GRAPH_RAG_CANARY_PROJECT_IDS: "${GRAPH_RAG_CANARY_PROJECT_IDS:-}"
+      GRAPH_RAG_SUMMARY_MODEL: "${GRAPH_RAG_SUMMARY_MODEL:-}"
+      GRAPH_RAG_SLO_CONTEXT_NO_SUMMARY_MS: "${GRAPH_RAG_SLO_CONTEXT_NO_SUMMARY_MS:-1200}"
+      GRAPH_RAG_SLO_CONTEXT_WITH_SUMMARY_MS: "${GRAPH_RAG_SLO_CONTEXT_WITH_SUMMARY_MS:-2500}"
+      GRAPH_RAG_SLO_EMBED_INGEST_P95_MS: "${GRAPH_RAG_SLO_EMBED_INGEST_P95_MS:-800}"
+      GRAPH_RAG_SLO_EMBED_CONTEXT_ERROR_RATE_PCT: "${GRAPH_RAG_SLO_EMBED_CONTEXT_ERROR_RATE_PCT:-0.1}"
+      VECTOR_STORE_ENABLED: "true"
+      CONTEXT_PACK_EVIDENCE_TOP_K: "12"
+      EMBEDDING_PROVIDER: "ollama"
+      OLLAMA_BASE_URL: "http://ollama:11434"
+      DEFAULT_EMBEDDING_MODEL: "${DEFAULT_EMBEDDING_MODEL:-nomic-embed-text}"
+      ALLOWED_EMBEDDING_MODELS: "${ALLOWED_EMBEDDING_MODELS:-nomic-embed-text,mxbai-embed-large,embeddinggemma}"
+      OLLAMA_EMBED_GPU_ENABLED: "${OLLAMA_EMBED_GPU_ENABLED:-true}"
     volumes:
       - /home/m4tr1x/.codex/auth.json:/root/.codex/auth.json:ro
     ports:
@@ -87,6 +122,7 @@ services:
       - postgres
       - kurrentdb
       - neo4j
+      - ollama
     command: ["python", "-m", "features.agents.mcp_server"]
     environment:
       DATABASE_URL: postgresql+psycopg://m4tr1x:m4tr1x@postgres:5432/task_management
@@ -100,6 +136,7 @@ services:
       MCP_SERVER_PATH: /mcp
       MCP_SERVER_STATELESS_HTTP: "true"
       AGENT_EXECUTOR_TIMEOUT_SECONDS: "180"
+      AGENT_CHAT_CONTEXT_LIMIT_TOKENS: "${AGENT_CHAT_CONTEXT_LIMIT_TOKENS:-400000}"
       MCP_AUTH_TOKEN: "dev-mcp-token"
       MCP_TOOL_AUTH_TOKEN: "dev-mcp-token"
       MCP_ACTOR_USER_ID: "00000000-0000-0000-0000-000000000099"
@@ -119,6 +156,21 @@ services:
       NEO4J_USERNAME: "neo4j"
       NEO4J_PASSWORD: "task-management-neo4j"
       NEO4J_DATABASE: "neo4j"
+      GRAPH_RAG_ENABLED: "true"
+      GRAPH_RAG_CANARY_WORKSPACE_IDS: "${GRAPH_RAG_CANARY_WORKSPACE_IDS:-}"
+      GRAPH_RAG_CANARY_PROJECT_IDS: "${GRAPH_RAG_CANARY_PROJECT_IDS:-}"
+      GRAPH_RAG_SUMMARY_MODEL: "${GRAPH_RAG_SUMMARY_MODEL:-}"
+      GRAPH_RAG_SLO_CONTEXT_NO_SUMMARY_MS: "${GRAPH_RAG_SLO_CONTEXT_NO_SUMMARY_MS:-1200}"
+      GRAPH_RAG_SLO_CONTEXT_WITH_SUMMARY_MS: "${GRAPH_RAG_SLO_CONTEXT_WITH_SUMMARY_MS:-2500}"
+      GRAPH_RAG_SLO_EMBED_INGEST_P95_MS: "${GRAPH_RAG_SLO_EMBED_INGEST_P95_MS:-800}"
+      GRAPH_RAG_SLO_EMBED_CONTEXT_ERROR_RATE_PCT: "${GRAPH_RAG_SLO_EMBED_CONTEXT_ERROR_RATE_PCT:-0.1}"
+      VECTOR_STORE_ENABLED: "true"
+      CONTEXT_PACK_EVIDENCE_TOP_K: "12"
+      EMBEDDING_PROVIDER: "ollama"
+      OLLAMA_BASE_URL: "http://ollama:11434"
+      DEFAULT_EMBEDDING_MODEL: "${DEFAULT_EMBEDDING_MODEL:-nomic-embed-text}"
+      ALLOWED_EMBEDDING_MODELS: "${ALLOWED_EMBEDDING_MODELS:-nomic-embed-text,mxbai-embed-large,embeddinggemma}"
+      OLLAMA_EMBED_GPU_ENABLED: "${OLLAMA_EMBED_GPU_ENABLED:-true}"
     ports:
       - "8091:8090"
     restart: unless-stopped
@@ -127,3 +179,4 @@ volumes:
   postgres-data:
   kurrent-data:
   neo4j-data:
+  ollama-data:

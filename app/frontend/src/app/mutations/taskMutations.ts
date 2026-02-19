@@ -16,26 +16,42 @@ export function useTaskMutations(c: any) {
   })
 
   const createTaskMutation = useMutation({
-    mutationFn: () =>
+    mutationFn: (payload?: {
+      title?: string
+      description?: string
+      project_id?: string
+      due_date?: string | null
+      labels?: string[]
+      open_task?: boolean
+    }) =>
       createTask(c.userId, {
-        title: c.taskTitle.trim(),
+        title: payload?.title?.trim() || c.taskTitle.trim(),
         workspace_id: c.workspaceId,
-        project_id: c.quickProjectId || c.selectedProjectId,
-        due_date: c.quickDueDate ? new Date(c.quickDueDate).toISOString() : null,
-        labels: c.quickTaskTags,
+        project_id: payload?.project_id || c.quickProjectId || c.selectedProjectId,
+        description: payload?.description ?? '',
+        due_date:
+          payload?.due_date !== undefined
+            ? payload.due_date
+            : (c.quickDueDate ? new Date(c.quickDueDate).toISOString() : null),
+        labels: payload?.labels ?? c.quickTaskTags,
         external_refs: c.parseExternalRefsText(c.quickTaskExternalRefsText),
         attachment_refs: c.parseAttachmentRefsText(c.quickTaskAttachmentRefsText),
       }),
-    onSuccess: async () => {
+    onSuccess: async (task, payload) => {
       c.setUiError(null)
-      c.setTaskTitle('')
-      c.setQuickDueDate('')
-      c.setQuickTaskTags([])
-      c.setQuickTaskExternalRefsText('')
-      c.setQuickTaskAttachmentRefsText('')
-      c.setShowQuickTaskTagPicker(false)
-      c.setQuickTaskTagQuery('')
-      c.setShowQuickAdd(false)
+      if (payload?.open_task) {
+        c.setSelectedTaskId(task.id)
+        c.setTab('tasks')
+      } else {
+        c.setTaskTitle('')
+        c.setQuickDueDate('')
+        c.setQuickTaskTags([])
+        c.setQuickTaskExternalRefsText('')
+        c.setQuickTaskAttachmentRefsText('')
+        c.setShowQuickTaskTagPicker(false)
+        c.setQuickTaskTagQuery('')
+        c.setShowQuickAdd(false)
+      }
       await c.invalidateAll()
     },
     onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Task create failed')

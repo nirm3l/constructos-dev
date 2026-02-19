@@ -33,6 +33,10 @@ export function useEditorGuards(c: any) {
       c.editProjectDescription !== (c.selectedProject.description ?? '') ||
       stableJson(parseProjectStatusesText(c.editProjectCustomStatusesText)) !==
         stableJson(c.selectedProject.custom_statuses ?? []) ||
+      Boolean(c.editProjectEmbeddingEnabled) !== Boolean(c.selectedProject.embedding_enabled) ||
+      String(c.editProjectEmbeddingModel || '').trim() !== String(c.selectedProject.embedding_model || '').trim() ||
+      String(c.editProjectContextPackEvidenceTopKText || '').trim() !==
+        String(c.selectedProject.context_pack_evidence_top_k ?? '').trim() ||
       stableJson(c.parseExternalRefsText(c.editProjectExternalRefsText)) !== stableJson(c.selectedProject.external_refs ?? []) ||
       stableJson(c.parseAttachmentRefsText(c.editProjectAttachmentRefsText)) !== stableJson(c.selectedProject.attachment_refs ?? []) ||
       stableJson(Array.from(new Set(c.editProjectMemberIds.filter(Boolean))).sort()) !== stableJson(selectedProjectMemberIds)
@@ -41,6 +45,9 @@ export function useEditorGuards(c: any) {
     c.editProjectAttachmentRefsText,
     c.editProjectCustomStatusesText,
     c.editProjectDescription,
+    c.editProjectEmbeddingEnabled,
+    c.editProjectEmbeddingModel,
+    c.editProjectContextPackEvidenceTopKText,
     c.editProjectExternalRefsText,
     c.editProjectMemberIds,
     c.editProjectName,

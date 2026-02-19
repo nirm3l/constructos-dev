@@ -1,21 +1,33 @@
 from __future__ import annotations
 
+import json
 import re
 import threading
+from time import perf_counter
+from datetime import datetime, timezone
 from collections.abc import Iterable
 from typing import Any
 
-from .observability import incr
+import httpx
+
+from .observability import incr, observe, set_value
 from .settings import (
+    CONTEXT_PACK_EVIDENCE_TOP_K,
     GRAPH_CONTEXT_MAX_HOPS,
     GRAPH_CONTEXT_MAX_TOKENS,
+    GRAPH_RAG_CANARY_PROJECT_IDS,
+    GRAPH_RAG_CANARY_WORKSPACE_IDS,
+    GRAPH_RAG_ENABLED,
+    GRAPH_RAG_SUMMARY_MODEL,
     KNOWLEDGE_GRAPH_ENABLED,
     NEO4J_DATABASE,
+    OLLAMA_BASE_URL,
     NEO4J_PASSWORD,
     NEO4J_URI,
     NEO4J_USERNAME,
     logger,
 )
+from .vector_store import resolve_project_embedding_runtime, search_project_chunks
 
 try:  # pragma: no cover - exercised in integration only
     from neo4j import GraphDatabase
@@ -46,6 +58,54 @@ _ENTITY_LABELS = {
 
 def graph_enabled() -> bool:
     return bool(KNOWLEDGE_GRAPH_ENABLED and NEO4J_URI)
+
+
+def _project_canary_scope(project_id: str) -> tuple[str, str]:
+    from .models import Project, SessionLocal
+
+    pid = str(project_id or "").strip()
+    if not pid:
+        return "", ""
+    try:
+        with SessionLocal() as db:
+            project = db.get(Project, pid)
+            if project is None or project.is_deleted:
+                return pid, ""
+            return pid, str(project.workspace_id or "").strip()
+    except Exception:
+        return pid, ""
+
+
+def graph_rag_enabled_for_scope(*, project_id: str, workspace_id: str | None = None) -> bool:
+    if not GRAPH_RAG_ENABLED:
+        return False
+    if not GRAPH_RAG_CANARY_PROJECT_IDS and not GRAPH_RAG_CANARY_WORKSPACE_IDS:
+        return True
+    pid = str(project_id or "").strip()
+    wid = str(workspace_id or "").strip()
+    return bool((pid and pid in GRAPH_RAG_CANARY_PROJECT_IDS) or (wid and wid in GRAPH_RAG_CANARY_WORKSPACE_IDS))
+
+
+def graph_rag_enabled_for_project(project_id: str) -> bool:
+    pid, workspace_id = _project_canary_scope(project_id)
+    return graph_rag_enabled_for_scope(project_id=pid, workspace_id=workspace_id)
+
+
+def _resolve_context_pack_evidence_top_k(project_id: str, requested_limit: int) -> int:
+    configured = int(CONTEXT_PACK_EVIDENCE_TOP_K or 10)
+    pid = str(project_id or "").strip()
+    if pid:
+        try:
+            from .models import Project, SessionLocal
+
+            with SessionLocal() as db:
+                project = db.get(Project, pid)
+                if project is not None and not project.is_deleted and project.context_pack_evidence_top_k is not None:
+                    configured = int(project.context_pack_evidence_top_k)
+        except Exception as exc:
+            logger.warning("Unable to resolve project evidence top-k project_id=%s: %s", pid, exc)
+    configured = max(1, min(configured, 40))
+    return max(1, min(configured, int(requested_limit or configured), 40))
 
 
 def normalize_entity_label(entity_type: str) -> str:
@@ -736,19 +796,372 @@ def graph_get_dependency_path(
     }
 
 
+def _as_datetime_utc(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except Exception:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return None
+
+
+def _truncate_snippet(text: str, max_chars: int = 260) -> str:
+    normalized = " ".join(str(text or "").split())
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max_chars - 1].rstrip() + "…"
+
+
+def _score_freshness(source_updated_at: Any) -> float:
+    dt = _as_datetime_utc(source_updated_at)
+    if dt is None:
+        return 0.45
+    age_hours = max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0)
+    if age_hours <= 24:
+        return 1.0
+    if age_hours <= 72:
+        return 0.85
+    if age_hours <= 7 * 24:
+        return 0.7
+    if age_hours <= 30 * 24:
+        return 0.55
+    return 0.35
+
+
+def _score_entity_priority(entity_type: str) -> float:
+    key = str(entity_type or "").strip().lower()
+    if key == "task":
+        return 1.0
+    if key == "specification":
+        return 0.9
+    if key == "note":
+        return 0.8
+    if key == "projectrule":
+        return 0.75
+    if key == "comment":
+        return 0.6
+    return 0.5
+
+
+def _compose_dependency_path(path_payload: dict[str, Any]) -> list[str]:
+    nodes = path_payload.get("nodes") or []
+    relationships = path_payload.get("relationships") or []
+    out: list[str] = []
+    for idx, node in enumerate(nodes):
+        entity_type = str((node or {}).get("entity_type") or "").strip()
+        if entity_type:
+            out.append(entity_type)
+        if idx < len(relationships):
+            rel = str(relationships[idx] or "").strip()
+            if rel:
+                out.append(rel)
+    return out
+
+
+def _build_dependency_paths(
+    *,
+    project_id: str,
+    focus_entity_type: str | None,
+    focus_entity_id: str | None,
+    candidates: list[tuple[str, str]],
+    max_items: int = 6,
+) -> list[dict[str, Any]]:
+    if not str(focus_entity_type or "").strip() or not str(focus_entity_id or "").strip():
+        return []
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for entity_type, entity_id in candidates:
+        key = (str(entity_type), str(entity_id))
+        if key in seen:
+            continue
+        seen.add(key)
+        if entity_id == focus_entity_id:
+            continue
+        try:
+            path_payload = graph_get_dependency_path(
+                project_id=project_id,
+                from_entity_type=str(focus_entity_type),
+                from_entity_id=str(focus_entity_id),
+                to_entity_type=entity_type,
+                to_entity_id=entity_id,
+                max_depth=max(2, GRAPH_CONTEXT_MAX_HOPS + 2),
+            )
+        except Exception:
+            continue
+        if not path_payload.get("found"):
+            continue
+        out.append(
+            {
+                "to_entity_type": entity_type,
+                "to_entity_id": entity_id,
+                "hops": int(path_payload.get("hops") or 0),
+                "relationships": path_payload.get("relationships") or [],
+                "path": _compose_dependency_path(path_payload),
+            }
+        )
+        if len(out) >= max(1, int(max_items)):
+            break
+    return out
+
+
+def _dependency_path_lookup(dependency_paths: list[dict[str, Any]]) -> dict[tuple[str, str], list[str]]:
+    out: dict[tuple[str, str], list[str]] = {}
+    for item in dependency_paths:
+        key = (str(item.get("to_entity_type") or ""), str(item.get("to_entity_id") or ""))
+        if not key[0] or not key[1]:
+            continue
+        path = [str(step) for step in (item.get("path") or []) if str(step).strip()]
+        if path:
+            out[key] = path
+    return out
+
+
+def _load_graph_only_evidence_candidates(
+    *,
+    project_id: str,
+    candidates: list[dict[str, Any]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    from .models import Note, ProjectRule, SessionLocal, Specification, Task
+
+    out: list[dict[str, Any]] = []
+    if not candidates:
+        return out
+    with SessionLocal() as db:
+        for candidate in candidates:
+            entity_type = str(candidate.get("entity_type") or "").strip()
+            entity_id = str(candidate.get("entity_id") or "").strip()
+            if not entity_type or not entity_id:
+                continue
+            graph_score = float(candidate.get("graph_score") or 0.0)
+            key = entity_type.lower()
+            snippets: list[tuple[str, str, Any]] = []
+            if key == "task":
+                task = db.get(Task, entity_id)
+                if not task or task.project_id != project_id or task.is_deleted or task.archived:
+                    continue
+                snippets = [
+                    ("task.title", task.title or "", task.updated_at),
+                    ("task.description", task.description or "", task.updated_at),
+                ]
+            elif key == "note":
+                note = db.get(Note, entity_id)
+                if not note or note.project_id != project_id or note.is_deleted or note.archived:
+                    continue
+                snippets = [
+                    ("note.title", note.title or "", note.updated_at),
+                    ("note.body", note.body or "", note.updated_at),
+                ]
+            elif key == "specification":
+                specification = db.get(Specification, entity_id)
+                if not specification or specification.project_id != project_id or specification.is_deleted or specification.archived:
+                    continue
+                snippets = [
+                    ("specification.title", specification.title or "", specification.updated_at),
+                    ("specification.body", specification.body or "", specification.updated_at),
+                ]
+            elif key == "projectrule":
+                rule = db.get(ProjectRule, entity_id)
+                if not rule or rule.project_id != project_id or rule.is_deleted:
+                    continue
+                snippets = [
+                    ("project_rule.title", rule.title or "", rule.updated_at),
+                    ("project_rule.body", rule.body or "", rule.updated_at),
+                ]
+            else:
+                continue
+
+            for source_type, text, source_updated_at in snippets:
+                snippet = _truncate_snippet(text)
+                if not snippet:
+                    continue
+                out.append(
+                    {
+                        "entity_type": entity_type,
+                        "entity_id": entity_id,
+                        "source_type": source_type,
+                        "snippet": snippet,
+                        "source_updated_at": source_updated_at,
+                        "graph_score": graph_score,
+                        "vector_similarity": None,
+                    }
+                )
+                if len(out) >= max(8, int(limit) * 4):
+                    return out
+    return out
+
+
+def _build_grounded_summary(
+    *,
+    project_name: str,
+    evidence: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if str(GRAPH_RAG_SUMMARY_MODEL or "").strip():
+        return _build_grounded_summary_with_ollama(project_name=project_name, evidence=evidence)
+    return _build_grounded_summary_heuristic(project_name=project_name, evidence=evidence)
+
+
+def _build_grounded_summary_heuristic(
+    *,
+    project_name: str,
+    evidence: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not evidence:
+        return {
+            "executive": f"{project_name}: no grounded textual evidence is currently available.",
+            "key_points": [],
+            "gaps": ["No indexed text evidence found for this project scope."],
+        }
+
+    top = evidence[: min(len(evidence), 5)]
+    key_points: list[dict[str, Any]] = []
+    for item in top:
+        snippet = _truncate_snippet(str(item.get("snippet") or ""), max_chars=170)
+        claim = snippet or f"{item.get('entity_type')} {item.get('entity_id')} is relevant."
+        key_points.append({"claim": claim, "evidence_ids": [str(item.get("evidence_id") or "")]})
+
+    executive = f"{project_name}: {len(top)} grounded finding(s) extracted from {len(evidence)} evidence item(s)."
+    gaps: list[str] = []
+    if len(evidence) < 3:
+        gaps.append("Limited evidence volume; add or expand project artifacts for stronger grounding.")
+    return {"executive": executive, "key_points": key_points, "gaps": gaps}
+
+
+def _summary_prompt(project_name: str, evidence: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    lines.append("You are generating a grounded project summary.")
+    lines.append("Use only the evidence list.")
+    lines.append("Rules:")
+    lines.append("- Do not invent facts.")
+    lines.append("- Every key point must cite at least one evidence_id.")
+    lines.append("- Return strict JSON object with keys: executive, key_points, gaps.")
+    lines.append("- key_points is an array of {claim, evidence_ids}.")
+    lines.append("")
+    lines.append(f"Project: {project_name}")
+    lines.append("Evidence:")
+    for item in evidence[:12]:
+        lines.append(
+            "[{evidence_id}] {entity_type} {entity_id} ({source_type}) score={score:.3f} :: {snippet}".format(
+                evidence_id=str(item.get("evidence_id") or ""),
+                entity_type=str(item.get("entity_type") or "Entity"),
+                entity_id=str(item.get("entity_id") or "?"),
+                source_type=str(item.get("source_type") or "source"),
+                score=float(item.get("final_score") or 0.0),
+                snippet=_truncate_snippet(str(item.get("snippet") or ""), max_chars=220),
+            )
+        )
+    lines.append("")
+    lines.append("Return JSON only.")
+    return "\n".join(lines)
+
+
+def _normalize_summary_payload(raw: dict[str, Any], *, evidence: list[dict[str, Any]]) -> dict[str, Any]:
+    evidence_ids = {str(item.get("evidence_id") or "").strip() for item in evidence if str(item.get("evidence_id") or "").strip()}
+    executive = str(raw.get("executive") or "").strip() or "Grounded summary is unavailable."
+    key_points: list[dict[str, Any]] = []
+    for row in (raw.get("key_points") or []):
+        if not isinstance(row, dict):
+            continue
+        claim = str(row.get("claim") or "").strip()
+        if not claim:
+            continue
+        ids = [str(item).strip() for item in (row.get("evidence_ids") or []) if str(item).strip()]
+        ids = [item for item in ids if item in evidence_ids]
+        if not ids:
+            continue
+        key_points.append({"claim": claim, "evidence_ids": ids[:3]})
+    gaps = [str(item).strip() for item in (raw.get("gaps") or []) if str(item).strip()]
+    return {
+        "executive": executive,
+        "key_points": key_points[:8],
+        "gaps": gaps[:8],
+    }
+
+
+def _parse_json_object(raw_text: str) -> dict[str, Any]:
+    text = str(raw_text or "").strip()
+    if not text:
+        raise ValueError("Summary response is empty")
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        parsed = json.loads(text[start : end + 1])
+        if isinstance(parsed, dict):
+            return parsed
+    raise ValueError("Summary response is not valid JSON object")
+
+
+def _build_grounded_summary_with_ollama(
+    *,
+    project_name: str,
+    evidence: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not evidence:
+        return {
+            "executive": f"{project_name}: no grounded textual evidence is currently available.",
+            "key_points": [],
+            "gaps": ["No indexed text evidence found for this project scope."],
+        }
+
+    model = str(GRAPH_RAG_SUMMARY_MODEL or "").strip()
+    if not model:
+        return _build_grounded_summary_heuristic(project_name=project_name, evidence=evidence)
+
+    prompt = _summary_prompt(project_name, evidence)
+    url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate"
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0.1},
+    }
+    response = httpx.post(url, json=payload, timeout=50.0)
+    if response.status_code >= 400:
+        detail = (response.text or f"Ollama summary request failed ({response.status_code})").strip()
+        raise RuntimeError(detail)
+    data = response.json()
+    summary_raw = _parse_json_object(str(data.get("response") or ""))
+    summary = _normalize_summary_payload(summary_raw, evidence=evidence)
+    if not summary.get("key_points"):
+        raise RuntimeError("Summary payload has no grounded key points")
+    return summary
+
+
 def _render_context_markdown(
     *,
-    overview: dict[str, Any],
-    focus_neighbors: list[dict[str, Any]],
-    connected_resources: list[dict[str, Any]],
+    structure: dict[str, Any],
+    evidence: list[dict[str, Any]],
+    summary: dict[str, Any] | None,
 ) -> str:
+    overview = structure.get("overview") or {}
+    focus_neighbors = structure.get("focus_neighbors") or []
+    dependency_paths = structure.get("dependency_paths") or []
     lines: list[str] = []
+
     project_name = str(overview.get("project_name") or "").strip() or overview.get("project_id") or "(unknown)"
     counts = overview.get("counts") or {}
-
     lines.append(f"# Graph Context: {project_name}")
     lines.append("")
-    lines.append("## Counts")
+    lines.append("## Structure")
     lines.append(
         "- tasks={tasks}, notes={notes}, specifications={specs}, project_rules={rules}, comments={comments}".format(
             tasks=int(counts.get("tasks") or 0),
@@ -758,52 +1171,63 @@ def _render_context_markdown(
             comments=int(counts.get("comments") or 0),
         )
     )
+    if focus_neighbors:
+        lines.append("- focus_neighbors:")
+        for row in focus_neighbors[:8]:
+            lines.append(
+                "  - {entity_type} {entity_id}: {title}".format(
+                    entity_type=str(row.get("entity_type") or "Entity"),
+                    entity_id=str(row.get("entity_id") or "?"),
+                    title=str(row.get("title") or row.get("entity_id") or ""),
+                )
+            )
+    if dependency_paths:
+        lines.append("- dependency_paths:")
+        for row in dependency_paths[:6]:
+            path = " -> ".join([str(step) for step in (row.get("path") or []) if str(step).strip()])
+            lines.append(
+                "  - {to_type} {to_id}: {path}".format(
+                    to_type=str(row.get("to_entity_type") or "Entity"),
+                    to_id=str(row.get("to_entity_id") or "?"),
+                    path=path or "RELATED",
+                )
+            )
 
     lines.append("")
-    lines.append("## Top Tags")
-    top_tags = overview.get("top_tags") or []
-    if not top_tags:
+    lines.append("## Evidence")
+    if not evidence:
         lines.append("- _(none)_")
     else:
-        for item in top_tags:
-            tag = str(item.get("tag") or "").strip() or "(empty)"
-            usage = int(item.get("usage") or 0)
-            lines.append(f"- {tag} ({usage})")
+        for row in evidence[: min(len(evidence), 12)]:
+            lines.append(
+                "- [{evidence_id}] {entity_type} {entity_id} ({source_type}) score={score:.3f} :: {snippet}".format(
+                    evidence_id=str(row.get("evidence_id") or ""),
+                    entity_type=str(row.get("entity_type") or "Entity"),
+                    entity_id=str(row.get("entity_id") or "?"),
+                    source_type=str(row.get("source_type") or "source"),
+                    score=float(row.get("final_score") or 0.0),
+                    snippet=_truncate_snippet(str(row.get("snippet") or ""), max_chars=180),
+                )
+            )
 
     lines.append("")
-    lines.append("## Key Relations")
-    top_relationships = overview.get("top_relationships") or []
-    if not top_relationships:
-        lines.append("- _(none)_")
+    lines.append("## Summary")
+    if not summary:
+        lines.append("- _(summary unavailable)_")
     else:
-        for item in top_relationships:
-            rel = str(item.get("relationship") or "").strip() or "(unknown)"
-            count = int(item.get("count") or 0)
-            lines.append(f"- {rel} ({count})")
-
-    lines.append("")
-    lines.append("## Focus Neighbors")
-    if not focus_neighbors:
-        lines.append("- _(none)_")
-    else:
-        for item in focus_neighbors:
-            et = str(item.get("entity_type") or "").strip() or "Entity"
-            eid = str(item.get("entity_id") or "").strip() or "?"
-            title = str(item.get("title") or "").strip() or eid
-            rel_path = "/".join([str(x) for x in (item.get("path_types") or []) if str(x).strip()]) or "RELATED"
-            lines.append(f"- {et} {eid}: {title} via {rel_path}")
-
-    lines.append("")
-    lines.append("## Connected Resources")
-    if not connected_resources:
-        lines.append("- _(none)_")
-    else:
-        for item in connected_resources:
-            et = str(item.get("entity_type") or "").strip() or "Entity"
-            eid = str(item.get("entity_id") or "").strip() or "?"
-            title = str(item.get("title") or "").strip() or eid
-            degree = int(item.get("degree") or 0)
-            lines.append(f"- {et} {eid}: {title} (degree={degree})")
+        lines.append(str(summary.get("executive") or ""))
+        key_points = summary.get("key_points") or []
+        if key_points:
+            for item in key_points:
+                evidence_ids = [str(item_id) for item_id in (item.get("evidence_ids") or []) if str(item_id).strip()]
+                suffix = f" [{', '.join(evidence_ids)}]" if evidence_ids else ""
+                lines.append(f"- {str(item.get('claim') or '').strip()}{suffix}")
+        gaps = summary.get("gaps") or []
+        if gaps:
+            lines.append("")
+            lines.append("Gaps:")
+            for gap in gaps:
+                lines.append(f"- {str(gap)}")
 
     text = "\n".join(lines).strip()
     max_chars = max(400, int(GRAPH_CONTEXT_MAX_TOKENS) * 4)
@@ -820,99 +1244,330 @@ def graph_context_pack(
     limit: int = 20,
 ) -> dict[str, Any]:
     require_graph_available()
-    safe_limit = max(1, min(int(limit or 20), 60))
-    overview = graph_get_project_overview(project_id, top_limit=min(max(4, safe_limit // 2), 20))
+    incr("graph_context_requests")
+    rag_enabled = graph_rag_enabled_for_project(project_id)
+    started_at = perf_counter()
+    summary_emitted = False
+    if rag_enabled:
+        incr("graph_rag_requests")
+    try:
+        safe_limit = max(1, min(int(limit or 20), 60))
+        evidence_top_k = _resolve_context_pack_evidence_top_k(project_id, safe_limit)
+        gaps: list[str] = []
+        if GRAPH_RAG_ENABLED and not rag_enabled and (GRAPH_RAG_CANARY_PROJECT_IDS or GRAPH_RAG_CANARY_WORKSPACE_IDS):
+            gaps.append("GraphRAG canary is disabled for this project scope; using graph-only mode.")
+        overview = graph_get_project_overview(project_id, top_limit=min(max(4, safe_limit // 2), 20))
 
-    focus_neighbors: list[dict[str, Any]] = []
-    if str(focus_entity_type or "").strip() and str(focus_entity_id or "").strip():
-        focus = graph_get_neighbors(
-            project_id=project_id,
-            entity_type=str(focus_entity_type),
-            entity_id=str(focus_entity_id),
-            depth=min(max(1, GRAPH_CONTEXT_MAX_HOPS), 4),
-            limit=min(safe_limit, 30),
-        )
-        focus_neighbors = focus.get("items") or []
+        focus_neighbors: list[dict[str, Any]] = []
+        if str(focus_entity_type or "").strip() and str(focus_entity_id or "").strip():
+            focus = graph_get_neighbors(
+                project_id=project_id,
+                entity_type=str(focus_entity_type),
+                entity_id=str(focus_entity_id),
+                depth=min(max(1, GRAPH_CONTEXT_MAX_HOPS), 4),
+                limit=min(safe_limit, 30),
+            )
+            focus_neighbors = focus.get("items") or []
 
-    connected_resources = run_graph_query(
-        """
-        MATCH (p:Project {id:$project_id})
-        MATCH (n)
-        WHERE (
-            coalesce(n.project_id, '') = $project_id
-            OR EXISTS { MATCH (n)-[:IN_PROJECT]->(p) }
-          )
-          AND coalesce(n.is_deleted, false) = false
-        OPTIONAL MATCH (n)-[r]-()
-        RETURN
-          head(labels(n)) AS entity_type,
-          n.id AS entity_id,
-          coalesce(n.title, n.name, n.id) AS title,
-          count(DISTINCT r) AS degree
-        ORDER BY degree DESC, title ASC
-        LIMIT $limit
-        """,
-        {
-            "project_id": project_id,
-            "limit": safe_limit,
-        },
-    )
-
-    comment_resources = run_graph_query(
-        """
-        MATCH (p:Project {id:$project_id})
-        MATCH (t:Task)-[r:COMMENTED_BY]->(u:User)
-        WHERE coalesce(t.is_deleted, false) = false
-          AND (
-            coalesce(t.project_id, '') = $project_id
-            OR EXISTS { MATCH (t)-[:IN_PROJECT]->(p) }
-          )
-        RETURN
-          'Comment' AS entity_type,
-          ('comment-thread:' + t.id + ':' + u.id) AS entity_id,
-          (coalesce(u.username, u.name, u.id) + ' · ' + toString(coalesce(r.count, 1)) + ' comments on ' + coalesce(t.title, t.id)) AS title,
-          toInteger(coalesce(r.count, 1) + 1) AS degree
-        ORDER BY degree DESC, title ASC
-        LIMIT $limit
-        """,
-        {
-            "project_id": project_id,
-            "limit": safe_limit,
-        },
-    )
-
-    merged_resources: list[dict[str, Any]] = []
-    seen_resource_ids: set[str] = set()
-    for row in [*connected_resources, *comment_resources]:
-        entity_id = str(row.get("entity_id") or "").strip()
-        if not entity_id or entity_id in seen_resource_ids:
-            continue
-        seen_resource_ids.add(entity_id)
-        merged_resources.append(
+        connected_resources = run_graph_query(
+            """
+            MATCH (p:Project {id:$project_id})
+            MATCH (n)
+            WHERE (
+                coalesce(n.project_id, '') = $project_id
+                OR EXISTS { MATCH (n)-[:IN_PROJECT]->(p) }
+              )
+              AND coalesce(n.is_deleted, false) = false
+            OPTIONAL MATCH (n)-[r]-()
+            RETURN
+              head(labels(n)) AS entity_type,
+              n.id AS entity_id,
+              coalesce(n.title, n.name, n.id) AS title,
+              count(DISTINCT r) AS degree
+            ORDER BY degree DESC, title ASC
+            LIMIT $limit
+            """,
             {
-                "entity_type": str(row.get("entity_type") or "Entity"),
-                "entity_id": entity_id,
-                "title": str(row.get("title") or entity_id),
-                "degree": int(row.get("degree") or 0),
-            }
+                "project_id": project_id,
+                "limit": safe_limit,
+            },
         )
-    merged_resources.sort(key=lambda item: (-int(item.get("degree") or 0), str(item.get("title") or "").lower()))
-    connected_resources = merged_resources[:safe_limit]
 
-    markdown = _render_context_markdown(
-        overview=overview,
-        focus_neighbors=focus_neighbors,
-        connected_resources=connected_resources,
-    )
-    return {
-        "project_id": project_id,
-        "focus_entity_type": focus_entity_type,
-        "focus_entity_id": focus_entity_id,
-        "overview": overview,
-        "focus_neighbors": focus_neighbors,
-        "connected_resources": connected_resources,
-        "markdown": markdown,
-    }
+        comment_resources = run_graph_query(
+            """
+            MATCH (p:Project {id:$project_id})
+            MATCH (t:Task)-[r:COMMENTED_BY]->(u:User)
+            WHERE coalesce(t.is_deleted, false) = false
+              AND (
+                coalesce(t.project_id, '') = $project_id
+                OR EXISTS { MATCH (t)-[:IN_PROJECT]->(p) }
+              )
+            RETURN
+              'Comment' AS entity_type,
+              ('comment-thread:' + t.id + ':' + u.id) AS entity_id,
+              (coalesce(u.username, u.name, u.id) + ' · ' + toString(coalesce(r.count, 1)) + ' comments on ' + coalesce(t.title, t.id)) AS title,
+              toInteger(coalesce(r.count, 1) + 1) AS degree
+            ORDER BY degree DESC, title ASC
+            LIMIT $limit
+            """,
+            {
+                "project_id": project_id,
+                "limit": safe_limit,
+            },
+        )
+
+        merged_resources: list[dict[str, Any]] = []
+        seen_resource_ids: set[str] = set()
+        for row in [*connected_resources, *comment_resources]:
+            entity_id = str(row.get("entity_id") or "").strip()
+            if not entity_id or entity_id in seen_resource_ids:
+                continue
+            seen_resource_ids.add(entity_id)
+            merged_resources.append(
+                {
+                    "entity_type": str(row.get("entity_type") or "Entity"),
+                    "entity_id": entity_id,
+                    "title": str(row.get("title") or entity_id),
+                    "degree": int(row.get("degree") or 0),
+                }
+            )
+        merged_resources.sort(key=lambda item: (-int(item.get("degree") or 0), str(item.get("title") or "").lower()))
+        connected_resources = merged_resources[:safe_limit]
+
+        max_degree = max([int(item.get("degree") or 0) for item in connected_resources], default=1)
+        candidate_scores: dict[tuple[str, str], float] = {}
+        for row in connected_resources:
+            entity_type = str(row.get("entity_type") or "").strip()
+            entity_id = str(row.get("entity_id") or "").strip()
+            if not entity_type or not entity_id:
+                continue
+            degree = int(row.get("degree") or 0)
+            candidate_scores[(entity_type, entity_id)] = max(0.0, min(1.0, degree / max(1, max_degree)))
+        for row in focus_neighbors:
+            entity_type = str(row.get("entity_type") or "").strip()
+            entity_id = str(row.get("entity_id") or "").strip()
+            if not entity_type or not entity_id:
+                continue
+            path_types = [str(item) for item in (row.get("path_types") or []) if str(item).strip()]
+            score = 1.0 / max(1.0, float(len(path_types) + 1))
+            prev = candidate_scores.get((entity_type, entity_id), 0.0)
+            candidate_scores[(entity_type, entity_id)] = max(prev, score)
+
+        candidate_pairs = sorted(candidate_scores.keys(), key=lambda key: -candidate_scores.get(key, 0.0))
+        dependency_paths = _build_dependency_paths(
+            project_id=project_id,
+            focus_entity_type=focus_entity_type,
+            focus_entity_id=focus_entity_id,
+            candidates=candidate_pairs,
+            max_items=min(8, evidence_top_k),
+        )
+        path_lookup = _dependency_path_lookup(dependency_paths)
+
+        project_name = str(overview.get("project_name") or project_id).strip() or project_id
+        top_tags = [str(item.get("tag") or "").strip() for item in (overview.get("top_tags") or []) if str(item.get("tag") or "").strip()]
+        focus_hint = str(focus_entity_id or "").strip()
+        retrieval_query = " ".join([project_name, focus_hint, *top_tags]).strip() or project_name
+
+        evidence: list[dict[str, Any]] = []
+        vector_mode = False
+        if rag_enabled:
+            from .models import SessionLocal
+
+            try:
+                with SessionLocal() as db:
+                    runtime = resolve_project_embedding_runtime(db, project_id)
+                    if runtime.enabled:
+                        vector_mode = True
+                        vector_candidates = search_project_chunks(
+                            db,
+                            project_id=project_id,
+                            query=retrieval_query,
+                            limit=max(evidence_top_k * 4, 12),
+                            entity_filters=set(candidate_pairs) or None,
+                        )
+                    else:
+                        vector_candidates = []
+                        gaps.append("Vector retrieval is disabled for this project; using graph-only evidence.")
+            except Exception as exc:
+                logger.warning("Vector retrieval failed for project=%s: %s", project_id, exc)
+                vector_candidates = []
+                vector_mode = False
+                gaps.append("Vector retrieval failed; used graph-only evidence fallback.")
+        else:
+            vector_candidates = []
+
+        if vector_candidates:
+            for item in vector_candidates:
+                entity_type = str(item.get("entity_type") or "").strip() or "Entity"
+                entity_id = str(item.get("entity_id") or "").strip() or "?"
+                source_type = str(item.get("source_type") or "source")
+                snippet = _truncate_snippet(str(item.get("snippet") or ""))
+                if not snippet:
+                    continue
+                key = (entity_type, entity_id)
+                graph_score = float(candidate_scores.get(key, 0.25))
+                vector_similarity = float(item.get("vector_similarity") or 0.0)
+                freshness = _score_freshness(item.get("source_updated_at"))
+                entity_priority = _score_entity_priority(entity_type)
+                final_score = (0.40 * graph_score) + (0.40 * vector_similarity) + (0.15 * freshness) + (0.05 * entity_priority)
+                source_updated_at = _as_datetime_utc(item.get("source_updated_at"))
+                evidence.append(
+                    {
+                        "entity_type": entity_type,
+                        "entity_id": entity_id,
+                        "source_type": source_type,
+                        "snippet": snippet,
+                        "vector_similarity": vector_similarity,
+                        "graph_score": graph_score,
+                        "final_score": final_score,
+                        "graph_path": path_lookup.get(key, [entity_type]),
+                        "updated_at": source_updated_at.isoformat().replace("+00:00", "Z") if source_updated_at else None,
+                        "why_selected": "high semantic similarity and graph relevance",
+                    }
+                )
+        else:
+            graph_candidates = [
+                {
+                    "entity_type": entity_type,
+                    "entity_id": entity_id,
+                    "graph_score": score,
+                }
+                for (entity_type, entity_id), score in sorted(candidate_scores.items(), key=lambda item: -item[1])
+            ]
+            graph_only_evidence = _load_graph_only_evidence_candidates(
+                project_id=project_id,
+                candidates=graph_candidates,
+                limit=max(evidence_top_k * 3, 10),
+            )
+            for item in graph_only_evidence:
+                entity_type = str(item.get("entity_type") or "").strip() or "Entity"
+                entity_id = str(item.get("entity_id") or "").strip() or "?"
+                source_type = str(item.get("source_type") or "source")
+                snippet = _truncate_snippet(str(item.get("snippet") or ""))
+                if not snippet:
+                    continue
+                graph_score = float(item.get("graph_score") or 0.0)
+                freshness = _score_freshness(item.get("source_updated_at"))
+                entity_priority = _score_entity_priority(entity_type)
+                final_score = (0.70 * graph_score) + (0.20 * freshness) + (0.10 * entity_priority)
+                source_updated_at = _as_datetime_utc(item.get("source_updated_at"))
+                key = (entity_type, entity_id)
+                evidence.append(
+                    {
+                        "entity_type": entity_type,
+                        "entity_id": entity_id,
+                        "source_type": source_type,
+                        "snippet": snippet,
+                        "vector_similarity": None,
+                        "graph_score": graph_score,
+                        "final_score": final_score,
+                        "graph_path": path_lookup.get(key, [entity_type]),
+                        "updated_at": source_updated_at.isoformat().replace("+00:00", "Z") if source_updated_at else None,
+                        "why_selected": "graph-only fallback based on topology and freshness",
+                    }
+                )
+
+        evidence.sort(
+            key=lambda item: (
+                -float(item.get("final_score") or 0.0),
+                -float(item.get("graph_score") or 0.0),
+                str(item.get("entity_type") or ""),
+                str(item.get("entity_id") or ""),
+            )
+        )
+        evidence = evidence[:evidence_top_k]
+        for idx, item in enumerate(evidence, start=1):
+            item["evidence_id"] = f"ev_{idx:03d}"
+            item["final_score"] = round(float(item.get("final_score") or 0.0), 4)
+            item["graph_score"] = round(float(item.get("graph_score") or 0.0), 4)
+            vector_similarity = item.get("vector_similarity")
+            if vector_similarity is not None:
+                item["vector_similarity"] = round(float(vector_similarity), 4)
+
+        summary: dict[str, Any] | None = None
+        if rag_enabled:
+            try:
+                summary = _build_grounded_summary(project_name=project_name, evidence=evidence)
+            except Exception as exc:
+                logger.warning("Grounded summary failed for project=%s: %s", project_id, exc)
+                summary = None
+                gaps.append("Grounded summary is unavailable; use structure and evidence directly.")
+
+        if summary:
+            key_points = summary.get("key_points") or []
+            grounded = 0
+            for item in key_points:
+                ids = [str(item_id) for item_id in (item.get("evidence_ids") or []) if str(item_id).strip()]
+                if ids:
+                    grounded += 1
+            ratio = int(round((grounded / max(1, len(key_points))) * 100)) if key_points else 0
+            set_value("context_pack_grounded_claim_ratio", ratio)
+        else:
+            set_value("context_pack_grounded_claim_ratio", 0)
+
+        structure = {
+            "overview": overview,
+            "focus_neighbors": focus_neighbors,
+            "dependency_paths": dependency_paths,
+        }
+        markdown = _render_context_markdown(
+            structure=structure,
+            evidence=evidence,
+            summary=summary,
+        )
+        response: dict[str, Any] = {
+            "project_id": project_id,
+            "focus": (
+                {"entity_type": str(focus_entity_type), "entity_id": str(focus_entity_id)}
+                if str(focus_entity_type or "").strip() and str(focus_entity_id or "").strip()
+                else None
+            ),
+            "mode": "graph+vector" if vector_mode else "graph-only",
+            "structure": structure,
+            "evidence": evidence,
+            "markdown": markdown,
+        }
+        if summary is not None:
+            response["summary"] = summary
+            summary_emitted = True
+        if gaps:
+            response["gaps"] = gaps
+        return response
+    except Exception:
+        incr("graph_context_failures")
+        if rag_enabled:
+            incr("graph_rag_failures")
+        raise
+    finally:
+        latency_ms = int((perf_counter() - started_at) * 1000)
+        observe("graph_context_latency_ms", latency_ms)
+        if summary_emitted:
+            observe("graph_context_latency_ms_with_summary", latency_ms)
+        else:
+            observe("graph_context_latency_ms_without_summary", latency_ms)
+
+
+def build_graph_context_pack(
+    *,
+    project_id: str | None,
+    focus_entity_type: str | None = None,
+    focus_entity_id: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    if not str(project_id or "").strip():
+        return {}
+    if not graph_enabled():
+        return {}
+    try:
+        return graph_context_pack(
+            project_id=str(project_id),
+            focus_entity_type=focus_entity_type,
+            focus_entity_id=focus_entity_id,
+            limit=limit,
+        )
+    except Exception as exc:
+        logger.warning("Knowledge graph context build failed: %s", exc)
+        return {}
 
 
 def build_graph_context_markdown(
@@ -922,20 +1577,12 @@ def build_graph_context_markdown(
     focus_entity_id: str | None = None,
     limit: int = 20,
 ) -> str:
-    if not str(project_id or "").strip():
+    pack = build_graph_context_pack(
+        project_id=project_id,
+        focus_entity_type=focus_entity_type,
+        focus_entity_id=focus_entity_id,
+        limit=limit,
+    )
+    if not pack:
         return ""
-    if not graph_enabled():
-        return ""
-    incr("graph_context_requests")
-    try:
-        pack = graph_context_pack(
-            project_id=str(project_id),
-            focus_entity_type=focus_entity_type,
-            focus_entity_id=focus_entity_id,
-            limit=limit,
-        )
-        return str(pack.get("markdown") or "").strip()
-    except Exception as exc:
-        incr("graph_context_failures")
-        logger.warning("Knowledge graph context build failed: %s", exc)
-        return ""
+    return str(pack.get("markdown") or "").strip()

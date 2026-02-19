@@ -454,6 +454,9 @@ def create_mcp():
         auth_token: str | None = None,
         description: str = "",
         custom_statuses: list[str] | None = None,
+        embedding_enabled: bool = False,
+        embedding_model: str | None = None,
+        context_pack_evidence_top_k: int | None = None,
         command_id: str | None = None,
     ) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
@@ -463,6 +466,9 @@ def create_mcp():
             auth_token=auth_token,
             description=description,
             custom_statuses=custom_statuses,
+            embedding_enabled=embedding_enabled,
+            embedding_model=embedding_model,
+            context_pack_evidence_top_k=context_pack_evidence_top_k,
             command_id=command_id,
         )
 

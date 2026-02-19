@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import datetime, timezone
 
@@ -63,6 +64,9 @@ class Project(Base, TimeMixin):
     custom_statuses: Mapped[str] = mapped_column(Text, default='["To do", "In progress", "Done"]')
     external_refs: Mapped[str] = mapped_column(Text, default="[]")
     attachment_refs: Mapped[str] = mapped_column(Text, default="[]")
+    embedding_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    embedding_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    context_pack_evidence_top_k: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
@@ -263,9 +267,67 @@ class CommandExecution(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
-engine_kwargs: dict[str, object] = {"pool_pre_ping": True}
-if DATABASE_URL.startswith("sqlite"):
-    engine_kwargs["connect_args"] = {"check_same_thread": False}
+class VectorChunk(Base, TimeMixin):
+    __tablename__ = "vector_chunks"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "entity_type",
+            "entity_id",
+            "source_type",
+            "chunk_index",
+            name="ux_vector_chunks_source_chunk",
+        ),
+    )
 
-engine = create_engine(DATABASE_URL, **engine_kwargs)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    entity_type: Mapped[str] = mapped_column(String(32), index=True)
+    entity_id: Mapped[str] = mapped_column(String(128), index=True)
+    source_type: Mapped[str] = mapped_column(String(64), index=True)
+    chunk_index: Mapped[int] = mapped_column(Integer, default=0)
+    text_chunk: Mapped[str] = mapped_column(Text, default="")
+    token_count: Mapped[int] = mapped_column(Integer, default=0)
+    embedding_json: Mapped[str] = mapped_column(Text, default="[]")
+    embedding_model: Mapped[str] = mapped_column(String(128), default="")
+    content_hash: Mapped[str] = mapped_column(String(64), default="")
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+
+def _runtime_database_url() -> str:
+    configured = os.getenv("DATABASE_URL", "").strip()
+    if configured:
+        return configured
+    db_path = os.getenv("DB_PATH", "/data/app.db")
+    return f"sqlite:///{db_path}"
+
+
+def _build_engine(url: str):
+    kwargs: dict[str, object] = {"pool_pre_ping": True}
+    if url.startswith("sqlite"):
+        kwargs["connect_args"] = {"check_same_thread": False}
+    return create_engine(url, **kwargs)
+
+
+_engine_url = str(DATABASE_URL or "").strip() or _runtime_database_url()
+engine = _build_engine(_engine_url)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+
+def ensure_engine() -> str:
+    global engine, _engine_url
+    runtime_url = _runtime_database_url()
+    if runtime_url == _engine_url:
+        return _engine_url
+    new_engine = _build_engine(runtime_url)
+    previous_engine = engine
+    engine = new_engine
+    SessionLocal.configure(bind=new_engine)
+    _engine_url = runtime_url
+    try:
+        previous_engine.dispose()
+    except Exception:
+        pass
+    return _engine_url

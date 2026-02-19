@@ -35,6 +35,10 @@ export type Project = {
   custom_statuses: string[]
   external_refs: ExternalRef[]
   attachment_refs: AttachmentRef[]
+  embedding_enabled: boolean
+  embedding_model: string | null
+  context_pack_evidence_top_k: number | null
+  embedding_index_status: 'not_indexed' | 'indexing' | 'ready' | 'stale'
   created_by: string
   created_at: string | null
   updated_at: string | null
@@ -95,6 +99,10 @@ export type BootstrapPayload = {
   workspaces: Workspace[]
   memberships: Array<{ workspace_id: string; role: string }>
   projects: Project[]
+  embedding_allowed_models: string[]
+  embedding_default_model: string
+  vector_store_enabled: boolean
+  context_pack_evidence_top_k_default: number
   users: Array<{ id: string; username: string; full_name: string; user_type: 'human' | 'agent' }>
   project_members: Array<{ project_id: string; user_id: string; role: string }>
   notifications: Notification[]
@@ -185,20 +193,56 @@ export type GraphContextNeighbor = {
   path_types: string[]
 }
 
-export type GraphContextResource = {
+export type GraphDependencyPath = {
+  to_entity_type: string
+  to_entity_id: string
+  hops: number
+  relationships: string[]
+  path: string[]
+}
+
+export type GraphContextStructure = {
+  overview: GraphProjectOverview
+  focus_neighbors: GraphContextNeighbor[]
+  dependency_paths: GraphDependencyPath[]
+}
+
+export type GraphContextFocus = {
   entity_type: string
   entity_id: string
-  title: string
-  degree: number
+}
+
+export type GraphContextEvidence = {
+  evidence_id: string
+  entity_type: string
+  entity_id: string
+  source_type: string
+  snippet: string
+  vector_similarity: number | null
+  graph_score: number
+  final_score: number
+  graph_path: string[]
+  updated_at: string | null
+  why_selected: string
+}
+
+export type GraphSummary = {
+  executive: string
+  key_points: Array<{
+    claim: string
+    evidence_ids: string[]
+  }>
+  gaps: string[]
 }
 
 export type GraphContextPack = {
   project_id: string
-  focus_entity_type: string | null
-  focus_entity_id: string | null
-  overview: GraphProjectOverview
-  focus_neighbors: GraphContextNeighbor[]
-  connected_resources: GraphContextResource[]
+  focus: GraphContextFocus | null
+  mode: 'graph-only' | 'graph+vector'
+  structure: GraphContextStructure
+  evidence: GraphContextEvidence[]
+  summary?: GraphSummary
+  gaps?: string[]
   markdown: string
 }
 
@@ -267,6 +311,14 @@ export type AgentChatResponse = {
   summary: string
   comment: string | null
   session_id?: string | null
+  usage?: AgentChatUsage | null
+}
+
+export type AgentChatUsage = {
+  input_tokens: number
+  cached_input_tokens?: number
+  output_tokens: number
+  context_limit_tokens?: number
 }
 
 export type Note = {
