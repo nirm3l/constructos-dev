@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from shared.core import Note, Project, Task, User, ensure_role, get_current_user, get_db
+from shared.core import Note, Project, Task, User, ensure_project_access, ensure_role, get_current_user, get_db
 from shared.settings import ATTACHMENTS_DIR
 
 router = APIRouter()
@@ -95,6 +95,15 @@ def _resolve_candidate(workspace_id: str, path: str) -> tuple[Path, Path]:
     return upload_root, candidate
 
 
+def _project_id_from_path(path: str) -> str | None:
+    parts = [part for part in Path(path).as_posix().split("/") if part]
+    if len(parts) >= 4 and parts[0] == "workspace" and parts[2] == "project":
+        project_id = parts[3]
+        if project_id and project_id != "_none":
+            return project_id
+    return None
+
+
 @router.post("/api/attachments/upload")
 async def upload_attachment(
     workspace_id: str = Form(...),
@@ -113,6 +122,8 @@ async def upload_attachment(
         task_id=task_id,
         note_id=note_id,
     )
+    if project_id:
+        ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member"})
 
     owner_type = "project"
     owner_id = project_id
@@ -156,6 +167,9 @@ def download_attachment(
 ):
     ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     _, candidate = _resolve_candidate(workspace_id, path)
+    project_id = _project_id_from_path(path)
+    if project_id:
+        ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     if not candidate.exists() or not candidate.is_file():
         raise HTTPException(status_code=404, detail="Attachment not found")
 
@@ -171,6 +185,9 @@ def delete_attachment(
 ):
     ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member"})
     upload_root, candidate = _resolve_candidate(payload.workspace_id, payload.path)
+    project_id = _project_id_from_path(payload.path)
+    if project_id:
+        ensure_project_access(db, payload.workspace_id, project_id, user.id, {"Owner", "Admin", "Member"})
     if not candidate.exists() or not candidate.is_file():
         raise HTTPException(status_code=404, detail="Attachment not found")
     candidate.unlink(missing_ok=False)

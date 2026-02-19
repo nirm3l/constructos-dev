@@ -22,6 +22,7 @@ from shared.core import (
     User,
     WorkspaceMember,
     append_event,
+    ensure_project_access,
     ensure_role,
     load_project_view,
 )
@@ -243,7 +244,7 @@ class DeleteProjectHandler:
         project = self.ctx.db.get(Project, self.project_id)
         if not project or project.is_deleted:
             raise HTTPException(status_code=404, detail="Project not found")
-        ensure_role(self.ctx.db, project.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
+        ensure_project_access(self.ctx.db, project.workspace_id, self.project_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
 
         tasks = self.ctx.db.execute(select(Task).where(Task.project_id == self.project_id, Task.is_deleted == False)).scalars().all()
         for t in tasks:
@@ -320,7 +321,7 @@ class PatchProjectHandler:
         project = self.ctx.db.get(Project, self.project_id)
         if not project or project.is_deleted:
             raise HTTPException(status_code=404, detail="Project not found")
-        ensure_role(self.ctx.db, project.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
+        ensure_project_access(self.ctx.db, project.workspace_id, self.project_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
 
         data = self.payload.model_dump(exclude_unset=True)
         event_payload: dict = {}
@@ -387,7 +388,7 @@ class AddProjectMemberHandler:
         project = self.ctx.db.get(Project, self.project_id)
         if not project or project.is_deleted:
             raise HTTPException(status_code=404, detail="Project not found")
-        ensure_role(self.ctx.db, project.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
+        ensure_project_access(self.ctx.db, project.workspace_id, self.project_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
         member_exists = self.ctx.db.execute(
             select(WorkspaceMember).where(
                 WorkspaceMember.workspace_id == project.workspace_id,
@@ -429,7 +430,7 @@ class RemoveProjectMemberHandler:
         project = self.ctx.db.get(Project, self.project_id)
         if not project or project.is_deleted:
             raise HTTPException(status_code=404, detail="Project not found")
-        ensure_role(self.ctx.db, project.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
+        ensure_project_access(self.ctx.db, project.workspace_id, self.project_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
         project_member = self.ctx.db.execute(
             select(ProjectMember).where(
                 ProjectMember.project_id == self.project_id,

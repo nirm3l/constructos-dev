@@ -1,6 +1,17 @@
 import React from 'react'
-import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
-import { getBootstrap, linkTaskToSpecification } from '../api'
+import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  authChangePassword,
+  authLogin,
+  authLogout,
+  authMe,
+  createAdminUser,
+  getBootstrap,
+  linkTaskToSpecification,
+  listAdminUsers,
+  resetAdminUserPassword,
+  updateAdminUserRole,
+} from '../api'
 import { useCoreQueries } from './useCoreQueries'
 import { useAppMutations } from './useAppMutations'
 import { useProjectEditorEffects } from './useProjectEditorEffects'
@@ -26,7 +37,6 @@ import {
   attachmentRefsToText,
   externalRefsToText,
   formatActivitySummary,
-  normalizeStoredUserId,
   parseAttachmentRefsText,
   parseCommaTags,
   parseExternalRefsText,
@@ -45,7 +55,7 @@ import '../styles.css'
 
 const queryClient = new QueryClient()
 
-function App() {
+function App({ logout }: { logout: () => void }) {
   const initialUrlStateRef = React.useRef<{
     tab: Tab | null
     projectId: string | null
@@ -75,7 +85,7 @@ function App() {
   }
   const initialUrlState = initialUrlStateRef.current!
 
-  const [userId] = React.useState<string>(() => normalizeStoredUserId(localStorage.getItem('user_id')))
+  const [userId] = React.useState<string>('session')
   const [tab, setTab] = React.useState<Tab>(() => {
     if (initialUrlState.tab) return initialUrlState.tab
     if (initialUrlState.specificationId) return 'specifications'
@@ -217,6 +227,97 @@ function App() {
   const { frontendVersion, backendVersion, backendBuild, backendDeployedAtUtc } = useAppVersion()
   const workspaceId = bootstrap.data?.workspaces[0]?.id ?? ''
   const userTimezone = bootstrap.data?.current_user?.timezone
+  const canManageUsers = React.useMemo(
+    () =>
+      (bootstrap.data?.memberships ?? []).some((m: any) => {
+        const role = String(m?.role || '')
+        return role === 'Owner' || role === 'Admin'
+      }),
+    [bootstrap.data?.memberships]
+  )
+  const [adminCreateUsername, setAdminCreateUsername] = React.useState('')
+  const [adminCreateFullName, setAdminCreateFullName] = React.useState('')
+  const [adminCreateRole, setAdminCreateRole] = React.useState('Member')
+  const [adminLastTempPassword, setAdminLastTempPassword] = React.useState<string | null>(null)
+  const [resetAdminPasswordUserId, setResetAdminPasswordUserId] = React.useState<string | null>(null)
+  const [updateAdminRoleUserId, setUpdateAdminRoleUserId] = React.useState<string | null>(null)
+
+  const adminUsersQuery = useQuery({
+    queryKey: ['admin-users', userId, workspaceId],
+    queryFn: () => listAdminUsers(userId, workspaceId),
+    enabled: Boolean(workspaceId && canManageUsers && tab === 'admin'),
+  })
+
+  const createAdminUserMutation = useMutation({
+    mutationFn: (payload: { workspace_id: string; username: string; full_name?: string; role?: string }) =>
+      createAdminUser(userId, payload),
+    onSuccess: async (payload) => {
+      setAdminCreateUsername('')
+      setAdminCreateFullName('')
+      setAdminCreateRole('Member')
+      setAdminLastTempPassword(payload.temporary_password || null)
+      await qc.invalidateQueries({ queryKey: ['admin-users', userId, workspaceId] })
+      await qc.invalidateQueries({ queryKey: ['bootstrap', userId] })
+    },
+    onError: (err: any) => {
+      setUiError(err?.message || 'Unable to create user')
+    },
+  })
+
+  const resetAdminUserPasswordMutation = useMutation({
+    mutationFn: (targetUserId: string) => resetAdminUserPassword(userId, targetUserId, { workspace_id: workspaceId }),
+    onMutate: (targetUserId: string) => {
+      setResetAdminPasswordUserId(targetUserId)
+    },
+    onSuccess: async (payload) => {
+      setAdminLastTempPassword(payload.temporary_password || null)
+      await qc.invalidateQueries({ queryKey: ['admin-users', userId, workspaceId] })
+    },
+    onError: (err: any) => {
+      setUiError(err?.message || 'Unable to reset password')
+    },
+    onSettled: () => {
+      setResetAdminPasswordUserId(null)
+    },
+  })
+  const updateAdminUserRoleMutation = useMutation({
+    mutationFn: (payload: { targetUserId: string; role: string }) =>
+      updateAdminUserRole(userId, payload.targetUserId, { workspace_id: workspaceId, role: payload.role }),
+    onMutate: (payload) => {
+      setUpdateAdminRoleUserId(payload.targetUserId)
+    },
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['admin-users', userId, workspaceId] })
+      await qc.invalidateQueries({ queryKey: ['bootstrap', userId] })
+    },
+    onError: (err: any) => {
+      setUiError(err?.message || 'Unable to update role')
+    },
+    onSettled: () => {
+      setUpdateAdminRoleUserId(null)
+    },
+  })
+  const adminUsers = adminUsersQuery.data?.items ?? []
+  const adminUsersError = adminUsersQuery.isError ? toErrorMessage(adminUsersQuery.error, 'Unable to load users') : null
+  const onCreateAdminUser = React.useCallback(() => {
+    if (!workspaceId) return
+    const username = adminCreateUsername.trim()
+    if (!username) return
+    createAdminUserMutation.mutate({
+      workspace_id: workspaceId,
+      username,
+      full_name: adminCreateFullName.trim() || undefined,
+      role: adminCreateRole,
+    })
+  }, [adminCreateFullName, adminCreateRole, adminCreateUsername, createAdminUserMutation, workspaceId])
+  const onResetAdminUserPassword = React.useCallback((targetUserId: string) => {
+    if (!workspaceId) return
+    resetAdminUserPasswordMutation.mutate(targetUserId)
+  }, [resetAdminUserPasswordMutation, workspaceId])
+  const onUpdateAdminUserRole = React.useCallback((targetUserId: string, role: string) => {
+    if (!workspaceId) return
+    updateAdminUserRoleMutation.mutate({ targetUserId, role })
+  }, [updateAdminUserRoleMutation, workspaceId])
 
   useBootstrapSelectionEffects({
     bootstrap,
@@ -982,7 +1083,25 @@ function App() {
       projectRuleCountQueries,
       projectMemberCounts,
       workspaceId,
+      canManageUsers,
+      adminUsers,
+      adminUsersLoading: adminUsersQuery.isLoading,
+      adminUsersError,
+      adminCreateUsername,
+      setAdminCreateUsername,
+      adminCreateFullName,
+      setAdminCreateFullName,
+      adminCreateRole,
+      setAdminCreateRole,
+      adminLastTempPassword,
+      createAdminUserMutation,
+      onCreateAdminUser,
+      onResetAdminUserPassword,
+      resetAdminPasswordUserId,
+      onUpdateAdminUserRole,
+      updateAdminRoleUserId,
       userId,
+      logout,
       toggleProjectEditor,
       createTaskFromGraphSummary,
       createNoteFromGraphSummary,
@@ -1256,10 +1375,186 @@ function App() {
   )
 }
 
+function AuthGate() {
+  const [phase, setPhase] = React.useState<'checking' | 'login' | 'change-password' | 'ready'>('checking')
+  const [authError, setAuthError] = React.useState<string | null>(null)
+  const [pending, setPending] = React.useState(false)
+  const [username, setUsername] = React.useState('m4tr1x')
+  const [password, setPassword] = React.useState('')
+  const [currentPassword, setCurrentPassword] = React.useState('')
+  const [newPassword, setNewPassword] = React.useState('')
+  const [confirmPassword, setConfirmPassword] = React.useState('')
+
+  const clearClientSessionState = React.useCallback(() => {
+    if (typeof window === 'undefined') return
+    const keys = ['codex_chat_state_v1', 'ui_tab', 'ui_selected_project_id', 'ui_projects_mode']
+    for (const key of keys) {
+      window.localStorage.removeItem(key)
+    }
+  }, [])
+
+  const checkAuth = React.useCallback(async () => {
+    setAuthError(null)
+    setPhase('checking')
+    try {
+      const payload = await authMe()
+      if (payload.user.must_change_password) {
+        setPhase('change-password')
+      } else {
+        setPhase('ready')
+      }
+    } catch {
+      setPhase('login')
+    }
+  }, [])
+
+  React.useEffect(() => {
+    void checkAuth()
+  }, [checkAuth])
+
+  const handleLogin = React.useCallback(async () => {
+    if (pending) return
+    setPending(true)
+    setAuthError(null)
+    try {
+      const payload = await authLogin({ username: username.trim(), password })
+      queryClient.clear()
+      clearClientSessionState()
+      setCurrentPassword(password)
+      setPassword('')
+      if (payload.user.must_change_password) {
+        setPhase('change-password')
+      } else {
+        setPhase('ready')
+      }
+    } catch (err: any) {
+      setAuthError(err?.message || 'Login failed')
+      setPhase('login')
+    } finally {
+      setPending(false)
+    }
+  }, [clearClientSessionState, password, pending, username])
+
+  const handleChangePassword = React.useCallback(async () => {
+    if (pending) return
+    if (newPassword.trim().length < 8) {
+      setAuthError('New password must be at least 8 characters.')
+      return
+    }
+    if (newPassword !== confirmPassword) {
+      setAuthError('Password confirmation does not match.')
+      return
+    }
+    setPending(true)
+    setAuthError(null)
+    try {
+      await authChangePassword({
+        current_password: currentPassword,
+        new_password: newPassword,
+      })
+      queryClient.clear()
+      setNewPassword('')
+      setConfirmPassword('')
+      setPhase('ready')
+    } catch (err: any) {
+      setAuthError(err?.message || 'Password change failed')
+      setPhase('change-password')
+    } finally {
+      setPending(false)
+    }
+  }, [confirmPassword, currentPassword, newPassword, pending])
+
+  const handleLogout = React.useCallback(() => {
+    void authLogout().finally(() => {
+      queryClient.clear()
+      clearClientSessionState()
+      setPhase('login')
+      setAuthError(null)
+      setCurrentPassword('')
+      setNewPassword('')
+      setConfirmPassword('')
+    })
+  }, [clearClientSessionState])
+
+  if (phase === 'checking') {
+    return <div className="page"><div className="card skeleton">Checking session...</div></div>
+  }
+
+  if (phase === 'login') {
+    return (
+      <div className="page">
+        <section className="card" style={{ maxWidth: 520, margin: '10vh auto 0 auto' }}>
+          <h2>Login</h2>
+          <p className="meta">Sign in using username and password.</p>
+          <div className="row wrap" style={{ marginTop: 10 }}>
+            <input
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="Username"
+              autoComplete="username"
+            />
+            <input
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Password"
+              type="password"
+              autoComplete="current-password"
+            />
+            <button onClick={handleLogin} disabled={pending || !username.trim() || !password}>
+              {pending ? 'Logging in...' : 'Login'}
+            </button>
+          </div>
+          {authError && <div className="notice notice-error" style={{ marginTop: 10 }}>{authError}</div>}
+        </section>
+      </div>
+    )
+  }
+
+  if (phase === 'change-password') {
+    return (
+      <div className="page">
+        <section className="card" style={{ maxWidth: 620, margin: '10vh auto 0 auto' }}>
+          <h2>Change password</h2>
+          <p className="meta">Temporary password must be changed before continuing. Minimum is 8 characters.</p>
+          <div className="row wrap" style={{ marginTop: 10 }}>
+            <input
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+              type="password"
+              placeholder="Current password"
+              autoComplete="current-password"
+            />
+            <input
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              type="password"
+              placeholder="New password"
+              autoComplete="new-password"
+            />
+            <input
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              type="password"
+              placeholder="Confirm new password"
+              autoComplete="new-password"
+            />
+            <button onClick={handleChangePassword} disabled={pending || !currentPassword || !newPassword || !confirmPassword}>
+              {pending ? 'Saving...' : 'Save new password'}
+            </button>
+          </div>
+          {authError && <div className="notice notice-error" style={{ marginTop: 10 }}>{authError}</div>}
+        </section>
+      </div>
+    )
+  }
+
+  return <App logout={handleLogout} />
+}
+
 export default function AppRoot() {
   return (
     <QueryClientProvider client={queryClient}>
-      <App />
+      <AuthGate />
     </QueryClientProvider>
   )
 }

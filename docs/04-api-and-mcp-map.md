@@ -84,16 +84,23 @@ SSE event types:
 - `GET /api/metrics`
 
 ## 2. API Conventions
-- Auth context: `X-User-Id` header.
+- Auth context: HTTP-only session cookie from `/api/auth/login`.
 - Idempotency for mutations: `X-Command-Id`.
 - Query endpoints are read-only and do not append events.
 
 Example mutation with `command_id`:
 ```bash
+# first login and store cookie
+curl -X POST http://localhost:8080/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -c cookie.txt \
+  -d '{"username":"m4tr1x","password":"testtest"}'
+
+# then call mutation with cookie + command id
 curl -X POST http://localhost:8080/api/tasks \
   -H 'Content-Type: application/json' \
-  -H 'X-User-Id: 00000000-0000-0000-0000-000000000001' \
   -H 'X-Command-Id: demo-task-create-001' \
+  -b cookie.txt \
   -d '{"workspace_id":"10000000-0000-0000-0000-000000000001","project_id":"20000000-0000-0000-0000-000000000001","title":"Prepare release notes"}'
 ```
 

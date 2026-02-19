@@ -15,8 +15,22 @@ from shared.vector_store import normalize_embedding_model, project_embedding_ind
 def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
     memberships = db.execute(select(WorkspaceMember).where(WorkspaceMember.user_id == user.id)).scalars().all()
     workspace_ids = [m.workspace_id for m in memberships]
+    role_by_workspace = {m.workspace_id: m.role for m in memberships}
     workspaces = db.execute(select(Workspace).where(Workspace.id.in_(workspace_ids), Workspace.is_deleted == False)).scalars().all()
-    projects = db.execute(select(Project).where(Project.workspace_id.in_(workspace_ids), Project.is_deleted == False)).scalars().all()
+    projects_all = db.execute(select(Project).where(Project.workspace_id.in_(workspace_ids), Project.is_deleted == False)).scalars().all()
+    assigned_project_ids = set(
+        db.execute(
+            select(ProjectMember.project_id).where(
+                ProjectMember.workspace_id.in_(workspace_ids),
+                ProjectMember.user_id == user.id,
+            )
+        ).scalars().all()
+    )
+    projects = [
+        project
+        for project in projects_all
+        if role_by_workspace.get(project.workspace_id) in {"Owner", "Admin"} or project.id in assigned_project_ids
+    ]
     users = db.execute(
         select(User)
         .join(WorkspaceMember, WorkspaceMember.user_id == User.id)

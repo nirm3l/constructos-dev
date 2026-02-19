@@ -5,7 +5,7 @@ import { SpecificationsPanel } from '../specifications/SpecificationsPanel'
 import { NotesPanel } from '../notes/NotesPanel'
 import { QuickAddDrawer } from '../tasks/QuickAddDrawer'
 import { TasksPanel } from '../tasks/TasksPanel'
-import { GlobalSearchResultsPanel, ProfilePanel, SearchPanel } from '../auxPanels'
+import { AdminPanel, GlobalSearchResultsPanel, ProfilePanel, SearchPanel } from '../auxPanels'
 
 export function AppPrimaryPanels({ state }: { state: any }) {
   return (
@@ -333,11 +333,33 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           backendVersion={state.backendVersion}
           backendBuild={state.backendBuild}
           deployedAtUtc={state.backendDeployedAtUtc}
+          onLogout={state.logout}
           onToggleTheme={() => {
             const next = state.theme === 'light' ? 'dark' : 'light'
             state.setTheme(next)
             state.themeMutation.mutate(next)
           }}
+        />
+      ) : state.tab === 'admin' ? (
+        <AdminPanel
+          canManageUsers={state.canManageUsers}
+          workspaceId={state.workspaceId}
+          users={state.adminUsers}
+          usersLoading={state.adminUsersLoading}
+          usersError={state.adminUsersError}
+          username={state.adminCreateUsername}
+          setUsername={state.setAdminCreateUsername}
+          fullName={state.adminCreateFullName}
+          setFullName={state.setAdminCreateFullName}
+          role={state.adminCreateRole}
+          setRole={state.setAdminCreateRole}
+          createPending={state.createAdminUserMutation.isPending}
+          onCreate={state.onCreateAdminUser}
+          lastTempPassword={state.adminLastTempPassword}
+          onResetPassword={state.onResetAdminUserPassword}
+          resetPendingUserId={state.resetAdminPasswordUserId}
+          onUpdateRole={state.onUpdateAdminUserRole}
+          updateRolePendingUserId={state.updateAdminRoleUserId}
         />
       ) : state.tab === 'search' ? (
         <GlobalSearchResultsPanel

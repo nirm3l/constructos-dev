@@ -20,8 +20,9 @@ from typing import Any
 import httpx
 
 
-DEFAULT_USER_ID = "00000000-0000-0000-0000-000000000001"
 BASE_URL = os.getenv("QA_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+DEFAULT_USERNAME = os.getenv("QA_USERNAME", "m4tr1x")
+DEFAULT_PASSWORD = os.getenv("QA_PASSWORD", "testtest")
 
 
 def _iso(dt: datetime) -> str:
@@ -41,7 +42,12 @@ class Bug:
 
 class Api:
     def __init__(self) -> None:
-        self.c = httpx.Client(timeout=40.0, headers={"X-User-Id": DEFAULT_USER_ID})
+        self.c = httpx.Client(timeout=40.0)
+        login = self.c.post(
+            BASE_URL + "/api/auth/login",
+            json={"username": DEFAULT_USERNAME, "password": DEFAULT_PASSWORD},
+        )
+        login.raise_for_status()
 
     def close(self) -> None:
         self.c.close()

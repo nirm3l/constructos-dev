@@ -31,7 +31,7 @@ from .contracts import (
     SpecificationCommandState,
     UserPreferencesPatch,
 )
-from .deps import ensure_role, get_command_id, get_current_user, get_db, run_command_with_retry
+from .deps import ensure_project_access, ensure_role, get_command_id, get_current_user, get_db, run_command_with_retry
 from .eventing import (
     allocate_id,
     append_event,
@@ -47,6 +47,7 @@ from .eventing import (
 from .models import (
     ActivityLog,
     AggregateSnapshot,
+    AuthSession,
     Base,
     CommandExecution,
     Note,

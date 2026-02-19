@@ -1,7 +1,7 @@
 {
   "name": "task-management-frontend",
   "private": true,
-  "version": "0.1.146",
+  "version": "0.1.152",
   "type": "module",
   "scripts": {
     "dev": "vite",

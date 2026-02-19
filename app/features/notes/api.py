@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from shared.core import NoteCreate, NotePatch, User, ensure_role, get_command_id, get_current_user, get_db, load_note_view
+from shared.core import NoteCreate, NotePatch, User, ensure_project_access, ensure_role, get_command_id, get_current_user, get_db, load_note_view
 
 from .application import NoteApplicationService
 from .read_models import NoteListQuery, list_notes_read_model
@@ -27,7 +27,7 @@ def list_notes(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     return list_notes_read_model(
         db,
         user,
@@ -61,7 +61,11 @@ def get_note(note_id: str, db: Session = Depends(get_db), user: User = Depends(g
     note = load_note_view(db, note_id)
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
-    ensure_role(db, note["workspace_id"], user.id, {"Owner", "Admin", "Member", "Guest"})
+    project_id = str(note.get("project_id") or "")
+    if project_id:
+        ensure_project_access(db, note["workspace_id"], project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    else:
+        ensure_role(db, note["workspace_id"], user.id, {"Owner", "Admin", "Member", "Guest"})
     return note
 
 

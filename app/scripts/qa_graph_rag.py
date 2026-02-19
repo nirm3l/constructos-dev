@@ -10,14 +10,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import sys
+import os
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 
-DEFAULT_USER_ID = "00000000-0000-0000-0000-000000000001"
+DEFAULT_USERNAME = os.getenv("QA_USERNAME", "m4tr1x")
+DEFAULT_PASSWORD = os.getenv("QA_PASSWORD", "testtest")
 
 
 @dataclass
@@ -28,9 +29,14 @@ class Check:
 
 
 class Api:
-    def __init__(self, *, base_url: str, user_id: str, timeout: float) -> None:
+    def __init__(self, *, base_url: str, username: str, password: str, timeout: float) -> None:
         self.base_url = base_url.rstrip("/")
-        self.client = httpx.Client(timeout=timeout, headers={"X-User-Id": user_id})
+        self.client = httpx.Client(timeout=timeout)
+        login = self.client.post(
+            self.base_url + "/api/auth/login",
+            json={"username": username, "password": password},
+        )
+        login.raise_for_status()
 
     def close(self) -> None:
         self.client.close()
@@ -77,8 +83,8 @@ def _check_context_pack_shape(pack: dict[str, Any]) -> list[Check]:
     return checks
 
 
-def run(base_url: str, user_id: str, timeout: float) -> int:
-    api = Api(base_url=base_url, user_id=user_id, timeout=timeout)
+def run(base_url: str, username: str, password: str, timeout: float) -> int:
+    api = Api(base_url=base_url, username=username, password=password, timeout=timeout)
     checks: list[Check] = []
     try:
         bootstrap = api.get("/api/bootstrap")
@@ -135,10 +141,12 @@ def run(base_url: str, user_id: str, timeout: float) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run GraphRAG QA checks against a running API.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
-    parser.add_argument("--user-id", default=DEFAULT_USER_ID)
+    parser.add_argument("--username", default=DEFAULT_USERNAME)
+    parser.add_argument("--password", default=DEFAULT_PASSWORD)
+    parser.add_argument("--user-id", default="", help=argparse.SUPPRESS)
     parser.add_argument("--timeout", type=float, default=30.0)
     args = parser.parse_args()
-    return run(base_url=args.base_url, user_id=args.user_id, timeout=args.timeout)
+    return run(base_url=args.base_url, username=args.username, password=args.password, timeout=args.timeout)
 
 
 if __name__ == "__main__":

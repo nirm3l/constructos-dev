@@ -13,6 +13,7 @@ from shared.core import (
     SpecificationPatch,
     User,
     append_event,
+    ensure_project_access,
     ensure_role,
     load_specification_command_state,
     load_specification_view,
@@ -139,7 +140,7 @@ def require_specification_command_state(
     state = load_specification_command_state(db, specification_id)
     if not state or state.is_deleted:
         raise HTTPException(status_code=404, detail="Specification not found")
-    ensure_role(db, state.workspace_id, user.id, allowed)
+    ensure_project_access(db, state.workspace_id, state.project_id, user.id, allowed)
     return state.workspace_id, state.project_id, state.status, bool(state.archived)
 
 
@@ -157,6 +158,13 @@ class CreateSpecificationHandler:
     def __call__(self) -> dict:
         ensure_role(self.ctx.db, self.payload.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
         _require_project_scope(self.ctx.db, workspace_id=self.payload.workspace_id, project_id=self.payload.project_id)
+        ensure_project_access(
+            self.ctx.db,
+            self.payload.workspace_id,
+            self.payload.project_id,
+            self.ctx.user.id,
+            {"Owner", "Admin", "Member"},
+        )
 
         title = _normalize_specification_title(self.payload.title)
         if not title:

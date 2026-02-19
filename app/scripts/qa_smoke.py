@@ -10,6 +10,7 @@ failures as BUG tasks in the `m4trix` project.
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -19,8 +20,9 @@ from typing import Any
 import httpx
 
 
-DEFAULT_USER_ID = "00000000-0000-0000-0000-000000000001"
 BASE_URL = "http://127.0.0.1:8000"
+DEFAULT_USERNAME = os.getenv("QA_USERNAME", "m4tr1x")
+DEFAULT_PASSWORD = os.getenv("QA_PASSWORD", "testtest")
 
 
 def _iso(dt: datetime) -> str:
@@ -40,7 +42,12 @@ class Bug:
 
 class Api:
     def __init__(self) -> None:
-        self.c = httpx.Client(timeout=30.0, headers={"X-User-Id": DEFAULT_USER_ID})
+        self.c = httpx.Client(timeout=30.0)
+        login = self.c.post(
+            BASE_URL + "/api/auth/login",
+            json={"username": DEFAULT_USERNAME, "password": DEFAULT_PASSWORD},
+        )
+        login.raise_for_status()
 
     def close(self) -> None:
         self.c.close()
@@ -113,7 +120,7 @@ def main() -> int:
             bugs.append(
                 Bug(
                     title="Bootstrap fails on clean environment",
-                    steps="1. Start app\n2. Call GET /api/bootstrap with default user header",
+                    steps="1. Start app\n2. Login as default user\n3. Call GET /api/bootstrap",
                     expected="200 OK with at least 1 workspace",
                     actual=f"Exception: {exc!r}",
                 )

@@ -11,6 +11,7 @@ from shared.core import (
     ProjectRulePatch,
     User,
     append_event,
+    ensure_project_access,
     allocate_id,
     ensure_role,
     load_project_rule_command_state,
@@ -33,7 +34,7 @@ def require_project_rule_command_state(db: Session, user: User, rule_id: str, *,
     state = load_project_rule_command_state(db, rule_id)
     if not state or state.is_deleted:
         raise HTTPException(status_code=404, detail="Project rule not found")
-    ensure_role(db, state.workspace_id, user.id, allowed)
+    ensure_project_access(db, state.workspace_id, state.project_id, user.id, allowed)
     return state.workspace_id, state.project_id
 
 
@@ -51,6 +52,13 @@ class CreateProjectRuleHandler:
     def __call__(self) -> dict:
         ensure_role(self.ctx.db, self.payload.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
         _require_project_scope(self.ctx.db, workspace_id=self.payload.workspace_id, project_id=self.payload.project_id)
+        ensure_project_access(
+            self.ctx.db,
+            self.payload.workspace_id,
+            self.payload.project_id,
+            self.ctx.user.id,
+            {"Owner", "Admin", "Member"},
+        )
         rid = allocate_id(self.ctx.db)
         title = self.payload.title.strip()
         if not title:

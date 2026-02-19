@@ -83,7 +83,7 @@ Consistency by store:
 - Multi-runtime domain reuse: same core services exposed via REST and MCP.
 
 ## 7. Security and Access Model
-- User context from `X-User-Id` (or query fallback).
+- User context from HTTP-only auth session cookie (`/api/auth/login` -> `m4tr1x_session`).
 - Workspace role checks (`Owner/Admin/Member/Guest`) on read/write flows.
 - MCP controls:
   - optional token (`MCP_AUTH_TOKEN`),

@@ -33,6 +33,10 @@ class User(Base, TimeMixin):
     username: Mapped[str] = mapped_column(String(64), unique=True)
     full_name: Mapped[str] = mapped_column(String(128))
     user_type: Mapped[str] = mapped_column(String(16), default="human")
+    password_hash: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=True)
+    password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     theme: Mapped[str] = mapped_column(String(16), default="light")
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")
     notifications_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -265,6 +269,14 @@ class CommandExecution(Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
     response_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class AuthSession(Base, TimeMixin):
+    __tablename__ = "auth_sessions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class VectorChunk(Base, TimeMixin):

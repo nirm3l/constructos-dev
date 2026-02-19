@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from shared.commanding import execute_command
-from shared.core import BulkAction, CommentCreate, ReorderPayload, TaskAutomationRun, TaskCreate, TaskPatch, User, ensure_role
+from shared.core import BulkAction, CommentCreate, ReorderPayload, TaskAutomationRun, TaskCreate, TaskPatch, User, ensure_project_access
 
 from .command_handlers import (
     AddCommentHandler,
@@ -98,7 +98,7 @@ class TaskApplicationService:
         return {"updated": updated}
 
     def reorder_tasks(self, workspace_id: str, project_id: str, payload: ReorderPayload) -> dict:
-        ensure_role(self.db, workspace_id, self.user.id, {"Owner", "Admin", "Member"})
+        ensure_project_access(self.db, workspace_id, project_id, self.user.id, {"Owner", "Admin", "Member"})
         handler = ReorderTasksHandler(self.ctx, workspace_id, project_id, payload)
         for idx, task_id in enumerate(payload.ordered_ids):
             execute_command(

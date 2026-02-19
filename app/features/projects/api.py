@@ -1,7 +1,16 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from shared.core import Project, ProjectCreate, ProjectMemberUpsert, ProjectPatch, ensure_role, get_command_id, get_current_user, get_db
+from shared.core import (
+    Project,
+    ProjectCreate,
+    ProjectMemberUpsert,
+    ProjectPatch,
+    ensure_project_access,
+    get_command_id,
+    get_current_user,
+    get_db,
+)
 from shared.knowledge_graph import graph_context_pack, graph_get_project_overview, graph_get_project_subgraph, require_graph_available
 from .application import ProjectApplicationService
 from .read_models import (
@@ -18,7 +27,7 @@ def _load_project_with_access(db: Session, user, project_id: str) -> Project:
     project = db.get(Project, project_id)
     if not project or project.is_deleted:
         raise HTTPException(status_code=404, detail="Project not found")
-    ensure_role(db, project.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    ensure_project_access(db, project.workspace_id, project.id, user.id, {"Owner", "Admin", "Member", "Guest"})
     return project
 
 

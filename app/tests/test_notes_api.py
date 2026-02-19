@@ -18,7 +18,10 @@ def build_client(tmp_path: Path) -> TestClient:
 
     main = reload(main)
     main.bootstrap_data()
-    return TestClient(main.app)
+    client = TestClient(main.app)
+    login = client.post('/api/auth/login', json={'username': 'm4tr1x', 'password': 'testtest'})
+    assert login.status_code == 200
+    return client
 
 
 def test_create_and_patch_note(tmp_path: Path):

@@ -18,6 +18,7 @@ from shared.core import (
     Task,
     User,
     append_event,
+    ensure_project_access,
     ensure_role,
     load_note_command_state,
     load_note_view,
@@ -40,7 +41,10 @@ def require_note_command_state(
     state = load_note_command_state(db, note_id)
     if not state or state.is_deleted:
         raise HTTPException(status_code=404, detail="Note not found")
-    ensure_role(db, state.workspace_id, user.id, allowed)
+    if state.project_id:
+        ensure_project_access(db, state.workspace_id, state.project_id, user.id, allowed)
+    else:
+        ensure_role(db, state.workspace_id, user.id, allowed)
     return state.workspace_id, state.project_id, state.task_id, state.specification_id, bool(state.archived), bool(state.pinned)
 
 
@@ -163,6 +167,13 @@ class CreateNoteHandler:
     def __call__(self) -> dict:
         ensure_role(self.ctx.db, self.payload.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
         _require_project_scope(self.ctx.db, workspace_id=self.payload.workspace_id, project_id=self.payload.project_id)
+        ensure_project_access(
+            self.ctx.db,
+            self.payload.workspace_id,
+            self.payload.project_id,
+            self.ctx.user.id,
+            {"Owner", "Admin", "Member"},
+        )
         title = _normalize_note_title(self.payload.title)
         if not title:
             raise HTTPException(status_code=422, detail="title cannot be empty")
@@ -247,6 +258,13 @@ class PatchNoteHandler:
             if not data["project_id"]:
                 raise HTTPException(status_code=422, detail="project_id cannot be null")
             _require_project_scope(self.ctx.db, workspace_id=workspace_id, project_id=str(data["project_id"]))
+            ensure_project_access(
+                self.ctx.db,
+                workspace_id,
+                str(data["project_id"]),
+                self.ctx.user.id,
+                {"Owner", "Admin", "Member"},
+            )
             effective_project_id = str(data["project_id"])
             if specification_id and "specification_id" not in data:
                 raise HTTPException(status_code=409, detail="Cannot change project while note is linked to specification")

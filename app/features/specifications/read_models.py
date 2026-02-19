@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from shared.core import Specification, User, ensure_role, serialize_specification
+from shared.core import Specification, User, ensure_project_access, serialize_specification
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,7 +21,7 @@ class SpecificationListQuery:
 
 
 def list_specifications_read_model(db: Session, user: User, query: SpecificationListQuery) -> dict:
-    ensure_role(db, query.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    ensure_project_access(db, query.workspace_id, query.project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     stmt = select(Specification).where(
         Specification.workspace_id == query.workspace_id,
         Specification.project_id == query.project_id,

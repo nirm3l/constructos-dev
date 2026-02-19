@@ -7,6 +7,7 @@ from shared.core import (
     ProjectRuleCreate,
     ProjectRulePatch,
     User,
+    ensure_project_access,
     ensure_role,
     get_command_id,
     get_current_user,
@@ -30,7 +31,7 @@ def list_project_rules(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     return list_project_rules_read_model(
         db,
         user,
@@ -59,7 +60,7 @@ def get_project_rule(rule_id: str, db: Session = Depends(get_db), user: User = D
     rule = load_project_rule_view(db, rule_id)
     if not rule:
         raise HTTPException(status_code=404, detail="Project rule not found")
-    ensure_role(db, rule["workspace_id"], user.id, {"Owner", "Admin", "Member", "Guest"})
+    ensure_project_access(db, rule["workspace_id"], rule["project_id"], user.id, {"Owner", "Admin", "Member", "Guest"})
     return rule
 
 

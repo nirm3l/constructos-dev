@@ -48,7 +48,7 @@ export function useRealtimeEffects(c: any) {
 
   React.useEffect(() => {
     if (!userId || !workspaceId) return
-    const streamUrl = `/api/notifications/stream?user_id=${encodeURIComponent(userId)}&workspace_id=${encodeURIComponent(workspaceId || '')}`
+    const streamUrl = `/api/notifications/stream?workspace_id=${encodeURIComponent(workspaceId || '')}`
     const es = new EventSource(streamUrl)
 
     const onNotification = (evt: MessageEvent) => {

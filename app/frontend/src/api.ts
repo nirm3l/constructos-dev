@@ -1,4 +1,9 @@
 import type {
+  AdminUserCreateResponse,
+  AdminUserRoleUpdateResponse,
+  AdminUserResetPasswordResponse,
+  AdminUsersPage,
+  AuthMePayload,
   BootstrapPayload,
   AgentChatResponse,
   GraphContextPack,
@@ -73,9 +78,9 @@ export async function api<T>(path: string, userId: string, init?: RequestInit): 
   const commandId = method === 'GET' ? undefined : (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`)
   const res = await fetch(path, {
     ...init,
+    credentials: 'same-origin',
     headers: {
       'Content-Type': 'application/json',
-      'X-User-Id': userId,
       ...(commandId ? { 'X-Command-Id': commandId } : {}),
       ...(init?.headers ?? {})
     }
@@ -90,7 +95,7 @@ export async function api<T>(path: string, userId: string, init?: RequestInit): 
 async function uploadApi<T>(path: string, userId: string, body: FormData): Promise<T> {
   const res = await fetch(path, {
     method: 'POST',
-    headers: { 'X-User-Id': userId },
+    credentials: 'same-origin',
     body
   })
   if (!res.ok) {
@@ -110,6 +115,95 @@ export async function getAppVersion(): Promise<AppVersionPayload> {
   }
   return (await res.json()) as AppVersionPayload
 }
+
+export async function authLogin(payload: { username: string; password: string }): Promise<AuthMePayload> {
+  const res = await fetch('/api/auth/login', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    const raw = await res.text()
+    throw new Error(formatApiError(raw, res.status))
+  }
+  return (await res.json()) as AuthMePayload
+}
+
+export async function authMe(): Promise<AuthMePayload> {
+  const res = await fetch('/api/auth/me', {
+    credentials: 'same-origin',
+  })
+  if (!res.ok) {
+    const raw = await res.text()
+    throw new Error(formatApiError(raw, res.status))
+  }
+  return (await res.json()) as AuthMePayload
+}
+
+export async function authLogout(): Promise<{ ok: boolean }> {
+  const res = await fetch('/api/auth/logout', {
+    method: 'POST',
+    credentials: 'same-origin',
+  })
+  if (!res.ok) {
+    const raw = await res.text()
+    throw new Error(formatApiError(raw, res.status))
+  }
+  return (await res.json()) as { ok: boolean }
+}
+
+export async function authChangePassword(payload: { current_password: string; new_password: string }): Promise<AuthMePayload> {
+  const res = await fetch('/api/auth/change-password', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    const raw = await res.text()
+    throw new Error(formatApiError(raw, res.status))
+  }
+  return (await res.json()) as AuthMePayload
+}
+
+export const listAdminUsers = (userId: string, workspaceId: string) =>
+  api<AdminUsersPage>(
+    `/api/admin/users${queryString({
+      workspace_id: workspaceId,
+    })}`,
+    userId
+  )
+
+export const createAdminUser = (
+  userId: string,
+  payload: {
+    workspace_id: string
+    username: string
+    full_name?: string
+    role?: string
+  }
+) => api<AdminUserCreateResponse>('/api/admin/users', userId, { method: 'POST', body: JSON.stringify(payload) })
+
+export const resetAdminUserPassword = (
+  userId: string,
+  targetUserId: string,
+  payload: { workspace_id: string }
+) =>
+  api<AdminUserResetPasswordResponse>(`/api/admin/users/${targetUserId}/reset-password`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const updateAdminUserRole = (
+  userId: string,
+  targetUserId: string,
+  payload: { workspace_id: string; role: string }
+) =>
+  api<AdminUserRoleUpdateResponse>(`/api/admin/users/${targetUserId}/set-role`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
 
 export const getTasks = (
   userId: string,
@@ -565,9 +659,8 @@ export const uploadAttachment = async (
   return uploadApi<AttachmentRef>('/api/attachments/upload', userId, form)
 }
 
-export const attachmentDownloadUrl = (payload: { user_id: string; workspace_id: string; path: string }): string =>
+export const attachmentDownloadUrl = (payload: { workspace_id: string; path: string; user_id?: string }): string =>
   `/api/attachments/download${queryString({
-    user_id: payload.user_id,
     workspace_id: payload.workspace_id,
     path: payload.path
   })}`

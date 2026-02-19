@@ -441,7 +441,7 @@ export function ProjectsInlineEditor({
               <button
                 key={`edit-member-${u.id}`}
                 type="button"
-                className={`status-chip ${selected ? 'active' : ''}`}
+                className={`status-chip project-member-chip ${selected ? 'active' : ''}`}
                 onClick={() => toggleEditProjectMember(u.id)}
                 aria-pressed={selected}
                 title={`${u.full_name} (${u.user_type})`}

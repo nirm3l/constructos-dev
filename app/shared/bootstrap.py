@@ -16,6 +16,7 @@ from features.projects.domain import EVENT_CREATED as PROJECT_EVENT_CREATED
 from features.rules.domain import EVENT_CREATED as PROJECT_RULE_EVENT_CREATED
 from features.specifications.domain import EVENT_CREATED as SPECIFICATION_EVENT_CREATED
 from features.tasks.domain import EVENT_CREATED as TASK_EVENT_CREATED
+from .auth import generate_temporary_password, hash_password
 from . import models as shared_models
 from .models import (
     Note,
@@ -53,14 +54,24 @@ def ensure_system_users(db: Session):
                 username=AGENT_SYSTEM_USERNAME,
                 full_name=AGENT_SYSTEM_FULL_NAME,
                 user_type="agent",
+                password_hash=None,
+                must_change_password=False,
+                password_changed_at=None,
+                is_active=True,
                 timezone="UTC",
                 theme="dark",
             )
         )
     else:
         agent_user = db.get(User, AGENT_SYSTEM_USER_ID)
-        if agent_user and agent_user.user_type != "agent":
-            agent_user.user_type = "agent"
+        if agent_user:
+            if agent_user.user_type != "agent":
+                agent_user.user_type = "agent"
+            # System agent does not authenticate with username/password.
+            agent_user.password_hash = None
+            agent_user.must_change_password = False
+            agent_user.password_changed_at = None
+            agent_user.is_active = True
     workspace = db.get(Workspace, BOOTSTRAP_WORKSPACE_ID)
     if workspace:
         membership = db.execute(
@@ -70,16 +81,79 @@ def ensure_system_users(db: Session):
             )
         ).scalar_one_or_none()
         if not membership:
-            db.add(WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=AGENT_SYSTEM_USER_ID, role="Member"))
+            db.add(WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=AGENT_SYSTEM_USER_ID, role="Admin"))
+        elif membership.role not in {"Owner", "Admin"}:
+            membership.role = "Admin"
     db.commit()
+
+
+def ensure_non_human_workspace_admin_roles(db: Session):
+    memberships = db.execute(
+        select(WorkspaceMember)
+        .join(User, User.id == WorkspaceMember.user_id)
+        .where(User.user_type != "human")
+    ).scalars().all()
+    changed = False
+    for membership in memberships:
+        if membership.role in {"Owner", "Admin"}:
+            continue
+        membership.role = "Admin"
+        changed = True
+    if changed:
+        db.commit()
 
 
 def ensure_user_table_columns(db: Session):
     existing = {column["name"] for column in inspect(db.bind).get_columns("users")}
     if "user_type" not in existing:
         db.execute(text("ALTER TABLE users ADD COLUMN user_type VARCHAR(16) DEFAULT 'human'"))
+    if "password_hash" not in existing:
+        db.execute(text("ALTER TABLE users ADD COLUMN password_hash VARCHAR(256)"))
+    if "must_change_password" not in existing:
+        db.execute(text("ALTER TABLE users ADD COLUMN must_change_password BOOLEAN DEFAULT TRUE"))
+    if "password_changed_at" not in existing:
+        db.execute(text("ALTER TABLE users ADD COLUMN password_changed_at TIMESTAMP WITH TIME ZONE"))
+    if "is_active" not in existing:
+        db.execute(text("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT TRUE"))
     db.execute(text("UPDATE users SET user_type='human' WHERE user_type IS NULL OR user_type = ''"))
     db.execute(text("UPDATE users SET user_type='agent' WHERE id = :agent_id"), {"agent_id": AGENT_SYSTEM_USER_ID})
+    db.execute(text("UPDATE users SET must_change_password=TRUE WHERE must_change_password IS NULL"))
+    db.execute(text("UPDATE users SET is_active=TRUE WHERE is_active IS NULL"))
+    db.commit()
+
+
+def ensure_user_password_defaults(db: Session):
+    default_user = db.get(User, DEFAULT_USER_ID)
+    if default_user:
+        if not default_user.password_hash:
+            default_user.password_hash = hash_password("testtest")
+            default_user.must_change_password = False
+            default_user.password_changed_at = datetime.now(timezone.utc)
+        default_user.is_active = True
+
+    legacy_users = db.execute(
+        select(User).where(
+            User.id != DEFAULT_USER_ID,
+            User.user_type == "human",
+            User.password_hash.is_(None),
+        )
+    ).scalars().all()
+    for user in legacy_users:
+        user.password_hash = hash_password(generate_temporary_password(12))
+        user.must_change_password = True
+        user.is_active = True
+        user.password_changed_at = None
+
+    # Non-human users (agent/bot/service) should not carry password state.
+    non_human_users = db.execute(
+        select(User).where(User.user_type != "human")
+    ).scalars().all()
+    for user in non_human_users:
+        user.password_hash = None
+        user.must_change_password = False
+        user.password_changed_at = None
+        user.is_active = True
+
     db.commit()
 
 
@@ -213,6 +287,10 @@ def bootstrap_data():
                         username=BOOTSTRAP_USERNAME,
                         full_name=BOOTSTRAP_FULL_NAME,
                         user_type="human",
+                        password_hash=hash_password("testtest"),
+                        must_change_password=False,
+                        password_changed_at=datetime.now(timezone.utc),
+                        is_active=True,
                         timezone="Europe/Sarajevo",
                         theme="light",
                     ),
@@ -222,7 +300,7 @@ def bootstrap_data():
             db.add_all(
                 [
                     WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=DEFAULT_USER_ID, role="Owner"),
-                    WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=AGENT_SYSTEM_USER_ID, role="Member"),
+                    WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=AGENT_SYSTEM_USER_ID, role="Admin"),
                 ]
             )
             db.commit()
@@ -246,8 +324,13 @@ def bootstrap_data():
                 )
             ).scalar_one_or_none()
             if not agent_member:
-                db.add(WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=AGENT_SYSTEM_USER_ID, role="Member"))
+                db.add(WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=AGENT_SYSTEM_USER_ID, role="Admin"))
+            elif agent_member.role not in {"Owner", "Admin"}:
+                agent_member.role = "Admin"
             db.commit()
+
+        ensure_user_password_defaults(db)
+        ensure_non_human_workspace_admin_roles(db)
 
         if current_version(db, "Project", BOOTSTRAP_PROJECT_ID) == 0:
             append_event(

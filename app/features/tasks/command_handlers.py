@@ -24,6 +24,7 @@ from shared.core import (
     TaskWatcher,
     User,
     append_event,
+    ensure_project_access,
     ensure_role,
     get_kurrent_client,
     get_user_zoneinfo,
@@ -163,7 +164,10 @@ def require_task_command_state(db: Session, user: User, task_id: str, *, allowed
     state = load_task_command_state(db, task_id)
     if not state or state.is_deleted:
         raise HTTPException(status_code=404, detail="Task not found")
-    ensure_role(db, state.workspace_id, user.id, allowed)
+    if state.project_id:
+        ensure_project_access(db, state.workspace_id, state.project_id, user.id, allowed)
+    else:
+        ensure_role(db, state.workspace_id, user.id, allowed)
     return state.workspace_id, state.project_id, state.status, state.archived
 
 
@@ -181,6 +185,13 @@ class CreateTaskHandler:
     def __call__(self) -> dict:
         ensure_role(self.ctx.db, self.payload.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
         project = _require_project_scope(self.ctx.db, workspace_id=self.payload.workspace_id, project_id=self.payload.project_id)
+        ensure_project_access(
+            self.ctx.db,
+            self.payload.workspace_id,
+            self.payload.project_id,
+            self.ctx.user.id,
+            {"Owner", "Admin", "Member"},
+        )
         title = _normalize_task_title(self.payload.title)
         if not title:
             raise HTTPException(status_code=422, detail="title cannot be empty")
@@ -307,6 +318,13 @@ class PatchTaskHandler:
             if not data["project_id"]:
                 raise HTTPException(status_code=422, detail="project_id cannot be null")
             _require_project_scope(self.ctx.db, workspace_id=workspace_id, project_id=str(data["project_id"]))
+            ensure_project_access(
+                self.ctx.db,
+                workspace_id,
+                str(data["project_id"]),
+                self.ctx.user.id,
+                {"Owner", "Admin", "Member"},
+            )
         if "labels" in data and data["labels"] is not None:
             data["labels"] = _normalize_tags(data["labels"])
         if "external_refs" in data and data["external_refs"] is not None:

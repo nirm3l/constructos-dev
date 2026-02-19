@@ -11,6 +11,7 @@ from shared.core import (
     SpecificationCreate,
     SpecificationPatch,
     User,
+    ensure_project_access,
     ensure_role,
     get_command_id,
     get_current_user,
@@ -71,7 +72,7 @@ def list_specifications(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     return list_specifications_read_model(
         db,
         user,
@@ -103,7 +104,13 @@ def get_specification(specification_id: str, db: Session = Depends(get_db), user
     specification = load_specification_view(db, specification_id)
     if not specification:
         raise HTTPException(status_code=404, detail="Specification not found")
-    ensure_role(db, specification["workspace_id"], user.id, {"Owner", "Admin", "Member", "Guest"})
+    ensure_project_access(
+        db,
+        specification["workspace_id"],
+        specification["project_id"],
+        user.id,
+        {"Owner", "Admin", "Member", "Guest"},
+    )
     return specification
 
 

@@ -16,6 +16,7 @@ from shared.core import (
     TaskCreate,
     TaskPatch,
     User,
+    ensure_project_access,
     ensure_role,
     load_note_command_state,
     load_note_view,
@@ -237,7 +238,10 @@ class SpecificationApplicationService:
         task_state = load_task_command_state(self.db, task_id)
         if not task_state or task_state.is_deleted:
             raise HTTPException(status_code=404, detail="Task not found")
-        ensure_role(self.db, task_state.workspace_id, self.user.id, MUTATION_ROLES)
+        if task_state.project_id:
+            ensure_project_access(self.db, task_state.workspace_id, task_state.project_id, self.user.id, MUTATION_ROLES)
+        else:
+            ensure_role(self.db, task_state.workspace_id, self.user.id, MUTATION_ROLES)
         if task_state.workspace_id != workspace_id:
             raise HTTPException(status_code=400, detail="Task does not belong to specification workspace")
         if task_state.project_id != project_id:
@@ -266,7 +270,10 @@ class SpecificationApplicationService:
         note_state = load_note_command_state(self.db, note_id)
         if not note_state or note_state.is_deleted:
             raise HTTPException(status_code=404, detail="Note not found")
-        ensure_role(self.db, note_state.workspace_id, self.user.id, MUTATION_ROLES)
+        if note_state.project_id:
+            ensure_project_access(self.db, note_state.workspace_id, note_state.project_id, self.user.id, MUTATION_ROLES)
+        else:
+            ensure_role(self.db, note_state.workspace_id, self.user.id, MUTATION_ROLES)
         if note_state.workspace_id != workspace_id:
             raise HTTPException(status_code=400, detail="Note does not belong to specification workspace")
         if note_state.project_id != project_id:

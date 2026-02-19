@@ -18,6 +18,7 @@ from shared.core import (
     TaskPatch,
     TaskWatcher,
     User,
+    ensure_project_access,
     ensure_role,
     export_tasks_response,
     get_command_id,
@@ -53,7 +54,7 @@ def list_tasks(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     return list_tasks_read_model(
         db,
         user,
@@ -169,7 +170,7 @@ def calendar_view(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     user_tz = get_user_zoneinfo(user)
     start = datetime.combine(from_date, datetime.min.time(), tzinfo=user_tz).astimezone(timezone.utc)
     end = datetime.combine(to_date, datetime.max.time(), tzinfo=user_tz).astimezone(timezone.utc)
@@ -201,7 +202,7 @@ def list_comments(task_id: str, db: Session = Depends(get_db), user: User = Depe
     task = db.get(Task, task_id)
     if not task or task.is_deleted:
         raise HTTPException(status_code=404, detail="Task not found")
-    ensure_role(db, task.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    ensure_project_access(db, task.workspace_id, task.project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     comments = db.execute(select(TaskComment).where(TaskComment.task_id == task_id).order_by(TaskComment.created_at.desc())).scalars().all()
     return [{"id": c.id, "task_id": c.task_id, "user_id": c.user_id, "body": c.body, "created_at": to_iso_utc(c.created_at)} for c in comments]
 
@@ -232,7 +233,7 @@ def task_activity(task_id: str, db: Session = Depends(get_db), user: User = Depe
     task = db.get(Task, task_id)
     if not task or task.is_deleted:
         raise HTTPException(status_code=404, detail="Task not found")
-    ensure_role(db, task.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    ensure_project_access(db, task.workspace_id, task.project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     logs = db.execute(select(ActivityLog).where(ActivityLog.task_id == task_id).order_by(ActivityLog.created_at.desc()).limit(200)).scalars().all()
     out = []
     for l in logs:
@@ -251,7 +252,7 @@ def export_tasks(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member"})
+    ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member"})
     return export_tasks_response(db, workspace_id, project_id, format)
 
 

@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from shared.core import Project, SavedViewCreate, User, append_event, allocate_id, ensure_role, load_saved_view
+from shared.core import Project, SavedViewCreate, User, append_event, allocate_id, ensure_project_access, ensure_role, load_saved_view
 from .domain import EVENT_CREATED as SAVED_VIEW_EVENT_CREATED
 
 
@@ -24,6 +24,13 @@ class CreateSavedViewHandler:
     def __call__(self) -> dict:
         role_required = {"Owner", "Admin", "Member"} if self.payload.shared else {"Owner", "Admin", "Member", "Guest"}
         ensure_role(self.ctx.db, self.payload.workspace_id, self.ctx.user.id, role_required)
+        ensure_project_access(
+            self.ctx.db,
+            self.payload.workspace_id,
+            self.payload.project_id,
+            self.ctx.user.id,
+            role_required,
+        )
         project = self.ctx.db.get(Project, self.payload.project_id)
         if not project or project.is_deleted:
             raise HTTPException(status_code=404, detail="Project not found")

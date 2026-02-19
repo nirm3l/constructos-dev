@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from shared.core import Note, User, ensure_role, serialize_note
+from shared.core import Note, User, ensure_project_access, serialize_note
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,7 +24,7 @@ class NoteListQuery:
 
 
 def list_notes_read_model(db: Session, user: User, query: NoteListQuery) -> dict:
-    ensure_role(db, query.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    ensure_project_access(db, query.workspace_id, query.project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     stmt = select(Note).where(
         Note.workspace_id == query.workspace_id,
         Note.project_id == query.project_id,

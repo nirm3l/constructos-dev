@@ -1,5 +1,5 @@
 import React from 'react'
-import type { Note, Specification, Task } from '../types'
+import type { AdminWorkspaceUser, Note, Specification, Task } from '../types'
 import { tagHue } from '../utils/ui'
 import { Icon } from './shared/uiHelpers'
 import { TaskListItem } from './tasks/taskViews'
@@ -106,6 +106,7 @@ export function ProfilePanel({
   backendVersion,
   backendBuild,
   deployedAtUtc,
+  onLogout,
   onToggleTheme,
 }: {
   userName: string
@@ -114,6 +115,7 @@ export function ProfilePanel({
   backendVersion: string
   backendBuild: string | null
   deployedAtUtc: string | null
+  onLogout: () => void
   onToggleTheme: () => void
 }) {
   return (
@@ -129,6 +131,153 @@ export function ProfilePanel({
       <p className="meta">Deployed (UTC): {deployedAtUtc ?? 'unknown'}</p>
       <div className="row">
         <button onClick={onToggleTheme}>Toggle Theme</button>
+        <button onClick={onLogout}>Logout</button>
+      </div>
+    </section>
+  )
+}
+
+export function AdminPanel({
+  canManageUsers,
+  workspaceId,
+  users,
+  usersLoading,
+  usersError,
+  username,
+  setUsername,
+  fullName,
+  setFullName,
+  role,
+  setRole,
+  createPending,
+  onCreate,
+  lastTempPassword,
+  onResetPassword,
+  resetPendingUserId,
+  onUpdateRole,
+  updateRolePendingUserId,
+}: {
+  canManageUsers: boolean
+  workspaceId: string
+  users: AdminWorkspaceUser[]
+  usersLoading: boolean
+  usersError: string | null
+  username: string
+  setUsername: (value: string) => void
+  fullName: string
+  setFullName: (value: string) => void
+  role: string
+  setRole: (value: string) => void
+  createPending: boolean
+  onCreate: () => void
+  lastTempPassword: string | null
+  onResetPassword: (userId: string) => void
+  resetPendingUserId: string | null
+  onUpdateRole: (userId: string, role: string) => void
+  updateRolePendingUserId: string | null
+}) {
+  if (!canManageUsers) {
+    return (
+      <section className="card">
+        <h2>Admin</h2>
+        <p className="meta">Admin access required.</p>
+      </section>
+    )
+  }
+
+  return (
+    <section className="card">
+      <h2>Admin</h2>
+      <p className="meta">Workspace: {workspaceId || 'n/a'}</p>
+      <div className="row wrap" style={{ marginTop: 10 }}>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          placeholder="Username (3-64 chars)"
+          autoComplete="off"
+        />
+        <input
+          value={fullName}
+          onChange={(e) => setFullName(e.target.value)}
+          placeholder="Full name (optional)"
+          autoComplete="off"
+        />
+        <select
+          value={role}
+          onChange={(e) => setRole(e.target.value)}
+          aria-label="New user workspace role"
+        >
+          <option value="Member">Member</option>
+          <option value="Admin">Admin</option>
+          <option value="Guest">Guest</option>
+          <option value="Owner">Owner</option>
+        </select>
+        <button onClick={onCreate} disabled={createPending || !username.trim()}>
+          {createPending ? 'Creating...' : 'Create user'}
+        </button>
+      </div>
+      {lastTempPassword && (
+        <div className="notice" style={{ marginTop: 10 }}>
+          Temporary password: <code>{lastTempPassword}</code>
+        </div>
+      )}
+      <div style={{ marginTop: 14 }}>
+        <h3 style={{ marginBottom: 8 }}>Workspace users</h3>
+        {usersLoading ? (
+          <div className="meta">Loading users...</div>
+        ) : usersError ? (
+          <div className="notice notice-error">{usersError}</div>
+        ) : users.length === 0 ? (
+          <div className="meta">No users.</div>
+        ) : (
+          <div className="task-list">
+            {users.map((item) => {
+              const canResetPassword = item.can_reset_password ?? item.user_type === 'human'
+              const roleUpdatePending = updateRolePendingUserId === item.id
+              return (
+                <div key={item.id} className="task-row">
+                  <div className="task-main">
+                    <div className="row wrap" style={{ gap: 8 }}>
+                      <strong>{item.username}</strong>
+                      <span className="status-chip">{item.role}</span>
+                      {canResetPassword && item.must_change_password && <span className="status-chip">must change password</span>}
+                      {!canResetPassword && <span className="status-chip">service account</span>}
+                      {!item.is_active && <span className="status-chip">inactive</span>}
+                    </div>
+                    <div className="meta">{item.full_name || '-'}</div>
+                  </div>
+                  <div className="row wrap" style={{ gap: 8 }}>
+                    <select
+                      value={item.role}
+                      onChange={(e) => {
+                        const nextRole = e.target.value
+                        if (nextRole === item.role) return
+                        onUpdateRole(item.id, nextRole)
+                      }}
+                      disabled={roleUpdatePending}
+                      title="Workspace role"
+                      aria-label={`Set workspace role for ${item.username}`}
+                    >
+                      <option value="Owner">Owner</option>
+                      <option value="Admin">Admin</option>
+                      <option value="Member">Member</option>
+                      <option value="Guest">Guest</option>
+                    </select>
+                    {canResetPassword ? (
+                      <button
+                        className="status-chip"
+                        onClick={() => onResetPassword(item.id)}
+                        disabled={resetPendingUserId === item.id}
+                      >
+                        {resetPendingUserId === item.id ? 'Resetting...' : 'Reset password'}
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
     </section>
   )

@@ -7,6 +7,66 @@ export type User = {
   theme: 'light' | 'dark'
 }
 
+export type AuthUser = {
+  id: string
+  username: string
+  full_name: string
+  user_type: 'human' | 'agent'
+  timezone: string
+  theme: 'light' | 'dark'
+  must_change_password: boolean
+  memberships: Array<{ workspace_id: string; role: string }>
+}
+
+export type AuthMePayload = {
+  ok: boolean
+  user: AuthUser
+}
+
+export type AdminWorkspaceUser = {
+  id: string
+  username: string
+  full_name: string
+  user_type: 'human' | 'agent' | 'bot' | string
+  role: string
+  is_active: boolean
+  must_change_password: boolean
+  can_reset_password?: boolean
+}
+
+export type AdminUsersPage = {
+  workspace_id: string
+  items: AdminWorkspaceUser[]
+  total: number
+}
+
+export type AdminUserCreateResponse = {
+  workspace_id: string
+  user: {
+    id: string
+    username: string
+    full_name: string
+    user_type: 'human' | 'agent'
+    role: string
+    must_change_password: boolean
+    is_active: boolean
+  }
+  temporary_password: string
+}
+
+export type AdminUserResetPasswordResponse = {
+  ok: boolean
+  user_id: string
+  temporary_password: string
+}
+
+export type AdminUserRoleUpdateResponse = {
+  ok: boolean
+  workspace_id: string
+  user_id: string
+  role: string
+}
+
 export type ExternalRef = {
   url: string
   title?: string

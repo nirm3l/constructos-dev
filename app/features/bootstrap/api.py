@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 
 from shared.core import emit_system_notifications, get_current_user, get_db
@@ -13,6 +13,7 @@ from .read_models import bootstrap_payload_read_model
 router = APIRouter()
 BASE_DIR = Path(__file__).resolve().parents[2]
 INDEX_HTML = BASE_DIR / "static" / "index.html"
+FAVICON_ICO = BASE_DIR / "static" / "favicon.ico"
 
 
 @router.get("/")
@@ -25,6 +26,14 @@ def root():
             "Expires": "0",
         },
     )
+
+
+@router.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    if FAVICON_ICO.exists():
+        return FileResponse(str(FAVICON_ICO), media_type="image/x-icon")
+    # Avoid noisy 404 in browsers when favicon is not present.
+    return Response(status_code=204)
 
 
 @router.get("/api/health")

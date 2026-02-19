@@ -18,7 +18,10 @@ def build_client(tmp_path: Path):
     main.bootstrap_data()
     from fastapi.testclient import TestClient
 
-    return TestClient(main.app)
+    client = TestClient(main.app)
+    login = client.post("/api/auth/login", json={"username": "m4tr1x", "password": "testtest"})
+    assert login.status_code == 200
+    return client
 
 
 def test_execute_task_automation_includes_project_description_in_context(tmp_path, monkeypatch):

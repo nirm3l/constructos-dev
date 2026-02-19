@@ -20,6 +20,22 @@ def build_client(tmp_path: Path):
 
     main = reload(main)
     main.bootstrap_data()
+    client = TestClient(main.app)
+    login = client.post('/api/auth/login', json={'username': 'm4tr1x', 'password': 'testtest'})
+    assert login.status_code == 200
+    return client
+
+
+def build_anonymous_client(tmp_path: Path):
+    db_file = tmp_path / "test.db"
+    os.environ["DATABASE_URL"] = f"sqlite:///{db_file}"
+    os.environ["ATTACHMENTS_DIR"] = str(tmp_path / "uploads")
+    os.environ.pop("DB_PATH", None)
+    os.environ["EVENTSTORE_URI"] = ""
+    import main
+
+    main = reload(main)
+    main.bootstrap_data()
     return TestClient(main.app)
 
 
@@ -28,6 +44,12 @@ def test_health(tmp_path):
     res = client.get('/api/health')
     assert res.status_code == 200
     assert res.json()['ok'] is True
+
+
+def test_bootstrap_requires_authenticated_session(tmp_path):
+    client = build_anonymous_client(tmp_path)
+    res = client.get('/api/bootstrap')
+    assert res.status_code == 401
 
 
 def test_version_endpoint_is_stable_per_deploy(tmp_path):
@@ -195,7 +217,7 @@ def test_comment_mention_creates_notification(tmp_path):
     comment = client.post(f"/api/tasks/{task['id']}/comments", json={'body': f"Ping @{current_user['username']}"})
     assert comment.status_code == 200
 
-    notes = client.get('/api/notifications', headers={'X-User-Id': current_user['id']})
+    notes = client.get('/api/notifications')
     assert notes.status_code == 200
     mentioned = [n for n in notes.json() if 'mentioned' in n['message']]
     assert mentioned
@@ -529,6 +551,59 @@ def test_project_members_assignment_and_user_types(tmp_path):
     assert any(pm['project_id'] == project_id for pm in refreshed['project_members'])
 
 
+def test_non_admin_user_sees_only_assigned_projects(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    assigned_project_id = bootstrap['projects'][0]['id']
+
+    hidden_project = client.post(
+        '/api/projects',
+        json={'workspace_id': ws_id, 'name': 'Hidden project for member'},
+    )
+    assert hidden_project.status_code == 200
+    hidden_project_id = hidden_project.json()['id']
+
+    created_user = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'member-assigned-only', 'full_name': 'Assigned Member'},
+    )
+    assert created_user.status_code == 200
+    created_payload = created_user.json()
+    member_id = created_payload['user']['id']
+    temp_password = created_payload['temporary_password']
+
+    assigned = client.post(
+        f'/api/projects/{assigned_project_id}/members',
+        json={'user_id': member_id, 'role': 'Contributor'},
+    )
+    assert assigned.status_code == 200
+
+    logout = client.post('/api/auth/logout')
+    assert logout.status_code == 200
+
+    login = client.post('/api/auth/login', json={'username': 'member-assigned-only', 'password': temp_password})
+    assert login.status_code == 200
+    assert login.json()['user']['must_change_password'] is True
+
+    changed = client.post(
+        '/api/auth/change-password',
+        json={'current_password': temp_password, 'new_password': 'memberpass1'},
+    )
+    assert changed.status_code == 200
+    assert changed.json()['user']['must_change_password'] is False
+
+    member_bootstrap = client.get('/api/bootstrap')
+    assert member_bootstrap.status_code == 200
+    visible_project_ids = {item['id'] for item in member_bootstrap.json()['projects']}
+    assert assigned_project_id in visible_project_ids
+    assert hidden_project_id not in visible_project_ids
+
+    hidden_tasks = client.get(f'/api/tasks?workspace_id={ws_id}&project_id={hidden_project_id}')
+    assert hidden_tasks.status_code == 403
+    assert hidden_tasks.json()['detail'] == 'Project access required'
+
+
 def test_delete_project_deletes_project_resources(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -693,6 +768,154 @@ def test_user_theme_preferences_persist(tmp_path):
     bootstrap = client.get('/api/bootstrap')
     assert bootstrap.status_code == 200
     assert bootstrap.json()['current_user']['theme'] == 'dark'
+
+
+def test_admin_create_user_forces_password_change_flow(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    created = client.post(
+        '/api/admin/users',
+        json={
+            'workspace_id': ws_id,
+            'username': 'new-user-01',
+            'full_name': 'New User',
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    temp_password = payload['temporary_password']
+    created_user_id = payload['user']['id']
+    assert payload['user']['must_change_password'] is True
+
+    users_page = client.get(f'/api/admin/users?workspace_id={ws_id}')
+    assert users_page.status_code == 200
+    assert any(item['id'] == created_user_id for item in users_page.json()['items'])
+
+    logout = client.post('/api/auth/logout')
+    assert logout.status_code == 200
+
+    login = client.post('/api/auth/login', json={'username': 'new-user-01', 'password': temp_password})
+    assert login.status_code == 200
+    assert login.json()['user']['must_change_password'] is True
+
+    blocked_bootstrap = client.get('/api/bootstrap')
+    assert blocked_bootstrap.status_code == 403
+    assert blocked_bootstrap.json()['detail'] == 'Password change required'
+
+    changed = client.post(
+        '/api/auth/change-password',
+        json={'current_password': temp_password, 'new_password': 'newpass88'},
+    )
+    assert changed.status_code == 200
+    assert changed.json()['user']['must_change_password'] is False
+
+    bootstrap_after = client.get('/api/bootstrap')
+    assert bootstrap_after.status_code == 200
+    assert bootstrap_after.json()['current_user']['username'] == 'new-user-01'
+
+
+def test_admin_reset_password_rotates_login_secret(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    created = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'reset-target'},
+    )
+    assert created.status_code == 200
+    target_id = created.json()['user']['id']
+    first_temp_password = created.json()['temporary_password']
+
+    reset = client.post(
+        f'/api/admin/users/{target_id}/reset-password',
+        json={'workspace_id': ws_id},
+    )
+    assert reset.status_code == 200
+    second_temp_password = reset.json()['temporary_password']
+    assert second_temp_password != first_temp_password
+
+    logout = client.post('/api/auth/logout')
+    assert logout.status_code == 200
+
+    old_login = client.post('/api/auth/login', json={'username': 'reset-target', 'password': first_temp_password})
+    assert old_login.status_code == 401
+
+    new_login = client.post('/api/auth/login', json={'username': 'reset-target', 'password': second_temp_password})
+    assert new_login.status_code == 200
+    assert new_login.json()['user']['must_change_password'] is True
+
+
+def test_admin_can_create_user_with_admin_role(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    created = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'admin-created-user', 'role': 'Admin'},
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    assert payload['user']['role'] == 'Admin'
+
+    users_page = client.get(f'/api/admin/users?workspace_id={ws_id}')
+    assert users_page.status_code == 200
+    created_row = next((item for item in users_page.json()['items'] if item['id'] == payload['user']['id']), None)
+    assert created_row is not None
+    assert created_row['role'] == 'Admin'
+
+
+def test_admin_can_update_workspace_user_role(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    created = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'role-update-target', 'role': 'Member'},
+    )
+    assert created.status_code == 200
+    target_id = created.json()['user']['id']
+
+    updated = client.post(
+        f'/api/admin/users/{target_id}/set-role',
+        json={'workspace_id': ws_id, 'role': 'Admin'},
+    )
+    assert updated.status_code == 200
+    assert updated.json()['ok'] is True
+    assert updated.json()['role'] == 'Admin'
+
+    users_page = client.get(f'/api/admin/users?workspace_id={ws_id}')
+    assert users_page.status_code == 200
+    updated_row = next((item for item in users_page.json()['items'] if item['id'] == target_id), None)
+    assert updated_row is not None
+    assert updated_row['role'] == 'Admin'
+
+
+def test_admin_cannot_reset_password_for_agent_user(tmp_path):
+    from shared.settings import AGENT_SYSTEM_USER_ID
+
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    users_page = client.get(f'/api/admin/users?workspace_id={ws_id}')
+    assert users_page.status_code == 200
+    agent_item = next((item for item in users_page.json()['items'] if item['id'] == AGENT_SYSTEM_USER_ID), None)
+    assert agent_item is not None
+    assert agent_item['user_type'] in {'agent', 'bot'}
+    assert agent_item['role'] in {'Owner', 'Admin'}
+    assert agent_item['must_change_password'] is False
+    assert agent_item['can_reset_password'] is False
+
+    reset = client.post(
+        f'/api/admin/users/{AGENT_SYSTEM_USER_ID}/reset-password',
+        json={'workspace_id': ws_id},
+    )
+    assert reset.status_code == 404
 
 
 def test_due_soon_system_notification(tmp_path):

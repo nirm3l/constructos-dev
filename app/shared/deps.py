@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import time
 import logging
+from datetime import datetime, timezone
 from collections.abc import Callable
 from typing import TypeVar
 
-from fastapi import Depends, Header, HTTPException, Query
+from fastapi import Depends, Header, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .auth import hash_session_token
 from .contracts import ConcurrencyConflictError
-from .models import SessionLocal, User, WorkspaceMember
+from .models import AuthSession, ProjectMember, SessionLocal, User, WorkspaceMember
 from .observability import incr
-from .settings import DEFAULT_USER_ID
+from .settings import AUTH_SESSION_COOKIE_NAME
 
 try:
     from eventsourcing.utils import retry as eventsourcing_retry
@@ -37,14 +39,36 @@ def get_db():
 
 
 def get_current_user(
+    request: Request,
     db: Session = Depends(get_db),
-    x_user_id: str | None = Header(default=None),
-    user_id: str | None = Query(default=None),
 ) -> User:
-    effective_user_id = x_user_id or user_id or DEFAULT_USER_ID
-    user = db.get(User, effective_user_id)
-    if not user:
+    session_token = request.cookies.get(AUTH_SESSION_COOKIE_NAME)
+    if not session_token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    session_hash = hash_session_token(session_token)
+    auth_session = db.execute(select(AuthSession).where(AuthSession.token_hash == session_hash)).scalar_one_or_none()
+    if not auth_session:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    now = datetime.now(timezone.utc)
+    expires_at = auth_session.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= now:
+        db.delete(auth_session)
+        db.commit()
+        raise HTTPException(status_code=401, detail="Session expired")
+    user = db.get(User, auth_session.user_id)
+    if not user or not bool(getattr(user, "is_active", True)):
         raise HTTPException(status_code=401, detail="User not found")
+    if bool(getattr(user, "must_change_password", False)):
+        path = request.url.path
+        allowed_paths = {
+            "/api/auth/me",
+            "/api/auth/change-password",
+            "/api/auth/logout",
+        }
+        if path not in allowed_paths:
+            raise HTTPException(status_code=403, detail="Password change required")
     return user
 
 
@@ -64,6 +88,37 @@ def ensure_role(db: Session, workspace_id: str, user_id: str, allowed: set[str])
     ).scalar_one_or_none()
     if not membership or membership.role not in allowed:
         raise HTTPException(status_code=403, detail="Forbidden")
+
+
+def ensure_project_access(
+    db: Session,
+    workspace_id: str,
+    project_id: str,
+    user_id: str,
+    allowed_workspace_roles: set[str],
+) -> None:
+    membership = db.execute(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == user_id,
+        )
+    ).scalar_one_or_none()
+    if not membership or membership.role not in allowed_workspace_roles:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # Workspace Owner/Admin can access all workspace projects.
+    if membership.role in {"Owner", "Admin"}:
+        return
+
+    assigned = db.execute(
+        select(ProjectMember.id).where(
+            ProjectMember.workspace_id == workspace_id,
+            ProjectMember.project_id == project_id,
+            ProjectMember.user_id == user_id,
+        )
+    ).scalar_one_or_none()
+    if not assigned:
+        raise HTTPException(status_code=403, detail="Project access required")
 
 
 def run_command_with_retry(db: Session, handler: Callable[[], _T], *, max_attempts: int = 5, initial_backoff_seconds: float = 0.01) -> _T:

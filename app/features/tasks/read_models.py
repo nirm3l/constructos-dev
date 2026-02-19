@@ -7,7 +7,16 @@ from fastapi import HTTPException
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from shared.core import Task, ensure_role, get_user_zoneinfo, load_task_command_state, normalize_datetime_to_utc, rebuild_state, serialize_task
+from shared.core import (
+    Task,
+    ensure_project_access,
+    ensure_role,
+    get_user_zoneinfo,
+    load_task_command_state,
+    normalize_datetime_to_utc,
+    rebuild_state,
+    serialize_task,
+)
 from shared.serializers import load_created_by_map
 
 
@@ -31,6 +40,7 @@ class TaskListQuery:
 
 
 def list_tasks_read_model(db: Session, user, query: TaskListQuery) -> dict:
+    ensure_project_access(db, query.workspace_id, query.project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     stmt = select(Task).where(
         Task.workspace_id == query.workspace_id,
         Task.project_id == query.project_id,
@@ -89,7 +99,16 @@ def get_task_automation_status_read_model(db: Session, user, task_id: str) -> di
     if not command_state or command_state.is_deleted:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    ensure_role(db, command_state.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    if command_state.project_id:
+        ensure_project_access(
+            db,
+            command_state.workspace_id,
+            command_state.project_id,
+            user.id,
+            {"Owner", "Admin", "Member", "Guest"},
+        )
+    else:
+        ensure_role(db, command_state.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
 
     state, _ = rebuild_state(db, "Task", task_id)
     return {

@@ -7,6 +7,7 @@ type AppHeaderProps = {
   bootstrapData: BootstrapPayload
   tab: Tab
   setTab: (tab: Tab) => void
+  canManageUsers: boolean
   searchQ: string
   setSearchQ: (value: string) => void
   selectedProjectId: string
@@ -31,6 +32,7 @@ export function AppHeader({
   bootstrapData,
   tab,
   setTab,
+  canManageUsers,
   searchQ,
   setSearchQ,
   selectedProjectId,
@@ -88,6 +90,16 @@ export function AppHeader({
           >
             <Icon path="M6 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm12 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm-6 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM7.4 6.6l3.9 10.8M16.6 6.6l-3.9 10.8" />
           </button>
+          {canManageUsers && (
+            <button
+              className={`top-graph-btn ${tab === 'admin' ? 'active' : ''}`.trim()}
+              onClick={() => setTab('admin')}
+              title="Admin"
+              aria-label="Admin"
+            >
+              <Icon path="M12 4a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM5 20v-1a7 7 0 0 1 14 0v1M3 8h4M17 8h4" />
+            </button>
+          )}
           <button className="top-profile-btn" onClick={() => setTab('profile')} title="Profile" aria-label="Profile">
             <Icon path="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8M4 20a8 8 0 0 1 16 0" />
             <span className="top-profile-name" title={bootstrapData.current_user.username}>
