@@ -4,6 +4,12 @@ import type { Tab } from '../../utils/ui'
 import { priorityTone, tagHue } from '../../utils/ui'
 import { Icon } from '../shared/uiHelpers'
 
+export function taskDescriptionPreview(description: string | null | undefined): string {
+  return String(description ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 export function TaskListItem({
   task,
   onOpen,
@@ -25,12 +31,19 @@ export function TaskListItem({
   projectName?: string
   specificationName?: string
 }) {
+  const descriptionPreviewText = taskDescriptionPreview(task.description)
+
   return (
     <div key={task.id} className={`task-item ${task.task_type === 'scheduled_instruction' ? 'scheduled' : ''}`}>
       <div className="task-main" role="button" onClick={() => onOpen(task.id)}>
         <div className="task-title">
           <strong>{task.title}</strong>
         </div>
+        {descriptionPreviewText && (
+          <p className="task-desc-preview" title={descriptionPreviewText}>
+            {descriptionPreviewText}
+          </p>
+        )}
         <span className="meta">
           {task.status} | {task.due_date ? new Date(task.due_date).toLocaleString() : 'No due date'}
           {showProject && <> | Project: {projectName || task.project_id}</>}

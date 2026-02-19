@@ -2,7 +2,7 @@ import React from 'react'
 import type { ProjectBoard, Task } from '../../types'
 import { priorityTone } from '../../utils/ui'
 import { Icon } from '../shared/uiHelpers'
-import { TaskListItem } from './taskViews'
+import { taskDescriptionPreview, TaskListItem } from './taskViews'
 
 type TasksPanelProps = {
   projectsMode: 'board' | 'list'
@@ -103,30 +103,38 @@ export function TasksPanel({
                     <span className="meta">{(boardData.lanes[status] ?? []).length}</span>
                   </div>
                   <div className="kanban-list">
-                    {(boardData.lanes[status] ?? []).map((task) => (
-                      <div key={task.id} className="kanban-card" onClick={() => onOpenTaskEditor(task.id)} role="button">
-                        <div className="kanban-title">
-                          <strong>{task.title}</strong>
-                          <span className={`prio prio-${priorityTone(task.priority)}`} title={`Priority: ${task.priority}`}>
-                            {task.priority}
-                          </span>
+                    {(boardData.lanes[status] ?? []).map((task) => {
+                      const descriptionPreviewText = taskDescriptionPreview(task.description)
+                      return (
+                        <div key={task.id} className="kanban-card" onClick={() => onOpenTaskEditor(task.id)} role="button">
+                          <div className="kanban-title">
+                            <strong>{task.title}</strong>
+                            <span className={`prio prio-${priorityTone(task.priority)}`} title={`Priority: ${task.priority}`}>
+                              {task.priority}
+                            </span>
+                          </div>
+                          {descriptionPreviewText && (
+                            <p className="kanban-desc-preview" title={descriptionPreviewText}>
+                              {descriptionPreviewText}
+                            </p>
+                          )}
+                          <div className="kanban-actions">
+                            {boardData.statuses.filter((s) => s !== status).slice(0, 3).map((nextStatus) => (
+                              <button
+                                key={nextStatus}
+                                className="status-chip"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  onMoveTaskStatus(task.id, nextStatus)
+                                }}
+                              >
+                                {nextStatus}
+                              </button>
+                            ))}
+                          </div>
                         </div>
-                        <div className="kanban-actions">
-                          {boardData.statuses.filter((s) => s !== status).slice(0, 3).map((nextStatus) => (
-                            <button
-                              key={nextStatus}
-                              className="status-chip"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                onMoveTaskStatus(task.id, nextStatus)
-                              }}
-                            >
-                              {nextStatus}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
+                      )
+                    })}
                   </div>
                 </div>
               ))}
