@@ -20,31 +20,36 @@ from features.agents.api import router as agents_router
 from features.attachments.api import router as attachments_router
 from features.notes.api import router as notes_router
 from features.agents.runner import start_automation_runner, stop_automation_runner
-from shared.core import bootstrap_data, project_kurrent_events_once, start_projection_worker, startup_bootstrap, stop_projection_worker
-from shared.eventing_graph import project_kurrent_graph_once, start_graph_projection_worker, stop_graph_projection_worker
-from shared.eventing_vector import project_kurrent_vector_once, start_vector_projection_worker, stop_vector_projection_worker
+from shared.core import bootstrap_data, start_projection_worker, startup_bootstrap, stop_projection_worker
+from shared.eventing_graph import start_graph_projection_worker, stop_graph_projection_worker
+from shared.eventing_vector import start_vector_projection_worker, stop_vector_projection_worker
 from shared.knowledge_graph import close_knowledge_graph_driver
+from shared.models import SessionLocal
+from shared.persistent_subscriptions import ensure_persistent_subscriptions
+from shared.realtime import register_realtime_session_hooks
 from shared.settings import AGENT_RUNNER_ENABLED
+from shared.system_notifications_worker import start_system_notifications_worker, stop_system_notifications_worker
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 CORS_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "*").split(",") if origin.strip()]
+register_realtime_session_hooks(SessionLocal)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     startup_bootstrap()
-    project_kurrent_events_once(limit=5000)
-    project_kurrent_graph_once(limit=5000)
-    project_kurrent_vector_once(limit=5000)
+    ensure_persistent_subscriptions()
     start_projection_worker()
     start_graph_projection_worker()
     start_vector_projection_worker()
+    start_system_notifications_worker()
     if AGENT_RUNNER_ENABLED:
         start_automation_runner()
     yield
     if AGENT_RUNNER_ENABLED:
         stop_automation_runner()
+    stop_system_notifications_worker()
     stop_vector_projection_worker()
     stop_graph_projection_worker()
     stop_projection_worker()

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from typing import Any
 
 from features.notes.domain import (
@@ -61,13 +60,20 @@ from .knowledge_graph import ensure_graph_schema, graph_enabled, run_graph_query
 from .observability import incr, set_value
 from .settings import (
     GRAPH_PROJECTION_BATCH_SIZE,
-    GRAPH_PROJECTION_POLL_INTERVAL_SECONDS,
+    PERSISTENT_SUBSCRIPTION_EVENT_BUFFER_SIZE,
+    PERSISTENT_SUBSCRIPTION_GRAPH_GROUP,
+    PERSISTENT_SUBSCRIPTION_MAX_ACK_BATCH_SIZE,
+    PERSISTENT_SUBSCRIPTION_MAX_ACK_DELAY_SECONDS,
+    PERSISTENT_SUBSCRIPTION_RETRY_BACKOFF_SECONDS,
+    PERSISTENT_SUBSCRIPTION_STOPPING_GRACE_SECONDS,
     logger,
 )
 
 _GRAPH_CHECKPOINT_NAME = "knowledge-graph"
 _graph_stop_event = threading.Event()
 _graph_thread: threading.Thread | None = None
+_graph_subscription: Any | None = None
+_graph_subscription_lock = threading.Lock()
 
 
 def _extract_aggregate_from_stream(stream_name: str) -> tuple[str, str] | None:
@@ -859,37 +865,64 @@ def _graph_worker_loop() -> None:
     client = get_kurrent_client()
     if client is None:
         return
-    from .models import SessionLocal
 
     while not _graph_stop_event.is_set():
+        subscription = None
         try:
             ensure_graph_schema()
-            project_kurrent_graph_once(limit=GRAPH_PROJECTION_BATCH_SIZE)
-            with SessionLocal() as db:
-                checkpoint = _get_graph_checkpoint(db)
-                start_position = checkpoint.commit_position if checkpoint.commit_position > 0 else None
-            subscription = client.subscribe_to_all(commit_position=start_position)
+            subscription = client.read_subscription_to_all(
+                group_name=PERSISTENT_SUBSCRIPTION_GRAPH_GROUP,
+                event_buffer_size=max(1, int(PERSISTENT_SUBSCRIPTION_EVENT_BUFFER_SIZE)),
+                max_ack_batch_size=max(1, int(PERSISTENT_SUBSCRIPTION_MAX_ACK_BATCH_SIZE)),
+                max_ack_delay=max(0.0, float(PERSISTENT_SUBSCRIPTION_MAX_ACK_DELAY_SECONDS)),
+                stopping_grace=max(0.0, float(PERSISTENT_SUBSCRIPTION_STOPPING_GRACE_SECONDS)),
+            )
+            _set_graph_subscription(subscription)
             for event in subscription:
                 if _graph_stop_event.is_set():
-                    subscription.stop()
                     break
                 packed = _recorded_to_envelope(event)
                 if packed is None:
+                    subscription.ack(event)
                     continue
                 commit_position, env = packed
-                with SessionLocal() as db:
-                    checkpoint = _get_graph_checkpoint(db)
-                    if commit_position <= checkpoint.commit_position:
-                        continue
+                try:
                     _project_graph_event(env, commit_position)
-                    checkpoint.commit_position = commit_position
-                    db.commit()
                     incr("graph_projection_events_processed", 1)
                     set_value("graph_projection_lag_commits", 0)
+                    subscription.ack(event)
+                except Exception as exc:
+                    incr("graph_projection_failures")
+                    logger.warning("Knowledge graph projection event failed, retrying event: %s", exc)
+                    subscription.nack(event, "retry")
         except Exception as exc:
             incr("graph_projection_failures")
             logger.warning("Knowledge graph projection worker retrying after error: %s", exc)
-            _graph_stop_event.wait(max(0.2, float(GRAPH_PROJECTION_POLL_INTERVAL_SECONDS)))
+            _graph_stop_event.wait(max(0.2, float(PERSISTENT_SUBSCRIPTION_RETRY_BACKOFF_SECONDS)))
+        finally:
+            _set_graph_subscription(None)
+            if subscription is not None:
+                try:
+                    subscription.stop()
+                except Exception:
+                    pass
+
+
+def _set_graph_subscription(subscription: Any | None) -> None:
+    global _graph_subscription
+    with _graph_subscription_lock:
+        _graph_subscription = subscription
+
+
+def _stop_graph_subscription() -> None:
+    with _graph_subscription_lock:
+        subscription = _graph_subscription
+    if subscription is None:
+        return
+    try:
+        subscription.stop()
+    except Exception:
+        pass
 
 
 def start_graph_projection_worker() -> None:
@@ -908,6 +941,7 @@ def start_graph_projection_worker() -> None:
 def stop_graph_projection_worker() -> None:
     global _graph_thread
     _graph_stop_event.set()
+    _stop_graph_subscription()
     if _graph_thread and _graph_thread.is_alive():
         _graph_thread.join(timeout=3)
     _graph_thread = None

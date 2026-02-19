@@ -33,6 +33,7 @@ Does:
 - `DATABASE_URL`
 - `EVENTSTORE_URI`
 - `APP_VERSION`, `APP_BUILD`, `APP_DEPLOYED_AT_UTC`
+- `SYSTEM_NOTIFICATIONS_INTERVAL_SECONDS`
 
 ### 3.2 Automation
 - `AGENT_RUNNER_ENABLED`
@@ -53,10 +54,19 @@ Does:
 - `KNOWLEDGE_GRAPH_ENABLED`
 - `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`
 - `GRAPH_PROJECTION_BATCH_SIZE`
-- `GRAPH_PROJECTION_POLL_INTERVAL_SECONDS`
 - `GRAPH_CONTEXT_MAX_HOPS`, `GRAPH_CONTEXT_MAX_TOKENS`
 
-### 3.5 Email Tool
+### 3.5 Persistent Subscriptions
+- `PERSISTENT_SUBSCRIPTION_READ_MODEL_GROUP`
+- `PERSISTENT_SUBSCRIPTION_GRAPH_GROUP`
+- `PERSISTENT_SUBSCRIPTION_VECTOR_GROUP`
+- `PERSISTENT_SUBSCRIPTION_EVENT_BUFFER_SIZE`
+- `PERSISTENT_SUBSCRIPTION_MAX_ACK_BATCH_SIZE`
+- `PERSISTENT_SUBSCRIPTION_MAX_ACK_DELAY_SECONDS`
+- `PERSISTENT_SUBSCRIPTION_STOPPING_GRACE_SECONDS`
+- `PERSISTENT_SUBSCRIPTION_RETRY_BACKOFF_SECONDS`
+
+### 3.6 Email Tool
 - `MCP_EMAIL_SMTP_*`
 - `MCP_EMAIL_FROM`
 - `MCP_EMAIL_ALLOWED_RECIPIENTS`
@@ -110,6 +120,7 @@ docker compose run --rm --build task-app pytest
 | Duplicate side effects on retries | same request mutates state multiple times | verify stable `X-Command-Id` reuse | enforce command_id reuse |
 | Runner does not process queued tasks | automation stays `queued` | verify `AGENT_RUNNER_ENABLED`, runner logs | verify `AGENT_CODEX_COMMAND`, timeout |
 | SSE does not deliver updates | stale notifications/activity in UI | check `/api/notifications/stream` connectivity | verify proxy idle timeout |
+| Projection consumer is stuck | lagging read models/graph/vector | inspect persistent subscription group info and parked count | nack policy review, fix handler error, replay parked messages |
 | Attachment download returns 404 | upload succeeded but file not found | verify `ATTACHMENTS_DIR` and scoped path | verify volume mounts and workspace path |
 
 ## 8. Pre-Production Hardening Checklist

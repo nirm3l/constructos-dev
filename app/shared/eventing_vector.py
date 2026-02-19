@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from typing import Any
 
 from sqlalchemy import select
@@ -16,7 +15,17 @@ from features.projects.domain import (
 from .contracts import EventEnvelope
 from .eventing_rebuild import rebuild_state
 from .eventing_store import get_kurrent_client
-from .settings import AGENT_SYSTEM_USER_ID, GRAPH_PROJECTION_BATCH_SIZE, GRAPH_PROJECTION_POLL_INTERVAL_SECONDS, logger
+from .settings import (
+    AGENT_SYSTEM_USER_ID,
+    GRAPH_PROJECTION_BATCH_SIZE,
+    PERSISTENT_SUBSCRIPTION_EVENT_BUFFER_SIZE,
+    PERSISTENT_SUBSCRIPTION_MAX_ACK_BATCH_SIZE,
+    PERSISTENT_SUBSCRIPTION_MAX_ACK_DELAY_SECONDS,
+    PERSISTENT_SUBSCRIPTION_RETRY_BACKOFF_SECONDS,
+    PERSISTENT_SUBSCRIPTION_STOPPING_GRACE_SECONDS,
+    PERSISTENT_SUBSCRIPTION_VECTOR_GROUP,
+    logger,
+)
 from .vector_store import (
     index_entity_state,
     maybe_reindex_project,
@@ -29,6 +38,8 @@ _VECTOR_CHECKPOINT_NAME = "vector-store"
 _PROJECT_EMBEDDING_INDEX_UPDATED = "ProjectEmbeddingIndexUpdated"
 _vector_stop_event = threading.Event()
 _vector_thread: threading.Thread | None = None
+_vector_subscription: Any | None = None
+_vector_subscription_lock = threading.Lock()
 
 
 def _extract_aggregate_from_stream(stream_name: str) -> tuple[str, str] | None:
@@ -225,32 +236,59 @@ def _vector_worker_loop() -> None:
     if client is None:
         return
     while not _vector_stop_event.is_set():
+        subscription = None
         try:
-            project_kurrent_vector_once(limit=GRAPH_PROJECTION_BATCH_SIZE)
-            with SessionLocal() as db:
-                checkpoint = _get_vector_checkpoint(db)
-                start_position = checkpoint.commit_position if checkpoint.commit_position > 0 else None
-            subscription = client.subscribe_to_all(commit_position=start_position)
+            subscription = client.read_subscription_to_all(
+                group_name=PERSISTENT_SUBSCRIPTION_VECTOR_GROUP,
+                event_buffer_size=max(1, int(PERSISTENT_SUBSCRIPTION_EVENT_BUFFER_SIZE)),
+                max_ack_batch_size=max(1, int(PERSISTENT_SUBSCRIPTION_MAX_ACK_BATCH_SIZE)),
+                max_ack_delay=max(0.0, float(PERSISTENT_SUBSCRIPTION_MAX_ACK_DELAY_SECONDS)),
+                stopping_grace=max(0.0, float(PERSISTENT_SUBSCRIPTION_STOPPING_GRACE_SECONDS)),
+            )
+            _set_vector_subscription(subscription)
             for event in subscription:
                 if _vector_stop_event.is_set():
-                    subscription.stop()
                     break
-                commit_position = int(getattr(event, "commit_position", -1))
-                if commit_position < 0:
-                    continue
                 packed = _recorded_to_envelope(event)
                 envelope = packed[1] if packed is not None else None
                 with SessionLocal() as db:
-                    checkpoint = _get_vector_checkpoint(db)
-                    if commit_position <= checkpoint.commit_position:
+                    try:
+                        if envelope is not None:
+                            _project_vector_event(db, envelope)
+                        db.commit()
+                    except Exception as exc:
+                        db.rollback()
+                        logger.warning("Vector projection event failed, retrying event: %s", exc)
+                        subscription.nack(event, "retry")
                         continue
-                    if envelope is not None:
-                        _project_vector_event(db, envelope)
-                    checkpoint.commit_position = commit_position
-                    db.commit()
+                subscription.ack(event)
         except Exception as exc:
             logger.warning("Vector projection worker retrying after error: %s", exc)
-            time.sleep(max(0.5, GRAPH_PROJECTION_POLL_INTERVAL_SECONDS))
+            _vector_stop_event.wait(max(0.2, float(PERSISTENT_SUBSCRIPTION_RETRY_BACKOFF_SECONDS)))
+        finally:
+            _set_vector_subscription(None)
+            if subscription is not None:
+                try:
+                    subscription.stop()
+                except Exception:
+                    pass
+
+
+def _set_vector_subscription(subscription: Any | None) -> None:
+    global _vector_subscription
+    with _vector_subscription_lock:
+        _vector_subscription = subscription
+
+
+def _stop_vector_subscription() -> None:
+    with _vector_subscription_lock:
+        subscription = _vector_subscription
+    if subscription is None:
+        return
+    try:
+        subscription.stop()
+    except Exception:
+        pass
 
 
 def start_vector_projection_worker() -> None:
@@ -269,6 +307,7 @@ def start_vector_projection_worker() -> None:
 def stop_vector_projection_worker() -> None:
     global _vector_thread
     _vector_stop_event.set()
+    _stop_vector_subscription()
     if _vector_thread and _vector_thread.is_alive():
         _vector_thread.join(timeout=3)
     _vector_thread = None

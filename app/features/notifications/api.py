@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from shared.core import emit_system_notifications, ensure_role, get_command_id, get_current_user, get_db, serialize_notification
 from shared.observability import incr
+from shared.realtime import realtime_hub
 
 from .application import NotificationApplicationService
 from .read_models import (
@@ -49,6 +50,10 @@ async def notifications_stream(
     incr("sse_connections", 1)
     if workspace_id:
         ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    channels = {f"user:{user.id}"}
+    if workspace_id:
+        channels.add(f"workspace:{workspace_id}")
+    subscription = realtime_hub.subscribe(channels=channels)
 
     async def event_generator():
         notification_cursor = last_id or ""
@@ -56,33 +61,41 @@ async def notifications_stream(
         if workspace_id and activity_cursor == 0:
             # Tail mode by default: only stream new activity generated after this connection starts.
             activity_cursor = latest_workspace_activity_id_read_model(db, workspace_id)
-        while True:
-            if await request.is_disconnected():
-                break
+        created = emit_system_notifications(db, user)
+        if created:
+            incr("notifications_emitted", created)
+        flush_now = True
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
 
-            created = emit_system_notifications(db, user)
-            if created:
-                incr("notifications_emitted", created)
-            items = list_notifications_after_cursor_read_model(db, user.id, notification_cursor, limit=50)
+                if not flush_now:
+                    try:
+                        await asyncio.wait_for(subscription.get(), timeout=30.0)
+                    except asyncio.TimeoutError:
+                        yield "event: ping\ndata: {}\n\n"
+                        continue
+                flush_now = False
 
-            for n in items:
-                payload = serialize_notification(n)
-                yield f"id: {n.id}\nevent: notification\ndata: {json.dumps(payload)}\n\n"
-                notification_cursor = n.id
+                items = list_notifications_after_cursor_read_model(db, user.id, notification_cursor, limit=50)
+                for n in items:
+                    payload = serialize_notification(n)
+                    yield f"id: {n.id}\nevent: notification\ndata: {json.dumps(payload)}\n\n"
+                    notification_cursor = n.id
 
-            if workspace_id:
-                activity_items = list_workspace_activity_after_id_read_model(
-                    db,
-                    workspace_id,
-                    activity_cursor,
-                    limit=100,
-                )
-                for item in activity_items:
-                    yield f"event: task_event\ndata: {json.dumps(item)}\n\n"
-                    activity_cursor = int(item["id"])
-
-            yield "event: ping\ndata: {}\n\n"
-            await asyncio.sleep(2)
+                if workspace_id:
+                    activity_items = list_workspace_activity_after_id_read_model(
+                        db,
+                        workspace_id,
+                        activity_cursor,
+                        limit=100,
+                    )
+                    for item in activity_items:
+                        yield f"event: task_event\ndata: {json.dumps(item)}\n\n"
+                        activity_cursor = int(item["id"])
+        finally:
+            subscription.close()
 
     return StreamingResponse(
         event_generator(),

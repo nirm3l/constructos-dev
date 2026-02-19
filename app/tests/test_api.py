@@ -1977,6 +1977,47 @@ def test_saved_view_projection_is_idempotent(tmp_path):
         db.commit()
 
 
+def test_append_event_write_through_ignores_duplicate_projection_race(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    from shared import eventing
+    from shared.core import append_event
+    from shared.models import SessionLocal
+    from sqlalchemy.exc import IntegrityError
+
+    class _FakeKurrentClient:
+        def append_to_stream(self, **_kwargs):
+            return None
+
+    def _raise_duplicate(_db, _env):
+        raise IntegrityError(
+            statement="insert into projects (...) values (...)",
+            params=None,
+            orig=Exception('duplicate key value violates unique constraint "projects_pkey"'),
+        )
+
+    monkeypatch.setattr(eventing, "get_kurrent_client", lambda: _FakeKurrentClient())
+    monkeypatch.setattr(eventing, "current_version", lambda _db, _aggregate_type, _aggregate_id: 0)
+    monkeypatch.setattr(eventing, "project_event", _raise_duplicate)
+
+    with SessionLocal() as db:
+        env = append_event(
+            db,
+            aggregate_type='Project',
+            aggregate_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+            event_type='ProjectCreated',
+            payload={'workspace_id': ws_id, 'name': 'Duplicate projection race'},
+            metadata={'actor_id': bootstrap['current_user']['id'], 'workspace_id': ws_id},
+            expected_version=0,
+        )
+        db.commit()
+
+    assert env.aggregate_type == 'Project'
+    assert env.version == 1
+
+
 def test_task_comment_projection_is_idempotent(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()

@@ -4,7 +4,10 @@ import json
 from typing import Any
 
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
+from features.notifications.domain import EVENT_CREATED as NOTIFICATION_EVENT_CREATED
 
 from .contracts import ConcurrencyConflictError, EventEnvelope
 from .eventing_notifications import emit_system_notifications as _emit_system_notifications
@@ -28,6 +31,22 @@ from .eventing_store import (
     stream_id,
 )
 from .models import StoredEvent
+from .realtime import enqueue_realtime_channels
+
+
+def _is_duplicate_projection_error(exc: IntegrityError) -> bool:
+    message = str(exc).lower()
+    return "duplicate key value violates unique constraint" in message or "unique constraint failed" in message
+
+
+def _project_event_write_through(db: Session, env: EventEnvelope) -> None:
+    try:
+        with db.begin_nested():
+            project_event(db, env)
+            db.flush()
+    except IntegrityError as exc:
+        if not _is_duplicate_projection_error(exc):
+            raise
 
 
 def append_event(
@@ -67,7 +86,7 @@ def append_event(
             raise HTTPException(status_code=503, detail=f"Kurrent append failed: {exc}") from exc
         # Write-through projection to keep the SQLite read-model consistent even if the
         # background projection checkpoint is stale (e.g. EventStore reset).
-        project_event(db, env)
+        _project_event_write_through(db, env)
     else:
         db.add(
             StoredEvent(
@@ -83,9 +102,26 @@ def append_event(
         project_event(db, env)
 
     maybe_snapshot(db, aggregate_type, aggregate_id, version)
+    _queue_realtime_signals(db, env)
 
     return env
 
 
 def emit_system_notifications(db: Session, user) -> int:
     return _emit_system_notifications(db, user, append_event)
+
+
+def _queue_realtime_signals(db: Session, env: EventEnvelope) -> None:
+    channels: set[str] = set()
+
+    workspace_id = str((env.metadata or {}).get("workspace_id") or (env.payload or {}).get("workspace_id") or "").strip()
+    if workspace_id:
+        channels.add(f"workspace:{workspace_id}")
+
+    if env.aggregate_type == "Notification" and env.event_type == NOTIFICATION_EVENT_CREATED:
+        user_id = str((env.payload or {}).get("user_id") or "").strip()
+        if user_id:
+            channels.add(f"user:{user_id}")
+
+    if channels:
+        enqueue_realtime_channels(db, channels)

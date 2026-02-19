@@ -45,7 +45,7 @@ graph LR
 - Notes and project rules as long-lived project memory.
 - Scheduled instruction tasks (one-shot and recurring).
 - AI automation loop: request -> queued -> runner -> completion/failure events.
-- Real-time notifications over SSE (`notification`, `task_event`, `ping`).
+- Real-time notifications over SSE (`notification`, `task_event`, `ping`) with commit-driven push wakeups.
 - Knowledge graph endpoints and MCP tools for dependency-aware context.
 - Command idempotency via `X-Command-Id` and `command_executions`.
 
@@ -76,7 +76,7 @@ docker compose run --rm --build task-app pytest
 
 ## Technology Stack
 - Backend: FastAPI, SQLAlchemy, Pydantic.
-- Eventing: KurrentDB/EventStore + custom projection workers.
+- Eventing: KurrentDB/EventStore + persistent subscription projection workers.
 - Datastores: PostgreSQL (read), KurrentDB (event source), Neo4j (graph).
 - Frontend: React + TypeScript + TanStack Query.
 - AI integration: FastMCP server + Codex command adapter.
