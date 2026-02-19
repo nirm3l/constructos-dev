@@ -1,5 +1,6 @@
 import type {
   AdminUserCreateResponse,
+  AdminUserDeactivateResponse,
   AdminUserRoleUpdateResponse,
   AdminUserResetPasswordResponse,
   AdminUsersPage,
@@ -201,6 +202,16 @@ export const updateAdminUserRole = (
   payload: { workspace_id: string; role: string }
 ) =>
   api<AdminUserRoleUpdateResponse>(`/api/admin/users/${targetUserId}/set-role`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const deactivateAdminUser = (
+  userId: string,
+  targetUserId: string,
+  payload: { workspace_id: string }
+) =>
+  api<AdminUserDeactivateResponse>(`/api/admin/users/${targetUserId}/deactivate`, userId, {
     method: 'POST',
     body: JSON.stringify(payload),
   })

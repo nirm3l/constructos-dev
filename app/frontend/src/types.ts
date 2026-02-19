@@ -32,6 +32,7 @@ export type AdminWorkspaceUser = {
   is_active: boolean
   must_change_password: boolean
   can_reset_password?: boolean
+  can_deactivate?: boolean
 }
 
 export type AdminUsersPage = {
@@ -65,6 +66,13 @@ export type AdminUserRoleUpdateResponse = {
   workspace_id: string
   user_id: string
   role: string
+}
+
+export type AdminUserDeactivateResponse = {
+  ok: boolean
+  workspace_id: string
+  user_id: string
+  is_active: boolean
 }
 
 export type ExternalRef = {

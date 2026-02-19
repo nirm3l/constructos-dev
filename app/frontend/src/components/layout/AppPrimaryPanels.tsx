@@ -325,42 +325,47 @@ export function AppPrimaryPanels({ state }: { state: any }) {
         />
       )}
 
-      {state.tab === 'profile' ? (
-        <ProfilePanel
-          userName={state.bootstrap.data.current_user.full_name}
-          theme={state.theme}
-          frontendVersion={state.frontendVersion}
-          backendVersion={state.backendVersion}
-          backendBuild={state.backendBuild}
-          deployedAtUtc={state.backendDeployedAtUtc}
-          onLogout={state.logout}
-          onToggleTheme={() => {
-            const next = state.theme === 'light' ? 'dark' : 'light'
-            state.setTheme(next)
-            state.themeMutation.mutate(next)
-          }}
-        />
-      ) : state.tab === 'admin' ? (
-        <AdminPanel
-          canManageUsers={state.canManageUsers}
-          workspaceId={state.workspaceId}
-          users={state.adminUsers}
-          usersLoading={state.adminUsersLoading}
-          usersError={state.adminUsersError}
-          username={state.adminCreateUsername}
-          setUsername={state.setAdminCreateUsername}
-          fullName={state.adminCreateFullName}
-          setFullName={state.setAdminCreateFullName}
-          role={state.adminCreateRole}
-          setRole={state.setAdminCreateRole}
-          createPending={state.createAdminUserMutation.isPending}
-          onCreate={state.onCreateAdminUser}
-          lastTempPassword={state.adminLastTempPassword}
-          onResetPassword={state.onResetAdminUserPassword}
-          resetPendingUserId={state.resetAdminPasswordUserId}
-          onUpdateRole={state.onUpdateAdminUserRole}
-          updateRolePendingUserId={state.updateAdminRoleUserId}
-        />
+      {state.tab === 'profile' || state.tab === 'admin' ? (
+        <div className="profile-stack">
+          <ProfilePanel
+            userName={state.bootstrap.data.current_user.full_name}
+            theme={state.theme}
+            frontendVersion={state.frontendVersion}
+            backendVersion={state.backendVersion}
+            backendBuild={state.backendBuild}
+            deployedAtUtc={state.backendDeployedAtUtc}
+            onLogout={state.logout}
+            onToggleTheme={() => {
+              const next = state.theme === 'light' ? 'dark' : 'light'
+              state.setTheme(next)
+              state.themeMutation.mutate(next)
+            }}
+          />
+          {state.canManageUsers && (
+            <AdminPanel
+              canManageUsers={state.canManageUsers}
+              workspaceId={state.workspaceId}
+              users={state.adminUsers}
+              usersLoading={state.adminUsersLoading}
+              usersError={state.adminUsersError}
+              username={state.adminCreateUsername}
+              setUsername={state.setAdminCreateUsername}
+              fullName={state.adminCreateFullName}
+              setFullName={state.setAdminCreateFullName}
+              role={state.adminCreateRole}
+              setRole={state.setAdminCreateRole}
+              createPending={state.createAdminUserMutation.isPending}
+              onCreate={state.onCreateAdminUser}
+              lastTempPassword={state.adminLastTempPassword}
+              onResetPassword={state.onResetAdminUserPassword}
+              resetPendingUserId={state.resetAdminPasswordUserId}
+              onUpdateRole={state.onUpdateAdminUserRole}
+              updateRolePendingUserId={state.updateAdminRoleUserId}
+              onDeactivateUser={state.onDeactivateAdminUser}
+              deactivatePendingUserId={state.deactivateAdminUserId}
+            />
+          )}
+        </div>
       ) : state.tab === 'search' ? (
         <GlobalSearchResultsPanel
           tasks={state.tasks.data?.items ?? []}

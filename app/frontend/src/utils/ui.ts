@@ -6,13 +6,19 @@ export type Tab = 'today' | 'tasks' | 'notes' | 'specifications' | 'projects' | 
 
 export const TAB_ORDER: Tab[] = ['today', 'tasks', 'notes', 'specifications', 'projects', 'knowledge-graph', 'search', 'profile', 'admin']
 
+const LEGACY_TAB_REDIRECTS: Record<string, Tab> = {
+  admin: 'profile',
+}
+
 export function normalizeStoredUserId(raw: string | null): string {
   if (!raw || raw === '1' || raw === '2') return DEFAULT_USER_ID
   return raw
 }
 
 export function parseStoredTab(raw: string | null): Tab {
-  if (raw && TAB_ORDER.includes(raw as Tab)) return raw as Tab
+  if (!raw) return 'tasks'
+  const normalized = LEGACY_TAB_REDIRECTS[raw] ?? raw
+  if (TAB_ORDER.includes(normalized as Tab)) return normalized as Tab
   return 'tasks'
 }
 
@@ -28,7 +34,8 @@ export function parseStoredProjectsMode(raw: string | null): 'board' | 'list' {
 
 export function parseUrlTab(raw: string | null): Tab | null {
   if (!raw) return null
-  return TAB_ORDER.includes(raw as Tab) ? (raw as Tab) : null
+  const normalized = LEGACY_TAB_REDIRECTS[raw] ?? raw
+  return TAB_ORDER.includes(normalized as Tab) ? (normalized as Tab) : null
 }
 
 export function toLocalDateTimeInput(iso: string | null): string {

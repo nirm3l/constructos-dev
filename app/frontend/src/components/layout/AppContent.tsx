@@ -11,7 +11,6 @@ export function AppContent({ state }: { state: any }) {
         bootstrapData={state.bootstrap.data}
         tab={state.tab}
         setTab={state.setTab}
-        canManageUsers={state.canManageUsers}
         searchQ={state.searchQ}
         setSearchQ={state.setSearchQ}
         selectedProjectId={state.selectedProjectId}

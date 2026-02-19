@@ -895,6 +895,65 @@ def test_admin_can_update_workspace_user_role(tmp_path):
     assert updated_row['role'] == 'Admin'
 
 
+def test_admin_can_deactivate_workspace_user(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    created = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'deactivate-target'},
+    )
+    assert created.status_code == 200
+    target_id = created.json()['user']['id']
+    temp_password = created.json()['temporary_password']
+
+    login_before_deactivate = client.post(
+        '/api/auth/login',
+        json={'username': 'deactivate-target', 'password': temp_password},
+    )
+    assert login_before_deactivate.status_code == 200
+
+    admin_login = client.post('/api/auth/login', json={'username': 'm4tr1x', 'password': 'testtest'})
+    assert admin_login.status_code == 200
+
+    deactivated = client.post(
+        f'/api/admin/users/{target_id}/deactivate',
+        json={'workspace_id': ws_id},
+    )
+    assert deactivated.status_code == 200
+    assert deactivated.json()['ok'] is True
+    assert deactivated.json()['is_active'] is False
+
+    users_page = client.get(f'/api/admin/users?workspace_id={ws_id}')
+    assert users_page.status_code == 200
+    deactivated_row = next((item for item in users_page.json()['items'] if item['id'] == target_id), None)
+    assert deactivated_row is not None
+    assert deactivated_row['is_active'] is False
+    assert deactivated_row['can_deactivate'] is False
+
+    client.post('/api/auth/logout')
+    login_after_deactivate = client.post(
+        '/api/auth/login',
+        json={'username': 'deactivate-target', 'password': temp_password},
+    )
+    assert login_after_deactivate.status_code == 401
+
+
+def test_admin_cannot_deactivate_own_account(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    me_id = bootstrap['current_user']['id']
+
+    blocked = client.post(
+        f'/api/admin/users/{me_id}/deactivate',
+        json={'workspace_id': ws_id},
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()['detail'] == 'You cannot deactivate your own account'
+
+
 def test_admin_cannot_reset_password_for_agent_user(tmp_path):
     from shared.settings import AGENT_SYSTEM_USER_ID
 
@@ -910,12 +969,19 @@ def test_admin_cannot_reset_password_for_agent_user(tmp_path):
     assert agent_item['role'] in {'Owner', 'Admin'}
     assert agent_item['must_change_password'] is False
     assert agent_item['can_reset_password'] is False
+    assert agent_item['can_deactivate'] is False
 
     reset = client.post(
         f'/api/admin/users/{AGENT_SYSTEM_USER_ID}/reset-password',
         json={'workspace_id': ws_id},
     )
     assert reset.status_code == 404
+
+    deactivate = client.post(
+        f'/api/admin/users/{AGENT_SYSTEM_USER_ID}/deactivate',
+        json={'workspace_id': ws_id},
+    )
+    assert deactivate.status_code == 422
 
 
 def test_due_soon_system_notification(tmp_path):

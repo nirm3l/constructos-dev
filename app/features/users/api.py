@@ -47,6 +47,10 @@ class AdminUpdateUserRolePayload(BaseModel):
     role: str
 
 
+class AdminDeactivateUserPayload(BaseModel):
+    workspace_id: str
+
+
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -233,6 +237,11 @@ def list_workspace_users(
                 "is_active": bool(member_user.is_active),
                 "must_change_password": bool(member_user.must_change_password) if member_user.user_type == "human" else False,
                 "can_reset_password": member_user.user_type == "human",
+                "can_deactivate": (
+                    member_user.user_type == "human"
+                    and bool(member_user.is_active)
+                    and member_user.id != user.id
+                ),
             }
             for member_user, membership in rows
         ],
@@ -361,6 +370,54 @@ def update_workspace_user_role(
     target_membership.role = role
     db.commit()
     return {"ok": True, "workspace_id": payload.workspace_id, "user_id": target_user_id, "role": role}
+
+
+@router.post("/api/admin/users/{target_user_id}/deactivate")
+def deactivate_workspace_user(
+    target_user_id: str,
+    payload: AdminDeactivateUserPayload,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    _require_workspace_admin(db, payload.workspace_id, user.id)
+    target_membership = db.execute(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == payload.workspace_id,
+            WorkspaceMember.user_id == target_user_id,
+        )
+    ).scalar_one_or_none()
+    if not target_membership:
+        raise HTTPException(status_code=404, detail="Workspace member not found")
+
+    target_user = db.get(User, target_user_id)
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target_user.user_type != "human":
+        raise HTTPException(status_code=422, detail="Only human users can be deactivated")
+    if target_user.id == user.id:
+        raise HTTPException(status_code=409, detail="You cannot deactivate your own account")
+    if not bool(target_user.is_active):
+        return {"ok": True, "workspace_id": payload.workspace_id, "user_id": target_user_id, "is_active": False}
+
+    if target_membership.role in ADMIN_ROLES:
+        active_human_admin_count = db.execute(
+            select(func.count())
+            .select_from(WorkspaceMember)
+            .join(User, User.id == WorkspaceMember.user_id)
+            .where(
+                WorkspaceMember.workspace_id == payload.workspace_id,
+                WorkspaceMember.role.in_(tuple(ADMIN_ROLES)),
+                User.user_type == "human",
+                User.is_active.is_(True),
+            )
+        ).scalar_one()
+        if int(active_human_admin_count or 0) <= 1:
+            raise HTTPException(status_code=409, detail="Workspace must have at least one active human admin")
+
+    target_user.is_active = False
+    db.execute(delete(AuthSession).where(AuthSession.user_id == target_user.id))
+    db.commit()
+    return {"ok": True, "workspace_id": payload.workspace_id, "user_id": target_user_id, "is_active": False}
 
 
 @router.patch("/api/me/preferences")

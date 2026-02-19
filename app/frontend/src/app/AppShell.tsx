@@ -2,6 +2,7 @@ import React from 'react'
 import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   authChangePassword,
+  deactivateAdminUser,
   authLogin,
   authLogout,
   authMe,
@@ -241,11 +242,12 @@ function App({ logout }: { logout: () => void }) {
   const [adminLastTempPassword, setAdminLastTempPassword] = React.useState<string | null>(null)
   const [resetAdminPasswordUserId, setResetAdminPasswordUserId] = React.useState<string | null>(null)
   const [updateAdminRoleUserId, setUpdateAdminRoleUserId] = React.useState<string | null>(null)
+  const [deactivateAdminUserId, setDeactivateAdminUserId] = React.useState<string | null>(null)
 
   const adminUsersQuery = useQuery({
     queryKey: ['admin-users', userId, workspaceId],
     queryFn: () => listAdminUsers(userId, workspaceId),
-    enabled: Boolean(workspaceId && canManageUsers && tab === 'admin'),
+    enabled: Boolean(workspaceId && canManageUsers && (tab === 'profile' || tab === 'admin')),
   })
 
   const createAdminUserMutation = useMutation({
@@ -297,6 +299,22 @@ function App({ logout }: { logout: () => void }) {
       setUpdateAdminRoleUserId(null)
     },
   })
+  const deactivateAdminUserMutation = useMutation({
+    mutationFn: (targetUserId: string) => deactivateAdminUser(userId, targetUserId, { workspace_id: workspaceId }),
+    onMutate: (targetUserId: string) => {
+      setDeactivateAdminUserId(targetUserId)
+    },
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['admin-users', userId, workspaceId] })
+      await qc.invalidateQueries({ queryKey: ['bootstrap', userId] })
+    },
+    onError: (err: any) => {
+      setUiError(err?.message || 'Unable to deactivate user')
+    },
+    onSettled: () => {
+      setDeactivateAdminUserId(null)
+    },
+  })
   const adminUsers = adminUsersQuery.data?.items ?? []
   const adminUsersError = adminUsersQuery.isError ? toErrorMessage(adminUsersQuery.error, 'Unable to load users') : null
   const onCreateAdminUser = React.useCallback(() => {
@@ -318,6 +336,10 @@ function App({ logout }: { logout: () => void }) {
     if (!workspaceId) return
     updateAdminUserRoleMutation.mutate({ targetUserId, role })
   }, [updateAdminUserRoleMutation, workspaceId])
+  const onDeactivateAdminUser = React.useCallback((targetUserId: string) => {
+    if (!workspaceId) return
+    deactivateAdminUserMutation.mutate(targetUserId)
+  }, [deactivateAdminUserMutation, workspaceId])
 
   useBootstrapSelectionEffects({
     bootstrap,
@@ -1100,6 +1122,8 @@ function App({ logout }: { logout: () => void }) {
       resetAdminPasswordUserId,
       onUpdateAdminUserRole,
       updateAdminRoleUserId,
+      onDeactivateAdminUser,
+      deactivateAdminUserId,
       userId,
       logout,
       toggleProjectEditor,

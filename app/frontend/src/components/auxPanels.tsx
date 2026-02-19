@@ -118,20 +118,52 @@ export function ProfilePanel({
   onLogout: () => void
   onToggleTheme: () => void
 }) {
+  const nextTheme = theme === 'light' ? 'dark' : 'light'
+
   return (
-    <section className="card">
-      <h2>Profile</h2>
-      <p className="meta">User: {userName}</p>
-      <p className="meta">Theme: {theme}</p>
-      <p className="meta">Frontend version: {frontendVersion}</p>
-      <p className="meta">
-        Backend version: {backendVersion}
-        {backendBuild ? ` (${backendBuild})` : ''}
-      </p>
-      <p className="meta">Deployed (UTC): {deployedAtUtc ?? 'unknown'}</p>
-      <div className="row">
-        <button onClick={onToggleTheme}>Toggle Theme</button>
-        <button onClick={onLogout}>Logout</button>
+    <section className="card profile-panel">
+      <div className="profile-panel-head">
+        <div className="profile-panel-identity">
+          <div className="profile-avatar" aria-hidden="true">
+            <Icon path="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8M4 20a8 8 0 0 1 16 0" />
+          </div>
+          <div className="profile-head-copy">
+            <h2>Profile</h2>
+            <p className="meta">Session and build details</p>
+          </div>
+        </div>
+        <span className="status-chip profile-theme-chip">{theme} mode</span>
+      </div>
+
+      <dl className="profile-facts">
+        <div className="profile-fact">
+          <dt>User</dt>
+          <dd>{userName}</dd>
+        </div>
+        <div className="profile-fact">
+          <dt>Frontend version</dt>
+          <dd>{frontendVersion}</dd>
+        </div>
+        <div className="profile-fact">
+          <dt>Backend version</dt>
+          <dd>
+            {backendVersion}
+            {backendBuild ? ` (${backendBuild})` : ''}
+          </dd>
+        </div>
+        <div className="profile-fact">
+          <dt>Deployed (UTC)</dt>
+          <dd>{deployedAtUtc ?? 'unknown'}</dd>
+        </div>
+      </dl>
+
+      <div className="row wrap profile-actions">
+        <button className="primary" onClick={onToggleTheme}>
+          Switch to {nextTheme} theme
+        </button>
+        <button className="danger-ghost" onClick={onLogout}>
+          Logout
+        </button>
       </div>
     </section>
   )
@@ -156,6 +188,8 @@ export function AdminPanel({
   resetPendingUserId,
   onUpdateRole,
   updateRolePendingUserId,
+  onDeactivateUser,
+  deactivatePendingUserId,
 }: {
   canManageUsers: boolean
   workspaceId: string
@@ -175,6 +209,8 @@ export function AdminPanel({
   resetPendingUserId: string | null
   onUpdateRole: (userId: string, role: string) => void
   updateRolePendingUserId: string | null
+  onDeactivateUser: (userId: string) => void
+  deactivatePendingUserId: string | null
 }) {
   if (!canManageUsers) {
     return (
@@ -257,8 +293,10 @@ export function AdminPanel({
           <div className="admin-user-list">
             {users.map((item) => {
               const canResetPassword = item.can_reset_password ?? item.user_type === 'human'
+              const canDeactivate = item.can_deactivate ?? (item.user_type === 'human' && item.is_active)
               const roleUpdatePending = updateRolePendingUserId === item.id
               const resetPending = resetPendingUserId === item.id
+              const deactivatePending = deactivatePendingUserId === item.id
               return (
                 <article key={item.id} className="admin-user-row">
                   <div className="admin-user-main">
@@ -294,7 +332,7 @@ export function AdminPanel({
                         <option value="Guest">Guest</option>
                       </select>
                     </label>
-                    {canResetPassword ? (
+                    {item.is_active && canResetPassword ? (
                       <button
                         className="admin-reset-btn"
                         onClick={() => onResetPassword(item.id)}
@@ -302,6 +340,22 @@ export function AdminPanel({
                       >
                         <Icon path="M20 11a8 8 0 1 0 2.3 5.6M20 4v7h-7" />
                         <span>{resetPending ? 'Resetting...' : 'Reset password'}</span>
+                      </button>
+                    ) : null}
+                    {item.is_active && canDeactivate ? (
+                      <button
+                        className="admin-deactivate-btn"
+                        onClick={() => {
+                          const confirmDeactivate = window.confirm(
+                            `Deactivate ${item.username}? They will be signed out and unable to log in.`
+                          )
+                          if (!confirmDeactivate) return
+                          onDeactivateUser(item.id)
+                        }}
+                        disabled={deactivatePending}
+                      >
+                        <Icon path="M6 6l12 12M18 6 6 18" />
+                        <span>{deactivatePending ? 'Deactivating...' : 'Deactivate user'}</span>
                       </button>
                     ) : null}
                   </div>
