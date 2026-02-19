@@ -186,43 +186,67 @@ export function AdminPanel({
   }
 
   return (
-    <section className="card">
-      <h2>Admin</h2>
-      <p className="meta">Workspace: {workspaceId || 'n/a'}</p>
-      <div className="row wrap" style={{ marginTop: 10 }}>
-        <input
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          placeholder="Username (3-64 chars)"
-          autoComplete="off"
-        />
-        <input
-          value={fullName}
-          onChange={(e) => setFullName(e.target.value)}
-          placeholder="Full name (optional)"
-          autoComplete="off"
-        />
-        <select
-          value={role}
-          onChange={(e) => setRole(e.target.value)}
-          aria-label="New user workspace role"
-        >
-          <option value="Member">Member</option>
-          <option value="Admin">Admin</option>
-          <option value="Guest">Guest</option>
-          <option value="Owner">Owner</option>
-        </select>
-        <button onClick={onCreate} disabled={createPending || !username.trim()}>
-          {createPending ? 'Creating...' : 'Create user'}
-        </button>
+    <section className="card admin-panel">
+      <div className="admin-panel-head">
+        <div>
+          <h2>Admin</h2>
+          <p className="meta">Create users, assign workspace roles, and rotate credentials.</p>
+        </div>
+        <span className="status-chip admin-workspace-chip">Workspace: {workspaceId || 'n/a'}</span>
       </div>
+
+      <div className="admin-create">
+        <div className="admin-create-grid">
+          <label className="field-control">
+            <span className="field-label">Username</span>
+            <input
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="3-64 chars"
+              autoComplete="off"
+            />
+          </label>
+          <label className="field-control">
+            <span className="field-label">Full name</span>
+            <input
+              value={fullName}
+              onChange={(e) => setFullName(e.target.value)}
+              placeholder="Optional"
+              autoComplete="off"
+            />
+          </label>
+          <label className="field-control">
+            <span className="field-label">Role</span>
+            <select
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              aria-label="New user workspace role"
+            >
+              <option value="Member">Member</option>
+              <option value="Admin">Admin</option>
+              <option value="Guest">Guest</option>
+              <option value="Owner">Owner</option>
+            </select>
+          </label>
+          <div className="admin-create-actions">
+            <button className="primary" onClick={onCreate} disabled={createPending || !username.trim()}>
+              {createPending ? 'Creating...' : 'Create user'}
+            </button>
+          </div>
+        </div>
+      </div>
+
       {lastTempPassword && (
-        <div className="notice" style={{ marginTop: 10 }}>
+        <div className="notice admin-temp-password">
           Temporary password: <code>{lastTempPassword}</code>
         </div>
       )}
-      <div style={{ marginTop: 14 }}>
-        <h3 style={{ marginBottom: 8 }}>Workspace users</h3>
+
+      <div className="admin-users">
+        <div className="admin-users-head">
+          <h3>Workspace users</h3>
+          <span className="meta">{users.length} total</span>
+        </div>
         {usersLoading ? (
           <div className="meta">Loading users...</div>
         ) : usersError ? (
@@ -230,50 +254,58 @@ export function AdminPanel({
         ) : users.length === 0 ? (
           <div className="meta">No users.</div>
         ) : (
-          <div className="task-list">
+          <div className="admin-user-list">
             {users.map((item) => {
               const canResetPassword = item.can_reset_password ?? item.user_type === 'human'
               const roleUpdatePending = updateRolePendingUserId === item.id
+              const resetPending = resetPendingUserId === item.id
               return (
-                <div key={item.id} className="task-row">
-                  <div className="task-main">
-                    <div className="row wrap" style={{ gap: 8 }}>
-                      <strong>{item.username}</strong>
+                <article key={item.id} className="admin-user-row">
+                  <div className="admin-user-main">
+                    <div className="admin-user-title">
+                      <strong>{item.full_name || item.username}</strong>
+                      <span className="admin-user-username">@{item.username}</span>
+                    </div>
+                    <div className="admin-user-badges">
                       <span className="status-chip">{item.role}</span>
+                      <span className="status-chip">{item.user_type}</span>
                       {canResetPassword && item.must_change_password && <span className="status-chip">must change password</span>}
                       {!canResetPassword && <span className="status-chip">service account</span>}
                       {!item.is_active && <span className="status-chip">inactive</span>}
                     </div>
-                    <div className="meta">{item.full_name || '-'}</div>
                   </div>
-                  <div className="row wrap" style={{ gap: 8 }}>
-                    <select
-                      value={item.role}
-                      onChange={(e) => {
-                        const nextRole = e.target.value
-                        if (nextRole === item.role) return
-                        onUpdateRole(item.id, nextRole)
-                      }}
-                      disabled={roleUpdatePending}
-                      title="Workspace role"
-                      aria-label={`Set workspace role for ${item.username}`}
-                    >
-                      <option value="Owner">Owner</option>
-                      <option value="Admin">Admin</option>
-                      <option value="Member">Member</option>
-                      <option value="Guest">Guest</option>
-                    </select>
+                  <div className="admin-user-actions">
+                    <label className="field-control admin-role-field">
+                      <span className="field-label">Role</span>
+                      <select
+                        value={item.role}
+                        onChange={(e) => {
+                          const nextRole = e.target.value
+                          if (nextRole === item.role) return
+                          onUpdateRole(item.id, nextRole)
+                        }}
+                        disabled={roleUpdatePending}
+                        title="Workspace role"
+                        aria-label={`Set workspace role for ${item.username}`}
+                      >
+                        <option value="Owner">Owner</option>
+                        <option value="Admin">Admin</option>
+                        <option value="Member">Member</option>
+                        <option value="Guest">Guest</option>
+                      </select>
+                    </label>
                     {canResetPassword ? (
                       <button
-                        className="status-chip"
+                        className="admin-reset-btn"
                         onClick={() => onResetPassword(item.id)}
-                        disabled={resetPendingUserId === item.id}
+                        disabled={resetPending}
                       >
-                        {resetPendingUserId === item.id ? 'Resetting...' : 'Reset password'}
+                        <Icon path="M20 11a8 8 0 1 0 2.3 5.6M20 4v7h-7" />
+                        <span>{resetPending ? 'Resetting...' : 'Reset password'}</span>
                       </button>
                     ) : null}
                   </div>
-                </div>
+                </article>
               )
             })}
           </div>
