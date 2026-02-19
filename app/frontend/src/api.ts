@@ -8,6 +8,7 @@ import type {
   BootstrapPayload,
   AgentChatResponse,
   GraphContextPack,
+  ProjectKnowledgeSearchResult,
   GraphProjectOverview,
   GraphProjectSubgraph,
   Notification,
@@ -19,8 +20,10 @@ import type {
   Project,
   ProjectBoard,
   ProjectMembersPage,
+  ProjectFromTemplateResponse,
   ProjectRule,
   ProjectRulesPage,
+  ProjectTemplatesPage,
   Specification,
   SpecificationBulkTaskCreateResponse,
   SpecificationsPage,
@@ -354,6 +357,29 @@ export const createProject = (
 ) =>
   api<Project>('/api/projects', userId, { method: 'POST', body: JSON.stringify(payload) })
 
+export const listProjectTemplates = (userId: string) =>
+  api<ProjectTemplatesPage>('/api/project-templates', userId)
+
+export const createProjectFromTemplate = (
+  userId: string,
+  payload: {
+    workspace_id: string
+    template_key: string
+    name: string
+    description?: string
+    custom_statuses?: string[]
+    member_user_ids?: string[]
+    embedding_enabled?: boolean
+    embedding_model?: string | null
+    context_pack_evidence_top_k?: number | null
+    parameters?: Record<string, unknown>
+  }
+) =>
+  api<ProjectFromTemplateResponse>('/api/projects/from-template', userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
 export const patchProject = (
   userId: string,
   projectId: string,
@@ -418,6 +444,26 @@ export const getProjectGraphSubgraph = (
     `/api/projects/${projectId}/knowledge-graph/subgraph${queryString({
       limit_nodes: params?.limit_nodes ?? 48,
       limit_edges: params?.limit_edges ?? 160,
+    })}`,
+    userId
+  )
+
+export const searchProjectKnowledge = (
+  userId: string,
+  projectId: string,
+  params: {
+    q: string
+    focus_entity_type?: string
+    focus_entity_id?: string
+    limit?: number
+  }
+) =>
+  api<ProjectKnowledgeSearchResult>(
+    `/api/projects/${projectId}/knowledge/search${queryString({
+      q: params.q,
+      focus_entity_type: params.focus_entity_type,
+      focus_entity_id: params.focus_entity_id,
+      limit: params.limit ?? 20,
     })}`,
     userId
   )

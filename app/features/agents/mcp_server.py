@@ -272,6 +272,25 @@ def create_mcp():
             limit=limit,
         )
 
+    @mcp.tool(description="Search project knowledge using vector retrieval and graph relevance signals.")
+    def search_project_knowledge(
+        project_id: str,
+        query: str,
+        auth_token: str | None = None,
+        focus_entity_type: str | None = None,
+        focus_entity_id: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.search_project_knowledge(
+            project_id=project_id,
+            query=query,
+            auth_token=auth_token,
+            focus_entity_type=focus_entity_type,
+            focus_entity_id=focus_entity_id,
+            limit=limit,
+        )
+
     @mcp.tool(description="Apply a bulk action to multiple tasks (e.g. archive, complete, delete).")
     def bulk_task_action(
         task_ids: list[str],
@@ -469,6 +488,55 @@ def create_mcp():
             embedding_enabled=embedding_enabled,
             embedding_model=embedding_model,
             context_pack_evidence_top_k=context_pack_evidence_top_k,
+            command_id=command_id,
+        )
+
+    @mcp.tool(description="List available project templates for accelerated project setup.")
+    def list_project_templates(
+        auth_token: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.list_project_templates(auth_token=auth_token)
+
+    @mcp.tool(description="Get one project template definition by key.")
+    def get_project_template(
+        template_key: str,
+        auth_token: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.get_project_template(
+            template_key=template_key,
+            auth_token=auth_token,
+        )
+
+    @mcp.tool(description="Create a project and seed specifications/tasks/rules from a project template.")
+    def create_project_from_template(
+        template_key: str,
+        name: str,
+        workspace_id: str | None = None,
+        auth_token: str | None = None,
+        description: str = "",
+        custom_statuses: list[str] | None = None,
+        member_user_ids: list[str] | None = None,
+        embedding_enabled: bool | None = None,
+        embedding_model: str | None = None,
+        context_pack_evidence_top_k: int | None = None,
+        parameters: dict[str, Any] | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.create_project_from_template(
+            template_key=template_key,
+            name=name,
+            workspace_id=workspace_id,
+            auth_token=auth_token,
+            description=description,
+            custom_statuses=custom_statuses,
+            member_user_ids=member_user_ids,
+            embedding_enabled=embedding_enabled,
+            embedding_model=embedding_model,
+            context_pack_evidence_top_k=context_pack_evidence_top_k,
+            parameters=parameters,
             command_id=command_id,
         )
 

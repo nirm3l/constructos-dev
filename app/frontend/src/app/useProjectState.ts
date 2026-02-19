@@ -4,6 +4,7 @@ import type { DraftProjectRule } from '../components/projects/ProjectsCreateForm
 
 export function useProjectState() {
   const [projectName, setProjectName] = React.useState('')
+  const [projectTemplateKey, setProjectTemplateKey] = React.useState('')
   const [projectDescription, setProjectDescription] = React.useState('')
   const [projectCustomStatusesText, setProjectCustomStatusesText] = React.useState('')
   const [projectExternalRefsText, setProjectExternalRefsText] = React.useState('')
@@ -48,6 +49,8 @@ export function useProjectState() {
   return {
     projectName,
     setProjectName,
+    projectTemplateKey,
+    setProjectTemplateKey,
     projectDescription,
     setProjectDescription,
     projectCustomStatusesText,

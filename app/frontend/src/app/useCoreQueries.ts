@@ -7,6 +7,7 @@ import {
   getProjectGraphOverview,
   getProjectGraphSubgraph,
   getProjectRules,
+  listProjectTemplates,
   getSpecifications,
   getProjectTags,
   getTasks,
@@ -78,6 +79,12 @@ export function useCoreQueries(c: any) {
         project_id: c.selectedProjectId,
       }),
     enabled: Boolean(c.workspaceId && c.selectedProjectId) && c.tab === 'projects'
+  })
+
+  const projectTemplates = useQuery({
+    queryKey: ['project-templates', c.userId],
+    queryFn: () => listProjectTemplates(c.userId),
+    enabled: Boolean(c.workspaceId) && c.tab === 'projects',
   })
 
   const projectGraphOverview = useQuery({
@@ -219,6 +226,7 @@ export function useCoreQueries(c: any) {
     taskNotes,
     projectTags,
     projectRules,
+    projectTemplates,
     projectGraphOverview,
     projectGraphContextPack,
     projectGraphSubgraph,

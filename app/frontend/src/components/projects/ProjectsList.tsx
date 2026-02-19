@@ -4,6 +4,13 @@ import { AttachmentRefList, ExternalRefList, Icon } from '../shared/uiHelpers'
 
 type CountQuery = { data?: { total?: number } }
 
+function formatTemplateAppliedAt(value: string | null | undefined): string {
+  if (!value) return 'Unknown'
+  const dt = new Date(value)
+  if (Number.isNaN(dt.getTime())) return value
+  return dt.toLocaleString()
+}
+
 export function ProjectsList({
   projects,
   selectedProjectId,
@@ -48,6 +55,13 @@ export function ProjectsList({
                 <strong>{project.name}</strong>
               </div>
               <span className="meta">Status: {project.status || 'active'}</span>
+              {project.template_binding ? (
+                <div className="meta">
+                  Template: {project.template_binding.template_key} v{project.template_binding.template_version}
+                  {' | '}
+                  Applied: {formatTemplateAppliedAt(project.template_binding.applied_at)}
+                </div>
+              ) : null}
               <div className="meta">{project.description || '(no description)'}</div>
               <div className="meta">
                 {[

@@ -43,6 +43,9 @@ _SCHEMA_READY = False
 _ENTITY_LABELS = {
     "workspace": "Workspace",
     "project": "Project",
+    "template": "Template",
+    "templateversion": "TemplateVersion",
+    "template_version": "TemplateVersion",
     "task": "Task",
     "note": "Note",
     "comment": "Comment",
@@ -53,6 +56,33 @@ _ENTITY_LABELS = {
     "project_rule": "ProjectRule",
     "user": "User",
     "tag": "Tag",
+    "boundedcontext": "BoundedContext",
+    "bounded_context": "BoundedContext",
+    "aggregate": "Aggregate",
+    "command": "Command",
+    "domainevent": "DomainEvent",
+    "domain_event": "DomainEvent",
+    "policy": "Policy",
+    "readmodel": "ReadModel",
+    "read_model": "ReadModel",
+    "integrationboundary": "IntegrationBoundary",
+    "integration_boundary": "IntegrationBoundary",
+    "gameplayloop": "GameplayLoop",
+    "gameplay_loop": "GameplayLoop",
+    "inputscheme": "InputScheme",
+    "input_scheme": "InputScheme",
+    "assetpipeline": "AssetPipeline",
+    "asset_pipeline": "AssetPipeline",
+    "deviceprofile": "DeviceProfile",
+    "device_profile": "DeviceProfile",
+    "performancebudget": "PerformanceBudget",
+    "performance_budget": "PerformanceBudget",
+    "deploymenttarget": "DeploymentTarget",
+    "deployment_target": "DeploymentTarget",
+    "releasepipeline": "ReleasePipeline",
+    "release_pipeline": "ReleasePipeline",
+    "telemetrymetric": "TelemetryMetric",
+    "telemetry_metric": "TelemetryMetric",
 }
 
 
@@ -179,6 +209,8 @@ def ensure_graph_schema() -> None:
         statements = [
             "CREATE CONSTRAINT workspace_id_unique IF NOT EXISTS FOR (n:Workspace) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT project_id_unique IF NOT EXISTS FOR (n:Project) REQUIRE n.id IS UNIQUE",
+            "CREATE CONSTRAINT template_id_unique IF NOT EXISTS FOR (n:Template) REQUIRE n.id IS UNIQUE",
+            "CREATE CONSTRAINT template_version_id_unique IF NOT EXISTS FOR (n:TemplateVersion) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT task_id_unique IF NOT EXISTS FOR (n:Task) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT note_id_unique IF NOT EXISTS FOR (n:Note) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT specification_id_unique IF NOT EXISTS FOR (n:Specification) REQUIRE n.id IS UNIQUE",
@@ -186,6 +218,7 @@ def ensure_graph_schema() -> None:
             "CREATE CONSTRAINT user_id_unique IF NOT EXISTS FOR (n:User) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT tag_value_unique IF NOT EXISTS FOR (n:Tag) REQUIRE n.value IS UNIQUE",
             "CREATE INDEX project_workspace_idx IF NOT EXISTS FOR (n:Project) ON (n.workspace_id)",
+            "CREATE INDEX template_key_idx IF NOT EXISTS FOR (n:Template) ON (n.key)",
             "CREATE INDEX task_project_idx IF NOT EXISTS FOR (n:Task) ON (n.project_id)",
             "CREATE INDEX note_project_idx IF NOT EXISTS FOR (n:Note) ON (n.project_id)",
             "CREATE INDEX specification_project_idx IF NOT EXISTS FOR (n:Specification) ON (n.project_id)",
@@ -796,6 +829,277 @@ def graph_get_dependency_path(
     }
 
 
+def _load_project_template_binding(project_id: str) -> dict[str, Any] | None:
+    from .models import ProjectTemplateBinding, SessionLocal
+
+    with SessionLocal() as db:
+        binding = (
+            db.query(ProjectTemplateBinding)
+            .filter(ProjectTemplateBinding.project_id == project_id)
+            .order_by(ProjectTemplateBinding.id.desc())
+            .first()
+        )
+        if binding is None:
+            return None
+        return {
+            "template_key": str(binding.template_key or "").strip(),
+            "template_version": str(binding.template_version or "").strip(),
+            "applied_by": str(binding.applied_by or "").strip(),
+            "applied_at": binding.created_at.isoformat().replace("+00:00", "Z") if binding.created_at else None,
+        }
+
+
+def search_project_knowledge(
+    *,
+    project_id: str,
+    query: str,
+    limit: int = 20,
+    focus_entity_type: str | None = None,
+    focus_entity_id: str | None = None,
+) -> dict[str, Any]:
+    text_query = str(query or "").strip()
+    if not text_query:
+        return {
+            "project_id": project_id,
+            "query": "",
+            "mode": "empty",
+            "items": [],
+            "gaps": ["query is empty"],
+        }
+
+    safe_limit = max(1, min(int(limit or 20), 50))
+    focus_type = str(focus_entity_type or "").strip() or None
+    focus_id = str(focus_entity_id or "").strip() or None
+    gaps: list[str] = []
+
+    candidate_scores: dict[tuple[str, str], float] = {}
+    path_lookup: dict[tuple[str, str], list[str]] = {}
+    focus_neighbors: list[dict[str, Any]] = []
+    if focus_type and focus_id and graph_enabled():
+        try:
+            focus_neighbors = graph_get_neighbors(
+                project_id=project_id,
+                entity_type=focus_type,
+                entity_id=focus_id,
+                depth=min(max(1, GRAPH_CONTEXT_MAX_HOPS), 4),
+                limit=min(max(10, safe_limit), 30),
+            ).get("items") or []
+        except Exception as exc:
+            gaps.append(f"focus graph neighborhood is unavailable: {exc}")
+
+    if graph_enabled():
+        try:
+            connected_resources = run_graph_query(
+                """
+                MATCH (p:Project {id:$project_id})
+                MATCH (n)
+                WHERE (
+                    coalesce(n.project_id, '') = $project_id
+                    OR EXISTS { MATCH (n)-[:IN_PROJECT]->(p) }
+                  )
+                  AND coalesce(n.is_deleted, false) = false
+                OPTIONAL MATCH (n)-[r]-()
+                RETURN
+                  head(labels(n)) AS entity_type,
+                  n.id AS entity_id,
+                  count(DISTINCT r) AS degree
+                ORDER BY degree DESC
+                LIMIT $limit
+                """,
+                {
+                    "project_id": project_id,
+                    "limit": max(safe_limit * 5, 80),
+                },
+            )
+            max_degree = max([int(item.get("degree") or 0) for item in connected_resources], default=1)
+            for row in connected_resources:
+                entity_type = str(row.get("entity_type") or "").strip()
+                entity_id = str(row.get("entity_id") or "").strip()
+                if not entity_type or not entity_id:
+                    continue
+                degree = int(row.get("degree") or 0)
+                candidate_scores[(entity_type, entity_id)] = max(0.0, min(1.0, degree / max(1, max_degree)))
+
+            for row in focus_neighbors:
+                entity_type = str(row.get("entity_type") or "").strip()
+                entity_id = str(row.get("entity_id") or "").strip()
+                if not entity_type or not entity_id:
+                    continue
+                path_types = [str(item) for item in (row.get("path_types") or []) if str(item).strip()]
+                score = 1.0 / max(1.0, float(len(path_types) + 1))
+                prev = candidate_scores.get((entity_type, entity_id), 0.0)
+                candidate_scores[(entity_type, entity_id)] = max(prev, score)
+
+            if focus_type and focus_id and candidate_scores:
+                dependency_paths = _build_dependency_paths(
+                    project_id=project_id,
+                    focus_entity_type=focus_type,
+                    focus_entity_id=focus_id,
+                    candidates=sorted(candidate_scores.keys(), key=lambda key: -candidate_scores.get(key, 0.0)),
+                    max_items=min(12, max(4, safe_limit)),
+                )
+                path_lookup = _dependency_path_lookup(dependency_paths)
+        except Exception as exc:
+            gaps.append(f"graph signal is unavailable: {exc}")
+    else:
+        gaps.append("knowledge graph is disabled")
+
+    from .models import SessionLocal
+
+    with SessionLocal() as db:
+        runtime = resolve_project_embedding_runtime(db, project_id)
+        vector_candidates: list[dict[str, Any]] = []
+        template_binding = _load_project_template_binding(project_id)
+        template_key = str((template_binding or {}).get("template_key") or "").strip()
+        expanded_query = " ".join([text_query, *_template_query_terms(template_key)]).strip() or text_query
+        if runtime.enabled:
+            try:
+                vector_candidates = search_project_chunks(
+                    db,
+                    project_id=project_id,
+                    query=expanded_query,
+                    limit=max(safe_limit * 4, 16),
+                    entity_filters=set(candidate_scores) or None,
+                )
+            except Exception as exc:
+                gaps.append(f"vector retrieval failed: {exc}")
+        else:
+            gaps.append("vector retrieval is disabled for this project")
+
+    items: list[dict[str, Any]] = []
+    if vector_candidates:
+        for candidate in vector_candidates:
+            entity_type = str(candidate.get("entity_type") or "").strip() or "Entity"
+            entity_id = str(candidate.get("entity_id") or "").strip() or "?"
+            source_type = str(candidate.get("source_type") or "source").strip() or "source"
+            snippet = _truncate_snippet(str(candidate.get("snippet") or ""))
+            if not snippet:
+                continue
+            key = (entity_type, entity_id)
+            graph_score = float(candidate_scores.get(key, 0.2 if not candidate_scores else 0.3))
+            vector_similarity = float(candidate.get("vector_similarity") or 0.0)
+            freshness = _score_freshness(candidate.get("source_updated_at"))
+            entity_priority = _score_entity_priority(entity_type)
+            graph_path = path_lookup.get(key, [entity_type])
+            template_alignment = _template_alignment_score(
+                template_key=template_key,
+                entity_type=entity_type,
+                source_type=source_type,
+                graph_path=graph_path,
+            )
+            final_score = (
+                (0.38 * vector_similarity)
+                + (0.30 * graph_score)
+                + (0.14 * freshness)
+                + (0.08 * entity_priority)
+                + (0.10 * template_alignment)
+            )
+            updated_at = _as_datetime_utc(candidate.get("source_updated_at"))
+            items.append(
+                {
+                    "entity_type": entity_type,
+                    "entity_id": entity_id,
+                    "source_type": source_type,
+                    "snippet": snippet,
+                    "vector_similarity": round(vector_similarity, 4),
+                    "graph_score": round(graph_score, 4),
+                    "template_alignment": round(template_alignment, 4),
+                    "final_score": float(final_score),
+                    "graph_path": graph_path,
+                    "updated_at": updated_at.isoformat().replace("+00:00", "Z") if updated_at else None,
+                    "why_selected": "combined vector similarity, graph relevance, and template alignment",
+                }
+            )
+    elif candidate_scores:
+        graph_only_evidence = _load_graph_only_evidence_candidates(
+            project_id=project_id,
+            candidates=[
+                {"entity_type": entity_type, "entity_id": entity_id, "graph_score": score}
+                for (entity_type, entity_id), score in sorted(candidate_scores.items(), key=lambda item: -item[1])
+            ],
+            limit=max(safe_limit * 2, 10),
+        )
+        for candidate in graph_only_evidence:
+            entity_type = str(candidate.get("entity_type") or "").strip() or "Entity"
+            entity_id = str(candidate.get("entity_id") or "").strip() or "?"
+            source_type = str(candidate.get("source_type") or "source").strip() or "source"
+            snippet = _truncate_snippet(str(candidate.get("snippet") or ""))
+            if not snippet:
+                continue
+            graph_score = float(candidate.get("graph_score") or 0.0)
+            freshness = _score_freshness(candidate.get("source_updated_at"))
+            entity_priority = _score_entity_priority(entity_type)
+            key = (entity_type, entity_id)
+            graph_path = path_lookup.get(key, [entity_type])
+            template_alignment = _template_alignment_score(
+                template_key=template_key,
+                entity_type=entity_type,
+                source_type=source_type,
+                graph_path=graph_path,
+            )
+            final_score = (
+                (0.62 * graph_score)
+                + (0.16 * freshness)
+                + (0.08 * entity_priority)
+                + (0.14 * template_alignment)
+            )
+            updated_at = _as_datetime_utc(candidate.get("source_updated_at"))
+            items.append(
+                {
+                    "entity_type": entity_type,
+                    "entity_id": entity_id,
+                    "source_type": source_type,
+                    "snippet": snippet,
+                    "vector_similarity": None,
+                    "graph_score": round(graph_score, 4),
+                    "template_alignment": round(template_alignment, 4),
+                    "final_score": float(final_score),
+                    "graph_path": graph_path,
+                    "updated_at": updated_at.isoformat().replace("+00:00", "Z") if updated_at else None,
+                    "why_selected": "graph fallback strengthened by template-aware ranking",
+                }
+            )
+    else:
+        gaps.append("no candidate knowledge entities found")
+
+    items.sort(
+        key=lambda item: (
+            -float(item.get("final_score") or 0.0),
+            -float(item.get("template_alignment") or 0.0),
+            -float(item.get("graph_score") or 0.0),
+            -float(item.get("vector_similarity") or 0.0),
+            str(item.get("entity_type") or ""),
+            str(item.get("entity_id") or ""),
+        )
+    )
+    items = items[:safe_limit]
+    for index, item in enumerate(items, start=1):
+        item["rank"] = index
+        item["final_score"] = round(float(item.get("final_score") or 0.0), 4)
+
+    mode = "graph+vector"
+    if items and all(item.get("vector_similarity") is None for item in items):
+        mode = "graph-only"
+    elif items and not candidate_scores:
+        mode = "vector-only"
+    elif not items:
+        mode = "empty"
+
+    response: dict[str, Any] = {
+        "project_id": project_id,
+        "query": text_query,
+        "mode": mode,
+        "items": items,
+    }
+    if focus_type and focus_id:
+        response["focus"] = {"entity_type": focus_type, "entity_id": focus_id}
+    if template_binding is not None:
+        response["template"] = template_binding
+    if gaps:
+        response["gaps"] = gaps
+    return response
+
+
 def _as_datetime_utc(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         if value.tzinfo is None:
@@ -853,6 +1157,101 @@ def _score_entity_priority(entity_type: str) -> float:
     if key == "comment":
         return 0.6
     return 0.5
+
+
+_TEMPLATE_ENTITY_ALIGNMENT: dict[str, set[str]] = {
+    "ddd_product_build": {
+        "boundedcontext",
+        "aggregate",
+        "command",
+        "domainevent",
+        "policy",
+        "readmodel",
+        "integrationboundary",
+        "specification",
+        "task",
+        "projectrule",
+    },
+    "mobile_browser_game_development": {
+        "gameplayloop",
+        "inputscheme",
+        "assetpipeline",
+        "deviceprofile",
+        "performancebudget",
+        "deploymenttarget",
+        "releasepipeline",
+        "telemetrymetric",
+        "specification",
+        "task",
+        "projectrule",
+    },
+}
+
+_TEMPLATE_QUERY_HINTS: dict[str, list[str]] = {
+    "ddd_product_build": [
+        "bounded context",
+        "aggregate",
+        "command",
+        "domain event",
+        "read model",
+        "policy",
+    ],
+    "mobile_browser_game_development": [
+        "mobile browser game",
+        "touch controls",
+        "asset pipeline",
+        "performance budget",
+        "docker compose",
+        "lan port",
+    ],
+}
+
+
+def _normalize_template_key(value: str | None) -> str:
+    key = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if key == "ddd":
+        return "ddd_product_build"
+    if key in {"mobile_game", "browser_game", "mobile_browser_game"}:
+        return "mobile_browser_game_development"
+    return key
+
+
+def _normalize_entity_key(value: str | None) -> str:
+    return str(value or "").strip().lower().replace("_", "").replace("-", "").replace(" ", "")
+
+
+def _template_query_terms(template_key: str | None) -> list[str]:
+    key = _normalize_template_key(template_key)
+    return list(_TEMPLATE_QUERY_HINTS.get(key) or [])
+
+
+def _template_alignment_score(
+    *,
+    template_key: str | None,
+    entity_type: str | None,
+    source_type: str | None = None,
+    graph_path: list[str] | None = None,
+) -> float:
+    normalized_template = _normalize_template_key(template_key)
+    priority = _TEMPLATE_ENTITY_ALIGNMENT.get(normalized_template)
+    if not priority:
+        return 0.5
+
+    entity_key = _normalize_entity_key(entity_type)
+    if entity_key in priority:
+        return 1.0
+
+    best = 0.35
+    source_key = _normalize_entity_key((source_type or "").split(".", 1)[0])
+    if source_key and source_key in priority:
+        best = max(best, 0.78)
+
+    for step in graph_path or []:
+        step_key = _normalize_entity_key(step)
+        if step_key in priority:
+            best = max(best, 0.86)
+            break
+    return best
 
 
 def _compose_dependency_path(path_payload: dict[str, Any]) -> list[str]:
@@ -1363,10 +1762,14 @@ def graph_context_pack(
         )
         path_lookup = _dependency_path_lookup(dependency_paths)
 
+        template_binding = _load_project_template_binding(project_id)
+        template_key = str((template_binding or {}).get("template_key") or "").strip()
         project_name = str(overview.get("project_name") or project_id).strip() or project_id
         top_tags = [str(item.get("tag") or "").strip() for item in (overview.get("top_tags") or []) if str(item.get("tag") or "").strip()]
         focus_hint = str(focus_entity_id or "").strip()
-        retrieval_query = " ".join([project_name, focus_hint, *top_tags]).strip() or project_name
+        retrieval_query = " ".join(
+            [project_name, focus_hint, *top_tags, *_template_query_terms(template_key)]
+        ).strip() or project_name
 
         evidence: list[dict[str, Any]] = []
         vector_mode = False
@@ -1409,7 +1812,20 @@ def graph_context_pack(
                 vector_similarity = float(item.get("vector_similarity") or 0.0)
                 freshness = _score_freshness(item.get("source_updated_at"))
                 entity_priority = _score_entity_priority(entity_type)
-                final_score = (0.40 * graph_score) + (0.40 * vector_similarity) + (0.15 * freshness) + (0.05 * entity_priority)
+                graph_path = path_lookup.get(key, [entity_type])
+                template_alignment = _template_alignment_score(
+                    template_key=template_key,
+                    entity_type=entity_type,
+                    source_type=source_type,
+                    graph_path=graph_path,
+                )
+                final_score = (
+                    (0.34 * graph_score)
+                    + (0.34 * vector_similarity)
+                    + (0.14 * freshness)
+                    + (0.08 * entity_priority)
+                    + (0.10 * template_alignment)
+                )
                 source_updated_at = _as_datetime_utc(item.get("source_updated_at"))
                 evidence.append(
                     {
@@ -1419,10 +1835,11 @@ def graph_context_pack(
                         "snippet": snippet,
                         "vector_similarity": vector_similarity,
                         "graph_score": graph_score,
+                        "template_alignment": template_alignment,
                         "final_score": final_score,
-                        "graph_path": path_lookup.get(key, [entity_type]),
+                        "graph_path": graph_path,
                         "updated_at": source_updated_at.isoformat().replace("+00:00", "Z") if source_updated_at else None,
-                        "why_selected": "high semantic similarity and graph relevance",
+                        "why_selected": "high semantic similarity with graph relevance and template alignment",
                     }
                 )
         else:
@@ -1449,9 +1866,21 @@ def graph_context_pack(
                 graph_score = float(item.get("graph_score") or 0.0)
                 freshness = _score_freshness(item.get("source_updated_at"))
                 entity_priority = _score_entity_priority(entity_type)
-                final_score = (0.70 * graph_score) + (0.20 * freshness) + (0.10 * entity_priority)
                 source_updated_at = _as_datetime_utc(item.get("source_updated_at"))
                 key = (entity_type, entity_id)
+                graph_path = path_lookup.get(key, [entity_type])
+                template_alignment = _template_alignment_score(
+                    template_key=template_key,
+                    entity_type=entity_type,
+                    source_type=source_type,
+                    graph_path=graph_path,
+                )
+                final_score = (
+                    (0.60 * graph_score)
+                    + (0.18 * freshness)
+                    + (0.08 * entity_priority)
+                    + (0.14 * template_alignment)
+                )
                 evidence.append(
                     {
                         "entity_type": entity_type,
@@ -1460,16 +1889,18 @@ def graph_context_pack(
                         "snippet": snippet,
                         "vector_similarity": None,
                         "graph_score": graph_score,
+                        "template_alignment": template_alignment,
                         "final_score": final_score,
-                        "graph_path": path_lookup.get(key, [entity_type]),
+                        "graph_path": graph_path,
                         "updated_at": source_updated_at.isoformat().replace("+00:00", "Z") if source_updated_at else None,
-                        "why_selected": "graph-only fallback based on topology and freshness",
+                        "why_selected": "graph-only fallback based on topology, freshness, and template alignment",
                     }
                 )
 
         evidence.sort(
             key=lambda item: (
                 -float(item.get("final_score") or 0.0),
+                -float(item.get("template_alignment") or 0.0),
                 -float(item.get("graph_score") or 0.0),
                 str(item.get("entity_type") or ""),
                 str(item.get("entity_id") or ""),
@@ -1483,6 +1914,7 @@ def graph_context_pack(
             vector_similarity = item.get("vector_similarity")
             if vector_similarity is not None:
                 item["vector_similarity"] = round(float(vector_similarity), 4)
+            item["template_alignment"] = round(float(item.get("template_alignment") or 0.0), 4)
 
         summary: dict[str, Any] | None = None
         if rag_enabled:
@@ -1527,6 +1959,8 @@ def graph_context_pack(
             "evidence": evidence,
             "markdown": markdown,
         }
+        if template_binding is not None:
+            response["template"] = template_binding
         if summary is not None:
             response["summary"] = summary
             summary_emitted = True

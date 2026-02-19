@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from features.projects.application import ProjectApplicationService
+from features.project_templates.application import ProjectTemplateApplicationService
 from features.rules.application import ProjectRuleApplicationService
 from features.rules.read_models import ProjectRuleListQuery, list_project_rules_read_model
 from features.specifications.application import SpecificationApplicationService
@@ -27,6 +28,7 @@ from shared.core import (
     load_specification_command_state,
     load_specification_view,
 )
+from features.project_templates.schemas import ProjectFromTemplateCreate
 from shared.deps import ensure_role
 from shared.knowledge_graph import (
     graph_context_pack as graph_context_pack_query,
@@ -35,6 +37,7 @@ from shared.knowledge_graph import (
     graph_get_neighbors as graph_get_neighbors_query,
     graph_get_project_overview as graph_get_project_overview_query,
     require_graph_available,
+    search_project_knowledge as search_project_knowledge_query,
 )
 from shared.models import User as UserModel
 from shared.settings import (
@@ -157,6 +160,16 @@ class AgentTaskService:
             prefix="mcp-project-create",
             payload={
                 "workspace_id": workspace_id,
+                "name_key": self._normalize_project_name(name).casefold(),
+            },
+        )
+
+    def _fallback_project_template_create_command_id(self, *, workspace_id: str, template_key: str, name: str) -> str:
+        return self._fallback_command_id(
+            prefix="mcp-project-template-create",
+            payload={
+                "workspace_id": workspace_id,
+                "template_key": str(template_key or "").strip().lower(),
                 "name_key": self._normalize_project_name(name).casefold(),
             },
         )
@@ -587,6 +600,98 @@ class AgentTaskService:
             )
         except Exception as exc:
             raise HTTPException(status_code=503, detail=f"Knowledge graph is unavailable: {exc}") from exc
+
+    def search_project_knowledge(
+        self,
+        *,
+        project_id: str,
+        query: str,
+        auth_token: str | None = None,
+        focus_entity_type: str | None = None,
+        focus_entity_id: str | None = None,
+        limit: int = 20,
+    ) -> dict:
+        self._require_token(auth_token)
+        if bool(str(focus_entity_type or "").strip()) != bool(str(focus_entity_id or "").strip()):
+            raise HTTPException(status_code=400, detail="focus_entity_type and focus_entity_id must be provided together")
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            project = self._load_project_scope(db=db, project_id=project_id)
+            ensure_role(db, project.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+        try:
+            return search_project_knowledge_query(
+                project_id=project_id,
+                query=query,
+                focus_entity_type=focus_entity_type,
+                focus_entity_id=focus_entity_id,
+                limit=limit,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Project knowledge search failed: {exc}") from exc
+
+    def list_project_templates(
+        self,
+        *,
+        auth_token: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            return ProjectTemplateApplicationService(db, user).list_templates()
+
+    def get_project_template(
+        self,
+        *,
+        template_key: str,
+        auth_token: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            return ProjectTemplateApplicationService(db, user).get_template(template_key)
+
+    def create_project_from_template(
+        self,
+        *,
+        template_key: str,
+        name: str,
+        workspace_id: str | None = None,
+        auth_token: str | None = None,
+        description: str = "",
+        custom_statuses: list[str] | None = None,
+        member_user_ids: list[str] | None = None,
+        embedding_enabled: bool | None = None,
+        embedding_model: str | None = None,
+        context_pack_evidence_top_k: int | None = None,
+        parameters: dict[str, Any] | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            resolved_workspace_id = self._resolve_workspace_for_project_create(explicit_workspace_id=workspace_id)
+            effective_command_id = command_id or self._fallback_project_template_create_command_id(
+                workspace_id=resolved_workspace_id,
+                template_key=template_key,
+                name=name,
+            )
+            payload = ProjectFromTemplateCreate(
+                workspace_id=resolved_workspace_id,
+                template_key=template_key,
+                name=name,
+                description=description,
+                custom_statuses=custom_statuses,
+                member_user_ids=member_user_ids or [],
+                embedding_enabled=embedding_enabled,
+                embedding_model=embedding_model,
+                context_pack_evidence_top_k=context_pack_evidence_top_k,
+                parameters=parameters or {},
+            )
+            return ProjectTemplateApplicationService(
+                db,
+                user,
+                command_id=effective_command_id,
+            ).create_project_from_template(payload)
 
     def create_task(
         self,

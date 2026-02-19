@@ -1,5 +1,5 @@
 import { useMutation } from '@tanstack/react-query'
-import { createProject, createProjectRule, deleteProject, deleteProjectRule, patchProjectRule } from '../../api'
+import { createProject, createProjectFromTemplate, createProjectRule, deleteProject, deleteProjectRule, patchProject, patchProjectRule } from '../../api'
 import { parseProjectEvidenceTopKInput, parseProjectStatusesText, toErrorMessage } from '../../utils/ui'
 
 export function useProjectMutations(c: any) {
@@ -14,11 +14,27 @@ export function useProjectMutations(c: any) {
   const createProjectMutation = useMutation({
     mutationFn: () => {
       const contextPackEvidenceTopK = parseProjectEvidenceTopKInput(c.projectContextPackEvidenceTopKText)
+      const normalizedTemplateKey = String(c.projectTemplateKey || '').trim()
+      const hasCustomStatuses = Boolean(String(c.projectCustomStatusesText || '').trim())
+      const customStatuses = hasCustomStatuses ? parseProjectStatusesText(c.projectCustomStatusesText) : undefined
+      if (normalizedTemplateKey) {
+        return createProjectFromTemplate(c.userId, {
+          workspace_id: c.workspaceId,
+          template_key: normalizedTemplateKey,
+          name: c.projectName.trim(),
+          description: c.projectDescription,
+          custom_statuses: customStatuses,
+          member_user_ids: Array.from(new Set(c.createProjectMemberIds)),
+          embedding_enabled: Boolean(c.projectEmbeddingEnabled),
+          embedding_model: String(c.projectEmbeddingModel || '').trim() || null,
+          context_pack_evidence_top_k: contextPackEvidenceTopK,
+        })
+      }
       return createProject(c.userId, {
         workspace_id: c.workspaceId,
         name: c.projectName.trim(),
         description: c.projectDescription,
-        custom_statuses: parseProjectStatusesText(c.projectCustomStatusesText),
+        custom_statuses: customStatuses,
         external_refs: c.parseExternalRefsText(c.projectExternalRefsText),
         attachment_refs: c.parseAttachmentRefsText(c.projectAttachmentRefsText),
         embedding_enabled: Boolean(c.projectEmbeddingEnabled),
@@ -27,8 +43,24 @@ export function useProjectMutations(c: any) {
         member_user_ids: Array.from(new Set(c.createProjectMemberIds)),
       })
     },
-    onSuccess: async (createdProject) => {
+    onSuccess: async (createdPayload: any) => {
+      const createdProject = createdPayload?.project ?? createdPayload
+      const createdFromTemplate = Boolean(createdPayload?.template?.key)
       c.setUiError(null)
+      if (createdFromTemplate) {
+        try {
+          const externalRefs = c.parseExternalRefsText(c.projectExternalRefsText)
+          const attachmentRefs = c.parseAttachmentRefsText(c.projectAttachmentRefsText)
+          if (externalRefs.length > 0 || attachmentRefs.length > 0) {
+            await patchProject(c.userId, createdProject.id, {
+              external_refs: externalRefs,
+              attachment_refs: attachmentRefs,
+            })
+          }
+        } catch (err) {
+          c.setUiError(toErrorMessage(err, 'Project created, but external links could not be saved'))
+        }
+      }
       if (c.draftProjectRules.length > 0) {
         const creations = c.draftProjectRules.map((rule: any) =>
           createProjectRule(c.userId, {
@@ -45,6 +77,7 @@ export function useProjectMutations(c: any) {
         }
       }
       c.setProjectName('')
+      c.setProjectTemplateKey('')
       c.setProjectDescription('')
       c.setProjectCustomStatusesText('')
       c.setProjectExternalRefsText('')

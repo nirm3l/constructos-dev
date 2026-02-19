@@ -78,6 +78,8 @@ Does:
 - `GET /api/version`
 - `GET /api/metrics`
 - `GET /api/events/{aggregate_type}/{aggregate_id}`
+- KurrentDB UI: `http://localhost:2113/web/index.html`
+- KurrentDB all-events feed: `http://localhost:2113/streams/%24all/head/backward/50?embed=body`
 
 ### 5.2 Runtime Metrics
 `/api/metrics` currently exposes:

@@ -1,5 +1,7 @@
 import React from 'react'
-import type { GraphContextPack, GraphProjectOverview, GraphProjectSubgraph } from '../../types'
+import { useQuery } from '@tanstack/react-query'
+import { searchProjectKnowledge } from '../../api'
+import type { GraphContextPack, GraphProjectOverview, GraphProjectSubgraph, ProjectKnowledgeSearchResult } from '../../types'
 import { ProjectKnowledgeGraphPanel } from './ProjectKnowledgeGraphPanel'
 
 type QueryLike<T> = {
@@ -12,6 +14,7 @@ type QueryLike<T> = {
 }
 
 type ProjectKnowledgeGraphPageProps = {
+  userId: string
   selectedProjectId: string
   selectedProjectName: string
   overviewQuery: QueryLike<GraphProjectOverview>
@@ -23,6 +26,7 @@ type ProjectKnowledgeGraphPageProps = {
 }
 
 export function ProjectKnowledgeGraphPage({
+  userId,
   selectedProjectId,
   selectedProjectName,
   overviewQuery,
@@ -32,6 +36,22 @@ export function ProjectKnowledgeGraphPage({
   onCreateNoteFromSummary,
   onLinkFocusTaskToSpecification,
 }: ProjectKnowledgeGraphPageProps) {
+  const [knowledgeSearchQuery, setKnowledgeSearchQuery] = React.useState('')
+  const normalizedSearchQuery = String(knowledgeSearchQuery || '').trim()
+  const knowledgeSearchResultsQuery = useQuery<ProjectKnowledgeSearchResult>({
+    queryKey: ['project-knowledge-search', userId, selectedProjectId, normalizedSearchQuery],
+    queryFn: () =>
+      searchProjectKnowledge(userId, selectedProjectId, {
+        q: normalizedSearchQuery,
+        limit: 16,
+      }),
+    enabled: Boolean(userId && selectedProjectId && normalizedSearchQuery.length >= 2),
+  })
+
+  React.useEffect(() => {
+    setKnowledgeSearchQuery('')
+  }, [selectedProjectId])
+
   if (!selectedProjectId) {
     return (
       <section className="card">
@@ -48,6 +68,9 @@ export function ProjectKnowledgeGraphPage({
         overviewQuery={overviewQuery}
         contextPackQuery={contextPackQuery}
         subgraphQuery={subgraphQuery}
+        knowledgeSearchQuery={knowledgeSearchQuery}
+        setKnowledgeSearchQuery={setKnowledgeSearchQuery}
+        knowledgeSearchResultsQuery={knowledgeSearchResultsQuery}
         onCreateTaskFromSummary={onCreateTaskFromSummary}
         onCreateNoteFromSummary={onCreateNoteFromSummary}
         onLinkFocusTaskToSpecification={onLinkFocusTaskToSpecification}

@@ -6,7 +6,16 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from shared.models import Notification, Project, ProjectMember, SavedView, User, Workspace, WorkspaceMember
+from shared.models import (
+    Notification,
+    Project,
+    ProjectMember,
+    ProjectTemplateBinding,
+    SavedView,
+    User,
+    Workspace,
+    WorkspaceMember,
+)
 from shared.serializers import load_created_by_map, serialize_notification, to_iso_utc
 from shared.settings import ALLOWED_EMBEDDING_MODELS, CONTEXT_PACK_EVIDENCE_TOP_K, DEFAULT_EMBEDDING_MODEL
 from shared.vector_store import normalize_embedding_model, project_embedding_index_status, vector_store_enabled
@@ -45,6 +54,12 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
             ProjectMember.project_id.in_(project_ids),
         )
     ).scalars().all()
+    project_template_bindings = db.execute(
+        select(ProjectTemplateBinding).where(
+            ProjectTemplateBinding.workspace_id.in_(workspace_ids),
+            ProjectTemplateBinding.project_id.in_(project_ids),
+        )
+    ).scalars().all()
     saved = db.execute(
         select(SavedView).where(
             SavedView.workspace_id.in_(workspace_ids),
@@ -53,6 +68,15 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
         )
     ).scalars().all()
     project_creator_map = load_created_by_map(db, "Project", project_ids)
+    project_template_binding_map = {
+        binding.project_id: {
+            "template_key": binding.template_key,
+            "template_version": binding.template_version,
+            "applied_by": binding.applied_by,
+            "applied_at": to_iso_utc(binding.created_at),
+        }
+        for binding in project_template_bindings
+    }
     projects_payload = []
     for p in projects:
         projects_payload.append(
@@ -77,6 +101,7 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
                 "created_by": project_creator_map.get(p.id, ""),
                 "created_at": to_iso_utc(p.created_at),
                 "updated_at": to_iso_utc(p.updated_at),
+                "template_binding": project_template_binding_map.get(p.id),
             }
         )
     vector_enabled = bool(vector_store_enabled())

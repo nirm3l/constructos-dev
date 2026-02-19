@@ -85,6 +85,19 @@ class ProjectMember(Base, TimeMixin):
     role: Mapped[str] = mapped_column(String(16), default="Contributor")
 
 
+class ProjectTemplateBinding(Base, TimeMixin):
+    __tablename__ = "project_template_bindings"
+    __table_args__ = (UniqueConstraint("project_id", name="ux_project_template_bindings_project"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    template_key: Mapped[str] = mapped_column(String(128), index=True)
+    template_version: Mapped[str] = mapped_column(String(32))
+    applied_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    parameters_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
 class Task(Base, TimeMixin):
     __tablename__ = "tasks"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)

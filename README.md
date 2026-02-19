@@ -62,6 +62,8 @@ curl -sS http://localhost:8080/api/health
 - App/API: `http://localhost:8080`
 - Version: `http://localhost:8080/api/version`
 - MCP endpoint (docker): `http://localhost:8091/mcp`
+- KurrentDB UI (event browser): `http://localhost:2113/web/index.html`
+- KurrentDB all-events feed (JSON): `http://localhost:2113/streams/%24all/head/backward/50?embed=body`
 
 ## Development Commands
 ```bash

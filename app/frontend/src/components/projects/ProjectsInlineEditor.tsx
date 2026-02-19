@@ -166,6 +166,7 @@ export function ProjectsInlineEditor({
           ? 'Stale'
           : 'Not indexed'
   const vectorAvailable = Boolean(vectorStoreEnabled)
+  const templateBinding = selectedProject.template_binding
 
   return (
     <div className="project-inline-editor" style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
@@ -455,6 +456,15 @@ export function ProjectsInlineEditor({
       <div className="row wrap resource-meta-row" style={{ marginTop: 10 }}>
         <div className="meta">Created by: {selectedProjectCreator}</div>
         {selectedProjectTimeMeta && <div className="meta">{selectedProjectTimeMeta.label}: {toUserDateTime(selectedProjectTimeMeta.value, userTimezone)}</div>}
+        {templateBinding ? (
+          <div className="meta">
+            Template: {templateBinding.template_key} v{templateBinding.template_version}
+            {' | '}
+            Applied: {toUserDateTime(templateBinding.applied_at, userTimezone) || 'Unknown'}
+          </div>
+        ) : (
+          <div className="meta">Template: Manual project (no template binding)</div>
+        )}
       </div>
     </div>
   )

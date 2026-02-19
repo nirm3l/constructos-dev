@@ -2,6 +2,7 @@ import React from 'react'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import { ExternalRefEditor, Icon, MarkdownModeToggle } from '../shared/uiHelpers'
 import { externalRefsToText, parseExternalRefsText, removeExternalRefByIndex } from '../../utils/ui'
+import type { ProjectTemplate } from '../../types'
 
 export type DraftProjectRule = { id: string; title: string; body: string }
 
@@ -14,6 +15,10 @@ type WorkspaceUser = {
 export function ProjectsCreateForm({
   projectName,
   setProjectName,
+  projectTemplateKey,
+  setProjectTemplateKey,
+  projectTemplates,
+  projectTemplatesLoading,
   createProjectMutation,
   projectCustomStatusesText,
   setProjectCustomStatusesText,
@@ -50,6 +55,10 @@ export function ProjectsCreateForm({
 }: {
   projectName: string
   setProjectName: React.Dispatch<React.SetStateAction<string>>
+  projectTemplateKey: string
+  setProjectTemplateKey: React.Dispatch<React.SetStateAction<string>>
+  projectTemplates: ProjectTemplate[]
+  projectTemplatesLoading: boolean
   createProjectMutation: { mutate: () => void; isPending: boolean }
   projectCustomStatusesText: string
   setProjectCustomStatusesText: React.Dispatch<React.SetStateAction<string>>
@@ -105,6 +114,10 @@ export function ProjectsCreateForm({
     if (current && modelOptions.includes(current)) return current
     return defaultModel
   }, [defaultModel, modelOptions, projectEmbeddingModel])
+  const selectedTemplate = React.useMemo(
+    () => projectTemplates.find((item) => item.key === projectTemplateKey) ?? null,
+    [projectTemplateKey, projectTemplates]
+  )
 
   return (
     <div style={{ marginBottom: 10 }}>
@@ -129,6 +142,73 @@ export function ProjectsCreateForm({
         >
           <Icon path="M12 5v14M5 12h14" />
         </button>
+      </div>
+      <label className="field-control" style={{ marginBottom: 10 }}>
+        <span className="field-label">Project template</span>
+        <select
+          value={projectTemplateKey}
+          onChange={(e) => {
+            const next = e.target.value
+            setProjectTemplateKey(next)
+            if (!next) return
+            const template = projectTemplates.find((item) => item.key === next)
+            if (!template) return
+            setProjectCustomStatusesText((template.default_custom_statuses ?? []).join(', '))
+            setProjectEmbeddingEnabled(Boolean(template.default_embedding_enabled))
+            if (template.default_embedding_enabled && !String(projectEmbeddingModel || '').trim() && defaultModel) {
+              setProjectEmbeddingModel(defaultModel)
+            }
+            if (!template.default_embedding_enabled) {
+              setProjectEmbeddingModel('')
+            }
+            setProjectContextPackEvidenceTopKText(
+              template.default_context_pack_evidence_top_k == null
+                ? ''
+                : String(template.default_context_pack_evidence_top_k)
+            )
+          }}
+          disabled={projectTemplatesLoading}
+        >
+          <option value="">Manual setup (no template)</option>
+          {projectTemplates.map((template) => (
+            <option key={`project-template-${template.key}`} value={template.key}>
+              {template.name}
+            </option>
+          ))}
+        </select>
+        {selectedTemplate ? (
+          <div className="meta" style={{ marginTop: 6 }}>
+            {selectedTemplate.description}
+            {' · '}
+            Seed specs: {selectedTemplate.seed_counts.specifications}, tasks: {selectedTemplate.seed_counts.tasks}, rules:{' '}
+            {selectedTemplate.seed_counts.rules}
+          </div>
+        ) : (
+          <div className="meta" style={{ marginTop: 6 }}>
+            Use manual mode for a blank project, or pick a template to seed initial specs, tasks, and rules.
+          </div>
+        )}
+      </label>
+      <div className="md-editor-surface" style={{ marginBottom: 10 }}>
+        <MarkdownModeToggle
+          view={projectDescriptionView}
+          onChange={setProjectDescriptionView}
+          ariaLabel="Project description editor view"
+        />
+        <div className="md-editor-content">
+          {projectDescriptionView === 'write' ? (
+            <textarea
+              className="md-textarea"
+              ref={projectDescriptionRef}
+              value={projectDescription}
+              onChange={(e) => setProjectDescription(e.target.value)}
+              placeholder="Project description (Markdown)"
+              style={{ width: '100%', minHeight: 96, maxHeight: 280, resize: 'none', overflowY: 'hidden' }}
+            />
+          ) : (
+            <MarkdownView value={projectDescription} />
+          )}
+        </div>
       </div>
       <label className="field-control" style={{ marginBottom: 10 }}>
         <span className="field-label">Board statuses (comma-separated)</span>
@@ -197,27 +277,6 @@ export function ProjectsCreateForm({
             Indexing starts after project creation.
           </div>
         )}
-      </div>
-      <div className="md-editor-surface">
-        <MarkdownModeToggle
-          view={projectDescriptionView}
-          onChange={setProjectDescriptionView}
-          ariaLabel="Project description editor view"
-        />
-        <div className="md-editor-content">
-          {projectDescriptionView === 'write' ? (
-            <textarea
-              className="md-textarea"
-              ref={projectDescriptionRef}
-              value={projectDescription}
-              onChange={(e) => setProjectDescription(e.target.value)}
-              placeholder="Project description (Markdown)"
-              style={{ width: '100%', minHeight: 96, maxHeight: 280, resize: 'none', overflowY: 'hidden' }}
-            />
-          ) : (
-            <MarkdownView value={projectDescription} />
-          )}
-        </div>
       </div>
       <div className="rules-studio" style={{ marginTop: 10, marginBottom: 14 }}>
         <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>

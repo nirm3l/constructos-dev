@@ -1,7 +1,7 @@
 import React from 'react'
 import ForceGraph2D from 'react-force-graph-2d'
 import { MarkdownView } from '../../markdown/MarkdownView'
-import type { GraphContextPack, GraphProjectOverview, GraphProjectSubgraph } from '../../types'
+import type { GraphContextPack, GraphProjectOverview, GraphProjectSubgraph, ProjectKnowledgeSearchResult } from '../../types'
 import { Icon } from '../shared/uiHelpers'
 
 type QueryLike<T> = {
@@ -55,6 +55,9 @@ export function ProjectKnowledgeGraphPanel({
   overviewQuery,
   contextPackQuery,
   subgraphQuery,
+  knowledgeSearchQuery,
+  setKnowledgeSearchQuery,
+  knowledgeSearchResultsQuery,
   onCreateTaskFromSummary,
   onCreateNoteFromSummary,
   onLinkFocusTaskToSpecification,
@@ -63,6 +66,9 @@ export function ProjectKnowledgeGraphPanel({
   overviewQuery: QueryLike<GraphProjectOverview>
   contextPackQuery: QueryLike<GraphContextPack>
   subgraphQuery: QueryLike<GraphProjectSubgraph>
+  knowledgeSearchQuery: string
+  setKnowledgeSearchQuery: React.Dispatch<React.SetStateAction<string>>
+  knowledgeSearchResultsQuery: QueryLike<ProjectKnowledgeSearchResult>
   onCreateTaskFromSummary?: (payload: { title: string; description: string }) => Promise<void> | void
   onCreateNoteFromSummary?: (payload: { title: string; body: string }) => Promise<void> | void
   onLinkFocusTaskToSpecification?: (taskId: string, specificationId: string) => Promise<void> | void
@@ -242,6 +248,10 @@ export function ProjectKnowledgeGraphPanel({
   const connectedSelectedEdges = selectedNode
     ? graphData.links.filter((edge) => String(edge.source) === selectedNode.id || String(edge.target) === selectedNode.id)
     : []
+  const normalizedKnowledgeSearchQuery = String(knowledgeSearchQuery || '').trim()
+  const knowledgeSearchActive = normalizedKnowledgeSearchQuery.length >= 2
+  const knowledgeSearchItems = knowledgeSearchResultsQuery.data?.items ?? []
+  const knowledgeSearchMode = knowledgeSearchResultsQuery.data?.mode ?? 'empty'
 
   const focusNodeOnCanvas = React.useCallback((nodeId: string, zoomTarget = 2.2) => {
     setSelectedNodeId(nodeId)
@@ -384,6 +394,71 @@ export function ProjectKnowledgeGraphPanel({
           <div className="meta" style={{ marginBottom: 8 }}>
             Retrieval mode: {contextPack?.mode ?? 'graph-only'}
           </div>
+
+          <div className="field-control" style={{ marginBottom: 10 }}>
+            <span className="field-label">Knowledge search</span>
+            <div className="row wrap" style={{ gap: 8, alignItems: 'center' }}>
+              <input
+                value={knowledgeSearchQuery}
+                onChange={(e) => setKnowledgeSearchQuery(e.target.value)}
+                placeholder="Search entities, events, commands, readiness, metrics..."
+              />
+              {knowledgeSearchResultsQuery.isFetching ? <span className="badge">Searching</span> : null}
+              {knowledgeSearchActive ? <span className="badge">Mode: {knowledgeSearchMode}</span> : null}
+            </div>
+            <div className="meta" style={{ marginTop: 6 }}>
+              Type at least 2 characters. Click a result to focus its node in the graph.
+            </div>
+          </div>
+
+          {knowledgeSearchActive ? (
+            <div className="graph-connected-block">
+              <div className="meta">Knowledge search results</div>
+              {knowledgeSearchResultsQuery.isError ? (
+                <div className="notice notice-error" style={{ marginTop: 8 }}>
+                  {toErrorMessage(knowledgeSearchResultsQuery.error)}
+                </div>
+              ) : knowledgeSearchItems.length === 0 ? (
+                <div className="meta" style={{ marginTop: 8 }}>No matches for this query.</div>
+              ) : (
+                <div className="graph-evidence-list">
+                  {knowledgeSearchItems.slice(0, 10).map((item) => {
+                    const graphPath = (item.graph_path ?? []).filter(Boolean).join(' -> ')
+                    return (
+                      <button
+                        key={`kg-search-${item.rank}-${item.entity_type}-${item.entity_id}`}
+                        type="button"
+                        className="graph-evidence-item"
+                        onClick={() => focusNodeOnCanvas(item.entity_id, 2.2)}
+                      >
+                        <div className="graph-evidence-head">
+                          <div className="graph-evidence-badges">
+                            <span className="graph-evidence-id">#{item.rank}</span>
+                            <span className="status-chip">{item.entity_type}</span>
+                            <span className="status-chip">{item.source_type}</span>
+                          </div>
+                          <span className="graph-evidence-score">Score {item.final_score.toFixed(3)}</span>
+                        </div>
+                        <div className="graph-evidence-snippet">{item.snippet}</div>
+                        <div className="graph-evidence-meta">
+                          <span className="meta">Entity {item.entity_id}</span>
+                          <span className="meta">Graph {item.graph_score.toFixed(3)}</span>
+                          <span className="meta">
+                            Vector {item.vector_similarity === null ? 'n/a' : item.vector_similarity.toFixed(3)}
+                          </span>
+                          {typeof item.template_alignment === 'number' ? (
+                            <span className="meta">Template {item.template_alignment.toFixed(3)}</span>
+                          ) : null}
+                        </div>
+                        {graphPath ? <div className="graph-evidence-path">Path {graphPath}</div> : null}
+                        {item.why_selected ? <div className="graph-evidence-why">{item.why_selected}</div> : null}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          ) : null}
 
           <div className="graph-count-grid">
             <div className="graph-stat">

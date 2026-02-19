@@ -11,7 +11,13 @@ from shared.core import (
     get_current_user,
     get_db,
 )
-from shared.knowledge_graph import graph_context_pack, graph_get_project_overview, graph_get_project_subgraph, require_graph_available
+from shared.knowledge_graph import (
+    graph_context_pack,
+    graph_get_project_overview,
+    graph_get_project_subgraph,
+    require_graph_available,
+    search_project_knowledge,
+)
 from .application import ProjectApplicationService
 from .read_models import (
     get_project_activity_read_model,
@@ -145,6 +151,31 @@ def project_knowledge_graph_subgraph(
         )
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Knowledge graph is unavailable: {exc}") from exc
+
+
+@router.get("/api/projects/{project_id}/knowledge/search")
+def project_knowledge_search(
+    project_id: str,
+    q: str = Query(min_length=1),
+    focus_entity_type: str | None = None,
+    focus_entity_id: str | None = None,
+    limit: int = Query(default=20, ge=1, le=50),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    project = _load_project_with_access(db, user, project_id)
+    if bool(str(focus_entity_type or "").strip()) != bool(str(focus_entity_id or "").strip()):
+        raise HTTPException(status_code=400, detail="focus_entity_type and focus_entity_id must be provided together")
+    try:
+        return search_project_knowledge(
+            project_id=project.id,
+            query=q,
+            focus_entity_type=focus_entity_type,
+            focus_entity_id=focus_entity_id,
+            limit=limit,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Project knowledge search failed: {exc}") from exc
 
 
 @router.post("/api/projects/{project_id}/members")

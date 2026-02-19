@@ -743,6 +743,49 @@ def test_project_knowledge_graph_endpoints(tmp_path, monkeypatch):
     assert 'focus_entity_type and focus_entity_id' in bad_focus.json()['detail']
 
 
+def test_project_knowledge_search_endpoint(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.projects import api as projects_api
+
+    monkeypatch.setattr(
+        projects_api,
+        'search_project_knowledge',
+        lambda project_id, query, focus_entity_type=None, focus_entity_id=None, limit=20: {
+            'project_id': project_id,
+            'query': query,
+            'mode': 'graph+vector',
+            'items': [
+                {
+                    'rank': 1,
+                    'entity_type': 'Task',
+                    'entity_id': 'task-1',
+                    'source_type': 'task.description',
+                    'snippet': 'Define command payload contracts',
+                    'vector_similarity': 0.91,
+                    'graph_score': 0.77,
+                    'final_score': 0.84,
+                    'graph_path': ['Task'],
+                    'updated_at': None,
+                }
+            ],
+        },
+    )
+
+    response = client.get(f"/api/projects/{project_id}/knowledge/search?q=command%20payload")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['project_id'] == project_id
+    assert payload['mode'] == 'graph+vector'
+    assert payload['items'][0]['entity_type'] == 'Task'
+
+    bad_focus = client.get(f"/api/projects/{project_id}/knowledge/search?q=test&focus_entity_type=Task")
+    assert bad_focus.status_code == 400
+    assert 'focus_entity_type and focus_entity_id' in bad_focus.json()['detail']
+
+
 def test_project_knowledge_graph_endpoint_returns_503_when_unavailable(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -1428,6 +1471,39 @@ def test_agent_service_create_project_uses_default_workspace(tmp_path, monkeypat
     created = service.create_project(name='MCP New Project')
     assert created['workspace_id'] == ws_id
     assert created['name'] == 'MCP New Project'
+
+
+def test_agent_service_search_project_knowledge(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+    monkeypatch.setattr(
+        svc_module,
+        "search_project_knowledge_query",
+        lambda project_id, query, focus_entity_type=None, focus_entity_id=None, limit=20: {
+            "project_id": project_id,
+            "query": query,
+            "mode": "graph+vector",
+            "items": [{"rank": 1, "entity_type": "Task", "entity_id": "x"}],
+        },
+    )
+
+    service = AgentTaskService()
+    payload = service.search_project_knowledge(
+        project_id=project_id,
+        query='command contracts',
+    )
+    assert payload['project_id'] == project_id
+    assert payload['mode'] == 'graph+vector'
+    assert payload['items'][0]['entity_type'] == 'Task'
 
 
 def test_workspace_activity_cursor_read_model_returns_new_rows(tmp_path):

@@ -69,6 +69,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             setShowProjectCreateForm: state.setShowProjectCreateForm,
             projectName: state.projectName,
             setProjectName: state.setProjectName,
+            projectTemplateKey: state.projectTemplateKey,
+            setProjectTemplateKey: state.setProjectTemplateKey,
             createProjectMutation: state.createProjectMutation,
             projectCustomStatusesText: state.projectCustomStatusesText,
             setProjectCustomStatusesText: state.setProjectCustomStatusesText,
@@ -96,6 +98,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             embeddingAllowedModels: state.embeddingAllowedModels,
             embeddingDefaultModel: state.embeddingDefaultModel,
             vectorStoreEnabled: state.vectorStoreEnabled,
+            contextPackEvidenceTopKDefault: state.contextPackEvidenceTopKDefault,
             workspaceUsers: state.workspaceUsers,
             createProjectMemberIds: state.createProjectMemberIds,
             toggleCreateProjectMember: state.toggleCreateProjectMember,
@@ -121,6 +124,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             editProjectDescription: state.editProjectDescription,
             setEditProjectDescription: state.setEditProjectDescription,
             projectRules: state.projectRules,
+            projectTemplates: state.projectTemplates,
             projectGraphOverview: state.projectGraphOverview,
             projectGraphContextPack: state.projectGraphContextPack,
             projectGraphSubgraph: state.projectGraphSubgraph,
@@ -151,6 +155,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             setEditProjectEmbeddingEnabled: state.setEditProjectEmbeddingEnabled,
             editProjectEmbeddingModel: state.editProjectEmbeddingModel,
             setEditProjectEmbeddingModel: state.setEditProjectEmbeddingModel,
+            editProjectContextPackEvidenceTopKText: state.editProjectContextPackEvidenceTopKText,
+            setEditProjectContextPackEvidenceTopKText: state.setEditProjectContextPackEvidenceTopKText,
             editProjectMemberIds: state.editProjectMemberIds,
             toggleEditProjectMember: state.toggleEditProjectMember,
             selectedProjectCreator: state.selectedProjectCreator,
@@ -161,6 +167,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
 
       {state.tab === 'knowledge-graph' && (
         <ProjectKnowledgeGraphPage
+          userId={state.userId}
           selectedProjectId={state.selectedProjectId}
           selectedProjectName={state.selectedProject?.name || ''}
           overviewQuery={state.projectGraphOverview}

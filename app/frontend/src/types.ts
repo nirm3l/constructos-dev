@@ -110,6 +110,56 @@ export type Project = {
   created_by: string
   created_at: string | null
   updated_at: string | null
+  template_binding?: ProjectTemplateBinding | null
+}
+
+export type ProjectTemplate = {
+  key: string
+  name: string
+  version: string
+  description: string
+  default_custom_statuses: string[]
+  default_embedding_enabled: boolean
+  default_context_pack_evidence_top_k: number | null
+  seed_counts: {
+    specifications: number
+    tasks: number
+    rules: number
+    graph_nodes?: number
+    graph_edges?: number
+  }
+}
+
+export type ProjectTemplatesPage = {
+  items: ProjectTemplate[]
+}
+
+export type ProjectFromTemplateResponse = {
+  project: Project
+  template: {
+    key: string
+    name: string
+    version: string
+  }
+  binding: {
+    project_id: string
+    workspace_id: string
+    template_key: string
+    template_version: string
+    applied_by: string
+    applied_at: string | null
+    parameters: Record<string, unknown>
+  }
+  seed_summary: {
+    specification_count: number
+    rule_count: number
+    task_count: number
+  }
+  seeded_entity_ids: {
+    specification_ids: string[]
+    rule_ids: string[]
+    task_ids: string[]
+  }
 }
 
 export type Task = {
@@ -288,6 +338,7 @@ export type GraphContextEvidence = {
   snippet: string
   vector_similarity: number | null
   graph_score: number
+  template_alignment?: number
   final_score: number
   graph_path: string[]
   updated_at: string | null
@@ -303,12 +354,20 @@ export type GraphSummary = {
   gaps: string[]
 }
 
+export type ProjectTemplateBinding = {
+  template_key: string
+  template_version: string
+  applied_by: string
+  applied_at: string | null
+}
+
 export type GraphContextPack = {
   project_id: string
   focus: GraphContextFocus | null
   mode: 'graph-only' | 'graph+vector'
   structure: GraphContextStructure
   evidence: GraphContextEvidence[]
+  template?: ProjectTemplateBinding
   summary?: GraphSummary
   gaps?: string[]
   markdown: string
@@ -334,6 +393,31 @@ export type GraphProjectSubgraph = {
   edge_count: number
   nodes: GraphSubgraphNode[]
   edges: GraphSubgraphEdge[]
+}
+
+export type ProjectKnowledgeSearchItem = {
+  rank: number
+  entity_type: string
+  entity_id: string
+  source_type: string
+  snippet: string
+  vector_similarity: number | null
+  graph_score: number
+  template_alignment?: number
+  final_score: number
+  graph_path: string[]
+  updated_at: string | null
+  why_selected?: string
+}
+
+export type ProjectKnowledgeSearchResult = {
+  project_id: string
+  query: string
+  mode: 'graph-only' | 'graph+vector' | 'vector-only' | 'empty'
+  focus?: GraphContextFocus
+  template?: ProjectTemplateBinding
+  gaps?: string[]
+  items: ProjectKnowledgeSearchItem[]
 }
 
 export type ProjectMember = {

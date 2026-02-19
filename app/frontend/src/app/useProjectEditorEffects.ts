@@ -46,9 +46,10 @@ export function useProjectEditorEffects(c: any) {
 
   React.useEffect(() => {
     if (!c.showProjectCreateForm) return
+    if (String(c.projectTemplateKey || '').trim()) return
     if (String(c.projectCustomStatusesText || '').trim()) return
     c.setProjectCustomStatusesText(projectStatusesToText(null))
-  }, [c.projectCustomStatusesText, c.setProjectCustomStatusesText, c.showProjectCreateForm])
+  }, [c.projectCustomStatusesText, c.projectTemplateKey, c.setProjectCustomStatusesText, c.showProjectCreateForm])
 
   React.useEffect(() => {
     if (!c.selectedProjectRule) return

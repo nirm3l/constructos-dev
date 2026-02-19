@@ -24,6 +24,10 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
         <ProjectsCreateForm
           projectName={state.projectName}
           setProjectName={state.setProjectName}
+          projectTemplateKey={state.projectTemplateKey}
+          setProjectTemplateKey={state.setProjectTemplateKey}
+          projectTemplates={state.projectTemplates.data?.items ?? []}
+          projectTemplatesLoading={Boolean(state.projectTemplates.isLoading || state.projectTemplates.isFetching)}
           createProjectMutation={state.createProjectMutation}
           projectCustomStatusesText={state.projectCustomStatusesText}
           setProjectCustomStatusesText={state.setProjectCustomStatusesText}

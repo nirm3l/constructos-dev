@@ -30,6 +30,7 @@
 
 ### 1.3 Projects
 - `POST /api/projects`
+- `POST /api/projects/from-template`
 - `PATCH /api/projects/{project_id}`
 - `DELETE /api/projects/{project_id}`
 - `GET /api/projects/{project_id}/board`
@@ -41,8 +42,13 @@
 - `GET /api/projects/{project_id}/knowledge-graph/overview`
 - `GET /api/projects/{project_id}/knowledge-graph/context-pack`
 - `GET /api/projects/{project_id}/knowledge-graph/subgraph`
+- `GET /api/projects/{project_id}/knowledge/search`
 
-### 1.4 Specifications
+### 1.4 Project Templates
+- `GET /api/project-templates`
+- `GET /api/project-templates/{template_key}`
+
+### 1.5 Specifications
 - `GET /api/specifications`
 - `POST /api/specifications`
 - `GET /api/specifications/{specification_id}`
@@ -58,13 +64,13 @@
 - `POST /api/specifications/{specification_id}/restore`
 - `POST /api/specifications/{specification_id}/delete`
 
-### 1.5 Notes, Rules, Views, Users
+### 1.6 Notes, Rules, Views, Users
 - `GET/POST/PATCH` plus archive/restore/pin/unpin/delete for notes (`/api/notes*`).
 - `GET/POST/PATCH/delete` for project rules (`/api/project-rules*`).
 - `POST /api/saved-views`.
 - `PATCH /api/me/preferences`.
 
-### 1.6 Notifications and Realtime
+### 1.7 Notifications and Realtime
 - `GET /api/notifications`
 - `POST /api/notifications/{notification_id}/read`
 - `GET /api/notifications/stream` (SSE)
@@ -74,12 +80,12 @@ SSE event types:
 - `task_event`
 - `ping`
 
-### 1.7 Attachments
+### 1.8 Attachments
 - `POST /api/attachments/upload`
 - `GET /api/attachments/download`
 - `POST /api/attachments/delete`
 
-### 1.8 Debug
+### 1.9 Debug
 - `GET /api/events/{aggregate_type}/{aggregate_id}`
 - `GET /api/metrics`
 
@@ -87,6 +93,11 @@ SSE event types:
 - Auth context: HTTP-only session cookie from `/api/auth/login`.
 - Idempotency for mutations: `X-Command-Id`.
 - Query endpoints are read-only and do not append events.
+- Bootstrap project payloads include optional `template_binding` when a project was created from a template:
+  - `template_key`
+  - `template_version`
+  - `applied_by`
+  - `applied_at`
 
 Example mutation with `command_id`:
 ```bash
@@ -113,6 +124,12 @@ Tool categories:
 - Specification linking: `link_*_to_spec`, `unlink_*_from_spec`, `create_tasks_from_spec`.
 - Automation: `run_task_with_codex`, `get_task_automation_status`.
 - Utility: `send_email` (SMTP).
+- Templates:
+  - `list_project_templates`
+  - `get_project_template`
+  - `create_project_from_template`
+- Knowledge search:
+  - `search_project_knowledge`
 
 ## 4. Integration Flow (Codex -> MCP -> Domain)
 ```mermaid
