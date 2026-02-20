@@ -499,6 +499,7 @@ function App({ logout }: { logout: () => void }) {
   const {
     taskTagSuggestions,
     noteTagSuggestions,
+    getTagUsage,
     toggleSearchTag,
     toggleNoteFilterTag,
     toggleSpecificationFilterTag,
@@ -1056,6 +1057,7 @@ function App({ logout }: { logout: () => void }) {
       projectsMode,
       setProjectsMode,
       taskTagSuggestions,
+      getTagUsage,
       searchTags,
       toggleSearchTag,
       clearSearchTags,

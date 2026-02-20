@@ -1,6 +1,7 @@
 import React from 'react'
 import type { AdminWorkspaceUser, Note, Specification, Task } from '../types'
 import { tagHue } from '../utils/ui'
+import { PopularTagFilters } from './shared/PopularTagFilters'
 import { Icon } from './shared/uiHelpers'
 import { TaskListItem } from './tasks/taskViews'
 
@@ -19,6 +20,7 @@ export function SearchPanel({
   searchTags,
   toggleSearchTag,
   clearSearchTags,
+  getTagUsage,
   onClose,
 }: {
   searchQ: string
@@ -35,6 +37,7 @@ export function SearchPanel({
   searchTags: string[]
   toggleSearchTag: (tag: string) => void
   clearSearchTags: () => void
+  getTagUsage: (tag: string) => number
   onClose: () => void
 }) {
   return (
@@ -72,27 +75,14 @@ export function SearchPanel({
           Archived only
         </label>
         <div className="row wrap">
-          {taskTagSuggestions.slice(0, 10).map((tag) => (
-            <button
-              key={`search-tag-${tag}`}
-              className={`status-chip tag-filter-chip ${searchTags.includes(tag.toLowerCase()) ? 'active' : ''}`}
-              onClick={() => toggleSearchTag(tag)}
-              aria-pressed={searchTags.includes(tag.toLowerCase())}
-            >
-              #{tag}
-            </button>
-          ))}
-          {searchTags.length > 0 && (
-            <button
-              className="action-icon tag-filter-clear"
-              type="button"
-              onClick={clearSearchTags}
-              title="Clear selected tags"
-              aria-label="Clear selected tags"
-            >
-              <Icon path="M6 6l12 12M18 6 6 18" />
-            </button>
-          )}
+          <PopularTagFilters
+            tags={taskTagSuggestions}
+            selectedTags={searchTags}
+            onToggleTag={toggleSearchTag}
+            onClear={clearSearchTags}
+            getTagUsage={getTagUsage}
+            idPrefix="search-tag"
+          />
         </div>
       </div>
     </section>

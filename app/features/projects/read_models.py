@@ -63,12 +63,14 @@ def get_project_tags_read_model(db: Session, user, project_id: str) -> dict:
     if not project or project.is_deleted:
         raise HTTPException(status_code=404, detail="Project not found")
     ensure_project_access(db, project.workspace_id, project.id, user.id, {"Owner", "Admin", "Member", "Guest"})
-    tags = db.execute(
-        select(ProjectTagIndex.tag)
+    rows = db.execute(
+        select(ProjectTagIndex.tag, ProjectTagIndex.usage_count)
         .where(ProjectTagIndex.project_id == project_id)
-        .order_by(ProjectTagIndex.tag.asc())
-    ).scalars().all()
-    return {"project_id": project_id, "tags": tags}
+        .order_by(ProjectTagIndex.usage_count.desc(), ProjectTagIndex.tag.asc())
+    ).all()
+    tag_stats = [{"tag": str(tag), "usage_count": int(usage_count or 0)} for tag, usage_count in rows]
+    tags = [item["tag"] for item in tag_stats]
+    return {"project_id": project_id, "tags": tags, "tag_stats": tag_stats}
 
 
 def get_project_members_read_model(db: Session, user, project_id: str) -> dict:

@@ -1,7 +1,8 @@
 import React from 'react'
 import type { ProjectBoard, Task } from '../../types'
-import { priorityTone } from '../../utils/ui'
+import { priorityTone, tagHue } from '../../utils/ui'
 import { Icon } from '../shared/uiHelpers'
+import { PopularTagFilters } from '../shared/PopularTagFilters'
 import { taskDescriptionPreview, TaskListItem } from './taskViews'
 
 type TasksPanelProps = {
@@ -11,6 +12,7 @@ type TasksPanelProps = {
   searchTags: string[]
   toggleSearchTag: (tag: string) => void
   clearSearchTags: () => void
+  getTagUsage: (tag: string) => number
   boardData: ProjectBoard | undefined
   onOpenTaskEditor: (taskId: string) => void
   onOpenSpecification: (specificationId: string, projectId: string) => void
@@ -29,6 +31,7 @@ export function TasksPanel({
   searchTags,
   toggleSearchTag,
   clearSearchTags,
+  getTagUsage,
   boardData,
   onOpenTaskEditor,
   onOpenSpecification,
@@ -69,27 +72,14 @@ export function TasksPanel({
         </div>
       </div>
       <div className="row wrap notes-tag-filters task-tag-filters">
-        {taskTagSuggestions.slice(0, 10).map((tag) => (
-          <button
-            key={`project-tag-${tag}`}
-            className={`status-chip tag-filter-chip ${searchTags.includes(tag.toLowerCase()) ? 'active' : ''}`}
-            onClick={() => toggleSearchTag(tag)}
-            aria-pressed={searchTags.includes(tag.toLowerCase())}
-          >
-            #{tag}
-          </button>
-        ))}
-        {searchTags.length > 0 && (
-          <button
-            className="action-icon tag-filter-clear"
-            type="button"
-            onClick={clearSearchTags}
-            title="Clear selected tags"
-            aria-label="Clear selected tags"
-          >
-            <Icon path="M6 6l12 12M18 6 6 18" />
-          </button>
-        )}
+        <PopularTagFilters
+          tags={taskTagSuggestions}
+          selectedTags={searchTags}
+          onToggleTag={toggleSearchTag}
+          onClear={clearSearchTags}
+          getTagUsage={getTagUsage}
+          idPrefix="project-tag"
+        />
       </div>
 
       {projectsMode === 'board' && boardData && (
@@ -117,6 +107,23 @@ export function TasksPanel({
                             <p className="kanban-desc-preview" title={descriptionPreviewText}>
                               {descriptionPreviewText}
                             </p>
+                          )}
+                          {(task.labels ?? []).length > 0 && (
+                            <div className="task-tags">
+                              {(task.labels ?? []).map((tag) => (
+                                <span
+                                  key={`${task.id}-${tag}`}
+                                  className="tag-mini"
+                                  style={{
+                                    backgroundColor: `hsl(${tagHue(tag)}, 70%, 92%)`,
+                                    borderColor: `hsl(${tagHue(tag)}, 70%, 78%)`,
+                                    color: `hsl(${tagHue(tag)}, 55%, 28%)`
+                                  }}
+                                >
+                                  #{tag}
+                                </span>
+                              ))}
+                            </div>
                           )}
                           <div className="kanban-actions">
                             {boardData.statuses.filter((s) => s !== status).slice(0, 3).map((nextStatus) => (

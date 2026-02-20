@@ -4,6 +4,7 @@ import { getNotes, getTasks } from '../../api'
 import type { Note, Specification, Task } from '../../types'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import { parseCommaTags } from '../../utils/ui'
+import { PopularTagFilters } from '../shared/PopularTagFilters'
 import {
   AttachmentRefList,
   ExternalRefEditor,
@@ -177,27 +178,14 @@ export function SpecificationsPanel({ state }: { state: any }) {
             />
             Archived
           </label>
-          {(state.taskTagSuggestions ?? []).slice(0, 10).map((tag: string) => (
-            <button
-              key={`spec-filter-${tag}`}
-              className={`status-chip tag-filter-chip ${state.specificationTags.includes(tag.toLowerCase()) ? 'active' : ''}`}
-              onClick={() => state.toggleSpecificationFilterTag(tag)}
-              aria-pressed={state.specificationTags.includes(tag.toLowerCase())}
-            >
-              #{tag}
-            </button>
-          ))}
-          {state.specificationTags.length > 0 && (
-            <button
-              className="action-icon tag-filter-clear"
-              type="button"
-              onClick={() => state.clearSpecificationFilterTags()}
-              title="Clear selected tags"
-              aria-label="Clear selected tags"
-            >
-              <Icon path="M6 6l12 12M18 6 6 18" />
-            </button>
-          )}
+          <PopularTagFilters
+            tags={state.taskTagSuggestions ?? []}
+            selectedTags={state.specificationTags}
+            onToggleTag={state.toggleSpecificationFilterTag}
+            onClear={() => state.clearSpecificationFilterTags()}
+            getTagUsage={state.getTagUsage}
+            idPrefix="spec-filter"
+          />
         </div>
 
         <div className="task-list">

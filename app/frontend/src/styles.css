@@ -1924,6 +1924,9 @@ button:disabled {
   border-color: color-mix(in srgb, var(--line), var(--brand) 20%);
   color: color-mix(in srgb, var(--text), var(--muted) 18%);
   font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   transition: border-color 0.16s ease, background-color 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
 }
 
@@ -1947,6 +1950,35 @@ button:disabled {
   margin-right: 5px;
   font-size: 11px;
   font-weight: 900;
+}
+
+.tag-filter-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 800;
+  background: color-mix(in srgb, var(--surface), var(--line) 28%);
+  color: color-mix(in srgb, var(--muted), var(--text) 42%);
+}
+
+.tag-filter-chip.active .tag-filter-count {
+  background: color-mix(in srgb, #ffffff, var(--brand) 22%);
+  color: color-mix(in srgb, var(--brand-strong), #102115 34%);
+}
+
+.tag-filter-more {
+  border-width: 1.5px;
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--line), var(--brand) 34%);
+  background: color-mix(in srgb, var(--surface-alt), var(--surface) 52%);
+  color: color-mix(in srgb, var(--muted), var(--text) 30%);
+  font-weight: 700;
 }
 
 .tag-filter-clear {
@@ -3512,6 +3544,22 @@ button:disabled {
   border-color: color-mix(in srgb, var(--brand), #d4ffe4 22%);
   color: #ecfff4;
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand), transparent 74%);
+}
+
+[data-theme="dark"] .tag-filter-count {
+  background: color-mix(in srgb, #1d3558, var(--surface) 42%);
+  color: color-mix(in srgb, #d4e7ff, var(--text) 25%);
+}
+
+[data-theme="dark"] .tag-filter-chip.active .tag-filter-count {
+  background: color-mix(in srgb, #d9ffee, var(--brand) 24%);
+  color: color-mix(in srgb, #153122, #000000 14%);
+}
+
+[data-theme="dark"] .tag-filter-more {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 36%);
+  background: color-mix(in srgb, #1a2d4f, var(--surface) 36%);
+  color: color-mix(in srgb, #d4e7ff, var(--text) 30%);
 }
 
 [data-theme="dark"] .tag-filter-clear {

@@ -662,6 +662,13 @@ def test_project_tags_are_shared_between_tasks_notes_and_specifications(tmp_path
     payload = tags.json()
     assert payload['project_id'] == project_id
     assert {'noteonly', 'shared', 'taskonly', 'speconly'}.issubset(set(payload['tags']))
+    assert payload['tags'] == [item['tag'] for item in payload['tag_stats']]
+
+    usage_by_tag = {item['tag']: item['usage_count'] for item in payload['tag_stats']}
+    assert usage_by_tag['shared'] == 3
+    assert usage_by_tag['taskonly'] == 1
+    assert usage_by_tag['noteonly'] == 1
+    assert usage_by_tag['speconly'] == 1
 
 
 def test_project_knowledge_graph_endpoints(tmp_path, monkeypatch):

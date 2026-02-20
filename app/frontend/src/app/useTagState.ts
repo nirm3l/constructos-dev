@@ -2,6 +2,50 @@ import React from 'react'
 import { parseCommaTags } from '../utils/ui'
 
 export function useTagState(c: any) {
+  const projectTagStats = React.useMemo(() => {
+    const sourceStats = Array.isArray(c.projectTagsData?.tag_stats) ? c.projectTagsData.tag_stats : []
+    const seen = new Set<string>()
+    const out: Array<{ tag: string; usage_count: number }> = []
+    for (const rawItem of sourceStats) {
+      const tag = String(rawItem?.tag || '').trim()
+      if (!tag) continue
+      const key = tag.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      const usage = Number(rawItem?.usage_count)
+      out.push({ tag, usage_count: Number.isFinite(usage) ? Math.max(0, usage) : 0 })
+    }
+    if (out.length > 0) return out
+
+    const fallbackTags = Array.isArray(c.projectTagsData?.tags) ? c.projectTagsData.tags : []
+    for (const rawTag of fallbackTags) {
+      const tag = String(rawTag || '').trim()
+      if (!tag) continue
+      const key = tag.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({ tag, usage_count: 0 })
+    }
+    return out
+  }, [c.projectTagsData?.tag_stats, c.projectTagsData?.tags])
+
+  const tagUsageByName = React.useMemo(() => {
+    const out: Record<string, number> = {}
+    for (const item of projectTagStats) {
+      out[item.tag.toLowerCase()] = item.usage_count
+    }
+    return out
+  }, [projectTagStats])
+
+  const getTagUsage = React.useCallback(
+    (tag: string) => {
+      const key = String(tag || '').trim().toLowerCase()
+      if (!key) return 0
+      return Number(tagUsageByName[key] ?? 0)
+    },
+    [tagUsageByName]
+  )
+
   const buildSharedFilterTags = React.useCallback(() => {
     const seen = new Set<string>()
     const out: string[] = []
@@ -51,12 +95,12 @@ export function useTagState(c: any) {
   ])
 
   const taskTagSuggestions = React.useMemo(() => {
-    return (c.projectTagsData?.tags ?? []).slice(0, 40)
-  }, [c.projectTagsData?.tags])
+    return projectTagStats.map((item) => item.tag)
+  }, [projectTagStats])
 
   const noteTagSuggestions = React.useMemo(() => {
-    return (c.projectTagsData?.tags ?? []).slice(0, 24)
-  }, [c.projectTagsData?.tags])
+    return projectTagStats.map((item) => item.tag)
+  }, [projectTagStats])
 
   const toggleSearchTag = React.useCallback((tag: string) => {
     applySharedFilterTagToggle(tag)
@@ -196,6 +240,7 @@ export function useTagState(c: any) {
   return {
     taskTagSuggestions,
     noteTagSuggestions,
+    getTagUsage,
     toggleSearchTag,
     toggleNoteFilterTag,
     toggleSpecificationFilterTag,

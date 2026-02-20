@@ -45,6 +45,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           searchTags={state.searchTags}
           toggleSearchTag={state.toggleSearchTag}
           clearSearchTags={state.clearSearchTags}
+          getTagUsage={state.getTagUsage}
           boardData={state.board.data}
           onOpenTaskEditor={state.openTaskEditor}
           onOpenSpecification={state.openSpecification}
@@ -191,6 +192,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             specificationTags: state.specificationTags,
             toggleSpecificationFilterTag: state.toggleSpecificationFilterTag,
             clearSpecificationFilterTags: state.clearSpecificationFilterTags,
+            getTagUsage: state.getTagUsage,
             specificationArchived: state.specificationArchived,
             setSpecificationArchived: state.setSpecificationArchived,
             createSpecificationMutation: state.createSpecificationMutation,
@@ -254,6 +256,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             noteTags: state.noteTags,
             toggleNoteFilterTag: state.toggleNoteFilterTag,
             clearNoteFilterTags: state.clearNoteFilterTags,
+            getTagUsage: state.getTagUsage,
             selectedNoteId: state.selectedNoteId,
             selectedNote: state.selectedNote,
             editNoteTitle: state.editNoteTitle,
@@ -328,6 +331,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           searchTags={state.searchTags}
           toggleSearchTag={state.toggleSearchTag}
           clearSearchTags={state.clearSearchTags}
+          getTagUsage={state.getTagUsage}
           onClose={() => state.setTab('tasks')}
         />
       )}

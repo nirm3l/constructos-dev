@@ -1,6 +1,7 @@
 import React from 'react'
 import type { Note } from '../../types'
 import { MarkdownView } from '../../markdown/MarkdownView'
+import { PopularTagFilters } from '../shared/PopularTagFilters'
 import { AttachmentRefList, ExternalRefEditor, ExternalRefList, Icon, MarkdownModeToggle } from '../shared/uiHelpers'
 
 export function NotesPanel({
@@ -30,27 +31,14 @@ export function NotesPanel({
             <input type="checkbox" checked={state.noteArchived} onChange={(e) => state.setNoteArchived(e.target.checked)} />
             Archived
           </label>
-          {state.noteTagSuggestions.slice(0, 10).map((tag: string) => (
-            <button
-              key={`note-filter-${tag}`}
-              className={`status-chip tag-filter-chip ${state.noteTags.includes(tag.toLowerCase()) ? 'active' : ''}`}
-              onClick={() => state.toggleNoteFilterTag(tag)}
-              aria-pressed={state.noteTags.includes(tag.toLowerCase())}
-            >
-              #{tag}
-            </button>
-          ))}
-          {state.noteTags.length > 0 && (
-            <button
-              className="action-icon tag-filter-clear"
-              type="button"
-              onClick={() => state.clearNoteFilterTags()}
-              title="Clear selected tags"
-              aria-label="Clear selected tags"
-            >
-              <Icon path="M6 6l12 12M18 6 6 18" />
-            </button>
-          )}
+          <PopularTagFilters
+            tags={state.noteTagSuggestions}
+            selectedTags={state.noteTags}
+            onToggleTag={state.toggleNoteFilterTag}
+            onClear={() => state.clearNoteFilterTags()}
+            getTagUsage={state.getTagUsage}
+            idPrefix="note-filter"
+          />
         </div>
 
         <div className="task-list">

@@ -279,9 +279,15 @@ export type ProjectBoard = {
   lanes: Record<string, Task[]>
 }
 
+export type ProjectTagStat = {
+  tag: string
+  usage_count: number
+}
+
 export type ProjectTags = {
   project_id: string
   tags: string[]
+  tag_stats?: ProjectTagStat[]
 }
 
 export type GraphProjectOverview = {
