@@ -9,16 +9,10 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from shared.auth import generate_temporary_password, hash_password, verify_password
-from shared.core import AggregateEventRepository, User, UserPreferencesPatch, WorkspaceMember, allocate_id
+from shared.core import AggregateEventRepository, User, UserPreferencesPatch, WorkspaceMember, allocate_id, coerce_originator_id
 from shared.settings import BOOTSTRAP_WORKSPACE_ID
 
 from .domain import (
-    EVENT_CREATED as USER_EVENT_CREATED,
-    EVENT_DEACTIVATED as USER_EVENT_DEACTIVATED,
-    EVENT_PASSWORD_CHANGED as USER_EVENT_PASSWORD_CHANGED,
-    EVENT_PASSWORD_RESET as USER_EVENT_PASSWORD_RESET,
-    EVENT_PREFERENCES_UPDATED as USER_EVENT_PREFERENCES_UPDATED,
-    EVENT_WORKSPACE_ROLE_SET as USER_EVENT_WORKSPACE_ROLE_SET,
     UserAggregate,
 )
 
@@ -88,13 +82,20 @@ class PatchUserPreferencesHandler:
 
     def __call__(self) -> dict:
         data = self.payload.model_dump(exclude_unset=True)
+        event_payload: dict[str, object] = {}
+        if "theme" in data:
+            event_payload["theme"] = data.get("theme")
+        if "timezone" in data:
+            event_payload["timezone"] = data.get("timezone")
+        if "notifications_enabled" in data:
+            event_payload["notifications_enabled"] = data.get("notifications_enabled")
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = repo.load_with_class(
             aggregate_type="User",
             aggregate_id=self.ctx.user.id,
             aggregate_cls=UserAggregate,
         )
-        aggregate.record_event(event_type=USER_EVENT_PREFERENCES_UPDATED, payload=data)
+        aggregate.update_preferences(**event_payload)
         repo.persist(
             aggregate,
             base_metadata={
@@ -135,14 +136,11 @@ class ChangePasswordHandler:
             aggregate_id=self.ctx.user.id,
             aggregate_cls=UserAggregate,
         )
-        aggregate.record_event(
-            event_type=USER_EVENT_PASSWORD_CHANGED,
-            payload={
-                "password_hash": hash_password(new_password),
-                "must_change_password": False,
-                "password_changed_at": _to_iso_utc(changed_at),
-                "keep_session_hash": self.keep_session_hash or None,
-            },
+        aggregate.change_password(
+            password_hash=hash_password(new_password),
+            must_change_password=False,
+            password_changed_at=_to_iso_utc(changed_at),
+            keep_session_hash=self.keep_session_hash or None,
         )
         repo.persist(
             aggregate,
@@ -175,23 +173,20 @@ class CreateWorkspaceUserHandler:
 
         target_user_id = allocate_id(self.ctx.db)
         temp_password = generate_temporary_password(12)
-        aggregate = UserAggregate(target_user_id, version=0)
-        aggregate.record_event(
-            event_type=USER_EVENT_CREATED,
-            payload={
-                "username": username,
-                "full_name": full_name,
-                "user_type": "human",
-                "password_hash": hash_password(temp_password),
-                "must_change_password": True,
-                "password_changed_at": None,
-                "is_active": True,
-                "timezone": "UTC",
-                "theme": "light",
-                "notifications_enabled": True,
-                "workspace_id": self.workspace_id,
-                "workspace_role": role,
-            },
+        aggregate = UserAggregate(
+            id=coerce_originator_id(target_user_id),
+            username=username,
+            full_name=full_name,
+            user_type="human",
+            password_hash=hash_password(temp_password),
+            must_change_password=True,
+            password_changed_at=None,
+            is_active=True,
+            timezone="UTC",
+            theme="light",
+            notifications_enabled=True,
+            workspace_id=self.workspace_id,
+            workspace_role=role,
         )
         AggregateEventRepository(self.ctx.db).persist(
             aggregate,
@@ -247,14 +242,11 @@ class ResetWorkspaceUserPasswordHandler:
             aggregate_id=self.target_user_id,
             aggregate_cls=UserAggregate,
         )
-        aggregate.record_event(
-            event_type=USER_EVENT_PASSWORD_RESET,
-            payload={
-                "password_hash": hash_password(temp_password),
-                "must_change_password": True,
-                "password_changed_at": None,
-                "revoke_all_sessions": True,
-            },
+        aggregate.reset_password(
+            password_hash=hash_password(temp_password),
+            must_change_password=True,
+            password_changed_at=None,
+            revoke_all_sessions=True,
         )
         repo.persist(
             aggregate,
@@ -310,13 +302,7 @@ class UpdateWorkspaceUserRoleHandler:
             aggregate_id=self.target_user_id,
             aggregate_cls=UserAggregate,
         )
-        aggregate.record_event(
-            event_type=USER_EVENT_WORKSPACE_ROLE_SET,
-            payload={
-                "workspace_id": self.workspace_id,
-                "role": role,
-            },
-        )
+        aggregate.set_workspace_role(workspace_id=self.workspace_id, role=role)
         repo.persist(
             aggregate,
             base_metadata={
@@ -376,13 +362,7 @@ class DeactivateWorkspaceUserHandler:
             aggregate_id=self.target_user_id,
             aggregate_cls=UserAggregate,
         )
-        aggregate.record_event(
-            event_type=USER_EVENT_DEACTIVATED,
-            payload={
-                "workspace_id": self.workspace_id,
-                "revoke_all_sessions": True,
-            },
-        )
+        aggregate.deactivate(workspace_id=self.workspace_id, revoke_all_sessions=True)
         repo.persist(
             aggregate,
             base_metadata={

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
 
-from shared.aggregates import AggregateRoot
-
+from eventsourcing.domain import Aggregate, event
 
 EVENT_CREATED = "ProjectCreated"
 EVENT_DELETED = "ProjectDeleted"
@@ -13,50 +11,80 @@ EVENT_MEMBER_UPSERTED = "ProjectMemberUpserted"
 EVENT_MEMBER_REMOVED = "ProjectMemberRemoved"
 
 
-class ProjectAggregate(AggregateRoot):
+class ProjectAggregate(Aggregate):
     aggregate_type = "Project"
 
-    def apply(self, *, event_type: str, payload: Mapping[str, Any]) -> None:
-        if event_type == EVENT_CREATED:
-            self.workspace_id = str(payload.get("workspace_id") or "")
-            self.name = str(payload.get("name") or "")
-            self.description = str(payload.get("description") or "")
-            self.custom_statuses = list(payload.get("custom_statuses") or [])
-            self.external_refs = list(payload.get("external_refs") or [])
-            self.attachment_refs = list(payload.get("attachment_refs") or [])
-            self.embedding_enabled = bool(payload.get("embedding_enabled", False))
-            self.embedding_model = payload.get("embedding_model")
-            self.context_pack_evidence_top_k = payload.get("context_pack_evidence_top_k")
-            self.status = str(payload.get("status") or "Active")
-            self.is_deleted = bool(payload.get("is_deleted", False))
-            self.member_roles = dict(payload.get("member_roles") or {})
-            return
+    @event("Created")
+    def __init__(
+        self,
+        id: Any,
+        workspace_id: str,
+        name: str,
+        description: str,
+        custom_statuses: list[str],
+        external_refs: list[dict[str, Any]],
+        attachment_refs: list[dict[str, Any]],
+        embedding_enabled: bool = False,
+        embedding_model: str | None = None,
+        context_pack_evidence_top_k: int | None = None,
+        status: str = "Active",
+    ) -> None:
+        _ = id
+        self.workspace_id = workspace_id
+        self.name = name
+        self.description = description
+        self.custom_statuses = custom_statuses
+        self.external_refs = external_refs
+        self.attachment_refs = attachment_refs
+        self.embedding_enabled = embedding_enabled
+        self.embedding_model = embedding_model
+        self.context_pack_evidence_top_k = context_pack_evidence_top_k
+        self.status = status
+        self.is_deleted = False
+        self.member_roles: dict[str, str] = {}
 
-        if event_type == EVENT_UPDATED:
-            for key, value in dict(payload).items():
-                setattr(self, key, value)
-            return
+    @event("Updated")
+    def update(
+        self,
+        name: str | None = None,
+        description: str | None = None,
+        custom_statuses: list[str] | None = None,
+        external_refs: list[dict[str, Any]] | None = None,
+        attachment_refs: list[dict[str, Any]] | None = None,
+        embedding_enabled: bool | None = None,
+        embedding_model: str | None = None,
+        context_pack_evidence_top_k: int | None = None,
+    ) -> None:
+        if name is not None:
+            self.name = name
+        if description is not None:
+            self.description = description
+        if custom_statuses is not None:
+            self.custom_statuses = custom_statuses
+        if external_refs is not None:
+            self.external_refs = external_refs
+        if attachment_refs is not None:
+            self.attachment_refs = attachment_refs
+        if embedding_enabled is not None:
+            self.embedding_enabled = embedding_enabled
+        if embedding_model is not None:
+            self.embedding_model = embedding_model
+        if context_pack_evidence_top_k is not None:
+            self.context_pack_evidence_top_k = context_pack_evidence_top_k
 
-        if event_type == EVENT_DELETED:
-            self.is_deleted = True
-            return
+    @event("Deleted")
+    def delete(self, deleted_tasks: int = 0, deleted_notes: int = 0) -> None:
+        _ = (deleted_tasks, deleted_notes)
+        self.is_deleted = True
 
-        if event_type == EVENT_MEMBER_UPSERTED:
-            member_roles = dict(getattr(self, "member_roles", {}) or {})
-            user_id = str(payload.get("user_id") or "")
-            role = str(payload.get("role") or "")
-            if user_id and role:
-                member_roles[user_id] = role
-                self.member_roles = member_roles
-            return
+    @event("MemberUpserted")
+    def upsert_member(self, user_id: str, role: str) -> None:
+        roles = dict(getattr(self, "member_roles", {}) or {})
+        roles[user_id] = role
+        self.member_roles = roles
 
-        if event_type == EVENT_MEMBER_REMOVED:
-            member_roles = dict(getattr(self, "member_roles", {}) or {})
-            user_id = str(payload.get("user_id") or "")
-            if user_id:
-                member_roles.pop(user_id, None)
-                self.member_roles = member_roles
-            return
-
-        raise ValueError(f"Unknown event type: {event_type}")
-
+    @event("MemberRemoved")
+    def remove_member(self, user_id: str) -> None:
+        roles = dict(getattr(self, "member_roles", {}) or {})
+        roles.pop(user_id, None)
+        self.member_roles = roles

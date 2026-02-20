@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
 
-from shared.aggregates import AggregateRoot
-
+from eventsourcing.domain import Aggregate, event
 
 EVENT_PREFERENCES_UPDATED = "UserPreferencesUpdated"
 EVENT_CREATED = "UserCreated"
@@ -14,56 +12,86 @@ EVENT_WORKSPACE_ROLE_SET = "UserWorkspaceRoleSet"
 EVENT_DEACTIVATED = "UserDeactivated"
 
 
-class UserAggregate(AggregateRoot):
+class UserAggregate(Aggregate):
     aggregate_type = "User"
 
-    def apply(self, *, event_type: str, payload: Mapping[str, Any]) -> None:
-        if event_type == EVENT_CREATED:
-            self.username = str(payload.get("username") or "")
-            self.full_name = str(payload.get("full_name") or "")
-            self.user_type = str(payload.get("user_type") or "")
-            self.password_hash = str(payload.get("password_hash") or "")
-            self.must_change_password = bool(payload.get("must_change_password", False))
-            self.password_changed_at = payload.get("password_changed_at")
-            self.is_active = bool(payload.get("is_active", True))
-            self.theme = str(payload.get("theme") or "light")
-            self.timezone = str(payload.get("timezone") or "UTC")
-            self.notifications_enabled = bool(payload.get("notifications_enabled", True))
-            workspace_id = str(payload.get("workspace_id") or "")
-            workspace_role = str(payload.get("workspace_role") or "")
-            workspace_roles: dict[str, str] = {}
-            if workspace_id and workspace_role:
-                workspace_roles[workspace_id] = workspace_role
-            self.workspace_roles = workspace_roles
-            return
+    @event("Created")
+    def __init__(
+        self,
+        id: Any,
+        username: str,
+        full_name: str,
+        user_type: str,
+        password_hash: str | None,
+        must_change_password: bool,
+        password_changed_at: str | None,
+        is_active: bool,
+        theme: str,
+        timezone: str,
+        notifications_enabled: bool,
+        workspace_id: str,
+        workspace_role: str,
+    ) -> None:
+        _ = id
+        self.username = username
+        self.full_name = full_name
+        self.user_type = user_type
+        self.password_hash = password_hash
+        self.must_change_password = must_change_password
+        self.password_changed_at = password_changed_at
+        self.is_active = is_active
+        self.theme = theme
+        self.timezone = timezone
+        self.notifications_enabled = notifications_enabled
+        self.workspace_roles = {workspace_id: workspace_role}
 
-        if event_type == EVENT_PREFERENCES_UPDATED:
-            if "theme" in payload:
-                self.theme = str(payload.get("theme") or "")
-            if "timezone" in payload:
-                self.timezone = str(payload.get("timezone") or "")
-            if "notifications_enabled" in payload:
-                self.notifications_enabled = bool(payload.get("notifications_enabled"))
-            return
+    @event("PreferencesUpdated")
+    def update_preferences(
+        self,
+        theme: str | None = None,
+        timezone: str | None = None,
+        notifications_enabled: bool | None = None,
+    ) -> None:
+        if theme is not None:
+            self.theme = str(theme)
+        if timezone is not None:
+            self.timezone = str(timezone)
+        if notifications_enabled is not None:
+            self.notifications_enabled = bool(notifications_enabled)
 
-        if event_type in {EVENT_PASSWORD_CHANGED, EVENT_PASSWORD_RESET}:
-            self.password_hash = str(payload.get("password_hash") or "")
-            self.must_change_password = bool(payload.get("must_change_password", False))
-            self.password_changed_at = payload.get("password_changed_at")
-            return
+    @event("PasswordChanged")
+    def change_password(
+        self,
+        password_hash: str,
+        must_change_password: bool,
+        password_changed_at: str | None,
+        keep_session_hash: str | None = None,
+    ) -> None:
+        _ = keep_session_hash
+        self.password_hash = password_hash
+        self.must_change_password = must_change_password
+        self.password_changed_at = password_changed_at
 
-        if event_type == EVENT_WORKSPACE_ROLE_SET:
-            workspace_id = str(payload.get("workspace_id") or "")
-            role = str(payload.get("role") or "")
-            if workspace_id and role:
-                workspace_roles = dict(getattr(self, "workspace_roles", {}) or {})
-                workspace_roles[workspace_id] = role
-                self.workspace_roles = workspace_roles
-            return
+    @event("PasswordReset")
+    def reset_password(
+        self,
+        password_hash: str,
+        must_change_password: bool,
+        password_changed_at: str | None,
+        revoke_all_sessions: bool = True,
+    ) -> None:
+        _ = revoke_all_sessions
+        self.password_hash = password_hash
+        self.must_change_password = must_change_password
+        self.password_changed_at = password_changed_at
 
-        if event_type == EVENT_DEACTIVATED:
-            self.is_active = False
-            return
+    @event("WorkspaceRoleSet")
+    def set_workspace_role(self, workspace_id: str, role: str) -> None:
+        roles = dict(getattr(self, "workspace_roles", {}) or {})
+        roles[workspace_id] = role
+        self.workspace_roles = roles
 
-        raise ValueError(f"Unknown event type: {event_type}")
-
+    @event("Deactivated")
+    def deactivate(self, workspace_id: str, revoke_all_sessions: bool = True) -> None:
+        _ = (workspace_id, revoke_all_sessions)
+        self.is_active = False

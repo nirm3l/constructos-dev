@@ -12,6 +12,7 @@ from shared.core import (
     SavedViewCreate,
     User,
     allocate_id,
+    coerce_originator_id,
     ensure_project_access,
     ensure_role,
     load_saved_view,
@@ -46,8 +47,8 @@ class CreateSavedViewHandler:
         if project.workspace_id != self.payload.workspace_id:
             raise HTTPException(status_code=400, detail="Project does not belong to workspace")
         sid = allocate_id(self.ctx.db)
-        aggregate = SavedViewAggregate(sid, version=0)
-        aggregate.create(
+        aggregate = SavedViewAggregate(
+            id=coerce_originator_id(sid),
             workspace_id=self.payload.workspace_id,
             project_id=self.payload.project_id,
             user_id=None if self.payload.shared else self.ctx.user.id,

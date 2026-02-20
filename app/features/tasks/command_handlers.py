@@ -24,6 +24,7 @@ from shared.core import (
     TaskPatch,
     TaskWatcher,
     User,
+    coerce_originator_id,
     ensure_project_access,
     ensure_role,
     get_kurrent_client,
@@ -34,22 +35,7 @@ from shared.core import (
     rebuild_state,
     to_iso_utc,
 )
-from .domain import (
-    EVENT_ARCHIVED,
-    EVENT_AUTOMATION_REQUESTED,
-    EVENT_COMMENT_ADDED,
-    EVENT_COMMENT_DELETED,
-    EVENT_COMPLETED,
-    EVENT_CREATED,
-    EVENT_DELETED,
-    EVENT_REOPENED,
-    EVENT_REORDERED,
-    EVENT_RESTORED,
-    EVENT_SCHEDULE_CONFIGURED,
-    EVENT_UPDATED,
-    EVENT_WATCH_TOGGLED,
-    TaskAggregate,
-)
+from .domain import TaskAggregate
 
 
 def _normalize_tags(values: list[str] | None) -> list[str]:
@@ -267,42 +253,36 @@ class CreateTaskHandler:
         max_order = self.ctx.db.execute(
             select(func.max(Task.order_index)).where(Task.workspace_id == self.payload.workspace_id, Task.project_id == self.payload.project_id)
         ).scalar() or 0
-        aggregate = TaskAggregate(tid, version=0)
-        aggregate.record_event(
-            event_type=EVENT_CREATED,
-            payload={
-                "workspace_id": self.payload.workspace_id,
-                "project_id": self.payload.project_id,
-                "specification_id": self.payload.specification_id,
-                "title": title,
-                "description": self.payload.description,
-                "status": initial_status,
-                "priority": self.payload.priority,
-                "due_date": to_iso_utc(normalize_datetime_to_utc(self.payload.due_date, user_tz)),
-                "assignee_id": self.payload.assignee_id,
-                "labels": _normalize_tags(self.payload.labels),
-                "subtasks": self.payload.subtasks,
-                "attachments": attachment_refs,
-                "external_refs": external_refs,
-                "attachment_refs": attachment_refs,
-                "recurring_rule": self.payload.recurring_rule,
-                "task_type": task_type,
-                "scheduled_instruction": scheduled_instruction if task_type == "scheduled_instruction" else None,
-                "scheduled_at_utc": to_iso_utc(scheduled_at) if task_type == "scheduled_instruction" else None,
-                "schedule_timezone": self.payload.schedule_timezone if task_type == "scheduled_instruction" else None,
-                "schedule_state": "idle",
-                "order_index": max_order + 1,
-            },
+        aggregate = TaskAggregate(
+            id=coerce_originator_id(tid),
+            workspace_id=self.payload.workspace_id,
+            project_id=self.payload.project_id,
+            specification_id=self.payload.specification_id,
+            title=title,
+            description=self.payload.description,
+            status=initial_status,
+            priority=self.payload.priority,
+            due_date=to_iso_utc(normalize_datetime_to_utc(self.payload.due_date, user_tz)),
+            assignee_id=self.payload.assignee_id,
+            labels=_normalize_tags(self.payload.labels),
+            subtasks=self.payload.subtasks,
+            attachments=attachment_refs,
+            external_refs=external_refs,
+            attachment_refs=attachment_refs,
+            recurring_rule=self.payload.recurring_rule,
+            task_type=task_type,
+            scheduled_instruction=scheduled_instruction if task_type == "scheduled_instruction" else None,
+            scheduled_at_utc=to_iso_utc(scheduled_at) if task_type == "scheduled_instruction" else None,
+            schedule_timezone=self.payload.schedule_timezone if task_type == "scheduled_instruction" else None,
+            schedule_state="idle",
+            order_index=max_order + 1,
         )
         if task_type == "scheduled_instruction":
-            aggregate.record_event(
-                event_type=EVENT_SCHEDULE_CONFIGURED,
-                payload={
-                    "scheduled_instruction": scheduled_instruction,
-                    "scheduled_at_utc": to_iso_utc(scheduled_at),
-                    "schedule_timezone": self.payload.schedule_timezone,
-                    "schedule_state": "idle",
-                },
+            aggregate.configure_schedule(
+                scheduled_instruction=scheduled_instruction,
+                scheduled_at_utc=to_iso_utc(scheduled_at),
+                schedule_timezone=self.payload.schedule_timezone,
+                schedule_state="idle",
             )
         _persist_task_aggregate(
             AggregateEventRepository(self.ctx.db),
@@ -425,16 +405,13 @@ class PatchTaskHandler:
             event_payload["recurring_rule"] = None
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, self.task_id)
-        aggregate.record_event(event_type=EVENT_UPDATED, payload=event_payload)
+        aggregate.update(changes=event_payload)
         if effective_task_type == "scheduled_instruction":
-            aggregate.record_event(
-                event_type=EVENT_SCHEDULE_CONFIGURED,
-                payload={
-                    "scheduled_instruction": effective_scheduled_instruction,
-                    "scheduled_at_utc": effective_scheduled_at_utc,
-                    "schedule_timezone": event_payload.get("schedule_timezone", current_schedule_timezone),
-                    "schedule_state": event_payload.get("schedule_state", "idle"),
-                },
+            aggregate.configure_schedule(
+                scheduled_instruction=effective_scheduled_instruction,
+                scheduled_at_utc=effective_scheduled_at_utc,
+                schedule_timezone=event_payload.get("schedule_timezone", current_schedule_timezone),
+                schedule_state=event_payload.get("schedule_state", "idle"),
             )
         _persist_task_aggregate(
             repo,
@@ -462,10 +439,7 @@ class CompleteTaskHandler:
             raise HTTPException(status_code=409, detail="Task already completed")
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, self.task_id)
-        aggregate.record_event(
-            event_type=EVENT_COMPLETED,
-            payload={"completed_at": to_iso_utc(datetime.now(timezone.utc))},
-        )
+        aggregate.complete(completed_at=to_iso_utc(datetime.now(timezone.utc)))
         _persist_task_aggregate(
             repo,
             aggregate,
@@ -501,7 +475,7 @@ class ReopenTaskHandler:
                 reopen_status = (statuses[0] if statuses else DEFAULT_STATUSES[0]) or DEFAULT_STATUSES[0]
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, self.task_id)
-        aggregate.record_event(event_type=EVENT_REOPENED, payload={"status": reopen_status})
+        aggregate.reopen(status=reopen_status)
         _persist_task_aggregate(
             repo,
             aggregate,
@@ -528,7 +502,7 @@ class ArchiveTaskHandler:
             raise HTTPException(status_code=409, detail="Task already archived")
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, self.task_id)
-        aggregate.record_event(event_type=EVENT_ARCHIVED, payload={})
+        aggregate.archive()
         _persist_task_aggregate(
             repo,
             aggregate,
@@ -552,7 +526,7 @@ class RestoreTaskHandler:
             raise HTTPException(status_code=409, detail="Task is not archived")
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, self.task_id)
-        aggregate.record_event(event_type=EVENT_RESTORED, payload={})
+        aggregate.restore()
         _persist_task_aggregate(
             repo,
             aggregate,
@@ -572,28 +546,26 @@ class BulkTaskActionHandler:
 
     def __call__(self, task_id: str) -> bool:
         workspace_id, project_id, status, archived = require_task_command_state(self.ctx.db, self.ctx.user, task_id, allowed={"Owner", "Admin", "Member"})
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, task_id)
         if self.payload.action == "complete":
             if status == "Done":
                 return False
-            et, ep = EVENT_COMPLETED, {"completed_at": to_iso_utc(datetime.now(timezone.utc))}
+            aggregate.complete(completed_at=to_iso_utc(datetime.now(timezone.utc)))
         elif self.payload.action == "archive":
             if archived:
                 return False
-            et, ep = EVENT_ARCHIVED, {}
+            aggregate.archive()
         elif self.payload.action == "delete":
-            et, ep = EVENT_DELETED, {}
+            aggregate.delete()
         elif self.payload.action == "set_status":
-            et, ep = EVENT_UPDATED, {"status": self.payload.payload.get("status", status)}
+            aggregate.update(changes={"status": self.payload.payload.get("status", status)})
         elif self.payload.action == "reopen":
             if status != "Done":
                 return False
-            et, ep = EVENT_REOPENED, {"status": self.payload.payload.get("status", "To do")}
+            aggregate.reopen(status=self.payload.payload.get("status", "To do"))
         else:
             return False
-
-        repo = AggregateEventRepository(self.ctx.db)
-        aggregate = _load_task_aggregate(repo, task_id)
-        aggregate.record_event(event_type=et, payload=ep)
         _persist_task_aggregate(
             repo,
             aggregate,
@@ -624,10 +596,7 @@ class ReorderTasksHandler:
             return False
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, task_id)
-        aggregate.record_event(
-            event_type=EVENT_REORDERED,
-            payload={"order_index": order_index, "status": self.payload.status},
-        )
+        aggregate.reorder(order_index=order_index, status=self.payload.status)
         _persist_task_aggregate(
             repo,
             aggregate,
@@ -650,10 +619,7 @@ class AddCommentHandler:
         workspace_id, project_id, _, _ = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member", "Guest"})
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, self.task_id)
-        aggregate.record_event(
-            event_type=EVENT_COMMENT_ADDED,
-            payload={"task_id": self.task_id, "user_id": self.ctx.user.id, "body": self.payload.body},
-        )
+        aggregate.add_comment(task_id=self.task_id, user_id=self.ctx.user.id, body=self.payload.body)
         _persist_task_aggregate(
             repo,
             aggregate,
@@ -682,10 +648,7 @@ class DeleteCommentHandler:
             raise HTTPException(status_code=404, detail="Comment not found")
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, self.task_id)
-        aggregate.record_event(
-            event_type=EVENT_COMMENT_DELETED,
-            payload={"task_id": self.task_id, "comment_id": self.comment_id},
-        )
+        aggregate.delete_comment(task_id=self.task_id, comment_id=self.comment_id)
         _persist_task_aggregate(
             repo,
             aggregate,
@@ -717,10 +680,7 @@ class ToggleWatchHandler:
         next_watched = not currently_watched
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, self.task_id)
-        aggregate.record_event(
-            event_type=EVENT_WATCH_TOGGLED,
-            payload={"task_id": self.task_id, "user_id": self.ctx.user.id, "watched": next_watched},
-        )
+        aggregate.toggle_watch(task_id=self.task_id, user_id=self.ctx.user.id, watched=next_watched)
         _persist_task_aggregate(
             repo,
             aggregate,
@@ -744,10 +704,7 @@ class RequestAutomationRunHandler:
         requested_at = to_iso_utc(datetime.now(timezone.utc))
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, self.task_id)
-        aggregate.record_event(
-            event_type=EVENT_AUTOMATION_REQUESTED,
-            payload={"requested_at": requested_at, "instruction": self.instruction},
-        )
+        aggregate.request_automation(requested_at=requested_at, instruction=self.instruction)
         _persist_task_aggregate(
             repo,
             aggregate,

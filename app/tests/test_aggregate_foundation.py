@@ -1,60 +1,61 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any
 
-from shared.aggregates import AggregateEventRepository, AggregateRoot
+from eventsourcing.domain import Aggregate, event
+
+from shared.aggregates import AggregateEventRepository, initialize_aggregate
 from shared.contracts import EventEnvelope
 
 
-class DemoAggregate(AggregateRoot):
+class DemoAggregate(Aggregate):
     aggregate_type = "Demo"
 
-    def apply(self, *, event_type: str, payload: Mapping[str, Any]) -> None:
-        if event_type == "DemoCreated":
-            self.title = str(payload.get("title") or "")
-            self.archived = False
-            return
-        if event_type == "DemoRenamed":
-            self.title = str(payload.get("title") or self.title)
-            return
-        if event_type == "DemoArchived":
-            self.archived = True
-            return
-        raise ValueError(f"Unknown event type: {event_type}")
+    @event("Created")
+    def __init__(self, *, id: Any, title: str) -> None:
+        _ = id
+        self.title = title
+        self.archived = False
+
+    @event("Renamed")
+    def rename(self, *, title: str) -> None:
+        self.title = title
+
+    @event("Archived")
+    def archive(self) -> None:
+        self.archived = True
 
 
-def test_aggregate_root_records_pending_events_and_versions() -> None:
-    aggregate = DemoAggregate("demo-1")
-
-    aggregate.record_event(
-        event_type="DemoCreated",
-        payload={"title": "Initial title"},
-        metadata={"trace_id": "trace-1"},
-    )
-    aggregate.record_event(
-        event_type="DemoArchived",
-        payload={},
-        metadata={"trace_id": "trace-2"},
+def test_initialize_aggregate_restores_state_and_supports_new_events() -> None:
+    aggregate_id = "11111111-1111-1111-1111-111111111111"
+    aggregate = initialize_aggregate(
+        DemoAggregate,
+        aggregate_id=aggregate_id,
+        version=3,
+        state={"title": "Existing", "archived": False},
     )
 
-    assert aggregate.version == 2
-    assert aggregate.loaded_version == 0
-    assert aggregate.title == "Initial title"
-    assert aggregate.archived is True
-    assert aggregate.has_pending_events is True
-    assert [event.event_type for event in aggregate.pending_events] == [
-        "DemoCreated",
-        "DemoArchived",
-    ]
+    assert str(aggregate.id) == aggregate_id
+    assert aggregate.version == 3
+    assert aggregate.title == "Existing"
+    assert aggregate.archived is False
+    assert list(aggregate.pending_events) == []
+
+    aggregate.rename(title="Renamed")
+
+    assert aggregate.version == 4
+    assert len(list(aggregate.pending_events)) == 1
+    assert aggregate.pending_events[0].originator_version == 4
 
 
 def test_aggregate_repository_load_with_class_uses_rebuild_state() -> None:
     db = object()
+    aggregate_id = "22222222-2222-2222-2222-222222222222"
 
-    def fake_rebuild_state(_db, aggregate_type: str, aggregate_id: str) -> tuple[dict[str, Any], int]:
+    def fake_rebuild_state(_db, aggregate_type: str, aggregate_id_arg: str) -> tuple[dict[str, Any], int]:
         assert _db is db
         assert aggregate_type == "Demo"
-        assert aggregate_id == "demo-existing"
+        assert aggregate_id_arg == aggregate_id
         return {"title": "Existing", "archived": False}, 4
 
     repo = AggregateEventRepository(
@@ -63,16 +64,15 @@ def test_aggregate_repository_load_with_class_uses_rebuild_state() -> None:
     )
     aggregate = repo.load_with_class(
         aggregate_type="Demo",
-        aggregate_id="demo-existing",
+        aggregate_id=aggregate_id,
         aggregate_cls=DemoAggregate,
     )
 
-    assert aggregate.id == "demo-existing"
+    assert str(aggregate.id) == aggregate_id
     assert aggregate.title == "Existing"
     assert aggregate.archived is False
     assert aggregate.version == 4
-    assert aggregate.loaded_version == 4
-    assert aggregate.has_pending_events is False
+    assert list(aggregate.pending_events) == []
 
 
 def test_aggregate_repository_persist_appends_events_in_order() -> None:
@@ -109,20 +109,14 @@ def test_aggregate_repository_persist_appends_events_in_order() -> None:
             metadata=dict(metadata),
         )
 
-    aggregate = DemoAggregate.from_state(
-        "demo-2",
-        {"title": "Before", "archived": False},
+    aggregate = initialize_aggregate(
+        DemoAggregate,
+        aggregate_id="33333333-3333-3333-3333-333333333333",
         version=7,
+        state={"title": "Before", "archived": False},
     )
-    aggregate.record_event(
-        event_type="DemoRenamed",
-        payload={"title": "After rename"},
-        metadata={"trace_id": "trace-rename"},
-    )
-    aggregate.record_event(
-        event_type="DemoArchived",
-        payload={},
-    )
+    aggregate.rename(title="After rename")
+    aggregate.archive()
 
     repo = AggregateEventRepository(db, append_event_fn=fake_append_event)
     emitted = repo.persist(
@@ -135,7 +129,5 @@ def test_aggregate_repository_persist_appends_events_in_order() -> None:
     assert calls[0]["expected_version"] == 7
     assert calls[1]["expected_version"] is None
     assert calls[0]["metadata"]["actor_id"] == "user-1"
-    assert calls[0]["metadata"]["trace_id"] == "trace-rename"
     assert calls[1]["metadata"]["workspace_id"] == "ws-1"
-    assert aggregate.has_pending_events is False
-    assert aggregate.loaded_version == aggregate.version
+    assert list(aggregate.pending_events) == []

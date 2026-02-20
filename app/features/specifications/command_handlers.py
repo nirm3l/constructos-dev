@@ -13,6 +13,7 @@ from shared.core import (
     SpecificationCreate,
     SpecificationPatch,
     User,
+    coerce_originator_id,
     ensure_project_access,
     ensure_role,
     load_specification_command_state,
@@ -184,8 +185,8 @@ class CreateSpecificationHandler:
                 detail="Specification with this title already exists in deleted state; restore is not supported",
             )
 
-        aggregate = SpecificationAggregate(sid, version=0)
-        aggregate.create(
+        aggregate = SpecificationAggregate(
+            id=coerce_originator_id(sid),
             workspace_id=self.payload.workspace_id,
             project_id=self.payload.project_id,
             title=title,

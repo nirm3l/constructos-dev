@@ -1,101 +1,72 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, TypeVar
+from uuid import UUID
 
+from eventsourcing.domain import Aggregate
 from sqlalchemy.orm import Session
 
 from .contracts import EventEnvelope
 
-
-@dataclass(frozen=True, slots=True)
-class PendingDomainEvent:
-    event_type: str
-    payload: dict[str, Any] = field(default_factory=dict)
-    metadata: dict[str, Any] = field(default_factory=dict)
+_AggregateT = TypeVar("_AggregateT", bound=Aggregate)
+_RESERVED_EVENT_KEYS = {"originator_id", "originator_version", "originator_topic", "timestamp"}
 
 
-class AggregateRoot(ABC):
-    aggregate_type: str = ""
+def coerce_originator_id(value: str) -> UUID:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("aggregate_id cannot be empty")
+    return UUID(text)
 
-    def __init__(self, aggregate_id: str, *, version: int = 0):
-        self.id = str(aggregate_id)
-        self.version = int(version)
-        self._loaded_version = int(version)
-        self._pending_events: list[PendingDomainEvent] = []
 
-    @classmethod
-    def from_state(
-        cls,
-        aggregate_id: str,
-        state: Mapping[str, Any],
-        *,
-        version: int,
-    ) -> AggregateRoot:
-        aggregate = cls.__new__(cls)
-        AggregateRoot.__init__(aggregate, aggregate_id=aggregate_id, version=version)
-        aggregate.restore(state)
-        return aggregate
+def initialize_aggregate(
+    aggregate_cls: type[_AggregateT],
+    *,
+    aggregate_id: str,
+    version: int = 0,
+    state: Mapping[str, Any] | None = None,
+) -> _AggregateT:
+    aggregate = object.__new__(aggregate_cls)
+    aggregate.__base_init__(
+        originator_id=coerce_originator_id(aggregate_id),
+        originator_version=int(version),
+        timestamp=datetime.now(timezone.utc),
+    )
+    for key, value in dict(state or {}).items():
+        if key in {"id", "version", "created_on", "modified_on"}:
+            continue
+        try:
+            setattr(aggregate, key, value)
+        except AttributeError:
+            # Ignore read-only aggregate attributes managed by eventsourcing internals.
+            continue
+    return aggregate
 
-    @property
-    def loaded_version(self) -> int:
-        return int(self._loaded_version)
 
-    @property
-    def has_pending_events(self) -> bool:
-        return bool(self._pending_events)
-
-    @property
-    def pending_events(self) -> list[PendingDomainEvent]:
-        return [
-            PendingDomainEvent(
-                event_type=event.event_type,
-                payload=dict(event.payload),
-                metadata=dict(event.metadata),
-            )
-            for event in self._pending_events
-        ]
-
-    def restore(self, state: Mapping[str, Any]) -> None:
-        for key, value in dict(state).items():
-            setattr(self, key, value)
-
-    @abstractmethod
-    def apply(self, *, event_type: str, payload: Mapping[str, Any]) -> None:
-        ...
-
-    def record_event(
-        self,
-        *,
-        event_type: str,
-        payload: Mapping[str, Any] | None = None,
-        metadata: Mapping[str, Any] | None = None,
-    ) -> None:
-        normalized_payload = dict(payload or {})
-        normalized_metadata = dict(metadata or {})
-        self.apply(event_type=event_type, payload=normalized_payload)
-        self.version += 1
-        self._pending_events.append(
-            PendingDomainEvent(
-                event_type=event_type,
-                payload=normalized_payload,
-                metadata=normalized_metadata,
-            )
-        )
-
-    def clear_pending_events(self) -> None:
-        self._pending_events.clear()
-        self._loaded_version = int(self.version)
-
-    def _require_aggregate_type(self) -> str:
-        aggregate_type = str(self.aggregate_type or "").strip()
-        if not aggregate_type:
-            raise ValueError(f"{self.__class__.__name__} must define aggregate_type")
+def _aggregate_type_for(aggregate: Aggregate) -> str:
+    aggregate_type = str(getattr(aggregate, "aggregate_type", "") or "").strip()
+    if aggregate_type:
         return aggregate_type
+    class_name = aggregate.__class__.__name__
+    if class_name.endswith("Aggregate"):
+        class_name = class_name[: -len("Aggregate")]
+    return class_name
 
 
-_AggregateT = TypeVar("_AggregateT", bound=AggregateRoot)
+def _event_type_for(aggregate: Aggregate, event: Any) -> str:
+    prefix = str(getattr(aggregate, "event_type_prefix", "") or "").strip() or _aggregate_type_for(aggregate)
+    return f"{prefix}{event.__class__.__name__}"
+
+
+def _payload_for(event: Any) -> dict[str, Any]:
+    payload = dict(getattr(event, "__dict__", {}) or {})
+    for key in _RESERVED_EVENT_KEYS:
+        payload.pop(key, None)
+    if isinstance(payload.get("changes"), dict):
+        changes = dict(payload.pop("changes"))
+        payload.update(changes)
+    return payload
 
 
 class AggregateEventRepository:
@@ -116,16 +87,6 @@ class AggregateEventRepository:
             self._append_event = append_event_fn
             self._rebuild_state = rebuild_state_fn
 
-    def load(
-        self,
-        *,
-        aggregate_type: str,
-        aggregate_id: str,
-        factory: Callable[[str, Mapping[str, Any], int], _AggregateT],
-    ) -> _AggregateT:
-        state, version = self._rebuild_state(self.db, aggregate_type, aggregate_id)
-        return factory(aggregate_id, state, version)
-
     def load_with_class(
         self,
         *,
@@ -133,45 +94,42 @@ class AggregateEventRepository:
         aggregate_id: str,
         aggregate_cls: type[_AggregateT],
     ) -> _AggregateT:
-        return self.load(
-            aggregate_type=aggregate_type,
+        state, version = self._rebuild_state(self.db, aggregate_type, aggregate_id)
+        return initialize_aggregate(
+            aggregate_cls,
             aggregate_id=aggregate_id,
-            factory=lambda aid, state, version: aggregate_cls.from_state(
-                aid,
-                state,
-                version=version,
-            ),
+            version=version,
+            state=state,
         )
 
     def persist(
         self,
-        aggregate: AggregateRoot,
+        aggregate: Aggregate,
         *,
         base_metadata: Mapping[str, Any],
         expected_version: int | None = None,
     ) -> list[EventEnvelope]:
-        pending = aggregate.pending_events
+        pending = list(getattr(aggregate, "pending_events", []) or [])
         if not pending:
             return []
 
-        aggregate_type = aggregate._require_aggregate_type()
-        first_expected = aggregate.loaded_version if expected_version is None else int(expected_version)
+        aggregate_type = _aggregate_type_for(aggregate)
+        first_expected = int(expected_version) if expected_version is not None else int(pending[0].originator_version) - 1
 
         appended: list[EventEnvelope] = []
         for idx, event in enumerate(pending):
-            metadata = dict(base_metadata)
-            metadata.update(event.metadata)
             appended.append(
                 self._append_event(
                     self.db,
                     aggregate_type=aggregate_type,
-                    aggregate_id=aggregate.id,
-                    event_type=event.event_type,
-                    payload=dict(event.payload),
-                    metadata=metadata,
+                    aggregate_id=str(aggregate.id),
+                    event_type=_event_type_for(aggregate, event),
+                    payload=_payload_for(event),
+                    metadata=dict(base_metadata),
                     expected_version=first_expected if idx == 0 else None,
                 )
             )
 
-        aggregate.clear_pending_events()
+        # Clear pending events only after all writes succeed.
+        aggregate.collect_events()
         return appended

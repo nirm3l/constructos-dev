@@ -21,6 +21,7 @@ from shared.core import (
     TaskCreate,
     User,
     ensure_role,
+    initialize_aggregate,
 )
 from shared.models import ProjectTemplateBinding
 
@@ -130,7 +131,7 @@ class ProjectTemplateApplicationService:
             applied_by=self.user.id,
             parameters_json=json.dumps(parameters or {}, ensure_ascii=True, sort_keys=True, default=str),
         )
-        aggregate = ProjectTemplateBindingAggregate(project_id, version=0)
+        aggregate = initialize_aggregate(ProjectTemplateBindingAggregate, aggregate_id=project_id, version=0)
         aggregate.bind(
             workspace_id=binding.workspace_id,
             project_id=binding.project_id,

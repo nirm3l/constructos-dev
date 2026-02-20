@@ -20,24 +20,16 @@ from shared.core import (
     Task,
     User,
     WorkspaceMember,
+    coerce_originator_id,
     ensure_project_access,
     ensure_role,
     load_project_view,
 )
 from shared.settings import ALLOWED_EMBEDDING_MODELS, DEFAULT_EMBEDDING_MODEL
-from ..notes.domain import EVENT_DELETED as NOTE_EVENT_DELETED
 from ..notes.domain import NoteAggregate
-from ..rules.domain import EVENT_DELETED as PROJECT_RULE_EVENT_DELETED
 from ..rules.domain import ProjectRuleAggregate
-from ..specifications.domain import EVENT_DELETED as SPECIFICATION_EVENT_DELETED
 from ..specifications.domain import SpecificationAggregate
-from ..tasks.domain import EVENT_DELETED as TASK_EVENT_DELETED
 from ..tasks.domain import TaskAggregate
-from .domain import EVENT_CREATED as PROJECT_EVENT_CREATED
-from .domain import EVENT_DELETED as PROJECT_EVENT_DELETED
-from .domain import EVENT_MEMBER_REMOVED as PROJECT_EVENT_MEMBER_REMOVED
-from .domain import EVENT_MEMBER_UPSERTED as PROJECT_EVENT_MEMBER_UPSERTED
-from .domain import EVENT_UPDATED as PROJECT_EVENT_UPDATED
 from .domain import ProjectAggregate
 
 
@@ -197,32 +189,21 @@ class CreateProjectHandler:
             embedding_model=self.payload.embedding_model,
         )
 
-        aggregate = ProjectAggregate(pid, version=0)
-        aggregate.record_event(
-            event_type=PROJECT_EVENT_CREATED,
-            payload={
-                "workspace_id": self.payload.workspace_id,
-                "name": name,
-                "description": self.payload.description,
-                "custom_statuses": _normalize_project_statuses(self.payload.custom_statuses),
-                "external_refs": _normalize_external_refs([r.model_dump() for r in self.payload.external_refs]),
-                "attachment_refs": _normalize_attachment_refs([r.model_dump() for r in self.payload.attachment_refs]),
-                "embedding_enabled": embedding_enabled,
-                "embedding_model": embedding_model,
-                "context_pack_evidence_top_k": _normalize_context_pack_evidence_top_k(self.payload.context_pack_evidence_top_k),
-                "status": "Active",
-            },
+        aggregate = ProjectAggregate(
+            id=coerce_originator_id(pid),
+            workspace_id=self.payload.workspace_id,
+            name=name,
+            description=self.payload.description,
+            custom_statuses=_normalize_project_statuses(self.payload.custom_statuses),
+            external_refs=_normalize_external_refs([r.model_dump() for r in self.payload.external_refs]),
+            attachment_refs=_normalize_attachment_refs([r.model_dump() for r in self.payload.attachment_refs]),
+            embedding_enabled=embedding_enabled,
+            embedding_model=embedding_model,
+            context_pack_evidence_top_k=_normalize_context_pack_evidence_top_k(self.payload.context_pack_evidence_top_k),
+            status="Active",
         )
         for uid in deduped_member_ids:
-            aggregate.record_event(
-                event_type=PROJECT_EVENT_MEMBER_UPSERTED,
-                payload={
-                    "workspace_id": self.payload.workspace_id,
-                    "project_id": pid,
-                    "user_id": uid,
-                    "role": "Owner" if uid == self.ctx.user.id else "Contributor",
-                },
-            )
+            aggregate.upsert_member(user_id=uid, role="Owner" if uid == self.ctx.user.id else "Contributor")
         AggregateEventRepository(self.ctx.db).persist(
             aggregate,
             base_metadata={
@@ -258,7 +239,7 @@ class DeleteProjectHandler:
                 aggregate_id=t.id,
                 aggregate_cls=TaskAggregate,
             )
-            task_aggregate.record_event(event_type=TASK_EVENT_DELETED, payload={})
+            task_aggregate.delete()
             repo.persist(
                 task_aggregate,
                 base_metadata={
@@ -275,7 +256,7 @@ class DeleteProjectHandler:
                 aggregate_id=n.id,
                 aggregate_cls=NoteAggregate,
             )
-            note_aggregate.record_event(event_type=NOTE_EVENT_DELETED, payload={"updated_by": self.ctx.user.id})
+            note_aggregate.delete(updated_by=self.ctx.user.id)
             repo.persist(
                 note_aggregate,
                 base_metadata={
@@ -293,7 +274,7 @@ class DeleteProjectHandler:
                 aggregate_id=r.id,
                 aggregate_cls=ProjectRuleAggregate,
             )
-            rule_aggregate.record_event(event_type=PROJECT_RULE_EVENT_DELETED, payload={"updated_by": self.ctx.user.id})
+            rule_aggregate.delete(updated_by=self.ctx.user.id)
             repo.persist(
                 rule_aggregate,
                 base_metadata={
@@ -312,10 +293,7 @@ class DeleteProjectHandler:
                 aggregate_id=specification.id,
                 aggregate_cls=SpecificationAggregate,
             )
-            specification_aggregate.record_event(
-                event_type=SPECIFICATION_EVENT_DELETED,
-                payload={"updated_by": self.ctx.user.id},
-            )
+            specification_aggregate.delete(updated_by=self.ctx.user.id)
             repo.persist(
                 specification_aggregate,
                 base_metadata={
@@ -330,10 +308,7 @@ class DeleteProjectHandler:
             aggregate_id=self.project_id,
             aggregate_cls=ProjectAggregate,
         )
-        aggregate.record_event(
-            event_type=PROJECT_EVENT_DELETED,
-            payload={"deleted_tasks": len(tasks), "deleted_notes": len(notes)},
-        )
+        aggregate.delete(deleted_tasks=len(tasks), deleted_notes=len(notes))
         repo.persist(
             aggregate,
             base_metadata={
@@ -403,10 +378,7 @@ class PatchProjectHandler:
             aggregate_id=self.project_id,
             aggregate_cls=ProjectAggregate,
         )
-        aggregate.record_event(
-            event_type=PROJECT_EVENT_UPDATED,
-            payload=event_payload,
-        )
+        aggregate.update(**event_payload)
         repo.persist(
             aggregate,
             base_metadata={
@@ -458,15 +430,7 @@ class AddProjectMemberHandler:
             aggregate_id=self.project_id,
             aggregate_cls=ProjectAggregate,
         )
-        aggregate.record_event(
-            event_type=PROJECT_EVENT_MEMBER_UPSERTED,
-            payload={
-                "workspace_id": project.workspace_id,
-                "project_id": self.project_id,
-                "user_id": self.user_id,
-                "role": normalized_role,
-            },
-        )
+        aggregate.upsert_member(user_id=self.user_id, role=normalized_role)
         repo.persist(
             aggregate,
             base_metadata={
@@ -504,14 +468,7 @@ class RemoveProjectMemberHandler:
             aggregate_id=self.project_id,
             aggregate_cls=ProjectAggregate,
         )
-        aggregate.record_event(
-            event_type=PROJECT_EVENT_MEMBER_REMOVED,
-            payload={
-                "workspace_id": project.workspace_id,
-                "project_id": self.project_id,
-                "user_id": self.user_id,
-            },
-        )
+        aggregate.remove_member(user_id=self.user_id)
         repo.persist(
             aggregate,
             base_metadata={

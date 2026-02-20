@@ -11,6 +11,7 @@ from shared.core import (
     ProjectRuleCreate,
     ProjectRulePatch,
     User,
+    coerce_originator_id,
     ensure_project_access,
     allocate_id,
     ensure_role,
@@ -63,8 +64,8 @@ class CreateProjectRuleHandler:
         title = self.payload.title.strip()
         if not title:
             raise HTTPException(status_code=422, detail="title cannot be empty")
-        aggregate = ProjectRuleAggregate(rid, version=0)
-        aggregate.create(
+        aggregate = ProjectRuleAggregate(
+            id=coerce_originator_id(rid),
             workspace_id=self.payload.workspace_id,
             project_id=self.payload.project_id,
             title=title,

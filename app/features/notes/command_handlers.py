@@ -18,6 +18,7 @@ from shared.core import (
     Specification,
     Task,
     User,
+    coerce_originator_id,
     ensure_project_access,
     ensure_role,
     load_note_command_state,
@@ -25,13 +26,6 @@ from shared.core import (
 )
 
 from .domain import (
-    EVENT_ARCHIVED,
-    EVENT_CREATED,
-    EVENT_DELETED,
-    EVENT_PINNED,
-    EVENT_RESTORED,
-    EVENT_UNPINNED,
-    EVENT_UPDATED,
     NoteAggregate,
 )
 
@@ -205,26 +199,22 @@ class CreateNoteHandler:
                 project_id=self.payload.project_id,
                 task_id=self.payload.task_id,
             )
-        aggregate = NoteAggregate(nid, version=0)
-        aggregate.record_event(
-            event_type=EVENT_CREATED,
-            payload={
-                "workspace_id": self.payload.workspace_id,
-                "project_id": self.payload.project_id,
-                "task_id": self.payload.task_id,
-                "specification_id": self.payload.specification_id,
-                "title": title,
-                "body": self.payload.body or "",
-                "tags": _normalize_tags(self.payload.tags),
-                "external_refs": _normalize_external_refs([r.model_dump() for r in self.payload.external_refs]),
-                "attachment_refs": _normalize_attachment_refs([r.model_dump() for r in self.payload.attachment_refs]),
-                "pinned": bool(self.payload.pinned),
-                "archived": False,
-                "is_deleted": False,
-                "created_by": self.ctx.user.id,
-                "updated_by": self.ctx.user.id,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            },
+        aggregate = NoteAggregate(
+            id=coerce_originator_id(nid),
+            workspace_id=self.payload.workspace_id,
+            project_id=self.payload.project_id,
+            task_id=self.payload.task_id,
+            specification_id=self.payload.specification_id,
+            title=title,
+            body=self.payload.body or "",
+            tags=_normalize_tags(self.payload.tags),
+            external_refs=_normalize_external_refs([r.model_dump() for r in self.payload.external_refs]),
+            attachment_refs=_normalize_attachment_refs([r.model_dump() for r in self.payload.attachment_refs]),
+            pinned=bool(self.payload.pinned),
+            archived=False,
+            created_by=self.ctx.user.id,
+            updated_by=self.ctx.user.id,
+            created_at=datetime.now(timezone.utc).isoformat(),
         )
         AggregateEventRepository(self.ctx.db).persist(
             aggregate,
@@ -296,15 +286,13 @@ class PatchNoteHandler:
             data["external_refs"] = _normalize_external_refs(data["external_refs"])
         if "attachment_refs" in data and data["attachment_refs"] is not None:
             data["attachment_refs"] = _normalize_attachment_refs(data["attachment_refs"])
-        # Keep updated_by in event payload for easy projection/audit.
-        data["updated_by"] = self.ctx.user.id
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = repo.load_with_class(
             aggregate_type="Note",
             aggregate_id=self.note_id,
             aggregate_cls=NoteAggregate,
         )
-        aggregate.record_event(event_type=EVENT_UPDATED, payload=data)
+        aggregate.update(changes=data, updated_by=self.ctx.user.id)
         repo.persist(
             aggregate,
             base_metadata={
@@ -339,7 +327,7 @@ class ArchiveNoteHandler:
             aggregate_id=self.note_id,
             aggregate_cls=NoteAggregate,
         )
-        aggregate.record_event(event_type=EVENT_ARCHIVED, payload={"updated_by": self.ctx.user.id})
+        aggregate.archive(updated_by=self.ctx.user.id)
         repo.persist(
             aggregate,
             base_metadata={
@@ -371,7 +359,7 @@ class RestoreNoteHandler:
             aggregate_id=self.note_id,
             aggregate_cls=NoteAggregate,
         )
-        aggregate.record_event(event_type=EVENT_RESTORED, payload={"updated_by": self.ctx.user.id})
+        aggregate.restore(updated_by=self.ctx.user.id)
         repo.persist(
             aggregate,
             base_metadata={
@@ -403,7 +391,7 @@ class PinNoteHandler:
             aggregate_id=self.note_id,
             aggregate_cls=NoteAggregate,
         )
-        aggregate.record_event(event_type=EVENT_PINNED, payload={"updated_by": self.ctx.user.id})
+        aggregate.pin(updated_by=self.ctx.user.id)
         repo.persist(
             aggregate,
             base_metadata={
@@ -435,7 +423,7 @@ class UnpinNoteHandler:
             aggregate_id=self.note_id,
             aggregate_cls=NoteAggregate,
         )
-        aggregate.record_event(event_type=EVENT_UNPINNED, payload={"updated_by": self.ctx.user.id})
+        aggregate.unpin(updated_by=self.ctx.user.id)
         repo.persist(
             aggregate,
             base_metadata={
@@ -465,7 +453,7 @@ class DeleteNoteHandler:
             aggregate_id=self.note_id,
             aggregate_cls=NoteAggregate,
         )
-        aggregate.record_event(event_type=EVENT_DELETED, payload={"updated_by": self.ctx.user.id})
+        aggregate.delete(updated_by=self.ctx.user.id)
         repo.persist(
             aggregate,
             base_metadata={
