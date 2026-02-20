@@ -57,6 +57,22 @@ import '../styles.css'
 const queryClient = new QueryClient()
 const VOICE_LANG_STORAGE_KEY = 'ui_voice_input_lang'
 const ALLOWED_VOICE_LANGS = new Set(['bs-BA', 'en-US'])
+const SEMANTIC_MIN_FINAL_SCORE = 0.42
+const SEMANTIC_RELATIVE_SCORE_FACTOR = 0.72
+const SEMANTIC_MIN_TOP_VECTOR_SIMILARITY = 0.34
+const SEMANTIC_MIN_VECTOR_SIMILARITY = 0.24
+const SEMANTIC_RELATIVE_VECTOR_FACTOR = 0.66
+const SEMANTIC_STRONG_VECTOR_SIMILARITY = 0.72
+const SEMANTIC_MIN_FALLBACK_VECTOR_SIMILARITY = 0.38
+const SEMANTIC_FALLBACK_MAX_ITEMS_WITHOUT_TOKEN_MATCH = 2
+
+function normalizeSemanticText(value: string): string {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
 
 function resolveInitialSpeechLang(): string {
   const fallback = 'bs-BA'
@@ -391,6 +407,10 @@ function App({ logout }: { logout: () => void }) {
     searchArchived,
     searchTags,
   })
+  const selectedProjectForSearch = React.useMemo(
+    () => (bootstrap.data?.projects ?? []).find((project: any) => project.id === selectedProjectId) ?? null,
+    [bootstrap.data?.projects, selectedProjectId]
+  )
 
   const {
     tasks,
@@ -398,10 +418,12 @@ function App({ logout }: { logout: () => void }) {
     notes,
     taskGroups,
     noteGroups,
+    noteLookup,
     searchNotes,
     taskNotes,
     specifications,
     searchSpecifications,
+    searchKnowledge,
     specificationLookup,
     specTasks,
     specNotes,
@@ -431,6 +453,9 @@ function App({ logout }: { logout: () => void }) {
     searchPriority,
     searchArchived,
     searchTags,
+    vectorStoreEnabled: Boolean(bootstrap.data?.vector_store_enabled),
+    selectedProjectEmbeddingEnabled: Boolean(selectedProjectForSearch?.embedding_enabled),
+    selectedProjectEmbeddingIndexStatus: String(selectedProjectForSearch?.embedding_index_status || 'not_indexed'),
     taskParams,
     noteArchived,
     noteTags,
@@ -534,6 +559,263 @@ function App({ logout }: { logout: () => void }) {
     attach(tasks.data?.items)
     return out
   }, [taskLookup.data?.items, tasks.data?.items])
+
+  const semanticQueryTokens = React.useMemo(() => {
+    const normalized = normalizeSemanticText(searchQ || '')
+    if (!normalized) return []
+    return normalized.split(' ').filter((token) => token.length >= 3)
+  }, [searchQ])
+
+  const semanticRelevantItems = React.useMemo(() => {
+    const payload = searchKnowledge.data
+    const mode = String(payload?.mode || 'empty').toLowerCase()
+    const items = Array.isArray(payload?.items) ? payload.items : []
+    if (items.length === 0) return []
+    if (mode !== 'graph+vector' && mode !== 'vector-only') return []
+    if (semanticQueryTokens.length === 0) return []
+
+    const scored = items
+      .map((item: any) => ({
+        item,
+        finalScore: Number(item?.final_score || 0),
+        vectorSimilarity:
+          item?.vector_similarity === null || item?.vector_similarity === undefined
+            ? null
+            : Number(item.vector_similarity),
+      }))
+      .filter((entry: any) => Number.isFinite(entry.finalScore))
+    if (scored.length === 0) return []
+
+    const scoredWithVector = scored.filter(
+      (entry: any) => entry.vectorSimilarity !== null && Number.isFinite(entry.vectorSimilarity)
+    )
+    if (scoredWithVector.length === 0) return []
+
+    const topScore = Math.max(...scored.map((entry: any) => entry.finalScore))
+    const topVectorSimilarity = Math.max(...scoredWithVector.map((entry: any) => Number(entry.vectorSimilarity || 0)))
+    if (topVectorSimilarity < SEMANTIC_MIN_TOP_VECTOR_SIMILARITY) return []
+    const scoreThreshold = Math.max(SEMANTIC_MIN_FINAL_SCORE, topScore * SEMANTIC_RELATIVE_SCORE_FACTOR)
+    const vectorThreshold = Math.max(
+      SEMANTIC_MIN_VECTOR_SIMILARITY,
+      topVectorSimilarity * SEMANTIC_RELATIVE_VECTOR_FACTOR
+    )
+
+    const thresholdPassed = scored.filter((entry: any) => {
+      if (entry.finalScore < scoreThreshold) return false
+      if (entry.vectorSimilarity === null || !Number.isFinite(entry.vectorSimilarity)) return false
+      if (entry.vectorSimilarity < vectorThreshold) return false
+      return true
+    })
+    if (thresholdPassed.length === 0) return []
+
+    const enriched = thresholdPassed.map((entry: any) => {
+      const snippet = normalizeSemanticText(String(entry.item?.snippet || ''))
+      const hasTokenMatch = semanticQueryTokens.some((token) => snippet.includes(token))
+      const hasStrongVectorMatch = Number(entry.vectorSimilarity || 0) >= SEMANTIC_STRONG_VECTOR_SIMILARITY
+      return {
+        ...entry,
+        hasTokenMatch,
+        hasStrongVectorMatch,
+      }
+    })
+    const hasAnyTokenMatch = enriched.some((entry: any) => entry.hasTokenMatch)
+    if (hasAnyTokenMatch) {
+      return enriched
+        .filter((entry: any) => entry.hasTokenMatch || entry.hasStrongVectorMatch)
+        .map((entry: any) => entry.item)
+    }
+
+    return enriched
+      .filter((entry: any) => Number(entry.vectorSimilarity || 0) >= SEMANTIC_MIN_FALLBACK_VECTOR_SIMILARITY)
+      .sort(
+        (a: any, b: any) =>
+          Number(b.finalScore || 0) - Number(a.finalScore || 0) ||
+          Number(b.vectorSimilarity || 0) - Number(a.vectorSimilarity || 0)
+      )
+      .slice(0, SEMANTIC_FALLBACK_MAX_ITEMS_WITHOUT_TOKEN_MATCH)
+      .map((entry: any) => entry.item)
+  }, [searchKnowledge.data, semanticQueryTokens])
+
+  const semanticTaskIds = React.useMemo(() => {
+    const out: string[] = []
+    const seen = new Set<string>()
+    for (const item of semanticRelevantItems) {
+      const type = String(item?.entity_type || '').toLowerCase()
+      if (!type.includes('task')) continue
+      const id = String(item?.entity_id || '').trim()
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      out.push(id)
+    }
+    return out
+  }, [semanticRelevantItems])
+
+  const semanticNoteIds = React.useMemo(() => {
+    const out: string[] = []
+    const seen = new Set<string>()
+    for (const item of semanticRelevantItems) {
+      const type = String(item?.entity_type || '').toLowerCase()
+      if (!type.includes('note')) continue
+      const id = String(item?.entity_id || '').trim()
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      out.push(id)
+    }
+    return out
+  }, [semanticRelevantItems])
+
+  const semanticSpecificationIds = React.useMemo(() => {
+    const out: string[] = []
+    const seen = new Set<string>()
+    for (const item of semanticRelevantItems) {
+      const type = String(item?.entity_type || '').toLowerCase()
+      if (!(type.includes('specification') || type.includes('spec'))) continue
+      const id = String(item?.entity_id || '').trim()
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      out.push(id)
+    }
+    return out
+  }, [semanticRelevantItems])
+
+  const taskSearchLookupMap = React.useMemo(() => {
+    const out = new Map<string, any>()
+    const attach = (items: any[] | undefined) => {
+      for (const item of items ?? []) {
+        const id = String(item?.id || '').trim()
+        if (!id) continue
+        out.set(id, item)
+      }
+    }
+    attach(taskLookup.data?.items)
+    attach(tasks.data?.items)
+    return out
+  }, [taskLookup.data?.items, tasks.data?.items])
+
+  const noteSearchLookupMap = React.useMemo(() => {
+    const out = new Map<string, any>()
+    const attach = (items: any[] | undefined) => {
+      for (const item of items ?? []) {
+        const id = String(item?.id || '').trim()
+        if (!id) continue
+        out.set(id, item)
+      }
+    }
+    attach(noteLookup.data?.items)
+    attach(searchNotes.data?.items)
+    return out
+  }, [noteLookup.data?.items, searchNotes.data?.items])
+
+  const specificationSearchLookupMap = React.useMemo(() => {
+    const out = new Map<string, any>()
+    const attach = (items: any[] | undefined) => {
+      for (const item of items ?? []) {
+        const id = String(item?.id || '').trim()
+        if (!id) continue
+        out.set(id, item)
+      }
+    }
+    attach(specificationLookup.data?.items)
+    attach(searchSpecifications.data?.items)
+    return out
+  }, [specificationLookup.data?.items, searchSpecifications.data?.items])
+
+  const mergeSearchItemsWithSemantic = React.useCallback((
+    primaryItems: any[],
+    semanticIds: string[],
+    lookupMap: Map<string, any>
+  ): any[] => {
+    const merged = [...(primaryItems ?? [])]
+    const seen = new Set<string>()
+    for (const item of merged) {
+      const id = String(item?.id || '').trim()
+      if (!id) continue
+      seen.add(id)
+    }
+    for (const id of semanticIds) {
+      if (!id || seen.has(id)) continue
+      const candidate = lookupMap.get(id)
+      if (!candidate) continue
+      merged.push(candidate)
+      seen.add(id)
+    }
+    return merged
+  }, [])
+
+  const normalizedSearchTagSet = React.useMemo(
+    () => new Set(searchTags.map((tag) => String(tag || '').trim().toLowerCase()).filter(Boolean)),
+    [searchTags]
+  )
+
+  const searchTasksCombined = React.useMemo(() => {
+    const merged = mergeSearchItemsWithSemantic(tasks.data?.items ?? [], semanticTaskIds, taskSearchLookupMap)
+    return merged.filter((task: any) => {
+      if (Boolean(task?.archived) !== Boolean(searchArchived)) return false
+      if (searchStatus && String(task?.status || '') !== searchStatus) return false
+      if (searchPriority && String(task?.priority || '') !== searchPriority) return false
+      if (normalizedSearchTagSet.size > 0) {
+        const labels = Array.isArray(task?.labels) ? task.labels : []
+        const hasMatchingTag = labels.some((tag: any) => normalizedSearchTagSet.has(String(tag || '').toLowerCase()))
+        if (!hasMatchingTag) return false
+      }
+      return true
+    })
+  }, [
+    mergeSearchItemsWithSemantic,
+    normalizedSearchTagSet,
+    searchArchived,
+    searchPriority,
+    searchStatus,
+    semanticTaskIds,
+    taskSearchLookupMap,
+    tasks.data?.items,
+  ])
+
+  const searchNotesCombined = React.useMemo(() => {
+    const merged = mergeSearchItemsWithSemantic(searchNotes.data?.items ?? [], semanticNoteIds, noteSearchLookupMap)
+    return merged.filter((note: any) => {
+      if (Boolean(note?.archived) !== Boolean(searchArchived)) return false
+      if (normalizedSearchTagSet.size > 0) {
+        const tags = Array.isArray(note?.tags) ? note.tags : []
+        const hasMatchingTag = tags.some((tag: any) => normalizedSearchTagSet.has(String(tag || '').toLowerCase()))
+        if (!hasMatchingTag) return false
+      }
+      return true
+    })
+  }, [
+    mergeSearchItemsWithSemantic,
+    normalizedSearchTagSet,
+    noteSearchLookupMap,
+    searchArchived,
+    searchNotes.data?.items,
+    semanticNoteIds,
+  ])
+
+  const searchSpecificationsCombined = React.useMemo(() => {
+    const merged = mergeSearchItemsWithSemantic(
+      searchSpecifications.data?.items ?? [],
+      semanticSpecificationIds,
+      specificationSearchLookupMap
+    )
+    return merged.filter((specification: any) => {
+      if (Boolean(specification?.archived) !== Boolean(searchArchived)) return false
+      if (searchSpecificationStatus && String(specification?.status || '') !== searchSpecificationStatus) return false
+      if (normalizedSearchTagSet.size > 0) {
+        const tags = Array.isArray(specification?.tags) ? specification.tags : []
+        const hasMatchingTag = tags.some((tag: any) => normalizedSearchTagSet.has(String(tag || '').toLowerCase()))
+        if (!hasMatchingTag) return false
+      }
+      return true
+    })
+  }, [
+    mergeSearchItemsWithSemantic,
+    normalizedSearchTagSet,
+    searchArchived,
+    searchSpecificationStatus,
+    searchSpecifications.data?.items,
+    semanticSpecificationIds,
+    specificationSearchLookupMap,
+  ])
 
   const openSpecification = React.useCallback((specificationId: string, projectId?: string | null) => {
     if (projectId) setSelectedProjectId(projectId)
@@ -1269,6 +1551,10 @@ function App({ logout }: { logout: () => void }) {
       selectedProjectTimeMeta,
       notes,
       searchNotes,
+      searchKnowledge,
+      searchTasksCombined,
+      searchNotesCombined,
+      searchSpecificationsCombined,
       taskNotes,
       specifications,
       searchSpecifications,

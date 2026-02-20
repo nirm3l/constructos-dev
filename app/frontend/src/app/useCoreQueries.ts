@@ -9,6 +9,7 @@ import {
   getProjectGraphSubgraph,
   getProjectRules,
   listProjectTemplates,
+  searchProjectKnowledge,
   getTaskGroups,
   getSpecifications,
   getProjectTags,
@@ -16,6 +17,15 @@ import {
 } from '../api'
 
 export function useCoreQueries(c: any) {
+  const normalizedSearchQ = String(c.searchQ || '').trim()
+  const canRunSemanticSearch =
+    Boolean(c.workspaceId && c.selectedProjectId) &&
+    c.tab === 'search' &&
+    normalizedSearchQ.length >= 3 &&
+    Boolean(c.vectorStoreEnabled) &&
+    Boolean(c.selectedProjectEmbeddingEnabled) &&
+    (c.selectedProjectEmbeddingIndexStatus === 'ready' || c.selectedProjectEmbeddingIndexStatus === 'stale')
+
   const tasks = useQuery({
     queryKey: ['tasks', c.userId, c.workspaceId, c.tab, c.selectedProjectId, c.searchQ, c.searchStatus, c.searchPriority, c.searchArchived, c.searchTags.join(',')],
     queryFn: () => getTasks(c.userId, c.workspaceId, c.taskParams),
@@ -60,6 +70,17 @@ export function useCoreQueries(c: any) {
     queryKey: ['note-groups', c.userId, c.workspaceId, c.selectedProjectId],
     queryFn: () =>
       getNoteGroups(c.userId, c.workspaceId, {
+        project_id: c.selectedProjectId,
+        limit: 200,
+        offset: 0,
+      }),
+    enabled: Boolean(c.workspaceId && c.selectedProjectId),
+  })
+
+  const noteLookup = useQuery({
+    queryKey: ['note-lookup', c.userId, c.workspaceId, c.selectedProjectId],
+    queryFn: () =>
+      getNotes(c.userId, c.workspaceId, {
         project_id: c.selectedProjectId,
         limit: 200,
         offset: 0,
@@ -172,6 +193,18 @@ export function useCoreQueries(c: any) {
     enabled: Boolean(c.workspaceId && c.selectedProjectId) && c.tab === 'search',
   })
 
+  const searchKnowledge = useQuery({
+    queryKey: ['search-knowledge', c.userId, c.selectedProjectId, normalizedSearchQ],
+    queryFn: () =>
+      searchProjectKnowledge(c.userId, c.selectedProjectId, {
+        q: normalizedSearchQ,
+        limit: 24,
+      }),
+    enabled: canRunSemanticSearch,
+    retry: 1,
+    staleTime: 15_000,
+  })
+
   const specificationLookup = useQuery({
     queryKey: ['specification-lookup', c.userId, c.workspaceId, c.selectedProjectId],
     queryFn: () =>
@@ -249,6 +282,7 @@ export function useCoreQueries(c: any) {
     notes,
     taskGroups,
     noteGroups,
+    noteLookup,
     searchNotes,
     taskNotes,
     projectTags,
@@ -259,6 +293,7 @@ export function useCoreQueries(c: any) {
     projectGraphSubgraph,
     specifications,
     searchSpecifications,
+    searchKnowledge,
     specificationLookup,
     specTasks,
     specNotes,

@@ -401,12 +401,12 @@ export function AppPrimaryPanels({ state }: { state: any }) {
         </div>
       ) : state.tab === 'search' ? (
         <GlobalSearchResultsPanel
-          tasks={state.tasks.data?.items ?? []}
-          tasksTotal={state.tasks.data?.total ?? 0}
-          notes={state.searchNotes.data?.items ?? []}
-          notesTotal={state.searchNotes.data?.total ?? 0}
-          specifications={state.searchSpecifications.data?.items ?? []}
-          specificationsTotal={state.searchSpecifications.data?.total ?? 0}
+          tasks={state.searchTasksCombined ?? []}
+          tasksTotal={state.searchTasksCombined?.length ?? 0}
+          notes={state.searchNotesCombined ?? []}
+          notesTotal={state.searchNotesCombined?.length ?? 0}
+          specifications={state.searchSpecificationsCombined ?? []}
+          specificationsTotal={state.searchSpecificationsCombined?.length ?? 0}
           projectNames={state.projectNames}
           specificationNames={state.specificationNameMap}
           onOpenSpecification={state.openSpecification}
