@@ -411,6 +411,7 @@ export async function runAgentChatStream(
     onAssistantDelta?: (delta: string) => void
     onStatus?: (message: string) => void
     onUsage?: (usage: AgentChatResponse['usage']) => void
+    signal?: AbortSignal
   }
 ): Promise<AgentChatResponse> {
   const commandId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
@@ -422,6 +423,7 @@ export async function runAgentChatStream(
       'X-Command-Id': commandId,
     },
     body: JSON.stringify(payload),
+    signal: handlers?.signal,
   })
   if (!res.ok) {
     const raw = await res.text()

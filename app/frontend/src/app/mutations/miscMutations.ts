@@ -1,3 +1,4 @@
+import React from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { addComment, deleteComment, markNotificationRead, patchMyPreferences, runAgentChatStream } from '../../api'
 
@@ -84,7 +85,34 @@ function linkifyAgentReply(content: string, projectId?: string | null): string {
     .join('\n')
 }
 
+function isAbortLikeError(err: unknown): boolean {
+  if (typeof DOMException !== 'undefined' && err instanceof DOMException) {
+    return err.name === 'AbortError'
+  }
+  if (err instanceof Error) {
+    const name = String(err.name || '').toLowerCase()
+    const message = String(err.message || '').toLowerCase()
+    return name === 'aborterror' || message.includes('abort')
+  }
+  return false
+}
+
 export function useMiscMutations(c: any) {
+  const activeChatAbortControllerRef = React.useRef<AbortController | null>(null)
+
+  const clearChatRunningState = React.useCallback(() => {
+    c.setIsCodexChatRunning(false)
+    c.setCodexChatRunStartedAt(null)
+    c.setCodexChatElapsedSeconds(0)
+  }, [c])
+
+  const cancelAgentChat = React.useCallback(() => {
+    const controller = activeChatAbortControllerRef.current
+    if (!controller) return
+    controller.abort()
+    clearChatRunningState()
+  }, [clearChatRunningState])
+
   const setChatTurnsForSession = (
     sessionId: string,
     updater: (prev: any[]) => any[]
@@ -249,6 +277,11 @@ export function useMiscMutations(c: any) {
       }
 
       try {
+        if (activeChatAbortControllerRef.current) {
+          activeChatAbortControllerRef.current.abort()
+        }
+        const abortController = new AbortController()
+        activeChatAbortControllerRef.current = abortController
         const response = await runAgentChatStream(
           c.userId,
           {
@@ -267,6 +300,7 @@ export function useMiscMutations(c: any) {
             onUsage: (usage) => {
               setChatUsageForSession(sessionId, usage ?? null)
             },
+            signal: abortController.signal,
           }
         )
         await waitForStreamDrain()
@@ -274,6 +308,17 @@ export function useMiscMutations(c: any) {
         return { response, assistantTurnId, assistantCreatedAt, streamedReply, sessionId }
       } catch (err) {
         cancelStreamFlush()
+        if (isAbortLikeError(err)) {
+          const stoppedContent = streamedReply.trim() ? streamedReply : 'Stopped.'
+          setChatTurnsForSession(sessionId, (prev: any[]) =>
+            prev.map((turn: any) =>
+              turn.id === assistantTurnId
+                ? { ...turn, content: stoppedContent }
+                : turn
+            )
+          )
+          throw err
+        }
         const msg = err instanceof Error ? err.message : 'Chat failed'
         setChatTurnsForSession(sessionId, (prev: any[]) =>
           prev.map((turn: any) =>
@@ -283,6 +328,8 @@ export function useMiscMutations(c: any) {
           )
         )
         throw err
+      } finally {
+        activeChatAbortControllerRef.current = null
       }
     },
     onSuccess: async (result, variables) => {
@@ -321,16 +368,15 @@ export function useMiscMutations(c: any) {
       if (response.ok === false) {
         c.setUiError(response.summary || response.comment || 'Chat request failed')
       }
-      c.setIsCodexChatRunning(false)
-      c.setCodexChatRunStartedAt(null)
-      c.setCodexChatElapsedSeconds(0)
-      c.setCodexChatInstruction('')
+      clearChatRunningState()
       await c.invalidateAll()
     },
     onError: (err) => {
-      c.setIsCodexChatRunning(false)
-      c.setCodexChatRunStartedAt(null)
-      c.setCodexChatElapsedSeconds(0)
+      clearChatRunningState()
+      if (isAbortLikeError(err)) {
+        c.setUiError(null)
+        return
+      }
       const msg = err instanceof Error ? err.message : 'Chat failed'
       c.setUiError(msg)
     }
@@ -342,5 +388,6 @@ export function useMiscMutations(c: any) {
     addCommentMutation,
     deleteCommentMutation,
     runAgentChatMutation,
+    cancelAgentChat,
   }
 }

@@ -1,6 +1,8 @@
 import React from 'react'
 import type { Notification } from '../types'
 
+const CHAT_NEAR_BOTTOM_THRESHOLD_PX = 28
+
 export function useRealtimeEffects(c: any) {
   const PROJECT_EMBEDDING_INDEX_UPDATED = 'ProjectEmbeddingIndexUpdated'
   const {
@@ -19,6 +21,11 @@ export function useRealtimeEffects(c: any) {
     codexChatHistoryRef,
     codexChatTurns,
   } = c
+  const shouldStickChatToBottomRef = React.useRef(true)
+  const isChatNearBottom = React.useCallback((el: HTMLDivElement) => {
+    const distanceToBottom = el.scrollHeight - el.clientHeight - el.scrollTop
+    return distanceToBottom <= CHAT_NEAR_BOTTOM_THRESHOLD_PX
+  }, [])
 
   const scheduleRealtimeRefresh = React.useCallback(() => {
     if (realtimeRefreshTimerRef.current !== null) {
@@ -116,6 +123,20 @@ export function useRealtimeEffects(c: any) {
 
   React.useEffect(() => {
     if (!showCodexChat || !codexChatHistoryRef.current) return
+    const historyEl = codexChatHistoryRef.current
+    const syncScrollLock = () => {
+      shouldStickChatToBottomRef.current = isChatNearBottom(historyEl)
+    }
+    syncScrollLock()
+    historyEl.addEventListener('scroll', syncScrollLock, { passive: true })
+    return () => {
+      historyEl.removeEventListener('scroll', syncScrollLock)
+    }
+  }, [codexChatHistoryRef, isChatNearBottom, showCodexChat])
+
+  React.useEffect(() => {
+    if (!showCodexChat || !codexChatHistoryRef.current) return
+    if (!shouldStickChatToBottomRef.current) return
     codexChatHistoryRef.current.scrollTop = codexChatHistoryRef.current.scrollHeight
   }, [codexChatHistoryRef, codexChatTurns, isCodexChatRunning, showCodexChat])
 }

@@ -7,8 +7,6 @@ import { TaskListItem } from './tasks/taskViews'
 
 const VOICE_LANG_OPTIONS = [
   { value: 'bs-BA', label: 'Bosnian (bs-BA)' },
-  { value: 'hr-HR', label: 'Croatian (hr-HR)' },
-  { value: 'sr-RS', label: 'Serbian (sr-RS)' },
   { value: 'en-US', label: 'English (en-US)' },
 ]
 

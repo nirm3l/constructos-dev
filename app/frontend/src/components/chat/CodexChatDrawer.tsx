@@ -115,7 +115,10 @@ export function CodexChatDrawer({ state }: { state: any }) {
   if (activeSessionUpdatedAt && (hasMessages || hasContext)) metaParts.push(activeSessionUpdatedAt)
   if (contextSummary) metaParts.push(contextSummary)
   const canDeleteSession = Array.isArray(state.codexChatSessions) && state.codexChatSessions.length > 1 && !state.runAgentChatMutation.isPending
-  const canUseProjectCreationStarter = !state.runAgentChatMutation.isPending && !state.isCodexChatRunning
+  const canUseProjectCreationStarter =
+    !state.runAgentChatMutation.isPending &&
+    !state.isCodexChatRunning &&
+    Boolean(state.workspaceId)
   const canQuickConfirmCreate =
     canUseProjectCreationStarter && Boolean(state.workspaceId) && state.codexChatTurns.length > 0
 
@@ -213,12 +216,16 @@ export function CodexChatDrawer({ state }: { state: any }) {
     : isListening
       ? 'Listening...'
       : ''
+  const canStopChat = Boolean(
+    state.isCodexChatRunning &&
+    state.runAgentChatMutation.isPending &&
+    typeof state.cancelAgentChat === 'function'
+  )
 
   const applyProjectCreationStarter = () => {
     if (!canUseProjectCreationStarter) return
-    state.setCodexChatInstruction(buildProjectCreationStarter())
     state.setUiError(null)
-    inputRef.current?.focus()
+    sendChatInstruction(buildProjectCreationStarter())
   }
 
   const sendChatInstruction = (rawInstruction: string, opts?: { clearInput?: boolean }) => {
@@ -464,6 +471,18 @@ export function CodexChatDrawer({ state }: { state: any }) {
             <span className={`codex-chat-status ${state.isCodexChatRunning || isListening ? 'codex-progress' : ''}`}>
               {statusText}
             </span>
+            {canStopChat && (
+              <button
+                className="action-icon danger-ghost"
+                onClick={() => {
+                  state.cancelAgentChat()
+                }}
+                title="Stop generating"
+                aria-label="Stop generating"
+              >
+                <Icon path="M8 8h8v8H8z" />
+              </button>
+            )}
             <button
               className="action-icon primary"
               onClick={() => {

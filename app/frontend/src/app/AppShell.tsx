@@ -56,7 +56,7 @@ import '../styles.css'
 
 const queryClient = new QueryClient()
 const VOICE_LANG_STORAGE_KEY = 'ui_voice_input_lang'
-const ALLOWED_VOICE_LANGS = new Set(['bs-BA', 'hr-HR', 'sr-RS', 'en-US'])
+const ALLOWED_VOICE_LANGS = new Set(['bs-BA', 'en-US'])
 
 function resolveInitialSpeechLang(): string {
   const fallback = 'bs-BA'
@@ -66,9 +66,7 @@ function resolveInitialSpeechLang(): string {
   }
   if (typeof navigator === 'undefined') return fallback
   const raw = String(navigator.language || '').trim().toLowerCase()
-  if (raw.startsWith('bs')) return 'bs-BA'
-  if (raw.startsWith('hr')) return 'hr-HR'
-  if (raw.startsWith('sr')) return 'sr-RS'
+  if (raw.startsWith('bs') || raw.startsWith('hr') || raw.startsWith('sr')) return 'bs-BA'
   if (raw.startsWith('en')) return 'en-US'
   return fallback
 }
@@ -845,6 +843,7 @@ function App({ logout }: { logout: () => void }) {
     deleteCommentMutation,
     runAutomationMutation,
     runAgentChatMutation,
+    cancelAgentChat,
   } = useAppMutations({
     saveProjectNow,
     saveNoteNow,
@@ -1484,6 +1483,7 @@ function App({ logout }: { logout: () => void }) {
       codexChatProjectId,
       codexChatUsage,
       runAgentChatMutation,
+      cancelAgentChat,
       codexChatHistoryRef,
       codexChatTurns,
       codexChatInstruction,
