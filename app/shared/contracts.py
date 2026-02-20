@@ -24,6 +24,7 @@ class TaskCreate(BaseModel):
     title: str = Field(min_length=1)
     workspace_id: str
     project_id: str
+    task_group_id: str | None = None
     specification_id: str | None = None
     description: str = ""
     priority: str = "Med"
@@ -55,6 +56,7 @@ class TaskPatch(BaseModel):
     attachment_refs: list[AttachmentRef] | None = None
     archived: bool | None = None
     project_id: str | None = None
+    task_group_id: str | None = None
     specification_id: str | None = None
     recurring_rule: str | None = None
     task_type: str | None = None
@@ -83,6 +85,7 @@ class AgentChatRun(BaseModel):
     project_id: str | None = None
     session_id: str | None = None
     history: list[dict[str, str]] = Field(default_factory=list)
+    attachment_refs: list[AttachmentRef] = Field(default_factory=list)
     allow_mutations: bool = True
 
 
@@ -90,6 +93,7 @@ class NoteCreate(BaseModel):
     title: str = Field(min_length=1)
     workspace_id: str
     project_id: str
+    note_group_id: str | None = None
     task_id: str | None = None
     specification_id: str | None = None
     body: str = ""
@@ -108,6 +112,7 @@ class NotePatch(BaseModel):
     pinned: bool | None = None
     archived: bool | None = None
     project_id: str | None = None
+    note_group_id: str | None = None
     task_id: str | None = None
     specification_id: str | None = None
 
@@ -161,6 +166,34 @@ class ProjectRulePatch(BaseModel):
     body: str | None = None
 
 
+class TaskGroupCreate(BaseModel):
+    workspace_id: str
+    project_id: str
+    name: str = Field(min_length=1)
+    description: str = ""
+    color: str | None = None
+
+
+class TaskGroupPatch(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    color: str | None = None
+
+
+class NoteGroupCreate(BaseModel):
+    workspace_id: str
+    project_id: str
+    name: str = Field(min_length=1)
+    description: str = ""
+    color: str | None = None
+
+
+class NoteGroupPatch(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    color: str | None = None
+
+
 class SpecificationCreate(BaseModel):
     workspace_id: str
     project_id: str
@@ -208,6 +241,7 @@ class TaskDTO:
     id: str
     workspace_id: str
     project_id: str | None
+    task_group_id: str | None
     specification_id: str | None
     title: str
     description: str
@@ -254,6 +288,7 @@ class TaskCommandState:
     id: str
     workspace_id: str
     project_id: str | None
+    task_group_id: str | None
     specification_id: str | None
     status: str
     archived: bool
@@ -269,6 +304,7 @@ class NoteDTO:
     id: str
     workspace_id: str
     project_id: str | None
+    note_group_id: str | None
     task_id: str | None
     specification_id: str | None
     title: str
@@ -289,6 +325,7 @@ class NoteCommandState:
     id: str
     workspace_id: str
     project_id: str | None
+    note_group_id: str | None
     task_id: str | None
     specification_id: str | None
     pinned: bool
@@ -342,4 +379,46 @@ class SpecificationCommandState:
     project_id: str
     status: str
     archived: bool
+    is_deleted: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TaskGroupDTO:
+    id: str
+    workspace_id: str
+    project_id: str
+    name: str
+    description: str
+    color: str | None
+    order_index: int
+    created_at: str | None
+    updated_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class TaskGroupCommandState:
+    id: str
+    workspace_id: str
+    project_id: str
+    is_deleted: bool
+
+
+@dataclass(frozen=True, slots=True)
+class NoteGroupDTO:
+    id: str
+    workspace_id: str
+    project_id: str
+    name: str
+    description: str
+    color: str | None
+    order_index: int
+    created_at: str | None
+    updated_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class NoteGroupCommandState:
+    id: str
+    workspace_id: str
+    project_id: str
     is_deleted: bool

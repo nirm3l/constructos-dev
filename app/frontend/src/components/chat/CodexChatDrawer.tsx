@@ -1,8 +1,16 @@
 import React from 'react'
 import { MarkdownView } from '../../markdown/MarkdownView'
-import { Icon } from '../shared/uiHelpers'
+import type { AttachmentRef } from '../../types'
+import { AttachmentRefList, Icon } from '../shared/uiHelpers'
 
 export function CodexChatDrawer({ state }: { state: any }) {
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null)
+  const [chatAttachmentRefs, setChatAttachmentRefs] = React.useState<AttachmentRef[]>([])
+
+  React.useEffect(() => {
+    setChatAttachmentRefs([])
+  }, [state.codexChatSessionId, state.codexChatProjectId])
+
   if (!state.showCodexChat) return null
   const usage = state.codexChatUsage
   const inputTokens = typeof usage?.input_tokens === 'number' ? Math.max(0, usage.input_tokens) : null
@@ -147,12 +155,53 @@ export function CodexChatDrawer({ state }: { state: any }) {
           rows={5}
           placeholder='Example: "Create 3 tasks for tomorrow in project Test2 with High priority"'
         />
+        <div className="row wrap" style={{ marginTop: 8, alignItems: 'center', gap: 8 }}>
+          <button
+            className="status-chip"
+            type="button"
+            disabled={state.runAgentChatMutation.isPending || !state.codexChatProjectId.trim()}
+            onClick={() => {
+              if (!state.codexChatProjectId.trim()) {
+                state.setUiError('Select a project before attaching files to chat.')
+                return
+              }
+              fileInputRef.current?.click()
+            }}
+          >
+            Attach file
+          </button>
+          <span className="meta">Attached text files are sent with your chat instruction.</span>
+          <input
+            ref={fileInputRef}
+            type="file"
+            style={{ display: 'none' }}
+            onChange={async (e) => {
+              const file = e.target.files?.[0]
+              e.target.value = ''
+              if (!file || !state.codexChatProjectId.trim()) return
+              try {
+                const ref = await state.uploadAttachmentRef(file, { project_id: state.codexChatProjectId })
+                setChatAttachmentRefs((prev) => [...prev, ref])
+                state.setUiError(null)
+              } catch (err: any) {
+                state.setUiError(err?.message || 'Chat attachment upload failed')
+              }
+            }}
+          />
+        </div>
+        <AttachmentRefList
+          refs={chatAttachmentRefs}
+          workspaceId={state.workspaceId}
+          userId={state.userId}
+          onRemovePath={(path) => setChatAttachmentRefs((prev) => prev.filter((ref) => ref.path !== path))}
+        />
         <div className="codex-chat-toolbar">
           <button
             className="action-icon"
             onClick={() => {
               state.setCodexChatTurns([])
               state.setCodexChatUsage(null)
+              setChatAttachmentRefs([])
             }}
             disabled={state.runAgentChatMutation.isPending || state.codexChatTurns.length === 0}
             title="Clear chat"
@@ -187,6 +236,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
                 history,
                 sessionId: state.codexChatSessionId,
                 projectId: state.codexChatProjectId.trim() ? state.codexChatProjectId : null,
+                attachmentRefs: chatAttachmentRefs,
               })
             }}
             disabled={state.runAgentChatMutation.isPending || !state.codexChatInstruction.trim() || !state.workspaceId}

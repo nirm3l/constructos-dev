@@ -20,6 +20,7 @@ from shared.core import (
     ReorderPayload,
     Task,
     TaskComment,
+    TaskGroup,
     TaskCreate,
     TaskPatch,
     TaskWatcher,
@@ -132,6 +133,17 @@ def _require_specification_scope(db: Session, *, workspace_id: str, project_id: 
     return specification
 
 
+def _require_task_group_scope(db: Session, *, workspace_id: str, project_id: str, task_group_id: str) -> TaskGroup:
+    task_group = db.get(TaskGroup, task_group_id)
+    if not task_group or task_group.is_deleted:
+        raise HTTPException(status_code=404, detail="Task group not found")
+    if task_group.workspace_id != workspace_id:
+        raise HTTPException(status_code=400, detail="Task group does not belong to workspace")
+    if task_group.project_id != project_id:
+        raise HTTPException(status_code=400, detail="Task group does not belong to project")
+    return task_group
+
+
 def _validate_schedule_fields(
     *,
     task_type: str,
@@ -232,6 +244,13 @@ class CreateTaskHandler:
                 project_id=self.payload.project_id,
                 specification_id=self.payload.specification_id,
             )
+        if self.payload.task_group_id:
+            _require_task_group_scope(
+                self.ctx.db,
+                workspace_id=self.payload.workspace_id,
+                project_id=self.payload.project_id,
+                task_group_id=self.payload.task_group_id,
+            )
         try:
             statuses = json.loads(project.custom_statuses or "[]")
         except Exception:
@@ -257,6 +276,7 @@ class CreateTaskHandler:
             id=coerce_originator_id(tid),
             workspace_id=self.payload.workspace_id,
             project_id=self.payload.project_id,
+            task_group_id=self.payload.task_group_id,
             specification_id=self.payload.specification_id,
             title=title,
             description=self.payload.description,
@@ -363,12 +383,27 @@ class PatchTaskHandler:
         current_specification_id = (
             current_row.specification_id if current_row is not None else (current_state.get("specification_id") if current_state else None)
         )
+        current_task_group_id = (
+            current_row.task_group_id if current_row is not None else (current_state.get("task_group_id") if current_state else None)
+        )
         effective_project_id = str(data.get("project_id", project_id) or "")
         if not effective_project_id:
             raise HTTPException(status_code=422, detail="project_id is required")
         project_id_changed = "project_id" in data and str(data.get("project_id") or "") != str(project_id or "")
         if project_id_changed and current_specification_id and "specification_id" not in data:
             raise HTTPException(status_code=409, detail="Cannot change project while task is linked to specification")
+        if project_id_changed and current_task_group_id and "task_group_id" not in data:
+            raise HTTPException(status_code=409, detail="Cannot change project while task is linked to task group")
+        if "task_group_id" in data:
+            if data.get("task_group_id"):
+                _require_task_group_scope(
+                    self.ctx.db,
+                    workspace_id=workspace_id,
+                    project_id=effective_project_id,
+                    task_group_id=str(data["task_group_id"]),
+                )
+            else:
+                data["task_group_id"] = None
         if "specification_id" in data:
             specification_id = data.get("specification_id")
             if specification_id:

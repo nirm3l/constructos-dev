@@ -14,6 +14,7 @@ class TaskAggregate(Aggregate):
         id: Any,
         workspace_id: str,
         project_id: str | None,
+        task_group_id: str | None,
         specification_id: str | None,
         title: str,
         description: str,
@@ -37,6 +38,7 @@ class TaskAggregate(Aggregate):
         _ = id
         self.workspace_id = workspace_id
         self.project_id = project_id
+        self.task_group_id = task_group_id
         self.specification_id = specification_id
         self.title = title
         self.description = description

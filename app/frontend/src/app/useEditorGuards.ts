@@ -63,11 +63,13 @@ export function useEditorGuards(c: any) {
     return (
       (c.editNoteTitle.trim() || 'Untitled') !== (c.selectedNote.title?.trim() || 'Untitled') ||
       c.editNoteBody !== (c.selectedNote.body ?? '') ||
+      (c.editNoteGroupId || null) !== (c.selectedNote.note_group_id ?? null) ||
       stableJson(parseCommaTags(c.editNoteTags)) !== stableJson(c.selectedNote.tags ?? []) ||
       stableJson(c.parseExternalRefsText(c.editNoteExternalRefsText)) !== stableJson(c.selectedNote.external_refs ?? []) ||
       stableJson(c.parseAttachmentRefsText(c.editNoteAttachmentRefsText)) !== stableJson(c.selectedNote.attachment_refs ?? [])
     )
   }, [
+    c.editNoteGroupId,
     c.editNoteAttachmentRefsText,
     c.editNoteBody,
     c.editNoteExternalRefsText,
@@ -109,6 +111,7 @@ export function useEditorGuards(c: any) {
       status: c.editStatus,
       priority: c.editPriority,
       project_id: c.editProjectId || c.selectedTask.project_id,
+      task_group_id: c.editTaskGroupId || null,
       labels: c.editTaskTags,
       due_date: c.editDueDate || '',
       task_type: c.editTaskType,
@@ -128,6 +131,7 @@ export function useEditorGuards(c: any) {
       status: c.selectedTask.status ?? 'To do',
       priority: c.selectedTask.priority ?? 'Med',
       project_id: c.selectedTask.project_id ?? '',
+      task_group_id: c.selectedTask.task_group_id ?? null,
       labels: c.selectedTask.labels ?? [],
       due_date: toLocalDateTimeInput(c.selectedTask.due_date),
       task_type: c.selectedTask.task_type ?? 'manual',
@@ -147,6 +151,7 @@ export function useEditorGuards(c: any) {
     c.editDueDate,
     c.editPriority,
     c.editProjectId,
+    c.editTaskGroupId,
     c.editRecurringEvery,
     c.editRecurringUnit,
     c.editScheduledAtUtc,

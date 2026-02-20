@@ -14,11 +14,13 @@ from features.projects.api import router as projects_router
 from features.rules.api import router as rules_router
 from features.specifications.api import router as specifications_router
 from features.tasks.api import router as tasks_router
+from features.task_groups.api import router as task_groups_router
 from features.users.api import router as users_router
 from features.views.api import router as views_router
 from features.agents.api import router as agents_router
 from features.attachments.api import router as attachments_router
 from features.notes.api import router as notes_router
+from features.note_groups.api import router as note_groups_router
 from features.agents.runner import start_automation_runner, stop_automation_runner
 from shared.core import bootstrap_data, start_projection_worker, startup_bootstrap, stop_projection_worker
 from shared.eventing_graph import start_graph_projection_worker, stop_graph_projection_worker
@@ -75,7 +77,9 @@ app.include_router(projects_router)
 app.include_router(rules_router)
 app.include_router(specifications_router)
 app.include_router(tasks_router)
+app.include_router(task_groups_router)
 app.include_router(notes_router)
+app.include_router(note_groups_router)
 app.include_router(attachments_router)
 app.include_router(notifications_router)
 app.include_router(views_router)

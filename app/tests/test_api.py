@@ -1,6 +1,7 @@
 import os
 from importlib import reload
 from pathlib import Path
+import zipfile
 from zoneinfo import ZoneInfo
 
 from datetime import datetime, timedelta, timezone
@@ -1443,6 +1444,88 @@ def test_agent_service_create_note_is_idempotent_without_explicit_command_id(tmp
     assert len([item for item in listed['items'] if item['title'] == 'Idempotent MCP note']) == 1
 
 
+def test_agent_service_task_note_group_lifecycle_and_filters(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    task_group = service.create_task_group(
+        name='MCP Task Group',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    note_group = service.create_note_group(
+        name='MCP Note Group',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+
+    created_task = service.create_task(
+        title='Task with group from MCP',
+        workspace_id=ws_id,
+        project_id=project_id,
+        task_group_id=task_group['id'],
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    created_note = service.create_note(
+        title='Note with group from MCP',
+        workspace_id=ws_id,
+        project_id=project_id,
+        note_group_id=note_group['id'],
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert created_task['task_group_id'] == task_group['id']
+    assert created_note['note_group_id'] == note_group['id']
+
+    listed_tasks = service.list_tasks(
+        workspace_id=ws_id,
+        project_id=project_id,
+        task_group_id=task_group['id'],
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    listed_notes = service.list_notes(
+        workspace_id=ws_id,
+        project_id=project_id,
+        note_group_id=note_group['id'],
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert any(item['id'] == created_task['id'] for item in listed_tasks['items'])
+    assert any(item['id'] == created_note['id'] for item in listed_notes['items'])
+
+    second_task_group = service.create_task_group(
+        name='MCP Task Group B',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    reordered = service.reorder_task_groups(
+        ordered_ids=[second_task_group['id'], task_group['id']],
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert reordered['ok'] is True
+
+    task_groups = service.list_task_groups(
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )['items']
+    assert [item['id'] for item in task_groups[:2]] == [second_task_group['id'], task_group['id']]
+
+    deleted = service.delete_task_group(group_id=task_group['id'], auth_token=svc_module.MCP_AUTH_TOKEN or None)
+    assert deleted['ok'] is True
+    refreshed = service.get_task(task_id=created_task['id'], auth_token=svc_module.MCP_AUTH_TOKEN or None)
+    assert refreshed['task_group_id'] is None
+
+
 def test_agent_service_create_task_requires_project_id(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
@@ -1551,6 +1634,167 @@ def test_agents_chat_endpoint_returns_executor_response(tmp_path):
     assert payload['action'] in {'complete', 'comment'}
     assert isinstance(payload['summary'], str)
     assert payload['session_id'] == 'test-session-1'
+
+
+def test_agents_chat_endpoint_includes_text_attachment_context(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    uploaded = client.post(
+        '/api/attachments/upload',
+        data={'workspace_id': ws_id, 'project_id': project_id},
+        files={'file': ('context.txt', BytesIO(b'hello from attachment file'), 'text/plain')},
+    )
+    assert uploaded.status_code == 200
+    attachment_ref = uploaded.json()
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    captured = {}
+
+    def _fake_execute_task_automation(**kwargs):
+        captured.update(kwargs)
+        return AutomationOutcome(action='comment', summary='ok', comment=None, usage=None)
+
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Use attachment content',
+            'session_id': 'chat-attachment-test',
+            'history': [],
+            'attachment_refs': [attachment_ref],
+        },
+    )
+    assert res.status_code == 200
+    assert 'Attached file context:' in captured['instruction']
+    assert 'hello from attachment file' in captured['instruction']
+    assert attachment_ref['path'] in captured['instruction']
+
+
+def test_agents_chat_endpoint_includes_docx_attachment_context(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    docx_buf = BytesIO()
+    with zipfile.ZipFile(docx_buf, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "word/document.xml",
+            (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                "<w:body>"
+                "<w:p><w:r><w:t>DOCX attachment content line one.</w:t></w:r></w:p>"
+                "<w:p><w:r><w:t>DOCX attachment content line two.</w:t></w:r></w:p>"
+                "</w:body>"
+                "</w:document>"
+            ),
+        )
+    docx_buf.seek(0)
+    uploaded = client.post(
+        '/api/attachments/upload',
+        data={'workspace_id': ws_id, 'project_id': project_id},
+        files={'file': ('context.docx', docx_buf, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')},
+    )
+    assert uploaded.status_code == 200
+    attachment_ref = uploaded.json()
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    captured = {}
+
+    def _fake_execute_task_automation(**kwargs):
+        captured.update(kwargs)
+        return AutomationOutcome(action='comment', summary='ok', comment=None, usage=None)
+
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Use DOCX content',
+            'history': [],
+            'attachment_refs': [attachment_ref],
+        },
+    )
+    assert res.status_code == 200
+    assert 'DOCX attachment content line one.' in captured['instruction']
+    assert 'DOCX attachment content line two.' in captured['instruction']
+
+
+def test_agents_chat_endpoint_includes_pdf_attachment_context(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    uploaded = client.post(
+        '/api/attachments/upload',
+        data={'workspace_id': ws_id, 'project_id': project_id},
+        files={'file': ('context.pdf', BytesIO(b'%PDF-1.4\\n%dummy\\n'), 'application/pdf')},
+    )
+    assert uploaded.status_code == 200
+    attachment_ref = uploaded.json()
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    captured = {}
+
+    def _fake_execute_task_automation(**kwargs):
+        captured.update(kwargs)
+        return AutomationOutcome(action='comment', summary='ok', comment=None, usage=None)
+
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+    monkeypatch.setattr(
+        agents_api,
+        '_extract_pdf_text',
+        lambda _path, *, max_chars: ("PDF attachment extracted text.", False, None),
+    )
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Use PDF content',
+            'history': [],
+            'attachment_refs': [attachment_ref],
+        },
+    )
+    assert res.status_code == 200
+    assert 'PDF attachment extracted text.' in captured['instruction']
+
+
+def test_agents_chat_endpoint_rejects_attachment_outside_workspace(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Use attachment content',
+            'history': [],
+            'attachment_refs': [{'path': 'workspace/not-my-workspace/project/x/project/x/context.txt'}],
+        },
+    )
+    assert res.status_code == 403
+    assert 'workspace' in res.text.lower()
 
 
 def test_agents_chat_endpoint_includes_usage_when_available(tmp_path, monkeypatch):

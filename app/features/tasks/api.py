@@ -38,6 +38,7 @@ router = APIRouter()
 def list_tasks(
     workspace_id: str,
     project_id: str,
+    task_group_id: str | None = None,
     specification_id: str | None = None,
     view: str | None = None,
     q: str | None = None,
@@ -61,6 +62,7 @@ def list_tasks(
         TaskListQuery(
             workspace_id=workspace_id,
             project_id=project_id,
+            task_group_id=task_group_id,
             specification_id=specification_id,
             view=view,
             q=q,

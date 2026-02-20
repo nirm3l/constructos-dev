@@ -131,6 +131,7 @@ export function useMiscMutations(c: any) {
       history: Array<{ role: 'user' | 'assistant'; content: string }>
       projectId: string | null
       sessionId: string
+      attachmentRefs?: Array<{ path: string; name?: string; mime_type?: string; size_bytes?: number }>
     }) =>
       runAgentChat(c.userId, {
         workspace_id: c.workspaceId,
@@ -138,6 +139,7 @@ export function useMiscMutations(c: any) {
         session_id: payload.sessionId || c.codexChatSessionId,
         instruction: payload.instruction,
         history: payload.history,
+        attachment_refs: payload.attachmentRefs || [],
         allow_mutations: true
       }),
     onSuccess: async (response, variables) => {

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
+import os
+from pathlib import Path
+import zipfile
+import xml.etree.ElementTree as ET
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from shared.core import AgentChatRun, User, ensure_role, get_current_user, get_db
+from shared.core import AgentChatRun, User, ensure_project_access, ensure_role, get_current_user, get_db
 from shared.settings import (
+    ATTACHMENTS_DIR,
     AGENT_CHAT_HISTORY_COMPACT_THRESHOLD,
     AGENT_CHAT_HISTORY_RECENT_TAIL,
     AGENT_EXECUTOR_TIMEOUT_SECONDS,
@@ -16,6 +22,265 @@ from .executor import execute_task_automation
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+_TEXT_MIME_PREFIXES = ("text/",)
+_TEXT_MIME_TYPES = {
+    "application/json",
+    "application/ld+json",
+    "application/xml",
+    "application/x-yaml",
+    "application/yaml",
+    "application/toml",
+    "application/x-toml",
+    "application/javascript",
+}
+_PDF_MIME_TYPES = {"application/pdf"}
+_DOCX_MIME_TYPES = {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+_TEXT_EXTENSIONS = {
+    ".txt",
+    ".md",
+    ".markdown",
+    ".rst",
+    ".log",
+    ".json",
+    ".jsonl",
+    ".csv",
+    ".tsv",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".xml",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".css",
+    ".html",
+    ".sql",
+    ".sh",
+    ".env",
+}
+_MAX_CHAT_ATTACHMENT_FILES = 6
+_MAX_CHAT_ATTACHMENT_CHARS_PER_FILE = 12_000
+_MAX_CHAT_ATTACHMENT_CHARS_TOTAL = 36_000
+
+
+def _upload_root() -> Path:
+    raw = os.getenv("ATTACHMENTS_DIR", ATTACHMENTS_DIR).strip() or ATTACHMENTS_DIR
+    return Path(raw).expanduser().resolve()
+
+
+def _project_id_from_path(path: str) -> str | None:
+    parts = [part for part in Path(path).as_posix().split("/") if part]
+    if len(parts) >= 4 and parts[0] == "workspace" and parts[2] == "project":
+        project_id = parts[3]
+        if project_id and project_id != "_none":
+            return project_id
+    return None
+
+
+def _resolve_attachment_candidate(workspace_id: str, path: str) -> Path:
+    upload_root = _upload_root()
+    rel = Path(path)
+    if rel.is_absolute():
+        raise HTTPException(status_code=400, detail="Invalid attachment path")
+    candidate = (upload_root / rel).resolve()
+    if not str(candidate).startswith(str(upload_root)):
+        raise HTTPException(status_code=400, detail="Invalid attachment path")
+    expected_prefix = f"workspace/{workspace_id}/"
+    if not str(path).startswith(expected_prefix):
+        raise HTTPException(status_code=403, detail="Attachment does not belong to workspace")
+    return candidate
+
+
+def _is_text_attachment(*, file_name: str, mime_type: str | None) -> bool:
+    lower_mime = str(mime_type or "").strip().lower()
+    if lower_mime and lower_mime.startswith(_TEXT_MIME_PREFIXES):
+        return True
+    if lower_mime in _TEXT_MIME_TYPES:
+        return True
+    suffix = Path(file_name or "").suffix.lower()
+    return suffix in _TEXT_EXTENSIONS
+
+
+def _is_pdf_attachment(*, file_name: str, mime_type: str | None) -> bool:
+    lower_mime = str(mime_type or "").strip().lower()
+    if lower_mime in _PDF_MIME_TYPES:
+        return True
+    return Path(file_name or "").suffix.lower() == ".pdf"
+
+
+def _is_docx_attachment(*, file_name: str, mime_type: str | None) -> bool:
+    lower_mime = str(mime_type or "").strip().lower()
+    if lower_mime in _DOCX_MIME_TYPES:
+        return True
+    return Path(file_name or "").suffix.lower() == ".docx"
+
+
+def _read_attachment_snippet(path: Path, *, max_chars: int) -> tuple[str, bool]:
+    if max_chars <= 0:
+        return "", False
+    # Use a byte budget that comfortably exceeds max_chars for UTF-8 text.
+    byte_budget = max(1, max_chars * 4)
+    with path.open("rb") as f:
+        raw = f.read(byte_budget + 1)
+    had_byte_truncation = len(raw) > byte_budget
+    clipped = raw[:byte_budget]
+    text = clipped.decode("utf-8", errors="replace")
+    had_char_truncation = len(text) > max_chars
+    snippet = text[:max_chars]
+    return snippet, (had_byte_truncation or had_char_truncation)
+
+
+def _extract_docx_text(path: Path, *, max_chars: int) -> tuple[str, bool, str | None]:
+    if max_chars <= 0:
+        return "", False, "Content: omitted (chat attachment context limit reached)."
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            raw_xml = archive.read("word/document.xml")
+    except KeyError:
+        return "", False, "Content: omitted (DOCX has no word/document.xml)."
+    except zipfile.BadZipFile:
+        return "", False, "Content: omitted (invalid DOCX format)."
+    except Exception as exc:
+        logger.warning("Failed reading DOCX attachment %s: %s", path, exc)
+        return "", False, "Content: omitted (failed to read DOCX)."
+
+    try:
+        root = ET.fromstring(raw_xml)
+    except ET.ParseError:
+        return "", False, "Content: omitted (invalid DOCX XML)."
+
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    paragraphs: list[str] = []
+    for paragraph in root.findall(".//w:p", ns):
+        pieces: list[str] = []
+        for run_text in paragraph.findall(".//w:t", ns):
+            text_value = str(run_text.text or "")
+            if text_value:
+                pieces.append(text_value)
+        line = "".join(pieces).strip()
+        if line:
+            paragraphs.append(line)
+
+    full_text = "\n\n".join(paragraphs).strip()
+    if not full_text:
+        return "", False, "Content: omitted (no extractable text found in DOCX)."
+
+    truncated = len(full_text) > max_chars
+    snippet = full_text[:max_chars]
+    return snippet, truncated, None
+
+
+def _extract_pdf_text(path: Path, *, max_chars: int) -> tuple[str, bool, str | None]:
+    if max_chars <= 0:
+        return "", False, "Content: omitted (chat attachment context limit reached)."
+    try:
+        from pypdf import PdfReader
+    except Exception:
+        return "", False, "Content: omitted (PDF parser unavailable; install pypdf)."
+
+    try:
+        reader = PdfReader(str(path))
+    except Exception as exc:
+        logger.warning("Failed opening PDF attachment %s: %s", path, exc)
+        return "", False, "Content: omitted (failed to open PDF)."
+
+    chunks: list[str] = []
+    used_chars = 0
+    truncated = False
+    for page in reader.pages:
+        try:
+            page_text = str(page.extract_text() or "")
+        except Exception:
+            page_text = ""
+        if not page_text:
+            continue
+        remaining = max_chars - used_chars
+        if remaining <= 0:
+            truncated = True
+            break
+        if len(page_text) > remaining:
+            chunks.append(page_text[:remaining])
+            used_chars += remaining
+            truncated = True
+            break
+        chunks.append(page_text)
+        used_chars += len(page_text)
+
+    full_text = "\n\n".join(part.strip() for part in chunks if part.strip()).strip()
+    if not full_text:
+        return "", False, "Content: omitted (no extractable text found in PDF)."
+    return full_text, truncated, None
+
+
+def _build_attachment_context(
+    *,
+    payload: AgentChatRun,
+    db: Session,
+    user: User,
+) -> str:
+    refs = payload.attachment_refs or []
+    if not refs:
+        return ""
+
+    lines: list[str] = []
+    total_chars = 0
+    for index, ref in enumerate(refs[:_MAX_CHAT_ATTACHMENT_FILES], start=1):
+        path = str(ref.path or "").strip()
+        if not path:
+            continue
+        candidate = _resolve_attachment_candidate(payload.workspace_id, path)
+        project_id = _project_id_from_path(path)
+        if project_id:
+            ensure_project_access(db, payload.workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+        if payload.project_id and project_id and project_id != payload.project_id:
+            raise HTTPException(status_code=400, detail="Attachment project mismatch with selected chat project")
+        if not candidate.exists() or not candidate.is_file():
+            raise HTTPException(status_code=404, detail=f"Attachment not found: {path}")
+
+        display_name = str(ref.name or Path(path).name or f"attachment-{index}").strip()
+        mime_type = str(ref.mime_type or "").strip() or mimetypes.guess_type(display_name)[0] or ""
+
+        lines.append(f"Attachment {index}: {display_name}")
+        lines.append(f"Path: {path}")
+        lines.append(f"MIME type: {mime_type or 'unknown'}")
+
+        remaining_chars = _MAX_CHAT_ATTACHMENT_CHARS_TOTAL - total_chars
+        if remaining_chars <= 0:
+            lines.append("Content: omitted (chat attachment context limit reached).")
+            lines.append("")
+            break
+
+        max_chars_for_file = min(_MAX_CHAT_ATTACHMENT_CHARS_PER_FILE, remaining_chars)
+        status_message: str | None = None
+        if _is_text_attachment(file_name=display_name, mime_type=mime_type):
+            snippet, truncated = _read_attachment_snippet(candidate, max_chars=max_chars_for_file)
+        elif _is_docx_attachment(file_name=display_name, mime_type=mime_type):
+            snippet, truncated, status_message = _extract_docx_text(candidate, max_chars=max_chars_for_file)
+        elif _is_pdf_attachment(file_name=display_name, mime_type=mime_type):
+            snippet, truncated, status_message = _extract_pdf_text(candidate, max_chars=max_chars_for_file)
+        else:
+            snippet, truncated = "", False
+            status_message = "Content: omitted (unsupported binary file type)."
+
+        if snippet:
+            lines.append("Content:")
+            lines.append(snippet)
+            if truncated:
+                lines.append("[truncated]")
+            total_chars += len(snippet)
+        else:
+            lines.append(status_message or "Content: omitted (empty or unreadable file).")
+        lines.append("")
+
+    if not lines:
+        return ""
+    return "Attached file context:\n" + "\n".join(lines).rstrip()
 
 
 def _compose_chat_instruction(current_instruction: str, history: list[dict[str, str]]) -> str:
@@ -154,7 +419,11 @@ def agent_chat(
         }
     if not instruction:
         raise HTTPException(status_code=400, detail="instruction is required")
-    effective_instruction = _compose_chat_instruction(instruction, compacted_history)
+    attachment_context = _build_attachment_context(payload=payload, db=db, user=user)
+    instruction_with_context = instruction
+    if attachment_context:
+        instruction_with_context = f"{instruction}\n\n{attachment_context}"
+    effective_instruction = _compose_chat_instruction(instruction_with_context, compacted_history)
 
     description = f"General Codex chat context. workspace_id={payload.workspace_id}; project_id={payload.project_id or ''}"
     try:

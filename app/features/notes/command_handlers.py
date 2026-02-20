@@ -13,6 +13,7 @@ from shared.core import (
     AggregateEventRepository,
     Note,
     NoteCreate,
+    NoteGroup,
     NotePatch,
     Project,
     Specification,
@@ -135,6 +136,17 @@ def _require_task_scope(db: Session, *, workspace_id: str, project_id: str, task
     return task
 
 
+def _require_note_group_scope(db: Session, *, workspace_id: str, project_id: str, note_group_id: str) -> NoteGroup:
+    note_group = db.get(NoteGroup, note_group_id)
+    if not note_group or note_group.is_deleted:
+        raise HTTPException(status_code=404, detail="Note group not found")
+    if note_group.workspace_id != workspace_id:
+        raise HTTPException(status_code=400, detail="Note group does not belong to workspace")
+    if note_group.project_id != project_id:
+        raise HTTPException(status_code=400, detail="Note group does not belong to project")
+    return note_group
+
+
 def _require_specification_scope(db: Session, *, workspace_id: str, project_id: str, specification_id: str) -> Specification:
     specification = db.get(Specification, specification_id)
     if not specification or specification.is_deleted:
@@ -199,10 +211,18 @@ class CreateNoteHandler:
                 project_id=self.payload.project_id,
                 task_id=self.payload.task_id,
             )
+        if self.payload.note_group_id:
+            _require_note_group_scope(
+                self.ctx.db,
+                workspace_id=self.payload.workspace_id,
+                project_id=self.payload.project_id,
+                note_group_id=self.payload.note_group_id,
+            )
         aggregate = NoteAggregate(
             id=coerce_originator_id(nid),
             workspace_id=self.payload.workspace_id,
             project_id=self.payload.project_id,
+            note_group_id=self.payload.note_group_id,
             task_id=self.payload.task_id,
             specification_id=self.payload.specification_id,
             title=title,
@@ -246,6 +266,8 @@ class PatchNoteHandler:
         )
         data = self.payload.model_dump(exclude_unset=True)
         effective_project_id = project_id
+        current_note_state = load_note_command_state(self.ctx.db, self.note_id)
+        current_note_group_id = current_note_state.note_group_id if current_note_state else None
         if "project_id" in data:
             if not data["project_id"]:
                 raise HTTPException(status_code=422, detail="project_id cannot be null")
@@ -260,6 +282,20 @@ class PatchNoteHandler:
             effective_project_id = str(data["project_id"])
             if specification_id and "specification_id" not in data:
                 raise HTTPException(status_code=409, detail="Cannot change project while note is linked to specification")
+            if current_note_group_id and "note_group_id" not in data:
+                raise HTTPException(status_code=409, detail="Cannot change project while note is linked to note group")
+        if "note_group_id" in data:
+            if data["note_group_id"]:
+                if not effective_project_id:
+                    raise HTTPException(status_code=400, detail="project_id is required when note_group_id is set")
+                _require_note_group_scope(
+                    self.ctx.db,
+                    workspace_id=workspace_id,
+                    project_id=effective_project_id,
+                    note_group_id=str(data["note_group_id"]),
+                )
+            else:
+                data["note_group_id"] = None
         if "task_id" in data and data["task_id"]:
             if not effective_project_id:
                 raise HTTPException(status_code=400, detail="project_id is required when task_id is set")

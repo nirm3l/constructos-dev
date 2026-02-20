@@ -41,6 +41,13 @@ export function AppPrimaryPanels({ state }: { state: any }) {
         <TasksPanel
           projectsMode={state.projectsMode}
           setProjectsMode={state.setProjectsMode}
+          taskGroups={state.taskGroups.data?.items ?? []}
+          taskGroupFilterId={state.taskGroupFilterId}
+          setTaskGroupFilterId={state.setTaskGroupFilterId}
+          createTaskGroupMutation={state.createTaskGroupMutation}
+          patchTaskGroupMutation={state.patchTaskGroupMutation}
+          deleteTaskGroupMutation={state.deleteTaskGroupMutation}
+          reorderTaskGroupsMutation={state.reorderTaskGroupsMutation}
           taskTagSuggestions={state.taskTagSuggestions}
           searchTags={state.searchTags}
           toggleSearchTag={state.toggleSearchTag}
@@ -250,8 +257,16 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           state={{
             notes: state.notes,
             createNoteMutation: state.createNoteMutation,
+            createNoteGroupMutation: state.createNoteGroupMutation,
+            patchNoteGroupMutation: state.patchNoteGroupMutation,
+            deleteNoteGroupMutation: state.deleteNoteGroupMutation,
+            reorderNoteGroupsMutation: state.reorderNoteGroupsMutation,
+            moveNoteToGroupMutation: state.moveNoteToGroupMutation,
+            noteGroups: state.noteGroups,
             noteArchived: state.noteArchived,
             setNoteArchived: state.setNoteArchived,
+            noteGroupFilterId: state.noteGroupFilterId,
+            setNoteGroupFilterId: state.setNoteGroupFilterId,
             noteTagSuggestions: state.noteTagSuggestions,
             noteTags: state.noteTags,
             toggleNoteFilterTag: state.toggleNoteFilterTag,
@@ -260,7 +275,9 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             selectedNoteId: state.selectedNoteId,
             selectedNote: state.selectedNote,
             editNoteTitle: state.editNoteTitle,
+            editNoteGroupId: state.editNoteGroupId,
             toggleNoteEditor: state.toggleNoteEditor,
+            setEditNoteGroupId: state.setEditNoteGroupId,
             setShowTagPicker: state.setShowTagPicker,
             setTagPickerQuery: state.setTagPickerQuery,
             tagHue: state.tagHue,

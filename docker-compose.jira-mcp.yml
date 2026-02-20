@@ -1,0 +1,16 @@
+services:
+  jira-mcp:
+    image: ghcr.io/sooperset/mcp-atlassian:latest
+    container_name: jira-mcp
+    env_file:
+      - .env.jira-mcp
+    command:
+      - --transport
+      - streamable-http
+      - --host
+      - 0.0.0.0
+      - --port
+      - "9000"
+    ports:
+      - "${JIRA_MCP_PORT:-9010}:9000"
+    restart: unless-stopped

@@ -66,6 +66,26 @@ curl -sS http://localhost:8080/api/health
 - KurrentDB UI (event browser): `http://localhost:2113/web/index.html`
 - KurrentDB all-events feed (JSON): `http://localhost:2113/streams/%24all/head/backward/50?embed=body`
 
+## Optional: Jira MCP (Separate Compose)
+1. Create local env file:
+```bash
+cp .env.jira-mcp.example .env.jira-mcp
+```
+2. Edit `.env.jira-mcp` and set your Jira Cloud credentials.
+`JIRA_API_TOKEN` is added in this file.
+3. Start Jira MCP:
+```bash
+docker compose -f docker-compose.jira-mcp.yml up -d
+```
+4. Register server in Codex:
+```bash
+codex mcp add jira --url http://localhost:9010/mcp
+```
+5. Verify:
+```bash
+codex mcp list
+```
+
 ## Development Commands
 ```bash
 # Full clean redeploy (DB + volumes reset)

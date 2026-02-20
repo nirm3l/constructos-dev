@@ -57,6 +57,9 @@ export function AppOverlays({ state }: { state: any }) {
           setEditDueDate: state.setEditDueDate,
           editDescription: state.editDescription,
           setEditDescription: state.setEditDescription,
+          taskGroups: state.taskGroups.data?.items ?? [],
+          editTaskGroupId: state.editTaskGroupId,
+          setEditTaskGroupId: state.setEditTaskGroupId,
           editTaskTags: state.editTaskTags,
           tagHue: state.tagHue,
           setShowTaskTagPicker: state.setShowTaskTagPicker,
@@ -158,6 +161,9 @@ export function AppOverlays({ state }: { state: any }) {
           setCodexChatRunStartedAt: state.setCodexChatRunStartedAt,
           setCodexChatElapsedSeconds: state.setCodexChatElapsedSeconds,
           workspaceId: state.workspaceId,
+          userId: state.userId,
+          uploadAttachmentRef: state.uploadAttachmentRef,
+          setUiError: state.setUiError,
           codexChatLastTaskEventAt: state.codexChatLastTaskEventAt,
         }}
       />

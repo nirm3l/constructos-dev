@@ -6,6 +6,11 @@ import { TaskDrawerInsights } from './TaskDrawerInsights'
 export function TaskDrawer({ state }: { state: any }) {
   if (!state.selectedTask) return null
   const linkedNotes: Note[] = state.taskNotes?.data?.items ?? []
+  const taskGroups: Array<{ id: string; name: string }> = state.taskGroups ?? []
+  const selectedTaskGroupId = String(state.editTaskGroupId || '')
+  const hasSelectedTaskGroup = selectedTaskGroupId
+    ? taskGroups.some((group) => group.id === selectedTaskGroupId)
+    : true
   const statusOptions: string[] = (state.taskStatusOptions ?? []).length > 0
     ? state.taskStatusOptions
     : ['To do', 'In progress', 'Done']
@@ -104,6 +109,22 @@ export function TaskDrawer({ state }: { state: any }) {
           </div>
         )}
         <div className="task-edit-grid task-main-fields" style={{ marginBottom: 8 }}>
+          <label className="field-control task-field-full">
+            <span className="field-label">Group</span>
+            <select value={state.editTaskGroupId} onChange={(e) => state.setEditTaskGroupId(e.target.value)}>
+              <option value="">Ungrouped</option>
+              {!hasSelectedTaskGroup && selectedTaskGroupId && (
+                <option value={selectedTaskGroupId}>
+                  Missing group ({selectedTaskGroupId.slice(0, 8)})
+                </option>
+              )}
+              {taskGroups.map((group) => (
+                <option key={group.id} value={group.id}>
+                  {group.name}
+                </option>
+              ))}
+            </select>
+          </label>
           <label className="field-control task-field-half">
             <span className="field-label">Status</span>
             <select value={state.editStatus} onChange={(e) => state.setEditStatus(e.target.value)}>

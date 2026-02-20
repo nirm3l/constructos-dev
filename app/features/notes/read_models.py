@@ -13,6 +13,7 @@ from shared.core import Note, User, ensure_project_access, serialize_note
 class NoteListQuery:
     workspace_id: str
     project_id: str
+    note_group_id: str | None = None
     task_id: str | None = None
     specification_id: str | None = None
     q: str | None = None
@@ -32,6 +33,8 @@ def list_notes_read_model(db: Session, user: User, query: NoteListQuery) -> dict
     )
     if query.task_id:
         stmt = stmt.where(Note.task_id == query.task_id)
+    if query.note_group_id is not None:
+        stmt = stmt.where(Note.note_group_id == query.note_group_id)
     if query.specification_id is not None:
         stmt = stmt.where(Note.specification_id == query.specification_id)
     if query.archived:
@@ -72,6 +75,7 @@ def list_notes_read_model(db: Session, user: User, query: NoteListQuery) -> dict
                 {
                     "workspace_id": query.workspace_id,
                     "project_id": query.project_id,
+                    "note_group_id": query.note_group_id,
                     "task_id": query.task_id,
                     "specification_id": query.specification_id,
                     "q": query.q,

@@ -24,6 +24,7 @@ from shared.serializers import load_created_by_map
 class TaskListQuery:
     workspace_id: str
     project_id: str
+    task_group_id: str | None = None
     specification_id: str | None = None
     view: str | None = None
     q: str | None = None
@@ -62,6 +63,8 @@ def list_tasks_read_model(db: Session, user, query: TaskListQuery) -> dict:
             stmt = stmt.where(or_(*tag_filters))
     if query.assignee_id is not None:
         stmt = stmt.where(Task.assignee_id == query.assignee_id)
+    if query.task_group_id is not None:
+        stmt = stmt.where(Task.task_group_id == query.task_group_id)
     if query.specification_id is not None:
         stmt = stmt.where(Task.specification_id == query.specification_id)
     if query.due_from:

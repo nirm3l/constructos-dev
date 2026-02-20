@@ -57,6 +57,13 @@ from features.notes.domain import (
     EVENT_UPDATED as NOTE_EVENT_UPDATED,
     MUTATION_EVENTS as NOTE_MUTATION_EVENTS,
 )
+from features.note_groups.domain import (
+    EVENT_CREATED as NOTE_GROUP_EVENT_CREATED,
+    EVENT_DELETED as NOTE_GROUP_EVENT_DELETED,
+    EVENT_REORDERED as NOTE_GROUP_EVENT_REORDERED,
+    EVENT_UPDATED as NOTE_GROUP_EVENT_UPDATED,
+    MUTATION_EVENTS as NOTE_GROUP_MUTATION_EVENTS,
+)
 from features.rules.domain import (
     EVENT_CREATED as PROJECT_RULE_EVENT_CREATED,
     EVENT_DELETED as PROJECT_RULE_EVENT_DELETED,
@@ -70,6 +77,13 @@ from features.specifications.domain import (
     EVENT_RESTORED as SPECIFICATION_EVENT_RESTORED,
     EVENT_UPDATED as SPECIFICATION_EVENT_UPDATED,
     MUTATION_EVENTS as SPECIFICATION_MUTATION_EVENTS,
+)
+from features.task_groups.domain import (
+    EVENT_CREATED as TASK_GROUP_EVENT_CREATED,
+    EVENT_DELETED as TASK_GROUP_EVENT_DELETED,
+    EVENT_REORDERED as TASK_GROUP_EVENT_REORDERED,
+    EVENT_UPDATED as TASK_GROUP_EVENT_UPDATED,
+    MUTATION_EVENTS as TASK_GROUP_MUTATION_EVENTS,
 )
 from features.project_templates.domain import (
     EVENT_BOUND as PROJECT_TEMPLATE_EVENT_BOUND,
@@ -88,6 +102,7 @@ from .models import (
     AggregateSnapshot,
     AuthSession,
     Note,
+    NoteGroup,
     Notification,
     Project,
     ProjectTemplateBinding,
@@ -99,6 +114,7 @@ from .models import (
     StoredEvent,
     Task,
     TaskComment,
+    TaskGroup,
     TaskWatcher,
     User,
     WorkspaceMember,
@@ -286,6 +302,7 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "id": event.aggregate_id,
             "workspace_id": p["workspace_id"],
             "project_id": p.get("project_id"),
+            "task_group_id": p.get("task_group_id"),
             "specification_id": p.get("specification_id"),
             "title": p["title"],
             "description": p.get("description", ""),
@@ -332,6 +349,7 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
         s["is_deleted"] = True
     elif event.event_type == TASK_EVENT_MOVED_TO_INBOX:
         s["project_id"] = None
+        s["task_group_id"] = None
     elif event.event_type == TASK_EVENT_AUTOMATION_REQUESTED:
         s["automation_state"] = "queued"
         s["last_agent_error"] = None
@@ -431,6 +449,7 @@ def apply_note_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "id": event.aggregate_id,
             "workspace_id": p["workspace_id"],
             "project_id": p.get("project_id"),
+            "note_group_id": p.get("note_group_id"),
             "task_id": p.get("task_id"),
             "specification_id": p.get("specification_id"),
             "title": p.get("title", ""),
@@ -466,6 +485,54 @@ def apply_note_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
         s["is_deleted"] = True
         if "updated_by" in p:
             s["updated_by"] = p.get("updated_by")
+    return s
+
+
+def apply_task_group_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, Any]:
+    s = dict(state)
+    p = event.payload
+    if event.event_type == TASK_GROUP_EVENT_CREATED:
+        s = {
+            "id": event.aggregate_id,
+            "workspace_id": p["workspace_id"],
+            "project_id": p["project_id"],
+            "name": p.get("name", ""),
+            "description": p.get("description", ""),
+            "color": p.get("color"),
+            "order_index": int(p.get("order_index", 0)),
+            "is_deleted": bool(p.get("is_deleted", False)),
+        }
+    elif event.event_type == TASK_GROUP_EVENT_UPDATED:
+        s.update(p)
+    elif event.event_type == TASK_GROUP_EVENT_REORDERED:
+        if "order_index" in p:
+            s["order_index"] = int(p.get("order_index") or 0)
+    elif event.event_type == TASK_GROUP_EVENT_DELETED:
+        s["is_deleted"] = True
+    return s
+
+
+def apply_note_group_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, Any]:
+    s = dict(state)
+    p = event.payload
+    if event.event_type == NOTE_GROUP_EVENT_CREATED:
+        s = {
+            "id": event.aggregate_id,
+            "workspace_id": p["workspace_id"],
+            "project_id": p["project_id"],
+            "name": p.get("name", ""),
+            "description": p.get("description", ""),
+            "color": p.get("color"),
+            "order_index": int(p.get("order_index", 0)),
+            "is_deleted": bool(p.get("is_deleted", False)),
+        }
+    elif event.event_type == NOTE_GROUP_EVENT_UPDATED:
+        s.update(p)
+    elif event.event_type == NOTE_GROUP_EVENT_REORDERED:
+        if "order_index" in p:
+            s["order_index"] = int(p.get("order_index") or 0)
+    elif event.event_type == NOTE_GROUP_EVENT_DELETED:
+        s["is_deleted"] = True
     return s
 
 
@@ -540,6 +607,10 @@ def rebuild_state(db: Session, aggregate_type: str, aggregate_id: str) -> tuple[
             state = apply_project_event(state, ev)
         elif aggregate_type == "Note":
             state = apply_note_event(state, ev)
+        elif aggregate_type == "TaskGroup":
+            state = apply_task_group_event(state, ev)
+        elif aggregate_type == "NoteGroup":
+            state = apply_note_group_event(state, ev)
         elif aggregate_type == "ProjectRule":
             state = apply_project_rule_event(state, ev)
         elif aggregate_type == "Specification":
@@ -664,6 +735,7 @@ def project_event(db: Session, ev: EventEnvelope):
             db.add(note)
         note.workspace_id = p["workspace_id"]
         note.project_id = p.get("project_id")
+        note.note_group_id = p.get("note_group_id")
         note.task_id = p.get("task_id")
         note.specification_id = p.get("specification_id")
         note.title = p.get("title", "") or ""
@@ -719,6 +791,7 @@ def project_event(db: Session, ev: EventEnvelope):
             db.add(task)
         task.workspace_id = p["workspace_id"]
         task.project_id = p.get("project_id")
+        task.task_group_id = p.get("task_group_id")
         task.specification_id = p.get("specification_id")
         task.title = p["title"]
         task.description = p.get("description", "") or ""
@@ -741,6 +814,40 @@ def project_event(db: Session, ev: EventEnvelope):
         task.last_schedule_error = None
         task.order_index = p.get("order_index", 0)
         _recompute_project_tag_index(db, task.project_id)
+    elif ev.event_type == TASK_GROUP_EVENT_CREATED:
+        group = db.get(TaskGroup, ev.aggregate_id)
+        if group is None:
+            group = TaskGroup(
+                id=ev.aggregate_id,
+                workspace_id=p["workspace_id"],
+                project_id=p["project_id"],
+                name=p.get("name", ""),
+            )
+            db.add(group)
+        group.workspace_id = p["workspace_id"]
+        group.project_id = p["project_id"]
+        group.name = p.get("name", "") or ""
+        group.description = p.get("description", "") or ""
+        group.color = p.get("color")
+        group.order_index = int(p.get("order_index", 0))
+        group.is_deleted = bool(p.get("is_deleted", False))
+    elif ev.event_type == NOTE_GROUP_EVENT_CREATED:
+        group = db.get(NoteGroup, ev.aggregate_id)
+        if group is None:
+            group = NoteGroup(
+                id=ev.aggregate_id,
+                workspace_id=p["workspace_id"],
+                project_id=p["project_id"],
+                name=p.get("name", ""),
+            )
+            db.add(group)
+        group.workspace_id = p["workspace_id"]
+        group.project_id = p["project_id"]
+        group.name = p.get("name", "") or ""
+        group.description = p.get("description", "") or ""
+        group.color = p.get("color")
+        group.order_index = int(p.get("order_index", 0))
+        group.is_deleted = bool(p.get("is_deleted", False))
     elif ev.event_type in NOTE_MUTATION_EVENTS:
         note = db.get(Note, ev.aggregate_id)
         if note:
@@ -857,6 +964,7 @@ def project_event(db: Session, ev: EventEnvelope):
                 task.is_deleted = True
             elif ev.event_type == TASK_EVENT_MOVED_TO_INBOX:
                 task.project_id = None
+                task.task_group_id = None
             elif ev.event_type == TASK_EVENT_SCHEDULE_CONFIGURED:
                 task.task_type = "scheduled_instruction"
                 task.scheduled_instruction = p.get("scheduled_instruction")
@@ -888,6 +996,38 @@ def project_event(db: Session, ev: EventEnvelope):
                 task.last_schedule_error = None
             _recompute_project_tag_index(db, old_project_id)
             _recompute_project_tag_index(db, task.project_id)
+    elif ev.event_type in TASK_GROUP_MUTATION_EVENTS:
+        group = db.get(TaskGroup, ev.aggregate_id)
+        if group:
+            if ev.event_type == TASK_GROUP_EVENT_UPDATED:
+                for k, v in p.items():
+                    setattr(group, k, v)
+            elif ev.event_type == TASK_GROUP_EVENT_REORDERED:
+                if "order_index" in p:
+                    group.order_index = int(p.get("order_index") or 0)
+            elif ev.event_type == TASK_GROUP_EVENT_DELETED:
+                group.is_deleted = True
+                db.execute(
+                    Task.__table__.update()
+                    .where(Task.task_group_id == ev.aggregate_id)
+                    .values(task_group_id=None)
+                )
+    elif ev.event_type in NOTE_GROUP_MUTATION_EVENTS:
+        group = db.get(NoteGroup, ev.aggregate_id)
+        if group:
+            if ev.event_type == NOTE_GROUP_EVENT_UPDATED:
+                for k, v in p.items():
+                    setattr(group, k, v)
+            elif ev.event_type == NOTE_GROUP_EVENT_REORDERED:
+                if "order_index" in p:
+                    group.order_index = int(p.get("order_index") or 0)
+            elif ev.event_type == NOTE_GROUP_EVENT_DELETED:
+                group.is_deleted = True
+                db.execute(
+                    Note.__table__.update()
+                    .where(Note.note_group_id == ev.aggregate_id)
+                    .values(note_group_id=None)
+                )
     elif ev.event_type == TASK_EVENT_COMMENT_ADDED:
         pending_exists = any(
             isinstance(obj, TaskComment)

@@ -10,6 +10,7 @@ dependencies = [
     "httpx==0.28.1",
     "kurrentdbclient==1.2.1",
     "neo4j==5.28.2",
+    "pypdf==5.2.0",
     "psycopg[binary]==3.2.12",
     "pydantic==2.12.5",
     "pytest==9.0.2",

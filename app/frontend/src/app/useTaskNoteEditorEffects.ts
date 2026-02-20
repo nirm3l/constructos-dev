@@ -11,6 +11,7 @@ export function useTaskNoteEditorEffects(c: any) {
     c.setEditPriority(c.selectedTask.priority)
     c.setEditDueDate(toLocalDateTimeInput(c.selectedTask.due_date))
     c.setEditProjectId(c.selectedTask.project_id)
+    c.setEditTaskGroupId(c.selectedTask.task_group_id ?? '')
     c.setEditTaskTags(c.selectedTask.labels ?? [])
     c.setEditTaskExternalRefsText(externalRefsToText(c.selectedTask.external_refs))
     c.setEditTaskAttachmentRefsText(attachmentRefsToText(c.selectedTask.attachment_refs))
@@ -47,6 +48,7 @@ export function useTaskNoteEditorEffects(c: any) {
     if (!c.selectedNote) return
     c.setEditNoteTitle(c.selectedNote.title ?? '')
     c.setEditNoteBody(c.selectedNote.body ?? '')
+    c.setEditNoteGroupId(c.selectedNote.note_group_id ?? '')
     c.setEditNoteTags((c.selectedNote.tags ?? []).join(', '))
     c.setEditNoteExternalRefsText(externalRefsToText(c.selectedNote.external_refs))
     c.setEditNoteAttachmentRefsText(attachmentRefsToText(c.selectedNote.attachment_refs))

@@ -13,6 +13,8 @@ import type {
   GraphProjectSubgraph,
   Notification,
   Note,
+  NoteGroup,
+  NoteGroupsPage,
   NotesPage,
   AttachmentRef,
   AppVersionPayload,
@@ -29,6 +31,8 @@ import type {
   SpecificationsPage,
   ProjectTags,
   Task,
+  TaskGroup,
+  TaskGroupsPage,
   TaskActivity,
   TaskAutomationStatus,
   TaskComment,
@@ -225,6 +229,7 @@ export const getTasks = (
   params?: {
     view?: string
     project_id: string
+    task_group_id?: string | null
     q?: string
     status?: string
     priority?: string
@@ -241,6 +246,7 @@ export const getTasks = (
       archived: params?.archived ?? false,
       view: params?.view,
       project_id: params?.project_id,
+      task_group_id: params?.task_group_id ?? undefined,
       q: params?.q,
       status: params?.status,
       priority: params?.priority,
@@ -258,6 +264,7 @@ export const createTask = (
     title: string
     workspace_id: string
     project_id: string
+    task_group_id?: string | null
     description?: string
     specification_id?: string | null
     due_date?: string | null
@@ -289,6 +296,7 @@ export const patchTask = (
       | 'status'
       | 'due_date'
       | 'project_id'
+      | 'task_group_id'
       | 'title'
       | 'priority'
       | 'labels'
@@ -303,6 +311,57 @@ export const patchTask = (
     >
   >
 ) => api<Task>(`/api/tasks/${taskId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })
+
+export const getTaskGroups = (
+  userId: string,
+  workspaceId: string,
+  params: {
+    project_id: string
+    q?: string
+    limit?: number
+    offset?: number
+  }
+) =>
+  api<TaskGroupsPage>(
+    `/api/task-groups${queryString({
+      workspace_id: workspaceId,
+      project_id: params.project_id,
+      q: params.q,
+      limit: params.limit ?? 100,
+      offset: params.offset ?? 0,
+    })}`,
+    userId
+  )
+
+export const createTaskGroup = (
+  userId: string,
+  payload: {
+    workspace_id: string
+    project_id: string
+    name: string
+    description?: string
+    color?: string | null
+  }
+) => api<TaskGroup>('/api/task-groups', userId, { method: 'POST', body: JSON.stringify(payload) })
+
+export const patchTaskGroup = (
+  userId: string,
+  taskGroupId: string,
+  payload: Partial<Pick<TaskGroup, 'name' | 'description' | 'color'>>
+) => api<TaskGroup>(`/api/task-groups/${taskGroupId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })
+
+export const deleteTaskGroup = (userId: string, taskGroupId: string) =>
+  api<{ ok: boolean }>(`/api/task-groups/${taskGroupId}/delete`, userId, { method: 'POST' })
+
+export const reorderTaskGroups = (userId: string, workspaceId: string, projectId: string, orderedIds: string[]) =>
+  api<{ ok: boolean; updated: number }>(
+    `/api/task-groups/reorder${queryString({
+      workspace_id: workspaceId,
+      project_id: projectId,
+    })}`,
+    userId,
+    { method: 'POST', body: JSON.stringify({ ordered_ids: orderedIds }) }
+  )
 
 export const listComments = (userId: string, taskId: string) => api<TaskComment[]>(`/api/tasks/${taskId}/comments`, userId)
 export const addComment = (userId: string, taskId: string, body: string) =>
@@ -327,6 +386,7 @@ export const runAgentChat = (
     project_id?: string | null
     session_id?: string | null
     history?: Array<{ role: 'user' | 'assistant'; content: string }>
+    attachment_refs?: AttachmentRef[]
     allow_mutations?: boolean
   }
 ) =>
@@ -520,6 +580,7 @@ export const getNotes = (
   workspaceId: string,
   params?: {
     project_id: string
+    note_group_id?: string | null
     task_id?: string | null
     specification_id?: string | null
     q?: string
@@ -534,6 +595,7 @@ export const getNotes = (
     `/api/notes${queryString({
       workspace_id: workspaceId,
       project_id: params?.project_id,
+      note_group_id: params?.note_group_id ?? undefined,
       task_id: params?.task_id ?? undefined,
       specification_id: params?.specification_id ?? undefined,
       q: params?.q,
@@ -552,6 +614,7 @@ export const createNote = (
     title: string
     workspace_id: string
     project_id: string
+    note_group_id?: string | null
     task_id?: string | null
     specification_id?: string | null
     body?: string
@@ -566,9 +629,60 @@ export const patchNote = (
   userId: string,
   noteId: string,
   payload: Partial<
-    Pick<Note, 'title' | 'body' | 'tags' | 'pinned' | 'archived' | 'project_id' | 'task_id' | 'specification_id' | 'external_refs' | 'attachment_refs'>
+    Pick<Note, 'title' | 'body' | 'tags' | 'pinned' | 'archived' | 'project_id' | 'note_group_id' | 'task_id' | 'specification_id' | 'external_refs' | 'attachment_refs'>
   >
 ) => api<Note>(`/api/notes/${noteId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })
+
+export const getNoteGroups = (
+  userId: string,
+  workspaceId: string,
+  params: {
+    project_id: string
+    q?: string
+    limit?: number
+    offset?: number
+  }
+) =>
+  api<NoteGroupsPage>(
+    `/api/note-groups${queryString({
+      workspace_id: workspaceId,
+      project_id: params.project_id,
+      q: params.q,
+      limit: params.limit ?? 100,
+      offset: params.offset ?? 0,
+    })}`,
+    userId
+  )
+
+export const createNoteGroup = (
+  userId: string,
+  payload: {
+    workspace_id: string
+    project_id: string
+    name: string
+    description?: string
+    color?: string | null
+  }
+) => api<NoteGroup>('/api/note-groups', userId, { method: 'POST', body: JSON.stringify(payload) })
+
+export const patchNoteGroup = (
+  userId: string,
+  noteGroupId: string,
+  payload: Partial<Pick<NoteGroup, 'name' | 'description' | 'color'>>
+) => api<NoteGroup>(`/api/note-groups/${noteGroupId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })
+
+export const deleteNoteGroup = (userId: string, noteGroupId: string) =>
+  api<{ ok: boolean }>(`/api/note-groups/${noteGroupId}/delete`, userId, { method: 'POST' })
+
+export const reorderNoteGroups = (userId: string, workspaceId: string, projectId: string, orderedIds: string[]) =>
+  api<{ ok: boolean; updated: number }>(
+    `/api/note-groups/reorder${queryString({
+      workspace_id: workspaceId,
+      project_id: projectId,
+    })}`,
+    userId,
+    { method: 'POST', body: JSON.stringify({ ordered_ids: orderedIds }) }
+  )
 
 export const getSpecifications = (
   userId: string,

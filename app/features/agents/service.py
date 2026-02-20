@@ -19,8 +19,36 @@ from features.tasks.application import TaskApplicationService
 from features.tasks.read_models import TaskListQuery, get_task_automation_status_read_model, list_tasks_read_model
 from features.notes.application import NoteApplicationService
 from features.notes.read_models import NoteListQuery, list_notes_read_model
-from shared.core import BulkAction, CommentCreate, Project, ProjectCreate, ProjectRuleCreate, ProjectRulePatch, SessionLocal, TaskAutomationRun, TaskCreate, TaskPatch, User, load_task_command_state, load_task_view
-from shared.core import NoteCreate, NotePatch, load_note_command_state, load_note_view
+from features.note_groups.application import NoteGroupApplicationService
+from features.note_groups.read_models import NoteGroupListQuery, list_note_groups_read_model
+from features.task_groups.application import TaskGroupApplicationService
+from features.task_groups.read_models import TaskGroupListQuery, list_task_groups_read_model
+from shared.core import (
+    BulkAction,
+    CommentCreate,
+    NoteCreate,
+    NoteGroupCreate,
+    NoteGroupPatch,
+    NotePatch,
+    Project,
+    ProjectCreate,
+    ProjectRuleCreate,
+    ProjectRulePatch,
+    ReorderPayload,
+    SessionLocal,
+    TaskAutomationRun,
+    TaskCreate,
+    TaskGroupCreate,
+    TaskGroupPatch,
+    TaskPatch,
+    User,
+    load_note_command_state,
+    load_note_group_command_state,
+    load_note_view,
+    load_task_command_state,
+    load_task_group_command_state,
+    load_task_view,
+)
 from shared.core import load_project_rule_command_state, load_project_rule_view
 from shared.core import (
     SpecificationCreate,
@@ -74,6 +102,26 @@ class AgentTaskService:
         state = load_task_command_state(db, task_id)
         if not state or state.is_deleted:
             raise HTTPException(status_code=404, detail="Task not found")
+        self._assert_workspace_allowed(state.workspace_id)
+        self._assert_project_allowed(state.project_id)
+        return state
+
+    def _assert_task_group_allowed(self, *, db, task_group_id: str | None):
+        if not task_group_id:
+            return None
+        state = load_task_group_command_state(db, task_group_id)
+        if not state or state.is_deleted:
+            raise HTTPException(status_code=404, detail="Task group not found")
+        self._assert_workspace_allowed(state.workspace_id)
+        self._assert_project_allowed(state.project_id)
+        return state
+
+    def _assert_note_group_allowed(self, *, db, note_group_id: str | None):
+        if not note_group_id:
+            return None
+        state = load_note_group_command_state(db, note_group_id)
+        if not state or state.is_deleted:
+            raise HTTPException(status_code=404, detail="Note group not found")
         self._assert_workspace_allowed(state.workspace_id)
         self._assert_project_allowed(state.project_id)
         return state
@@ -205,6 +253,7 @@ class AgentTaskService:
         q: str | None = None,
         status: str | None = None,
         project_id: str | None = None,
+        task_group_id: str | None = None,
         specification_id: str | None = None,
         label: str | None = None,
         assignee_id: str | None = None,
@@ -222,6 +271,8 @@ class AgentTaskService:
         with SessionLocal() as db:
             if specification_id:
                 self._assert_specification_allowed(db=db, specification_id=specification_id)
+            if task_group_id:
+                self._assert_task_group_allowed(db=db, task_group_id=task_group_id)
             ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
             return list_tasks_read_model(
                 db,
@@ -232,6 +283,7 @@ class AgentTaskService:
                     q=q,
                     status=status,
                     project_id=project_id,
+                    task_group_id=task_group_id,
                     specification_id=specification_id,
                     label=label,
                     assignee_id=assignee_id,
@@ -248,6 +300,7 @@ class AgentTaskService:
         workspace_id: str,
         auth_token: str | None = None,
         project_id: str | None = None,
+        note_group_id: str | None = None,
         task_id: str | None = None,
         specification_id: str | None = None,
         q: str | None = None,
@@ -265,6 +318,8 @@ class AgentTaskService:
         with SessionLocal() as db:
             if task_id:
                 self._assert_task_allowed(db=db, task_id=task_id)
+            if note_group_id:
+                self._assert_note_group_allowed(db=db, note_group_id=note_group_id)
             if specification_id:
                 self._assert_specification_allowed(db=db, specification_id=specification_id)
             ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
@@ -274,11 +329,68 @@ class AgentTaskService:
                 NoteListQuery(
                     workspace_id=workspace_id,
                     project_id=project_id,
+                    note_group_id=note_group_id,
                     task_id=task_id,
                     specification_id=specification_id,
                     q=q,
                     archived=archived,
                     pinned=pinned,
+                    limit=limit,
+                    offset=offset,
+                ),
+            )
+
+    def list_task_groups(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        auth_token: str | None = None,
+        q: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        self._require_token(auth_token)
+        self._assert_workspace_allowed(workspace_id)
+        self._assert_project_allowed(project_id)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            return list_task_groups_read_model(
+                db,
+                user,
+                TaskGroupListQuery(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    q=q,
+                    limit=limit,
+                    offset=offset,
+                ),
+            )
+
+    def list_note_groups(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        auth_token: str | None = None,
+        q: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        self._require_token(auth_token)
+        self._assert_workspace_allowed(workspace_id)
+        self._assert_project_allowed(project_id)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            return list_note_groups_read_model(
+                db,
+                user,
+                NoteGroupListQuery(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    q=q,
                     limit=limit,
                     offset=offset,
                 ),
@@ -705,6 +817,7 @@ class AgentTaskService:
         due_date: str | None = None,
         recurring_rule: str | None = None,
         specification_id: str | None = None,
+        task_group_id: str | None = None,
         task_type: str = "manual",
         scheduled_instruction: str | None = None,
         scheduled_at_utc: str | None = None,
@@ -721,11 +834,17 @@ class AgentTaskService:
                 explicit_workspace_id=workspace_id,
                 project_id=project_id,
             )
+            if task_group_id:
+                group_state = self._assert_task_group_allowed(db=db, task_group_id=task_group_id)
+                assert group_state is not None
+                if group_state.workspace_id != resolved_workspace_id or group_state.project_id != resolved_project_id:
+                    raise HTTPException(status_code=400, detail="task_group_id does not belong to workspace_id/project_id")
             effective_command_id = command_id or self._fallback_command_id(
                 prefix="mcp-task-create",
                 payload={
                     "workspace_id": resolved_workspace_id,
                     "project_id": resolved_project_id,
+                    "task_group_id": task_group_id,
                     "title": title,
                     "description": description,
                     "priority": priority,
@@ -743,6 +862,7 @@ class AgentTaskService:
             payload = TaskCreate(
                 workspace_id=resolved_workspace_id,
                 project_id=resolved_project_id,
+                task_group_id=task_group_id,
                 title=title,
                 description=description,
                 priority=priority,
@@ -766,6 +886,7 @@ class AgentTaskService:
         workspace_id: str | None = None,
         auth_token: str | None = None,
         project_id: str | None = None,
+        note_group_id: str | None = None,
         task_id: str | None = None,
         specification_id: str | None = None,
         tags: list[str] | None = None,
@@ -781,11 +902,17 @@ class AgentTaskService:
                 project_id=project_id,
                 task_id=task_id,
             )
+            if note_group_id:
+                group_state = self._assert_note_group_allowed(db=db, note_group_id=note_group_id)
+                assert group_state is not None
+                if group_state.workspace_id != ws_id or group_state.project_id != proj_id:
+                    raise HTTPException(status_code=400, detail="note_group_id does not belong to workspace_id/project_id")
             effective_command_id = command_id or self._fallback_command_id(
                 prefix="mcp-note-create",
                 payload={
                     "workspace_id": ws_id,
                     "project_id": proj_id,
+                    "note_group_id": note_group_id,
                     "task_id": resolved_task_id,
                     "specification_id": specification_id,
                     "title": title,
@@ -797,6 +924,7 @@ class AgentTaskService:
             payload = NoteCreate(
                 workspace_id=ws_id,
                 project_id=proj_id,
+                note_group_id=note_group_id,
                 task_id=resolved_task_id,
                 specification_id=specification_id,
                 title=title,
@@ -805,6 +933,206 @@ class AgentTaskService:
                 pinned=bool(pinned),
             )
             return NoteApplicationService(db, user, command_id=effective_command_id).create_note(payload)
+
+    def create_task_group(
+        self,
+        *,
+        name: str,
+        project_id: str,
+        workspace_id: str | None = None,
+        description: str = "",
+        color: str | None = None,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_create(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-task-group-create",
+                payload={
+                    "workspace_id": resolved_workspace_id,
+                    "project_id": resolved_project_id,
+                    "name_key": str(name or "").strip().casefold(),
+                    "description": description,
+                    "color": color,
+                },
+            )
+            payload = TaskGroupCreate(
+                workspace_id=resolved_workspace_id,
+                project_id=resolved_project_id,
+                name=name,
+                description=description,
+                color=color,
+            )
+            return TaskGroupApplicationService(db, user, command_id=effective_command_id).create_task_group(payload)
+
+    def update_task_group(self, *, group_id: str, patch: dict, auth_token: str | None = None, command_id: str | None = None) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            state = self._assert_task_group_allowed(db=db, task_group_id=group_id)
+            assert state is not None
+            payload = TaskGroupPatch(**patch)
+            return TaskGroupApplicationService(
+                db,
+                user,
+                command_id=command_id or f"mcp-task-group-patch-{uuid.uuid4()}",
+            ).patch_task_group(group_id, payload)
+
+    def delete_task_group(self, *, group_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            state = self._assert_task_group_allowed(db=db, task_group_id=group_id)
+            assert state is not None
+            return TaskGroupApplicationService(
+                db,
+                user,
+                command_id=command_id or f"mcp-task-group-delete-{uuid.uuid4()}",
+            ).delete_task_group(group_id)
+
+    def reorder_task_groups(
+        self,
+        *,
+        ordered_ids: list[str],
+        project_id: str,
+        workspace_id: str | None = None,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_create(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            for group_id in ordered_ids:
+                group_state = self._assert_task_group_allowed(db=db, task_group_id=group_id)
+                assert group_state is not None
+                if group_state.workspace_id != resolved_workspace_id or group_state.project_id != resolved_project_id:
+                    raise HTTPException(status_code=400, detail="ordered_ids includes task group outside project scope")
+            payload = ReorderPayload(ordered_ids=ordered_ids)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-task-group-reorder",
+                payload={
+                    "workspace_id": resolved_workspace_id,
+                    "project_id": resolved_project_id,
+                    "ordered_ids": ordered_ids,
+                },
+            )
+            return TaskGroupApplicationService(
+                db,
+                user,
+                command_id=effective_command_id,
+            ).reorder_task_groups(resolved_workspace_id, resolved_project_id, payload)
+
+    def create_note_group(
+        self,
+        *,
+        name: str,
+        project_id: str,
+        workspace_id: str | None = None,
+        description: str = "",
+        color: str | None = None,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_create(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-note-group-create",
+                payload={
+                    "workspace_id": resolved_workspace_id,
+                    "project_id": resolved_project_id,
+                    "name_key": str(name or "").strip().casefold(),
+                    "description": description,
+                    "color": color,
+                },
+            )
+            payload = NoteGroupCreate(
+                workspace_id=resolved_workspace_id,
+                project_id=resolved_project_id,
+                name=name,
+                description=description,
+                color=color,
+            )
+            return NoteGroupApplicationService(db, user, command_id=effective_command_id).create_note_group(payload)
+
+    def update_note_group(self, *, group_id: str, patch: dict, auth_token: str | None = None, command_id: str | None = None) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            state = self._assert_note_group_allowed(db=db, note_group_id=group_id)
+            assert state is not None
+            payload = NoteGroupPatch(**patch)
+            return NoteGroupApplicationService(
+                db,
+                user,
+                command_id=command_id or f"mcp-note-group-patch-{uuid.uuid4()}",
+            ).patch_note_group(group_id, payload)
+
+    def delete_note_group(self, *, group_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            state = self._assert_note_group_allowed(db=db, note_group_id=group_id)
+            assert state is not None
+            return NoteGroupApplicationService(
+                db,
+                user,
+                command_id=command_id or f"mcp-note-group-delete-{uuid.uuid4()}",
+            ).delete_note_group(group_id)
+
+    def reorder_note_groups(
+        self,
+        *,
+        ordered_ids: list[str],
+        project_id: str,
+        workspace_id: str | None = None,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_create(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            for group_id in ordered_ids:
+                group_state = self._assert_note_group_allowed(db=db, note_group_id=group_id)
+                assert group_state is not None
+                if group_state.workspace_id != resolved_workspace_id or group_state.project_id != resolved_project_id:
+                    raise HTTPException(status_code=400, detail="ordered_ids includes note group outside project scope")
+            payload = ReorderPayload(ordered_ids=ordered_ids)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-note-group-reorder",
+                payload={
+                    "workspace_id": resolved_workspace_id,
+                    "project_id": resolved_project_id,
+                    "ordered_ids": ordered_ids,
+                },
+            )
+            return NoteGroupApplicationService(
+                db,
+                user,
+                command_id=effective_command_id,
+            ).reorder_note_groups(resolved_workspace_id, resolved_project_id, payload)
 
     def create_project(
         self,

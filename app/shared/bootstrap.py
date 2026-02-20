@@ -20,12 +20,14 @@ from .auth import generate_temporary_password, hash_password
 from . import models as shared_models
 from .models import (
     Note,
+    NoteGroup,
     Project,
     ProjectMember,
     ProjectRule,
     ProjectTagIndex,
     Specification,
     Task,
+    TaskGroup,
     TaskWatcher,
     User,
     Workspace,
@@ -177,6 +179,30 @@ def ensure_task_table_columns(db: Session):
     db.commit()
 
 
+def ensure_task_group_tables(db: Session):
+    TaskGroup.__table__.create(bind=db.bind, checkfirst=True)
+    existing_task_columns = {column["name"] for column in inspect(db.bind).get_columns("tasks")}
+    if "task_group_id" not in existing_task_columns:
+        db.execute(text("ALTER TABLE tasks ADD COLUMN task_group_id VARCHAR(36)"))
+    db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_task_groups_project_name ON task_groups(project_id, name)"))
+    db.execute(text("CREATE INDEX IF NOT EXISTS ix_task_groups_workspace_id ON task_groups(workspace_id)"))
+    db.execute(text("CREATE INDEX IF NOT EXISTS ix_task_groups_project_id ON task_groups(project_id)"))
+    db.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_task_group_id ON tasks(task_group_id)"))
+    db.commit()
+
+
+def ensure_note_group_tables(db: Session):
+    NoteGroup.__table__.create(bind=db.bind, checkfirst=True)
+    existing_note_columns = {column["name"] for column in inspect(db.bind).get_columns("notes")}
+    if "note_group_id" not in existing_note_columns:
+        db.execute(text("ALTER TABLE notes ADD COLUMN note_group_id VARCHAR(36)"))
+    db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_note_groups_project_name ON note_groups(project_id, name)"))
+    db.execute(text("CREATE INDEX IF NOT EXISTS ix_note_groups_workspace_id ON note_groups(workspace_id)"))
+    db.execute(text("CREATE INDEX IF NOT EXISTS ix_note_groups_project_id ON note_groups(project_id)"))
+    db.execute(text("CREATE INDEX IF NOT EXISTS ix_notes_note_group_id ON notes(note_group_id)"))
+    db.commit()
+
+
 def ensure_saved_view_table_columns(db: Session):
     existing = {column["name"] for column in inspect(db.bind).get_columns("saved_views")}
     if "project_id" not in existing:
@@ -271,9 +297,11 @@ def bootstrap_data():
         ensure_user_table_columns(db)
         ensure_project_table_columns(db)
         ensure_note_table_columns(db)
+        ensure_note_group_tables(db)
         ensure_specification_table_columns(db)
         ensure_notification_table_columns(db)
         ensure_task_table_columns(db)
+        ensure_task_group_tables(db)
         ensure_saved_view_table_columns(db)
         ensure_task_comment_table_columns(db)
         ensure_task_watcher_table_constraints(db)

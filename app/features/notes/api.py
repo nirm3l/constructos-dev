@@ -16,6 +16,7 @@ router = APIRouter()
 def list_notes(
     workspace_id: str,
     project_id: str,
+    note_group_id: str | None = None,
     task_id: str | None = None,
     specification_id: str | None = None,
     q: str | None = None,
@@ -34,6 +35,7 @@ def list_notes(
         NoteListQuery(
             workspace_id=workspace_id,
             project_id=project_id,
+            note_group_id=note_group_id,
             task_id=task_id,
             specification_id=specification_id,
             q=q,

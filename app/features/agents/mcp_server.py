@@ -35,6 +35,7 @@ def create_mcp():
         q: str | None = None,
         status: str | None = None,
         project_id: str | None = None,
+        task_group_id: str | None = None,
         specification_id: str | None = None,
         label: str | None = None,
         assignee_id: str | None = None,
@@ -51,6 +52,7 @@ def create_mcp():
             q=q,
             status=status,
             project_id=project_id,
+            task_group_id=task_group_id,
             specification_id=specification_id,
             label=label,
             assignee_id=assignee_id,
@@ -70,6 +72,7 @@ def create_mcp():
         workspace_id: str,
         auth_token: str | None = None,
         project_id: str | None = None,
+        note_group_id: str | None = None,
         task_id: str | None = None,
         specification_id: str | None = None,
         q: str | None = None,
@@ -83,6 +86,7 @@ def create_mcp():
             workspace_id=workspace_id,
             auth_token=auth_token,
             project_id=project_id,
+            note_group_id=note_group_id,
             task_id=task_id,
             specification_id=specification_id,
             q=q,
@@ -96,6 +100,160 @@ def create_mcp():
     def get_note(note_id: str, auth_token: str | None = None) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
         return service.get_note(note_id=note_id, auth_token=auth_token)
+
+    @mcp.tool(description="List task groups in a workspace/project.")
+    def list_task_groups(
+        workspace_id: str,
+        project_id: str,
+        auth_token: str | None = None,
+        q: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.list_task_groups(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            auth_token=auth_token,
+            q=q,
+            limit=limit,
+            offset=offset,
+        )
+
+    @mcp.tool(description="Create a task group in a project.")
+    def create_task_group(
+        name: str,
+        project_id: str,
+        workspace_id: str | None = None,
+        description: str = "",
+        color: str | None = None,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.create_task_group(
+            name=name,
+            project_id=project_id,
+            workspace_id=workspace_id,
+            description=description,
+            color=color,
+            auth_token=auth_token,
+            command_id=command_id,
+        )
+
+    @mcp.tool(description="Patch a task group.")
+    def update_task_group(
+        group_id: str,
+        patch: dict[str, Any],
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.update_task_group(
+            group_id=group_id,
+            patch=patch,
+            auth_token=auth_token,
+            command_id=command_id,
+        )
+
+    @mcp.tool(description="Delete a task group.")
+    def delete_task_group(group_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.delete_task_group(group_id=group_id, auth_token=auth_token, command_id=command_id)
+
+    @mcp.tool(description="Reorder task groups in a project.")
+    def reorder_task_groups(
+        ordered_ids: list[str],
+        project_id: str,
+        workspace_id: str | None = None,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.reorder_task_groups(
+            ordered_ids=ordered_ids,
+            project_id=project_id,
+            workspace_id=workspace_id,
+            auth_token=auth_token,
+            command_id=command_id,
+        )
+
+    @mcp.tool(description="List note groups in a workspace/project.")
+    def list_note_groups(
+        workspace_id: str,
+        project_id: str,
+        auth_token: str | None = None,
+        q: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.list_note_groups(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            auth_token=auth_token,
+            q=q,
+            limit=limit,
+            offset=offset,
+        )
+
+    @mcp.tool(description="Create a note group in a project.")
+    def create_note_group(
+        name: str,
+        project_id: str,
+        workspace_id: str | None = None,
+        description: str = "",
+        color: str | None = None,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.create_note_group(
+            name=name,
+            project_id=project_id,
+            workspace_id=workspace_id,
+            description=description,
+            color=color,
+            auth_token=auth_token,
+            command_id=command_id,
+        )
+
+    @mcp.tool(description="Patch a note group.")
+    def update_note_group(
+        group_id: str,
+        patch: dict[str, Any],
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.update_note_group(
+            group_id=group_id,
+            patch=patch,
+            auth_token=auth_token,
+            command_id=command_id,
+        )
+
+    @mcp.tool(description="Delete a note group.")
+    def delete_note_group(group_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.delete_note_group(group_id=group_id, auth_token=auth_token, command_id=command_id)
+
+    @mcp.tool(description="Reorder note groups in a project.")
+    def reorder_note_groups(
+        ordered_ids: list[str],
+        project_id: str,
+        workspace_id: str | None = None,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.reorder_note_groups(
+            ordered_ids=ordered_ids,
+            project_id=project_id,
+            workspace_id=workspace_id,
+            auth_token=auth_token,
+            command_id=command_id,
+        )
 
     @mcp.tool(description="List project rules in a workspace/project.")
     def list_project_rules(
@@ -351,6 +509,7 @@ def create_mcp():
         due_date: str | None = None,
         recurring_rule: str | None = None,
         specification_id: str | None = None,
+        task_group_id: str | None = None,
         task_type: str = "manual",
         scheduled_instruction: str | None = None,
         scheduled_at_utc: str | None = None,
@@ -370,6 +529,7 @@ def create_mcp():
             due_date=due_date,
             recurring_rule=recurring_rule,
             specification_id=specification_id,
+            task_group_id=task_group_id,
             task_type=task_type,
             scheduled_instruction=scheduled_instruction,
             scheduled_at_utc=scheduled_at_utc,
@@ -386,6 +546,7 @@ def create_mcp():
         workspace_id: str | None = None,
         auth_token: str | None = None,
         project_id: str | None = None,
+        note_group_id: str | None = None,
         task_id: str | None = None,
         specification_id: str | None = None,
         tags: list[str] | None = None,
@@ -399,6 +560,7 @@ def create_mcp():
             workspace_id=workspace_id,
             auth_token=auth_token,
             project_id=project_id,
+            note_group_id=note_group_id,
             task_id=task_id,
             specification_id=specification_id,
             tags=tags,

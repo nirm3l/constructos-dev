@@ -11,3 +11,4 @@ httpx==0.28.1
 kurrentdbclient==1.2.1
 fastmcp>=2.0.0
 neo4j==5.28.2
+pypdf==5.2.0

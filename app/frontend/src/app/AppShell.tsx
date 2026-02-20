@@ -131,8 +131,10 @@ function App({ logout }: { logout: () => void }) {
   const [searchPriority, setSearchPriority] = React.useState('')
   const [searchTags, setSearchTags] = React.useState<string[]>([])
   const [searchArchived, setSearchArchived] = React.useState(false)
+  const [taskGroupFilterId, setTaskGroupFilterId] = React.useState('')
   const [noteTags, setNoteTags] = React.useState<string[]>([])
   const [noteArchived, setNoteArchived] = React.useState(false)
+  const [noteGroupFilterId, setNoteGroupFilterId] = React.useState('')
   const [specificationStatus, setSpecificationStatus] = React.useState('')
   const [specificationTags, setSpecificationTags] = React.useState<string[]>([])
   const [specificationArchived, setSpecificationArchived] = React.useState(false)
@@ -146,6 +148,7 @@ function App({ logout }: { logout: () => void }) {
   const [specificationEditorView, setSpecificationEditorView] = React.useState<'write' | 'preview'>('preview')
   const [editNoteTitle, setEditNoteTitle] = React.useState('')
   const [editNoteBody, setEditNoteBody] = React.useState('')
+  const [editNoteGroupId, setEditNoteGroupId] = React.useState('')
   const [editNoteTags, setEditNoteTags] = React.useState('')
   const [editNoteExternalRefsText, setEditNoteExternalRefsText] = React.useState('')
   const [editNoteAttachmentRefsText, setEditNoteAttachmentRefsText] = React.useState('')
@@ -154,7 +157,7 @@ function App({ logout }: { logout: () => void }) {
   const [noteEditorView, setNoteEditorView] = React.useState<'write' | 'preview'>('preview')
   const {
     editStatus, setEditStatus, editTitle, setEditTitle, editDescription, setEditDescription, editPriority, setEditPriority,
-    editDueDate, setEditDueDate, editProjectId, setEditProjectId, editTaskTags, setEditTaskTags, editTaskExternalRefsText,
+    editDueDate, setEditDueDate, editProjectId, setEditProjectId, editTaskGroupId, setEditTaskGroupId, editTaskTags, setEditTaskTags, editTaskExternalRefsText,
     setEditTaskExternalRefsText, editTaskAttachmentRefsText, setEditTaskAttachmentRefsText, showTaskTagPicker,
     setShowTaskTagPicker, taskTagPickerQuery, setTaskTagPickerQuery, editTaskType, setEditTaskType, editScheduledAtUtc,
     setEditScheduledAtUtc, editScheduleTimezone, setEditScheduleTimezone, editScheduledInstruction, setEditScheduledInstruction,
@@ -370,6 +373,8 @@ function App({ logout }: { logout: () => void }) {
     tasks,
     taskLookup,
     notes,
+    taskGroups,
+    noteGroups,
     searchNotes,
     taskNotes,
     specifications,
@@ -395,6 +400,8 @@ function App({ logout }: { logout: () => void }) {
     selectedProjectId,
     selectedTaskId,
     selectedSpecificationId,
+    taskGroupFilterId,
+    noteGroupFilterId,
     searchQ,
     searchStatus,
     searchSpecificationStatus,
@@ -444,6 +451,23 @@ function App({ logout }: { logout: () => void }) {
       selectedProjectId,
       notifications: notifications.data ?? [],
     })
+
+  React.useEffect(() => {
+    setTaskGroupFilterId('')
+    setNoteGroupFilterId('')
+  }, [selectedProjectId])
+
+  React.useEffect(() => {
+    if (!taskGroupFilterId) return
+    const exists = (taskGroups.data?.items ?? []).some((group: any) => group.id === taskGroupFilterId)
+    if (!exists) setTaskGroupFilterId('')
+  }, [taskGroupFilterId, taskGroups.data?.items])
+
+  React.useEffect(() => {
+    if (!noteGroupFilterId) return
+    const exists = (noteGroups.data?.items ?? []).some((group: any) => group.id === noteGroupFilterId)
+    if (!exists) setNoteGroupFilterId('')
+  }, [noteGroupFilterId, noteGroups.data?.items])
   const taskStatusOptions = React.useMemo(() => {
     const projectIdForStatus = editProjectId || selectedTask?.project_id || selectedProjectId
     const project = (bootstrap.data?.projects ?? []).find((item: any) => item.id === projectIdForStatus)
@@ -572,6 +596,7 @@ function App({ logout }: { logout: () => void }) {
     selectedNote,
     editNoteTitle,
     editNoteBody,
+    editNoteGroupId,
     editNoteTags,
     editNoteExternalRefsText,
     editNoteAttachmentRefsText,
@@ -588,6 +613,7 @@ function App({ logout }: { logout: () => void }) {
     editStatus,
     editPriority,
     editProjectId,
+    editTaskGroupId,
     editTaskTags,
     editDueDate,
     editTaskType,
@@ -615,23 +641,26 @@ function App({ logout }: { logout: () => void }) {
     const opened = openTaskEditor(taskId)
     if (!opened) return false
     if (projectId) setSelectedProjectId(projectId)
+    setTaskGroupFilterId('')
     setTab('tasks')
     return true
-  }, [openTaskEditor, setSelectedProjectId, setTab])
+  }, [openTaskEditor, setSelectedProjectId, setTab, setTaskGroupFilterId])
 
   const openNote = React.useCallback((noteId: string, projectId?: string | null) => {
     if (!noteId) return false
     if (selectedNoteId === noteId) {
       if (projectId) setSelectedProjectId(projectId)
+      setNoteGroupFilterId('')
       setTab('notes')
       return true
     }
     const changed = toggleNoteEditor(noteId)
     if (!changed) return false
     if (projectId) setSelectedProjectId(projectId)
+    setNoteGroupFilterId('')
     setTab('notes')
     return true
-  }, [selectedNoteId, toggleNoteEditor, setSelectedProjectId, setTab])
+  }, [selectedNoteId, toggleNoteEditor, setSelectedProjectId, setTab, setNoteGroupFilterId])
 
   
 
@@ -647,6 +676,7 @@ function App({ logout }: { logout: () => void }) {
     setEditPriority,
     setEditDueDate,
     setEditProjectId,
+    setEditTaskGroupId,
     setEditTaskTags,
     setEditTaskExternalRefsText,
     setEditTaskAttachmentRefsText,
@@ -672,6 +702,7 @@ function App({ logout }: { logout: () => void }) {
     selectedNote,
     setEditNoteTitle,
     setEditNoteBody,
+    setEditNoteGroupId,
     setEditNoteTags,
     setEditNoteExternalRefsText,
     setEditNoteAttachmentRefsText,
@@ -717,6 +748,7 @@ function App({ logout }: { logout: () => void }) {
     selectedNoteId,
     editNoteTitle,
     editNoteBody,
+    editNoteGroupId,
     editNoteTags,
     editNoteExternalRefsText,
     editNoteAttachmentRefsText,
@@ -729,6 +761,7 @@ function App({ logout }: { logout: () => void }) {
     editStatus,
     editPriority,
     editProjectId,
+    editTaskGroupId,
     selectedTask,
     editTaskTags,
     editTaskExternalRefsText,
@@ -744,6 +777,10 @@ function App({ logout }: { logout: () => void }) {
     saveNoteMutation,
     saveTaskMutation,
     createTaskMutation,
+    createTaskGroupMutation,
+    patchTaskGroupMutation,
+    deleteTaskGroupMutation,
+    reorderTaskGroupsMutation,
     completeTaskMutation,
     reopenTaskMutation,
     archiveTaskMutation,
@@ -754,6 +791,11 @@ function App({ logout }: { logout: () => void }) {
     patchProjectRuleMutation,
     deleteProjectRuleMutation,
     createNoteMutation,
+    createNoteGroupMutation,
+    patchNoteGroupMutation,
+    deleteNoteGroupMutation,
+    reorderNoteGroupsMutation,
+    moveNoteToGroupMutation,
     pinNoteMutation,
     unpinNoteMutation,
     archiveNoteMutation,
@@ -1065,6 +1107,13 @@ function App({ logout }: { logout: () => void }) {
       openTaskEditor,
       moveTaskToStatus,
       tasks,
+      taskGroups,
+      taskGroupFilterId,
+      setTaskGroupFilterId,
+      createTaskGroupMutation,
+      patchTaskGroupMutation,
+      deleteTaskGroupMutation,
+      reorderTaskGroupsMutation,
       restoreTaskMutation,
       reopenTaskMutation,
       completeTaskMutation,
@@ -1196,8 +1245,16 @@ function App({ logout }: { logout: () => void }) {
       specTasks,
       specNotes,
       createNoteMutation,
+      createNoteGroupMutation,
+      patchNoteGroupMutation,
+      deleteNoteGroupMutation,
+      reorderNoteGroupsMutation,
+      moveNoteToGroupMutation,
+      noteGroups,
       noteArchived,
       setNoteArchived,
+      noteGroupFilterId,
+      setNoteGroupFilterId,
       noteTagSuggestions,
       noteTags,
       toggleNoteFilterTag,
@@ -1206,6 +1263,8 @@ function App({ logout }: { logout: () => void }) {
       selectedNote,
       editNoteTitle,
       setEditNoteTitle,
+      editNoteGroupId,
+      setEditNoteGroupId,
       toggleNoteEditor,
       setShowTagPicker,
       setTagPickerQuery,
@@ -1319,6 +1378,8 @@ function App({ logout }: { logout: () => void }) {
       setEditDueDate,
       editDescription,
       setEditDescription,
+      editTaskGroupId,
+      setEditTaskGroupId,
       editTaskTags,
       setShowTaskTagPicker,
       editTaskType,

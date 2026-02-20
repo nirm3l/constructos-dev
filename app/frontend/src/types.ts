@@ -166,6 +166,7 @@ export type Task = {
   id: string
   workspace_id: string
   project_id: string
+  task_group_id: string | null
   specification_id: string | null
   title: string
   description: string
@@ -483,6 +484,7 @@ export type Note = {
   id: string
   workspace_id: string
   project_id: string
+  note_group_id: string | null
   task_id: string | null
   specification_id: string | null
   title: string
@@ -500,6 +502,44 @@ export type Note = {
 
 export type NotesPage = {
   items: Note[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export type TaskGroup = {
+  id: string
+  workspace_id: string
+  project_id: string
+  name: string
+  description: string
+  color: string | null
+  order_index: number
+  created_at: string | null
+  updated_at: string | null
+}
+
+export type TaskGroupsPage = {
+  items: TaskGroup[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export type NoteGroup = {
+  id: string
+  workspace_id: string
+  project_id: string
+  name: string
+  description: string
+  color: string | null
+  order_index: number
+  created_at: string | null
+  updated_at: string | null
+}
+
+export type NoteGroupsPage = {
+  items: NoteGroup[]
   total: number
   limit: number
   offset: number

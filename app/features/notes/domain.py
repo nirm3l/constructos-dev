@@ -31,6 +31,7 @@ class NoteAggregate(Aggregate):
         id: Any,
         workspace_id: str,
         project_id: str | None,
+        note_group_id: str | None,
         task_id: str | None,
         specification_id: str | None,
         title: str,
@@ -47,6 +48,7 @@ class NoteAggregate(Aggregate):
         _ = id
         self.workspace_id = workspace_id
         self.project_id = project_id
+        self.note_group_id = note_group_id
         self.task_id = task_id
         self.specification_id = specification_id
         self.title = title

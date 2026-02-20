@@ -1,5 +1,6 @@
 import { useQueries, useQuery } from '@tanstack/react-query'
 import {
+  getNoteGroups,
   getNotifications,
   getNotes,
   getProjectBoard,
@@ -8,6 +9,7 @@ import {
   getProjectGraphSubgraph,
   getProjectRules,
   listProjectTemplates,
+  getTaskGroups,
   getSpecifications,
   getProjectTags,
   getTasks,
@@ -32,14 +34,37 @@ export function useCoreQueries(c: any) {
   })
 
   const notes = useQuery({
-    queryKey: ['notes', c.userId, c.workspaceId, c.selectedProjectId, c.noteArchived, c.noteTags.join(',')],
+    queryKey: ['notes', c.userId, c.workspaceId, c.selectedProjectId, c.noteGroupFilterId, c.noteArchived, c.noteTags.join(',')],
     queryFn: () =>
       getNotes(c.userId, c.workspaceId, {
         project_id: c.selectedProjectId,
+        note_group_id: c.noteGroupFilterId || undefined,
         tags: c.noteTags,
         archived: c.noteArchived
       }),
     enabled: Boolean(c.workspaceId && c.selectedProjectId) && c.tab === 'notes'
+  })
+
+  const taskGroups = useQuery({
+    queryKey: ['task-groups', c.userId, c.workspaceId, c.selectedProjectId],
+    queryFn: () =>
+      getTaskGroups(c.userId, c.workspaceId, {
+        project_id: c.selectedProjectId,
+        limit: 200,
+        offset: 0,
+      }),
+    enabled: Boolean(c.workspaceId && c.selectedProjectId),
+  })
+
+  const noteGroups = useQuery({
+    queryKey: ['note-groups', c.userId, c.workspaceId, c.selectedProjectId],
+    queryFn: () =>
+      getNoteGroups(c.userId, c.workspaceId, {
+        project_id: c.selectedProjectId,
+        limit: 200,
+        offset: 0,
+      }),
+    enabled: Boolean(c.workspaceId && c.selectedProjectId),
   })
 
   const searchNotes = useQuery({
@@ -222,6 +247,8 @@ export function useCoreQueries(c: any) {
     tasks,
     taskLookup,
     notes,
+    taskGroups,
+    noteGroups,
     searchNotes,
     taskNotes,
     projectTags,

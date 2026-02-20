@@ -15,6 +15,8 @@ from sqlalchemy.orm import Session
 from .contracts import (
     NoteCommandState,
     NoteDTO,
+    NoteGroupCommandState,
+    NoteGroupDTO,
     NotificationDTO,
     ProjectRuleCommandState,
     ProjectRuleDTO,
@@ -22,8 +24,10 @@ from .contracts import (
     SpecificationDTO,
     TaskCommandState,
     TaskDTO,
+    TaskGroupCommandState,
+    TaskGroupDTO,
 )
-from .models import Note, Notification, Project, ProjectRule, SavedView, Specification, StoredEvent, Task
+from .models import Note, NoteGroup, Notification, Project, ProjectRule, SavedView, Specification, StoredEvent, Task, TaskGroup
 from .settings import DEFAULT_STATUSES
 from .vector_store import project_embedding_index_status
 
@@ -94,6 +98,7 @@ def serialize_task(task: Task, created_by: str = "") -> dict[str, Any]:
         id=task.id,
         workspace_id=task.workspace_id,
         project_id=task.project_id,
+        task_group_id=task.task_group_id,
         specification_id=task.specification_id,
         title=task.title,
         description=task.description,
@@ -129,6 +134,7 @@ def serialize_note(note: Note) -> dict[str, Any]:
         id=note.id,
         workspace_id=note.workspace_id,
         project_id=note.project_id,
+        note_group_id=note.note_group_id,
         task_id=note.task_id,
         specification_id=note.specification_id,
         title=note.title,
@@ -157,6 +163,36 @@ def serialize_notification(notification: Notification) -> dict[str, Any]:
         task_id=notification.task_id,
         note_id=notification.note_id,
         specification_id=notification.specification_id,
+    )
+    return asdict(dto)
+
+
+def serialize_task_group(group: TaskGroup) -> dict[str, Any]:
+    dto = TaskGroupDTO(
+        id=group.id,
+        workspace_id=group.workspace_id,
+        project_id=group.project_id,
+        name=group.name,
+        description=group.description or "",
+        color=group.color,
+        order_index=int(group.order_index or 0),
+        created_at=to_iso_utc(group.created_at),
+        updated_at=to_iso_utc(group.updated_at),
+    )
+    return asdict(dto)
+
+
+def serialize_note_group(group: NoteGroup) -> dict[str, Any]:
+    dto = NoteGroupDTO(
+        id=group.id,
+        workspace_id=group.workspace_id,
+        project_id=group.project_id,
+        name=group.name,
+        description=group.description or "",
+        color=group.color,
+        order_index=int(group.order_index or 0),
+        created_at=to_iso_utc(group.created_at),
+        updated_at=to_iso_utc(group.updated_at),
     )
     return asdict(dto)
 
@@ -208,6 +244,7 @@ def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
             "id": task_id,
             "workspace_id": state.get("workspace_id"),
             "project_id": state.get("project_id"),
+            "task_group_id": state.get("task_group_id"),
             "specification_id": state.get("specification_id"),
             "title": state.get("title"),
             "description": state.get("description", ""),
@@ -253,6 +290,7 @@ def load_note_view(db: Session, note_id: str) -> dict[str, Any] | None:
             "id": note_id,
             "workspace_id": state.get("workspace_id"),
             "project_id": state.get("project_id"),
+            "note_group_id": state.get("note_group_id"),
             "task_id": state.get("task_id"),
             "specification_id": state.get("specification_id"),
             "title": state.get("title") or "",
@@ -285,6 +323,7 @@ def load_task_command_state(db: Session, task_id: str) -> TaskCommandState | Non
             id=task.id,
             workspace_id=task.workspace_id,
             project_id=task.project_id,
+            task_group_id=task.task_group_id,
             specification_id=task.specification_id,
             status=task.status,
             archived=task.archived,
@@ -298,6 +337,7 @@ def load_task_command_state(db: Session, task_id: str) -> TaskCommandState | Non
         id=task_id,
         workspace_id=state.get("workspace_id", ""),
         project_id=state.get("project_id"),
+        task_group_id=state.get("task_group_id"),
         specification_id=state.get("specification_id"),
         status=state.get("status", "To do"),
         archived=bool(state.get("archived", False)),
@@ -316,6 +356,7 @@ def load_note_command_state(db: Session, note_id: str) -> NoteCommandState | Non
             id=note.id,
             workspace_id=note.workspace_id,
             project_id=note.project_id,
+            note_group_id=note.note_group_id,
             task_id=note.task_id,
             specification_id=note.specification_id,
             pinned=bool(note.pinned),
@@ -330,10 +371,111 @@ def load_note_command_state(db: Session, note_id: str) -> NoteCommandState | Non
         id=note_id,
         workspace_id=state.get("workspace_id", ""),
         project_id=state.get("project_id"),
+        note_group_id=state.get("note_group_id"),
         task_id=state.get("task_id"),
         specification_id=state.get("specification_id"),
         pinned=bool(state.get("pinned", False)),
         archived=bool(state.get("archived", False)),
+        is_deleted=bool(state.get("is_deleted", False)),
+    )
+
+
+def load_task_group_view(db: Session, group_id: str) -> dict[str, Any] | None:
+    from .eventing import get_kurrent_client, rebuild_state
+
+    if get_kurrent_client() is not None:
+        state, _ = rebuild_state(db, "TaskGroup", group_id)
+        if not state or state.get("is_deleted"):
+            return None
+        return {
+            "id": group_id,
+            "workspace_id": state.get("workspace_id"),
+            "project_id": state.get("project_id"),
+            "name": state.get("name", ""),
+            "description": state.get("description", ""),
+            "color": state.get("color"),
+            "order_index": int(state.get("order_index", 0)),
+            "created_at": None,
+            "updated_at": None,
+        }
+
+    group = db.get(TaskGroup, group_id)
+    if group and not group.is_deleted:
+        return serialize_task_group(group)
+    return None
+
+
+def load_note_group_view(db: Session, group_id: str) -> dict[str, Any] | None:
+    from .eventing import get_kurrent_client, rebuild_state
+
+    if get_kurrent_client() is not None:
+        state, _ = rebuild_state(db, "NoteGroup", group_id)
+        if not state or state.get("is_deleted"):
+            return None
+        return {
+            "id": group_id,
+            "workspace_id": state.get("workspace_id"),
+            "project_id": state.get("project_id"),
+            "name": state.get("name", ""),
+            "description": state.get("description", ""),
+            "color": state.get("color"),
+            "order_index": int(state.get("order_index", 0)),
+            "created_at": None,
+            "updated_at": None,
+        }
+
+    group = db.get(NoteGroup, group_id)
+    if group and not group.is_deleted:
+        return serialize_note_group(group)
+    return None
+
+
+def load_task_group_command_state(db: Session, group_id: str) -> TaskGroupCommandState | None:
+    from .eventing import get_kurrent_client, rebuild_state
+
+    if get_kurrent_client() is None:
+        group = db.get(TaskGroup, group_id)
+        if not group:
+            return None
+        return TaskGroupCommandState(
+            id=group.id,
+            workspace_id=group.workspace_id,
+            project_id=group.project_id,
+            is_deleted=bool(group.is_deleted),
+        )
+
+    state, _ = rebuild_state(db, "TaskGroup", group_id)
+    if not state:
+        return None
+    return TaskGroupCommandState(
+        id=group_id,
+        workspace_id=state.get("workspace_id", ""),
+        project_id=state.get("project_id", ""),
+        is_deleted=bool(state.get("is_deleted", False)),
+    )
+
+
+def load_note_group_command_state(db: Session, group_id: str) -> NoteGroupCommandState | None:
+    from .eventing import get_kurrent_client, rebuild_state
+
+    if get_kurrent_client() is None:
+        group = db.get(NoteGroup, group_id)
+        if not group:
+            return None
+        return NoteGroupCommandState(
+            id=group.id,
+            workspace_id=group.workspace_id,
+            project_id=group.project_id,
+            is_deleted=bool(group.is_deleted),
+        )
+
+    state, _ = rebuild_state(db, "NoteGroup", group_id)
+    if not state:
+        return None
+    return NoteGroupCommandState(
+        id=group_id,
+        workspace_id=state.get("workspace_id", ""),
+        project_id=state.get("project_id", ""),
         is_deleted=bool(state.get("is_deleted", False)),
     )
 

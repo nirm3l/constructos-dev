@@ -1,5 +1,17 @@
 import { useMutation } from '@tanstack/react-query'
-import { archiveNote, createNote, deleteNote, pinNote, restoreNote, unpinNote } from '../../api'
+import {
+  archiveNote,
+  createNote,
+  createNoteGroup,
+  deleteNote,
+  deleteNoteGroup,
+  patchNote,
+  patchNoteGroup,
+  pinNote,
+  reorderNoteGroups,
+  restoreNote,
+  unpinNote,
+} from '../../api'
 import { toErrorMessage } from '../../utils/ui'
 
 export function useNoteMutations(c: any) {
@@ -16,6 +28,7 @@ export function useNoteMutations(c: any) {
       title?: string
       body?: string
       project_id?: string
+      note_group_id?: string | null
       task_id?: string | null
       specification_id?: string | null
     }) =>
@@ -23,6 +36,7 @@ export function useNoteMutations(c: any) {
         title: payload?.title?.trim() || 'Untitled',
         workspace_id: c.workspaceId,
         project_id: payload?.project_id || c.selectedProjectId,
+        note_group_id: payload?.note_group_id ?? null,
         task_id: payload?.task_id ?? null,
         specification_id: payload?.specification_id ?? null,
         body: payload?.body ?? '',
@@ -92,6 +106,93 @@ export function useNoteMutations(c: any) {
     onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Delete note failed')
   })
 
+  const createNoteGroupMutation = useMutation({
+    mutationFn: (payload: { name: string; description?: string; color?: string | null }) => {
+      const name = String(payload?.name || '').trim()
+      if (!name) throw new Error('Note group name is required')
+      if (!c.workspaceId || !c.selectedProjectId) throw new Error('Select a project first')
+      return createNoteGroup(c.userId, {
+        workspace_id: c.workspaceId,
+        project_id: c.selectedProjectId,
+        name,
+        description: payload?.description ?? '',
+        color: payload?.color ?? null,
+      })
+    },
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.qc.invalidateQueries({ queryKey: ['note-groups'] })
+      await c.qc.invalidateQueries({ queryKey: ['notes'] })
+      await c.qc.invalidateQueries({ queryKey: ['task-notes'] })
+    },
+    onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Note group create failed'),
+  })
+
+  const patchNoteGroupMutation = useMutation({
+    mutationFn: (payload: {
+      noteGroupId: string
+      name?: string
+      description?: string
+      color?: string | null
+    }) => {
+      const body: { name?: string; description?: string; color?: string | null } = {}
+      if (payload.name !== undefined) {
+        const name = String(payload.name).trim()
+        if (!name) throw new Error('Note group name is required')
+        body.name = name
+      }
+      if (payload.description !== undefined) body.description = payload.description
+      if (payload.color !== undefined) body.color = payload.color
+      return patchNoteGroup(c.userId, payload.noteGroupId, body)
+    },
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.qc.invalidateQueries({ queryKey: ['note-groups'] })
+      await c.qc.invalidateQueries({ queryKey: ['notes'] })
+      await c.qc.invalidateQueries({ queryKey: ['task-notes'] })
+    },
+    onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Note group update failed'),
+  })
+
+  const deleteNoteGroupMutation = useMutation({
+    mutationFn: (noteGroupId: string) => deleteNoteGroup(c.userId, noteGroupId),
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.qc.invalidateQueries({ queryKey: ['note-groups'] })
+      await c.qc.invalidateQueries({ queryKey: ['notes'] })
+      await c.qc.invalidateQueries({ queryKey: ['task-notes'] })
+    },
+    onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Note group delete failed'),
+  })
+
+  const reorderNoteGroupsMutation = useMutation({
+    mutationFn: (orderedIds: string[]) => {
+      if (!c.workspaceId || !c.selectedProjectId) throw new Error('Select a project first')
+      return reorderNoteGroups(c.userId, c.workspaceId, c.selectedProjectId, orderedIds)
+    },
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.qc.invalidateQueries({ queryKey: ['note-groups'] })
+      await c.qc.invalidateQueries({ queryKey: ['notes'] })
+      await c.qc.invalidateQueries({ queryKey: ['task-notes'] })
+    },
+    onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Note group reorder failed'),
+  })
+
+  const moveNoteToGroupMutation = useMutation({
+    mutationFn: (payload: { noteId: string; note_group_id: string | null }) =>
+      patchNote(c.userId, payload.noteId, { note_group_id: payload.note_group_id }),
+    onSuccess: async (note, payload) => {
+      c.setUiError(null)
+      if (c.selectedNoteId === payload.noteId) {
+        c.setEditNoteGroupId(payload.note_group_id || '')
+      }
+      await c.qc.invalidateQueries({ queryKey: ['notes'] })
+      await c.qc.invalidateQueries({ queryKey: ['task-notes'] })
+    },
+    onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Note move failed'),
+  })
+
   return {
     saveNoteMutation,
     createNoteMutation,
@@ -100,5 +201,10 @@ export function useNoteMutations(c: any) {
     archiveNoteMutation,
     restoreNoteMutation,
     deleteNoteMutation,
+    createNoteGroupMutation,
+    patchNoteGroupMutation,
+    deleteNoteGroupMutation,
+    reorderNoteGroupsMutation,
+    moveNoteToGroupMutation,
   }
 }

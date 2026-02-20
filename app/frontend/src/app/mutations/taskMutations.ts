@@ -1,5 +1,16 @@
 import { useMutation } from '@tanstack/react-query'
-import { archiveTask, completeTask, createTask, reopenTask, restoreTask, runTaskWithCodex } from '../../api'
+import {
+  archiveTask,
+  completeTask,
+  createTask,
+  createTaskGroup,
+  deleteTaskGroup,
+  patchTaskGroup,
+  reorderTaskGroups,
+  reopenTask,
+  restoreTask,
+  runTaskWithCodex,
+} from '../../api'
 
 export function useTaskMutations(c: any) {
   const saveTaskMutation = useMutation({
@@ -20,6 +31,7 @@ export function useTaskMutations(c: any) {
       title?: string
       description?: string
       project_id?: string
+      task_group_id?: string | null
       due_date?: string | null
       labels?: string[]
       open_task?: boolean
@@ -28,6 +40,7 @@ export function useTaskMutations(c: any) {
         title: payload?.title?.trim() || c.taskTitle.trim(),
         workspace_id: c.workspaceId,
         project_id: payload?.project_id || c.quickProjectId || c.selectedProjectId,
+        task_group_id: payload?.task_group_id ?? null,
         description: payload?.description ?? '',
         due_date:
           payload?.due_date !== undefined
@@ -109,6 +122,79 @@ export function useTaskMutations(c: any) {
     onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Codex run failed')
   })
 
+  const createTaskGroupMutation = useMutation({
+    mutationFn: (payload: { name: string; description?: string; color?: string | null }) => {
+      const name = String(payload?.name || '').trim()
+      if (!name) throw new Error('Task group name is required')
+      if (!c.workspaceId || !c.selectedProjectId) throw new Error('Select a project first')
+      return createTaskGroup(c.userId, {
+        workspace_id: c.workspaceId,
+        project_id: c.selectedProjectId,
+        name,
+        description: payload?.description ?? '',
+        color: payload?.color ?? null,
+      })
+    },
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.qc.invalidateQueries({ queryKey: ['task-groups'] })
+      await c.qc.invalidateQueries({ queryKey: ['tasks'] })
+      await c.qc.invalidateQueries({ queryKey: ['board'] })
+    },
+    onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Task group create failed'),
+  })
+
+  const patchTaskGroupMutation = useMutation({
+    mutationFn: (payload: {
+      taskGroupId: string
+      name?: string
+      description?: string
+      color?: string | null
+    }) => {
+      const body: { name?: string; description?: string; color?: string | null } = {}
+      if (payload.name !== undefined) {
+        const name = String(payload.name).trim()
+        if (!name) throw new Error('Task group name is required')
+        body.name = name
+      }
+      if (payload.description !== undefined) body.description = payload.description
+      if (payload.color !== undefined) body.color = payload.color
+      return patchTaskGroup(c.userId, payload.taskGroupId, body)
+    },
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.qc.invalidateQueries({ queryKey: ['task-groups'] })
+      await c.qc.invalidateQueries({ queryKey: ['tasks'] })
+      await c.qc.invalidateQueries({ queryKey: ['board'] })
+    },
+    onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Task group update failed'),
+  })
+
+  const deleteTaskGroupMutation = useMutation({
+    mutationFn: (taskGroupId: string) => deleteTaskGroup(c.userId, taskGroupId),
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.qc.invalidateQueries({ queryKey: ['task-groups'] })
+      await c.qc.invalidateQueries({ queryKey: ['tasks'] })
+      await c.qc.invalidateQueries({ queryKey: ['board'] })
+    },
+    onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Task group delete failed'),
+  })
+
+  const reorderTaskGroupsMutation = useMutation({
+    mutationFn: (orderedIds: string[]) => {
+      if (!c.workspaceId || !c.selectedProjectId) throw new Error('Select a project first')
+      return reorderTaskGroups(c.userId, c.workspaceId, c.selectedProjectId, orderedIds)
+    },
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.qc.invalidateQueries({ queryKey: ['task-groups'] })
+      await c.qc.invalidateQueries({ queryKey: ['tasks'] })
+      await c.qc.invalidateQueries({ queryKey: ['board'] })
+    },
+    onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Task group reorder failed'),
+  })
+
   return {
     saveTaskMutation,
     createTaskMutation,
@@ -117,5 +203,9 @@ export function useTaskMutations(c: any) {
     archiveTaskMutation,
     restoreTaskMutation,
     runAutomationMutation,
+    createTaskGroupMutation,
+    patchTaskGroupMutation,
+    deleteTaskGroupMutation,
+    reorderTaskGroupsMutation,
   }
 }

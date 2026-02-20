@@ -7,6 +7,7 @@ export function useTaskEditorState() {
   const [editPriority, setEditPriority] = React.useState('Med')
   const [editDueDate, setEditDueDate] = React.useState('')
   const [editProjectId, setEditProjectId] = React.useState('')
+  const [editTaskGroupId, setEditTaskGroupId] = React.useState('')
   const [editTaskTags, setEditTaskTags] = React.useState<string[]>([])
   const [editTaskExternalRefsText, setEditTaskExternalRefsText] = React.useState('')
   const [editTaskAttachmentRefsText, setEditTaskAttachmentRefsText] = React.useState('')
@@ -30,7 +31,7 @@ export function useTaskEditorState() {
 
   return {
     editStatus, setEditStatus, editTitle, setEditTitle, editDescription, setEditDescription, editPriority, setEditPriority,
-    editDueDate, setEditDueDate, editProjectId, setEditProjectId, editTaskTags, setEditTaskTags, editTaskExternalRefsText,
+    editDueDate, setEditDueDate, editProjectId, setEditProjectId, editTaskGroupId, setEditTaskGroupId, editTaskTags, setEditTaskTags, editTaskExternalRefsText,
     setEditTaskExternalRefsText, editTaskAttachmentRefsText, setEditTaskAttachmentRefsText, showTaskTagPicker,
     setShowTaskTagPicker, taskTagPickerQuery, setTaskTagPickerQuery, editTaskType, setEditTaskType, editScheduledAtUtc,
     setEditScheduledAtUtc, editScheduleTimezone, setEditScheduleTimezone, editScheduledInstruction, setEditScheduledInstruction,

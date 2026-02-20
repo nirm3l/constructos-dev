@@ -23,7 +23,10 @@ export function useAppActions(c: any) {
     await c.qc.invalidateQueries({ queryKey: ['tasks'] })
     await c.qc.invalidateQueries({ queryKey: ['task-lookup'] })
     await c.qc.invalidateQueries({ queryKey: ['task-notes'] })
+    await c.qc.invalidateQueries({ queryKey: ['task-groups'] })
     await c.qc.invalidateQueries({ queryKey: ['notes'] })
+    await c.qc.invalidateQueries({ queryKey: ['search-notes'] })
+    await c.qc.invalidateQueries({ queryKey: ['note-groups'] })
     await c.qc.invalidateQueries({ queryKey: ['project-tags'] })
     await c.qc.invalidateQueries({ queryKey: ['board'] })
     await c.qc.invalidateQueries({ queryKey: ['bootstrap'] })
@@ -36,10 +39,17 @@ export function useAppActions(c: any) {
   }, [c.qc])
 
   const moveTaskToStatus = React.useCallback(
-    (taskId: string, nextStatus: string) => {
-      patchTask(c.userId, taskId, { status: nextStatus }).then(() => invalidateAll())
+    (taskId: string, nextStatus: string, nextTaskGroupId?: string | null) => {
+      const payload: { status: string; task_group_id?: string | null } = { status: nextStatus }
+      if (nextTaskGroupId !== undefined) payload.task_group_id = nextTaskGroupId
+      patchTask(c.userId, taskId, payload)
+        .then(() => {
+          c.setUiError(null)
+          return invalidateAll()
+        })
+        .catch((err) => c.setUiError(toErrorMessage(err, 'Task move failed')))
     },
-    [c.userId, invalidateAll]
+    [c.setUiError, c.userId, invalidateAll]
   )
 
   const uploadAttachmentRef = React.useCallback(
@@ -199,6 +209,7 @@ export function useAppActions(c: any) {
     const payload = {
       title: c.editNoteTitle.trim() || 'Untitled',
       body: c.editNoteBody,
+      note_group_id: c.editNoteGroupId || null,
       tags: parseCommaTags(c.editNoteTags),
       external_refs: c.parseExternalRefsText(c.editNoteExternalRefsText),
       attachment_refs: c.parseAttachmentRefsText(c.editNoteAttachmentRefsText),
@@ -211,6 +222,7 @@ export function useAppActions(c: any) {
     c.editNoteAttachmentRefsText,
     c.editNoteBody,
     c.editNoteExternalRefsText,
+    c.editNoteGroupId,
     c.editNoteTags,
     c.editNoteTitle,
     c.parseAttachmentRefsText,
@@ -232,6 +244,7 @@ export function useAppActions(c: any) {
       status: c.editStatus,
       priority: c.editPriority,
       project_id: c.editProjectId || c.selectedTask?.project_id,
+      task_group_id: c.editTaskGroupId || null,
       labels: c.editTaskTags,
       external_refs: c.parseExternalRefsText(c.editTaskExternalRefsText),
       attachment_refs: c.parseAttachmentRefsText(c.editTaskAttachmentRefsText),
@@ -248,6 +261,7 @@ export function useAppActions(c: any) {
     c.editDueDate,
     c.editPriority,
     c.editProjectId,
+    c.editTaskGroupId,
     c.editRecurringEvery,
     c.editRecurringUnit,
     c.editScheduledAtUtc,

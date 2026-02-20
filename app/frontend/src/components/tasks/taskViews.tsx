@@ -1,4 +1,5 @@
 import React from 'react'
+import { createPortal } from 'react-dom'
 import type { Task } from '../../types'
 import type { Tab } from '../../utils/ui'
 import { priorityTone, tagHue } from '../../utils/ui'
@@ -8,6 +9,35 @@ export function taskDescriptionPreview(description: string | null | undefined): 
   return String(description ?? '')
     .replace(/\s+/g, ' ')
     .trim()
+}
+
+function formatScheduleTrigger(iso: string | null | undefined): string {
+  if (!iso) return 'At: not set'
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return `At: ${String(iso)}`
+  try {
+    return `At: ${new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)}`
+  } catch {
+    return `At: ${date.toLocaleString()}`
+  }
+}
+
+function formatRecurringRuleCompact(recurringRule: string | null | undefined): string {
+  const raw = String(recurringRule ?? '').trim()
+  if (!raw) return 'Repeat: once'
+  const parsed = raw.match(/^every:(\d+)([mhd])$/i)
+  if (!parsed) return `Repeat: ${raw}`
+  const amount = Number(parsed[1] ?? '0')
+  const unit = String(parsed[2] ?? '').toLowerCase()
+  if (unit === 'm') return `Repeat: every ${amount}m`
+  if (unit === 'h') return `Repeat: every ${amount}h`
+  return `Repeat: every ${amount}d`
+}
+
+function formatScheduleState(state: Task['schedule_state'] | null | undefined): string {
+  const raw = String(state ?? '').trim()
+  if (!raw) return 'State: Unknown'
+  return `State: ${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
 }
 
 export function TaskListItem({
@@ -32,17 +62,37 @@ export function TaskListItem({
   specificationName?: string
 }) {
   const descriptionPreviewText = taskDescriptionPreview(task.description)
+  const isScheduled = task.task_type === 'scheduled_instruction'
+  const scheduleTrigger = formatScheduleTrigger(task.scheduled_at_utc)
+  const scheduleRepeat = formatRecurringRuleCompact(task.recurring_rule)
+  const scheduleState = formatScheduleState(task.schedule_state)
 
   return (
-    <div key={task.id} className={`task-item ${task.task_type === 'scheduled_instruction' ? 'scheduled' : ''}`}>
+    <div key={task.id} className={`task-item ${isScheduled ? 'scheduled' : ''}`}>
       <div className="task-main" role="button" onClick={() => onOpen(task.id)}>
         <div className="task-title">
           <strong>{task.title}</strong>
+          {isScheduled && <span className="task-kind-pill">Scheduled</span>}
         </div>
         {descriptionPreviewText && (
           <p className="task-desc-preview" title={descriptionPreviewText}>
             {descriptionPreviewText}
           </p>
+        )}
+        {isScheduled && (
+          <div className="task-schedule-compact">
+            <span className="task-schedule-chip task-schedule-chip-primary" title={scheduleTrigger}>
+              <Icon path="M12 8v5l3 2m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0" />
+              <span>{scheduleTrigger}</span>
+            </span>
+            <span className="task-schedule-chip" title={scheduleRepeat}>
+              <Icon path="M21 12a9 9 0 0 1-9 9m0 0-4-4m4 4v-4m-9-5a9 9 0 0 1 9-9m0 0 4 4m-4-4v4" />
+              <span>{scheduleRepeat}</span>
+            </span>
+            <span className={`task-schedule-chip task-schedule-state task-schedule-state-${task.schedule_state}`} title={scheduleState}>
+              {scheduleState}
+            </span>
+          </div>
         )}
         <span className="meta">
           {task.status} | {task.due_date ? new Date(task.due_date).toLocaleString() : 'No due date'}
@@ -81,21 +131,10 @@ export function TaskListItem({
             </button>
           </div>
         )}
-        {task.task_type === 'scheduled_instruction' && (
-          <span className="meta">
-            Scheduled {task.scheduled_at_utc ? `for ${new Date(task.scheduled_at_utc).toLocaleString()}` : 'time not set'} (
-            {task.schedule_state})
-          </span>
-        )}
         <div className="task-badges">
           <span className={`prio prio-${priorityTone(task.priority)}`} title={`Priority: ${task.priority}`}>
             {task.priority}
           </span>
-          {task.task_type === 'scheduled_instruction' && (
-            <span className={`badge ${task.schedule_state === 'done' ? 'done' : ''}`} title="Scheduled task">
-              Scheduled
-            </span>
-          )}
         </div>
       </div>
       {task.archived ? (
@@ -122,8 +161,14 @@ export function BottomTabs({
   tab: Tab
   onSelectTab: (tab: Tab) => void
 }) {
-  return (
-    <nav className="bottom-tabs">
+  const [portalTarget, setPortalTarget] = React.useState<HTMLElement | null>(null)
+
+  React.useEffect(() => {
+    setPortalTarget(document.body)
+  }, [])
+
+  const nav = (
+    <nav className="bottom-tabs" style={{ position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 1200 }}>
       <button className={tab === 'today' ? 'primary' : ''} onClick={() => onSelectTab('today')} title="Today" aria-label="Today">
         <Icon path="M8 3v4M16 3v4M4 10h16M4 5h16v15H4z" />
         <span className="tab-label">Today</span>
@@ -142,4 +187,7 @@ export function BottomTabs({
       </button>
     </nav>
   )
+
+  if (!portalTarget) return nav
+  return createPortal(nav, portalTarget)
 }

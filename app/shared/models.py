@@ -98,11 +98,26 @@ class ProjectTemplateBinding(Base, TimeMixin):
     parameters_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
+class TaskGroup(Base, TimeMixin):
+    __tablename__ = "task_groups"
+    __table_args__ = (UniqueConstraint("project_id", "name", name="ux_task_groups_project_name"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    description: Mapped[str] = mapped_column(Text, default="")
+    color: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    order_index: Mapped[int] = mapped_column(Integer, default=0)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class Task(Base, TimeMixin):
     __tablename__ = "tasks"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
     project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), nullable=True)
+    task_group_id: Mapped[str | None] = mapped_column(ForeignKey("task_groups.id"), nullable=True, index=True)
     specification_id: Mapped[str | None] = mapped_column(ForeignKey("specifications.id"), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(256))
     description: Mapped[str] = mapped_column(Text, default="")
@@ -151,6 +166,7 @@ class Note(Base, TimeMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), nullable=True, index=True)
+    note_group_id: Mapped[str | None] = mapped_column(ForeignKey("note_groups.id"), nullable=True, index=True)
     task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id"), nullable=True, index=True)
     specification_id: Mapped[str | None] = mapped_column(ForeignKey("specifications.id"), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(256))
@@ -163,6 +179,20 @@ class Note(Base, TimeMixin):
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     updated_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+
+class NoteGroup(Base, TimeMixin):
+    __tablename__ = "note_groups"
+    __table_args__ = (UniqueConstraint("project_id", "name", name="ux_note_groups_project_name"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    description: Mapped[str] = mapped_column(Text, default="")
+    color: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    order_index: Mapped[int] = mapped_column(Integer, default=0)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class ProjectTagIndex(Base, TimeMixin):
