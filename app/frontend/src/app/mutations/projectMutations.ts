@@ -1,6 +1,6 @@
 import { useMutation } from '@tanstack/react-query'
-import { createProject, createProjectFromTemplate, createProjectRule, deleteProject, deleteProjectRule, patchProject, patchProjectRule } from '../../api'
-import { parseProjectEvidenceTopKInput, parseProjectStatusesText, toErrorMessage } from '../../utils/ui'
+import { createProject, createProjectFromTemplate, createProjectRule, deleteProject, deleteProjectRule, patchProject, patchProjectRule, previewProjectFromTemplate } from '../../api'
+import { parseProjectEvidenceTopKInput, parseProjectStatusesText, parseTemplateParametersInput, toErrorMessage } from '../../utils/ui'
 
 export function useProjectMutations(c: any) {
   const saveProjectMutation = useMutation({
@@ -11,12 +11,42 @@ export function useProjectMutations(c: any) {
     onError: (err) => c.setUiError(toErrorMessage(err, 'Project save failed')),
   })
 
+  const previewProjectFromTemplateMutation = useMutation({
+    mutationFn: () => {
+      const normalizedTemplateKey = String(c.projectTemplateKey || '').trim()
+      if (!normalizedTemplateKey) {
+        throw new Error('Select a project template to preview')
+      }
+      const contextPackEvidenceTopK = parseProjectEvidenceTopKInput(c.projectContextPackEvidenceTopKText)
+      const hasCustomStatuses = Boolean(String(c.projectCustomStatusesText || '').trim())
+      const customStatuses = hasCustomStatuses ? parseProjectStatusesText(c.projectCustomStatusesText) : undefined
+      const parameters = parseTemplateParametersInput(c.projectTemplateParametersText)
+      return previewProjectFromTemplate(c.userId, {
+        workspace_id: c.workspaceId,
+        template_key: normalizedTemplateKey,
+        name: c.projectName.trim(),
+        description: c.projectDescription,
+        custom_statuses: customStatuses,
+        member_user_ids: Array.from(new Set(c.createProjectMemberIds)),
+        embedding_enabled: Boolean(c.projectEmbeddingEnabled),
+        embedding_model: String(c.projectEmbeddingModel || '').trim() || null,
+        context_pack_evidence_top_k: contextPackEvidenceTopK,
+        parameters,
+      })
+    },
+    onSuccess: () => {
+      c.setUiError(null)
+    },
+    onError: (err) => c.setUiError(toErrorMessage(err, 'Template preview failed'))
+  })
+
   const createProjectMutation = useMutation({
     mutationFn: () => {
       const contextPackEvidenceTopK = parseProjectEvidenceTopKInput(c.projectContextPackEvidenceTopKText)
       const normalizedTemplateKey = String(c.projectTemplateKey || '').trim()
       const hasCustomStatuses = Boolean(String(c.projectCustomStatusesText || '').trim())
       const customStatuses = hasCustomStatuses ? parseProjectStatusesText(c.projectCustomStatusesText) : undefined
+      const parameters = parseTemplateParametersInput(c.projectTemplateParametersText)
       if (normalizedTemplateKey) {
         return createProjectFromTemplate(c.userId, {
           workspace_id: c.workspaceId,
@@ -28,6 +58,7 @@ export function useProjectMutations(c: any) {
           embedding_enabled: Boolean(c.projectEmbeddingEnabled),
           embedding_model: String(c.projectEmbeddingModel || '').trim() || null,
           context_pack_evidence_top_k: contextPackEvidenceTopK,
+          parameters,
         })
       }
       return createProject(c.userId, {
@@ -85,6 +116,7 @@ export function useProjectMutations(c: any) {
       c.setProjectEmbeddingEnabled(false)
       c.setProjectEmbeddingModel('')
       c.setProjectContextPackEvidenceTopKText('')
+      c.setProjectTemplateParametersText('')
       c.setProjectDescriptionView('write')
       c.setCreateProjectMemberIds([])
       c.setDraftProjectRules([])
@@ -93,6 +125,7 @@ export function useProjectMutations(c: any) {
       c.setDraftProjectRuleBody('')
       c.setDraftProjectRuleView('write')
       c.setShowProjectCreateForm(false)
+      previewProjectFromTemplateMutation.reset()
       await c.invalidateAll()
     },
     onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Project create failed')
@@ -150,6 +183,7 @@ export function useProjectMutations(c: any) {
 
   return {
     saveProjectMutation,
+    previewProjectFromTemplateMutation,
     createProjectMutation,
     deleteProjectMutation,
     createProjectRuleMutation,

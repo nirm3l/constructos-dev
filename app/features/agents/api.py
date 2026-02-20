@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import json
 import logging
 import mimetypes
 import os
+import queue
 from pathlib import Path
+import threading
 import zipfile
 import xml.etree.ElementTree as ET
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from shared.core import AgentChatRun, User, ensure_project_access, ensure_role, get_current_user, get_db
@@ -18,7 +22,7 @@ from shared.settings import (
     AGENT_EXECUTOR_TIMEOUT_SECONDS,
 )
 
-from .executor import execute_task_automation
+from .executor import execute_task_automation, execute_task_automation_stream
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -380,13 +384,12 @@ def _maybe_compact_history(
     return [compact_turn, *tail], True
 
 
-@router.post("/api/agents/chat")
-def agent_chat(
+def _prepare_chat_instruction(
+    *,
     payload: AgentChatRun,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    db: Session,
+    user: User,
+) -> tuple[str, list[dict[str, str]], bool]:
     raw_instruction = (payload.instruction or "").strip()
     force_compact, instruction = _parse_compact_command(raw_instruction)
     if not raw_instruction:
@@ -409,21 +412,35 @@ def agent_chat(
             summary = "Chat history compacted."
         else:
             summary = "Chat history compaction skipped."
-        return {
-            "ok": True,
-            "action": "comment",
-            "summary": summary,
-            "comment": None,
-            "session_id": payload.session_id,
-            "usage": None,
-        }
+        return summary, compacted_history, True
     if not instruction:
         raise HTTPException(status_code=400, detail="instruction is required")
+
     attachment_context = _build_attachment_context(payload=payload, db=db, user=user)
     instruction_with_context = instruction
     if attachment_context:
         instruction_with_context = f"{instruction}\n\n{attachment_context}"
     effective_instruction = _compose_chat_instruction(instruction_with_context, compacted_history)
+    return effective_instruction, compacted_history, False
+
+
+@router.post("/api/agents/chat")
+def agent_chat(
+    payload: AgentChatRun,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    effective_instruction, _, compact_only = _prepare_chat_instruction(payload=payload, db=db, user=user)
+    if compact_only:
+        return {
+            "ok": True,
+            "action": "comment",
+            "summary": effective_instruction,
+            "comment": None,
+            "session_id": payload.session_id,
+            "usage": None,
+        }
 
     description = f"General Codex chat context. workspace_id={payload.workspace_id}; project_id={payload.project_id or ''}"
     try:
@@ -465,3 +482,91 @@ def agent_chat(
             "session_id": payload.session_id,
             "usage": None,
         }
+
+
+@router.post("/api/agents/chat/stream")
+def agent_chat_stream(
+    payload: AgentChatRun,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    effective_instruction, _, compact_only = _prepare_chat_instruction(payload=payload, db=db, user=user)
+    if compact_only:
+        compact_response = {
+            "ok": True,
+            "action": "comment",
+            "summary": effective_instruction,
+            "comment": None,
+            "session_id": payload.session_id,
+            "usage": None,
+        }
+
+        def _compact_stream():
+            yield json.dumps({"type": "final", "response": compact_response}, ensure_ascii=True) + "\n"
+
+        return StreamingResponse(_compact_stream(), media_type="application/x-ndjson")
+
+    description = f"General Codex chat context. workspace_id={payload.workspace_id}; project_id={payload.project_id or ''}"
+
+    def _stream() -> object:
+        event_queue: queue.Queue[dict[str, object] | None] = queue.Queue()
+
+        def _on_event(event: dict[str, object]) -> None:
+            event_queue.put(event)
+
+        def _worker() -> None:
+            try:
+                outcome = execute_task_automation_stream(
+                    task_id="",
+                    title="General Codex Chat",
+                    description=description,
+                    status="To do",
+                    instruction=effective_instruction,
+                    workspace_id=payload.workspace_id,
+                    project_id=payload.project_id,
+                    allow_mutations=bool(payload.allow_mutations),
+                    on_event=_on_event,
+                )
+                final_payload = {
+                    "ok": True,
+                    "action": outcome.action,
+                    "summary": outcome.summary,
+                    "comment": outcome.comment,
+                    "session_id": payload.session_id,
+                    "usage": outcome.usage,
+                }
+                event_queue.put({"type": "final", "response": final_payload})
+            except TimeoutError:
+                timeout_payload = {
+                    "ok": False,
+                    "action": "comment",
+                    "summary": f"Codex timed out after {AGENT_EXECUTOR_TIMEOUT_SECONDS:.0f}s.",
+                    "comment": "Try a narrower request (e.g. one project at a time) or run again.",
+                    "session_id": payload.session_id,
+                    "usage": None,
+                }
+                event_queue.put({"type": "final", "response": timeout_payload})
+            except Exception as exc:
+                error_payload = {
+                    "ok": False,
+                    "action": "comment",
+                    "summary": "Codex failed to complete the request.",
+                    "comment": str(exc)[:500],
+                    "session_id": payload.session_id,
+                    "usage": None,
+                }
+                event_queue.put({"type": "final", "response": error_payload})
+            finally:
+                event_queue.put(None)
+
+        worker = threading.Thread(target=_worker, daemon=True)
+        worker.start()
+
+        while True:
+            item = event_queue.get()
+            if item is None:
+                break
+            yield json.dumps(item, ensure_ascii=True) + "\n"
+
+    return StreamingResponse(_stream(), media_type="application/x-ndjson")

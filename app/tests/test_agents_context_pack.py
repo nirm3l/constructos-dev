@@ -111,6 +111,31 @@ def test_codex_prompt_includes_soul_md_section():
     assert "Task A IMPLEMENTS Spec B" in prompt
 
 
+def test_codex_prompt_includes_interactive_project_creation_guidance():
+    from features.agents.codex_mcp_adapter import _build_prompt
+
+    prompt = _build_prompt(
+        {
+            "task_id": "",
+            "title": "General Codex Chat",
+            "description": "chat",
+            "status": "To do",
+            "instruction": "Help me create a new project",
+            "workspace_id": "ws-1",
+            "project_id": "",
+            "project_name": "",
+            "project_description": "",
+            "project_rules": [],
+            "graph_context_markdown": "",
+        }
+    )
+
+    assert "strict interactive setup protocol" in prompt
+    assert "Strict protocol is mandatory" in prompt
+    assert "list_project_templates -> get_project_template -> collect template parameters -> preview_project_from_template" in prompt
+    assert "Never call create_project or create_project_from_template" in prompt
+
+
 def test_codex_usage_extraction_from_json_stream():
     from features.agents.codex_mcp_adapter import _extract_turn_usage
 

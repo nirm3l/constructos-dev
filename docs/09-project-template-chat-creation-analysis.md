@@ -93,3 +93,39 @@ Improve graph consistency by projecting template-binding-related graph updates t
 ## 7. Final Recommendation
 Proceed with chat-driven interactive creation now (Phase 1), then add preview mode and real parameterization in follow-up iterations. This gives immediate product value while keeping architecture changes incremental and safe.
 
+## 8. Implementation Progress (2026-02-20)
+Completed:
+- Added template preview API and application service path:
+  - `POST /api/projects/from-template/preview`
+  - `ProjectTemplateApplicationService.preview_project_from_template(...)`
+- Added MCP tool support for template preview:
+  - `preview_project_from_template`
+- Added frontend preview + confirm flow in project create form:
+  - users can preview template seed plan before create
+  - create is blocked in template mode until preview indicates no name conflict
+- Added chat guidance for interactive project creation in Codex adapter prompt:
+  - explicit template sequence with preview before create
+  - explicit confirmation gate before mutating create calls
+- Added chat UI quick starters for project creation:
+  - Start project setup
+  - Template setup
+  - Manual setup
+- Added one-click chat confirmation action:
+  - Confirm create (sends explicit create confirmation without manual typing)
+- Made template `parameters` operational in seed customization:
+  - DDD template supports:
+    - `domain_name`
+    - `bounded_context_name`
+    - `integration_boundary_name`
+  - Mobile browser game template supports:
+    - `game_name`
+    - `target_device_profile`
+    - `deployment_target`
+    - `release_environment`
+    - `qa_port`
+    - `team_size`
+  - Parameters now affect seed blueprint content (spec/task/rule text and graph node titles) in both preview and create.
+
+Pending follow-up:
+- Expand `parameters` support with richer per-template option schemas and validation hints.
+- Consider emitting a dedicated template-binding graph event to align graph updates with event projection path.

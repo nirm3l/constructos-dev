@@ -22,6 +22,7 @@ import type {
   Project,
   ProjectBoard,
   ProjectMembersPage,
+  ProjectFromTemplatePreviewResponse,
   ProjectFromTemplateResponse,
   ProjectRule,
   ProjectRulesPage,
@@ -395,6 +396,97 @@ export const runAgentChat = (
     body: JSON.stringify(payload)
   })
 
+export async function runAgentChatStream(
+  userId: string,
+  payload: {
+    workspace_id: string
+    instruction: string
+    project_id?: string | null
+    session_id?: string | null
+    history?: Array<{ role: 'user' | 'assistant'; content: string }>
+    attachment_refs?: AttachmentRef[]
+    allow_mutations?: boolean
+  },
+  handlers?: {
+    onAssistantDelta?: (delta: string) => void
+    onStatus?: (message: string) => void
+    onUsage?: (usage: AgentChatResponse['usage']) => void
+  }
+): Promise<AgentChatResponse> {
+  const commandId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
+  const res = await fetch('/api/agents/chat/stream', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Command-Id': commandId,
+    },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    const raw = await res.text()
+    throw new Error(formatApiError(raw, res.status))
+  }
+  if (!res.body) {
+    throw new Error('Chat stream is unavailable')
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let finalResponse: AgentChatResponse | null = null
+
+  const processLine = (line: string) => {
+    const trimmed = line.trim()
+    if (!trimmed) return
+    let event: any
+    try {
+      event = JSON.parse(trimmed)
+    } catch {
+      return
+    }
+    const type = String(event?.type || '').trim()
+    if (type === 'assistant_text') {
+      const delta = String(event?.delta || '')
+      if (delta) handlers?.onAssistantDelta?.(delta)
+      return
+    }
+    if (type === 'status') {
+      const message = String(event?.message || '').trim()
+      if (message) handlers?.onStatus?.(message)
+      return
+    }
+    if (type === 'usage') {
+      handlers?.onUsage?.(event?.usage ?? null)
+      return
+    }
+    if (type === 'final' && event?.response) {
+      finalResponse = event.response as AgentChatResponse
+    }
+  }
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    while (true) {
+      const newlineIdx = buffer.indexOf('\n')
+      if (newlineIdx < 0) break
+      const line = buffer.slice(0, newlineIdx)
+      buffer = buffer.slice(newlineIdx + 1)
+      processLine(line)
+    }
+  }
+
+  if (buffer.trim()) {
+    processLine(buffer)
+  }
+  if (!finalResponse) {
+    throw new Error('Chat stream ended without a final response')
+  }
+  return finalResponse
+}
+
 export const getNotifications = (userId: string) => api<Notification[]>('/api/notifications', userId)
 
 export const markNotificationRead = (userId: string, id: string) =>
@@ -436,6 +528,26 @@ export const createProjectFromTemplate = (
   }
 ) =>
   api<ProjectFromTemplateResponse>('/api/projects/from-template', userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const previewProjectFromTemplate = (
+  userId: string,
+  payload: {
+    workspace_id: string
+    template_key: string
+    name?: string
+    description?: string
+    custom_statuses?: string[]
+    member_user_ids?: string[]
+    embedding_enabled?: boolean
+    embedding_model?: string | null
+    context_pack_evidence_top_k?: number | null
+    parameters?: Record<string, unknown>
+  }
+) =>
+  api<ProjectFromTemplatePreviewResponse>('/api/projects/from-template/preview', userId, {
     method: 'POST',
     body: JSON.stringify(payload),
   })

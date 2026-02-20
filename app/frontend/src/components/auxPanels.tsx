@@ -5,6 +5,13 @@ import { PopularTagFilters } from './shared/PopularTagFilters'
 import { Icon } from './shared/uiHelpers'
 import { TaskListItem } from './tasks/taskViews'
 
+const VOICE_LANG_OPTIONS = [
+  { value: 'bs-BA', label: 'Bosnian (bs-BA)' },
+  { value: 'hr-HR', label: 'Croatian (hr-HR)' },
+  { value: 'sr-RS', label: 'Serbian (sr-RS)' },
+  { value: 'en-US', label: 'English (en-US)' },
+]
+
 export function SearchPanel({
   searchQ,
   setSearchQ,
@@ -92,21 +99,25 @@ export function SearchPanel({
 export function ProfilePanel({
   userName,
   theme,
+  speechLang,
   frontendVersion,
   backendVersion,
   backendBuild,
   deployedAtUtc,
   onLogout,
   onToggleTheme,
+  onChangeSpeechLang,
 }: {
   userName: string
   theme: 'light' | 'dark'
+  speechLang: string
   frontendVersion: string
   backendVersion: string
   backendBuild: string | null
   deployedAtUtc: string | null
   onLogout: () => void
   onToggleTheme: () => void
+  onChangeSpeechLang: (value: string) => void
 }) {
   const nextTheme = theme === 'light' ? 'dark' : 'light'
 
@@ -144,6 +155,20 @@ export function ProfilePanel({
         <div className="profile-fact">
           <dt>Deployed (UTC)</dt>
           <dd>{deployedAtUtc ?? 'unknown'}</dd>
+        </div>
+        <div className="profile-fact">
+          <dt>Voice language</dt>
+          <dd>
+            <select
+              value={speechLang}
+              onChange={(e) => onChangeSpeechLang(e.target.value)}
+              aria-label="Voice recognition language"
+            >
+              {VOICE_LANG_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </dd>
         </div>
       </dl>
 

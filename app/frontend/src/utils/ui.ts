@@ -235,6 +235,21 @@ export function parseProjectEvidenceTopKInput(raw: string): number | null {
   return value
 }
 
+export function parseTemplateParametersInput(raw: string): Record<string, unknown> {
+  const text = String(raw || '').trim()
+  if (!text) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error('Template parameters must be a valid JSON object.')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Template parameters must be a JSON object.')
+  }
+  return parsed as Record<string, unknown>
+}
+
 export function parseExternalRefsText(raw: string): ExternalRef[] {
   return String(raw || '')
     .split('\n')

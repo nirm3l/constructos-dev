@@ -162,6 +162,63 @@ export type ProjectFromTemplateResponse = {
   }
 }
 
+export type ProjectFromTemplatePreviewResponse = {
+  mode: 'preview'
+  template: {
+    key: string
+    name: string
+    version: string
+    description: string
+  }
+  project_blueprint: {
+    workspace_id: string
+    project_id: string | null
+    name: string
+    description: string
+    custom_statuses: string[]
+    member_user_ids: string[]
+    effective_member_user_ids: string[]
+    embedding_enabled: boolean
+    embedding_model: string | null
+    context_pack_evidence_top_k: number | null
+  }
+  binding_preview: {
+    workspace_id: string
+    project_id: string | null
+    template_key: string
+    template_version: string
+    applied_by: string
+    parameters: Record<string, unknown>
+  }
+  seed_summary: {
+    specification_count: number
+    rule_count: number
+    task_count: number
+    graph_node_count: number
+    graph_edge_count: number
+  }
+  seed_blueprint: {
+    specifications: Array<Record<string, unknown>>
+    tasks: Array<Record<string, unknown>>
+    rules: Array<Record<string, unknown>>
+    graph: {
+      nodes: Array<Record<string, unknown>>
+      edges: Array<Record<string, unknown>>
+    }
+  }
+  graph_scaffold_summary: {
+    template_node_id: string
+    template_version_node_id: string
+    project_relation_types: string[]
+    graph_node_count: number
+    graph_edge_count: number
+  }
+  project_conflict: {
+    status: 'none' | 'active' | 'deleted' | 'name_missing' | string
+    can_create: boolean
+  }
+}
+
 export type Task = {
   id: string
   workspace_id: string

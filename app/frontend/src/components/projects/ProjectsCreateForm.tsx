@@ -2,7 +2,7 @@ import React from 'react'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import { ExternalRefEditor, Icon, MarkdownModeToggle } from '../shared/uiHelpers'
 import { externalRefsToText, parseExternalRefsText, removeExternalRefByIndex } from '../../utils/ui'
-import type { ProjectTemplate } from '../../types'
+import type { ProjectFromTemplatePreviewResponse, ProjectTemplate } from '../../types'
 
 export type DraftProjectRule = { id: string; title: string; body: string }
 
@@ -19,6 +19,7 @@ export function ProjectsCreateForm({
   setProjectTemplateKey,
   projectTemplates,
   projectTemplatesLoading,
+  previewProjectFromTemplateMutation,
   createProjectMutation,
   projectCustomStatusesText,
   setProjectCustomStatusesText,
@@ -28,6 +29,8 @@ export function ProjectsCreateForm({
   setProjectEmbeddingModel,
   projectContextPackEvidenceTopKText,
   setProjectContextPackEvidenceTopKText,
+  projectTemplateParametersText,
+  setProjectTemplateParametersText,
   embeddingAllowedModels,
   embeddingDefaultModel,
   vectorStoreEnabled,
@@ -59,6 +62,12 @@ export function ProjectsCreateForm({
   setProjectTemplateKey: React.Dispatch<React.SetStateAction<string>>
   projectTemplates: ProjectTemplate[]
   projectTemplatesLoading: boolean
+  previewProjectFromTemplateMutation: {
+    mutate: () => void
+    data?: ProjectFromTemplatePreviewResponse
+    isPending: boolean
+    reset: () => void
+  }
   createProjectMutation: { mutate: () => void; isPending: boolean }
   projectCustomStatusesText: string
   setProjectCustomStatusesText: React.Dispatch<React.SetStateAction<string>>
@@ -68,6 +77,8 @@ export function ProjectsCreateForm({
   setProjectEmbeddingModel: React.Dispatch<React.SetStateAction<string>>
   projectContextPackEvidenceTopKText: string
   setProjectContextPackEvidenceTopKText: React.Dispatch<React.SetStateAction<string>>
+  projectTemplateParametersText: string
+  setProjectTemplateParametersText: React.Dispatch<React.SetStateAction<string>>
   embeddingAllowedModels: string[]
   embeddingDefaultModel: string
   vectorStoreEnabled: boolean
@@ -118,6 +129,76 @@ export function ProjectsCreateForm({
     () => projectTemplates.find((item) => item.key === projectTemplateKey) ?? null,
     [projectTemplateKey, projectTemplates]
   )
+  const templateMode = Boolean(String(projectTemplateKey || '').trim())
+  const templatePreview = templateMode ? (previewProjectFromTemplateMutation.data ?? null) : null
+  const templatePreviewParametersJson = React.useMemo(() => {
+    if (!templatePreview) return ''
+    const parameters = templatePreview.binding_preview?.parameters ?? {}
+    const entries = Object.entries(parameters)
+    if (entries.length === 0) return ''
+    return JSON.stringify(parameters, null, 2)
+  }, [templatePreview])
+  const previewCanCreate = Boolean(templatePreview?.project_conflict?.can_create)
+  const previewConflictStatus = String(templatePreview?.project_conflict?.status || '').trim()
+  const canPreviewTemplatePlan =
+    templateMode && !previewProjectFromTemplateMutation.isPending && !createProjectMutation.isPending
+  const canCreateProject =
+    Boolean(projectName.trim()) &&
+    !createProjectMutation.isPending &&
+    (!templateMode || previewCanCreate)
+
+  const conflictMessage = React.useMemo(() => {
+    if (!templateMode || !templatePreview) return ''
+    if (previewConflictStatus === 'none') return 'No project name conflict detected.'
+    if (previewConflictStatus === 'active') return 'A project with this name already exists in this workspace.'
+    if (previewConflictStatus === 'deleted') {
+      return 'A deleted project with this name exists; choose another name.'
+    }
+    if (previewConflictStatus === 'name_missing') return 'Enter a project name to validate conflicts.'
+    return `Project conflict status: ${previewConflictStatus}`
+  }, [previewConflictStatus, templateMode, templatePreview])
+
+  const runTemplatePreview = React.useCallback(() => {
+    if (!canPreviewTemplatePlan) return
+    previewProjectFromTemplateMutation.mutate()
+  }, [canPreviewTemplatePlan, previewProjectFromTemplateMutation])
+
+  const runCreate = React.useCallback(() => {
+    if (!projectName.trim() || createProjectMutation.isPending) return
+    if (!templateMode) {
+      createProjectMutation.mutate()
+      return
+    }
+    if (!templatePreview) {
+      runTemplatePreview()
+      return
+    }
+    if (!previewCanCreate) return
+    createProjectMutation.mutate()
+  }, [
+    createProjectMutation,
+    previewCanCreate,
+    projectName,
+    runTemplatePreview,
+    templateMode,
+    templatePreview,
+  ])
+
+  const resetTemplatePreview = previewProjectFromTemplateMutation.reset
+  React.useEffect(() => {
+    resetTemplatePreview()
+  }, [
+    resetTemplatePreview,
+    projectTemplateKey,
+    projectName,
+    projectDescription,
+    projectCustomStatusesText,
+    projectEmbeddingEnabled,
+    projectEmbeddingModel,
+    projectContextPackEvidenceTopKText,
+    projectTemplateParametersText,
+    createProjectMemberIds,
+  ])
 
   return (
     <div style={{ marginBottom: 10 }}>
@@ -128,17 +209,30 @@ export function ProjectsCreateForm({
           onChange={(e) => setProjectName(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
-              const name = projectName.trim()
-              if (!name || createProjectMutation.isPending) return
-              createProjectMutation.mutate()
+              runCreate()
             }
           }}
           placeholder="New project"
         />
+        {templateMode ? (
+          <button
+            type="button"
+            className="status-chip"
+            disabled={!canPreviewTemplatePlan}
+            onClick={runTemplatePreview}
+            title="Preview template creation plan"
+            aria-label="Preview template creation plan"
+          >
+            Preview plan
+          </button>
+        ) : null}
         <button
+          type="button"
           className="primary"
-          disabled={!projectName.trim() || createProjectMutation.isPending}
-          onClick={() => createProjectMutation.mutate()}
+          disabled={!canCreateProject}
+          onClick={runCreate}
+          title={templateMode ? 'Create project from previewed template' : 'Create project'}
+          aria-label={templateMode ? 'Create project from previewed template' : 'Create project'}
         >
           <Icon path="M12 5v14M5 12h14" />
         </button>
@@ -189,6 +283,63 @@ export function ProjectsCreateForm({
           </div>
         )}
       </label>
+      {templateMode ? (
+        <div className="field-control" style={{ marginBottom: 10 }}>
+          <span className="field-label">Template plan preview</span>
+          {previewProjectFromTemplateMutation.isPending ? (
+            <div className="meta">Building preview...</div>
+          ) : !templatePreview ? (
+            <div className="meta">
+              Run preview to validate creation and inspect what will be seeded before creating the project.
+            </div>
+          ) : (
+            <div className="meta">
+              Seed specs: {templatePreview.seed_summary.specification_count}, tasks: {templatePreview.seed_summary.task_count},
+              rules: {templatePreview.seed_summary.rule_count}, graph nodes: {templatePreview.seed_summary.graph_node_count},
+              graph edges: {templatePreview.seed_summary.graph_edge_count}.
+              {' '}
+              {conflictMessage}
+            </div>
+          )}
+          {templatePreview ? (
+            <div className="meta" style={{ marginTop: 6 }}>
+              Resolved statuses: {templatePreview.project_blueprint.custom_statuses.join(', ') || '(none)'}.
+              {' '}
+              Embeddings: {templatePreview.project_blueprint.embedding_enabled ? 'enabled' : 'disabled'}
+              {templatePreview.project_blueprint.embedding_model
+                ? ` (${templatePreview.project_blueprint.embedding_model})`
+                : ''}.
+              {' '}
+              Context top K:{' '}
+              {templatePreview.project_blueprint.context_pack_evidence_top_k == null
+                ? 'default'
+                : templatePreview.project_blueprint.context_pack_evidence_top_k}
+              .
+            </div>
+          ) : null}
+          {templatePreviewParametersJson ? (
+            <div className="meta" style={{ marginTop: 6 }}>
+              Applied parameters:
+              <pre style={{ margin: '6px 0 0', whiteSpace: 'pre-wrap' }}>{templatePreviewParametersJson}</pre>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {templateMode ? (
+        <label className="field-control" style={{ marginBottom: 10 }}>
+          <span className="field-label">Template parameters (JSON, optional)</span>
+          <textarea
+            value={projectTemplateParametersText}
+            onChange={(e) => setProjectTemplateParametersText(e.target.value)}
+            placeholder='{"domain_name":"Order","bounded_context_name":"Sales Context"}'
+            rows={4}
+            style={{ width: '100%', minHeight: 84 }}
+          />
+          <div className="meta" style={{ marginTop: 6 }}>
+            Parameters are applied in template preview and template create.
+          </div>
+        </label>
+      ) : null}
       <div className="md-editor-surface" style={{ marginBottom: 10 }}>
         <MarkdownModeToggle
           view={projectDescriptionView}

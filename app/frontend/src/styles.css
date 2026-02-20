@@ -1831,6 +1831,45 @@ button:disabled {
   border: 1px solid rgba(255,255,255,0.08);
 }
 
+.markdown pre:has(.mermaid-diagram-shell) {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  overflow: visible;
+}
+
+.mermaid-diagram-shell {
+  margin: 0.55em 0;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 22%);
+  overflow-x: auto;
+}
+
+.mermaid-diagram {
+  display: flex;
+  justify-content: center;
+  min-width: 100%;
+}
+
+.mermaid-diagram svg {
+  display: block;
+  height: auto;
+  margin-inline: auto;
+  max-width: none;
+}
+
+.mermaid-diagram-status {
+  font-size: 12px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.mermaid-diagram-fallback {
+  margin: 8px 0 0;
+}
+
 [data-theme="dark"] .markdown {
   background: color-mix(in srgb, var(--surface), var(--surface-alt) 22%);
 }
@@ -3134,15 +3173,29 @@ button:disabled {
   animation: codex-pulse 1s ease-in-out infinite;
 }
 
+.codex-chat-drawer-body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .codex-chat-history {
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 10px;
-  max-height: 42vh;
+  flex: 1 1 auto;
+  min-height: 120px;
+  max-height: none;
   overflow: auto;
   display: grid;
   gap: 8px;
   background: color-mix(in srgb, var(--surface), var(--surface-alt) 18%);
+  overscroll-behavior: contain;
+}
+
+.codex-chat-composer {
+  flex: 0 0 auto;
+  margin-top: 8px;
 }
 
 .codex-chat-bubble {
@@ -3159,6 +3212,20 @@ button:disabled {
 
 .codex-chat-bubble.assistant {
   background: color-mix(in srgb, var(--surface-alt), white 24%);
+}
+
+.codex-chat-bubble .markdown {
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+  overflow: visible;
+  max-height: none;
+}
+
+.codex-chat-bubble .markdown pre {
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .codex-chat-role {
@@ -3181,6 +3248,9 @@ button:disabled {
   border: 1px solid var(--line);
   background: color-mix(in srgb, var(--surface), var(--surface-alt) 18%);
   color: var(--text);
+  min-height: 64px;
+  max-height: 116px;
+  resize: none;
   transition: border-color 0.16s ease, box-shadow 0.16s ease, background-color 0.16s ease;
 }
 

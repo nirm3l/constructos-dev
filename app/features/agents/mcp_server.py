@@ -671,6 +671,35 @@ def create_mcp():
             auth_token=auth_token,
         )
 
+    @mcp.tool(description="Preview project creation from a template without writing data.")
+    def preview_project_from_template(
+        template_key: str,
+        workspace_id: str | None = None,
+        auth_token: str | None = None,
+        name: str = "",
+        description: str = "",
+        custom_statuses: list[str] | None = None,
+        member_user_ids: list[str] | None = None,
+        embedding_enabled: bool | None = None,
+        embedding_model: str | None = None,
+        context_pack_evidence_top_k: int | None = None,
+        parameters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.preview_project_from_template(
+            template_key=template_key,
+            workspace_id=workspace_id,
+            auth_token=auth_token,
+            name=name,
+            description=description,
+            custom_statuses=custom_statuses,
+            member_user_ids=member_user_ids,
+            embedding_enabled=embedding_enabled,
+            embedding_model=embedding_model,
+            context_pack_evidence_top_k=context_pack_evidence_top_k,
+            parameters=parameters,
+        )
+
     @mcp.tool(description="Create a project and seed specifications/tasks/rules from a project template.")
     def create_project_from_template(
         template_key: str,

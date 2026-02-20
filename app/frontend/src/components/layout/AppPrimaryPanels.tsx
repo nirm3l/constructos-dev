@@ -79,6 +79,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             setProjectName: state.setProjectName,
             projectTemplateKey: state.projectTemplateKey,
             setProjectTemplateKey: state.setProjectTemplateKey,
+            previewProjectFromTemplateMutation: state.previewProjectFromTemplateMutation,
             createProjectMutation: state.createProjectMutation,
             projectCustomStatusesText: state.projectCustomStatusesText,
             setProjectCustomStatusesText: state.setProjectCustomStatusesText,
@@ -107,6 +108,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             embeddingDefaultModel: state.embeddingDefaultModel,
             vectorStoreEnabled: state.vectorStoreEnabled,
             contextPackEvidenceTopKDefault: state.contextPackEvidenceTopKDefault,
+            projectTemplateParametersText: state.projectTemplateParametersText,
+            setProjectTemplateParametersText: state.setProjectTemplateParametersText,
             workspaceUsers: state.workspaceUsers,
             createProjectMemberIds: state.createProjectMemberIds,
             toggleCreateProjectMember: state.toggleCreateProjectMember,
@@ -358,11 +361,13 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           <ProfilePanel
             userName={state.bootstrap.data.current_user.full_name}
             theme={state.theme}
+            speechLang={state.speechLang}
             frontendVersion={state.frontendVersion}
             backendVersion={state.backendVersion}
             backendBuild={state.backendBuild}
             deployedAtUtc={state.backendDeployedAtUtc}
             onLogout={state.logout}
+            onChangeSpeechLang={state.setSpeechLang}
             onToggleTheme={() => {
               const next = state.theme === 'light' ? 'dark' : 'light'
               state.setTheme(next)

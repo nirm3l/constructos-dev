@@ -55,6 +55,23 @@ import type { Tab } from '../utils/ui'
 import '../styles.css'
 
 const queryClient = new QueryClient()
+const VOICE_LANG_STORAGE_KEY = 'ui_voice_input_lang'
+const ALLOWED_VOICE_LANGS = new Set(['bs-BA', 'hr-HR', 'sr-RS', 'en-US'])
+
+function resolveInitialSpeechLang(): string {
+  const fallback = 'bs-BA'
+  if (typeof window !== 'undefined') {
+    const stored = String(window.localStorage.getItem(VOICE_LANG_STORAGE_KEY) || '').trim()
+    if (ALLOWED_VOICE_LANGS.has(stored)) return stored
+  }
+  if (typeof navigator === 'undefined') return fallback
+  const raw = String(navigator.language || '').trim().toLowerCase()
+  if (raw.startsWith('bs')) return 'bs-BA'
+  if (raw.startsWith('hr')) return 'hr-HR'
+  if (raw.startsWith('sr')) return 'sr-RS'
+  if (raw.startsWith('en')) return 'en-US'
+  return fallback
+}
 
 function App({ logout }: { logout: () => void }) {
   const initialUrlStateRef = React.useRef<{
@@ -95,6 +112,7 @@ function App({ logout }: { logout: () => void }) {
     return parseStoredTab(localStorage.getItem('ui_tab'))
   })
   const [theme, setTheme] = React.useState<'light' | 'dark'>('light')
+  const [speechLang, setSpeechLang] = React.useState<string>(resolveInitialSpeechLang)
   const [taskTitle, setTaskTitle] = React.useState('')
   const [quickDueDate, setQuickDueDate] = React.useState('')
   const [quickDueDateFocused, setQuickDueDateFocused] = React.useState(false)
@@ -103,6 +121,7 @@ function App({ logout }: { logout: () => void }) {
     projectExternalRefsText, setProjectExternalRefsText, projectAttachmentRefsText, setProjectAttachmentRefsText,
     projectEmbeddingEnabled, setProjectEmbeddingEnabled, projectEmbeddingModel, setProjectEmbeddingModel,
     projectContextPackEvidenceTopKText, setProjectContextPackEvidenceTopKText,
+    projectTemplateParametersText, setProjectTemplateParametersText,
     projectDescriptionView, setProjectDescriptionView, showProjectCreateForm,
     setShowProjectCreateForm, showProjectEditForm, setShowProjectEditForm, editProjectName, setEditProjectName, editProjectDescription,
     setEditProjectDescription, editProjectCustomStatusesText, setEditProjectCustomStatusesText, editProjectExternalRefsText,
@@ -202,6 +221,12 @@ function App({ logout }: { logout: () => void }) {
     el.style.height = `${next}px`
     el.style.overflowY = el.scrollHeight > maxHeight ? 'auto' : 'hidden'
   }, [])
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return
+    const normalized = ALLOWED_VOICE_LANGS.has(speechLang) ? speechLang : 'bs-BA'
+    window.localStorage.setItem(VOICE_LANG_STORAGE_KEY, normalized)
+  }, [speechLang])
 
   useUiPersistenceEffects({
     tab,
@@ -785,6 +810,7 @@ function App({ logout }: { logout: () => void }) {
     reopenTaskMutation,
     archiveTaskMutation,
     restoreTaskMutation,
+    previewProjectFromTemplateMutation,
     createProjectMutation,
     deleteProjectMutation,
     createProjectRuleMutation,
@@ -857,6 +883,7 @@ function App({ logout }: { logout: () => void }) {
     projectEmbeddingEnabled,
     projectEmbeddingModel,
     projectContextPackEvidenceTopKText,
+    projectTemplateParametersText,
     createProjectMemberIds,
     draftProjectRules,
     setProjectName,
@@ -868,6 +895,7 @@ function App({ logout }: { logout: () => void }) {
     setProjectEmbeddingEnabled,
     setProjectEmbeddingModel,
     setProjectContextPackEvidenceTopKText,
+    setProjectTemplateParametersText,
     setProjectDescriptionView,
     setCreateProjectMemberIds,
     setDraftProjectRules,
@@ -1127,6 +1155,7 @@ function App({ logout }: { logout: () => void }) {
       setProjectName,
       projectTemplateKey,
       setProjectTemplateKey,
+      previewProjectFromTemplateMutation,
       createProjectMutation,
       projectCustomStatusesText,
       setProjectCustomStatusesText,
@@ -1136,6 +1165,8 @@ function App({ logout }: { logout: () => void }) {
       setProjectEmbeddingModel,
       projectContextPackEvidenceTopKText,
       setProjectContextPackEvidenceTopKText,
+      projectTemplateParametersText,
+      setProjectTemplateParametersText,
       projectDescriptionView,
       setProjectDescriptionView,
       projectDescriptionRef,
@@ -1348,7 +1379,9 @@ function App({ logout }: { logout: () => void }) {
       searchArchived,
       setSearchArchived,
       theme,
+      speechLang,
       setTheme,
+      setSpeechLang,
       themeMutation,
       projectNames,
       taskNameMap,

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from shared.core import get_command_id, get_current_user, get_db
 
 from .application import ProjectTemplateApplicationService
-from .schemas import ProjectFromTemplateCreate
+from .schemas import ProjectFromTemplateCreate, ProjectFromTemplatePreview
 
 router = APIRouter()
 
@@ -37,3 +37,11 @@ def create_project_from_template(
 ):
     return ProjectTemplateApplicationService(db, user, command_id=command_id).create_project_from_template(payload)
 
+
+@router.post("/api/projects/from-template/preview")
+def preview_project_from_template(
+    payload: ProjectFromTemplatePreview,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    return ProjectTemplateApplicationService(db, user).preview_project_from_template(payload)

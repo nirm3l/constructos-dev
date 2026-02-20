@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -125,6 +127,71 @@ def _parse_command_outcome(stdout: str) -> AutomationOutcome:
     return AutomationOutcome(action=action, summary=summary, comment=comment, usage=usage)
 
 
+def _run_command_streaming(
+    *,
+    command: list[str],
+    context: dict[str, object],
+    timeout_seconds: float,
+    on_event: Callable[[dict[str, object]], None] | None = None,
+) -> str:
+    proc = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    timed_out = False
+    done = threading.Event()
+
+    def _timeout_watchdog() -> None:
+        nonlocal timed_out
+        if done.wait(timeout_seconds):
+            return
+        if proc.poll() is None:
+            timed_out = True
+            proc.kill()
+
+    watchdog = threading.Thread(target=_timeout_watchdog, daemon=True)
+    watchdog.start()
+
+    input_payload = json.dumps(context)
+    if proc.stdin is None:
+        raise RuntimeError("Executor stdin is unavailable")
+    proc.stdin.write(input_payload)
+    proc.stdin.close()
+
+    lines: list[str] = []
+    if proc.stdout is None:
+        raise RuntimeError("Executor stdout is unavailable")
+    for raw_line in proc.stdout:
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        lines.append(line)
+        if on_event is None:
+            continue
+        try:
+            parsed = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        event_type = str(parsed.get("type") or "").strip()
+        if event_type in {"assistant_text", "status", "usage"}:
+            on_event(parsed)
+
+    return_code = proc.wait()
+    done.set()
+    if timed_out:
+        raise TimeoutError(f"Executor timed out after {timeout_seconds:.1f}s")
+    if return_code != 0:
+        err_text = "\n".join(lines).strip()
+        raise RuntimeError(f"Executor failed (exit={return_code}): {err_text[:300]}")
+    return "\n".join(lines)
+
+
 def execute_task_automation(
     *,
     task_id: str,
@@ -196,3 +263,69 @@ def execute_task_automation(
         err_text = (proc.stderr or proc.stdout or "").strip()
         raise RuntimeError(f"Executor failed (exit={proc.returncode}): {err_text[:300]}")
     return _parse_command_outcome(proc.stdout)
+
+
+def execute_task_automation_stream(
+    *,
+    task_id: str,
+    title: str,
+    description: str,
+    status: str,
+    instruction: str,
+    workspace_id: str | None = None,
+    project_id: str | None = None,
+    allow_mutations: bool = True,
+    on_event: Callable[[dict[str, object]], None] | None = None,
+) -> AutomationOutcome:
+    # Deterministic shortcut for explicit completion requests.
+    lower_instruction = (instruction or "").lower()
+    should_complete = any(token in lower_instruction for token in ("#complete", "complete task", "mark done"))
+    if str(task_id or "").strip() and should_complete and status != "Done" and allow_mutations:
+        return AutomationOutcome(action="complete", summary="Automation runner marked task as completed.")
+
+    if AGENT_EXECUTOR_MODE != "command":
+        return _placeholder_outcome(instruction=instruction, current_status=status)
+    if not AGENT_CODEX_COMMAND:
+        raise RuntimeError("AGENT_EXECUTOR_MODE=command requires AGENT_CODEX_COMMAND")
+
+    command = shlex.split(AGENT_CODEX_COMMAND)
+    project_name, project_description, project_rules = _load_project_context(project_id)
+    graph_context_pack = build_graph_context_pack(
+        project_id=project_id,
+        focus_entity_type="Task" if str(task_id or "").strip() else None,
+        focus_entity_id=task_id if str(task_id or "").strip() else None,
+    )
+    graph_context_markdown = str(graph_context_pack.get("markdown") or "").strip() if graph_context_pack else ""
+    if not graph_context_markdown:
+        graph_context_markdown = build_graph_context_markdown(
+            project_id=project_id,
+            focus_entity_type="Task" if str(task_id or "").strip() else None,
+            focus_entity_id=task_id if str(task_id or "").strip() else None,
+        )
+    graph_evidence_json = json.dumps(graph_context_pack.get("evidence") or [], ensure_ascii=True) if graph_context_pack else "[]"
+    graph_summary_markdown = _graph_summary_to_markdown(graph_context_pack.get("summary")) if graph_context_pack else ""
+    context = {
+        "task_id": task_id,
+        "title": title,
+        "description": description,
+        "status": status,
+        "instruction": instruction,
+        "workspace_id": workspace_id,
+        "project_id": project_id,
+        "project_name": project_name,
+        "project_description": project_description,
+        "project_rules": project_rules,
+        "graph_context_markdown": graph_context_markdown,
+        "graph_evidence_json": graph_evidence_json,
+        "graph_summary_markdown": graph_summary_markdown,
+        "allow_mutations": allow_mutations,
+        "stream_events": True,
+        "stream_plain_text": not bool(str(task_id or "").strip()),
+    }
+    stdout = _run_command_streaming(
+        command=command,
+        context=context,
+        timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
+        on_event=on_event,
+    )
+    return _parse_command_outcome(stdout)

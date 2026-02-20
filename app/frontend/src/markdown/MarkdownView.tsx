@@ -2,6 +2,7 @@ import React from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
+import { MermaidDiagram } from './MermaidDiagram'
 
 function isInternalAppHref(href: string): boolean {
   const value = href.trim()
@@ -21,7 +22,45 @@ function navigateInternalHref(href: string): void {
   window.dispatchEvent(new PopStateEvent('popstate'))
 }
 
-export function MarkdownView({ value }: { value: string }) {
+function extractText(node: React.ReactNode): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map((part) => extractText(part)).join('')
+  if (!React.isValidElement(node)) return ''
+  const maybeChildren = (node.props as { children?: React.ReactNode }).children
+  return extractText(maybeChildren)
+}
+
+function isMermaidCodeBlock(className: string | undefined, inline: boolean | undefined): boolean {
+  if (inline) return false
+  const normalized = String(className || '').toLowerCase()
+  return normalized.includes('language-mermaid')
+}
+
+type MarkdownCodeProps = React.ComponentPropsWithoutRef<'code'> & {
+  inline?: boolean
+  className?: string
+  children?: React.ReactNode
+}
+
+type MarkdownPreProps = React.ComponentPropsWithoutRef<'pre'> & {
+  children?: React.ReactNode
+}
+
+function isMermaidDiagramElement(node: React.ReactNode): boolean {
+  if (!React.isValidElement(node)) return false
+  const elementType = node.type as unknown
+  if (elementType === MermaidDiagram) return true
+  const displayName = (elementType as { displayName?: string } | null)?.displayName
+  return displayName === 'MermaidDiagram'
+}
+
+function MarkdownViewComponent({
+  value,
+  disableMermaid = false,
+}: {
+  value: string
+  disableMermaid?: boolean
+}) {
   return (
     <div className="markdown">
       <ReactMarkdown
@@ -44,7 +83,39 @@ export function MarkdownView({ value }: { value: string }) {
                 {children}
               </a>
             )
-          }
+          },
+          code: ({ inline, className, children, ...props }: MarkdownCodeProps) => {
+            if (!disableMermaid && isMermaidCodeBlock(className, inline)) {
+              const source = extractText(children).replace(/\n$/, '')
+              return <MermaidDiagram code={source} />
+            }
+            return (
+              <code className={className} {...props}>
+                {children}
+              </code>
+            )
+          },
+          pre: ({ children, ...props }: MarkdownPreProps) => {
+            const parts = React.Children.toArray(children)
+            let mermaidNode: React.ReactNode | null = null
+            let hasMeaningfulNonMermaidContent = false
+
+            for (const part of parts) {
+              if (isMermaidDiagramElement(part)) {
+                if (!mermaidNode) mermaidNode = part
+                continue
+              }
+              if (extractText(part).trim()) {
+                hasMeaningfulNonMermaidContent = true
+                break
+              }
+            }
+
+            if (mermaidNode && !hasMeaningfulNonMermaidContent) {
+              return <>{mermaidNode}</>
+            }
+            return <pre {...props}>{children}</pre>
+          },
         }}
       >
         {value || ''}
@@ -52,3 +123,8 @@ export function MarkdownView({ value }: { value: string }) {
     </div>
   )
 }
+
+export const MarkdownView = React.memo(
+  MarkdownViewComponent,
+  (prev, next) => prev.value === next.value && prev.disableMermaid === next.disableMermaid
+)

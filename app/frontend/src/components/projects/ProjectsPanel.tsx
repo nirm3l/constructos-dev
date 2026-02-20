@@ -28,6 +28,7 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
           setProjectTemplateKey={state.setProjectTemplateKey}
           projectTemplates={state.projectTemplates.data?.items ?? []}
           projectTemplatesLoading={Boolean(state.projectTemplates.isLoading || state.projectTemplates.isFetching)}
+          previewProjectFromTemplateMutation={state.previewProjectFromTemplateMutation}
           createProjectMutation={state.createProjectMutation}
           projectCustomStatusesText={state.projectCustomStatusesText}
           setProjectCustomStatusesText={state.setProjectCustomStatusesText}
@@ -58,6 +59,8 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
           embeddingDefaultModel={state.embeddingDefaultModel}
           vectorStoreEnabled={state.vectorStoreEnabled}
           contextPackEvidenceTopKDefault={state.contextPackEvidenceTopKDefault}
+          projectTemplateParametersText={state.projectTemplateParametersText}
+          setProjectTemplateParametersText={state.setProjectTemplateParametersText}
           workspaceUsers={state.workspaceUsers}
           createProjectMemberIds={state.createProjectMemberIds}
           toggleCreateProjectMember={state.toggleCreateProjectMember}

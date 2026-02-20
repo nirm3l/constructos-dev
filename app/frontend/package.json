@@ -1,7 +1,7 @@
 {
   "name": "task-management-frontend",
   "private": true,
-  "version": "0.1.189",
+  "version": "0.1.210",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,6 +11,7 @@
   "dependencies": {
     "@tanstack/react-query": "^5.90.6",
     "highlight.js": "^11.11.1",
+    "mermaid": "^11.12.3",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-force-graph-2d": "^1.29.0",

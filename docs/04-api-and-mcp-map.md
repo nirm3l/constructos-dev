@@ -31,6 +31,7 @@
 ### 1.3 Projects
 - `POST /api/projects`
 - `POST /api/projects/from-template`
+- `POST /api/projects/from-template/preview`
 - `PATCH /api/projects/{project_id}`
 - `DELETE /api/projects/{project_id}`
 - `GET /api/projects/{project_id}/board`
@@ -127,6 +128,7 @@ Tool categories:
 - Templates:
   - `list_project_templates`
   - `get_project_template`
+  - `preview_project_from_template`
   - `create_project_from_template`
 - Knowledge search:
   - `search_project_knowledge`

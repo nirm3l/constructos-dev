@@ -12,6 +12,7 @@ export function useProjectState() {
   const [projectEmbeddingEnabled, setProjectEmbeddingEnabled] = React.useState(false)
   const [projectEmbeddingModel, setProjectEmbeddingModel] = React.useState('')
   const [projectContextPackEvidenceTopKText, setProjectContextPackEvidenceTopKText] = React.useState('')
+  const [projectTemplateParametersText, setProjectTemplateParametersText] = React.useState('')
   const [projectDescriptionView, setProjectDescriptionView] = React.useState<'write' | 'preview'>('write')
   const [showProjectCreateForm, setShowProjectCreateForm] = React.useState(false)
   const [showProjectEditForm, setShowProjectEditForm] = React.useState(false)
@@ -65,6 +66,8 @@ export function useProjectState() {
     setProjectEmbeddingModel,
     projectContextPackEvidenceTopKText,
     setProjectContextPackEvidenceTopKText,
+    projectTemplateParametersText,
+    setProjectTemplateParametersText,
     projectDescriptionView,
     setProjectDescriptionView,
     showProjectCreateForm,

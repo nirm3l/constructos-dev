@@ -1,5 +1,5 @@
 import { useMutation } from '@tanstack/react-query'
-import { addComment, deleteComment, markNotificationRead, patchMyPreferences, runAgentChat } from '../../api'
+import { addComment, deleteComment, markNotificationRead, patchMyPreferences, runAgentChatStream } from '../../api'
 
 const ENTITY_ID_SOURCE = '[0-9a-fA-F]{8,}(?:-[0-9a-fA-F]{4,}){0,4}'
 const ENTITY_ID_PATTERN = /([0-9a-fA-F]{8,}(?:-[0-9a-fA-F]{4,}){0,4})/
@@ -85,6 +85,28 @@ function linkifyAgentReply(content: string, projectId?: string | null): string {
 }
 
 export function useMiscMutations(c: any) {
+  const setChatTurnsForSession = (
+    sessionId: string,
+    updater: (prev: any[]) => any[]
+  ) => {
+    if (sessionId && typeof c.setCodexChatTurnsForSession === 'function') {
+      c.setCodexChatTurnsForSession(sessionId, updater)
+      return
+    }
+    c.setCodexChatTurns(updater)
+  }
+
+  const setChatUsageForSession = (
+    sessionId: string,
+    usage: any
+  ) => {
+    if (sessionId && typeof c.setCodexChatUsageForSession === 'function') {
+      c.setCodexChatUsageForSession(sessionId, usage)
+      return
+    }
+    c.setCodexChatUsage(usage)
+  }
+
   const markReadMutation = useMutation({
     mutationFn: (id: string) => markNotificationRead(c.userId, id),
     onSuccess: async () => {
@@ -126,58 +148,176 @@ export function useMiscMutations(c: any) {
   })
 
   const runAgentChatMutation = useMutation({
-    mutationFn: (payload: {
+    mutationFn: async (payload: {
       instruction: string
       history: Array<{ role: 'user' | 'assistant'; content: string }>
       projectId: string | null
       sessionId: string
       attachmentRefs?: Array<{ path: string; name?: string; mime_type?: string; size_bytes?: number }>
-    }) =>
-      runAgentChat(c.userId, {
-        workspace_id: c.workspaceId,
-        project_id: payload.projectId,
-        session_id: payload.sessionId || c.codexChatSessionId,
-        instruction: payload.instruction,
-        history: payload.history,
-        attachment_refs: payload.attachmentRefs || [],
-        allow_mutations: true
-      }),
-    onSuccess: async (response, variables) => {
+    }) => {
+      const sessionId = payload.sessionId || c.codexChatSessionId
+      const assistantTurnId = globalThis.crypto?.randomUUID?.() ?? `a-${Date.now()}`
+      const assistantCreatedAt = Date.now()
+      const thinkingFrames = ['Thinking.', 'Thinking..', 'Thinking...']
+      let thinkingFrameIndex = 0
+      let thinkingTimer: ReturnType<typeof globalThis.setInterval> | null = null
+      let hasAssistantDelta = false
+      const setAssistantTurnContent = (content: string) => {
+        setChatTurnsForSession(sessionId, (prev: any[]) =>
+          prev.map((turn: any) =>
+            turn.id === assistantTurnId
+              ? { ...turn, content }
+              : turn
+          )
+        )
+      }
+      const stopThinkingAnimation = () => {
+        if (thinkingTimer === null) return
+        globalThis.clearInterval(thinkingTimer)
+        thinkingTimer = null
+      }
+      const startThinkingAnimation = () => {
+        thinkingTimer = globalThis.setInterval(() => {
+          if (hasAssistantDelta) return
+          setAssistantTurnContent(thinkingFrames[thinkingFrameIndex] || 'Thinking...')
+          thinkingFrameIndex = (thinkingFrameIndex + 1) % thinkingFrames.length
+        }, 320)
+      }
+      setChatTurnsForSession(sessionId, (prev: any[]) => [
+        ...prev,
+        {
+          id: assistantTurnId,
+          role: 'assistant',
+          content: 'Thinking...',
+          createdAt: assistantCreatedAt,
+        },
+      ])
+      startThinkingAnimation()
+
+      let streamedReply = ''
+      let pendingStreamDelta = ''
+      let streamFlushTimer: ReturnType<typeof globalThis.setTimeout> | null = null
+      let streamDrainResolver: (() => void) | null = null
+
+      const resolveStreamDrainIfIdle = () => {
+        if (!pendingStreamDelta && streamFlushTimer === null && streamDrainResolver) {
+          const resolver = streamDrainResolver
+          streamDrainResolver = null
+          resolver()
+        }
+      }
+
+      const flushStreamDeltaStep = () => {
+        if (!pendingStreamDelta) {
+          streamFlushTimer = null
+          resolveStreamDrainIfIdle()
+          return
+        }
+        const nextChunk = pendingStreamDelta.slice(0, 48)
+        pendingStreamDelta = pendingStreamDelta.slice(nextChunk.length)
+        streamedReply += nextChunk
+        setAssistantTurnContent(streamedReply)
+        streamFlushTimer = globalThis.setTimeout(flushStreamDeltaStep, 16)
+      }
+
+      const enqueueStreamDelta = (delta: string) => {
+        if (!delta) return
+        if (!hasAssistantDelta) {
+          hasAssistantDelta = true
+          stopThinkingAnimation()
+        }
+        pendingStreamDelta += delta
+        if (streamFlushTimer !== null) return
+        flushStreamDeltaStep()
+      }
+
+      const waitForStreamDrain = async () => {
+        if (!pendingStreamDelta && streamFlushTimer === null) return
+        await new Promise<void>((resolve) => {
+          streamDrainResolver = resolve
+        })
+      }
+
+      const cancelStreamFlush = () => {
+        stopThinkingAnimation()
+        if (streamFlushTimer !== null) {
+          globalThis.clearTimeout(streamFlushTimer)
+          streamFlushTimer = null
+        }
+        pendingStreamDelta = ''
+        resolveStreamDrainIfIdle()
+      }
+
+      try {
+        const response = await runAgentChatStream(
+          c.userId,
+          {
+            workspace_id: c.workspaceId,
+            project_id: payload.projectId,
+            session_id: sessionId,
+            instruction: payload.instruction,
+            history: payload.history,
+            attachment_refs: payload.attachmentRefs || [],
+            allow_mutations: true,
+          },
+          {
+            onAssistantDelta: (delta) => {
+              enqueueStreamDelta(delta)
+            },
+            onUsage: (usage) => {
+              setChatUsageForSession(sessionId, usage ?? null)
+            },
+          }
+        )
+        await waitForStreamDrain()
+        stopThinkingAnimation()
+        return { response, assistantTurnId, assistantCreatedAt, streamedReply, sessionId }
+      } catch (err) {
+        cancelStreamFlush()
+        const msg = err instanceof Error ? err.message : 'Chat failed'
+        setChatTurnsForSession(sessionId, (prev: any[]) =>
+          prev.map((turn: any) =>
+            turn.id === assistantTurnId
+              ? { ...turn, content: `Error: ${msg}` }
+              : turn
+          )
+        )
+        throw err
+      }
+    },
+    onSuccess: async (result, variables) => {
+      const { response, assistantTurnId, assistantCreatedAt, streamedReply, sessionId } = result
       c.setUiError(null)
       if (response.usage) {
-        if (variables.sessionId && typeof c.setCodexChatUsageForSession === 'function') {
-          c.setCodexChatUsageForSession(variables.sessionId, response.usage)
-        } else {
-          c.setCodexChatUsage(response.usage)
-        }
+        setChatUsageForSession(sessionId, response.usage)
       }
+      const fallbackReply = [response.summary, response.comment].filter(Boolean).join('\n\n').trim()
+      const rawReply = streamedReply.trim() ? streamedReply : fallbackReply
       const reply = linkifyAgentReply(
-        [response.summary, response.comment].filter(Boolean).join('\n\n').trim(),
+        rawReply,
         variables.projectId || c.codexChatProjectId || c.selectedProjectId || null
       )
-      if (reply) {
-        if (variables.sessionId && typeof c.setCodexChatTurnsForSession === 'function') {
-          c.setCodexChatTurnsForSession(variables.sessionId, (prev: any[]) => [
-            ...prev,
-            {
-              id: globalThis.crypto?.randomUUID?.() ?? `a-${Date.now()}`,
-              role: 'assistant',
-              content: reply,
-              createdAt: Date.now()
-            }
-          ])
-        } else {
-          c.setCodexChatTurns((prev: any[]) => [
-            ...prev,
-            {
-              id: globalThis.crypto?.randomUUID?.() ?? `a-${Date.now()}`,
-              role: 'assistant',
-              content: reply,
-              createdAt: Date.now()
-            }
-          ])
+      setChatTurnsForSession(sessionId, (prev: any[]) => {
+        if (!reply) {
+          return prev.filter((turn: any) => turn.id !== assistantTurnId)
         }
-      }
+        let found = false
+        const next = prev.map((turn: any) => {
+          if (turn.id !== assistantTurnId) return turn
+          found = true
+          return { ...turn, content: reply }
+        })
+        if (found) return next
+        return [
+          ...next,
+          {
+            id: assistantTurnId,
+            role: 'assistant',
+            content: reply,
+            createdAt: assistantCreatedAt,
+          },
+        ]
+      })
       if (response.ok === false) {
         c.setUiError(response.summary || response.comment || 'Chat request failed')
       }
@@ -187,33 +327,12 @@ export function useMiscMutations(c: any) {
       c.setCodexChatInstruction('')
       await c.invalidateAll()
     },
-    onError: (err, variables) => {
+    onError: (err) => {
       c.setIsCodexChatRunning(false)
       c.setCodexChatRunStartedAt(null)
       c.setCodexChatElapsedSeconds(0)
       const msg = err instanceof Error ? err.message : 'Chat failed'
       c.setUiError(msg)
-      if (variables?.sessionId && typeof c.setCodexChatTurnsForSession === 'function') {
-        c.setCodexChatTurnsForSession(variables.sessionId, (prev: any[]) => [
-          ...prev,
-          {
-            id: globalThis.crypto?.randomUUID?.() ?? `aerr-${Date.now()}`,
-            role: 'assistant',
-            content: `Error: ${msg}`,
-            createdAt: Date.now()
-          }
-        ])
-      } else {
-        c.setCodexChatTurns((prev: any[]) => [
-          ...prev,
-          {
-            id: globalThis.crypto?.randomUUID?.() ?? `aerr-${Date.now()}`,
-            role: 'assistant',
-            content: `Error: ${msg}`,
-            createdAt: Date.now()
-          }
-        ])
-      }
     }
   })
 

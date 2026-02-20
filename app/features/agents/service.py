@@ -56,7 +56,7 @@ from shared.core import (
     load_specification_command_state,
     load_specification_view,
 )
-from features.project_templates.schemas import ProjectFromTemplateCreate
+from features.project_templates.schemas import ProjectFromTemplateCreate, ProjectFromTemplatePreview
 from shared.deps import ensure_role
 from shared.knowledge_graph import (
     graph_context_pack as graph_context_pack_query,
@@ -761,6 +761,39 @@ class AgentTaskService:
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             return ProjectTemplateApplicationService(db, user).get_template(template_key)
+
+    def preview_project_from_template(
+        self,
+        *,
+        template_key: str,
+        workspace_id: str | None = None,
+        auth_token: str | None = None,
+        name: str = "",
+        description: str = "",
+        custom_statuses: list[str] | None = None,
+        member_user_ids: list[str] | None = None,
+        embedding_enabled: bool | None = None,
+        embedding_model: str | None = None,
+        context_pack_evidence_top_k: int | None = None,
+        parameters: dict[str, Any] | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            resolved_workspace_id = self._resolve_workspace_for_project_create(explicit_workspace_id=workspace_id)
+            payload = ProjectFromTemplatePreview(
+                workspace_id=resolved_workspace_id,
+                template_key=template_key,
+                name=name,
+                description=description,
+                custom_statuses=custom_statuses,
+                member_user_ids=member_user_ids or [],
+                embedding_enabled=embedding_enabled,
+                embedding_model=embedding_model,
+                context_pack_evidence_top_k=context_pack_evidence_top_k,
+                parameters=parameters or {},
+            )
+            return ProjectTemplateApplicationService(db, user).preview_project_from_template(payload)
 
     def create_project_from_template(
         self,

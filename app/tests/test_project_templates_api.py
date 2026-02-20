@@ -50,6 +50,88 @@ def test_project_template_catalog_endpoints(tmp_path):
     assert ddd_payload["seed_counts"]["rules"] >= 1
 
 
+def test_preview_project_from_template_returns_plan_and_does_not_write(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    workspace_id = bootstrap["workspaces"][0]["id"]
+    project_count_before = len(bootstrap["projects"])
+
+    response = client.post(
+        "/api/projects/from-template/preview",
+        json={
+            "workspace_id": workspace_id,
+            "template_key": "ddd_product_build",
+            "name": "DDD Preview Pilot",
+            "description": "Preview only",
+            "member_user_ids": [bootstrap["current_user"]["id"]],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mode"] == "preview"
+    assert body["template"]["key"] == "ddd_product_build"
+    assert body["project_blueprint"]["name"] == "DDD Preview Pilot"
+    assert body["project_conflict"]["status"] == "none"
+    assert body["project_conflict"]["can_create"] is True
+    assert body["seed_summary"]["specification_count"] >= 1
+    assert body["seed_summary"]["task_count"] >= 1
+    assert body["seed_summary"]["rule_count"] >= 1
+    assert body["seed_summary"]["graph_node_count"] >= 1
+    assert body["seed_summary"]["graph_edge_count"] >= 1
+    preview_project_id = body["project_blueprint"]["project_id"]
+    assert isinstance(preview_project_id, str) and preview_project_id
+
+    refreshed = client.get("/api/bootstrap").json()
+    assert len(refreshed["projects"]) == project_count_before
+
+    from shared.models import ProjectTemplateBinding, SessionLocal
+
+    with SessionLocal() as db:
+        binding = db.execute(
+            select(ProjectTemplateBinding).where(ProjectTemplateBinding.project_id == preview_project_id)
+        ).scalar_one_or_none()
+        assert binding is None
+
+
+def test_preview_project_from_template_returns_404_for_unknown_template(tmp_path):
+    client = build_client(tmp_path)
+    workspace_id = client.get("/api/bootstrap").json()["workspaces"][0]["id"]
+    response = client.post(
+        "/api/projects/from-template/preview",
+        json={
+            "workspace_id": workspace_id,
+            "template_key": "unknown-template",
+        },
+    )
+    assert response.status_code == 404
+
+
+def test_preview_project_from_template_applies_parameters_to_seed_blueprint(tmp_path):
+    client = build_client(tmp_path)
+    workspace_id = client.get("/api/bootstrap").json()["workspaces"][0]["id"]
+    response = client.post(
+        "/api/projects/from-template/preview",
+        json={
+            "workspace_id": workspace_id,
+            "template_key": "ddd",
+            "name": "DDD Parameter Preview",
+            "parameters": {
+                "domain_name": "Order",
+                "bounded_context_name": "Sales Context",
+                "integration_boundary_name": "ERP ACL Boundary",
+            },
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["binding_preview"]["parameters"]["domain_name"] == "Order"
+    nodes = payload["seed_blueprint"]["graph"]["nodes"]
+    node_title_by_key = {str(item["node_key"]): str(item["title"]) for item in nodes}
+    assert node_title_by_key["agg_product"] == "Order Aggregate"
+    assert node_title_by_key["bc_core"] == "Sales Context"
+    assert node_title_by_key["boundary_catalog_acl"] == "ERP ACL Boundary"
+
+
 def test_create_project_from_template_seeds_entities_and_binding(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get("/api/bootstrap").json()
@@ -103,6 +185,45 @@ def test_create_project_from_template_seeds_entities_and_binding(tmp_path):
         ).scalars().all()
         assert len(bindings) == 1
         assert bindings[0].template_key == "ddd_product_build"
+
+
+def test_create_project_from_template_applies_parameters_and_persists_binding_parameters(tmp_path):
+    client = build_client(tmp_path)
+    workspace_id = client.get("/api/bootstrap").json()["workspaces"][0]["id"]
+    response = client.post(
+        "/api/projects/from-template",
+        json={
+            "workspace_id": workspace_id,
+            "template_key": "mobile-game",
+            "name": "Mobile Parameter Pilot",
+            "parameters": {
+                "game_name": "Sky Runners",
+                "target_device_profile": "Midrange Android 2022",
+                "deployment_target": "Staging LAN Cluster",
+                "release_environment": "Staging",
+                "qa_port": 4173,
+                "team_size": 10,
+            },
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["binding"]["parameters"]["game_name"] == "Sky Runners"
+    assert payload["binding"]["parameters"]["team_size"] == 10
+
+    project_id = payload["project"]["id"]
+    tasks = client.get(f"/api/tasks?workspace_id={workspace_id}&project_id={project_id}").json()["items"]
+    deploy_task = next(item for item in tasks if item["title"] == "Create Docker Compose deployment profile for LAN QA")
+    assert "Staging LAN Cluster" in str(deploy_task["description"])
+    assert "4173" in str(deploy_task["description"])
+    assert "large team" in str(deploy_task["description"]).casefold()
+
+    rules = client.get(f"/api/project-rules?workspace_id={workspace_id}&project_id={project_id}").json()["items"]
+    deploy_rule = next(
+        item for item in rules if item["title"] == "All releases must be deployed through Docker Compose on a LAN-accessible port"
+    )
+    assert "Staging LAN Cluster" in str(deploy_rule["body"])
+    assert "4173" in str(deploy_rule["body"])
 
 
 def test_create_project_from_template_returns_404_for_unknown_template(tmp_path):
@@ -198,3 +319,24 @@ def test_agent_service_can_create_project_from_template(tmp_path, monkeypatch):
     assert created["project"]["workspace_id"] == workspace_id
     assert created["template"]["key"] == "mobile_browser_game_development"
     assert created["seed_summary"]["task_count"] >= 1
+
+
+def test_agent_service_can_preview_project_from_template(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    workspace_id = client.get("/api/bootstrap").json()["workspaces"][0]["id"]
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", workspace_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {workspace_id})
+
+    service = AgentTaskService()
+    preview = service.preview_project_from_template(
+        template_key="mobile-game",
+        name="Mobile Game Preview",
+    )
+    assert preview["mode"] == "preview"
+    assert preview["template"]["key"] == "mobile_browser_game_development"
+    assert preview["seed_summary"]["task_count"] >= 1
