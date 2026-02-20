@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from shared.core import (
+    AggregateEventRepository,
     Note,
     NoteCreate,
     NotePatch,
@@ -17,7 +18,6 @@ from shared.core import (
     Specification,
     Task,
     User,
-    append_event,
     ensure_project_access,
     ensure_role,
     load_note_command_state,
@@ -32,6 +32,7 @@ from .domain import (
     EVENT_RESTORED,
     EVENT_UNPINNED,
     EVENT_UPDATED,
+    NoteAggregate,
 )
 
 
@@ -204,10 +205,8 @@ class CreateNoteHandler:
                 project_id=self.payload.project_id,
                 task_id=self.payload.task_id,
             )
-        append_event(
-            self.ctx.db,
-            aggregate_type="Note",
-            aggregate_id=nid,
+        aggregate = NoteAggregate(nid, version=0)
+        aggregate.record_event(
             event_type=EVENT_CREATED,
             payload={
                 "workspace_id": self.payload.workspace_id,
@@ -226,7 +225,10 @@ class CreateNoteHandler:
                 "updated_by": self.ctx.user.id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
             },
-            metadata={
+        )
+        AggregateEventRepository(self.ctx.db).persist(
+            aggregate,
+            base_metadata={
                 "actor_id": self.ctx.user.id,
                 "workspace_id": self.payload.workspace_id,
                 "project_id": self.payload.project_id,
@@ -296,13 +298,16 @@ class PatchNoteHandler:
             data["attachment_refs"] = _normalize_attachment_refs(data["attachment_refs"])
         # Keep updated_by in event payload for easy projection/audit.
         data["updated_by"] = self.ctx.user.id
-        append_event(
-            self.ctx.db,
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = repo.load_with_class(
             aggregate_type="Note",
             aggregate_id=self.note_id,
-            event_type=EVENT_UPDATED,
-            payload=data,
-            metadata={
+            aggregate_cls=NoteAggregate,
+        )
+        aggregate.record_event(event_type=EVENT_UPDATED, payload=data)
+        repo.persist(
+            aggregate,
+            base_metadata={
                 "actor_id": self.ctx.user.id,
                 "workspace_id": workspace_id,
                 "project_id": data.get("project_id", project_id),
@@ -328,13 +333,22 @@ class ArchiveNoteHandler:
         )
         if archived:
             raise HTTPException(status_code=409, detail="Note already archived")
-        append_event(
-            self.ctx.db,
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = repo.load_with_class(
             aggregate_type="Note",
             aggregate_id=self.note_id,
-            event_type=EVENT_ARCHIVED,
-            payload={"updated_by": self.ctx.user.id},
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id, "note_id": self.note_id},
+            aggregate_cls=NoteAggregate,
+        )
+        aggregate.record_event(event_type=EVENT_ARCHIVED, payload={"updated_by": self.ctx.user.id})
+        repo.persist(
+            aggregate,
+            base_metadata={
+                "actor_id": self.ctx.user.id,
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "task_id": task_id,
+                "note_id": self.note_id,
+            },
         )
         self.ctx.db.commit()
         return {"ok": True}
@@ -351,13 +365,22 @@ class RestoreNoteHandler:
         )
         if not archived:
             raise HTTPException(status_code=409, detail="Note is not archived")
-        append_event(
-            self.ctx.db,
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = repo.load_with_class(
             aggregate_type="Note",
             aggregate_id=self.note_id,
-            event_type=EVENT_RESTORED,
-            payload={"updated_by": self.ctx.user.id},
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id, "note_id": self.note_id},
+            aggregate_cls=NoteAggregate,
+        )
+        aggregate.record_event(event_type=EVENT_RESTORED, payload={"updated_by": self.ctx.user.id})
+        repo.persist(
+            aggregate,
+            base_metadata={
+                "actor_id": self.ctx.user.id,
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "task_id": task_id,
+                "note_id": self.note_id,
+            },
         )
         self.ctx.db.commit()
         return {"ok": True}
@@ -374,13 +397,22 @@ class PinNoteHandler:
         )
         if pinned:
             raise HTTPException(status_code=409, detail="Note already pinned")
-        append_event(
-            self.ctx.db,
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = repo.load_with_class(
             aggregate_type="Note",
             aggregate_id=self.note_id,
-            event_type=EVENT_PINNED,
-            payload={"updated_by": self.ctx.user.id},
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id, "note_id": self.note_id},
+            aggregate_cls=NoteAggregate,
+        )
+        aggregate.record_event(event_type=EVENT_PINNED, payload={"updated_by": self.ctx.user.id})
+        repo.persist(
+            aggregate,
+            base_metadata={
+                "actor_id": self.ctx.user.id,
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "task_id": task_id,
+                "note_id": self.note_id,
+            },
         )
         self.ctx.db.commit()
         return {"ok": True}
@@ -397,13 +429,22 @@ class UnpinNoteHandler:
         )
         if not pinned:
             raise HTTPException(status_code=409, detail="Note is not pinned")
-        append_event(
-            self.ctx.db,
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = repo.load_with_class(
             aggregate_type="Note",
             aggregate_id=self.note_id,
-            event_type=EVENT_UNPINNED,
-            payload={"updated_by": self.ctx.user.id},
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id, "note_id": self.note_id},
+            aggregate_cls=NoteAggregate,
+        )
+        aggregate.record_event(event_type=EVENT_UNPINNED, payload={"updated_by": self.ctx.user.id})
+        repo.persist(
+            aggregate,
+            base_metadata={
+                "actor_id": self.ctx.user.id,
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "task_id": task_id,
+                "note_id": self.note_id,
+            },
         )
         self.ctx.db.commit()
         return {"ok": True}
@@ -418,13 +459,22 @@ class DeleteNoteHandler:
         workspace_id, project_id, task_id, _, _, _ = require_note_command_state(
             self.ctx.db, self.ctx.user, self.note_id, allowed={"Owner", "Admin", "Member"}
         )
-        append_event(
-            self.ctx.db,
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = repo.load_with_class(
             aggregate_type="Note",
             aggregate_id=self.note_id,
-            event_type=EVENT_DELETED,
-            payload={"updated_by": self.ctx.user.id},
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id, "note_id": self.note_id},
+            aggregate_cls=NoteAggregate,
+        )
+        aggregate.record_event(event_type=EVENT_DELETED, payload={"updated_by": self.ctx.user.id})
+        repo.persist(
+            aggregate,
+            base_metadata={
+                "actor_id": self.ctx.user.id,
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "task_id": task_id,
+                "note_id": self.note_id,
+            },
         )
         self.ctx.db.commit()
         return {"ok": True}

@@ -7,19 +7,19 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from shared.core import (
+    AggregateEventRepository,
     Project,
     Specification,
     SpecificationCreate,
     SpecificationPatch,
     User,
-    append_event,
     ensure_project_access,
     ensure_role,
     load_specification_command_state,
     load_specification_view,
 )
 
-from .domain import EVENT_ARCHIVED, EVENT_CREATED, EVENT_DELETED, EVENT_RESTORED, EVENT_UPDATED
+from .domain import SpecificationAggregate
 
 ALLOWED_SPEC_STATUSES = {"Draft", "Ready", "In progress", "Implemented", "Archived"}
 SPEC_STATUS_ALIASES = {
@@ -184,26 +184,21 @@ class CreateSpecificationHandler:
                 detail="Specification with this title already exists in deleted state; restore is not supported",
             )
 
-        append_event(
-            self.ctx.db,
-            aggregate_type="Specification",
-            aggregate_id=sid,
-            event_type=EVENT_CREATED,
-            payload={
-                "workspace_id": self.payload.workspace_id,
-                "project_id": self.payload.project_id,
-                "title": title,
-                "body": self.payload.body or "",
-                "status": status,
-                "tags": _normalize_tags(self.payload.tags),
-                "external_refs": _normalize_external_refs([r.model_dump() for r in self.payload.external_refs]),
-                "attachment_refs": _normalize_attachment_refs([r.model_dump() for r in self.payload.attachment_refs]),
-                "archived": status == "Archived",
-                "is_deleted": False,
-                "created_by": self.ctx.user.id,
-                "updated_by": self.ctx.user.id,
-            },
-            metadata={
+        aggregate = SpecificationAggregate(sid, version=0)
+        aggregate.create(
+            workspace_id=self.payload.workspace_id,
+            project_id=self.payload.project_id,
+            title=title,
+            body=self.payload.body or "",
+            status=status,
+            tags=_normalize_tags(self.payload.tags),
+            external_refs=_normalize_external_refs([r.model_dump() for r in self.payload.external_refs]),
+            attachment_refs=_normalize_attachment_refs([r.model_dump() for r in self.payload.attachment_refs]),
+            created_by=self.ctx.user.id,
+        )
+        AggregateEventRepository(self.ctx.db).persist(
+            aggregate,
+            base_metadata={
                 "actor_id": self.ctx.user.id,
                 "workspace_id": self.payload.workspace_id,
                 "project_id": self.payload.project_id,
@@ -231,6 +226,18 @@ class PatchSpecificationHandler:
             self.specification_id,
             allowed={"Owner", "Admin", "Member"},
         )
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = repo.load_with_class(
+            aggregate_type="Specification",
+            aggregate_id=self.specification_id,
+            aggregate_cls=SpecificationAggregate,
+        )
+        if bool(getattr(aggregate, "is_deleted", False)):
+            raise HTTPException(status_code=404, detail="Specification not found")
+        if not getattr(aggregate, "workspace_id", ""):
+            aggregate.workspace_id = workspace_id
+        if not getattr(aggregate, "project_id", ""):
+            aggregate.project_id = project_id
         data = self.payload.model_dump(exclude_unset=True)
 
         event_payload: dict[str, object] = {}
@@ -253,51 +260,20 @@ class PatchSpecificationHandler:
         if "archived" in data and data["archived"] is not None:
             requested_archived = bool(data["archived"])
             if requested_archived and not archived:
-                append_event(
-                    self.ctx.db,
-                    aggregate_type="Specification",
-                    aggregate_id=self.specification_id,
-                    event_type=EVENT_ARCHIVED,
-                    payload={"updated_by": self.ctx.user.id},
-                    metadata={
-                        "actor_id": self.ctx.user.id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "specification_id": self.specification_id,
-                    },
-                )
+                try:
+                    aggregate.archive(updated_by=self.ctx.user.id)
+                except ValueError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
                 archived = True
             elif not requested_archived and archived:
-                append_event(
-                    self.ctx.db,
-                    aggregate_type="Specification",
-                    aggregate_id=self.specification_id,
-                    event_type=EVENT_RESTORED,
-                    payload={"updated_by": self.ctx.user.id},
-                    metadata={
-                        "actor_id": self.ctx.user.id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "specification_id": self.specification_id,
-                    },
-                )
+                try:
+                    aggregate.restore_archived(updated_by=self.ctx.user.id)
+                except ValueError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
                 archived = False
 
         if event_payload:
-            event_payload["updated_by"] = self.ctx.user.id
-            append_event(
-                self.ctx.db,
-                aggregate_type="Specification",
-                aggregate_id=self.specification_id,
-                event_type=EVENT_UPDATED,
-                payload=event_payload,
-                metadata={
-                    "actor_id": self.ctx.user.id,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
-                    "specification_id": self.specification_id,
-                },
-            )
+            aggregate.update(changes=dict(event_payload), updated_by=self.ctx.user.id)
 
         if not event_payload and "archived" not in data:
             view = load_specification_view(self.ctx.db, self.specification_id)
@@ -305,6 +281,15 @@ class PatchSpecificationHandler:
                 raise HTTPException(status_code=404, detail="Specification not found")
             return view
 
+        repo.persist(
+            aggregate,
+            base_metadata={
+                "actor_id": self.ctx.user.id,
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "specification_id": self.specification_id,
+            },
+        )
         self.ctx.db.commit()
         view = load_specification_view(self.ctx.db, self.specification_id)
         if view is None:
@@ -326,13 +311,19 @@ class ArchiveSpecificationHandler:
         )
         if archived:
             raise HTTPException(status_code=409, detail="Specification already archived")
-        append_event(
-            self.ctx.db,
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = repo.load_with_class(
             aggregate_type="Specification",
             aggregate_id=self.specification_id,
-            event_type=EVENT_ARCHIVED,
-            payload={"updated_by": self.ctx.user.id},
-            metadata={
+            aggregate_cls=SpecificationAggregate,
+        )
+        try:
+            aggregate.archive(updated_by=self.ctx.user.id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        repo.persist(
+            aggregate,
+            base_metadata={
                 "actor_id": self.ctx.user.id,
                 "workspace_id": workspace_id,
                 "project_id": project_id,
@@ -357,13 +348,19 @@ class RestoreSpecificationHandler:
         )
         if not archived:
             raise HTTPException(status_code=409, detail="Specification is not archived")
-        append_event(
-            self.ctx.db,
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = repo.load_with_class(
             aggregate_type="Specification",
             aggregate_id=self.specification_id,
-            event_type=EVENT_RESTORED,
-            payload={"updated_by": self.ctx.user.id},
-            metadata={
+            aggregate_cls=SpecificationAggregate,
+        )
+        try:
+            aggregate.restore_archived(updated_by=self.ctx.user.id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        repo.persist(
+            aggregate,
+            base_metadata={
                 "actor_id": self.ctx.user.id,
                 "workspace_id": workspace_id,
                 "project_id": project_id,
@@ -386,13 +383,21 @@ class DeleteSpecificationHandler:
             self.specification_id,
             allowed={"Owner", "Admin", "Member"},
         )
-        append_event(
-            self.ctx.db,
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = repo.load_with_class(
             aggregate_type="Specification",
             aggregate_id=self.specification_id,
-            event_type=EVENT_DELETED,
-            payload={"updated_by": self.ctx.user.id},
-            metadata={
+            aggregate_cls=SpecificationAggregate,
+        )
+        if bool(getattr(aggregate, "is_deleted", False)):
+            return {"ok": True}
+        try:
+            aggregate.delete(updated_by=self.ctx.user.id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        repo.persist(
+            aggregate,
+            base_metadata={
                 "actor_id": self.ctx.user.id,
                 "workspace_id": workspace_id,
                 "project_id": project_id,

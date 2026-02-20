@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from shared.core import (
-    ActivityLog,
+    AggregateEventRepository,
     DEFAULT_STATUSES,
     Note,
     Project,
@@ -17,23 +17,28 @@ from shared.core import (
     ProjectPatch,
     ProjectRule,
     Specification,
-    SavedView,
     Task,
     User,
     WorkspaceMember,
-    append_event,
     ensure_project_access,
     ensure_role,
     load_project_view,
 )
 from shared.settings import ALLOWED_EMBEDDING_MODELS, DEFAULT_EMBEDDING_MODEL
 from ..notes.domain import EVENT_DELETED as NOTE_EVENT_DELETED
+from ..notes.domain import NoteAggregate
 from ..rules.domain import EVENT_DELETED as PROJECT_RULE_EVENT_DELETED
+from ..rules.domain import ProjectRuleAggregate
 from ..specifications.domain import EVENT_DELETED as SPECIFICATION_EVENT_DELETED
+from ..specifications.domain import SpecificationAggregate
 from ..tasks.domain import EVENT_DELETED as TASK_EVENT_DELETED
+from ..tasks.domain import TaskAggregate
 from .domain import EVENT_CREATED as PROJECT_EVENT_CREATED
 from .domain import EVENT_DELETED as PROJECT_EVENT_DELETED
+from .domain import EVENT_MEMBER_REMOVED as PROJECT_EVENT_MEMBER_REMOVED
+from .domain import EVENT_MEMBER_UPSERTED as PROJECT_EVENT_MEMBER_UPSERTED
 from .domain import EVENT_UPDATED as PROJECT_EVENT_UPDATED
+from .domain import ProjectAggregate
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,10 +197,8 @@ class CreateProjectHandler:
             embedding_model=self.payload.embedding_model,
         )
 
-        append_event(
-            self.ctx.db,
-            aggregate_type="Project",
-            aggregate_id=pid,
+        aggregate = ProjectAggregate(pid, version=0)
+        aggregate.record_event(
             event_type=PROJECT_EVENT_CREATED,
             payload={
                 "workspace_id": self.payload.workspace_id,
@@ -209,25 +212,26 @@ class CreateProjectHandler:
                 "context_pack_evidence_top_k": _normalize_context_pack_evidence_top_k(self.payload.context_pack_evidence_top_k),
                 "status": "Active",
             },
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": self.payload.workspace_id, "project_id": pid},
+        )
+        for uid in deduped_member_ids:
+            aggregate.record_event(
+                event_type=PROJECT_EVENT_MEMBER_UPSERTED,
+                payload={
+                    "workspace_id": self.payload.workspace_id,
+                    "project_id": pid,
+                    "user_id": uid,
+                    "role": "Owner" if uid == self.ctx.user.id else "Contributor",
+                },
+            )
+        AggregateEventRepository(self.ctx.db).persist(
+            aggregate,
+            base_metadata={
+                "actor_id": self.ctx.user.id,
+                "workspace_id": self.payload.workspace_id,
+                "project_id": pid,
+            },
             expected_version=0,
         )
-        self.ctx.db.commit()
-        # Assign project members (creator is always assigned as Owner).
-        for uid in deduped_member_ids:
-            existing = self.ctx.db.execute(
-                select(ProjectMember).where(ProjectMember.project_id == pid, ProjectMember.user_id == uid)
-            ).scalar_one_or_none()
-            if existing:
-                continue
-            self.ctx.db.add(
-                ProjectMember(
-                    workspace_id=self.payload.workspace_id,
-                    project_id=pid,
-                    user_id=uid,
-                    role="Owner" if uid == self.ctx.user.id else "Contributor",
-                )
-            )
         self.ctx.db.commit()
         project_view = load_project_view(self.ctx.db, pid)
         if project_view is None:
@@ -246,66 +250,97 @@ class DeleteProjectHandler:
             raise HTTPException(status_code=404, detail="Project not found")
         ensure_project_access(self.ctx.db, project.workspace_id, self.project_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
 
+        repo = AggregateEventRepository(self.ctx.db)
         tasks = self.ctx.db.execute(select(Task).where(Task.project_id == self.project_id, Task.is_deleted == False)).scalars().all()
         for t in tasks:
-            append_event(
-                self.ctx.db,
+            task_aggregate = repo.load_with_class(
                 aggregate_type="Task",
                 aggregate_id=t.id,
-                event_type=TASK_EVENT_DELETED,
-                payload={},
-                metadata={"actor_id": self.ctx.user.id, "workspace_id": project.workspace_id, "task_id": t.id, "project_id": self.project_id},
+                aggregate_cls=TaskAggregate,
+            )
+            task_aggregate.record_event(event_type=TASK_EVENT_DELETED, payload={})
+            repo.persist(
+                task_aggregate,
+                base_metadata={
+                    "actor_id": self.ctx.user.id,
+                    "workspace_id": project.workspace_id,
+                    "task_id": t.id,
+                    "project_id": self.project_id,
+                },
             )
         notes = self.ctx.db.execute(select(Note).where(Note.project_id == self.project_id, Note.is_deleted == False)).scalars().all()
         for n in notes:
-            append_event(
-                self.ctx.db,
+            note_aggregate = repo.load_with_class(
                 aggregate_type="Note",
                 aggregate_id=n.id,
-                event_type=NOTE_EVENT_DELETED,
-                payload={"updated_by": self.ctx.user.id},
-                metadata={"actor_id": self.ctx.user.id, "workspace_id": project.workspace_id, "task_id": n.task_id, "project_id": self.project_id, "note_id": n.id},
+                aggregate_cls=NoteAggregate,
+            )
+            note_aggregate.record_event(event_type=NOTE_EVENT_DELETED, payload={"updated_by": self.ctx.user.id})
+            repo.persist(
+                note_aggregate,
+                base_metadata={
+                    "actor_id": self.ctx.user.id,
+                    "workspace_id": project.workspace_id,
+                    "task_id": n.task_id,
+                    "project_id": self.project_id,
+                    "note_id": n.id,
+                },
             )
         rules = self.ctx.db.execute(select(ProjectRule).where(ProjectRule.project_id == self.project_id, ProjectRule.is_deleted == False)).scalars().all()
         for r in rules:
-            append_event(
-                self.ctx.db,
+            rule_aggregate = repo.load_with_class(
                 aggregate_type="ProjectRule",
                 aggregate_id=r.id,
-                event_type=PROJECT_RULE_EVENT_DELETED,
-                payload={"updated_by": self.ctx.user.id},
-                metadata={"actor_id": self.ctx.user.id, "workspace_id": project.workspace_id, "project_id": self.project_id, "project_rule_id": r.id},
+                aggregate_cls=ProjectRuleAggregate,
+            )
+            rule_aggregate.record_event(event_type=PROJECT_RULE_EVENT_DELETED, payload={"updated_by": self.ctx.user.id})
+            repo.persist(
+                rule_aggregate,
+                base_metadata={
+                    "actor_id": self.ctx.user.id,
+                    "workspace_id": project.workspace_id,
+                    "project_id": self.project_id,
+                    "project_rule_id": r.id,
+                },
             )
         specifications = self.ctx.db.execute(
             select(Specification).where(Specification.project_id == self.project_id, Specification.is_deleted == False)
         ).scalars().all()
         for specification in specifications:
-            append_event(
-                self.ctx.db,
+            specification_aggregate = repo.load_with_class(
                 aggregate_type="Specification",
                 aggregate_id=specification.id,
+                aggregate_cls=SpecificationAggregate,
+            )
+            specification_aggregate.record_event(
                 event_type=SPECIFICATION_EVENT_DELETED,
                 payload={"updated_by": self.ctx.user.id},
-                metadata={
+            )
+            repo.persist(
+                specification_aggregate,
+                base_metadata={
                     "actor_id": self.ctx.user.id,
                     "workspace_id": project.workspace_id,
                     "project_id": self.project_id,
                     "specification_id": specification.id,
                 },
             )
-        for view in self.ctx.db.execute(select(SavedView).where(SavedView.project_id == self.project_id)).scalars().all():
-            self.ctx.db.delete(view)
-        for log in self.ctx.db.execute(select(ActivityLog).where(ActivityLog.project_id == self.project_id)).scalars().all():
-            self.ctx.db.delete(log)
-        for member in self.ctx.db.execute(select(ProjectMember).where(ProjectMember.project_id == self.project_id)).scalars().all():
-            self.ctx.db.delete(member)
-        append_event(
-            self.ctx.db,
+        aggregate = repo.load_with_class(
             aggregate_type="Project",
             aggregate_id=self.project_id,
+            aggregate_cls=ProjectAggregate,
+        )
+        aggregate.record_event(
             event_type=PROJECT_EVENT_DELETED,
             payload={"deleted_tasks": len(tasks), "deleted_notes": len(notes)},
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": project.workspace_id, "project_id": self.project_id},
+        )
+        repo.persist(
+            aggregate,
+            base_metadata={
+                "actor_id": self.ctx.user.id,
+                "workspace_id": project.workspace_id,
+                "project_id": self.project_id,
+            },
         )
         self.ctx.db.commit()
         return {"ok": True, "deleted_tasks": len(tasks), "deleted_notes": len(notes)}
@@ -362,13 +397,23 @@ class PatchProjectHandler:
                 raise HTTPException(status_code=404, detail="Project not found")
             return view
 
-        append_event(
-            self.ctx.db,
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = repo.load_with_class(
             aggregate_type="Project",
             aggregate_id=self.project_id,
+            aggregate_cls=ProjectAggregate,
+        )
+        aggregate.record_event(
             event_type=PROJECT_EVENT_UPDATED,
             payload=event_payload,
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": project.workspace_id, "project_id": self.project_id},
+        )
+        repo.persist(
+            aggregate,
+            base_metadata={
+                "actor_id": self.ctx.user.id,
+                "workspace_id": project.workspace_id,
+                "project_id": self.project_id,
+            },
         )
         self.ctx.db.commit()
         view = load_project_view(self.ctx.db, self.project_id)
@@ -405,17 +450,31 @@ class AddProjectMemberHandler:
             )
         ).scalar_one_or_none()
         normalized_role = str(self.role or "Contributor").strip() or "Contributor"
-        if project_member is None:
-            self.ctx.db.add(
-                ProjectMember(
-                    workspace_id=project.workspace_id,
-                    project_id=self.project_id,
-                    user_id=self.user_id,
-                    role=normalized_role,
-                )
-            )
-        else:
-            project_member.role = normalized_role
+        if project_member is not None and project_member.role == normalized_role:
+            return {"ok": True, "project_id": self.project_id, "user_id": self.user_id, "role": normalized_role}
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = repo.load_with_class(
+            aggregate_type="Project",
+            aggregate_id=self.project_id,
+            aggregate_cls=ProjectAggregate,
+        )
+        aggregate.record_event(
+            event_type=PROJECT_EVENT_MEMBER_UPSERTED,
+            payload={
+                "workspace_id": project.workspace_id,
+                "project_id": self.project_id,
+                "user_id": self.user_id,
+                "role": normalized_role,
+            },
+        )
+        repo.persist(
+            aggregate,
+            base_metadata={
+                "actor_id": self.ctx.user.id,
+                "workspace_id": project.workspace_id,
+                "project_id": self.project_id,
+            },
+        )
         self.ctx.db.commit()
         return {"ok": True, "project_id": self.project_id, "user_id": self.user_id, "role": normalized_role}
 
@@ -437,7 +496,29 @@ class RemoveProjectMemberHandler:
                 ProjectMember.user_id == self.user_id,
             )
         ).scalar_one_or_none()
-        if project_member is not None:
-            self.ctx.db.delete(project_member)
-            self.ctx.db.commit()
+        if project_member is None:
+            return {"ok": True, "project_id": self.project_id, "user_id": self.user_id}
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = repo.load_with_class(
+            aggregate_type="Project",
+            aggregate_id=self.project_id,
+            aggregate_cls=ProjectAggregate,
+        )
+        aggregate.record_event(
+            event_type=PROJECT_EVENT_MEMBER_REMOVED,
+            payload={
+                "workspace_id": project.workspace_id,
+                "project_id": self.project_id,
+                "user_id": self.user_id,
+            },
+        )
+        repo.persist(
+            aggregate,
+            base_metadata={
+                "actor_id": self.ctx.user.id,
+                "workspace_id": project.workspace_id,
+                "project_id": self.project_id,
+            },
+        )
+        self.ctx.db.commit()
         return {"ok": True, "project_id": self.project_id, "user_id": self.user_id}

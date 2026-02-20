@@ -13,3 +13,10 @@ __pycache__/
 app/__pycache__/
 app/**/__pycache__/
 app/.pytest_cache/
+
+# Frontend build/install artifacts
+app/frontend/node_modules/
+app/frontend/dist/
+app/frontend/*.tsbuildinfo
+app/frontend/vite.config.js
+app/frontend/vite.config.d.ts

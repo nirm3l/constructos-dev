@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from shared.core import (
+    AggregateEventRepository,
     BulkAction,
     CommentCreate,
     DEFAULT_STATUSES,
@@ -23,7 +24,6 @@ from shared.core import (
     TaskPatch,
     TaskWatcher,
     User,
-    append_event,
     ensure_project_access,
     ensure_role,
     get_kurrent_client,
@@ -48,6 +48,7 @@ from .domain import (
     EVENT_SCHEDULE_CONFIGURED,
     EVENT_UPDATED,
     EVENT_WATCH_TOGGLED,
+    TaskAggregate,
 )
 
 
@@ -171,6 +172,36 @@ def require_task_command_state(db: Session, user: User, task_id: str, *, allowed
     return state.workspace_id, state.project_id, state.status, state.archived
 
 
+def _load_task_aggregate(repo: AggregateEventRepository, task_id: str) -> TaskAggregate:
+    return repo.load_with_class(
+        aggregate_type="Task",
+        aggregate_id=task_id,
+        aggregate_cls=TaskAggregate,
+    )
+
+
+def _persist_task_aggregate(
+    repo: AggregateEventRepository,
+    aggregate: TaskAggregate,
+    *,
+    actor_id: str,
+    workspace_id: str,
+    project_id: str | None,
+    task_id: str,
+    expected_version: int | None = None,
+) -> None:
+    repo.persist(
+        aggregate,
+        base_metadata={
+            "actor_id": actor_id,
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "task_id": task_id,
+        },
+        expected_version=expected_version,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class CommandContext:
     db: Session
@@ -236,10 +267,8 @@ class CreateTaskHandler:
         max_order = self.ctx.db.execute(
             select(func.max(Task.order_index)).where(Task.workspace_id == self.payload.workspace_id, Task.project_id == self.payload.project_id)
         ).scalar() or 0
-        append_event(
-            self.ctx.db,
-            aggregate_type="Task",
-            aggregate_id=tid,
+        aggregate = TaskAggregate(tid, version=0)
+        aggregate.record_event(
             event_type=EVENT_CREATED,
             payload={
                 "workspace_id": self.payload.workspace_id,
@@ -264,19 +293,9 @@ class CreateTaskHandler:
                 "schedule_state": "idle",
                 "order_index": max_order + 1,
             },
-            metadata={
-                "actor_id": self.ctx.user.id,
-                "workspace_id": self.payload.workspace_id,
-                "project_id": self.payload.project_id,
-                "task_id": tid,
-            },
-            expected_version=0,
         )
         if task_type == "scheduled_instruction":
-            append_event(
-                self.ctx.db,
-                aggregate_type="Task",
-                aggregate_id=tid,
+            aggregate.record_event(
                 event_type=EVENT_SCHEDULE_CONFIGURED,
                 payload={
                     "scheduled_instruction": scheduled_instruction,
@@ -284,13 +303,16 @@ class CreateTaskHandler:
                     "schedule_timezone": self.payload.schedule_timezone,
                     "schedule_state": "idle",
                 },
-                metadata={
-                    "actor_id": self.ctx.user.id,
-                    "workspace_id": self.payload.workspace_id,
-                    "project_id": self.payload.project_id,
-                    "task_id": tid,
-                },
             )
+        _persist_task_aggregate(
+            AggregateEventRepository(self.ctx.db),
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=self.payload.workspace_id,
+            project_id=self.payload.project_id,
+            task_id=tid,
+            expected_version=0,
+        )
         try:
             self.ctx.db.commit()
         except IntegrityError as exc:
@@ -401,24 +423,11 @@ class PatchTaskHandler:
             event_payload["schedule_state"] = "idle"
             event_payload["last_schedule_error"] = None
             event_payload["recurring_rule"] = None
-        append_event(
-            self.ctx.db,
-            aggregate_type="Task",
-            aggregate_id=self.task_id,
-            event_type=EVENT_UPDATED,
-            payload=event_payload,
-            metadata={
-                "actor_id": self.ctx.user.id,
-                "workspace_id": workspace_id,
-                "project_id": event_payload.get("project_id", project_id),
-                "task_id": self.task_id,
-            },
-        )
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.record_event(event_type=EVENT_UPDATED, payload=event_payload)
         if effective_task_type == "scheduled_instruction":
-            append_event(
-                self.ctx.db,
-                aggregate_type="Task",
-                aggregate_id=self.task_id,
+            aggregate.record_event(
                 event_type=EVENT_SCHEDULE_CONFIGURED,
                 payload={
                     "scheduled_instruction": effective_scheduled_instruction,
@@ -426,8 +435,15 @@ class PatchTaskHandler:
                     "schedule_timezone": event_payload.get("schedule_timezone", current_schedule_timezone),
                     "schedule_state": event_payload.get("schedule_state", "idle"),
                 },
-                metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": self.task_id},
             )
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=event_payload.get("project_id", project_id),
+            task_id=self.task_id,
+        )
         self.ctx.db.commit()
         task_view = load_task_view(self.ctx.db, self.task_id)
         if task_view is None:
@@ -444,13 +460,19 @@ class CompleteTaskHandler:
         workspace_id, project_id, status, _ = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member"})
         if status == "Done":
             raise HTTPException(status_code=409, detail="Task already completed")
-        append_event(
-            self.ctx.db,
-            aggregate_type="Task",
-            aggregate_id=self.task_id,
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.record_event(
             event_type=EVENT_COMPLETED,
             payload={"completed_at": to_iso_utc(datetime.now(timezone.utc))},
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": self.task_id},
+        )
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
         )
         self.ctx.db.commit()
         task_view = load_task_view(self.ctx.db, self.task_id)
@@ -477,13 +499,16 @@ class ReopenTaskHandler:
                 except Exception:
                     statuses = DEFAULT_STATUSES
                 reopen_status = (statuses[0] if statuses else DEFAULT_STATUSES[0]) or DEFAULT_STATUSES[0]
-        append_event(
-            self.ctx.db,
-            aggregate_type="Task",
-            aggregate_id=self.task_id,
-            event_type=EVENT_REOPENED,
-            payload={"status": reopen_status},
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": self.task_id},
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.record_event(event_type=EVENT_REOPENED, payload={"status": reopen_status})
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
         )
         self.ctx.db.commit()
         task_view = load_task_view(self.ctx.db, self.task_id)
@@ -501,13 +526,16 @@ class ArchiveTaskHandler:
         workspace_id, project_id, _, archived = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member"})
         if archived:
             raise HTTPException(status_code=409, detail="Task already archived")
-        append_event(
-            self.ctx.db,
-            aggregate_type="Task",
-            aggregate_id=self.task_id,
-            event_type=EVENT_ARCHIVED,
-            payload={},
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": self.task_id},
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.record_event(event_type=EVENT_ARCHIVED, payload={})
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
         )
         self.ctx.db.commit()
         return {"ok": True}
@@ -522,13 +550,16 @@ class RestoreTaskHandler:
         workspace_id, project_id, _, archived = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member"})
         if not archived:
             raise HTTPException(status_code=409, detail="Task is not archived")
-        append_event(
-            self.ctx.db,
-            aggregate_type="Task",
-            aggregate_id=self.task_id,
-            event_type=EVENT_RESTORED,
-            payload={},
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": self.task_id},
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.record_event(event_type=EVENT_RESTORED, payload={})
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
         )
         self.ctx.db.commit()
         return {"ok": True}
@@ -560,13 +591,16 @@ class BulkTaskActionHandler:
         else:
             return False
 
-        append_event(
-            self.ctx.db,
-            aggregate_type="Task",
-            aggregate_id=task_id,
-            event_type=et,
-            payload=ep,
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id},
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, task_id)
+        aggregate.record_event(event_type=et, payload=ep)
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=task_id,
         )
         self.ctx.db.commit()
         return True
@@ -588,13 +622,19 @@ class ReorderTasksHandler:
             or state.project_id != self.project_id
         ):
             return False
-        append_event(
-            self.ctx.db,
-            aggregate_type="Task",
-            aggregate_id=task_id,
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, task_id)
+        aggregate.record_event(
             event_type=EVENT_REORDERED,
             payload={"order_index": order_index, "status": self.payload.status},
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": self.workspace_id, "project_id": state.project_id, "task_id": task_id},
+        )
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=self.workspace_id,
+            project_id=state.project_id,
+            task_id=task_id,
         )
         self.ctx.db.commit()
         return True
@@ -608,13 +648,19 @@ class AddCommentHandler:
 
     def __call__(self) -> dict:
         workspace_id, project_id, _, _ = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member", "Guest"})
-        append_event(
-            self.ctx.db,
-            aggregate_type="Task",
-            aggregate_id=self.task_id,
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.record_event(
             event_type=EVENT_COMMENT_ADDED,
             payload={"task_id": self.task_id, "user_id": self.ctx.user.id, "body": self.payload.body},
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": self.task_id},
+        )
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
         )
         self.ctx.db.commit()
         last = self.ctx.db.execute(select(TaskComment).where(TaskComment.task_id == self.task_id).order_by(TaskComment.id.desc()).limit(1)).scalar_one_or_none()
@@ -634,13 +680,19 @@ class DeleteCommentHandler:
         comment = self.ctx.db.get(TaskComment, self.comment_id)
         if not comment or comment.task_id != self.task_id:
             raise HTTPException(status_code=404, detail="Comment not found")
-        append_event(
-            self.ctx.db,
-            aggregate_type="Task",
-            aggregate_id=self.task_id,
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.record_event(
             event_type=EVENT_COMMENT_DELETED,
             payload={"task_id": self.task_id, "comment_id": self.comment_id},
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": self.task_id},
+        )
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
         )
         self.ctx.db.commit()
         return {"ok": True}
@@ -663,13 +715,19 @@ class ToggleWatchHandler:
             or 0
         ) > 0
         next_watched = not currently_watched
-        append_event(
-            self.ctx.db,
-            aggregate_type="Task",
-            aggregate_id=self.task_id,
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.record_event(
             event_type=EVENT_WATCH_TOGGLED,
             payload={"task_id": self.task_id, "user_id": self.ctx.user.id, "watched": next_watched},
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": self.task_id},
+        )
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
         )
         self.ctx.db.commit()
         return {"watched": next_watched}
@@ -684,13 +742,19 @@ class RequestAutomationRunHandler:
     def __call__(self) -> dict:
         workspace_id, project_id, _, _ = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member"})
         requested_at = to_iso_utc(datetime.now(timezone.utc))
-        append_event(
-            self.ctx.db,
-            aggregate_type="Task",
-            aggregate_id=self.task_id,
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.record_event(
             event_type=EVENT_AUTOMATION_REQUESTED,
             payload={"requested_at": requested_at, "instruction": self.instruction},
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": workspace_id, "project_id": project_id, "task_id": self.task_id},
+        )
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
         )
         self.ctx.db.commit()
         return {"ok": True, "task_id": self.task_id, "automation_state": "queued", "requested_at": requested_at}

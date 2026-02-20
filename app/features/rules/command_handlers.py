@@ -6,11 +6,11 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from shared.core import (
+    AggregateEventRepository,
     Project,
     ProjectRuleCreate,
     ProjectRulePatch,
     User,
-    append_event,
     ensure_project_access,
     allocate_id,
     ensure_role,
@@ -18,7 +18,7 @@ from shared.core import (
     load_project_rule_view,
 )
 
-from .domain import EVENT_CREATED, EVENT_DELETED, EVENT_UPDATED
+from .domain import ProjectRuleAggregate
 
 
 def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> Project:
@@ -63,21 +63,17 @@ class CreateProjectRuleHandler:
         title = self.payload.title.strip()
         if not title:
             raise HTTPException(status_code=422, detail="title cannot be empty")
-        append_event(
-            self.ctx.db,
-            aggregate_type="ProjectRule",
-            aggregate_id=rid,
-            event_type=EVENT_CREATED,
-            payload={
-                "workspace_id": self.payload.workspace_id,
-                "project_id": self.payload.project_id,
-                "title": title,
-                "body": self.payload.body or "",
-                "created_by": self.ctx.user.id,
-                "updated_by": self.ctx.user.id,
-                "is_deleted": False,
-            },
-            metadata={
+        aggregate = ProjectRuleAggregate(rid, version=0)
+        aggregate.create(
+            workspace_id=self.payload.workspace_id,
+            project_id=self.payload.project_id,
+            title=title,
+            body=self.payload.body or "",
+            created_by=self.ctx.user.id,
+        )
+        AggregateEventRepository(self.ctx.db).persist(
+            aggregate,
+            base_metadata={
                 "actor_id": self.ctx.user.id,
                 "workspace_id": self.payload.workspace_id,
                 "project_id": self.payload.project_id,
@@ -102,6 +98,18 @@ class PatchProjectRuleHandler:
         workspace_id, project_id = require_project_rule_command_state(
             self.ctx.db, self.ctx.user, self.rule_id, allowed={"Owner", "Admin", "Member"}
         )
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = repo.load_with_class(
+            aggregate_type="ProjectRule",
+            aggregate_id=self.rule_id,
+            aggregate_cls=ProjectRuleAggregate,
+        )
+        if not getattr(aggregate, "workspace_id", ""):
+            aggregate.workspace_id = workspace_id
+        if not getattr(aggregate, "project_id", ""):
+            aggregate.project_id = project_id
+        if bool(getattr(aggregate, "is_deleted", False)):
+            raise HTTPException(status_code=404, detail="Project rule not found")
         data = self.payload.model_dump(exclude_unset=True)
         event_payload: dict[str, str] = {}
         if "title" in data and data["title"] is not None:
@@ -116,14 +124,10 @@ class PatchProjectRuleHandler:
             if view is None:
                 raise HTTPException(status_code=404, detail="Project rule not found")
             return view
-        event_payload["updated_by"] = self.ctx.user.id
-        append_event(
-            self.ctx.db,
-            aggregate_type="ProjectRule",
-            aggregate_id=self.rule_id,
-            event_type=EVENT_UPDATED,
-            payload=event_payload,
-            metadata={
+        aggregate.update(changes=event_payload, updated_by=self.ctx.user.id)
+        repo.persist(
+            aggregate,
+            base_metadata={
                 "actor_id": self.ctx.user.id,
                 "workspace_id": workspace_id,
                 "project_id": project_id,
@@ -146,13 +150,18 @@ class DeleteProjectRuleHandler:
         workspace_id, project_id = require_project_rule_command_state(
             self.ctx.db, self.ctx.user, self.rule_id, allowed={"Owner", "Admin", "Member"}
         )
-        append_event(
-            self.ctx.db,
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = repo.load_with_class(
             aggregate_type="ProjectRule",
             aggregate_id=self.rule_id,
-            event_type=EVENT_DELETED,
-            payload={"updated_by": self.ctx.user.id},
-            metadata={
+            aggregate_cls=ProjectRuleAggregate,
+        )
+        if bool(getattr(aggregate, "is_deleted", False)):
+            return {"ok": True}
+        aggregate.delete(updated_by=self.ctx.user.id)
+        repo.persist(
+            aggregate,
+            base_metadata={
                 "actor_id": self.ctx.user.id,
                 "workspace_id": workspace_id,
                 "project_id": project_id,

@@ -18,6 +18,8 @@ from features.notifications.domain import (
 from features.projects.domain import (
     EVENT_CREATED as PROJECT_EVENT_CREATED,
     EVENT_DELETED as PROJECT_EVENT_DELETED,
+    EVENT_MEMBER_REMOVED as PROJECT_EVENT_MEMBER_REMOVED,
+    EVENT_MEMBER_UPSERTED as PROJECT_EVENT_MEMBER_UPSERTED,
     EVENT_UPDATED as PROJECT_EVENT_UPDATED,
 )
 from features.tasks.domain import (
@@ -69,14 +71,27 @@ from features.specifications.domain import (
     EVENT_UPDATED as SPECIFICATION_EVENT_UPDATED,
     MUTATION_EVENTS as SPECIFICATION_MUTATION_EVENTS,
 )
-from features.users.domain import EVENT_PREFERENCES_UPDATED as USER_EVENT_PREFERENCES_UPDATED
+from features.project_templates.domain import (
+    EVENT_BOUND as PROJECT_TEMPLATE_EVENT_BOUND,
+)
+from features.users.domain import (
+    EVENT_CREATED as USER_EVENT_CREATED,
+    EVENT_DEACTIVATED as USER_EVENT_DEACTIVATED,
+    EVENT_PASSWORD_CHANGED as USER_EVENT_PASSWORD_CHANGED,
+    EVENT_PASSWORD_RESET as USER_EVENT_PASSWORD_RESET,
+    EVENT_PREFERENCES_UPDATED as USER_EVENT_PREFERENCES_UPDATED,
+    EVENT_WORKSPACE_ROLE_SET as USER_EVENT_WORKSPACE_ROLE_SET,
+)
 from features.views.domain import EVENT_CREATED as SAVED_VIEW_EVENT_CREATED
 from .models import (
     ActivityLog,
     AggregateSnapshot,
+    AuthSession,
     Note,
     Notification,
     Project,
+    ProjectTemplateBinding,
+    ProjectMember,
     ProjectTagIndex,
     ProjectRule,
     SavedView,
@@ -86,6 +101,7 @@ from .models import (
     TaskComment,
     TaskWatcher,
     User,
+    WorkspaceMember,
 )
 from .settings import DEFAULT_STATUSES, SNAPSHOT_EVERY
 from .event_upcasters import upcast_event, upcast_snapshot
@@ -587,6 +603,8 @@ def project_event(db: Session, ev: EventEnvelope):
         if project:
             project.is_deleted = True
         db.execute(delete(ProjectTagIndex).where(ProjectTagIndex.project_id == ev.aggregate_id))
+        db.execute(delete(ProjectMember).where(ProjectMember.project_id == ev.aggregate_id))
+        db.execute(delete(SavedView).where(SavedView.project_id == ev.aggregate_id))
     elif ev.event_type == PROJECT_EVENT_UPDATED:
         project = db.get(Project, ev.aggregate_id)
         if project:
@@ -606,6 +624,39 @@ def project_event(db: Session, ev: EventEnvelope):
                 project.embedding_model = p.get("embedding_model")
             if "context_pack_evidence_top_k" in p:
                 project.context_pack_evidence_top_k = p.get("context_pack_evidence_top_k")
+    elif ev.event_type == PROJECT_EVENT_MEMBER_UPSERTED:
+        project_id = p.get("project_id") or ev.aggregate_id
+        workspace_id = p.get("workspace_id") or m.get("workspace_id")
+        user_id = p.get("user_id")
+        role = str(p.get("role") or "Contributor")
+        if project_id and workspace_id and user_id:
+            existing = db.execute(
+                select(ProjectMember).where(
+                    ProjectMember.project_id == project_id,
+                    ProjectMember.user_id == user_id,
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                db.add(
+                    ProjectMember(
+                        workspace_id=workspace_id,
+                        project_id=project_id,
+                        user_id=user_id,
+                        role=role,
+                    )
+                )
+            else:
+                existing.role = role
+    elif ev.event_type == PROJECT_EVENT_MEMBER_REMOVED:
+        project_id = p.get("project_id") or ev.aggregate_id
+        user_id = p.get("user_id")
+        if project_id and user_id:
+            db.execute(
+                delete(ProjectMember).where(
+                    ProjectMember.project_id == project_id,
+                    ProjectMember.user_id == user_id,
+                )
+            )
     elif ev.event_type == NOTE_EVENT_CREATED:
         note = db.get(Note, ev.aggregate_id)
         if note is None:
@@ -950,6 +1001,113 @@ def project_event(db: Session, ev: EventEnvelope):
             saved.name = p["name"]
             saved.shared = p.get("shared", False)
             saved.filters = json.dumps(p.get("filters", {}))
+    elif ev.event_type == PROJECT_TEMPLATE_EVENT_BOUND:
+        project_id = p.get("project_id") or ev.aggregate_id
+        if project_id:
+            binding = db.execute(
+                select(ProjectTemplateBinding).where(ProjectTemplateBinding.project_id == project_id)
+            ).scalar_one_or_none()
+            if binding is None:
+                binding = ProjectTemplateBinding(
+                    workspace_id=p.get("workspace_id") or m.get("workspace_id") or "",
+                    project_id=project_id,
+                    template_key=str(p.get("template_key") or ""),
+                    template_version=str(p.get("template_version") or ""),
+                    applied_by=str(p.get("applied_by") or m.get("actor_id") or ""),
+                    parameters_json=str(p.get("parameters_json") or "{}"),
+                )
+                db.add(binding)
+            else:
+                if p.get("workspace_id"):
+                    binding.workspace_id = p["workspace_id"]
+                if p.get("template_key"):
+                    binding.template_key = p["template_key"]
+                if p.get("template_version"):
+                    binding.template_version = p["template_version"]
+                if p.get("applied_by"):
+                    binding.applied_by = p["applied_by"]
+                if p.get("parameters_json") is not None:
+                    binding.parameters_json = str(p.get("parameters_json") or "{}")
+    elif ev.event_type == USER_EVENT_CREATED:
+        user = db.get(User, ev.aggregate_id)
+        if user is None:
+            user = User(
+                id=ev.aggregate_id,
+                username=str(p.get("username") or ""),
+                full_name=str(p.get("full_name") or ""),
+                user_type=str(p.get("user_type") or "human"),
+            )
+            db.add(user)
+        user.username = str(p.get("username") or user.username)
+        user.full_name = str(p.get("full_name") or user.full_name)
+        user.user_type = str(p.get("user_type") or user.user_type or "human")
+        user.password_hash = p.get("password_hash")
+        user.must_change_password = bool(p.get("must_change_password", True))
+        changed_at = p.get("password_changed_at")
+        user.password_changed_at = datetime.fromisoformat(changed_at) if changed_at else None
+        user.is_active = bool(p.get("is_active", True))
+        user.theme = str(p.get("theme") or user.theme or "light")
+        user.timezone = str(p.get("timezone") or user.timezone or "UTC")
+        user.notifications_enabled = bool(p.get("notifications_enabled", True))
+
+        workspace_id = p.get("workspace_id")
+        workspace_role = p.get("workspace_role")
+        if workspace_id and workspace_role:
+            membership = db.execute(
+                select(WorkspaceMember).where(
+                    WorkspaceMember.workspace_id == workspace_id,
+                    WorkspaceMember.user_id == ev.aggregate_id,
+                )
+            ).scalar_one_or_none()
+            if membership is None:
+                db.add(
+                    WorkspaceMember(
+                        workspace_id=workspace_id,
+                        user_id=ev.aggregate_id,
+                        role=str(workspace_role),
+                    )
+                )
+            else:
+                membership.role = str(workspace_role)
+    elif ev.event_type == USER_EVENT_WORKSPACE_ROLE_SET:
+        workspace_id = p.get("workspace_id")
+        role = str(p.get("role") or "Member")
+        if workspace_id:
+            membership = db.execute(
+                select(WorkspaceMember).where(
+                    WorkspaceMember.workspace_id == workspace_id,
+                    WorkspaceMember.user_id == ev.aggregate_id,
+                )
+            ).scalar_one_or_none()
+            if membership is None:
+                db.add(
+                    WorkspaceMember(
+                        workspace_id=workspace_id,
+                        user_id=ev.aggregate_id,
+                        role=role,
+                    )
+                )
+            else:
+                membership.role = role
+    elif ev.event_type in {USER_EVENT_PASSWORD_CHANGED, USER_EVENT_PASSWORD_RESET}:
+        user = db.get(User, ev.aggregate_id)
+        if user:
+            if "password_hash" in p:
+                user.password_hash = p.get("password_hash")
+            if "must_change_password" in p:
+                user.must_change_password = bool(p.get("must_change_password"))
+            changed_at = p.get("password_changed_at")
+            user.password_changed_at = datetime.fromisoformat(changed_at) if changed_at else None
+        keep_session_hash = str(p.get("keep_session_hash") or "").strip()
+        stmt = delete(AuthSession).where(AuthSession.user_id == ev.aggregate_id)
+        if keep_session_hash:
+            stmt = stmt.where(AuthSession.token_hash != keep_session_hash)
+        db.execute(stmt)
+    elif ev.event_type == USER_EVENT_DEACTIVATED:
+        user = db.get(User, ev.aggregate_id)
+        if user:
+            user.is_active = False
+        db.execute(delete(AuthSession).where(AuthSession.user_id == ev.aggregate_id))
     elif ev.event_type == USER_EVENT_PREFERENCES_UPDATED:
         user = db.get(User, ev.aggregate_id)
         if user:

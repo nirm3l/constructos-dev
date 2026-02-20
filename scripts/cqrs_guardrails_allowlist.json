@@ -1,0 +1,14 @@
+{
+  "entries": [
+    {
+      "path": "app/features/users/api.py",
+      "regex": "\\bdb\\.add\\(",
+      "reason": "Authentication session lifecycle is infrastructure-managed in this API slice."
+    },
+    {
+      "path": "app/features/users/api.py",
+      "regex": "\\bdb\\.execute\\(\\s*delete\\(",
+      "reason": "Auth session revocation and expiration cleanup are currently infrastructure-managed in this API slice."
+    }
+  ]
+}

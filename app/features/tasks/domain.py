@@ -1,115 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
-from eventsourcing.domain import Aggregate, event
-
-
-class TaskAggregate(Aggregate):
-    INITIAL_VERSION = 0
-
-    @event("Created")
-    def __init__(
-        self,
-        *,
-        workspace_id: str,
-        project_id: str | None,
-        specification_id: str | None,
-        title: str,
-        description: str,
-        status: str,
-        priority: str,
-        due_date: str | None,
-        assignee_id: str | None,
-        labels: list[str],
-        subtasks: list[dict[str, Any]],
-        attachments: list[dict[str, Any]],
-        external_refs: list[dict[str, Any]],
-        attachment_refs: list[dict[str, Any]],
-        recurring_rule: str | None,
-        order_index: int,
-        task_type: str = "manual",
-        scheduled_instruction: str | None = None,
-        scheduled_at_utc: str | None = None,
-        schedule_timezone: str | None = None,
-        schedule_state: str = "idle",
-    ) -> None:
-        self.workspace_id = workspace_id
-        self.project_id = project_id
-        self.specification_id = specification_id
-        self.title = title
-        self.description = description
-        self.status = status
-        self.priority = priority
-        self.due_date = due_date
-        self.assignee_id = assignee_id
-        self.labels = labels
-        self.subtasks = subtasks
-        self.attachments = attachments
-        self.external_refs = external_refs
-        self.attachment_refs = attachment_refs
-        self.recurring_rule = recurring_rule
-        self.task_type = task_type
-        self.scheduled_instruction = scheduled_instruction
-        self.scheduled_at_utc = scheduled_at_utc
-        self.schedule_timezone = schedule_timezone
-        self.schedule_state = schedule_state
-        self.last_schedule_run_at = None
-        self.last_schedule_error = None
-        self.order_index = order_index
-        self.archived = False
-        self.is_deleted = False
-        self.completed_at = None
-
-    @event("Updated")
-    def updated(self, changes: dict[str, Any]) -> None:
-        for key, value in changes.items():
-            setattr(self, key, value)
-
-    @event("Reordered")
-    def reordered(self, *, order_index: int, status: str | None) -> None:
-        self.order_index = order_index
-        if status:
-            self.status = status
-
-    @event("Completed")
-    def completed(self, completed_at: str) -> None:
-        self.status = "Done"
-        self.completed_at = completed_at
-
-    @event("Reopened")
-    def reopened(self, status: str = "To do") -> None:
-        self.status = status
-        self.completed_at = None
-
-    @event("Archived")
-    def archived_event(self) -> None:
-        self.archived = True
-
-    @event("Restored")
-    def restored(self) -> None:
-        self.archived = False
-
-    @event("Deleted")
-    def deleted(self) -> None:
-        self.is_deleted = True
-
-    @event("MovedToInbox")
-    def moved_to_inbox(self, from_project_id: str | None = None) -> None:
-        _ = from_project_id
-        self.project_id = None
-
-    @event("CommentAdded")
-    def comment_added(self, *, task_id: str, user_id: str, body: str) -> None:
-        _ = (task_id, user_id, body)
-
-    @event("CommentDeleted")
-    def comment_deleted(self, *, task_id: str, comment_id: int) -> None:
-        _ = (task_id, comment_id)
-
-    @event("WatchToggled")
-    def watch_toggled(self, *, task_id: str, user_id: str, watched: bool | None = None) -> None:
-        _ = (task_id, user_id, watched)
+from shared.aggregates import AggregateRoot
 
 
 EVENT_CREATED = "TaskCreated"
@@ -151,3 +45,146 @@ MUTATION_EVENTS = {
     EVENT_SCHEDULE_FAILED,
     EVENT_SCHEDULE_DISABLED,
 }
+
+
+class TaskAggregate(AggregateRoot):
+    aggregate_type = "Task"
+
+    def apply(self, *, event_type: str, payload: Mapping[str, Any]) -> None:
+        if event_type == EVENT_CREATED:
+            self.workspace_id = str(payload.get("workspace_id") or "")
+            self.project_id = payload.get("project_id")
+            self.specification_id = payload.get("specification_id")
+            self.title = str(payload.get("title") or "")
+            self.description = str(payload.get("description") or "")
+            self.status = str(payload.get("status") or "")
+            self.priority = str(payload.get("priority") or "Medium")
+            self.due_date = payload.get("due_date")
+            self.assignee_id = payload.get("assignee_id")
+            self.labels = list(payload.get("labels") or [])
+            self.subtasks = list(payload.get("subtasks") or [])
+            self.attachments = list(payload.get("attachments") or [])
+            self.external_refs = list(payload.get("external_refs") or [])
+            self.attachment_refs = list(payload.get("attachment_refs") or [])
+            self.recurring_rule = payload.get("recurring_rule")
+            self.task_type = str(payload.get("task_type") or "manual")
+            self.scheduled_instruction = payload.get("scheduled_instruction")
+            self.scheduled_at_utc = payload.get("scheduled_at_utc")
+            self.schedule_timezone = payload.get("schedule_timezone")
+            self.schedule_state = str(payload.get("schedule_state") or "idle")
+            self.last_schedule_run_at = payload.get("last_schedule_run_at")
+            self.last_schedule_error = payload.get("last_schedule_error")
+            self.order_index = int(payload.get("order_index") or 0)
+            self.archived = bool(payload.get("archived", False))
+            self.is_deleted = bool(payload.get("is_deleted", False))
+            self.completed_at = payload.get("completed_at")
+            self.automation_state = payload.get("automation_state")
+            self.automation_requested_at = payload.get("requested_at")
+            self.automation_started_at = payload.get("started_at")
+            self.automation_completed_at = payload.get("completed_at")
+            self.automation_failed_at = payload.get("failed_at")
+            self.last_automation_error = payload.get("error")
+            return
+
+        if event_type == EVENT_UPDATED:
+            for key, value in dict(payload).items():
+                setattr(self, key, value)
+            return
+
+        if event_type == EVENT_REORDERED:
+            self.order_index = int(payload.get("order_index") or 0)
+            status = payload.get("status")
+            if status:
+                self.status = str(status)
+            return
+
+        if event_type == EVENT_COMPLETED:
+            self.status = "Done"
+            self.completed_at = payload.get("completed_at")
+            return
+
+        if event_type == EVENT_REOPENED:
+            self.status = str(payload.get("status") or "To do")
+            self.completed_at = None
+            return
+
+        if event_type == EVENT_ARCHIVED:
+            self.archived = True
+            return
+
+        if event_type == EVENT_RESTORED:
+            self.archived = False
+            return
+
+        if event_type == EVENT_DELETED:
+            self.is_deleted = True
+            return
+
+        if event_type == EVENT_MOVED_TO_INBOX:
+            self.project_id = None
+            return
+
+        if event_type in {EVENT_COMMENT_ADDED, EVENT_COMMENT_DELETED, EVENT_WATCH_TOGGLED}:
+            return
+
+        if event_type == EVENT_AUTOMATION_REQUESTED:
+            self.automation_state = "queued"
+            self.automation_requested_at = payload.get("requested_at")
+            return
+
+        if event_type == EVENT_AUTOMATION_STARTED:
+            self.automation_state = "running"
+            self.automation_started_at = payload.get("started_at")
+            return
+
+        if event_type == EVENT_AUTOMATION_COMPLETED:
+            self.automation_state = "completed"
+            self.automation_completed_at = payload.get("completed_at")
+            self.last_automation_error = None
+            return
+
+        if event_type == EVENT_AUTOMATION_FAILED:
+            self.automation_state = "failed"
+            self.automation_failed_at = payload.get("failed_at")
+            self.last_automation_error = payload.get("error")
+            return
+
+        if event_type == EVENT_SCHEDULE_CONFIGURED:
+            self.scheduled_instruction = payload.get("scheduled_instruction")
+            self.scheduled_at_utc = payload.get("scheduled_at_utc")
+            self.schedule_timezone = payload.get("schedule_timezone")
+            self.schedule_state = str(payload.get("schedule_state") or "idle")
+            if "last_schedule_error" in payload:
+                self.last_schedule_error = payload.get("last_schedule_error")
+            return
+
+        if event_type == EVENT_SCHEDULE_QUEUED:
+            self.schedule_state = str(payload.get("schedule_state") or "queued")
+            return
+
+        if event_type == EVENT_SCHEDULE_STARTED:
+            self.schedule_state = str(payload.get("schedule_state") or "running")
+            return
+
+        if event_type == EVENT_SCHEDULE_COMPLETED:
+            self.schedule_state = str(payload.get("schedule_state") or "idle")
+            self.last_schedule_run_at = payload.get("last_schedule_run_at")
+            self.last_schedule_error = None
+            return
+
+        if event_type == EVENT_SCHEDULE_FAILED:
+            self.schedule_state = str(payload.get("schedule_state") or "error")
+            self.last_schedule_error = payload.get("error")
+            return
+
+        if event_type == EVENT_SCHEDULE_DISABLED:
+            self.task_type = "manual"
+            self.schedule_state = str(payload.get("schedule_state") or "idle")
+            self.scheduled_instruction = None
+            self.scheduled_at_utc = None
+            self.schedule_timezone = None
+            self.last_schedule_error = None
+            return
+
+        raise ValueError(f"Unknown event type: {event_type}")
+

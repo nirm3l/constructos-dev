@@ -14,6 +14,7 @@ m4tr1x is a task/project platform that combines:
 - `docs/03-domain-model-and-workflows.md` - domain model, lifecycle logic, key workflows.
 - `docs/04-api-and-mcp-map.md` - REST surface, SSE behavior, MCP tools map.
 - `docs/05-operations-runbook.md` - deployment, env config, observability, troubleshooting.
+- `docs/08-cqrs-consistency-guardrails.md` - CQRS consistency rules, allowlist policy, and guardrail enforcement.
 
 ## System At A Glance
 ```mermaid

@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from shared.auth import generate_session_token, generate_temporary_password, hash_password, hash_session_token, verify_password
+from shared.auth import generate_session_token, hash_session_token, verify_password
 from shared.core import AuthSession, User, UserPreferencesPatch, WorkspaceMember, get_command_id, get_current_user, get_db
 from shared.settings import AUTH_COOKIE_SECURE, AUTH_SESSION_COOKIE_NAME, AUTH_SESSION_TTL_HOURS
 
@@ -186,29 +186,15 @@ def change_password(
     request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    command_id: str | None = Depends(get_command_id),
 ):
-    current_password = str(payload.current_password or "")
-    new_password = str(payload.new_password or "")
-    if len(new_password) < 8:
-        raise HTTPException(status_code=422, detail="new_password must be at least 8 characters")
-    if not verify_password(current_password, user.password_hash):
-        raise HTTPException(status_code=400, detail="Current password is incorrect")
-    if verify_password(new_password, user.password_hash):
-        raise HTTPException(status_code=422, detail="new_password must differ from current password")
-
-    user.password_hash = hash_password(new_password)
-    user.must_change_password = False
-    user.password_changed_at = _now_utc()
-
     current_session_token = request.cookies.get(AUTH_SESSION_COOKIE_NAME)
     current_hash = hash_session_token(current_session_token) if current_session_token else ""
-    db.execute(
-        delete(AuthSession).where(
-            AuthSession.user_id == user.id,
-            AuthSession.token_hash != current_hash,
-        )
+    UserApplicationService(db, user, command_id=command_id).change_password(
+        current_password=str(payload.current_password or ""),
+        new_password=str(payload.new_password or ""),
+        keep_session_hash=current_hash or None,
     )
-    db.commit()
     return {"ok": True, "user": _serialize_auth_user(db, user)}
 
 
@@ -254,52 +240,17 @@ def create_workspace_user(
     payload: AdminCreateUserPayload,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    command_id: str | None = Depends(get_command_id),
 ):
-    _require_workspace_admin(db, payload.workspace_id, user.id)
     username = _normalize_username(payload.username)
     role = _normalize_workspace_role(payload.role)
     full_name = str(payload.full_name or "").strip() or username
-
-    existing_user = db.execute(select(User).where(func.lower(User.username) == username.lower())).scalar_one_or_none()
-    if existing_user:
-        raise HTTPException(status_code=409, detail="username is already in use")
-
-    temp_password = generate_temporary_password(12)
-    created_user = User(
+    return UserApplicationService(db, user, command_id=command_id).create_workspace_user(
+        workspace_id=payload.workspace_id,
         username=username,
         full_name=full_name,
-        user_type="human",
-        password_hash=hash_password(temp_password),
-        must_change_password=True,
-        password_changed_at=None,
-        is_active=True,
-        timezone="UTC",
-        theme="light",
+        role=role,
     )
-    db.add(created_user)
-    db.flush()
-    db.add(
-        WorkspaceMember(
-            workspace_id=payload.workspace_id,
-            user_id=created_user.id,
-            role=role,
-        )
-    )
-    db.commit()
-
-    return {
-        "workspace_id": payload.workspace_id,
-        "user": {
-            "id": created_user.id,
-            "username": created_user.username,
-            "full_name": created_user.full_name,
-            "user_type": created_user.user_type,
-            "role": role,
-            "must_change_password": True,
-            "is_active": True,
-        },
-        "temporary_password": temp_password,
-    }
 
 
 @router.post("/api/admin/users/{target_user_id}/reset-password")
@@ -308,27 +259,12 @@ def reset_workspace_user_password(
     payload: AdminResetPasswordPayload,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    command_id: str | None = Depends(get_command_id),
 ):
-    _require_workspace_admin(db, payload.workspace_id, user.id)
-    target_membership = db.execute(
-        select(WorkspaceMember).where(
-            WorkspaceMember.workspace_id == payload.workspace_id,
-            WorkspaceMember.user_id == target_user_id,
-        )
-    ).scalar_one_or_none()
-    if not target_membership:
-        raise HTTPException(status_code=404, detail="Workspace member not found")
-    target_user = db.get(User, target_user_id)
-    if not target_user or target_user.user_type != "human":
-        raise HTTPException(status_code=404, detail="User not found")
-
-    temp_password = generate_temporary_password(12)
-    target_user.password_hash = hash_password(temp_password)
-    target_user.must_change_password = True
-    target_user.password_changed_at = None
-    db.execute(delete(AuthSession).where(AuthSession.user_id == target_user.id))
-    db.commit()
-    return {"ok": True, "user_id": target_user.id, "temporary_password": temp_password}
+    return UserApplicationService(db, user, command_id=command_id).reset_workspace_user_password(
+        workspace_id=payload.workspace_id,
+        target_user_id=target_user_id,
+    )
 
 
 @router.post("/api/admin/users/{target_user_id}/set-role")
@@ -337,39 +273,14 @@ def update_workspace_user_role(
     payload: AdminUpdateUserRolePayload,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    command_id: str | None = Depends(get_command_id),
 ):
-    _require_workspace_admin(db, payload.workspace_id, user.id)
     role = _normalize_workspace_role(payload.role)
-    target_membership = db.execute(
-        select(WorkspaceMember).where(
-            WorkspaceMember.workspace_id == payload.workspace_id,
-            WorkspaceMember.user_id == target_user_id,
-        )
-    ).scalar_one_or_none()
-    if not target_membership:
-        raise HTTPException(status_code=404, detail="Workspace member not found")
-
-    target_user = db.get(User, target_user_id)
-    if not target_user:
-        raise HTTPException(status_code=404, detail="User not found")
-    if target_user.user_type != "human" and role not in ADMIN_ROLES:
-        raise HTTPException(status_code=422, detail="Non-human users must keep admin role")
-
-    if target_membership.role in ADMIN_ROLES and role not in ADMIN_ROLES:
-        admin_count = db.execute(
-            select(func.count())
-            .select_from(WorkspaceMember)
-            .where(
-                WorkspaceMember.workspace_id == payload.workspace_id,
-                WorkspaceMember.role.in_(tuple(ADMIN_ROLES)),
-            )
-        ).scalar_one()
-        if int(admin_count or 0) <= 1:
-            raise HTTPException(status_code=409, detail="Workspace must have at least one admin")
-
-    target_membership.role = role
-    db.commit()
-    return {"ok": True, "workspace_id": payload.workspace_id, "user_id": target_user_id, "role": role}
+    return UserApplicationService(db, user, command_id=command_id).update_workspace_user_role(
+        workspace_id=payload.workspace_id,
+        target_user_id=target_user_id,
+        role=role,
+    )
 
 
 @router.post("/api/admin/users/{target_user_id}/deactivate")
@@ -378,46 +289,12 @@ def deactivate_workspace_user(
     payload: AdminDeactivateUserPayload,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    command_id: str | None = Depends(get_command_id),
 ):
-    _require_workspace_admin(db, payload.workspace_id, user.id)
-    target_membership = db.execute(
-        select(WorkspaceMember).where(
-            WorkspaceMember.workspace_id == payload.workspace_id,
-            WorkspaceMember.user_id == target_user_id,
-        )
-    ).scalar_one_or_none()
-    if not target_membership:
-        raise HTTPException(status_code=404, detail="Workspace member not found")
-
-    target_user = db.get(User, target_user_id)
-    if not target_user:
-        raise HTTPException(status_code=404, detail="User not found")
-    if target_user.user_type != "human":
-        raise HTTPException(status_code=422, detail="Only human users can be deactivated")
-    if target_user.id == user.id:
-        raise HTTPException(status_code=409, detail="You cannot deactivate your own account")
-    if not bool(target_user.is_active):
-        return {"ok": True, "workspace_id": payload.workspace_id, "user_id": target_user_id, "is_active": False}
-
-    if target_membership.role in ADMIN_ROLES:
-        active_human_admin_count = db.execute(
-            select(func.count())
-            .select_from(WorkspaceMember)
-            .join(User, User.id == WorkspaceMember.user_id)
-            .where(
-                WorkspaceMember.workspace_id == payload.workspace_id,
-                WorkspaceMember.role.in_(tuple(ADMIN_ROLES)),
-                User.user_type == "human",
-                User.is_active.is_(True),
-            )
-        ).scalar_one()
-        if int(active_human_admin_count or 0) <= 1:
-            raise HTTPException(status_code=409, detail="Workspace must have at least one active human admin")
-
-    target_user.is_active = False
-    db.execute(delete(AuthSession).where(AuthSession.user_id == target_user.id))
-    db.commit()
-    return {"ok": True, "workspace_id": payload.workspace_id, "user_id": target_user_id, "is_active": False}
+    return UserApplicationService(db, user, command_id=command_id).deactivate_workspace_user(
+        workspace_id=payload.workspace_id,
+        target_user_id=target_user_id,
+    )
 
 
 @router.patch("/api/me/preferences")

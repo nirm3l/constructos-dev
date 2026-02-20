@@ -14,6 +14,7 @@ from features.rules.application import ProjectRuleApplicationService
 from features.specifications.application import SpecificationApplicationService
 from features.tasks.application import TaskApplicationService
 from shared.core import (
+    AggregateEventRepository,
     ProjectCreate,
     ProjectRuleCreate,
     SpecificationCreate,
@@ -30,6 +31,7 @@ from .catalog import (
 )
 from .graph_scaffold import sync_template_graph_scaffold
 from .schemas import ProjectFromTemplateCreate
+from .domain import ProjectTemplateBindingAggregate
 
 
 def _stable_command_id(*, prefix: str, payload: dict[str, Any]) -> str:
@@ -128,10 +130,31 @@ class ProjectTemplateApplicationService:
             applied_by=self.user.id,
             parameters_json=json.dumps(parameters or {}, ensure_ascii=True, sort_keys=True, default=str),
         )
-        self.db.add(binding)
+        aggregate = ProjectTemplateBindingAggregate(project_id, version=0)
+        aggregate.bind(
+            workspace_id=binding.workspace_id,
+            project_id=binding.project_id,
+            template_key=binding.template_key,
+            template_version=binding.template_version,
+            applied_by=binding.applied_by,
+            parameters_json=binding.parameters_json,
+        )
+        AggregateEventRepository(self.db).persist(
+            aggregate,
+            base_metadata={
+                "actor_id": self.user.id,
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+            },
+            expected_version=0,
+        )
         self.db.commit()
-        self.db.refresh(binding)
-        return binding
+        created = self.db.execute(
+            select(ProjectTemplateBinding).where(ProjectTemplateBinding.project_id == project_id)
+        ).scalar_one_or_none()
+        if created is None:
+            raise HTTPException(status_code=500, detail="Project template binding was not created")
+        return created
 
     def _seed_specifications(
         self,

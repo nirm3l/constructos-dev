@@ -1519,7 +1519,14 @@ function AuthGate() {
         <section className="card" style={{ maxWidth: 520, margin: '10vh auto 0 auto' }}>
           <h2>Login</h2>
           <p className="meta">Sign in using username and password.</p>
-          <div className="row wrap" style={{ marginTop: 10 }}>
+          <form
+            className="row wrap"
+            style={{ marginTop: 10 }}
+            onSubmit={(e) => {
+              e.preventDefault()
+              void handleLogin()
+            }}
+          >
             <input
               value={username}
               onChange={(e) => setUsername(e.target.value)}
@@ -1533,10 +1540,10 @@ function AuthGate() {
               type="password"
               autoComplete="current-password"
             />
-            <button onClick={handleLogin} disabled={pending || !username.trim() || !password}>
+            <button type="submit" disabled={pending || !username.trim() || !password}>
               {pending ? 'Logging in...' : 'Login'}
             </button>
-          </div>
+          </form>
           {authError && <div className="notice notice-error" style={{ marginTop: 10 }}>{authError}</div>}
         </section>
       </div>

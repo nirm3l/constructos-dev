@@ -6,8 +6,17 @@ from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from shared.core import Project, SavedViewCreate, User, append_event, allocate_id, ensure_project_access, ensure_role, load_saved_view
-from .domain import EVENT_CREATED as SAVED_VIEW_EVENT_CREATED
+from shared.core import (
+    AggregateEventRepository,
+    Project,
+    SavedViewCreate,
+    User,
+    allocate_id,
+    ensure_project_access,
+    ensure_role,
+    load_saved_view,
+)
+from .domain import SavedViewAggregate
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,20 +46,22 @@ class CreateSavedViewHandler:
         if project.workspace_id != self.payload.workspace_id:
             raise HTTPException(status_code=400, detail="Project does not belong to workspace")
         sid = allocate_id(self.ctx.db)
-        append_event(
-            self.ctx.db,
-            aggregate_type="SavedView",
-            aggregate_id=sid,
-            event_type=SAVED_VIEW_EVENT_CREATED,
-            payload={
+        aggregate = SavedViewAggregate(sid, version=0)
+        aggregate.create(
+            workspace_id=self.payload.workspace_id,
+            project_id=self.payload.project_id,
+            user_id=None if self.payload.shared else self.ctx.user.id,
+            name=self.payload.name,
+            shared=self.payload.shared,
+            filters=self.payload.filters,
+        )
+        AggregateEventRepository(self.ctx.db).persist(
+            aggregate,
+            base_metadata={
+                "actor_id": self.ctx.user.id,
                 "workspace_id": self.payload.workspace_id,
                 "project_id": self.payload.project_id,
-                "user_id": None if self.payload.shared else self.ctx.user.id,
-                "name": self.payload.name,
-                "shared": self.payload.shared,
-                "filters": self.payload.filters,
             },
-            metadata={"actor_id": self.ctx.user.id, "workspace_id": self.payload.workspace_id, "project_id": self.payload.project_id},
             expected_version=0,
         )
         try:

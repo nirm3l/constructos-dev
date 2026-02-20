@@ -106,3 +106,9 @@ Consistency by store:
 - Clean write/read separation.
 - Single event model powering API, automation, and graph projections.
 - Strong foundation for explainable AI actions because all mutations are evented.
+
+## 11. CQRS Guardrails
+- Repository check: `scripts/check_cqrs_guardrails.py`.
+- Scope: `app/features/**/api.py`, `app/features/**/application.py`, `app/features/**/command_handlers.py`.
+- Blocked patterns: direct `db.add`, `db.delete`, and direct SQL `insert/update/delete` execution in feature write slices.
+- Temporary exceptions are explicitly tracked in `scripts/cqrs_guardrails_allowlist.json`.

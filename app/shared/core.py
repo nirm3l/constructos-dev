@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .bootstrap import bootstrap_data, bootstrap_payload, startup_bootstrap
+from .aggregates import AggregateEventRepository, AggregateRoot, PendingDomainEvent
 from .contracts import (
     AgentChatRun,
     BulkAction,

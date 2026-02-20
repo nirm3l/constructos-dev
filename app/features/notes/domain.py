@@ -1,70 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
-from eventsourcing.domain import Aggregate, event
-
-
-class NoteAggregate(Aggregate):
-    INITIAL_VERSION = 0
-
-    @event("Created")
-    def __init__(
-        self,
-        *,
-        workspace_id: str,
-        project_id: str | None,
-        task_id: str | None,
-        specification_id: str | None,
-        title: str,
-        body: str,
-        tags: list[str],
-        external_refs: list[dict[str, Any]],
-        attachment_refs: list[dict[str, Any]],
-        pinned: bool,
-        archived: bool,
-        created_by: str,
-        updated_by: str,
-    ) -> None:
-        self.workspace_id = workspace_id
-        self.project_id = project_id
-        self.task_id = task_id
-        self.specification_id = specification_id
-        self.title = title
-        self.body = body
-        self.tags = tags
-        self.external_refs = external_refs
-        self.attachment_refs = attachment_refs
-        self.pinned = pinned
-        self.archived = archived
-        self.is_deleted = False
-        self.created_by = created_by
-        self.updated_by = updated_by
-
-    @event("Updated")
-    def updated(self, changes: dict[str, Any]) -> None:
-        for k, v in changes.items():
-            setattr(self, k, v)
-
-    @event("Archived")
-    def archived_event(self) -> None:
-        self.archived = True
-
-    @event("Restored")
-    def restored(self) -> None:
-        self.archived = False
-
-    @event("Pinned")
-    def pinned_event(self) -> None:
-        self.pinned = True
-
-    @event("Unpinned")
-    def unpinned_event(self) -> None:
-        self.pinned = False
-
-    @event("Deleted")
-    def deleted(self) -> None:
-        self.is_deleted = True
+from shared.aggregates import AggregateRoot
 
 
 EVENT_CREATED = "NoteCreated"
@@ -83,3 +22,69 @@ MUTATION_EVENTS = {
     EVENT_UNPINNED,
     EVENT_DELETED,
 }
+
+
+class NoteAggregate(AggregateRoot):
+    aggregate_type = "Note"
+
+    def apply(self, *, event_type: str, payload: Mapping[str, Any]) -> None:
+        if event_type == EVENT_CREATED:
+            self.workspace_id = str(payload.get("workspace_id") or "")
+            self.project_id = payload.get("project_id")
+            self.task_id = payload.get("task_id")
+            self.specification_id = payload.get("specification_id")
+            self.title = str(payload.get("title") or "")
+            self.body = str(payload.get("body") or "")
+            self.tags = list(payload.get("tags") or [])
+            self.external_refs = list(payload.get("external_refs") or [])
+            self.attachment_refs = list(payload.get("attachment_refs") or [])
+            self.pinned = bool(payload.get("pinned", False))
+            self.archived = bool(payload.get("archived", False))
+            self.is_deleted = bool(payload.get("is_deleted", False))
+            self.created_by = str(payload.get("created_by") or "")
+            self.updated_by = str(payload.get("updated_by") or "")
+            self.created_at = payload.get("created_at")
+            return
+
+        if event_type == EVENT_UPDATED:
+            for key, value in dict(payload).items():
+                setattr(self, key, value)
+            return
+
+        if event_type == EVENT_ARCHIVED:
+            self.archived = True
+            updated_by = payload.get("updated_by")
+            if updated_by is not None:
+                self.updated_by = str(updated_by)
+            return
+
+        if event_type == EVENT_RESTORED:
+            self.archived = False
+            updated_by = payload.get("updated_by")
+            if updated_by is not None:
+                self.updated_by = str(updated_by)
+            return
+
+        if event_type == EVENT_PINNED:
+            self.pinned = True
+            updated_by = payload.get("updated_by")
+            if updated_by is not None:
+                self.updated_by = str(updated_by)
+            return
+
+        if event_type == EVENT_UNPINNED:
+            self.pinned = False
+            updated_by = payload.get("updated_by")
+            if updated_by is not None:
+                self.updated_by = str(updated_by)
+            return
+
+        if event_type == EVENT_DELETED:
+            self.is_deleted = True
+            updated_by = payload.get("updated_by")
+            if updated_by is not None:
+                self.updated_by = str(updated_by)
+            return
+
+        raise ValueError(f"Unknown event type: {event_type}")
+

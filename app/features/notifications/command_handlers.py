@@ -6,9 +6,9 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from shared.core import Notification, User, WorkspaceMember, append_event
+from shared.core import AggregateEventRepository, Notification, User, WorkspaceMember
 from shared.settings import BOOTSTRAP_WORKSPACE_ID
-from .domain import EVENT_MARKED_READ as NOTIFICATION_EVENT_MARKED_READ
+from .domain import NotificationAggregate
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,15 +26,21 @@ class MarkNotificationReadHandler:
         n = self.ctx.db.get(Notification, self.notification_id)
         if not n or n.user_id != self.ctx.user.id:
             raise HTTPException(status_code=404, detail="Notification not found")
-        append_event(
-            self.ctx.db,
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = repo.load_with_class(
             aggregate_type="Notification",
             aggregate_id=self.notification_id,
-            event_type=NOTIFICATION_EVENT_MARKED_READ,
-            payload={"notification_id": self.notification_id, "user_id": self.ctx.user.id},
-            metadata={
+            aggregate_cls=NotificationAggregate,
+        )
+        aggregate.mark_read(notification_id=self.notification_id, user_id=self.ctx.user.id)
+        repo.persist(
+            aggregate,
+            base_metadata={
                 "actor_id": self.ctx.user.id,
-                "workspace_id": self.ctx.db.execute(select(WorkspaceMember.workspace_id).where(WorkspaceMember.user_id == self.ctx.user.id)).scalar() or BOOTSTRAP_WORKSPACE_ID,
+                "workspace_id": (
+                    self.ctx.db.execute(select(WorkspaceMember.workspace_id).where(WorkspaceMember.user_id == self.ctx.user.id)).scalar()
+                    or BOOTSTRAP_WORKSPACE_ID
+                ),
             },
         )
         self.ctx.db.commit()
