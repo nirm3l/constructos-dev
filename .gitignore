@@ -3,6 +3,7 @@
 .uv-cache/
 data/
 .deploy.env
+.env
 .env.jira-mcp
 
 __pycache__/
