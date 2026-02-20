@@ -87,6 +87,7 @@ services:
       AGENT_CHAT_CONTEXT_LIMIT_TOKENS: "${AGENT_CHAT_CONTEXT_LIMIT_TOKENS:-400000}"
       AGENT_CODEX_COMMAND: "python -m features.agents.codex_mcp_adapter"
       AGENT_CODEX_MCP_URL: "http://mcp-tools:8090/mcp"
+      GITHUB_PAT: "${GITHUB_PAT:-}"
       MCP_AUTH_TOKEN: "dev-mcp-token"
       MCP_ALLOWED_WORKSPACE_IDS: "10000000-0000-0000-0000-000000000001"
       KNOWLEDGE_GRAPH_ENABLED: "true"
@@ -110,6 +111,7 @@ services:
       ALLOWED_EMBEDDING_MODELS: "${ALLOWED_EMBEDDING_MODELS:-nomic-embed-text,mxbai-embed-large,embeddinggemma}"
       OLLAMA_EMBED_GPU_ENABLED: "${OLLAMA_EMBED_GPU_ENABLED:-true}"
     volumes:
+      - ./codex.task-app.toml:/root/.codex/config.toml:ro
       - /home/m4tr1x/.codex/auth.json:/root/.codex/auth.json:ro
     ports:
       - "8080:8000"
