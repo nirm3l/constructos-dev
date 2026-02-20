@@ -26,6 +26,7 @@ from .settings import (
     PERSISTENT_SUBSCRIPTION_VECTOR_GROUP,
     logger,
 )
+from .realtime import enqueue_realtime_channel
 from .vector_store import (
     index_entity_state,
     maybe_reindex_project,
@@ -144,6 +145,7 @@ def _emit_project_index_activity(
             details=details_json,
         )
     )
+    enqueue_realtime_channel(db, f"workspace:{workspace_id}")
 
 
 def _project_vector_event(db, ev: EventEnvelope) -> None:
