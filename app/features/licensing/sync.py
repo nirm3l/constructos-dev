@@ -8,21 +8,29 @@ from typing import Any
 import httpx
 from sqlalchemy import select
 
+from shared.licensing import resolve_license_installation_id
 from shared.models import LicenseEntitlement, LicenseInstallation, LicenseValidationLog, SessionLocal
 from shared.settings import (
     APP_VERSION,
     LICENSE_HEARTBEAT_SECONDS,
-    LICENSE_INSTALLATION_ID,
     LICENSE_PUBLIC_KEY,
     LICENSE_SERVER_TOKEN,
     LICENSE_SERVER_URL,
     logger,
 )
 
+from .read_models import license_status_read_model
 from .token_crypto import LicenseTokenError, verify_entitlement_token
 
 _worker_stop_event = threading.Event()
 _worker_thread: threading.Thread | None = None
+
+
+class LicenseActivationError(RuntimeError):
+    def __init__(self, status_code: int, detail: str):
+        super().__init__(detail)
+        self.status_code = int(status_code)
+        self.detail = str(detail or "Activation failed")
 
 
 def _now_utc() -> datetime:
@@ -105,6 +113,27 @@ def _append_validation_log(db, *, installation_db_id: int, result: str, reason: 
     )
 
 
+def _get_or_create_installation(db, installation_id: str) -> tuple[LicenseInstallation, bool]:
+    installation = db.execute(
+        select(LicenseInstallation).where(LicenseInstallation.installation_id == installation_id)
+    ).scalar_one_or_none()
+    if installation is not None:
+        return installation, False
+    now = _now_utc()
+    installation = LicenseInstallation(
+        installation_id=installation_id,
+        workspace_id=None,
+        status="trial",
+        plan_code="trial",
+        activated_at=now,
+        trial_ends_at=now,
+        metadata_json=_json_dumps({"source": "licensing-sync"}),
+    )
+    db.add(installation)
+    db.flush()
+    return installation, True
+
+
 def _apply_entitlement_payload(db, installation: LicenseInstallation, payload: dict[str, Any]) -> None:
     entitlement_payload = payload.get("entitlement") if isinstance(payload.get("entitlement"), dict) else payload
     status = str(entitlement_payload.get("status") or installation.status or "unlicensed").strip().lower() or "unlicensed"
@@ -136,7 +165,7 @@ def _apply_entitlement_payload(db, installation: LicenseInstallation, payload: d
         select(LicenseEntitlement)
         .where(LicenseEntitlement.installation_id == installation.id)
         .order_by(LicenseEntitlement.valid_from.desc(), LicenseEntitlement.id.desc())
-    ).scalar_one_or_none()
+    ).scalars().first()
 
     should_insert = True
     if latest is not None:
@@ -194,24 +223,8 @@ def sync_license_once() -> bool:
         return False
 
     with SessionLocal() as db:
-        installation_created = False
-        installation = db.execute(
-            select(LicenseInstallation).where(LicenseInstallation.installation_id == LICENSE_INSTALLATION_ID)
-        ).scalar_one_or_none()
-        if installation is None:
-            installation_created = True
-            now = _now_utc()
-            installation = LicenseInstallation(
-                installation_id=LICENSE_INSTALLATION_ID,
-                workspace_id=None,
-                status="trial",
-                plan_code="trial",
-                activated_at=now,
-                trial_ends_at=now,
-                metadata_json=_json_dumps({"source": "licensing-sync"}),
-            )
-            db.add(installation)
-            db.flush()
+        installation_id = resolve_license_installation_id(db)
+        installation, installation_created = _get_or_create_installation(db, installation_id)
         if installation_created:
             # Persist the installation record before external I/O so failed sync
             # does not erase the local installation identity.
@@ -255,6 +268,70 @@ def sync_license_once() -> bool:
             db.commit()
             logger.warning("License sync failed: %s", exc)
             return False
+
+
+def _control_plane_error_detail(response: httpx.Response) -> str:
+    fallback = f"Control-plane request failed ({response.status_code})"
+    try:
+        payload = response.json()
+    except Exception:
+        text = str(response.text or "").strip()
+        return text or fallback
+    if isinstance(payload, dict):
+        detail = payload.get("detail")
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()
+    text = str(response.text or "").strip()
+    return text or fallback
+
+
+def activate_with_code_once(activation_code: str) -> dict[str, Any]:
+    if not str(LICENSE_SERVER_URL or "").strip():
+        raise LicenseActivationError(503, "License server is not configured")
+
+    code = str(activation_code or "").strip()
+    if not code:
+        raise LicenseActivationError(422, "activation_code is required")
+
+    with SessionLocal() as db:
+        installation_id = resolve_license_installation_id(db)
+        installation, installation_created = _get_or_create_installation(db, installation_id)
+        if installation_created:
+            db.commit()
+
+        try:
+            with httpx.Client(timeout=8.0) as client:
+                response = client.post(
+                    _server_url("/v1/installations/activate"),
+                    headers=_server_headers(),
+                    json={
+                        "installation_id": installation.installation_id,
+                        "workspace_id": installation.workspace_id,
+                        "app_version": APP_VERSION,
+                        "activation_code": code,
+                        "metadata": {"source": "task-app"},
+                    },
+                )
+                if response.status_code >= 400:
+                    raise LicenseActivationError(response.status_code, _control_plane_error_detail(response))
+
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise LicenseActivationError(502, "Control-plane response must be a JSON object")
+
+            verified_payload = _resolve_verified_entitlement_payload(payload)
+            _apply_entitlement_payload(db, installation, verified_payload)
+            db.commit()
+            return {
+                "license": license_status_read_model(db),
+                "seat_usage": payload.get("seat_usage") if isinstance(payload.get("seat_usage"), dict) else None,
+            }
+        except LicenseActivationError:
+            db.rollback()
+            raise
+        except Exception as exc:
+            db.rollback()
+            raise LicenseActivationError(503, f"License activation failed: {exc}") from exc
 
 
 def _worker_loop() -> None:

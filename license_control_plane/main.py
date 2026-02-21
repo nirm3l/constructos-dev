@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
+import string
+import hashlib
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import DateTime, Integer, String, Text, create_engine, func, or_, select
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, func, or_, select
 from sqlalchemy.orm import Mapped, Session, declarative_base, mapped_column, sessionmaker
 
 try:
@@ -43,6 +47,7 @@ LCP_TOKEN_TTL_SECONDS = max(60, _env_int("LCP_TOKEN_TTL_SECONDS", 3600))
 LCP_SIGNING_PRIVATE_KEY_PEM = os.getenv("LCP_SIGNING_PRIVATE_KEY_PEM", "").strip()
 LCP_SIGNING_KEY_ID = os.getenv("LCP_SIGNING_KEY_ID", "default-ed25519").strip() or "default-ed25519"
 LCP_REQUIRE_SIGNED_TOKENS = _env_bool("LCP_REQUIRE_SIGNED_TOKENS", False)
+LCP_DEFAULT_MAX_INSTALLATIONS = max(1, _env_int("LCP_DEFAULT_MAX_INSTALLATIONS", 3))
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 INDEX_HTML = STATIC_DIR / "index.html"
@@ -62,6 +67,45 @@ class Installation(Base):
     subscription_valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     trial_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     trial_ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class ActivationCode(Base):
+    __tablename__ = "activation_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    code_suffix: Mapped[str] = mapped_column(String(16), index=True)
+    customer_ref: Mapped[str] = mapped_column(String(128), index=True)
+    plan_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    max_installations: Mapped[int] = mapped_column(Integer, default=LCP_DEFAULT_MAX_INSTALLATIONS)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    usage_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class ClientToken(Base):
+    __tablename__ = "client_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    token_suffix: Mapped[str] = mapped_column(String(16), index=True)
+    customer_ref: Mapped[str] = mapped_column(String(128), index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     metadata_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
@@ -100,6 +144,33 @@ class AdminSubscriptionUpdateRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class AdminActivationCodeCreateRequest(BaseModel):
+    customer_ref: str = Field(min_length=2, max_length=128)
+    plan_code: str | None = None
+    valid_until: str | None = None
+    max_installations: int = Field(default=LCP_DEFAULT_MAX_INSTALLATIONS, ge=1, le=100)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class InstallationActivateRequest(BaseModel):
+    installation_id: str = Field(min_length=3, max_length=128)
+    activation_code: str = Field(min_length=8, max_length=128)
+    workspace_id: str | None = None
+    app_version: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AdminClientTokenCreateRequest(BaseModel):
+    customer_ref: str = Field(min_length=2, max_length=128)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class InstallationAuthContext:
+    auth_type: str
+    customer_ref: str | None = None
+
+
 def _get_db():
     db = SessionLocal()
     try:
@@ -108,12 +179,56 @@ def _get_db():
         db.close()
 
 
-def _require_api_token(authorization: str | None = Header(default=None)) -> None:
+def _extract_bearer_secret(authorization: str | None) -> str | None:
+    raw = str(authorization or "").strip()
+    if not raw:
+        return None
+    if not raw.lower().startswith("bearer "):
+        return None
+    secret = raw[7:].strip()
+    return secret or None
+
+
+def _secret_hash(value: str | None) -> str:
+    normalized = str(value or "").strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _require_admin_token(authorization: str | None = Header(default=None)) -> None:
     if not LCP_API_TOKEN:
         return
-    expected = f"Bearer {LCP_API_TOKEN}"
-    if not authorization or authorization != expected:
-        raise HTTPException(status_code=401, detail="Invalid control-plane token")
+    provided = _extract_bearer_secret(authorization)
+    if not provided or provided != LCP_API_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid control-plane admin token")
+
+
+def _require_installation_auth(
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(_get_db),
+) -> InstallationAuthContext:
+    provided = _extract_bearer_secret(authorization)
+    if LCP_API_TOKEN and provided == LCP_API_TOKEN:
+        return InstallationAuthContext(auth_type="admin", customer_ref=None)
+
+    if provided:
+        token_hash = _secret_hash(provided)
+        client_token = db.execute(
+            select(ClientToken).where(
+                ClientToken.token_hash == token_hash,
+                ClientToken.is_active.is_(True),
+            )
+        ).scalar_one_or_none()
+        if client_token is not None:
+            return InstallationAuthContext(auth_type="client", customer_ref=client_token.customer_ref)
+
+    if not LCP_API_TOKEN:
+        has_client_tokens = db.execute(
+            select(ClientToken.id).where(ClientToken.is_active.is_(True)).limit(1)
+        ).scalar_one_or_none()
+        if has_client_tokens is None:
+            return InstallationAuthContext(auth_type="anonymous", customer_ref=None)
+
+    raise HTTPException(status_code=401, detail="Invalid control-plane token")
 
 
 def _now_utc() -> datetime:
@@ -148,6 +263,97 @@ def _load_metadata(raw: str | None) -> dict[str, Any]:
 
 def _dump_metadata(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def _normalize_activation_code(value: str | None) -> str:
+    raw = str(value or "").upper()
+    return "".join(ch for ch in raw if ch.isalnum())
+
+
+def _activation_code_hash(value: str | None) -> str:
+    normalized = _normalize_activation_code(value)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _activation_code_suffix(value: str | None) -> str:
+    normalized = _normalize_activation_code(value)
+    if len(normalized) <= 6:
+        return normalized
+    return normalized[-6:]
+
+
+def _client_token_suffix(value: str | None) -> str:
+    normalized = str(value or "").strip()
+    if len(normalized) <= 8:
+        return normalized
+    return normalized[-8:]
+
+
+def _generate_client_token() -> str:
+    return f"lcp_{secrets.token_urlsafe(30)}"
+
+
+def _generate_activation_code() -> str:
+    alphabet = string.ascii_uppercase + string.digits
+    raw = "".join(secrets.choice(alphabet) for _ in range(20))
+    return f"ACT-{raw[0:4]}-{raw[4:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}"
+
+
+def _serialize_activation_code(code: ActivationCode) -> dict[str, Any]:
+    valid_until = code.valid_until
+    if valid_until and valid_until.tzinfo is None:
+        valid_until = valid_until.replace(tzinfo=timezone.utc)
+    if valid_until:
+        valid_until = valid_until.astimezone(timezone.utc)
+    return {
+        "id": code.id,
+        "customer_ref": code.customer_ref,
+        "plan_code": code.plan_code,
+        "valid_until": valid_until.isoformat() if valid_until else None,
+        "max_installations": int(code.max_installations),
+        "is_active": bool(code.is_active),
+        "usage_count": int(code.usage_count),
+        "code_suffix": code.code_suffix,
+        "last_used_at": code.last_used_at.isoformat() if code.last_used_at else None,
+        "metadata": _load_metadata(code.metadata_json),
+        "updated_at": code.updated_at.isoformat(),
+        "created_at": code.created_at.isoformat(),
+    }
+
+
+def _serialize_client_token(record: ClientToken) -> dict[str, Any]:
+    return {
+        "id": record.id,
+        "customer_ref": record.customer_ref,
+        "is_active": bool(record.is_active),
+        "token_suffix": record.token_suffix,
+        "metadata": _load_metadata(record.metadata_json),
+        "updated_at": record.updated_at.isoformat(),
+        "created_at": record.created_at.isoformat(),
+    }
+
+
+def _active_customer_installations(db: Session, customer_ref: str) -> list[Installation]:
+    matches = db.execute(
+        select(Installation).where(Installation.customer_ref == customer_ref)
+    ).scalars().all()
+    active: list[Installation] = []
+    for installation in matches:
+        status = str(_compute_entitlement(installation).get("status") or "").strip().lower()
+        if status in {"active", "grace"}:
+            active.append(installation)
+    return active
+
+
+def _enforce_installation_customer_scope(installation: Installation, auth_context: InstallationAuthContext) -> None:
+    token_customer = str(auth_context.customer_ref or "").strip()
+    if not token_customer:
+        return
+    current_customer = str(installation.customer_ref or "").strip()
+    if current_customer and current_customer != token_customer:
+        raise HTTPException(status_code=403, detail="Token is not allowed for this installation")
+    if not current_customer:
+        installation.customer_ref = token_customer
 
 
 def _compute_entitlement(installation: Installation) -> dict[str, Any]:
@@ -279,16 +485,18 @@ def health() -> dict[str, Any]:
         "ok": True,
         "timestamp": _now_utc().isoformat(),
         "trial_days": LCP_TRIAL_DAYS,
+        "default_max_installations": LCP_DEFAULT_MAX_INSTALLATIONS,
     }
 
 
 @app.post("/v1/installations/register")
 def register_installation(
     payload: InstallationRegisterRequest,
-    _auth: None = Depends(_require_api_token),
+    auth_context: InstallationAuthContext = Depends(_require_installation_auth),
     db: Session = Depends(_get_db),
 ) -> dict[str, Any]:
     installation = _upsert_installation(db, payload)
+    _enforce_installation_customer_scope(installation, auth_context)
     entitlement = _compute_entitlement(installation)
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
@@ -309,14 +517,330 @@ def register_installation(
 @app.post("/v1/installations/heartbeat")
 def heartbeat_installation(
     payload: InstallationHeartbeatRequest,
-    _auth: None = Depends(_require_api_token),
+    auth_context: InstallationAuthContext = Depends(_require_installation_auth),
     db: Session = Depends(_get_db),
 ) -> dict[str, Any]:
     installation = _upsert_installation(db, payload)
+    _enforce_installation_customer_scope(installation, auth_context)
     entitlement = _compute_entitlement(installation)
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
     return {"ok": True, "entitlement": entitlement, "entitlement_token": entitlement_token}
+
+
+@app.post("/v1/installations/activate")
+def activate_installation(
+    payload: InstallationActivateRequest,
+    auth_context: InstallationAuthContext = Depends(_require_installation_auth),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    normalized_code = _normalize_activation_code(payload.activation_code)
+    if not normalized_code:
+        raise HTTPException(status_code=400, detail="Activation code is required")
+
+    code_hash = _activation_code_hash(normalized_code)
+    activation_code = db.execute(
+        select(ActivationCode).where(ActivationCode.code_hash == code_hash)
+    ).scalar_one_or_none()
+    if activation_code is None:
+        raise HTTPException(status_code=404, detail="Invalid activation code")
+    if not activation_code.is_active:
+        raise HTTPException(status_code=400, detail="Activation code is inactive")
+    if auth_context.customer_ref and auth_context.customer_ref != activation_code.customer_ref:
+        raise HTTPException(status_code=403, detail="Token is not allowed to activate this customer")
+
+    now = _now_utc()
+    code_valid_until = activation_code.valid_until
+    if code_valid_until and code_valid_until.tzinfo is None:
+        code_valid_until = code_valid_until.replace(tzinfo=timezone.utc)
+    if code_valid_until:
+        code_valid_until = code_valid_until.astimezone(timezone.utc)
+    if code_valid_until and code_valid_until <= now:
+        raise HTTPException(status_code=400, detail="Activation code has expired")
+
+    existing_installation = db.execute(
+        select(Installation).where(Installation.installation_id == payload.installation_id)
+    ).scalar_one_or_none()
+    active_installations = _active_customer_installations(db, activation_code.customer_ref)
+    active_ids = {item.installation_id for item in active_installations}
+    already_counted = (
+        existing_installation is not None
+        and existing_installation.customer_ref == activation_code.customer_ref
+        and existing_installation.installation_id in active_ids
+    )
+
+    if (not already_counted) and len(active_ids) >= int(activation_code.max_installations):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Seat limit exceeded ({len(active_ids)}/{int(activation_code.max_installations)}) for customer {activation_code.customer_ref}",
+        )
+
+    installation = _upsert_installation(
+        db,
+        InstallationRegisterRequest(
+            installation_id=payload.installation_id,
+            workspace_id=payload.workspace_id,
+            app_version=payload.app_version,
+            metadata=payload.metadata,
+        ),
+    )
+    _enforce_installation_customer_scope(installation, auth_context)
+    installation.customer_ref = activation_code.customer_ref
+    installation.plan_code = str(activation_code.plan_code or installation.plan_code or "monthly").strip() or "monthly"
+    installation.subscription_status = "active"
+    installation.subscription_valid_until = code_valid_until
+
+    merged_metadata = _load_metadata(installation.metadata_json)
+    merged_metadata.update(payload.metadata or {})
+    merged_metadata.update(
+        {
+            "activation_code_suffix": activation_code.code_suffix,
+            "activation_code_id": activation_code.id,
+            "activated_at": now.isoformat(),
+        }
+    )
+    installation.metadata_json = _dump_metadata(merged_metadata)
+
+    if not already_counted:
+        activation_code.usage_count = int(activation_code.usage_count) + 1
+    activation_code.last_used_at = now
+
+    entitlement = _compute_entitlement(installation)
+    entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
+    db.commit()
+
+    refreshed_active_count = len(_active_customer_installations(db, activation_code.customer_ref))
+
+    return {
+        "ok": True,
+        "installation": _serialize_installation(installation),
+        "entitlement": entitlement,
+        "entitlement_token": entitlement_token,
+        "seat_usage": {
+            "active_installations": refreshed_active_count,
+            "max_installations": int(activation_code.max_installations),
+            "customer_ref": activation_code.customer_ref,
+        },
+    }
+
+
+@app.post("/v1/admin/activation-codes")
+def admin_create_activation_code(
+    payload: AdminActivationCodeCreateRequest,
+    _auth: None = Depends(_require_admin_token),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    customer_ref = str(payload.customer_ref or "").strip()
+    if not customer_ref:
+        raise HTTPException(status_code=400, detail="customer_ref is required")
+
+    valid_until = _parse_iso_datetime(payload.valid_until)
+    if valid_until and valid_until <= _now_utc():
+        raise HTTPException(status_code=400, detail="valid_until must be in the future")
+
+    activation_code_raw = ""
+    activation_code_hash = ""
+    for _ in range(10):
+        candidate = _generate_activation_code()
+        candidate_hash = _activation_code_hash(candidate)
+        exists = db.execute(
+            select(ActivationCode.id).where(ActivationCode.code_hash == candidate_hash)
+        ).scalar_one_or_none()
+        if exists is None:
+            activation_code_raw = candidate
+            activation_code_hash = candidate_hash
+            break
+    if not activation_code_raw:
+        raise HTTPException(status_code=500, detail="Failed to allocate activation code")
+
+    record = ActivationCode(
+        code_hash=activation_code_hash,
+        code_suffix=_activation_code_suffix(activation_code_raw),
+        customer_ref=customer_ref,
+        plan_code=str(payload.plan_code or "").strip() or "monthly",
+        valid_until=valid_until,
+        max_installations=int(payload.max_installations or LCP_DEFAULT_MAX_INSTALLATIONS),
+        is_active=True,
+        usage_count=0,
+        metadata_json=_dump_metadata(payload.metadata or {}),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {
+        "ok": True,
+        "activation_code": activation_code_raw,
+        "activation_code_record": _serialize_activation_code(record),
+    }
+
+
+@app.get("/v1/admin/activation-codes")
+def admin_list_activation_codes(
+    q: str | None = Query(default=None),
+    customer_ref: str | None = Query(default=None),
+    active: bool | None = Query(default=None),
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    _auth: None = Depends(_require_admin_token),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    filters = []
+    query_text = str(q or "").strip().lower()
+    if query_text:
+        like = f"%{query_text}%"
+        filters.append(
+            or_(
+                func.lower(ActivationCode.customer_ref).like(like),
+                func.lower(func.coalesce(ActivationCode.plan_code, "")).like(like),
+                func.lower(func.coalesce(ActivationCode.code_suffix, "")).like(like),
+            )
+        )
+
+    customer_filter = str(customer_ref or "").strip()
+    if customer_filter:
+        filters.append(ActivationCode.customer_ref == customer_filter)
+    if active is not None:
+        filters.append(ActivationCode.is_active == bool(active))
+
+    total_stmt = select(func.count()).select_from(ActivationCode)
+    rows_stmt = select(ActivationCode)
+    if filters:
+        for clause in filters:
+            total_stmt = total_stmt.where(clause)
+            rows_stmt = rows_stmt.where(clause)
+
+    total = int(db.execute(total_stmt).scalar_one())
+    rows = db.execute(
+        rows_stmt.order_by(ActivationCode.updated_at.desc(), ActivationCode.id.desc()).offset(offset).limit(limit)
+    ).scalars().all()
+
+    return {
+        "ok": True,
+        "items": [_serialize_activation_code(row) for row in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.post("/v1/admin/activation-codes/{code_id}/deactivate")
+def admin_deactivate_activation_code(
+    code_id: int,
+    _auth: None = Depends(_require_admin_token),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    record = db.get(ActivationCode, code_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Activation code not found")
+    record.is_active = False
+    db.commit()
+    db.refresh(record)
+    return {"ok": True, "activation_code_record": _serialize_activation_code(record)}
+
+
+@app.post("/v1/admin/client-tokens")
+def admin_create_client_token(
+    payload: AdminClientTokenCreateRequest,
+    _auth: None = Depends(_require_admin_token),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    customer_ref = str(payload.customer_ref or "").strip()
+    if not customer_ref:
+        raise HTTPException(status_code=400, detail="customer_ref is required")
+
+    raw_token = ""
+    token_hash = ""
+    for _ in range(10):
+        candidate = _generate_client_token()
+        candidate_hash = _secret_hash(candidate)
+        exists = db.execute(
+            select(ClientToken.id).where(ClientToken.token_hash == candidate_hash)
+        ).scalar_one_or_none()
+        if exists is None:
+            raw_token = candidate
+            token_hash = candidate_hash
+            break
+    if not raw_token:
+        raise HTTPException(status_code=500, detail="Failed to allocate client token")
+
+    record = ClientToken(
+        token_hash=token_hash,
+        token_suffix=_client_token_suffix(raw_token),
+        customer_ref=customer_ref,
+        is_active=True,
+        metadata_json=_dump_metadata(payload.metadata or {}),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {
+        "ok": True,
+        "client_token": raw_token,
+        "client_token_record": _serialize_client_token(record),
+    }
+
+
+@app.get("/v1/admin/client-tokens")
+def admin_list_client_tokens(
+    q: str | None = Query(default=None),
+    customer_ref: str | None = Query(default=None),
+    active: bool | None = Query(default=None),
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    _auth: None = Depends(_require_admin_token),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    filters = []
+    query_text = str(q or "").strip().lower()
+    if query_text:
+        like = f"%{query_text}%"
+        filters.append(
+            or_(
+                func.lower(ClientToken.customer_ref).like(like),
+                func.lower(func.coalesce(ClientToken.token_suffix, "")).like(like),
+            )
+        )
+
+    customer_filter = str(customer_ref or "").strip()
+    if customer_filter:
+        filters.append(ClientToken.customer_ref == customer_filter)
+    if active is not None:
+        filters.append(ClientToken.is_active == bool(active))
+
+    total_stmt = select(func.count()).select_from(ClientToken)
+    rows_stmt = select(ClientToken)
+    if filters:
+        for clause in filters:
+            total_stmt = total_stmt.where(clause)
+            rows_stmt = rows_stmt.where(clause)
+
+    total = int(db.execute(total_stmt).scalar_one())
+    rows = db.execute(
+        rows_stmt.order_by(ClientToken.updated_at.desc(), ClientToken.id.desc()).offset(offset).limit(limit)
+    ).scalars().all()
+
+    return {
+        "ok": True,
+        "items": [_serialize_client_token(row) for row in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.post("/v1/admin/client-tokens/{token_id}/deactivate")
+def admin_deactivate_client_token(
+    token_id: int,
+    _auth: None = Depends(_require_admin_token),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    record = db.get(ClientToken, token_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Client token not found")
+    record.is_active = False
+    db.commit()
+    db.refresh(record)
+    return {"ok": True, "client_token_record": _serialize_client_token(record)}
 
 
 @app.get("/v1/admin/installations")
@@ -325,7 +849,7 @@ def admin_list_installations(
     status: str | None = Query(default=None),
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    _auth: None = Depends(_require_api_token),
+    _auth: None = Depends(_require_admin_token),
     db: Session = Depends(_get_db),
 ) -> dict[str, Any]:
     filters = []
@@ -379,7 +903,7 @@ def admin_list_installations(
 def admin_update_subscription(
     installation_id: str,
     payload: AdminSubscriptionUpdateRequest,
-    _auth: None = Depends(_require_api_token),
+    _auth: None = Depends(_require_admin_token),
     db: Session = Depends(_get_db),
 ) -> dict[str, Any]:
     installation = db.execute(
@@ -417,7 +941,7 @@ def admin_update_subscription(
 @app.get("/v1/admin/installations/{installation_id}")
 def admin_get_installation(
     installation_id: str,
-    _auth: None = Depends(_require_api_token),
+    _auth: None = Depends(_require_admin_token),
     db: Session = Depends(_get_db),
 ) -> dict[str, Any]:
     installation = db.execute(

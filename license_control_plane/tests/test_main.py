@@ -151,3 +151,157 @@ def test_admin_list_installations_supports_search_and_status_filter(tmp_path: Pa
         assert payload["total"] == 1
         assert len(payload["items"]) == 1
         assert payload["items"][0]["installation"]["installation_id"] == "cp-tenant-beta"
+
+
+def test_activation_code_flow_enforces_three_device_limit(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-seat-limit",
+                "plan_code": "monthly",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+                "metadata": {"issued_by": "tests"},
+            },
+        )
+        assert create_code.status_code == 200
+        code_payload = create_code.json()
+        assert code_payload["ok"] is True
+        activation_code = code_payload["activation_code"]
+        assert isinstance(activation_code, str)
+        assert activation_code.startswith("ACT-")
+
+        for installation_id in ["cp-seat-1", "cp-seat-2", "cp-seat-3"]:
+            activate = client.post(
+                "/v1/installations/activate",
+                headers={"Authorization": "Bearer control-plane-token"},
+                json={
+                    "installation_id": installation_id,
+                    "workspace_id": "workspace-seat",
+                    "activation_code": activation_code,
+                    "metadata": {"source": "integration-test"},
+                },
+            )
+            assert activate.status_code == 200
+            body = activate.json()
+            assert body["ok"] is True
+            assert body["entitlement"]["status"] == "active"
+            assert body["seat_usage"]["max_installations"] == 3
+
+        fourth = client.post(
+            "/v1/installations/activate",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-seat-4",
+                "workspace_id": "workspace-seat",
+                "activation_code": activation_code,
+                "metadata": {"source": "integration-test"},
+            },
+        )
+        assert fourth.status_code == 409
+        assert "Seat limit exceeded (3/3)" in fourth.json()["detail"]
+
+        list_codes = client.get(
+            "/v1/admin/activation-codes?customer_ref=customer-seat-limit",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert list_codes.status_code == 200
+        list_payload = list_codes.json()
+        assert list_payload["ok"] is True
+        assert list_payload["total"] == 1
+        assert list_payload["items"][0]["usage_count"] == 3
+
+
+def test_client_token_allows_installation_endpoints_and_blocks_admin_endpoints(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        create_client_token = client.post(
+            "/v1/admin/client-tokens",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-client-token",
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert create_client_token.status_code == 200
+        client_token_payload = create_client_token.json()
+        assert client_token_payload["ok"] is True
+        client_token = client_token_payload["client_token"]
+        assert isinstance(client_token, str)
+        assert client_token.startswith("lcp_")
+
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-client-token",
+                "plan_code": "monthly",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert create_code.status_code == 200
+        activation_code = create_code.json()["activation_code"]
+
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": f"Bearer {client_token}"},
+            json={
+                "installation_id": "cp-client-token-installation",
+                "workspace_id": "workspace-client-token",
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert register.status_code == 200
+        register_payload = register.json()
+        assert register_payload["ok"] is True
+        assert register_payload["installation"]["customer_ref"] == "customer-client-token"
+
+        activate = client.post(
+            "/v1/installations/activate",
+            headers={"Authorization": f"Bearer {client_token}"},
+            json={
+                "installation_id": "cp-client-token-installation",
+                "workspace_id": "workspace-client-token",
+                "activation_code": activation_code,
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert activate.status_code == 200
+        activate_payload = activate.json()
+        assert activate_payload["ok"] is True
+        assert activate_payload["entitlement"]["status"] == "active"
+
+        forbidden_admin = client.get(
+            "/v1/admin/installations",
+            headers={"Authorization": f"Bearer {client_token}"},
+        )
+        assert forbidden_admin.status_code == 401
+
+        wrong_customer_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-other",
+                "plan_code": "monthly",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert wrong_customer_code.status_code == 200
+        wrong_code = wrong_customer_code.json()["activation_code"]
+
+        wrong_activate = client.post(
+            "/v1/installations/activate",
+            headers={"Authorization": f"Bearer {client_token}"},
+            json={
+                "installation_id": "cp-client-token-installation",
+                "workspace_id": "workspace-client-token",
+                "activation_code": wrong_code,
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert wrong_activate.status_code == 403

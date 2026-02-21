@@ -47,10 +47,13 @@ def test_sync_license_once_updates_local_entitlement(tmp_path: Path, monkeypatch
     os.environ.pop("LICENSE_PUBLIC_KEY", None)
 
     import shared.models as shared_models
+    import shared.licensing as shared_licensing
     import shared.settings as shared_settings
 
     reload(shared_settings)
     reload(shared_models)
+    reload(shared_licensing)
+    shared_licensing.reset_license_installation_id_cache()
 
     import main
 
@@ -149,10 +152,13 @@ def test_sync_license_once_accepts_valid_signed_token(tmp_path: Path, monkeypatc
     os.environ["LICENSE_PUBLIC_KEY"] = public_key_pem
 
     import shared.models as shared_models
+    import shared.licensing as shared_licensing
     import shared.settings as shared_settings
 
     reload(shared_settings)
     reload(shared_models)
+    reload(shared_licensing)
+    shared_licensing.reset_license_installation_id_cache()
 
     import main
 
@@ -233,10 +239,13 @@ def test_sync_license_once_rejects_invalid_signed_token(tmp_path: Path, monkeypa
     os.environ["LICENSE_PUBLIC_KEY"] = public_key_pem
 
     import shared.models as shared_models
+    import shared.licensing as shared_licensing
     import shared.settings as shared_settings
 
     reload(shared_settings)
     reload(shared_models)
+    reload(shared_licensing)
+    shared_licensing.reset_license_installation_id_cache()
 
     import main
 

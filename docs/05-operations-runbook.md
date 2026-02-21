@@ -74,6 +74,11 @@ Optional hardening for signed entitlement tokens:
 - `LCP_REQUIRE_SIGNED_TOKENS=true`
 External billing sync:
 - Update subscription state through `PUT /v1/admin/installations/{installation_id}/subscription` from your billing application.
+Activation code flow (multi-device seat control):
+- Issue customer deployment token via `POST /v1/admin/client-tokens` and set that value as `LICENSE_SERVER_TOKEN` for the customer deployment.
+- Issue activation code via `POST /v1/admin/activation-codes` (`customer_ref`, `max_installations`, `valid_until`).
+- Customer enters activation code in app (`POST /api/license/activate` -> control-plane `POST /v1/installations/activate`).
+- Control-plane binds installation to `customer_ref` and enforces seat limit (default `3`).
 
 ## 3. Critical Environment Variables
 
@@ -121,16 +126,31 @@ External billing sync:
 - `MCP_EMAIL_ALLOWED_DOMAINS`
 
 ### 3.7 Licensing
-- `LICENSE_ENFORCEMENT_ENABLED`
-- `LICENSE_INSTALLATION_ID`
-- `LICENSE_SERVER_URL`
-- `LICENSE_SERVER_TOKEN`
-- `LICENSE_PUBLIC_KEY`
-- `LICENSE_HEARTBEAT_SECONDS`
-- `LICENSE_GRACE_HOURS`
-- `LICENSE_TRIAL_DAYS`
+- Required client-side variables:
+  - `LICENSE_SERVER_URL`
+  - `LICENSE_SERVER_TOKEN`
+- Optional advanced variables:
+  - `LICENSE_PUBLIC_KEY` (require signed entitlement tokens from control-plane)
+  - `LICENSE_INSTALLATION_ID` (manual override; otherwise app auto-generates stable `inst-<uuid>`)
+  - `LICENSE_HEARTBEAT_SECONDS` (default `900`)
+  - `LICENSE_GRACE_HOURS` (default `72`)
+  - `LICENSE_TRIAL_DAYS` (default `7`)
 - Write endpoints (`POST|PUT|PATCH|DELETE`) are blocked with `HTTP 402` when enforcement is enabled and license state is `expired` or `unlicensed`.
 - If `LICENSE_PUBLIC_KEY` is configured, app accepts only valid signed `entitlement_token` payloads from control-plane.
+- `POST /api/license/activate` is write-exempt from license lock so expired installations can re-activate.
+
+### 3.8 Control-Plane Licensing
+- `LCP_API_TOKEN`
+- `LCP_TRIAL_DAYS`
+- `LCP_TOKEN_TTL_SECONDS`
+- `LCP_DEFAULT_MAX_INSTALLATIONS` (default seat limit used when creating activation codes)
+- `LCP_SIGNING_PRIVATE_KEY_PEM`
+- `LCP_SIGNING_KEY_ID`
+- `LCP_REQUIRE_SIGNED_TOKENS`
+- Admin endpoints require `LCP_API_TOKEN`.
+- Installation endpoints (`/v1/installations/*`) accept either:
+  - admin token, or
+  - active customer-specific client token issued from `/v1/admin/client-tokens`.
 
 ## 4. Bootstrap and Migration Behavior
 `startup_bootstrap()` performs:

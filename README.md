@@ -51,6 +51,8 @@ graph LR
 - Knowledge graph endpoints and MCP tools for dependency-aware context.
 - Command idempotency via `X-Command-Id` and `command_executions`.
 - Licensing status endpoint and write-lock enforcement (`HTTP 402` on mutations when license is expired and enforcement is enabled).
+- Activation-code licensing flow with control-plane seat limits (for example up to 3 devices per customer).
+- Per-customer deployment tokens for control-plane access (`LICENSE_SERVER_TOKEN` scoped per customer).
 
 ## Quick Start
 1. Start the stack:
@@ -135,5 +137,5 @@ docker compose run --rm --build task-app pytest
 - `app/features/*` - vertical slices (tasks, projects, specs, notes, rules, agents...).
 - `app/shared/*` - eventing, projections, models, settings, bootstrap, graph.
 - `app/frontend/*` - SPA and UI state management.
-- `license_control_plane/*` - standalone licensing control-plane service (register/heartbeat/admin subscription update).
+- `license_control_plane/*` - standalone licensing control-plane service (register/heartbeat/admin subscription update + activation code issuance + seat limits).
 - `scripts/*` - deploy, reset, and helper scripts.

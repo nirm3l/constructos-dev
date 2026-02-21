@@ -1,6 +1,7 @@
 import React from 'react'
 import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  activateLicense,
   authChangePassword,
   deactivateAdminUser,
   authLogin,
@@ -274,6 +275,21 @@ function App({ logout }: { logout: () => void }) {
     enabled: Boolean(bootstrap.data),
     retry: 1,
     refetchInterval: 60_000,
+  })
+  const activateLicenseMutation = useMutation({
+    mutationFn: (activationCode: string) =>
+      activateLicense(userId, {
+        activation_code: activationCode,
+      }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['license-status', userId] })
+      setUiError(null)
+      setUiInfo('License activated successfully.')
+      setTimeout(() => setUiInfo(null), 2500)
+    },
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'License activation failed'))
+    },
   })
   const { frontendVersion, backendVersion, backendBuild, backendDeployedAtUtc } = useAppVersion()
   const workspaceId = bootstrap.data?.workspaces[0]?.id ?? ''
@@ -1378,6 +1394,7 @@ function App({ logout }: { logout: () => void }) {
       state={{
       bootstrap,
       licenseStatus,
+      activateLicenseMutation,
       tab,
       setTab,
       searchQ,

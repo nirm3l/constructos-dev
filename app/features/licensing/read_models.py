@@ -8,10 +8,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from shared.models import LicenseEntitlement, LicenseInstallation
+from shared.licensing import resolve_license_installation_id
 from shared.settings import (
     LICENSE_ENFORCEMENT_ENABLED,
     LICENSE_GRACE_HOURS,
-    LICENSE_INSTALLATION_ID,
     LICENSE_SERVER_URL,
 )
 
@@ -38,7 +38,7 @@ def _latest_entitlement(db: Session, installation_db_id: int) -> LicenseEntitlem
         select(LicenseEntitlement)
         .where(LicenseEntitlement.installation_id == installation_db_id)
         .order_by(LicenseEntitlement.valid_from.desc(), LicenseEntitlement.id.desc())
-    ).scalar_one_or_none()
+    ).scalars().first()
 
 
 def _coerce_metadata(raw: str | None) -> dict[str, Any]:
@@ -55,12 +55,13 @@ def _coerce_metadata(raw: str | None) -> dict[str, Any]:
 
 def license_status_read_model(db: Session) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
+    installation_id = resolve_license_installation_id(db)
     installation = db.execute(
-        select(LicenseInstallation).where(LicenseInstallation.installation_id == LICENSE_INSTALLATION_ID)
+        select(LicenseInstallation).where(LicenseInstallation.installation_id == installation_id)
     ).scalar_one_or_none()
     if installation is None:
         return {
-            "installation_id": LICENSE_INSTALLATION_ID,
+            "installation_id": installation_id,
             "status": LICENSE_STATUS_UNLICENSED,
             "plan_code": None,
             "enforcement_enabled": bool(LICENSE_ENFORCEMENT_ENABLED),
@@ -123,4 +124,3 @@ def license_health_summary_read_model(db: Session) -> dict[str, Any]:
         "enforcement_enabled": payload["enforcement_enabled"],
         "write_access": payload["write_access"],
     }
-

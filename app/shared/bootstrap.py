@@ -17,6 +17,7 @@ from features.rules.domain import EVENT_CREATED as PROJECT_RULE_EVENT_CREATED
 from features.specifications.domain import EVENT_CREATED as SPECIFICATION_EVENT_CREATED
 from features.tasks.domain import EVENT_CREATED as TASK_EVENT_CREATED
 from .auth import generate_temporary_password, hash_password
+from .licensing import resolve_license_installation_id
 from . import models as shared_models
 from .models import (
     Note,
@@ -46,7 +47,6 @@ from .settings import (
     BOOTSTRAP_WORKSPACE_ID,
     DEFAULT_USER_ID,
     DEFAULT_STATUSES,
-    LICENSE_INSTALLATION_ID,
     LICENSE_TRIAL_DAYS,
 )
 
@@ -294,15 +294,16 @@ def ensure_task_watcher_table_constraints(db: Session):
 
 
 def ensure_license_installation(db: Session):
+    installation_id = resolve_license_installation_id(db)
     installation = db.execute(
-        select(LicenseInstallation).where(LicenseInstallation.installation_id == LICENSE_INSTALLATION_ID)
+        select(LicenseInstallation).where(LicenseInstallation.installation_id == installation_id)
     ).scalar_one_or_none()
     now = datetime.now(timezone.utc)
     trial_days = max(1, int(LICENSE_TRIAL_DAYS))
     if installation is None:
         db.add(
             LicenseInstallation(
-                installation_id=LICENSE_INSTALLATION_ID,
+                installation_id=installation_id,
                 workspace_id=None,
                 status="trial",
                 plan_code="trial",

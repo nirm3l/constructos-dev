@@ -152,8 +152,9 @@ DEFAULT_EMBEDDING_MODEL = os.getenv("DEFAULT_EMBEDDING_MODEL", "nomic-embed-text
 ALLOWED_EMBEDDING_MODELS = _parse_csv_list_env("ALLOWED_EMBEDDING_MODELS") or [DEFAULT_EMBEDDING_MODEL]
 OLLAMA_EMBED_GPU_ENABLED = _env_bool("OLLAMA_EMBED_GPU_ENABLED", True)
 
-LICENSE_ENFORCEMENT_ENABLED = _env_bool("LICENSE_ENFORCEMENT_ENABLED", False)
-LICENSE_INSTALLATION_ID = os.getenv("LICENSE_INSTALLATION_ID", "local-installation").strip() or "local-installation"
+# License enforcement is intentionally always enabled in runtime.
+LICENSE_ENFORCEMENT_ENABLED = True
+LICENSE_INSTALLATION_ID = os.getenv("LICENSE_INSTALLATION_ID", "").strip()
 LICENSE_SERVER_URL = os.getenv("LICENSE_SERVER_URL", "").strip()
 LICENSE_SERVER_TOKEN = os.getenv("LICENSE_SERVER_TOKEN", "").strip()
 LICENSE_PUBLIC_KEY = os.getenv("LICENSE_PUBLIC_KEY", "").strip()

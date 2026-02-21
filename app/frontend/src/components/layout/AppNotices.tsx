@@ -6,6 +6,14 @@ type LicenseNoticeState = {
   isError: boolean
 } | null
 
+function _errorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    const message = String(error.message || '').trim()
+    if (message) return message
+  }
+  return 'License activation failed.'
+}
+
 function _daysRemaining(isoDate: string | null): number | null {
   if (!isoDate) return null
   const date = new Date(isoDate)
@@ -39,9 +47,31 @@ function _buildLicenseNotice(license: any): LicenseNoticeState {
 }
 
 export function AppNotices({ state }: { state: any }) {
+  const [activationCode, setActivationCode] = React.useState('')
+  const license = state.licenseStatus?.data?.license
+  const status = String(license?.status || '').toLowerCase()
   const licenseNotice = React.useMemo(
     () => _buildLicenseNotice(state.licenseStatus?.data?.license),
     [state.licenseStatus?.data?.license]
+  )
+  const canActivate = ['trial', 'grace', 'expired', 'unlicensed'].includes(status)
+  const activateLicenseMutation = state.activateLicenseMutation
+  const seatUsage = activateLicenseMutation?.data?.seat_usage
+
+  React.useEffect(() => {
+    if (activateLicenseMutation?.isSuccess) {
+      setActivationCode('')
+    }
+  }, [activateLicenseMutation?.isSuccess])
+
+  const submitActivation = React.useCallback(
+    (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault()
+      const code = String(activationCode || '').trim()
+      if (!code) return
+      activateLicenseMutation?.mutate(code)
+    },
+    [activationCode, activateLicenseMutation]
   )
 
   return (
@@ -65,6 +95,37 @@ export function AppNotices({ state }: { state: any }) {
       {licenseNotice && (
         <div className={`notice ${licenseNotice.isError ? 'notice-error' : ''}`.trim()} role={licenseNotice.isError ? 'alert' : 'status'}>
           <span>{licenseNotice.message}</span>
+        </div>
+      )}
+      {canActivate && (
+        <div className="notice notice-license-activate" role="status">
+          <div className="license-activate-header">
+            <span>Activate subscription with code</span>
+            {license?.installation_id && (
+              <span className="license-installation-id">
+                Installation ID: <code>{String(license.installation_id)}</code>
+              </span>
+            )}
+          </div>
+          <form className="license-activate-form" onSubmit={submitActivation}>
+            <input
+              value={activationCode}
+              onChange={(event) => setActivationCode(event.target.value)}
+              placeholder="Enter activation code"
+              autoComplete="off"
+            />
+            <button type="submit" disabled={Boolean(activateLicenseMutation?.isPending) || !String(activationCode || '').trim()}>
+              {activateLicenseMutation?.isPending ? 'Activating...' : 'Activate'}
+            </button>
+          </form>
+          {activateLicenseMutation?.isError && (
+            <p className="license-activate-error">{_errorMessage(activateLicenseMutation.error)}</p>
+          )}
+          {activateLicenseMutation?.isSuccess && seatUsage && (
+            <p className="license-activate-meta">
+              Seats in use: {seatUsage.active_installations}/{seatUsage.max_installations} ({seatUsage.customer_ref})
+            </p>
+          )}
         </div>
       )}
     </>

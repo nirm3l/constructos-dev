@@ -283,6 +283,18 @@ export type LicenseStatusResponse = {
   license: LicenseStatus
 }
 
+export type LicenseActivationSeatUsage = {
+  active_installations: number
+  max_installations: number
+  customer_ref: string
+}
+
+export type LicenseActivationResponse = {
+  ok: boolean
+  license: LicenseStatus
+  seat_usage: LicenseActivationSeatUsage | null
+}
+
 export type AppVersionPayload = {
   backend_version: string
   backend_build: string | null

@@ -1,4 +1,8 @@
 import type {
+  ActivationCodeCreateRequest,
+  ActivationCodeCreateResponse,
+  ClientTokenCreateRequest,
+  ClientTokenCreateResponse,
   HealthResponse,
   InstallationResponse,
   InstallationsListResponse,
@@ -78,4 +82,24 @@ export function updateInstallationSubscription(
       body: JSON.stringify(payload),
     }
   )
+}
+
+export function createActivationCode(
+  token: string,
+  payload: ActivationCodeCreateRequest
+): Promise<ActivationCodeCreateResponse> {
+  return api<ActivationCodeCreateResponse>('/v1/admin/activation-codes', token, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function createClientToken(
+  token: string,
+  payload: ClientTokenCreateRequest
+): Promise<ClientTokenCreateResponse> {
+  return api<ClientTokenCreateResponse>('/v1/admin/client-tokens', token, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
 }

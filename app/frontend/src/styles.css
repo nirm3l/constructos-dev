@@ -3147,6 +3147,48 @@ button:disabled {
   box-shadow: 0 12px 28px rgba(10, 20, 10, 0.2);
 }
 
+.notice-license-activate {
+  margin-top: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.license-activate-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.license-installation-id {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.license-activate-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.license-activate-error {
+  margin: 0;
+  color: #b22222;
+}
+
+.license-activate-meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (max-width: 760px) {
+  .license-activate-form {
+    grid-template-columns: 1fr;
+  }
+}
+
 .skeleton {
   min-height: 72px;
   display: flex;
