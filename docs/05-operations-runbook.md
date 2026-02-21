@@ -70,8 +70,8 @@ Optional hardening for signed entitlement tokens:
 - `LCP_SIGNING_PRIVATE_KEY_PEM` (Ed25519 private key in PEM form)
 - `LCP_SIGNING_KEY_ID` (token key identifier)
 - `LCP_REQUIRE_SIGNED_TOKENS=true`
-Monri callback verification:
-- `LCP_MONRI_WEBHOOK_SECRET`
+External billing sync:
+- Update subscription state through `PUT /v1/admin/installations/{installation_id}/subscription` from your billing application.
 
 ## 3. Critical Environment Variables
 

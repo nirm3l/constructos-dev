@@ -95,7 +95,7 @@ def test_sync_license_once_updates_local_entitlement(tmp_path: Path, monkeypatch
                             "valid_until": "2026-03-21T00:00:00Z",
                             "trial_ends_at": "2026-02-28T00:00:00Z",
                             "token_expires_at": "2026-02-21T01:00:00Z",
-                            "metadata": {"billing_provider": "monri"},
+                            "metadata": {"billing_provider": "external-billing-app"},
                         },
                     }
                 )
@@ -171,7 +171,7 @@ def test_sync_license_once_accepts_valid_signed_token(tmp_path: Path, monkeypatc
         "valid_until": "2026-03-21T00:00:00Z",
         "trial_ends_at": "2026-02-28T00:00:00Z",
         "token_expires_at": "2026-02-21T01:00:00Z",
-        "metadata": {"billing_provider": "monri"},
+        "metadata": {"billing_provider": "external-billing-app"},
     }
     signed_token = _sign_token_payload(entitlement_payload, private_key)
 
@@ -255,7 +255,7 @@ def test_sync_license_once_rejects_invalid_signed_token(tmp_path: Path, monkeypa
         "valid_until": "2026-03-21T00:00:00Z",
         "trial_ends_at": "2026-02-28T00:00:00Z",
         "token_expires_at": "2026-02-21T01:00:00Z",
-        "metadata": {"billing_provider": "monri"},
+        "metadata": {"billing_provider": "external-billing-app"},
     }
     signed_token = _sign_token_payload(entitlement_payload, private_key)
     signed_token["signature"] = signed_token["signature"][:-2] + "zz"

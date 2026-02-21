@@ -120,20 +120,20 @@ Enforce entitlement with central validation and graceful but strict degradation.
 - Audit log for each license decision.
 - App verifies `entitlement_token` using `LICENSE_PUBLIC_KEY` when configured.
 
-## Phase 5: Billing (Simple and Standard)
+## Phase 5: Billing Integration (External App)
 ### Recommendation
-Use Monri recurring billing as primary path for Bosnia and Herzegovina availability.
+Keep billing outside this repository and treat this application as licensing enforcement only.
 
-### Minimal Monri Setup
+### Minimal External Billing Setup
 - One product: `m4tr1x Self-Hosted`.
 - One recurring monthly price.
 - 7-day trial configured in entitlement policy at control-plane level.
 - Hosted payment page for subscription start.
 - Merchant self-service flow for card updates/cancel/reactivate.
-- Payment success callback updates installation-to-customer mapping.
-- Subscription lifecycle callbacks refresh entitlement status.
-- Failed recurring charge callback starts dunning/grace logic.
-- Callback endpoint: `/v1/monri/callback` on control-plane (HMAC signature verification with webhook secret).
+- External billing application updates installation-to-customer mapping.
+- External billing application updates subscription lifecycle and renewal state.
+- Failed recurring charge events in billing system start dunning/grace logic, then billing app updates control-plane.
+- Integration endpoint in this app: `PUT /v1/admin/installations/{installation_id}/subscription` with control-plane token.
 
 ### Entitlement Mapping
 - Active/trialing subscription => active entitlement.
@@ -162,7 +162,7 @@ GHCR private image publishing workflow with multi-arch outputs.
 License control-plane service + app-side enforcement in read-only mode first.
 
 ### Step 4
-Monri integration and callback-driven entitlement.
+External billing app integration and entitlement updates via control-plane admin API.
 
 ### Step 5
 Enable strict write-lock after grace period and complete operational runbook.
@@ -198,15 +198,15 @@ Enable strict write-lock after grace period and complete operational runbook.
 - Mitigation: provide optional non-Kurrent local mode or run KurrentDB on remote amd64 host.
 - Risk: Determined customer reverse engineers local container.
 - Mitigation: server-authoritative entitlement, short-lived tokens, compiled sensitive modules, image signing.
-- Risk: Webhook outages desynchronize entitlements.
-- Mitigation: idempotent webhook processing + periodic reconciliation job.
+- Risk: External billing sync outages desynchronize entitlements.
+- Mitigation: idempotent admin update calls + periodic reconciliation job from billing app.
 
 ## Suggested Order of Execution
 1. Cross-platform compose split and M4 smoke test.
 2. GHCR private image pipeline.
 3. Dockerfile hardening.
 4. Licensing backend slice.
-5. Monri billing integration.
+5. External billing app integration.
 6. UI status and operator runbook.
 
 ## References (verified 2026-02-21)
@@ -217,4 +217,3 @@ Enable strict write-lock after grace period and complete operational runbook.
 - Ollama macOS install (Apple M series): https://docs.ollama.com/installation/mac
 - GitHub Container Registry docs: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry
 - GitHub Actions publishing Docker images: https://docs.github.com/en/actions/use-cases-and-examples/publishing-packages/publishing-docker-images
-- Monri developers portal: https://ipg.monri.com/en/documentation

@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
 import os
 from importlib import reload
 from pathlib import Path
@@ -35,7 +32,6 @@ def _build_client(tmp_path: Path, *, private_key_pem: str = "") -> TestClient:
     os.environ["LCP_SIGNING_PRIVATE_KEY_PEM"] = private_key_pem
     os.environ["LCP_SIGNING_KEY_ID"] = "test-key"
     os.environ["LCP_REQUIRE_SIGNED_TOKENS"] = "false"
-    os.environ["LCP_MONRI_WEBHOOK_SECRET"] = "monri-secret"
 
     import license_control_plane.main as lcp_main
 
@@ -67,45 +63,42 @@ def test_register_returns_signed_entitlement_when_signing_key_is_configured(tmp_
         assert verified["installation_id"] == "cp-signed-installation"
 
 
-def test_monri_callback_updates_subscription_status(tmp_path: Path):
+def test_admin_subscription_update_changes_installation_status(tmp_path: Path):
     with _build_client(tmp_path) as client:
         register = client.post(
             "/v1/installations/register",
             headers={"Authorization": "Bearer control-plane-token"},
             json={
-                "installation_id": "cp-monri-installation",
+                "installation_id": "cp-external-billing-installation",
                 "workspace_id": "workspace-a",
                 "metadata": {"source": "test"},
             },
         )
         assert register.status_code == 200
 
-        callback_payload = {
-            "installation_id": "cp-monri-installation",
-            "status": "approved",
-            "plan_code": "monthly",
-            "customer_ref": "customer-001",
-            "valid_until": "2026-03-21T00:00:00Z",
-        }
-        raw = json.dumps(callback_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-        signature = hmac.new(b"monri-secret", raw, hashlib.sha256).hexdigest()
-
-        callback = client.post(
-            "/v1/monri/callback",
-            headers={"X-Monri-Signature": signature},
-            data=raw,
+        update = client.put(
+            "/v1/admin/installations/cp-external-billing-installation/subscription",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "subscription_status": "active",
+                "customer_ref": "customer-001",
+                "valid_until": "2026-03-21T00:00:00Z",
+                "metadata": {"billing_sync_source": "external-billing-app"},
+                "plan_code": "monthly",
+            },
         )
-        assert callback.status_code == 200
-        callback_data = callback.json()
-        assert callback_data["ok"] is True
-        assert callback_data["subscription_status"] == "active"
-        assert callback_data["entitlement"]["status"] == "active"
+        assert update.status_code == 200
+        update_payload = update.json()
+        assert update_payload["ok"] is True
+        assert update_payload["subscription_status"] == "active"
+        assert update_payload["entitlement"]["status"] == "active"
 
         get_installation = client.get(
-            "/v1/admin/installations/cp-monri-installation",
+            "/v1/admin/installations/cp-external-billing-installation",
             headers={"Authorization": "Bearer control-plane-token"},
         )
         assert get_installation.status_code == 200
         installation_payload = get_installation.json()["installation"]
         assert installation_payload["subscription_status"] == "active"
         assert installation_payload["plan_code"] == "monthly"
+        assert installation_payload["metadata"].get("billing_sync_source") == "external-billing-app"
