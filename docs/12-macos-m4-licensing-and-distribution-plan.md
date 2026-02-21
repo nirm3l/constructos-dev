@@ -11,7 +11,7 @@ This plan defines the changes needed to:
 - Phase 1 completed: base + Ubuntu GPU + macOS M4 compose split is implemented.
 - Phase 2 completed: GHCR release workflow exists and deploy scripts support GHCR pull-only deployment mode for clients.
 - Phase 3 completed (baseline): runtime image now runs as non-root and compose drops capabilities with `no-new-privileges`.
-- Phase 4 in progress: license models, bootstrap seed, status API, health summary, write-lock middleware, and control-plane sync worker are implemented.
+- Phase 4 in progress: license models, bootstrap seed, status API, health summary, write-lock middleware, control-plane sync worker, and signed entitlement token verification are implemented.
 - Phase 6 in progress: frontend now fetches `/api/license/status` and shows trial/grace/expired notice states.
 
 ## Constraints and Facts
@@ -118,6 +118,7 @@ Enforce entitlement with central validation and graceful but strict degradation.
 - Server time as source of truth, not client clock.
 - Installation binding (installation ID + customer account).
 - Audit log for each license decision.
+- App verifies `entitlement_token` using `LICENSE_PUBLIC_KEY` when configured.
 
 ## Phase 5: Billing (Simple and Standard)
 ### Recommendation
@@ -132,6 +133,7 @@ Use Monri recurring billing as primary path for Bosnia and Herzegovina availabil
 - Payment success callback updates installation-to-customer mapping.
 - Subscription lifecycle callbacks refresh entitlement status.
 - Failed recurring charge callback starts dunning/grace logic.
+- Callback endpoint: `/v1/monri/callback` on control-plane (HMAC signature verification with webhook secret).
 
 ### Entitlement Mapping
 - Active/trialing subscription => active entitlement.

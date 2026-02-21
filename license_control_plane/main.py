@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import DateTime, Integer, String, Text, create_engine, select
 from sqlalchemy.orm import Mapped, Session, declarative_base, mapped_column, sessionmaker
+
+try:
+    from .token_signing import SigningError, sign_entitlement_payload
+except Exception:  # pragma: no cover - runtime import fallback
+    from token_signing import SigningError, sign_entitlement_payload
 
 
 def _env_int(name: str, default: int) -> int:
@@ -21,10 +28,21 @@ def _env_int(name: str, default: int) -> int:
     return int(raw)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 LCP_DATABASE_URL = os.getenv("LCP_DATABASE_URL", "sqlite:////data/license-control-plane.db").strip() or "sqlite:////data/license-control-plane.db"
 LCP_API_TOKEN = os.getenv("LCP_API_TOKEN", "").strip()
 LCP_TRIAL_DAYS = max(1, _env_int("LCP_TRIAL_DAYS", 7))
 LCP_TOKEN_TTL_SECONDS = max(60, _env_int("LCP_TOKEN_TTL_SECONDS", 3600))
+LCP_SIGNING_PRIVATE_KEY_PEM = os.getenv("LCP_SIGNING_PRIVATE_KEY_PEM", "").strip()
+LCP_SIGNING_KEY_ID = os.getenv("LCP_SIGNING_KEY_ID", "default-ed25519").strip() or "default-ed25519"
+LCP_REQUIRE_SIGNED_TOKENS = _env_bool("LCP_REQUIRE_SIGNED_TOKENS", False)
+LCP_MONRI_WEBHOOK_SECRET = os.getenv("LCP_MONRI_WEBHOOK_SECRET", "").strip()
 
 Base = declarative_base()
 
@@ -204,12 +222,89 @@ def _upsert_installation(db: Session, payload: InstallationRegisterRequest | Ins
     return installation
 
 
+def _sign_entitlement_if_configured(entitlement_payload: dict[str, Any]) -> dict[str, Any] | None:
+    if not LCP_SIGNING_PRIVATE_KEY_PEM:
+        return None
+    return sign_entitlement_payload(
+        entitlement_payload,
+        private_key_pem=LCP_SIGNING_PRIVATE_KEY_PEM,
+        key_id=LCP_SIGNING_KEY_ID,
+    )
+
+
+def _build_entitlement_bundle(entitlement_payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    signed_token = _sign_entitlement_if_configured(entitlement_payload)
+    if LCP_REQUIRE_SIGNED_TOKENS and signed_token is None:
+        raise HTTPException(status_code=500, detail="Signed tokens are required but signing key is not configured")
+    return entitlement_payload, signed_token
+
+
+def _normalize_monri_signature(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if raw.lower().startswith("sha256="):
+        return raw.split("=", 1)[1].strip().lower()
+    return raw.lower()
+
+
+def _require_monri_signature(raw_body: bytes, provided_signature: str | None) -> None:
+    if not LCP_MONRI_WEBHOOK_SECRET:
+        return
+    expected = hmac.new(
+        LCP_MONRI_WEBHOOK_SECRET.encode("utf-8"),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest().lower()
+    provided = _normalize_monri_signature(provided_signature)
+    if not provided or not hmac.compare_digest(expected, provided):
+        raise HTTPException(status_code=401, detail="Invalid Monri signature")
+
+
+def _first_non_empty(*values: Any) -> str | None:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return None
+
+
+def _extract_installation_id_from_monri(payload: dict[str, Any]) -> str | None:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    order_info = payload.get("order_info") if isinstance(payload.get("order_info"), dict) else {}
+    custom_data = payload.get("custom_data") if isinstance(payload.get("custom_data"), dict) else {}
+    return _first_non_empty(
+        payload.get("installation_id"),
+        payload.get("merchant_order_id"),
+        metadata.get("installation_id"),
+        order_info.get("installation_id"),
+        custom_data.get("installation_id"),
+    )
+
+
+def _map_monri_subscription_status(raw_status: str | None) -> str:
+    status = str(raw_status or "").strip().lower()
+    if status in {"active", "paid", "approved", "authorized", "success", "succeeded", "trialing"}:
+        return "active"
+    if status in {"past_due", "grace", "pending", "unpaid"}:
+        return "past_due"
+    if status in {"canceled", "cancelled", "failed", "expired", "declined"}:
+        return "canceled"
+    return "none"
+
+
 app = FastAPI(title="m4tr1x Licensing Control Plane")
 
 
 @app.on_event("startup")
 def _startup() -> None:
     Base.metadata.create_all(bind=engine)
+    if LCP_REQUIRE_SIGNED_TOKENS and not LCP_SIGNING_PRIVATE_KEY_PEM:
+        raise RuntimeError("LCP_REQUIRE_SIGNED_TOKENS is enabled but LCP_SIGNING_PRIVATE_KEY_PEM is not configured")
+    if LCP_SIGNING_PRIVATE_KEY_PEM:
+        # Fail fast on invalid keys during startup.
+        try:
+            _sign_entitlement_if_configured({"installation_id": "startup-check", "status": "trial"})
+        except SigningError as exc:
+            raise RuntimeError(f"Failed to initialize signing key: {exc}") from exc
 
 
 @app.get("/api/health")
@@ -229,6 +324,7 @@ def register_installation(
 ) -> dict[str, Any]:
     installation = _upsert_installation(db, payload)
     entitlement = _compute_entitlement(installation)
+    entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
     return {
         "ok": True,
@@ -240,6 +336,7 @@ def register_installation(
             "trial_ends_at": installation.trial_ends_at.isoformat(),
         },
         "entitlement": entitlement,
+        "entitlement_token": entitlement_token,
     }
 
 
@@ -251,8 +348,100 @@ def heartbeat_installation(
 ) -> dict[str, Any]:
     installation = _upsert_installation(db, payload)
     entitlement = _compute_entitlement(installation)
+    entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
-    return {"ok": True, "entitlement": entitlement}
+    return {"ok": True, "entitlement": entitlement, "entitlement_token": entitlement_token}
+
+
+@app.post("/v1/monri/callback")
+async def monri_callback(
+    request: Request,
+    x_monri_signature: str | None = Header(default=None),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    raw_body = await request.body()
+    _require_monri_signature(raw_body, x_monri_signature)
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8") if raw_body else "{}")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Callback payload must be a JSON object")
+
+    installation_id = _extract_installation_id_from_monri(payload)
+    if not installation_id:
+        raise HTTPException(status_code=400, detail="Missing installation_id in Monri callback payload")
+
+    installation = db.execute(
+        select(Installation).where(Installation.installation_id == installation_id)
+    ).scalar_one_or_none()
+
+    now = _now_utc()
+    if installation is None:
+        installation = Installation(
+            installation_id=installation_id,
+            workspace_id=None,
+            trial_started_at=now,
+            trial_ends_at=now + timedelta(days=LCP_TRIAL_DAYS),
+            metadata_json=_dump_metadata({}),
+        )
+        db.add(installation)
+        db.flush()
+
+    raw_status = _first_non_empty(
+        payload.get("subscription_status"),
+        payload.get("status"),
+        payload.get("payment_status"),
+        payload.get("transaction_status"),
+    )
+    mapped_status = _map_monri_subscription_status(raw_status)
+    if mapped_status != "none":
+        installation.subscription_status = mapped_status
+
+    installation.plan_code = _first_non_empty(
+        payload.get("plan_code"),
+        payload.get("plan"),
+        payload.get("product_code"),
+        installation.plan_code,
+    )
+    installation.customer_ref = _first_non_empty(
+        payload.get("customer_ref"),
+        payload.get("customer_id"),
+        installation.customer_ref,
+    )
+
+    valid_until_raw = _first_non_empty(
+        payload.get("valid_until"),
+        payload.get("next_billing_at"),
+        payload.get("subscription_end"),
+    )
+    parsed_valid_until = _parse_iso_datetime(valid_until_raw)
+    if parsed_valid_until is not None:
+        installation.subscription_valid_until = parsed_valid_until
+
+    merged_metadata = _load_metadata(installation.metadata_json)
+    merged_metadata.update(
+        {
+            "billing_provider": "monri",
+            "monri_last_status": raw_status,
+            "monri_last_payload": payload,
+            "monri_updated_at": now.isoformat(),
+        }
+    )
+    installation.metadata_json = _dump_metadata(merged_metadata)
+
+    entitlement = _compute_entitlement(installation)
+    entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
+    db.commit()
+
+    return {
+        "ok": True,
+        "installation_id": installation.installation_id,
+        "subscription_status": installation.subscription_status,
+        "entitlement": entitlement,
+        "entitlement_token": entitlement_token,
+    }
 
 
 @app.put("/v1/admin/installations/{installation_id}/subscription")
@@ -282,6 +471,7 @@ def admin_update_subscription(
     installation.metadata_json = _dump_metadata(merged_metadata)
 
     entitlement = _compute_entitlement(installation)
+    entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
 
     return {
@@ -289,6 +479,7 @@ def admin_update_subscription(
         "installation_id": installation_id,
         "subscription_status": installation.subscription_status,
         "entitlement": entitlement,
+        "entitlement_token": entitlement_token,
     }
 
 
@@ -305,6 +496,7 @@ def admin_get_installation(
         raise HTTPException(status_code=404, detail="Installation not found")
 
     entitlement = _compute_entitlement(installation)
+    entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     return {
         "ok": True,
         "installation": {
@@ -320,4 +512,5 @@ def admin_get_installation(
             "updated_at": installation.updated_at.isoformat(),
         },
         "entitlement": entitlement,
+        "entitlement_token": entitlement_token,
     }

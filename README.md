@@ -76,6 +76,10 @@ DEPLOY_SOURCE=ghcr IMAGE_TAG=v0.1.227 ./scripts/deploy.sh
 # include bundled local licensing control-plane service
 DEPLOY_LICENSE_CONTROL_PLANE=true ./scripts/deploy.sh
 ```
+For signed entitlement enforcement, configure:
+- `LCP_SIGNING_PRIVATE_KEY_PEM` on control-plane
+- matching `LICENSE_PUBLIC_KEY` on app services
+
 2. Check health:
 ```bash
 curl -sS http://localhost:8080/api/health
@@ -84,6 +88,7 @@ curl -sS http://localhost:8080/api/health
 - App/API: `http://localhost:8080`
 - Version: `http://localhost:8080/api/version`
 - License status: `http://localhost:8080/api/license/status`
+- Optional local control-plane health: `http://localhost:8092/api/health`
 - MCP endpoint (docker): `http://localhost:8091/mcp`
 - KurrentDB UI (event browser): `http://localhost:2113/web/index.html`
 - KurrentDB all-events feed (JSON): `http://localhost:2113/streams/%24all/head/backward/50?embed=body`

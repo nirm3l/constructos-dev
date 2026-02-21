@@ -66,6 +66,12 @@ Override file:
 - `docker-compose.license-control-plane.yml`
 Default local URL used by app services in this mode:
 - `http://license-control-plane:8092`
+Optional hardening for signed entitlement tokens:
+- `LCP_SIGNING_PRIVATE_KEY_PEM` (Ed25519 private key in PEM form)
+- `LCP_SIGNING_KEY_ID` (token key identifier)
+- `LCP_REQUIRE_SIGNED_TOKENS=true`
+Monri callback verification:
+- `LCP_MONRI_WEBHOOK_SECRET`
 
 ## 3. Critical Environment Variables
 
@@ -122,6 +128,7 @@ Default local URL used by app services in this mode:
 - `LICENSE_GRACE_HOURS`
 - `LICENSE_TRIAL_DAYS`
 - Write endpoints (`POST|PUT|PATCH|DELETE`) are blocked with `HTTP 402` when enforcement is enabled and license state is `expired` or `unlicensed`.
+- If `LICENSE_PUBLIC_KEY` is configured, app accepts only valid signed `entitlement_token` payloads from control-plane.
 
 ## 4. Bootstrap and Migration Behavior
 `startup_bootstrap()` performs:
@@ -142,6 +149,7 @@ Default local URL used by app services in this mode:
 - `GET /api/events/{aggregate_type}/{aggregate_id}`
 - KurrentDB UI: `http://localhost:2113/web/index.html`
 - KurrentDB all-events feed: `http://localhost:2113/streams/%24all/head/backward/50?embed=body`
+- Optional control-plane local health: `GET http://localhost:8092/api/health`
 
 ### 5.2 Runtime Metrics
 `/api/metrics` currently exposes:

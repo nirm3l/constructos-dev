@@ -13,10 +13,13 @@ from shared.settings import (
     APP_VERSION,
     LICENSE_HEARTBEAT_SECONDS,
     LICENSE_INSTALLATION_ID,
+    LICENSE_PUBLIC_KEY,
     LICENSE_SERVER_TOKEN,
     LICENSE_SERVER_URL,
     logger,
 )
+
+from .token_crypto import LicenseTokenError, verify_entitlement_token
 
 _worker_stop_event = threading.Event()
 _worker_thread: threading.Thread | None = None
@@ -172,15 +175,31 @@ def _apply_entitlement_payload(db, installation: LicenseInstallation, payload: d
     )
 
 
+def _resolve_verified_entitlement_payload(server_payload: dict[str, Any]) -> dict[str, Any]:
+    token_payload = server_payload.get("entitlement_token")
+    public_key = str(LICENSE_PUBLIC_KEY or "").strip()
+
+    if public_key:
+        if not isinstance(token_payload, dict):
+            raise LicenseTokenError("Signed entitlement token is required when LICENSE_PUBLIC_KEY is configured")
+        verified = verify_entitlement_token(token_payload, public_key)
+        return {"entitlement": verified}
+
+    # Development fallback: when no public key is configured, accept plain payload.
+    return server_payload
+
+
 def sync_license_once() -> bool:
     if not str(LICENSE_SERVER_URL or "").strip():
         return False
 
     with SessionLocal() as db:
+        installation_created = False
         installation = db.execute(
             select(LicenseInstallation).where(LicenseInstallation.installation_id == LICENSE_INSTALLATION_ID)
         ).scalar_one_or_none()
         if installation is None:
+            installation_created = True
             now = _now_utc()
             installation = LicenseInstallation(
                 installation_id=LICENSE_INSTALLATION_ID,
@@ -193,6 +212,10 @@ def sync_license_once() -> bool:
             )
             db.add(installation)
             db.flush()
+        if installation_created:
+            # Persist the installation record before external I/O so failed sync
+            # does not erase the local installation identity.
+            db.commit()
 
         try:
             with httpx.Client(timeout=8.0) as client:
@@ -213,7 +236,8 @@ def sync_license_once() -> bool:
             payload = heartbeat_response.json()
             if not isinstance(payload, dict):
                 raise ValueError("Control-plane response must be a JSON object")
-            _apply_entitlement_payload(db, installation, payload)
+            verified_payload = _resolve_verified_entitlement_payload(payload)
+            _apply_entitlement_payload(db, installation, verified_payload)
             db.commit()
             return True
         except Exception as exc:
