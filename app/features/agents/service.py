@@ -1011,8 +1011,10 @@ class AgentTaskService:
             if task_group_id:
                 group_state = self._assert_task_group_allowed(db=db, task_group_id=task_group_id)
                 assert group_state is not None
-                if group_state.workspace_id != resolved_workspace_id or group_state.project_id != resolved_project_id:
-                    raise HTTPException(status_code=400, detail="task_group_id does not belong to workspace_id/project_id")
+                if group_state.workspace_id != resolved_workspace_id:
+                    raise HTTPException(status_code=400, detail="task_group_id does not belong to workspace_id")
+                if group_state.project_id != resolved_project_id:
+                    raise HTTPException(status_code=400, detail="task_group_id does not belong to project_id")
             effective_command_id = command_id or self._fallback_command_id(
                 prefix="mcp-task-create",
                 payload={
@@ -1085,8 +1087,10 @@ class AgentTaskService:
             if note_group_id:
                 group_state = self._assert_note_group_allowed(db=db, note_group_id=note_group_id)
                 assert group_state is not None
-                if group_state.workspace_id != ws_id or group_state.project_id != proj_id:
-                    raise HTTPException(status_code=400, detail="note_group_id does not belong to workspace_id/project_id")
+                if group_state.workspace_id != ws_id:
+                    raise HTTPException(status_code=400, detail="note_group_id does not belong to workspace_id")
+                if group_state.project_id != proj_id:
+                    raise HTTPException(status_code=400, detail="note_group_id does not belong to project_id")
             effective_command_id = command_id or self._fallback_command_id(
                 prefix="mcp-note-create",
                 payload={
