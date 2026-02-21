@@ -1492,6 +1492,29 @@ def test_agent_service_can_set_my_theme(tmp_path):
     assert to_light['theme'] == 'light'
 
 
+def test_ui_and_mcp_theme_updates_follow_same_gateway_path(tmp_path):
+    client = build_client(tmp_path)
+
+    ui_updated = client.patch('/api/me/preferences', json={'theme': 'dark'})
+    assert ui_updated.status_code == 200
+    assert ui_updated.json()['theme'] == 'dark'
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    mcp_updated = service.set_my_theme(
+        theme='light',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+        command_id='test-mcp-theme-to-light-after-ui-dark',
+    )
+    assert mcp_updated['theme'] == 'light'
+
+    refreshed = client.get('/api/bootstrap')
+    assert refreshed.status_code == 200
+    assert refreshed.json()['current_user']['theme'] == 'light'
+
+
 def test_agent_service_theme_without_user_id_targets_primary_user(tmp_path):
     build_client(tmp_path)
 

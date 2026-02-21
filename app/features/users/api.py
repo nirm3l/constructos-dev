@@ -13,6 +13,7 @@ from shared.core import AuthSession, User, UserPreferencesPatch, WorkspaceMember
 from shared.settings import AUTH_COOKIE_SECURE, AUTH_SESSION_COOKIE_NAME, AUTH_SESSION_TTL_HOURS
 
 from .application import UserApplicationService
+from .gateway import UserOperationGateway
 
 router = APIRouter()
 
@@ -304,4 +305,10 @@ def patch_me_preferences(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return UserApplicationService(db, user, command_id=command_id).patch_preferences(payload)
+    gateway = UserOperationGateway()
+    return gateway.patch_preferences(
+        db=db,
+        actor_user_id=user.id,
+        payload=payload,
+        command_id=command_id,
+    )
