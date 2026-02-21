@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 
+from features.licensing.read_models import license_health_summary_read_model
 from shared.core import emit_system_notifications, get_current_user, get_db
 from shared.settings import APP_BUILD, APP_DEPLOYED_AT_UTC, APP_VERSION
 from .read_models import bootstrap_payload_read_model
@@ -37,8 +38,12 @@ def favicon():
 
 
 @router.get("/api/health")
-def health():
-    return {"ok": True, "timestamp": datetime.now(timezone.utc).isoformat()}
+def health(db: Session = Depends(get_db)):
+    return {
+        "ok": True,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "license": license_health_summary_read_model(db),
+    }
 
 
 @router.get("/api/version")

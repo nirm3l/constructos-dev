@@ -21,6 +21,7 @@ from . import models as shared_models
 from .models import (
     Note,
     NoteGroup,
+    LicenseInstallation,
     Project,
     ProjectMember,
     ProjectRule,
@@ -45,6 +46,8 @@ from .settings import (
     BOOTSTRAP_WORKSPACE_ID,
     DEFAULT_USER_ID,
     DEFAULT_STATUSES,
+    LICENSE_INSTALLATION_ID,
+    LICENSE_TRIAL_DAYS,
 )
 
 
@@ -290,6 +293,40 @@ def ensure_task_watcher_table_constraints(db: Session):
     db.commit()
 
 
+def ensure_license_installation(db: Session):
+    installation = db.execute(
+        select(LicenseInstallation).where(LicenseInstallation.installation_id == LICENSE_INSTALLATION_ID)
+    ).scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+    trial_days = max(1, int(LICENSE_TRIAL_DAYS))
+    if installation is None:
+        db.add(
+            LicenseInstallation(
+                installation_id=LICENSE_INSTALLATION_ID,
+                workspace_id=None,
+                status="trial",
+                plan_code="trial",
+                activated_at=now,
+                trial_ends_at=now + timedelta(days=trial_days),
+                metadata_json='{"source":"bootstrap-local"}',
+            )
+        )
+        db.commit()
+        return
+    changed = False
+    if installation.workspace_id is None and db.get(Workspace, BOOTSTRAP_WORKSPACE_ID) is not None:
+        installation.workspace_id = BOOTSTRAP_WORKSPACE_ID
+        changed = True
+    if installation.activated_at is None:
+        installation.activated_at = now
+        changed = True
+    if installation.trial_ends_at is None:
+        installation.trial_ends_at = now + timedelta(days=trial_days)
+        changed = True
+    if changed:
+        db.commit()
+
+
 def bootstrap_data():
     shared_models.ensure_engine()
     shared_models.Base.metadata.create_all(bind=shared_models.engine)
@@ -357,6 +394,7 @@ def bootstrap_data():
                 agent_member.role = "Admin"
             db.commit()
 
+        ensure_license_installation(db)
         ensure_user_password_defaults(db)
         ensure_non_human_workspace_admin_roles(db)
 

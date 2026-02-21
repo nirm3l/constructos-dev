@@ -15,6 +15,7 @@ m4tr1x is a task/project platform that combines:
 - `docs/04-api-and-mcp-map.md` - REST surface, SSE behavior, MCP tools map.
 - `docs/05-operations-runbook.md` - deployment, env config, observability, troubleshooting.
 - `docs/08-cqrs-consistency-guardrails.md` - CQRS consistency rules, allowlist policy, and guardrail enforcement.
+- `docs/12-macos-m4-licensing-and-distribution-plan.md` - cross-platform runtime, licensing, and distribution roadmap.
 
 ## System At A Glance
 ```mermaid
@@ -49,11 +50,22 @@ graph LR
 - Real-time notifications over SSE (`notification`, `task_event`, `ping`) with commit-driven push wakeups.
 - Knowledge graph endpoints and MCP tools for dependency-aware context.
 - Command idempotency via `X-Command-Id` and `command_executions`.
+- Licensing status endpoint and write-lock enforcement (`HTTP 402` on mutations when license is expired and enforcement is enabled).
 
 ## Quick Start
 1. Start the stack:
 ```bash
 ./scripts/deploy.sh
+```
+`deploy.sh` supports `DEPLOY_TARGET=auto|base|ubuntu-gpu|macos-m4` (default: `auto`).
+
+Examples:
+```bash
+# Ubuntu with local GPU-backed Ollama container
+DEPLOY_TARGET=ubuntu-gpu ./scripts/deploy.sh
+
+# macOS M4 with host-native Ollama (run `ollama serve` on host first)
+DEPLOY_TARGET=macos-m4 ./scripts/deploy.sh
 ```
 2. Check health:
 ```bash
@@ -62,6 +74,7 @@ curl -sS http://localhost:8080/api/health
 3. Open app and APIs:
 - App/API: `http://localhost:8080`
 - Version: `http://localhost:8080/api/version`
+- License status: `http://localhost:8080/api/license/status`
 - MCP endpoint (docker): `http://localhost:8091/mcp`
 - KurrentDB UI (event browser): `http://localhost:2113/web/index.html`
 - KurrentDB all-events feed (JSON): `http://localhost:2113/streams/%24all/head/backward/50?embed=body`

@@ -16,16 +16,32 @@ The default Docker Compose stack includes:
 Effects:
 - bumps patch version (`VERSION` + frontend package version),
 - generates `.deploy.env` (`APP_VERSION`, `APP_BUILD`, `APP_DEPLOYED_AT_UTC`),
-- runs `docker compose up -d --build`.
+- resolves `DEPLOY_TARGET` (`auto|base|ubuntu-gpu|macos-m4`),
+- runs `docker compose ... up -d --build` with target-specific override files.
 
-### 2.2 Full Reset
+### 2.2 Deploy Targets
+- `auto` resolves to `macos-m4` on `Darwin`.
+- `auto` resolves to `ubuntu-gpu` on `Linux` when `/dev/dri` exists.
+- `auto` resolves to `base` on all other cases.
+- `ubuntu-gpu`: enables Linux GPU-backed Ollama container config from `docker-compose.ubuntu-gpu.yml`.
+- `macos-m4`: disables in-stack Ollama and points services to host-native Ollama (`host.docker.internal`), and forces `kurrentdb` on `linux/amd64`.
+- `base`: platform-neutral stack without GPU-specific overrides.
+
+### 2.3 Full Reset
 ```bash
 ./scripts/recreate_from_zero.sh
 ```
 Does:
-- `docker compose down -v`,
+- uses the same resolved compose files as deploy target for `down` and `ps`,
 - clears local DB/upload paths,
 - performs fresh deploy + health/version checks.
+
+### 2.4 Private Image Release (GHCR)
+- Workflow file: `.github/workflows/release-images.yml`.
+- Trigger: push tag matching `v*` (for example `v1.3.0`) or manual dispatch.
+- Output image: `ghcr.io/<owner>/<repo>-task-app:<tag>`.
+- Output image: `ghcr.io/<owner>/<repo>-mcp-tools:<tag>`.
+- Platforms: `linux/amd64` and `linux/arm64`.
 
 ## 3. Critical Environment Variables
 
@@ -72,6 +88,16 @@ Does:
 - `MCP_EMAIL_ALLOWED_RECIPIENTS`
 - `MCP_EMAIL_ALLOWED_DOMAINS`
 
+### 3.7 Licensing
+- `LICENSE_ENFORCEMENT_ENABLED`
+- `LICENSE_INSTALLATION_ID`
+- `LICENSE_SERVER_URL`
+- `LICENSE_PUBLIC_KEY`
+- `LICENSE_HEARTBEAT_SECONDS`
+- `LICENSE_GRACE_HOURS`
+- `LICENSE_TRIAL_DAYS`
+- Write endpoints (`POST|PUT|PATCH|DELETE`) are blocked with `HTTP 402` when enforcement is enabled and license state is `expired` or `unlicensed`.
+
 ## 4. Bootstrap and Migration Behavior
 `startup_bootstrap()` performs:
 - schema/table create/update,
@@ -86,6 +112,7 @@ Does:
 ### 5.1 Endpoints
 - `GET /api/health`
 - `GET /api/version`
+- `GET /api/license/status`
 - `GET /api/metrics`
 - `GET /api/events/{aggregate_type}/{aggregate_id}`
 - KurrentDB UI: `http://localhost:2113/web/index.html`

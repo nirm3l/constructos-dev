@@ -1,0 +1,15 @@
+services:
+  kurrentdb:
+    platform: linux/amd64
+
+  ollama:
+    profiles:
+      - linux-ollama-only
+
+  task-app:
+    environment:
+      OLLAMA_BASE_URL: "http://host.docker.internal:11434"
+
+  mcp-tools:
+    environment:
+      OLLAMA_BASE_URL: "http://host.docker.internal:11434"

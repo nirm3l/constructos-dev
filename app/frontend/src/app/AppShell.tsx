@@ -8,6 +8,7 @@ import {
   authMe,
   createAdminUser,
   getBootstrap,
+  getLicenseStatus,
   linkTaskToSpecification,
   listAdminUsers,
   resetAdminUserPassword,
@@ -266,6 +267,13 @@ function App({ logout }: { logout: () => void }) {
     queryKey: ['bootstrap', userId],
     queryFn: () => getBootstrap(userId),
     retry: 1,
+  })
+  const licenseStatus = useQuery({
+    queryKey: ['license-status', userId],
+    queryFn: () => getLicenseStatus(userId),
+    enabled: Boolean(bootstrap.data),
+    retry: 1,
+    refetchInterval: 60_000,
   })
   const { frontendVersion, backendVersion, backendBuild, backendDeployedAtUtc } = useAppVersion()
   const workspaceId = bootstrap.data?.workspaces[0]?.id ?? ''
@@ -1369,6 +1377,7 @@ function App({ logout }: { logout: () => void }) {
     <AppContent
       state={{
       bootstrap,
+      licenseStatus,
       tab,
       setTab,
       searchQ,

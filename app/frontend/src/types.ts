@@ -264,6 +264,25 @@ export type Notification = {
   specification_id?: string | null
 }
 
+export type LicenseStatus = {
+  installation_id: string
+  status: 'active' | 'trial' | 'grace' | 'expired' | 'unlicensed' | string
+  plan_code: string | null
+  enforcement_enabled: boolean
+  write_access: boolean
+  trial_ends_at: string | null
+  grace_ends_at: string | null
+  last_validated_at: string | null
+  token_expires_at: string | null
+  license_server_url: string | null
+  metadata: Record<string, unknown>
+}
+
+export type LicenseStatusResponse = {
+  ok: boolean
+  license: LicenseStatus
+}
+
 export type AppVersionPayload = {
   backend_version: string
   backend_build: string | null

@@ -6,6 +6,7 @@ import type {
   AdminUsersPage,
   AuthMePayload,
   BootstrapPayload,
+  LicenseStatusResponse,
   AgentChatResponse,
   GraphContextPack,
   ProjectKnowledgeSearchResult,
@@ -115,6 +116,7 @@ async function uploadApi<T>(path: string, userId: string, body: FormData): Promi
 }
 
 export const getBootstrap = (userId: string) => api<BootstrapPayload>('/api/bootstrap', userId)
+export const getLicenseStatus = (userId: string) => api<LicenseStatusResponse>('/api/license/status', userId)
 
 export async function getAppVersion(): Promise<AppVersionPayload> {
   const res = await fetch('/api/version')

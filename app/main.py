@@ -2,12 +2,14 @@ from contextlib import asynccontextmanager
 import os
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from features.bootstrap.api import router as bootstrap_router
 from features.debug.api import router as debug_router
+from features.licensing.api import router as licensing_router
 from features.notifications.api import router as notifications_router
 from features.project_templates.api import router as project_templates_router
 from features.projects.api import router as projects_router
@@ -23,6 +25,7 @@ from features.notes.api import router as notes_router
 from features.note_groups.api import router as note_groups_router
 from features.agents.runner import start_automation_runner, stop_automation_runner
 from shared.core import bootstrap_data, start_projection_worker, startup_bootstrap, stop_projection_worker
+from shared.deps import is_license_write_allowed
 from shared.eventing_graph import start_graph_projection_worker, stop_graph_projection_worker
 from shared.eventing_vector import start_vector_projection_worker, stop_vector_projection_worker
 from shared.knowledge_graph import close_knowledge_graph_driver
@@ -67,6 +70,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def enforce_license_write_access(request: Request, call_next):
+    allowed, payload = is_license_write_allowed(request)
+    if allowed:
+        return await call_next(request)
+    return JSONResponse(
+        status_code=402,
+        content={
+            "detail": "License expired. Write access is disabled until subscription is reactivated.",
+            "license": {
+                "status": payload.get("status") if payload else "unlicensed",
+                "write_access": bool(payload.get("write_access")) if payload else False,
+                "enforcement_enabled": bool(payload.get("enforcement_enabled")) if payload else True,
+                "trial_ends_at": payload.get("trial_ends_at") if payload else None,
+                "grace_ends_at": payload.get("grace_ends_at") if payload else None,
+            },
+        },
+    )
+
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
@@ -85,3 +109,4 @@ app.include_router(notifications_router)
 app.include_router(views_router)
 app.include_router(agents_router)
 app.include_router(debug_router)
+app.include_router(licensing_router)

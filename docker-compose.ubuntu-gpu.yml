@@ -1,0 +1,17 @@
+services:
+  ollama:
+    environment:
+      OLLAMA_VULKAN: "1"
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "44"
+      - "992"
+
+  task-app:
+    environment:
+      OLLAMA_BASE_URL: "http://ollama:11434"
+
+  mcp-tools:
+    environment:
+      OLLAMA_BASE_URL: "http://ollama:11434"
