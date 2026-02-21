@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from features.agents.gateway import build_ui_gateway
 from shared.core import (
     Project,
     ProjectCreate,
@@ -44,7 +45,20 @@ def create_project(
     user=Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return ProjectApplicationService(db, user, command_id=command_id).create_project(payload)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.create_project(
+        name=payload.name,
+        workspace_id=payload.workspace_id,
+        description=payload.description,
+        custom_statuses=payload.custom_statuses,
+        external_refs=[item.model_dump() for item in payload.external_refs],
+        attachment_refs=[item.model_dump() for item in payload.attachment_refs],
+        embedding_enabled=payload.embedding_enabled,
+        embedding_model=payload.embedding_model,
+        context_pack_evidence_top_k=payload.context_pack_evidence_top_k,
+        member_user_ids=payload.member_user_ids,
+        command_id=command_id,
+    )
 
 
 @router.delete("/api/projects/{project_id}")
@@ -101,12 +115,8 @@ def project_knowledge_graph_overview(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    project = _load_project_with_access(db, user, project_id)
-    try:
-        require_graph_available()
-        return graph_get_project_overview(project_id=project.id, top_limit=top_limit)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Knowledge graph is unavailable: {exc}") from exc
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.graph_get_project_overview(project_id=project_id, top_limit=top_limit)
 
 
 @router.get("/api/projects/{project_id}/knowledge-graph/context-pack")
@@ -118,19 +128,13 @@ def project_knowledge_graph_context_pack(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    project = _load_project_with_access(db, user, project_id)
-    if bool(str(focus_entity_type or "").strip()) != bool(str(focus_entity_id or "").strip()):
-        raise HTTPException(status_code=400, detail="focus_entity_type and focus_entity_id must be provided together")
-    try:
-        require_graph_available()
-        return graph_context_pack(
-            project_id=project.id,
-            focus_entity_type=focus_entity_type,
-            focus_entity_id=focus_entity_id,
-            limit=limit,
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Knowledge graph is unavailable: {exc}") from exc
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.graph_context_pack(
+        project_id=project_id,
+        focus_entity_type=focus_entity_type,
+        focus_entity_id=focus_entity_id,
+        limit=limit,
+    )
 
 
 @router.get("/api/projects/{project_id}/knowledge-graph/subgraph")
@@ -163,19 +167,14 @@ def project_knowledge_search(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    project = _load_project_with_access(db, user, project_id)
-    if bool(str(focus_entity_type or "").strip()) != bool(str(focus_entity_id or "").strip()):
-        raise HTTPException(status_code=400, detail="focus_entity_type and focus_entity_id must be provided together")
-    try:
-        return search_project_knowledge(
-            project_id=project.id,
-            query=q,
-            focus_entity_type=focus_entity_type,
-            focus_entity_id=focus_entity_id,
-            limit=limit,
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Project knowledge search failed: {exc}") from exc
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.search_project_knowledge(
+        project_id=project_id,
+        query=q,
+        focus_entity_type=focus_entity_type,
+        focus_entity_id=focus_entity_id,
+        limit=limit,
+    )
 
 
 @router.post("/api/projects/{project_id}/members")

@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from features.agents.gateway import build_ui_gateway
 from shared.core import (
     ReorderPayload,
     TaskGroupCreate,
@@ -32,17 +33,13 @@ def list_task_groups(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
-    return list_task_groups_read_model(
-        db,
-        user,
-        TaskGroupListQuery(
-            workspace_id=workspace_id,
-            project_id=project_id,
-            q=q,
-            limit=limit,
-            offset=offset,
-        ),
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.list_task_groups(
+        workspace_id=workspace_id,
+        project_id=project_id,
+        q=q,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -53,7 +50,15 @@ def create_task_group(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return TaskGroupApplicationService(db, user, command_id=command_id).create_task_group(payload)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.create_task_group(
+        name=payload.name,
+        project_id=payload.project_id,
+        workspace_id=payload.workspace_id,
+        description=payload.description,
+        color=payload.color,
+        command_id=command_id,
+    )
 
 
 @router.get("/api/task-groups/{group_id}")
@@ -73,7 +78,12 @@ def patch_task_group(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return TaskGroupApplicationService(db, user, command_id=command_id).patch_task_group(group_id, payload)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.update_task_group(
+        group_id=group_id,
+        patch=payload.model_dump(exclude_unset=True),
+        command_id=command_id,
+    )
 
 
 @router.post("/api/task-groups/{group_id}/delete")
@@ -83,7 +93,8 @@ def delete_task_group(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return TaskGroupApplicationService(db, user, command_id=command_id).delete_task_group(group_id)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.delete_task_group(group_id=group_id, command_id=command_id)
 
 
 @router.post("/api/task-groups/reorder")
@@ -95,4 +106,10 @@ def reorder_task_groups(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return TaskGroupApplicationService(db, user, command_id=command_id).reorder_task_groups(workspace_id, project_id, payload)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.reorder_task_groups(
+        ordered_ids=payload.ordered_ids,
+        project_id=project_id,
+        workspace_id=workspace_id,
+        command_id=command_id,
+    )

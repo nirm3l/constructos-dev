@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -677,12 +678,17 @@ def test_project_knowledge_graph_endpoints(tmp_path, monkeypatch):
     bootstrap = client.get('/api/bootstrap').json()
     project_id = bootstrap['projects'][0]['id']
 
+    import features.agents.service as agent_service_module
     from features.projects import api as projects_api
 
-    monkeypatch.setattr(projects_api, 'require_graph_available', lambda: None)
     monkeypatch.setattr(
-        projects_api,
-        'graph_get_project_overview',
+        agent_service_module,
+        'require_graph_available',
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        agent_service_module,
+        'graph_get_project_overview_query',
         lambda project_id, top_limit=8: {
             'project_id': project_id,
             'project_name': 'Stub Project',
@@ -692,8 +698,8 @@ def test_project_knowledge_graph_endpoints(tmp_path, monkeypatch):
         },
     )
     monkeypatch.setattr(
-        projects_api,
-        'graph_context_pack',
+        agent_service_module,
+        'graph_context_pack_query',
         lambda project_id, focus_entity_type=None, focus_entity_id=None, limit=20: {
             'project_id': project_id,
             'focus_entity_type': focus_entity_type,
@@ -710,6 +716,7 @@ def test_project_knowledge_graph_endpoints(tmp_path, monkeypatch):
             'markdown': '# Graph Context',
         },
     )
+    monkeypatch.setattr(projects_api, 'require_graph_available', lambda: None)
     monkeypatch.setattr(
         projects_api,
         'graph_get_project_subgraph',
@@ -756,11 +763,11 @@ def test_project_knowledge_search_endpoint(tmp_path, monkeypatch):
     bootstrap = client.get('/api/bootstrap').json()
     project_id = bootstrap['projects'][0]['id']
 
-    from features.projects import api as projects_api
+    import features.agents.service as agent_service_module
 
     monkeypatch.setattr(
-        projects_api,
-        'search_project_knowledge',
+        agent_service_module,
+        'search_project_knowledge_query',
         lambda project_id, query, focus_entity_type=None, focus_entity_id=None, limit=20: {
             'project_id': project_id,
             'query': query,
@@ -799,12 +806,12 @@ def test_project_knowledge_graph_endpoint_returns_503_when_unavailable(tmp_path,
     bootstrap = client.get('/api/bootstrap').json()
     project_id = bootstrap['projects'][0]['id']
 
-    from features.projects import api as projects_api
+    from features.agents.service import AgentTaskService
 
-    def _raise_unavailable():
-        raise RuntimeError('disabled')
+    def _raise_unavailable(self, project_id, top_limit=8):
+        raise HTTPException(status_code=503, detail='Knowledge graph is unavailable: disabled')
 
-    monkeypatch.setattr(projects_api, 'require_graph_available', _raise_unavailable)
+    monkeypatch.setattr(AgentTaskService, 'graph_get_project_overview', _raise_unavailable)
     res = client.get(f"/api/projects/{project_id}/knowledge-graph/overview")
     assert res.status_code == 503
     assert 'Knowledge graph is unavailable' in res.json()['detail']

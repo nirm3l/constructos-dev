@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from features.agents.gateway import build_ui_gateway
 from shared.core import NoteCreate, NotePatch, User, ensure_project_access, ensure_role, get_command_id, get_current_user, get_db, load_note_view
 
 from .application import NoteApplicationService
@@ -28,23 +29,19 @@ def list_notes(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
-    return list_notes_read_model(
-        db,
-        user,
-        NoteListQuery(
-            workspace_id=workspace_id,
-            project_id=project_id,
-            note_group_id=note_group_id,
-            task_id=task_id,
-            specification_id=specification_id,
-            q=q,
-            tags=[t.strip().lower() for t in tags.split(",") if t.strip()] if tags else None,
-            archived=archived,
-            pinned=pinned,
-            limit=limit,
-            offset=offset,
-        ),
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.list_notes(
+        workspace_id=workspace_id,
+        project_id=project_id,
+        note_group_id=note_group_id,
+        task_id=task_id,
+        specification_id=specification_id,
+        q=q,
+        tags=[t.strip().lower() for t in tags.split(",") if t.strip()] if tags else None,
+        archived=archived,
+        pinned=pinned,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -55,20 +52,27 @@ def create_note(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return NoteApplicationService(db, user, command_id=command_id).create_note(payload)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.create_note(
+        title=payload.title,
+        body=payload.body,
+        workspace_id=payload.workspace_id,
+        project_id=payload.project_id,
+        note_group_id=payload.note_group_id,
+        task_id=payload.task_id,
+        specification_id=payload.specification_id,
+        tags=payload.tags,
+        pinned=payload.pinned,
+        external_refs=[item.model_dump() for item in payload.external_refs],
+        attachment_refs=[item.model_dump() for item in payload.attachment_refs],
+        command_id=command_id,
+    )
 
 
 @router.get("/api/notes/{note_id}")
 def get_note(note_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    note = load_note_view(db, note_id)
-    if not note:
-        raise HTTPException(status_code=404, detail="Note not found")
-    project_id = str(note.get("project_id") or "")
-    if project_id:
-        ensure_project_access(db, note["workspace_id"], project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
-    else:
-        ensure_role(db, note["workspace_id"], user.id, {"Owner", "Admin", "Member", "Guest"})
-    return note
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.get_note(note_id=note_id)
 
 
 @router.patch("/api/notes/{note_id}")
@@ -79,7 +83,12 @@ def patch_note(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return NoteApplicationService(db, user, command_id=command_id).patch_note(note_id, payload)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.update_note(
+        note_id=note_id,
+        patch=payload.model_dump(exclude_unset=True),
+        command_id=command_id,
+    )
 
 
 @router.post("/api/notes/{note_id}/archive")
@@ -89,7 +98,8 @@ def archive_note(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return NoteApplicationService(db, user, command_id=command_id).archive_note(note_id)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.archive_note(note_id=note_id, command_id=command_id)
 
 
 @router.post("/api/notes/{note_id}/restore")
@@ -99,7 +109,8 @@ def restore_note(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return NoteApplicationService(db, user, command_id=command_id).restore_note(note_id)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.restore_note(note_id=note_id, command_id=command_id)
 
 
 @router.post("/api/notes/{note_id}/pin")
@@ -109,7 +120,8 @@ def pin_note(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return NoteApplicationService(db, user, command_id=command_id).pin_note(note_id)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.pin_note(note_id=note_id, command_id=command_id)
 
 
 @router.post("/api/notes/{note_id}/unpin")
@@ -119,7 +131,8 @@ def unpin_note(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return NoteApplicationService(db, user, command_id=command_id).unpin_note(note_id)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.unpin_note(note_id=note_id, command_id=command_id)
 
 
 @router.post("/api/notes/{note_id}/delete")
@@ -129,4 +142,5 @@ def delete_note(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return NoteApplicationService(db, user, command_id=command_id).delete_note(note_id)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.delete_note(note_id=note_id, command_id=command_id)

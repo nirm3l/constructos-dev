@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from features.agents.gateway import build_ui_gateway
 from shared.core import (
     ProjectRuleCreate,
     ProjectRulePatch,
@@ -31,17 +32,13 @@ def list_project_rules(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
-    return list_project_rules_read_model(
-        db,
-        user,
-        ProjectRuleListQuery(
-            workspace_id=workspace_id,
-            project_id=project_id,
-            q=q,
-            limit=limit,
-            offset=offset,
-        ),
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.list_project_rules(
+        workspace_id=workspace_id,
+        project_id=project_id,
+        q=q,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -52,16 +49,20 @@ def create_project_rule(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return ProjectRuleApplicationService(db, user, command_id=command_id).create_project_rule(payload)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.create_project_rule(
+        title=payload.title,
+        project_id=payload.project_id,
+        workspace_id=payload.workspace_id,
+        body=payload.body,
+        command_id=command_id,
+    )
 
 
 @router.get("/api/project-rules/{rule_id}")
 def get_project_rule(rule_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    rule = load_project_rule_view(db, rule_id)
-    if not rule:
-        raise HTTPException(status_code=404, detail="Project rule not found")
-    ensure_project_access(db, rule["workspace_id"], rule["project_id"], user.id, {"Owner", "Admin", "Member", "Guest"})
-    return rule
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.get_project_rule(rule_id=rule_id)
 
 
 @router.patch("/api/project-rules/{rule_id}")
@@ -72,7 +73,12 @@ def patch_project_rule(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return ProjectRuleApplicationService(db, user, command_id=command_id).patch_project_rule(rule_id, payload)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.update_project_rule(
+        rule_id=rule_id,
+        patch=payload.model_dump(exclude_unset=True),
+        command_id=command_id,
+    )
 
 
 @router.post("/api/project-rules/{rule_id}/delete")
@@ -82,4 +88,5 @@ def delete_project_rule(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return ProjectRuleApplicationService(db, user, command_id=command_id).delete_project_rule(rule_id)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.delete_project_rule(rule_id=rule_id, command_id=command_id)

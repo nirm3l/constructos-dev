@@ -6,11 +6,11 @@ from typing import Any
 
 from shared.settings import MCP_AUTH_TOKEN
 
-from .service import AgentTaskService
+from .gateway import build_mcp_gateway
 
 
 def _require_token(auth_token: str | None):
-    """Mirror AgentTaskService token enforcement for tools that bypass the app service layer."""
+    """Mirror gateway token enforcement for tools that bypass the app service layer."""
     if not MCP_AUTH_TOKEN:
         return
     if not auth_token or not hmac.compare_digest(auth_token, MCP_AUTH_TOKEN):
@@ -24,7 +24,7 @@ def create_mcp():
         raise RuntimeError("fastmcp is required to run MCP server. Install dependency: fastmcp>=2.0.0") from exc
 
     mcp = FastMCP(name="task-management-mcp")
-    service = AgentTaskService()
+    service = build_mcp_gateway()
     default_tool_token = os.getenv("MCP_TOOL_AUTH_TOKEN", "").strip() or None
 
     @mcp.tool(description="List tasks in a workspace with optional filters.")

@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from features.agents.gateway import build_ui_gateway
 from shared.core import (
     ActivityLog,
     BulkAction,
@@ -29,7 +30,7 @@ from shared.core import (
     to_iso_utc,
 )
 from .application import TaskApplicationService
-from .read_models import TaskListQuery, get_task_automation_status_read_model, list_tasks_read_model
+from .read_models import TaskListQuery, list_tasks_read_model
 
 router = APIRouter()
 
@@ -55,28 +56,24 @@ def list_tasks(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
-    return list_tasks_read_model(
-        db,
-        user,
-        TaskListQuery(
-            workspace_id=workspace_id,
-            project_id=project_id,
-            task_group_id=task_group_id,
-            specification_id=specification_id,
-            view=view,
-            q=q,
-            status=status,
-            tags=[t.strip().lower() for t in tags.split(",") if t.strip()] if tags else None,
-            label=label,
-            assignee_id=assignee_id,
-            due_from=due_from,
-            due_to=due_to,
-            priority=priority,
-            archived=archived,
-            limit=limit,
-            offset=offset,
-        ),
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.list_tasks(
+        workspace_id=workspace_id,
+        project_id=project_id,
+        task_group_id=task_group_id,
+        specification_id=specification_id,
+        view=view,
+        q=q,
+        status=status,
+        tags=[t.strip().lower() for t in tags.split(",") if t.strip()] if tags else None,
+        label=label,
+        assignee_id=assignee_id,
+        due_from=due_from,
+        due_to=due_to,
+        priority=priority,
+        archived=archived,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -87,7 +84,27 @@ def create_task(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return TaskApplicationService(db, user, command_id=command_id).create_task(payload)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.create_task(
+        workspace_id=payload.workspace_id,
+        title=payload.title,
+        project_id=payload.project_id,
+        description=payload.description,
+        priority=payload.priority,
+        due_date=payload.due_date.isoformat() if payload.due_date else None,
+        external_refs=[item.model_dump() for item in payload.external_refs],
+        attachment_refs=[item.model_dump() for item in payload.attachment_refs],
+        recurring_rule=payload.recurring_rule,
+        specification_id=payload.specification_id,
+        task_group_id=payload.task_group_id,
+        task_type=payload.task_type,
+        scheduled_instruction=payload.scheduled_instruction,
+        scheduled_at_utc=payload.scheduled_at_utc.isoformat() if payload.scheduled_at_utc else None,
+        schedule_timezone=payload.schedule_timezone,
+        assignee_id=payload.assignee_id,
+        labels=payload.labels,
+        command_id=command_id,
+    )
 
 
 @router.patch("/api/tasks/{task_id}")
@@ -98,7 +115,12 @@ def patch_task(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return TaskApplicationService(db, user, command_id=command_id).patch_task(task_id, payload)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.update_task(
+        task_id=task_id,
+        patch=payload.model_dump(exclude_unset=True),
+        command_id=command_id,
+    )
 
 
 @router.post("/api/tasks/{task_id}/complete")
@@ -108,7 +130,8 @@ def complete_task(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return TaskApplicationService(db, user, command_id=command_id).complete_task(task_id)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.complete_task(task_id=task_id, command_id=command_id)
 
 
 @router.post("/api/tasks/{task_id}/reopen")
@@ -148,7 +171,13 @@ def bulk_action(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return TaskApplicationService(db, user, command_id=command_id).bulk_action(payload)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.bulk_task_action(
+        task_ids=payload.task_ids,
+        action=payload.action,
+        payload=payload.payload,
+        command_id=command_id,
+    )
 
 
 @router.post("/api/tasks/reorder")
@@ -196,7 +225,8 @@ def add_comment(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return TaskApplicationService(db, user, command_id=command_id).add_comment(task_id, payload)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.add_task_comment(task_id=task_id, body=payload.body, command_id=command_id)
 
 
 @router.get("/api/tasks/{task_id}/comments")
@@ -266,9 +296,15 @@ def request_automation_run(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return TaskApplicationService(db, user, command_id=command_id).request_automation_run(task_id, payload)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.request_task_automation_run(
+        task_id=task_id,
+        instruction=payload.instruction,
+        command_id=command_id,
+    )
 
 
 @router.get("/api/tasks/{task_id}/automation")
 def task_automation_status(task_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return get_task_automation_status_read_model(db, user, task_id)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.get_task_automation_status(task_id=task_id)

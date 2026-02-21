@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import uuid
+from datetime import datetime
 from typing import Any
 
 from fastapi import HTTPException
@@ -84,23 +85,47 @@ from shared.settings import (
 class AgentTaskService:
     """Service used by MCP tools to safely operate on tasks."""
 
-    def __init__(self, *, user_gateway: UserOperationGateway | None = None):
+    def __init__(
+        self,
+        *,
+        user_gateway: UserOperationGateway | None = None,
+        require_token: bool = True,
+        actor_user_id: str | None = None,
+        allowed_workspace_ids: set[str] | None = None,
+        allowed_project_ids: set[str] | None = None,
+        default_workspace_id: str | None = None,
+    ):
         self._user_gateway = user_gateway or UserOperationGateway()
+        self._require_mcp_token = bool(require_token)
+        self._actor_user_id = str(actor_user_id or "").strip() or None
+        self._allowed_workspace_ids = (
+            set(MCP_ALLOWED_WORKSPACE_IDS) if allowed_workspace_ids is None else set(allowed_workspace_ids)
+        )
+        self._allowed_project_ids = (
+            set(MCP_ALLOWED_PROJECT_IDS) if allowed_project_ids is None else set(allowed_project_ids)
+        )
+        self._default_workspace_id = (
+            str(MCP_DEFAULT_WORKSPACE_ID or "").strip()
+            if default_workspace_id is None
+            else str(default_workspace_id or "").strip()
+        )
 
     def _require_token(self, auth_token: str | None):
+        if not self._require_mcp_token:
+            return
         if not MCP_AUTH_TOKEN:
             return
         if not auth_token or not hmac.compare_digest(auth_token, MCP_AUTH_TOKEN):
             raise HTTPException(status_code=401, detail="Invalid MCP token")
 
     def _assert_workspace_allowed(self, workspace_id: str):
-        if MCP_ALLOWED_WORKSPACE_IDS and workspace_id not in MCP_ALLOWED_WORKSPACE_IDS:
+        if self._allowed_workspace_ids and workspace_id not in self._allowed_workspace_ids:
             raise HTTPException(status_code=403, detail="Workspace is outside MCP allowlist")
 
     def _assert_project_allowed(self, project_id: str | None):
         if not project_id:
             return
-        if MCP_ALLOWED_PROJECT_IDS and project_id not in MCP_ALLOWED_PROJECT_IDS:
+        if self._allowed_project_ids and project_id not in self._allowed_project_ids:
             raise HTTPException(status_code=403, detail="Project is outside MCP allowlist")
 
     def _assert_task_allowed(self, *, db, task_id: str | None):
@@ -154,7 +179,7 @@ class AgentTaskService:
         return state
 
     def _resolve_actor_user(self, user_id: str | None = None) -> UserModel:
-        target_user_id = str(user_id or "").strip() or MCP_ACTOR_USER_ID
+        target_user_id = str(user_id or "").strip() or self._actor_user_id or MCP_ACTOR_USER_ID
         with SessionLocal() as db:
             user = db.get(User, target_user_id)
             if not user:
@@ -165,6 +190,8 @@ class AgentTaskService:
         explicit_user_id = str(user_id or "").strip()
         if explicit_user_id:
             return explicit_user_id
+        if self._actor_user_id:
+            return self._actor_user_id
         # In containerized runtime the MCP actor is often a dedicated bot account.
         # Preference updates should default to the primary app user unless the caller
         # explicitly targets a different user.
@@ -189,11 +216,11 @@ class AgentTaskService:
         if explicit_workspace_id:
             self._assert_workspace_allowed(explicit_workspace_id)
             return explicit_workspace_id
-        if MCP_DEFAULT_WORKSPACE_ID:
-            self._assert_workspace_allowed(MCP_DEFAULT_WORKSPACE_ID)
-            return MCP_DEFAULT_WORKSPACE_ID
-        if len(MCP_ALLOWED_WORKSPACE_IDS) == 1:
-            return next(iter(MCP_ALLOWED_WORKSPACE_IDS))
+        if self._default_workspace_id:
+            self._assert_workspace_allowed(self._default_workspace_id)
+            return self._default_workspace_id
+        if len(self._allowed_workspace_ids) == 1:
+            return next(iter(self._allowed_workspace_ids))
         raise HTTPException(
             status_code=400,
             detail="workspace_id is required for project creation when MCP default workspace is not configured",
@@ -274,8 +301,11 @@ class AgentTaskService:
         project_id: str | None = None,
         task_group_id: str | None = None,
         specification_id: str | None = None,
+        tags: list[str] | None = None,
         label: str | None = None,
         assignee_id: str | None = None,
+        due_from: datetime | None = None,
+        due_to: datetime | None = None,
         priority: str | None = None,
         archived: bool = False,
         limit: int = 30,
@@ -304,8 +334,11 @@ class AgentTaskService:
                     project_id=project_id,
                     task_group_id=task_group_id,
                     specification_id=specification_id,
+                    tags=tags,
                     label=label,
                     assignee_id=assignee_id,
+                    due_from=due_from,
+                    due_to=due_to,
                     priority=priority,
                     archived=archived,
                     limit=limit,
@@ -323,6 +356,7 @@ class AgentTaskService:
         task_id: str | None = None,
         specification_id: str | None = None,
         q: str | None = None,
+        tags: list[str] | None = None,
         archived: bool = False,
         pinned: bool | None = None,
         limit: int = 30,
@@ -352,6 +386,7 @@ class AgentTaskService:
                     task_id=task_id,
                     specification_id=specification_id,
                     q=q,
+                    tags=tags,
                     archived=archived,
                     pinned=pinned,
                     limit=limit,
@@ -453,6 +488,7 @@ class AgentTaskService:
         project_id: str | None = None,
         q: str | None = None,
         status: str | None = None,
+        tags: list[str] | None = None,
         archived: bool = False,
         limit: int = 30,
         offset: int = 0,
@@ -473,6 +509,7 @@ class AgentTaskService:
                     project_id=project_id,
                     q=q,
                     status=status,
+                    tags=tags,
                     archived=archived,
                     limit=limit,
                     offset=offset,
@@ -518,6 +555,8 @@ class AgentTaskService:
         offset: int = 0,
     ) -> dict:
         self._require_token(auth_token)
+        if bool(str(focus_entity_type or "").strip()) != bool(str(focus_entity_id or "").strip()):
+            raise HTTPException(status_code=400, detail="focus_entity_type and focus_entity_id must be provided together")
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             spec_state = self._assert_specification_allowed(db=db, specification_id=specification_id)
@@ -796,6 +835,8 @@ class AgentTaskService:
         limit: int = 20,
     ) -> dict:
         self._require_token(auth_token)
+        if bool(str(focus_entity_type or "").strip()) != bool(str(focus_entity_id or "").strip()):
+            raise HTTPException(status_code=400, detail="focus_entity_type and focus_entity_id must be provided together")
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             project = self._load_project_scope(db=db, project_id=project_id)
@@ -946,6 +987,8 @@ class AgentTaskService:
         description: str = "",
         priority: str = "Med",
         due_date: str | None = None,
+        external_refs: list[dict[str, Any]] | None = None,
+        attachment_refs: list[dict[str, Any]] | None = None,
         recurring_rule: str | None = None,
         specification_id: str | None = None,
         task_group_id: str | None = None,
@@ -980,6 +1023,8 @@ class AgentTaskService:
                     "description": description,
                     "priority": priority,
                     "due_date": due_date,
+                    "external_refs": external_refs or [],
+                    "attachment_refs": attachment_refs or [],
                     "recurring_rule": recurring_rule,
                     "specification_id": specification_id,
                     "task_type": task_type,
@@ -998,6 +1043,8 @@ class AgentTaskService:
                 description=description,
                 priority=priority,
                 due_date=due_date,
+                external_refs=external_refs or [],
+                attachment_refs=attachment_refs or [],
                 recurring_rule=recurring_rule,
                 specification_id=specification_id,
                 task_type=task_type,
@@ -1022,6 +1069,8 @@ class AgentTaskService:
         specification_id: str | None = None,
         tags: list[str] | None = None,
         pinned: bool = False,
+        external_refs: list[dict[str, Any]] | None = None,
+        attachment_refs: list[dict[str, Any]] | None = None,
         command_id: str | None = None,
     ) -> dict:
         self._require_token(auth_token)
@@ -1050,6 +1099,8 @@ class AgentTaskService:
                     "body": body or "",
                     "tags": tags or [],
                     "pinned": bool(pinned),
+                    "external_refs": external_refs or [],
+                    "attachment_refs": attachment_refs or [],
                 },
             )
             payload = NoteCreate(
@@ -1062,6 +1113,8 @@ class AgentTaskService:
                 body=body or "",
                 tags=tags or [],
                 pinned=bool(pinned),
+                external_refs=external_refs or [],
+                attachment_refs=attachment_refs or [],
             )
             return NoteApplicationService(db, user, command_id=effective_command_id).create_note(payload)
 
@@ -1273,9 +1326,12 @@ class AgentTaskService:
         auth_token: str | None = None,
         description: str = "",
         custom_statuses: list[str] | None = None,
+        external_refs: list[dict[str, Any]] | None = None,
+        attachment_refs: list[dict[str, Any]] | None = None,
         embedding_enabled: bool = False,
         embedding_model: str | None = None,
         context_pack_evidence_top_k: int | None = None,
+        member_user_ids: list[str] | None = None,
         command_id: str | None = None,
     ) -> dict:
         self._require_token(auth_token)
@@ -1291,9 +1347,12 @@ class AgentTaskService:
                 name=name,
                 description=description,
                 custom_statuses=custom_statuses,
+                external_refs=external_refs or [],
+                attachment_refs=attachment_refs or [],
                 embedding_enabled=bool(embedding_enabled),
                 embedding_model=embedding_model,
                 context_pack_evidence_top_k=context_pack_evidence_top_k,
+                member_user_ids=member_user_ids or [],
             )
             return ProjectApplicationService(db, user, command_id=effective_command_id).create_project(payload)
 
@@ -1342,6 +1401,9 @@ class AgentTaskService:
         workspace_id: str | None = None,
         body: str = "",
         status: str = "Draft",
+        tags: list[str] | None = None,
+        external_refs: list[dict[str, Any]] | None = None,
+        attachment_refs: list[dict[str, Any]] | None = None,
         auth_token: str | None = None,
         command_id: str | None = None,
     ) -> dict:
@@ -1361,6 +1423,9 @@ class AgentTaskService:
                     "title": title,
                     "body": body or "",
                     "status": status,
+                    "tags": tags or [],
+                    "external_refs": external_refs or [],
+                    "attachment_refs": attachment_refs or [],
                 },
             )
             payload = SpecificationCreate(
@@ -1369,6 +1434,9 @@ class AgentTaskService:
                 title=title,
                 body=body or "",
                 status=status,
+                tags=tags or [],
+                external_refs=external_refs or [],
+                attachment_refs=attachment_refs or [],
             )
             return SpecificationApplicationService(
                 db, user, command_id=effective_command_id
