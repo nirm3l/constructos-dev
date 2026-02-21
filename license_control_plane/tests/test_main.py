@@ -309,3 +309,122 @@ def test_client_token_allows_installation_endpoints_and_blocks_admin_endpoints(t
             },
         )
         assert wrong_activate.status_code == 403
+
+
+def test_public_waitlist_join_creates_and_deduplicates_email(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        first = client.post(
+            "/v1/public/waitlist",
+            json={
+                "email": "Engineer@Example.com",
+                "source": "marketing-site",
+                "metadata": {"campaign": "landing"},
+            },
+            headers={"User-Agent": "pytest-waitlist"},
+        )
+        assert first.status_code == 200
+        first_payload = first.json()
+        assert first_payload["ok"] is True
+        assert first_payload["created"] is True
+        assert first_payload["waitlist_entry"]["email"] == "engineer@example.com"
+        assert first_payload["waitlist_entry"]["source"] == "marketing-site"
+
+        second = client.post(
+            "/v1/public/waitlist",
+            json={
+                "email": "engineer@example.com",
+                "source": "marketing-site",
+                "metadata": {"campaign": "landing-repeat"},
+            },
+        )
+        assert second.status_code == 200
+        second_payload = second.json()
+        assert second_payload["ok"] is True
+        assert second_payload["created"] is False
+        assert second_payload["waitlist_entry"]["email"] == "engineer@example.com"
+
+        listed = client.get(
+            "/v1/admin/waitlist?q=engineer@example.com",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert listed.status_code == 200
+        listed_payload = listed.json()
+        assert listed_payload["ok"] is True
+        assert listed_payload["total"] == 1
+        assert listed_payload["items"][0]["email"] == "engineer@example.com"
+
+
+def test_public_waitlist_join_rejects_invalid_email(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        invalid = client.post(
+            "/v1/public/waitlist",
+            json={"email": "not-an-email"},
+        )
+        assert invalid.status_code == 400
+        assert invalid.json()["detail"] == "Invalid email format"
+
+
+def test_public_contact_request_create_list_and_deduplicate(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        first = client.post(
+            "/v1/public/contact-requests",
+            json={
+                "request_type": "onboarding",
+                "email": "ops@example.com",
+                "source": "marketing-site",
+                "metadata": {"team_size": "6"},
+            },
+        )
+        assert first.status_code == 200
+        first_payload = first.json()
+        assert first_payload["ok"] is True
+        assert first_payload["created"] is True
+        assert first_payload["contact_request"]["request_type"] == "onboarding"
+        assert first_payload["contact_request"]["email"] == "ops@example.com"
+
+        second = client.post(
+            "/v1/public/contact-requests",
+            json={
+                "request_type": "onboarding",
+                "email": "ops@example.com",
+                "source": "marketing-site",
+            },
+        )
+        assert second.status_code == 200
+        second_payload = second.json()
+        assert second_payload["ok"] is True
+        assert second_payload["created"] is False
+
+        demo = client.post(
+            "/v1/public/contact-requests",
+            json={
+                "request_type": "demo",
+                "email": "ops@example.com",
+                "source": "marketing-site",
+            },
+        )
+        assert demo.status_code == 200
+        assert demo.json()["created"] is True
+
+        listed = client.get(
+            "/v1/admin/contact-requests?request_type=onboarding",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert listed.status_code == 200
+        listed_payload = listed.json()
+        assert listed_payload["ok"] is True
+        assert listed_payload["total"] == 1
+        assert listed_payload["items"][0]["request_type"] == "onboarding"
+
+
+def test_public_contact_request_rejects_unsupported_request_type(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        invalid = client.post(
+            "/v1/public/contact-requests",
+            json={
+                "request_type": "unknown_type",
+                "email": "ops@example.com",
+            },
+        )
+        assert invalid.status_code == 400
+        assert "Unsupported request_type" in invalid.json()["detail"]

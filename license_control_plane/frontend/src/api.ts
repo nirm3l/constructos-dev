@@ -3,9 +3,11 @@ import type {
   ActivationCodeCreateResponse,
   ClientTokenCreateRequest,
   ClientTokenCreateResponse,
+  ContactRequestsListResponse,
   HealthResponse,
   InstallationResponse,
   InstallationsListResponse,
+  WaitlistListResponse,
   UpdateSubscriptionRequest,
   UpdateSubscriptionResponse,
 } from './types'
@@ -102,4 +104,31 @@ export function createClientToken(
     method: 'POST',
     body: JSON.stringify(payload),
   })
+}
+
+export function listWaitlist(
+  token: string,
+  params: { q?: string; status?: string; source?: string; limit?: number; offset?: number }
+): Promise<WaitlistListResponse> {
+  const search = new URLSearchParams()
+  if (params.q) search.set('q', params.q)
+  if (params.status) search.set('status', params.status)
+  if (params.source) search.set('source', params.source)
+  if (params.limit != null) search.set('limit', String(params.limit))
+  if (params.offset != null) search.set('offset', String(params.offset))
+  return api<WaitlistListResponse>(`/v1/admin/waitlist?${search.toString()}`, token)
+}
+
+export function listContactRequests(
+  token: string,
+  params: { q?: string; request_type?: string; status?: string; source?: string; limit?: number; offset?: number }
+): Promise<ContactRequestsListResponse> {
+  const search = new URLSearchParams()
+  if (params.q) search.set('q', params.q)
+  if (params.request_type) search.set('request_type', params.request_type)
+  if (params.status) search.set('status', params.status)
+  if (params.source) search.set('source', params.source)
+  if (params.limit != null) search.set('limit', String(params.limit))
+  if (params.offset != null) search.set('offset', String(params.offset))
+  return api<ContactRequestsListResponse>(`/v1/admin/contact-requests?${search.toString()}`, token)
 }

@@ -6,7 +6,9 @@ import {
   createClientToken,
   getHealth,
   getInstallation,
+  listContactRequests,
   listInstallations,
+  listWaitlist,
   updateInstallationSubscription
 } from './api'
 import type { ActivationCodeCreateRequest, ClientTokenCreateRequest, InstallationListItem, SubscriptionStatus, UpdateSubscriptionRequest } from './types'
@@ -84,6 +86,13 @@ export function App() {
 
   const [search, setSearch] = React.useState('')
   const [statusFilter, setStatusFilter] = React.useState('')
+  const [waitlistSearch, setWaitlistSearch] = React.useState('')
+  const [waitlistStatusFilter, setWaitlistStatusFilter] = React.useState('')
+  const [waitlistSourceFilter, setWaitlistSourceFilter] = React.useState('')
+  const [contactRequestsSearch, setContactRequestsSearch] = React.useState('')
+  const [contactRequestsTypeFilter, setContactRequestsTypeFilter] = React.useState('')
+  const [contactRequestsStatusFilter, setContactRequestsStatusFilter] = React.useState('')
+  const [contactRequestsSourceFilter, setContactRequestsSourceFilter] = React.useState('')
   const [selectedInstallationId, setSelectedInstallationId] = React.useState<string | null>(null)
   const [form, setForm] = React.useState<FormState | null>(null)
   const [feedback, setFeedback] = React.useState<string>('')
@@ -106,6 +115,33 @@ export function App() {
   const installations = useQuery({
     queryKey: ['installations', token, search, statusFilter],
     queryFn: () => listInstallations(token, { q: search, status: statusFilter, limit: 50, offset: 0 }),
+  })
+
+  const waitlist = useQuery({
+    queryKey: ['waitlist', token, waitlistSearch, waitlistStatusFilter, waitlistSourceFilter],
+    queryFn: () =>
+      listWaitlist(token, {
+        q: waitlistSearch,
+        status: waitlistStatusFilter,
+        source: waitlistSourceFilter,
+        limit: 100,
+        offset: 0,
+      }),
+    enabled: Boolean(token),
+  })
+
+  const contactRequests = useQuery({
+    queryKey: ['contact-requests', token, contactRequestsSearch, contactRequestsTypeFilter, contactRequestsStatusFilter, contactRequestsSourceFilter],
+    queryFn: () =>
+      listContactRequests(token, {
+        q: contactRequestsSearch,
+        request_type: contactRequestsTypeFilter,
+        status: contactRequestsStatusFilter,
+        source: contactRequestsSourceFilter,
+        limit: 100,
+        offset: 0,
+      }),
+    enabled: Boolean(token),
   })
 
   React.useEffect(() => {
@@ -209,6 +245,8 @@ export function App() {
     (item) => item.installation.installation_id === selectedInstallationId
   )
   const installationCount = installations.data?.items.length ?? 0
+  const waitlistCount = waitlist.data?.items.length ?? 0
+  const contactRequestsCount = contactRequests.data?.items.length ?? 0
 
   const saveToken = () => {
     const next = tokenInput.trim()
@@ -236,23 +274,6 @@ export function App() {
           </p>
         </div>
       </header>
-
-      <section className="panel">
-        <h2>Quick Start</h2>
-        <ol className="steps">
-          <li>Enter the admin token and click Save Token.</li>
-          <li>Create a client API token and configure it in customer deployment as <code>LICENSE_SERVER_TOKEN</code>.</li>
-          <li>Create an activation code for the same customer and share that code with the customer.</li>
-          <li>Customer enters activation code in the app. Installation binds to that customer (seat limit enforced).</li>
-          <li>Select an installation and update subscription values in the right-side form.</li>
-          <li>Click Save Subscription, then check entitlement status on the same page.</li>
-        </ol>
-        <p className="muted">
-          Status rules: <code>active/trialing</code> + future <code>valid_until</code> results in active entitlement.
-          <code>grace/past_due</code> + future <code>valid_until</code> results in grace entitlement.
-          If no valid subscription exists, installation uses built-in trial until <code>trial_ends_at</code>, then becomes expired.
-        </p>
-      </section>
 
       <section className="panel">
         <h2>Admin API Token (Optional)</h2>
@@ -426,6 +447,196 @@ export function App() {
           <p className="generated-code">
             New activation code: <code>{createdActivationCode}</code>
           </p>
+        )}
+      </section>
+
+      <section className="panel">
+        <h2>Waitlist</h2>
+        <p className="muted">
+          Emails collected from the marketing-site waitlist form.
+        </p>
+        <div className="row compact">
+          <input
+            value={waitlistSearch}
+            onChange={(event) => setWaitlistSearch(event.target.value)}
+            placeholder="Search by email or source"
+          />
+          <select value={waitlistStatusFilter} onChange={(event) => setWaitlistStatusFilter(event.target.value)}>
+            <option value="">All statuses</option>
+            <option value="pending">pending</option>
+            <option value="contacted">contacted</option>
+            <option value="converted">converted</option>
+          </select>
+          <input
+            value={waitlistSourceFilter}
+            onChange={(event) => setWaitlistSourceFilter(event.target.value)}
+            placeholder="Source (for example marketing-site)"
+          />
+        </div>
+        <div className="row compact">
+          <button
+            type="button"
+            className="button-secondary"
+            onClick={() => {
+              setWaitlistSearch('')
+              setWaitlistStatusFilter('')
+              setWaitlistSourceFilter('')
+            }}
+          >
+            Clear Filters
+          </button>
+          <button
+            type="button"
+            className="button-secondary"
+            onClick={() => void waitlist.refetch()}
+            disabled={!token}
+          >
+            Reload
+          </button>
+        </div>
+        {!token && <p className="muted">Save admin token to load waitlist entries.</p>}
+        {waitlist.isLoading && token && <p className="muted">Loading waitlist entries...</p>}
+        {waitlist.isError && token && (
+          <p className="error">{waitlist.error instanceof Error ? waitlist.error.message : 'Failed to load waitlist entries.'}</p>
+        )}
+        {!waitlist.isLoading && !waitlist.isError && token && waitlistCount === 0 && (
+          <p className="muted">No waitlist entries found for current filters.</p>
+        )}
+        {!waitlist.isLoading && !waitlist.isError && token && waitlistCount > 0 && (
+          <>
+            <p className="muted">
+              Loaded items: {waitlistCount} | Total: {waitlist.data?.total ?? 0}
+            </p>
+            <div className="waitlist-table-wrap">
+              <table className="waitlist-table">
+                <thead>
+                  <tr>
+                    <th>Email</th>
+                    <th>Source</th>
+                    <th>Status</th>
+                    <th>Campaign</th>
+                    <th>Created</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(waitlist.data?.items ?? []).map((entry) => {
+                    const metadata = entry.metadata ?? {}
+                    const campaignRaw = metadata.campaign
+                    const campaign = typeof campaignRaw === 'string' && campaignRaw.trim() ? campaignRaw.trim() : '-'
+                    return (
+                      <tr key={entry.id}>
+                        <td><code>{entry.email}</code></td>
+                        <td>{entry.source || '-'}</td>
+                        <td>{entry.status || '-'}</td>
+                        <td>{campaign}</td>
+                        <td>{formatDateTime(entry.created_at)}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </section>
+
+      <section className="panel">
+        <h2>Contact Requests</h2>
+        <p className="muted">
+          Requests submitted from marketing-site forms (demo, onboarding, plan details).
+        </p>
+        <div className="row compact">
+          <input
+            value={contactRequestsSearch}
+            onChange={(event) => setContactRequestsSearch(event.target.value)}
+            placeholder="Search by email, type, or source"
+          />
+          <select
+            value={contactRequestsTypeFilter}
+            onChange={(event) => setContactRequestsTypeFilter(event.target.value)}
+          >
+            <option value="">All request types</option>
+            <option value="demo">demo</option>
+            <option value="onboarding">onboarding</option>
+            <option value="plan_details">plan_details</option>
+          </select>
+          <select
+            value={contactRequestsStatusFilter}
+            onChange={(event) => setContactRequestsStatusFilter(event.target.value)}
+          >
+            <option value="">All statuses</option>
+            <option value="pending">pending</option>
+            <option value="contacted">contacted</option>
+            <option value="converted">converted</option>
+          </select>
+          <input
+            value={contactRequestsSourceFilter}
+            onChange={(event) => setContactRequestsSourceFilter(event.target.value)}
+            placeholder="Source (for example marketing-site)"
+          />
+        </div>
+        <div className="row compact">
+          <button
+            type="button"
+            className="button-secondary"
+            onClick={() => {
+              setContactRequestsSearch('')
+              setContactRequestsTypeFilter('')
+              setContactRequestsStatusFilter('')
+              setContactRequestsSourceFilter('')
+            }}
+          >
+            Clear Filters
+          </button>
+          <button
+            type="button"
+            className="button-secondary"
+            onClick={() => void contactRequests.refetch()}
+            disabled={!token}
+          >
+            Reload
+          </button>
+        </div>
+        {!token && <p className="muted">Save admin token to load contact requests.</p>}
+        {contactRequests.isLoading && token && <p className="muted">Loading contact requests...</p>}
+        {contactRequests.isError && token && (
+          <p className="error">
+            {contactRequests.error instanceof Error ? contactRequests.error.message : 'Failed to load contact requests.'}
+          </p>
+        )}
+        {!contactRequests.isLoading && !contactRequests.isError && token && contactRequestsCount === 0 && (
+          <p className="muted">No contact requests found for current filters.</p>
+        )}
+        {!contactRequests.isLoading && !contactRequests.isError && token && contactRequestsCount > 0 && (
+          <>
+            <p className="muted">
+              Loaded items: {contactRequestsCount} | Total: {contactRequests.data?.total ?? 0}
+            </p>
+            <div className="waitlist-table-wrap">
+              <table className="waitlist-table">
+                <thead>
+                  <tr>
+                    <th>Email</th>
+                    <th>Request Type</th>
+                    <th>Source</th>
+                    <th>Status</th>
+                    <th>Created</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(contactRequests.data?.items ?? []).map((entry) => (
+                    <tr key={entry.id}>
+                      <td><code>{entry.email}</code></td>
+                      <td>{entry.request_type || '-'}</td>
+                      <td>{entry.source || '-'}</td>
+                      <td>{entry.status || '-'}</td>
+                      <td>{formatDateTime(entry.created_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </section>
 

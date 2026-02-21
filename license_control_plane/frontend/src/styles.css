@@ -94,6 +94,37 @@ h2 {
   background: #f8fafc;
 }
 
+.waitlist-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.waitlist-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 640px;
+}
+
+.waitlist-table th,
+.waitlist-table td {
+  padding: 0.55rem 0.65rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.waitlist-table th {
+  font-size: 0.82rem;
+  color: var(--muted);
+  background: #f8fafc;
+}
+
+.waitlist-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
 input,
 select,
 textarea,

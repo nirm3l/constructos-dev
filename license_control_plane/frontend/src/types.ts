@@ -115,3 +115,40 @@ export type ClientTokenCreateResponse = {
   client_token: string
   client_token_record: ClientTokenRecord
 }
+
+export type WaitlistEntryRecord = {
+  id: number
+  email: string
+  source: string
+  status: string
+  metadata: Record<string, unknown>
+  updated_at: string
+  created_at: string
+}
+
+export type WaitlistListResponse = {
+  ok: boolean
+  items: WaitlistEntryRecord[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export type ContactRequestRecord = {
+  id: number
+  request_type: string
+  email: string
+  source: string
+  status: string
+  metadata: Record<string, unknown>
+  updated_at: string
+  created_at: string
+}
+
+export type ContactRequestsListResponse = {
+  ok: boolean
+  items: ContactRequestRecord[]
+  total: number
+  limit: number
+  offset: number
+}

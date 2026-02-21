@@ -11,6 +11,7 @@ services:
       LCP_SIGNING_PRIVATE_KEY_PEM: "${LCP_SIGNING_PRIVATE_KEY_PEM:-}"
       LCP_SIGNING_KEY_ID: "${LCP_SIGNING_KEY_ID:-default-ed25519}"
       LCP_REQUIRE_SIGNED_TOKENS: "${LCP_REQUIRE_SIGNED_TOKENS:-false}"
+      LCP_CORS_ORIGINS: "${LCP_CORS_ORIGINS:-http://localhost:8082,http://127.0.0.1:8082,https://costructos.dev,https://www.costructos.dev}"
     ports:
       - "8092:8092"
     volumes:

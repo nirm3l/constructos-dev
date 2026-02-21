@@ -5,12 +5,14 @@ import os
 import secrets
 import string
 import hashlib
+import re
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -48,9 +50,19 @@ LCP_SIGNING_PRIVATE_KEY_PEM = os.getenv("LCP_SIGNING_PRIVATE_KEY_PEM", "").strip
 LCP_SIGNING_KEY_ID = os.getenv("LCP_SIGNING_KEY_ID", "default-ed25519").strip() or "default-ed25519"
 LCP_REQUIRE_SIGNED_TOKENS = _env_bool("LCP_REQUIRE_SIGNED_TOKENS", False)
 LCP_DEFAULT_MAX_INSTALLATIONS = max(1, _env_int("LCP_DEFAULT_MAX_INSTALLATIONS", 3))
+LCP_CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "LCP_CORS_ORIGINS",
+        "http://localhost:8082,http://127.0.0.1:8082,https://costructos.dev,https://www.costructos.dev",
+    ).split(",")
+    if origin.strip()
+]
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 INDEX_HTML = STATIC_DIR / "index.html"
+EMAIL_PATTERN = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
+PUBLIC_REQUEST_TYPES = {"demo", "onboarding", "plan_details"}
 
 Base = declarative_base()
 
@@ -115,6 +127,39 @@ class ClientToken(Base):
     )
 
 
+class WaitlistEntry(Base):
+    __tablename__ = "waitlist_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    source: Mapped[str] = mapped_column(String(64), default="marketing-site", index=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class ContactRequest(Base):
+    __tablename__ = "contact_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    request_type: Mapped[str] = mapped_column(String(32), index=True)
+    email: Mapped[str] = mapped_column(String(320), index=True)
+    source: Mapped[str] = mapped_column(String(64), default="marketing-site", index=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 engine = create_engine(
     LCP_DATABASE_URL,
     connect_args={"check_same_thread": False} if LCP_DATABASE_URL.startswith("sqlite") else {},
@@ -165,6 +210,19 @@ class AdminClientTokenCreateRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class WaitlistJoinRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=320)
+    source: str | None = Field(default="marketing-site", max_length=64)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ContactRequestCreateRequest(BaseModel):
+    request_type: str = Field(min_length=3, max_length=32)
+    email: str = Field(min_length=5, max_length=320)
+    source: str | None = Field(default="marketing-site", max_length=64)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 @dataclass(frozen=True)
 class InstallationAuthContext:
     auth_type: str
@@ -192,6 +250,27 @@ def _extract_bearer_secret(authorization: str | None) -> str | None:
 def _secret_hash(value: str | None) -> str:
     normalized = str(value or "").strip()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _normalize_email(value: str | None) -> str:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="email is required")
+    if len(normalized) > 320:
+        raise HTTPException(status_code=400, detail="email is too long")
+    if not EMAIL_PATTERN.fullmatch(normalized):
+        raise HTTPException(status_code=400, detail="Invalid email format")
+    return normalized
+
+
+def _normalize_public_request_type(value: str | None) -> str:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="request_type is required")
+    if normalized not in PUBLIC_REQUEST_TYPES:
+        allowed = ", ".join(sorted(PUBLIC_REQUEST_TYPES))
+        raise HTTPException(status_code=400, detail=f"Unsupported request_type. Allowed values: {allowed}")
+    return normalized
 
 
 def _require_admin_token(authorization: str | None = Header(default=None)) -> None:
@@ -327,6 +406,31 @@ def _serialize_client_token(record: ClientToken) -> dict[str, Any]:
         "customer_ref": record.customer_ref,
         "is_active": bool(record.is_active),
         "token_suffix": record.token_suffix,
+        "metadata": _load_metadata(record.metadata_json),
+        "updated_at": record.updated_at.isoformat(),
+        "created_at": record.created_at.isoformat(),
+    }
+
+
+def _serialize_waitlist_entry(record: WaitlistEntry) -> dict[str, Any]:
+    return {
+        "id": record.id,
+        "email": record.email,
+        "source": record.source,
+        "status": record.status,
+        "metadata": _load_metadata(record.metadata_json),
+        "updated_at": record.updated_at.isoformat(),
+        "created_at": record.created_at.isoformat(),
+    }
+
+
+def _serialize_contact_request(record: ContactRequest) -> dict[str, Any]:
+    return {
+        "id": record.id,
+        "request_type": record.request_type,
+        "email": record.email,
+        "source": record.source,
+        "status": record.status,
         "metadata": _load_metadata(record.metadata_json),
         "updated_at": record.updated_at.isoformat(),
         "created_at": record.created_at.isoformat(),
@@ -481,6 +585,13 @@ def _serialize_installation(installation: Installation) -> dict[str, Any]:
 
 
 app = FastAPI(title="m4tr1x Licensing Control Plane")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=LCP_CORS_ORIGINS if LCP_CORS_ORIGINS else ["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")
@@ -503,6 +614,109 @@ def health() -> dict[str, Any]:
         "timestamp": _now_utc().isoformat(),
         "trial_days": LCP_TRIAL_DAYS,
         "default_max_installations": LCP_DEFAULT_MAX_INSTALLATIONS,
+    }
+
+
+@app.post("/v1/public/waitlist")
+def public_join_waitlist(
+    payload: WaitlistJoinRequest,
+    request: Request,
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    email = _normalize_email(payload.email)
+    source = str(payload.source or "").strip()[:64] or "marketing-site"
+
+    metadata = dict(payload.metadata or {})
+    request_ip = _resolve_request_ip(request)
+    user_agent = str(request.headers.get("user-agent") or "").strip()[:512]
+    if request_ip:
+        metadata["request_ip"] = request_ip
+    if user_agent:
+        metadata["user_agent"] = user_agent
+
+    existing = db.execute(
+        select(WaitlistEntry).where(WaitlistEntry.email == email)
+    ).scalar_one_or_none()
+    if existing is not None:
+        merged_metadata = _load_metadata(existing.metadata_json)
+        merged_metadata.update(metadata)
+        existing.source = source
+        existing.metadata_json = _dump_metadata(merged_metadata)
+        db.commit()
+        db.refresh(existing)
+        return {
+            "ok": True,
+            "created": False,
+            "waitlist_entry": _serialize_waitlist_entry(existing),
+        }
+
+    record = WaitlistEntry(
+        email=email,
+        source=source,
+        status="pending",
+        metadata_json=_dump_metadata(metadata),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {
+        "ok": True,
+        "created": True,
+        "waitlist_entry": _serialize_waitlist_entry(record),
+    }
+
+
+@app.post("/v1/public/contact-requests")
+def public_create_contact_request(
+    payload: ContactRequestCreateRequest,
+    request: Request,
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    request_type = _normalize_public_request_type(payload.request_type)
+    email = _normalize_email(payload.email)
+    source = str(payload.source or "").strip()[:64] or "marketing-site"
+
+    metadata = dict(payload.metadata or {})
+    request_ip = _resolve_request_ip(request)
+    user_agent = str(request.headers.get("user-agent") or "").strip()[:512]
+    if request_ip:
+        metadata["request_ip"] = request_ip
+    if user_agent:
+        metadata["user_agent"] = user_agent
+
+    existing = db.execute(
+        select(ContactRequest).where(
+            ContactRequest.request_type == request_type,
+            ContactRequest.email == email,
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        merged_metadata = _load_metadata(existing.metadata_json)
+        merged_metadata.update(metadata)
+        existing.source = source
+        existing.metadata_json = _dump_metadata(merged_metadata)
+        db.commit()
+        db.refresh(existing)
+        return {
+            "ok": True,
+            "created": False,
+            "contact_request": _serialize_contact_request(existing),
+        }
+
+    record = ContactRequest(
+        request_type=request_type,
+        email=email,
+        source=source,
+        status="pending",
+        metadata_json=_dump_metadata(metadata),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {
+        "ok": True,
+        "created": True,
+        "contact_request": _serialize_contact_request(record),
     }
 
 
@@ -862,6 +1076,112 @@ def admin_deactivate_client_token(
     db.commit()
     db.refresh(record)
     return {"ok": True, "client_token_record": _serialize_client_token(record)}
+
+
+@app.get("/v1/admin/waitlist")
+def admin_list_waitlist(
+    q: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    source: str | None = Query(default=None),
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    _auth: None = Depends(_require_admin_token),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    filters = []
+    query_text = str(q or "").strip().lower()
+    if query_text:
+        like = f"%{query_text}%"
+        filters.append(
+            or_(
+                func.lower(WaitlistEntry.email).like(like),
+                func.lower(func.coalesce(WaitlistEntry.source, "")).like(like),
+            )
+        )
+
+    status_value = str(status or "").strip().lower()
+    if status_value:
+        filters.append(func.lower(WaitlistEntry.status) == status_value)
+
+    source_value = str(source or "").strip().lower()
+    if source_value:
+        filters.append(func.lower(WaitlistEntry.source) == source_value)
+
+    total_stmt = select(func.count()).select_from(WaitlistEntry)
+    rows_stmt = select(WaitlistEntry)
+    if filters:
+        for clause in filters:
+            total_stmt = total_stmt.where(clause)
+            rows_stmt = rows_stmt.where(clause)
+
+    total = int(db.execute(total_stmt).scalar_one())
+    rows = db.execute(
+        rows_stmt.order_by(WaitlistEntry.created_at.desc(), WaitlistEntry.id.desc()).offset(offset).limit(limit)
+    ).scalars().all()
+
+    return {
+        "ok": True,
+        "items": [_serialize_waitlist_entry(row) for row in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.get("/v1/admin/contact-requests")
+def admin_list_contact_requests(
+    q: str | None = Query(default=None),
+    request_type: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    source: str | None = Query(default=None),
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    _auth: None = Depends(_require_admin_token),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    filters = []
+    query_text = str(q or "").strip().lower()
+    if query_text:
+        like = f"%{query_text}%"
+        filters.append(
+            or_(
+                func.lower(ContactRequest.email).like(like),
+                func.lower(func.coalesce(ContactRequest.request_type, "")).like(like),
+                func.lower(func.coalesce(ContactRequest.source, "")).like(like),
+            )
+        )
+
+    request_type_value = str(request_type or "").strip().lower()
+    if request_type_value:
+        filters.append(func.lower(ContactRequest.request_type) == request_type_value)
+
+    status_value = str(status or "").strip().lower()
+    if status_value:
+        filters.append(func.lower(ContactRequest.status) == status_value)
+
+    source_value = str(source or "").strip().lower()
+    if source_value:
+        filters.append(func.lower(ContactRequest.source) == source_value)
+
+    total_stmt = select(func.count()).select_from(ContactRequest)
+    rows_stmt = select(ContactRequest)
+    if filters:
+        for clause in filters:
+            total_stmt = total_stmt.where(clause)
+            rows_stmt = rows_stmt.where(clause)
+
+    total = int(db.execute(total_stmt).scalar_one())
+    rows = db.execute(
+        rows_stmt.order_by(ContactRequest.created_at.desc(), ContactRequest.id.desc()).offset(offset).limit(limit)
+    ).scalars().all()
+
+    return {
+        "ok": True,
+        "items": [_serialize_contact_request(row) for row in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @app.get("/v1/admin/installations")
