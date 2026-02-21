@@ -111,7 +111,7 @@ def test_codex_prompt_includes_soul_md_section():
     assert "File: ProjectRules.md (source: project_rules)" in prompt
     assert "Quality: Do not skip tests." in prompt
     assert "Current User ID: user-1" in prompt
-    assert "pass user_id=Current User ID in tool calls" in prompt
+    assert "set_user_theme(theme='light'|'dark')" in prompt
     assert "File: GraphContext.md (source: knowledge_graph)" in prompt
     assert "Task A IMPLEMENTS Spec B" in prompt
 

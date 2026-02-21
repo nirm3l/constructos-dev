@@ -622,6 +622,19 @@ class AgentTaskService:
         user = self._resolve_actor_user(target_user_id)
         current_theme = str(user.theme or "light").strip().lower()
         next_theme = "light" if current_theme == "dark" else "dark"
+        effective_command_id = (
+            self._fallback_command_id(
+                prefix="mcp-theme-toggle",
+                payload={
+                    "base_command_id": str(command_id or ""),
+                    "user_id": user.id,
+                    "from_theme": current_theme,
+                    "to_theme": next_theme,
+                },
+            )
+            if command_id
+            else f"mcp-theme-toggle-{uuid.uuid4()}"
+        )
         with SessionLocal() as db:
             actor = db.get(User, user.id)
             if not actor:
@@ -630,7 +643,7 @@ class AgentTaskService:
             return UserApplicationService(
                 db,
                 actor,
-                command_id=command_id or f"mcp-theme-toggle-{uuid.uuid4()}",
+                command_id=effective_command_id,
             ).patch_preferences(payload)
 
     def set_my_theme(
@@ -646,6 +659,9 @@ class AgentTaskService:
         if normalized not in {"light", "dark"}:
             raise HTTPException(status_code=422, detail="theme must be one of: light, dark")
         user = self._resolve_actor_user(self._resolve_preference_target_user_id(user_id))
+        # Theme set is naturally idempotent by target value, so we avoid relying on
+        # LLM-provided command_id values that may be unintentionally reused across turns.
+        effective_command_id = f"mcp-theme-set-{uuid.uuid4()}"
         with SessionLocal() as db:
             actor = db.get(User, user.id)
             if not actor:
@@ -654,7 +670,7 @@ class AgentTaskService:
             return UserApplicationService(
                 db,
                 actor,
-                command_id=command_id or f"mcp-theme-set-{uuid.uuid4()}",
+                command_id=effective_command_id,
             ).patch_preferences(payload)
 
     def _load_project_scope(self, *, db, project_id: str):

@@ -73,16 +73,21 @@ async def notifications_stream(
                 if not flush_now:
                     try:
                         await asyncio.wait_for(subscription.get(), timeout=30.0)
+                        signal_received = True
                     except asyncio.TimeoutError:
                         yield "event: ping\ndata: {}\n\n"
                         continue
+                else:
+                    signal_received = False
                 flush_now = False
+                emitted = False
 
                 items = list_notifications_after_cursor_read_model(db, user.id, notification_cursor, limit=50)
                 for n in items:
                     payload = serialize_notification(n)
                     yield f"id: {n.id}\nevent: notification\ndata: {json.dumps(payload)}\n\n"
                     notification_cursor = n.id
+                    emitted = True
 
                 if workspace_id:
                     activity_items = list_workspace_activity_after_id_read_model(
@@ -94,6 +99,12 @@ async def notifications_stream(
                     for item in activity_items:
                         yield f"event: task_event\ndata: {json.dumps(item)}\n\n"
                         activity_cursor = int(item["id"])
+                        emitted = True
+
+                if signal_received and not emitted:
+                    # Forward a lightweight refresh event even when no new rows are
+                    # visible in current notification/activity cursors.
+                    yield "event: task_event\ndata: {}\n\n"
         finally:
             subscription.close()
 

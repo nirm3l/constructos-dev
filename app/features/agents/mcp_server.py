@@ -101,32 +101,22 @@ def create_mcp():
         auth_token = auth_token or default_tool_token
         return service.get_note(note_id=note_id, auth_token=auth_token)
 
-    @mcp.tool(description="Get user preferences (defaults to primary app user if MCP actor is a bot).")
-    def get_my_preferences(
-        auth_token: str | None = None,
-        user_id: str | None = None,
-    ) -> dict[str, Any]:
-        auth_token = auth_token or default_tool_token
-        return service.get_my_preferences(auth_token=auth_token, user_id=user_id)
-
-    @mcp.tool(description="Toggle user theme between light and dark.")
+    @mcp.tool(description="Toggle current app-user theme between light and dark.")
     def toggle_my_theme(
         auth_token: str | None = None,
         command_id: str | None = None,
-        user_id: str | None = None,
     ) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
-        return service.toggle_my_theme(auth_token=auth_token, command_id=command_id, user_id=user_id)
+        return service.toggle_my_theme(auth_token=auth_token, command_id=command_id)
 
-    @mcp.tool(description="Set user theme to light or dark.")
-    def set_my_theme(
+    @mcp.tool(description="Set current app-user theme to light or dark.")
+    def set_user_theme(
         theme: str,
         auth_token: str | None = None,
         command_id: str | None = None,
-        user_id: str | None = None,
     ) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
-        return service.set_my_theme(theme=theme, auth_token=auth_token, command_id=command_id, user_id=user_id)
+        return service.set_my_theme(theme=theme, auth_token=auth_token, command_id=command_id)
 
     @mcp.tool(description="List task groups in a workspace/project.")
     def list_task_groups(

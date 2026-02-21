@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from features.notifications.domain import EVENT_CREATED as NOTIFICATION_EVENT_CREATED
+from features.users.domain import EVENT_PREFERENCES_UPDATED as USER_EVENT_PREFERENCES_UPDATED
 
 from .contracts import ConcurrencyConflictError, EventEnvelope
 from .eventing_notifications import emit_system_notifications as _emit_system_notifications
@@ -120,6 +121,10 @@ def _queue_realtime_signals(db: Session, env: EventEnvelope) -> None:
 
     if env.aggregate_type == "Notification" and env.event_type == NOTIFICATION_EVENT_CREATED:
         user_id = str((env.payload or {}).get("user_id") or "").strip()
+        if user_id:
+            channels.add(f"user:{user_id}")
+    if env.aggregate_type == "User" and env.event_type == USER_EVENT_PREFERENCES_UPDATED:
+        user_id = str(env.aggregate_id or "").strip()
         if user_id:
             channels.add(f"user:{user_id}")
 

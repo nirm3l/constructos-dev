@@ -1545,6 +1545,38 @@ def test_agent_service_rejects_invalid_set_my_theme_value(tmp_path):
         assert 'theme must be one of' in exc.detail
 
 
+def test_agent_service_set_my_theme_does_not_replay_stale_llm_command_id(tmp_path):
+    build_client(tmp_path)
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    shared_command_id = 'test-shared-theme-command-id'
+
+    first = service.set_my_theme(
+        theme='dark',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+        command_id=shared_command_id,
+    )
+    transition = service.set_my_theme(
+        theme='light',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+        command_id='test-transition-theme-command-id',
+    )
+    second = service.set_my_theme(
+        theme='dark',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+        command_id=shared_command_id,
+    )
+    refreshed = service.get_my_preferences(auth_token=svc_module.MCP_AUTH_TOKEN or None)
+
+    assert first['theme'] == 'dark'
+    assert transition['theme'] == 'light'
+    assert second['theme'] == 'dark'
+    assert refreshed['theme'] == 'dark'
+
+
 def test_agent_service_task_note_group_lifecycle_and_filters(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
