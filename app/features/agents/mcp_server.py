@@ -101,6 +101,19 @@ def create_mcp():
         auth_token = auth_token or default_tool_token
         return service.get_note(note_id=note_id, auth_token=auth_token)
 
+    @mcp.tool(description="Get current MCP actor user preferences.")
+    def get_my_preferences(auth_token: str | None = None) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.get_my_preferences(auth_token=auth_token)
+
+    @mcp.tool(description="Toggle current MCP actor theme between light and dark.")
+    def toggle_my_theme(
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.toggle_my_theme(auth_token=auth_token, command_id=command_id)
+
     @mcp.tool(description="List task groups in a workspace/project.")
     def list_task_groups(
         workspace_id: str,

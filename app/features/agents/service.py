@@ -15,6 +15,7 @@ from features.rules.application import ProjectRuleApplicationService
 from features.rules.read_models import ProjectRuleListQuery, list_project_rules_read_model
 from features.specifications.application import SpecificationApplicationService
 from features.specifications.read_models import SpecificationListQuery, list_specifications_read_model
+from features.users.application import UserApplicationService
 from features.tasks.application import TaskApplicationService
 from features.tasks.read_models import TaskListQuery, get_task_automation_status_read_model, list_tasks_read_model
 from features.notes.application import NoteApplicationService
@@ -42,6 +43,7 @@ from shared.core import (
     TaskGroupPatch,
     TaskPatch,
     User,
+    UserPreferencesPatch,
     load_note_command_state,
     load_note_group_command_state,
     load_note_view,
@@ -584,6 +586,32 @@ class AgentTaskService:
             self._assert_workspace_allowed(state.workspace_id)
             self._assert_project_allowed(state.project_id)
             return get_task_automation_status_read_model(db, user, task_id)
+
+    def get_my_preferences(self, *, auth_token: str | None = None) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        return {
+            "id": user.id,
+            "theme": str(user.theme or "light"),
+            "timezone": str(user.timezone or "UTC"),
+            "notifications_enabled": bool(user.notifications_enabled),
+        }
+
+    def toggle_my_theme(self, *, auth_token: str | None = None, command_id: str | None = None) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        current_theme = str(user.theme or "light").strip().lower()
+        next_theme = "light" if current_theme == "dark" else "dark"
+        with SessionLocal() as db:
+            actor = db.get(User, user.id)
+            if not actor:
+                raise HTTPException(status_code=401, detail="User not found")
+            payload = UserPreferencesPatch(theme=next_theme)
+            return UserApplicationService(
+                db,
+                actor,
+                command_id=command_id or f"mcp-theme-toggle-{uuid.uuid4()}",
+            ).patch_preferences(payload)
 
     def _load_project_scope(self, *, db, project_id: str):
         project = db.execute(select(Project).where(Project.id == project_id, Project.is_deleted == False)).scalar_one_or_none()

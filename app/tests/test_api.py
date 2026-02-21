@@ -1444,6 +1444,32 @@ def test_agent_service_create_note_is_idempotent_without_explicit_command_id(tmp
     assert len([item for item in listed['items'] if item['title'] == 'Idempotent MCP note']) == 1
 
 
+def test_agent_service_can_toggle_my_theme(tmp_path):
+    build_client(tmp_path)
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    before = service.get_my_preferences(auth_token=svc_module.MCP_AUTH_TOKEN or None)
+    first_toggle = service.toggle_my_theme(
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+        command_id='test-mcp-theme-toggle-1',
+    )
+    second_toggle = service.toggle_my_theme(
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+        command_id='test-mcp-theme-toggle-2',
+    )
+
+    assert before['theme'] in {'light', 'dark'}
+    assert first_toggle['theme'] in {'light', 'dark'}
+    assert first_toggle['theme'] != before['theme']
+    assert second_toggle['theme'] == before['theme']
+
+    refreshed = service.get_my_preferences(auth_token=svc_module.MCP_AUTH_TOKEN or None)
+    assert refreshed['theme'] == before['theme']
+
+
 def test_agent_service_task_note_group_lifecycle_and_filters(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
