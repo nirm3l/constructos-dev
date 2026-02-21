@@ -57,7 +57,10 @@ graph LR
 ```bash
 ./scripts/deploy.sh
 ```
-`deploy.sh` supports `DEPLOY_TARGET=auto|base|ubuntu-gpu|macos-m4` (default: `auto`).
+`deploy.sh` supports:
+- `DEPLOY_TARGET=auto|base|ubuntu-gpu|macos-m4` (default: `auto`)
+- `DEPLOY_SOURCE=local|ghcr` (default: `local`)
+- `DEPLOY_LICENSE_CONTROL_PLANE=true|false` (default: `false`)
 
 Examples:
 ```bash
@@ -66,6 +69,12 @@ DEPLOY_TARGET=ubuntu-gpu ./scripts/deploy.sh
 
 # macOS M4 with host-native Ollama (run `ollama serve` on host first)
 DEPLOY_TARGET=macos-m4 ./scripts/deploy.sh
+
+# pull private images from GHCR (no local build on client host)
+DEPLOY_SOURCE=ghcr IMAGE_TAG=v0.1.227 ./scripts/deploy.sh
+
+# include bundled local licensing control-plane service
+DEPLOY_LICENSE_CONTROL_PLANE=true ./scripts/deploy.sh
 ```
 2. Check health:
 ```bash
@@ -120,4 +129,5 @@ docker compose run --rm --build task-app pytest
 - `app/features/*` - vertical slices (tasks, projects, specs, notes, rules, agents...).
 - `app/shared/*` - eventing, projections, models, settings, bootstrap, graph.
 - `app/frontend/*` - SPA and UI state management.
+- `license_control_plane/*` - standalone licensing control-plane service (register/heartbeat/admin subscription update).
 - `scripts/*` - deploy, reset, and helper scripts.

@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 DEPLOY_TARGET="${DEPLOY_TARGET:-auto}"
+DEPLOY_LICENSE_CONTROL_PLANE="${DEPLOY_LICENSE_CONTROL_PLANE:-false}"
 
 resolve_deploy_target() {
   if [[ "$DEPLOY_TARGET" != "auto" ]]; then
@@ -48,6 +49,10 @@ case "$TARGET_RESOLVED" in
     exit 1
     ;;
 esac
+
+if [[ "${DEPLOY_LICENSE_CONTROL_PLANE,,}" == "true" || "${DEPLOY_LICENSE_CONTROL_PLANE}" == "1" ]]; then
+  COMPOSE_ARGS+=(-f docker-compose.license-control-plane.yml)
+fi
 
 echo "[1/5] Stopping Docker Compose stack and removing volumes..."
 docker compose "${COMPOSE_ARGS[@]}" down -v --remove-orphans || true

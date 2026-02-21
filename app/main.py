@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from features.bootstrap.api import router as bootstrap_router
 from features.debug.api import router as debug_router
 from features.licensing.api import router as licensing_router
+from features.licensing.sync import start_license_sync_worker, stop_license_sync_worker
 from features.notifications.api import router as notifications_router
 from features.project_templates.api import router as project_templates_router
 from features.projects.api import router as projects_router
@@ -48,6 +49,7 @@ async def lifespan(_app: FastAPI):
     start_projection_worker()
     start_graph_projection_worker()
     start_vector_projection_worker()
+    start_license_sync_worker()
     start_system_notifications_worker()
     if AGENT_RUNNER_ENABLED:
         start_automation_runner()
@@ -55,6 +57,7 @@ async def lifespan(_app: FastAPI):
     if AGENT_RUNNER_ENABLED:
         stop_automation_runner()
     stop_system_notifications_worker()
+    stop_license_sync_worker()
     stop_vector_projection_worker()
     stop_graph_projection_worker()
     stop_projection_worker()

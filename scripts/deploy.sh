@@ -4,11 +4,16 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-APP_VERSION="$(python3 scripts/bump_version.py)"
 DEPLOYED_AT_UTC="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo "nogit")"
-APP_BUILD="$(date -u +"%Y%m%d%H%M%S")-${GIT_SHA}"
 DEPLOY_TARGET="${DEPLOY_TARGET:-auto}"
+DEPLOY_SOURCE="${DEPLOY_SOURCE:-local}"
+DEPLOY_LICENSE_CONTROL_PLANE="${DEPLOY_LICENSE_CONTROL_PLANE:-false}"
+GHCR_OWNER="${GHCR_OWNER:-nirm3l}"
+GHCR_REPO="${GHCR_REPO:-m4tr1x}"
+IMAGE_TAG="${IMAGE_TAG:-}"
+TASK_APP_IMAGE="${TASK_APP_IMAGE:-}"
+MCP_TOOLS_IMAGE="${MCP_TOOLS_IMAGE:-}"
 
 resolve_deploy_target() {
   if [[ "$DEPLOY_TARGET" != "auto" ]]; then
@@ -54,13 +59,59 @@ case "$TARGET_RESOLVED" in
     ;;
 esac
 
+if [[ "${DEPLOY_LICENSE_CONTROL_PLANE,,}" == "true" || "${DEPLOY_LICENSE_CONTROL_PLANE}" == "1" ]]; then
+  COMPOSE_ARGS+=(-f docker-compose.license-control-plane.yml)
+fi
+
+case "$DEPLOY_SOURCE" in
+  local)
+    APP_VERSION="$(python3 scripts/bump_version.py)"
+    APP_BUILD="$(date -u +"%Y%m%d%H%M%S")-${GIT_SHA}"
+    TASK_APP_IMAGE="${TASK_APP_IMAGE:-task-management-task-app:local}"
+    MCP_TOOLS_IMAGE="${MCP_TOOLS_IMAGE:-task-management-mcp-tools:local}"
+    ;;
+  ghcr)
+    if [[ -z "$IMAGE_TAG" ]]; then
+      echo "IMAGE_TAG is required when DEPLOY_SOURCE=ghcr"
+      echo "Example: DEPLOY_SOURCE=ghcr IMAGE_TAG=v0.1.227 ./scripts/deploy.sh"
+      exit 1
+    fi
+    APP_VERSION="$IMAGE_TAG"
+    APP_BUILD="ghcr-${IMAGE_TAG}-${GIT_SHA}"
+    TASK_APP_IMAGE="${TASK_APP_IMAGE:-ghcr.io/${GHCR_OWNER}/${GHCR_REPO}-task-app:${IMAGE_TAG}}"
+    MCP_TOOLS_IMAGE="${MCP_TOOLS_IMAGE:-ghcr.io/${GHCR_OWNER}/${GHCR_REPO}-mcp-tools:${IMAGE_TAG}}"
+    ;;
+  *)
+    echo "Unsupported DEPLOY_SOURCE: $DEPLOY_SOURCE"
+    echo "Supported values: local, ghcr"
+    exit 1
+    ;;
+esac
+
 cat > .deploy.env <<EOF
 APP_VERSION=${APP_VERSION}
 APP_BUILD=${APP_BUILD}
 APP_DEPLOYED_AT_UTC=${DEPLOYED_AT_UTC}
+TASK_APP_IMAGE=${TASK_APP_IMAGE}
+MCP_TOOLS_IMAGE=${MCP_TOOLS_IMAGE}
 EOF
 
 echo "Deploying version ${APP_VERSION} (${APP_BUILD}) at ${DEPLOYED_AT_UTC}"
 echo "Resolved deploy target: ${TARGET_RESOLVED}"
+echo "Deploy source: ${DEPLOY_SOURCE}"
+echo "task-app image: ${TASK_APP_IMAGE}"
+echo "mcp-tools image: ${MCP_TOOLS_IMAGE}"
 echo "Compose files: ${COMPOSE_ARGS[*]}"
-docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d --build
+
+if [[ "$DEPLOY_SOURCE" == "ghcr" ]]; then
+  echo "Pulling GHCR images..."
+  docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env pull task-app mcp-tools
+  if [[ "${DEPLOY_LICENSE_CONTROL_PLANE,,}" == "true" || "${DEPLOY_LICENSE_CONTROL_PLANE}" == "1" ]]; then
+    docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d --no-build task-app mcp-tools
+    docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d license-control-plane
+  else
+    docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d --no-build
+  fi
+else
+  docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d --build
+fi

@@ -8,15 +8,19 @@ The default Docker Compose stack includes:
 - `kurrentdb`
 - `neo4j`
 
+Optional override:
+- `license-control-plane` (local licensing server, enabled via `docker-compose.license-control-plane.yml`)
+
 ## 2. Standard Operating Flow
 ### 2.1 Deploy
 ```bash
 ./scripts/deploy.sh
 ```
 Effects:
-- bumps patch version (`VERSION` + frontend package version),
+- bumps patch version (`VERSION` + frontend package version) for `DEPLOY_SOURCE=local`,
 - generates `.deploy.env` (`APP_VERSION`, `APP_BUILD`, `APP_DEPLOYED_AT_UTC`),
 - resolves `DEPLOY_TARGET` (`auto|base|ubuntu-gpu|macos-m4`),
+- resolves `DEPLOY_SOURCE` (`local|ghcr`),
 - runs `docker compose ... up -d --build` with target-specific override files.
 
 ### 2.2 Deploy Targets
@@ -42,6 +46,26 @@ Does:
 - Output image: `ghcr.io/<owner>/<repo>-task-app:<tag>`.
 - Output image: `ghcr.io/<owner>/<repo>-mcp-tools:<tag>`.
 - Platforms: `linux/amd64` and `linux/arm64`.
+
+### 2.5 Pull-Based Deployment From GHCR
+Use this when clients should only pull private images and not build from source.
+```bash
+DEPLOY_SOURCE=ghcr IMAGE_TAG=v0.1.227 ./scripts/deploy.sh
+```
+Required env for private pulls:
+- `GHCR_OWNER` (default: `nirm3l`)
+- `GHCR_REPO` (default: `m4tr1x`)
+- `IMAGE_TAG` (required when `DEPLOY_SOURCE=ghcr`)
+
+### 2.6 Local Licensing Control Plane (Optional Override)
+Enable bundled control-plane service:
+```bash
+DEPLOY_LICENSE_CONTROL_PLANE=true ./scripts/deploy.sh
+```
+Override file:
+- `docker-compose.license-control-plane.yml`
+Default local URL used by app services in this mode:
+- `http://license-control-plane:8092`
 
 ## 3. Critical Environment Variables
 
@@ -92,6 +116,7 @@ Does:
 - `LICENSE_ENFORCEMENT_ENABLED`
 - `LICENSE_INSTALLATION_ID`
 - `LICENSE_SERVER_URL`
+- `LICENSE_SERVER_TOKEN`
 - `LICENSE_PUBLIC_KEY`
 - `LICENSE_HEARTBEAT_SECONDS`
 - `LICENSE_GRACE_HOURS`

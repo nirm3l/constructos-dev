@@ -9,9 +9,9 @@ This plan defines the changes needed to:
 
 ## Implementation Status (Current Snapshot)
 - Phase 1 completed: base + Ubuntu GPU + macOS M4 compose split is implemented.
-- Phase 2 completed (baseline): GHCR release workflow for tagged multi-arch image publishing exists.
+- Phase 2 completed: GHCR release workflow exists and deploy scripts support GHCR pull-only deployment mode for clients.
 - Phase 3 completed (baseline): runtime image now runs as non-root and compose drops capabilities with `no-new-privileges`.
-- Phase 4 in progress: license models, bootstrap seed, status API, health summary, and write-lock middleware are implemented.
+- Phase 4 in progress: license models, bootstrap seed, status API, health summary, write-lock middleware, and control-plane sync worker are implemented.
 - Phase 6 in progress: frontend now fetches `/api/license/status` and shows trial/grace/expired notice states.
 
 ## Constraints and Facts
@@ -121,20 +121,17 @@ Enforce entitlement with central validation and graceful but strict degradation.
 
 ## Phase 5: Billing (Simple and Standard)
 ### Recommendation
-Use Stripe Billing as primary path.
+Use Monri recurring billing as primary path for Bosnia and Herzegovina availability.
 
-### Minimal Stripe Setup
+### Minimal Monri Setup
 - One product: `m4tr1x Self-Hosted`.
 - One recurring monthly price.
-- 7-day trial configured on subscription.
-- Stripe Checkout for subscription start.
-- Stripe Customer Portal for self-service card updates/cancel/reactivate.
-- Webhook event `checkout.session.completed` updates installation-to-customer mapping.
-- Webhook event `customer.subscription.created` activates entitlement.
-- Webhook event `customer.subscription.updated` refreshes entitlement status.
-- Webhook event `customer.subscription.deleted` deactivates entitlement after grace.
-- Webhook event `invoice.paid` clears payment-failed state.
-- Webhook event `invoice.payment_failed` starts dunning/grace logic.
+- 7-day trial configured in entitlement policy at control-plane level.
+- Hosted payment page for subscription start.
+- Merchant self-service flow for card updates/cancel/reactivate.
+- Payment success callback updates installation-to-customer mapping.
+- Subscription lifecycle callbacks refresh entitlement status.
+- Failed recurring charge callback starts dunning/grace logic.
 
 ### Entitlement Mapping
 - Active/trialing subscription => active entitlement.
@@ -163,7 +160,7 @@ GHCR private image publishing workflow with multi-arch outputs.
 License control-plane service + app-side enforcement in read-only mode first.
 
 ### Step 4
-Stripe integration and webhook-driven entitlement.
+Monri integration and callback-driven entitlement.
 
 ### Step 5
 Enable strict write-lock after grace period and complete operational runbook.
@@ -172,6 +169,7 @@ Enable strict write-lock after grace period and complete operational runbook.
 - `docker-compose.yml`
 - `docker-compose.ubuntu-gpu.yml` (new)
 - `docker-compose.macos-m4.yml` (new)
+- `docker-compose.license-control-plane.yml` (new)
 - `app/Dockerfile`
 - `.github/workflows/release-images.yml` (new)
 - `app/shared/settings.py`
@@ -180,6 +178,7 @@ Enable strict write-lock after grace period and complete operational runbook.
 - `app/shared/deps.py`
 - `app/main.py` (router include)
 - `app/features/licensing/*` (new)
+- `license_control_plane/*` (new)
 - `app/frontend/src/*` (license status UI)
 - `docs/05-operations-runbook.md` (deployment/licensing ops update)
 
@@ -205,7 +204,7 @@ Enable strict write-lock after grace period and complete operational runbook.
 2. GHCR private image pipeline.
 3. Dockerfile hardening.
 4. Licensing backend slice.
-5. Stripe billing integration.
+5. Monri billing integration.
 6. UI status and operator runbook.
 
 ## References (verified 2026-02-21)
@@ -216,6 +215,4 @@ Enable strict write-lock after grace period and complete operational runbook.
 - Ollama macOS install (Apple M series): https://docs.ollama.com/installation/mac
 - GitHub Container Registry docs: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry
 - GitHub Actions publishing Docker images: https://docs.github.com/en/actions/use-cases-and-examples/publishing-packages/publishing-docker-images
-- Stripe subscription trials: https://docs.stripe.com/billing/subscriptions/trials
-- Stripe Customer Portal: https://docs.stripe.com/customer-management
-- Stripe Billing webhooks: https://docs.stripe.com/billing/subscriptions/webhooks
+- Monri developers portal: https://ipg.monri.com/en/documentation

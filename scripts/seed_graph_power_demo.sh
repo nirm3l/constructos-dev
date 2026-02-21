@@ -434,7 +434,7 @@ TASK_PAY_IDEMPOTENCY="$(create_task "${LEAD_USER_ID}" "${SPEC_PAY_ID}" \
   "Design payment intent idempotency contract" \
   "Define idempotency key scope, dedupe storage horizon and failure semantics for retry storms." \
   "High" "${LEAD_USER_ID}" '["payments","idempotency","api","risk"]' "" \
-  '[{"url":"https://docs.stripe.com/idempotency","title":"Stripe idempotency guide","source":"external"}]' | jq -r '.id')"
+  '[{"url":"https://ipg.monri.com/en/documentation","title":"Monri API documentation","source":"external"}]' | jq -r '.id')"
 TASK_PAY_OUTBOX="$(create_task "${BOT_USER_ID}" "${SPEC_PAY_ID}" \
   "Implement outbox for payment capture events" \
   "Guarantee capture event delivery with exactly-once projection semantics into fulfillment read model." \
