@@ -17,6 +17,7 @@ from shared.core import (
 )
 from shared.observability import incr
 from shared.realtime import realtime_hub
+from features.licensing.read_models import license_status_read_model
 
 from .application import NotificationApplicationService
 from .read_models import (
@@ -34,6 +35,20 @@ def _load_user_state_cursor(db: Session, user_id: str) -> str:
     if updated_at is None:
         return ""
     return updated_at.isoformat()
+
+
+def _load_license_state_cursor(db: Session) -> str:
+    payload = license_status_read_model(db)
+    stable = {
+        "installation_id": payload.get("installation_id"),
+        "status": payload.get("status"),
+        "plan_code": payload.get("plan_code"),
+        "write_access": bool(payload.get("write_access")),
+        "trial_ends_at": payload.get("trial_ends_at"),
+        "grace_ends_at": payload.get("grace_ends_at"),
+        "last_validated_at": payload.get("last_validated_at"),
+    }
+    return json.dumps(stable, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
 async def _wait_for_signal(subscription, timeout_seconds: float) -> None:
@@ -79,6 +94,7 @@ async def notifications_stream(
         notification_cursor = last_id or ""
         activity_cursor = max(last_activity_id, 0)
         user_state_cursor = _load_user_state_cursor(db, user.id)
+        license_state_cursor = _load_license_state_cursor(db)
         if workspace_id and activity_cursor == 0:
             # Tail mode by default: only stream new activity generated after this connection starts.
             activity_cursor = latest_workspace_activity_id_read_model(db, workspace_id)
@@ -128,6 +144,12 @@ async def notifications_stream(
                 if refreshed_user_state_cursor != user_state_cursor:
                     user_state_cursor = refreshed_user_state_cursor
                     yield "event: task_event\ndata: {}\n\n"
+                    emitted = True
+
+                refreshed_license_state_cursor = _load_license_state_cursor(db)
+                if refreshed_license_state_cursor != license_state_cursor:
+                    license_state_cursor = refreshed_license_state_cursor
+                    yield "event: license_event\ndata: {}\n\n"
                     emitted = True
 
                 if not emitted:

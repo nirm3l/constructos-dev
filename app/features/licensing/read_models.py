@@ -12,7 +12,6 @@ from shared.licensing import resolve_license_installation_id
 from shared.settings import (
     LICENSE_ENFORCEMENT_ENABLED,
     LICENSE_GRACE_HOURS,
-    LICENSE_SERVER_URL,
 )
 
 from .domain import (
@@ -70,7 +69,6 @@ def license_status_read_model(db: Session) -> dict[str, Any]:
             "grace_ends_at": None,
             "last_validated_at": None,
             "token_expires_at": None,
-            "license_server_url": LICENSE_SERVER_URL or None,
             "metadata": {},
         }
 
@@ -112,7 +110,6 @@ def license_status_read_model(db: Session) -> dict[str, Any]:
         "grace_ends_at": grace_ends_at.isoformat() if grace_ends_at else None,
         "last_validated_at": _ensure_aware(installation.last_validated_at).isoformat() if installation.last_validated_at else None,
         "token_expires_at": _ensure_aware(installation.token_expires_at).isoformat() if installation.token_expires_at else None,
-        "license_server_url": LICENSE_SERVER_URL or None,
         "metadata": _coerce_metadata(installation.metadata_json),
     }
 

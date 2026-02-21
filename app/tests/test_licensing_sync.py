@@ -41,7 +41,6 @@ def test_sync_license_once_updates_local_entitlement(tmp_path: Path, monkeypatch
     os.environ["EVENTSTORE_URI"] = ""
     os.environ["LICENSE_ENFORCEMENT_ENABLED"] = "true"
     os.environ["LICENSE_INSTALLATION_ID"] = "sync-test-installation"
-    os.environ["LICENSE_SERVER_URL"] = "http://license-control-plane:8092"
     os.environ["LICENSE_SERVER_TOKEN"] = "dev-license-token"
     os.environ["LICENSE_TRIAL_DAYS"] = "7"
     os.environ.pop("LICENSE_PUBLIC_KEY", None)
@@ -144,7 +143,6 @@ def test_sync_license_once_accepts_valid_signed_token(tmp_path: Path, monkeypatc
     os.environ["EVENTSTORE_URI"] = ""
     os.environ["LICENSE_ENFORCEMENT_ENABLED"] = "true"
     os.environ["LICENSE_INSTALLATION_ID"] = "signed-installation"
-    os.environ["LICENSE_SERVER_URL"] = "http://license-control-plane:8092"
     os.environ["LICENSE_SERVER_TOKEN"] = "dev-license-token"
     os.environ["LICENSE_TRIAL_DAYS"] = "7"
 
@@ -231,7 +229,6 @@ def test_sync_license_once_rejects_invalid_signed_token(tmp_path: Path, monkeypa
     os.environ["EVENTSTORE_URI"] = ""
     os.environ["LICENSE_ENFORCEMENT_ENABLED"] = "true"
     os.environ["LICENSE_INSTALLATION_ID"] = "invalid-signature-installation"
-    os.environ["LICENSE_SERVER_URL"] = "http://license-control-plane:8092"
     os.environ["LICENSE_SERVER_TOKEN"] = "dev-license-token"
     os.environ["LICENSE_TRIAL_DAYS"] = "7"
 

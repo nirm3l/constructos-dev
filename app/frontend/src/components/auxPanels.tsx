@@ -1,5 +1,5 @@
 import React from 'react'
-import type { AdminWorkspaceUser, Note, Specification, Task } from '../types'
+import type { AdminWorkspaceUser, LicenseStatus, Note, Specification, Task } from '../types'
 import { tagHue } from '../utils/ui'
 import { PopularTagFilters } from './shared/PopularTagFilters'
 import { Icon } from './shared/uiHelpers'
@@ -102,6 +102,9 @@ export function ProfilePanel({
   backendVersion,
   backendBuild,
   deployedAtUtc,
+  license,
+  licenseLoading,
+  licenseError,
   onLogout,
   onToggleTheme,
   onChangeSpeechLang,
@@ -113,11 +116,22 @@ export function ProfilePanel({
   backendVersion: string
   backendBuild: string | null
   deployedAtUtc: string | null
+  license: LicenseStatus | null | undefined
+  licenseLoading: boolean
+  licenseError: string | null
   onLogout: () => void
   onToggleTheme: () => void
   onChangeSpeechLang: (value: string) => void
 }) {
   const nextTheme = theme === 'light' ? 'dark' : 'light'
+  const licenseStatus = String(license?.status || '').trim().toLowerCase() || 'unknown'
+  const licenseStatusLabel = licenseStatus.charAt(0).toUpperCase() + licenseStatus.slice(1)
+  const formatDateTime = (value: string | null): string => {
+    if (!value) return 'n/a'
+    const parsed = new Date(value)
+    if (Number.isNaN(parsed.getTime())) return value
+    return parsed.toLocaleString()
+  }
 
   return (
     <section className="card profile-panel">
@@ -178,6 +192,57 @@ export function ProfilePanel({
           Logout
         </button>
       </div>
+
+      <section className="profile-license" aria-label="License details">
+        <div className="profile-license-head">
+          <h3>License</h3>
+          <span className="status-chip">{licenseStatusLabel}</span>
+        </div>
+        {licenseLoading ? (
+          <p className="meta">Loading license status...</p>
+        ) : licenseError ? (
+          <div className="notice notice-error">{licenseError}</div>
+        ) : !license ? (
+          <p className="meta">License status is unavailable.</p>
+        ) : (
+          <dl className="profile-facts profile-license-facts">
+            <div className="profile-fact">
+              <dt>Installation ID</dt>
+              <dd>
+                <code>{license.installation_id || 'n/a'}</code>
+              </dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Plan</dt>
+              <dd>{license.plan_code || 'n/a'}</dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Write access</dt>
+              <dd>{license.write_access ? 'Allowed' : 'Read-only'}</dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Enforcement</dt>
+              <dd>{license.enforcement_enabled ? 'Enabled' : 'Disabled'}</dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Trial ends</dt>
+              <dd>{formatDateTime(license.trial_ends_at)}</dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Grace ends</dt>
+              <dd>{formatDateTime(license.grace_ends_at)}</dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Last validated</dt>
+              <dd>{formatDateTime(license.last_validated_at)}</dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Token expires</dt>
+              <dd>{formatDateTime(license.token_expires_at)}</dd>
+            </div>
+          </dl>
+        )}
+      </section>
     </section>
   )
 }

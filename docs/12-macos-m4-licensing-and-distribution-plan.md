@@ -98,7 +98,7 @@ Enforce entitlement with central validation and graceful but strict degradation.
 - Add license data model `LicenseEntitlement` in `app/shared/models.py`.
 - Add license data model `LicenseValidationLog` in `app/shared/models.py`.
 - Add bootstrap schema guards in `app/shared/bootstrap.py`.
-- Add config `LICENSE_SERVER_URL` in `app/shared/settings.py`.
+- Use a fixed internal license server endpoint in `app/shared/settings.py` (not customer-configurable at runtime).
 - Add config `LICENSE_PUBLIC_KEY` in `app/shared/settings.py`.
 - Add config `LICENSE_HEARTBEAT_SECONDS` in `app/shared/settings.py`.
 - Add config `LICENSE_GRACE_HOURS` in `app/shared/settings.py`.

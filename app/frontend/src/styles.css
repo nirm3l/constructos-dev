@@ -2403,6 +2403,29 @@ button:disabled {
   justify-content: flex-end;
 }
 
+.profile-license {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--line), var(--brand) 14%);
+  padding-top: 12px;
+}
+
+.profile-license-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.profile-license-head h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.profile-license-facts .profile-fact dd code {
+  font-size: 12px;
+}
+
 [data-theme="dark"] .profile-avatar {
   border-color: color-mix(in srgb, var(--brand), var(--line) 22%);
   background: linear-gradient(

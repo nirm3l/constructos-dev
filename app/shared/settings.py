@@ -155,7 +155,9 @@ OLLAMA_EMBED_GPU_ENABLED = _env_bool("OLLAMA_EMBED_GPU_ENABLED", True)
 # License enforcement is intentionally always enabled in runtime.
 LICENSE_ENFORCEMENT_ENABLED = True
 LICENSE_INSTALLATION_ID = os.getenv("LICENSE_INSTALLATION_ID", "").strip()
-LICENSE_SERVER_URL = os.getenv("LICENSE_SERVER_URL", "").strip()
+# License server endpoint is intentionally fixed in runtime and not configurable
+# via customer-side environment variables.
+LICENSE_SERVER_URL = "http://license-control-plane:8092"
 LICENSE_SERVER_TOKEN = os.getenv("LICENSE_SERVER_TOKEN", "").strip()
 LICENSE_PUBLIC_KEY = os.getenv("LICENSE_PUBLIC_KEY", "").strip()
 LICENSE_HEARTBEAT_SECONDS = _env_int("LICENSE_HEARTBEAT_SECONDS", 900)

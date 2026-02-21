@@ -274,7 +274,6 @@ function App({ logout }: { logout: () => void }) {
     queryFn: () => getLicenseStatus(userId),
     enabled: Boolean(bootstrap.data),
     retry: 1,
-    refetchInterval: 60_000,
   })
   const activateLicenseMutation = useMutation({
     mutationFn: (activationCode: string) =>

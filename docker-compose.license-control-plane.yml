@@ -19,12 +19,10 @@ services:
 
   task-app:
     environment:
-      LICENSE_SERVER_URL: "${LICENSE_SERVER_URL:-http://license-control-plane:8092}"
       LICENSE_SERVER_TOKEN: "${LICENSE_SERVER_TOKEN:-dev-license-token}"
 
   mcp-tools:
     environment:
-      LICENSE_SERVER_URL: "${LICENSE_SERVER_URL:-http://license-control-plane:8092}"
       LICENSE_SERVER_TOKEN: "${LICENSE_SERVER_TOKEN:-dev-license-token}"
 
 volumes:

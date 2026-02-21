@@ -104,7 +104,6 @@ services:
       DEFAULT_EMBEDDING_MODEL: "${DEFAULT_EMBEDDING_MODEL:-nomic-embed-text}"
       ALLOWED_EMBEDDING_MODELS: "${ALLOWED_EMBEDDING_MODELS:-nomic-embed-text,mxbai-embed-large,embeddinggemma}"
       OLLAMA_EMBED_GPU_ENABLED: "${OLLAMA_EMBED_GPU_ENABLED:-true}"
-      LICENSE_SERVER_URL: "${LICENSE_SERVER_URL:-}"
       LICENSE_SERVER_TOKEN: "${LICENSE_SERVER_TOKEN:-}"
     volumes:
       - ./codex.task-app.toml:/home/app/.codex/config.toml:ro
@@ -173,7 +172,6 @@ services:
       DEFAULT_EMBEDDING_MODEL: "${DEFAULT_EMBEDDING_MODEL:-nomic-embed-text}"
       ALLOWED_EMBEDDING_MODELS: "${ALLOWED_EMBEDDING_MODELS:-nomic-embed-text,mxbai-embed-large,embeddinggemma}"
       OLLAMA_EMBED_GPU_ENABLED: "${OLLAMA_EMBED_GPU_ENABLED:-true}"
-      LICENSE_SERVER_URL: "${LICENSE_SERVER_URL:-}"
       LICENSE_SERVER_TOKEN: "${LICENSE_SERVER_TOKEN:-}"
     ports:
       - "8091:8090"

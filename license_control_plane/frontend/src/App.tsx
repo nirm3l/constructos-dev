@@ -513,6 +513,9 @@ export function App() {
               <p className="muted">
                 Trial ends at: {formatDateTime(details.data?.installation.trial_ends_at ?? selectedFromList?.installation.trial_ends_at ?? null)}
               </p>
+              <p className="muted">
+                Activation IP: <code>{String(details.data?.installation.activation_ip ?? selectedFromList?.installation.activation_ip ?? '-')}</code>
+              </p>
 
               {form && (
                 <form

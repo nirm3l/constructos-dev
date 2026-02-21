@@ -274,7 +274,6 @@ export type LicenseStatus = {
   grace_ends_at: string | null
   last_validated_at: string | null
   token_expires_at: string | null
-  license_server_url: string | null
   metadata: Record<string, unknown>
 }
 

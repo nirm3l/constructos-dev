@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from shared.licensing import resolve_license_installation_id
 from shared.models import LicenseEntitlement, LicenseInstallation, LicenseValidationLog, SessionLocal
+from shared.realtime import realtime_hub
 from shared.settings import (
     APP_VERSION,
     LICENSE_HEARTBEAT_SECONDS,
@@ -196,12 +197,21 @@ def _apply_entitlement_payload(db, installation: LicenseInstallation, payload: d
         result=status,
         reason="control_plane_sync_ok",
         details={
-            "server": LICENSE_SERVER_URL,
             "status": status,
             "plan_code": plan_code,
             "token_expires_at": _to_iso(token_expires_at),
         },
     )
+
+
+def _publish_license_realtime_signal(installation: LicenseInstallation) -> None:
+    workspace_id = str(installation.workspace_id or "").strip()
+    if not workspace_id:
+        return
+    try:
+        realtime_hub.publish(f"workspace:{workspace_id}", reason="license-sync")
+    except Exception as exc:
+        logger.warning("Unable to publish license realtime signal: %s", exc)
 
 
 def _resolve_verified_entitlement_payload(server_payload: dict[str, Any]) -> dict[str, Any]:
@@ -219,9 +229,6 @@ def _resolve_verified_entitlement_payload(server_payload: dict[str, Any]) -> dic
 
 
 def sync_license_once() -> bool:
-    if not str(LICENSE_SERVER_URL or "").strip():
-        return False
-
     with SessionLocal() as db:
         installation_id = resolve_license_installation_id(db)
         installation, installation_created = _get_or_create_installation(db, installation_id)
@@ -252,6 +259,7 @@ def sync_license_once() -> bool:
             verified_payload = _resolve_verified_entitlement_payload(payload)
             _apply_entitlement_payload(db, installation, verified_payload)
             db.commit()
+            _publish_license_realtime_signal(installation)
             return True
         except Exception as exc:
             db.rollback()
@@ -261,7 +269,6 @@ def sync_license_once() -> bool:
                 result="error",
                 reason="control_plane_sync_failed",
                 details={
-                    "server": LICENSE_SERVER_URL,
                     "error": str(exc),
                 },
             )
@@ -286,9 +293,6 @@ def _control_plane_error_detail(response: httpx.Response) -> str:
 
 
 def activate_with_code_once(activation_code: str) -> dict[str, Any]:
-    if not str(LICENSE_SERVER_URL or "").strip():
-        raise LicenseActivationError(503, "License server is not configured")
-
     code = str(activation_code or "").strip()
     if not code:
         raise LicenseActivationError(422, "activation_code is required")
@@ -322,6 +326,7 @@ def activate_with_code_once(activation_code: str) -> dict[str, Any]:
             verified_payload = _resolve_verified_entitlement_payload(payload)
             _apply_entitlement_payload(db, installation, verified_payload)
             db.commit()
+            _publish_license_realtime_signal(installation)
             return {
                 "license": license_status_read_model(db),
                 "seat_usage": payload.get("seat_usage") if isinstance(payload.get("seat_usage"), dict) else None,
@@ -345,9 +350,6 @@ def _worker_loop() -> None:
 
 def start_license_sync_worker() -> None:
     global _worker_thread
-    if not str(LICENSE_SERVER_URL or "").strip():
-        logger.info("License sync worker disabled: LICENSE_SERVER_URL is not configured")
-        return
     if _worker_thread and _worker_thread.is_alive():
         return
     _worker_stop_event.clear()

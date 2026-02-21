@@ -366,6 +366,9 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             backendVersion={state.backendVersion}
             backendBuild={state.backendBuild}
             deployedAtUtc={state.backendDeployedAtUtc}
+            license={state.licenseStatus?.data?.license ?? null}
+            licenseLoading={Boolean(state.licenseStatus?.isLoading)}
+            licenseError={state.licenseStatus?.isError ? 'Unable to load license status.' : null}
             onLogout={state.logout}
             onChangeSpeechLang={state.setSpeechLang}
             onToggleTheme={() => {

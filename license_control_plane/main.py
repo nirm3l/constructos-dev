@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -396,6 +396,20 @@ def _compute_entitlement(installation: Installation) -> dict[str, Any]:
     }
 
 
+def _resolve_request_ip(request: Request) -> str | None:
+    forwarded = str(request.headers.get("x-forwarded-for") or "").strip()
+    if forwarded:
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first[:128]
+    real_ip = str(request.headers.get("x-real-ip") or "").strip()
+    if real_ip:
+        return real_ip[:128]
+    if request.client and request.client.host:
+        return str(request.client.host).strip()[:128] or None
+    return None
+
+
 def _upsert_installation(db: Session, payload: InstallationRegisterRequest | InstallationHeartbeatRequest) -> Installation:
     installation = db.execute(
         select(Installation).where(Installation.installation_id == payload.installation_id)
@@ -449,6 +463,8 @@ def _build_entitlement_bundle(entitlement_payload: dict[str, Any]) -> tuple[dict
 
 
 def _serialize_installation(installation: Installation) -> dict[str, Any]:
+    metadata = _load_metadata(installation.metadata_json)
+    activation_ip = str(metadata.get("activation_ip") or "").strip() or None
     return {
         "installation_id": installation.installation_id,
         "workspace_id": installation.workspace_id,
@@ -458,7 +474,8 @@ def _serialize_installation(installation: Installation) -> dict[str, Any]:
         "subscription_valid_until": installation.subscription_valid_until.isoformat() if installation.subscription_valid_until else None,
         "trial_started_at": installation.trial_started_at.isoformat(),
         "trial_ends_at": installation.trial_ends_at.isoformat(),
-        "metadata": _load_metadata(installation.metadata_json),
+        "activation_ip": activation_ip,
+        "metadata": metadata,
         "updated_at": installation.updated_at.isoformat(),
     }
 
@@ -531,6 +548,7 @@ def heartbeat_installation(
 @app.post("/v1/installations/activate")
 def activate_installation(
     payload: InstallationActivateRequest,
+    request: Request,
     auth_context: InstallationAuthContext = Depends(_require_installation_auth),
     db: Session = Depends(_get_db),
 ) -> dict[str, Any]:
@@ -599,6 +617,9 @@ def activate_installation(
             "activated_at": now.isoformat(),
         }
     )
+    activation_ip = _resolve_request_ip(request)
+    if activation_ip:
+        merged_metadata["activation_ip"] = activation_ip
     installation.metadata_json = _dump_metadata(merged_metadata)
 
     if not already_counted:

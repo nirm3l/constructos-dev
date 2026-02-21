@@ -126,8 +126,8 @@ Activation code flow (multi-device seat control):
 - `MCP_EMAIL_ALLOWED_DOMAINS`
 
 ### 3.7 Licensing
+- License server endpoint is fixed in application runtime and is not customer-configurable.
 - Required client-side variables:
-  - `LICENSE_SERVER_URL`
   - `LICENSE_SERVER_TOKEN`
 - Optional advanced variables:
   - `LICENSE_PUBLIC_KEY` (require signed entitlement tokens from control-plane)

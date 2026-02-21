@@ -103,12 +103,18 @@ export function useRealtimeEffects(c: any) {
       scheduleRealtimeRefresh()
     }
 
+    const onLicenseEvent = () => {
+      qc.invalidateQueries({ queryKey: ['license-status', userId] })
+    }
+
     es.addEventListener('notification', onNotification as EventListener)
     es.addEventListener('task_event', onTaskEvent as EventListener)
+    es.addEventListener('license_event', onLicenseEvent as EventListener)
 
     return () => {
       es.removeEventListener('notification', onNotification as EventListener)
       es.removeEventListener('task_event', onTaskEvent as EventListener)
+      es.removeEventListener('license_event', onLicenseEvent as EventListener)
       es.close()
     }
   }, [qc, scheduleRealtimeRefresh, selectedProjectId, setCodexChatLastTaskEventAt, showCodexChat, tab, userId, workspaceId])

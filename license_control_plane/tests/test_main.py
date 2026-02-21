@@ -176,7 +176,10 @@ def test_activation_code_flow_enforces_three_device_limit(tmp_path: Path):
         for installation_id in ["cp-seat-1", "cp-seat-2", "cp-seat-3"]:
             activate = client.post(
                 "/v1/installations/activate",
-                headers={"Authorization": "Bearer control-plane-token"},
+                headers={
+                    "Authorization": "Bearer control-plane-token",
+                    "X-Forwarded-For": "203.0.113.10",
+                },
                 json={
                     "installation_id": installation_id,
                     "workspace_id": "workspace-seat",
@@ -189,6 +192,7 @@ def test_activation_code_flow_enforces_three_device_limit(tmp_path: Path):
             assert body["ok"] is True
             assert body["entitlement"]["status"] == "active"
             assert body["seat_usage"]["max_installations"] == 3
+            assert body["installation"]["activation_ip"] == "203.0.113.10"
 
         fourth = client.post(
             "/v1/installations/activate",

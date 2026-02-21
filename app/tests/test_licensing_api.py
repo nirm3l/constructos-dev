@@ -146,7 +146,6 @@ def test_license_activate_endpoint_returns_updated_license_payload(tmp_path: Pat
                 "grace_ends_at": None,
                 "last_validated_at": None,
                 "token_expires_at": None,
-                "license_server_url": "http://license-control-plane:8092",
                 "metadata": {},
             },
             "seat_usage": {
