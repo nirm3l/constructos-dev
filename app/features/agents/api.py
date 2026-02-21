@@ -327,7 +327,13 @@ def _parse_compact_command(instruction: str) -> tuple[bool, str]:
     return True, remainder
 
 
-def _compact_history_with_codex(*, history: list[dict[str, str]], workspace_id: str, project_id: str | None) -> str | None:
+def _compact_history_with_codex(
+    *,
+    history: list[dict[str, str]],
+    workspace_id: str,
+    project_id: str | None,
+    actor_user_id: str | None,
+) -> str | None:
     if not history:
         return None
     lines = [f"{item['role'].upper()}: {item['content']}" for item in history[-80:]]
@@ -347,6 +353,7 @@ def _compact_history_with_codex(*, history: list[dict[str, str]], workspace_id: 
         instruction=compact_instruction,
         workspace_id=workspace_id,
         project_id=project_id,
+        actor_user_id=actor_user_id,
         allow_mutations=False,
     )
     parts = [str(outcome.summary or "").strip(), str(outcome.comment or "").strip()]
@@ -359,6 +366,7 @@ def _maybe_compact_history(
     history: list[dict[str, str]],
     workspace_id: str,
     project_id: str | None,
+    actor_user_id: str | None,
     force: bool = False,
 ) -> tuple[list[dict[str, str]], bool]:
     threshold = max(0, int(AGENT_CHAT_HISTORY_COMPACT_THRESHOLD))
@@ -366,7 +374,12 @@ def _maybe_compact_history(
     if not should_compact:
         return history, False
     try:
-        compacted = _compact_history_with_codex(history=history, workspace_id=workspace_id, project_id=project_id)
+        compacted = _compact_history_with_codex(
+            history=history,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            actor_user_id=actor_user_id,
+        )
     except TimeoutError:
         logger.warning("Skipping chat history compaction due to timeout.")
         return history, False
@@ -403,6 +416,7 @@ def _prepare_chat_instruction(
         history=history,
         workspace_id=payload.workspace_id,
         project_id=payload.project_id,
+        actor_user_id=user.id,
         force=force_compact,
     )
     if force_compact and not instruction:
@@ -452,6 +466,7 @@ def agent_chat(
             instruction=effective_instruction,
             workspace_id=payload.workspace_id,
             project_id=payload.project_id,
+            actor_user_id=user.id,
             allow_mutations=bool(payload.allow_mutations),
         )
         return {
@@ -525,6 +540,7 @@ def agent_chat_stream(
                     instruction=effective_instruction,
                     workspace_id=payload.workspace_id,
                     project_id=payload.project_id,
+                    actor_user_id=user.id,
                     allow_mutations=bool(payload.allow_mutations),
                     on_event=_on_event,
                 )

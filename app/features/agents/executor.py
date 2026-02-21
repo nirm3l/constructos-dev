@@ -201,6 +201,7 @@ def execute_task_automation(
     instruction: str,
     workspace_id: str | None = None,
     project_id: str | None = None,
+    actor_user_id: str | None = None,
     allow_mutations: bool = True,
 ) -> AutomationOutcome:
     # Deterministic shortcut: users can explicitly complete a task via "#complete".
@@ -239,6 +240,7 @@ def execute_task_automation(
         "instruction": instruction,
         "workspace_id": workspace_id,
         "project_id": project_id,
+        "actor_user_id": actor_user_id,
         "project_name": project_name,
         "project_description": project_description,
         "project_rules": project_rules,
@@ -274,6 +276,7 @@ def execute_task_automation_stream(
     instruction: str,
     workspace_id: str | None = None,
     project_id: str | None = None,
+    actor_user_id: str | None = None,
     allow_mutations: bool = True,
     on_event: Callable[[dict[str, object]], None] | None = None,
 ) -> AutomationOutcome:
@@ -312,6 +315,7 @@ def execute_task_automation_stream(
         "instruction": instruction,
         "workspace_id": workspace_id,
         "project_id": project_id,
+        "actor_user_id": actor_user_id,
         "project_name": project_name,
         "project_description": project_description,
         "project_rules": project_rules,

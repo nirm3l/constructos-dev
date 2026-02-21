@@ -1470,6 +1470,81 @@ def test_agent_service_can_toggle_my_theme(tmp_path):
     assert refreshed['theme'] == before['theme']
 
 
+def test_agent_service_can_set_my_theme(tmp_path):
+    build_client(tmp_path)
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    to_dark = service.set_my_theme(
+        theme='dark',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+        command_id='test-mcp-theme-set-dark',
+    )
+    assert to_dark['theme'] == 'dark'
+
+    to_light = service.set_my_theme(
+        theme='light',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+        command_id='test-mcp-theme-set-light',
+    )
+    assert to_light['theme'] == 'light'
+
+
+def test_agent_service_theme_without_user_id_targets_primary_user(tmp_path):
+    build_client(tmp_path)
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    bot_user_id = '00000000-0000-0000-0000-000000000099'
+
+    service.set_my_theme(
+        theme='dark',
+        user_id=bot_user_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+        command_id='test-mcp-theme-bot-dark',
+    )
+    service.set_my_theme(
+        theme='dark',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+        command_id='test-mcp-theme-primary-dark',
+    )
+
+    primary = service.set_my_theme(
+        theme='light',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+        command_id='test-mcp-theme-primary-light',
+    )
+    bot = service.get_my_preferences(
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+        user_id=bot_user_id,
+    )
+
+    assert primary['id'] == svc_module.DEFAULT_USER_ID
+    assert primary['theme'] == 'light'
+    assert bot['id'] == bot_user_id
+    assert bot['theme'] == 'dark'
+
+
+def test_agent_service_rejects_invalid_set_my_theme_value(tmp_path):
+    build_client(tmp_path)
+
+    from fastapi import HTTPException
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    try:
+        service.set_my_theme(theme='blue', auth_token=svc_module.MCP_AUTH_TOKEN or None)
+        assert False, 'Expected HTTPException'
+    except HTTPException as exc:
+        assert exc.status_code == 422
+        assert 'theme must be one of' in exc.detail
+
+
 def test_agent_service_task_note_group_lifecycle_and_filters(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -1702,6 +1777,7 @@ def test_agents_chat_endpoint_includes_text_attachment_context(tmp_path, monkeyp
     assert 'Attached file context:' in captured['instruction']
     assert 'hello from attachment file' in captured['instruction']
     assert attachment_ref['path'] in captured['instruction']
+    assert captured['actor_user_id'] == bootstrap['current_user']['id']
 
 
 def test_agents_chat_endpoint_includes_docx_attachment_context(tmp_path, monkeypatch):

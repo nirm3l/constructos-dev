@@ -23,6 +23,7 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     instruction = ctx.get("instruction", "")
     workspace_id = ctx.get("workspace_id") or ""
     project_id = ctx.get("project_id") or ""
+    actor_user_id = str(ctx.get("actor_user_id") or "").strip()
     project_name = ctx.get("project_name") or ""
     project_description = str(ctx.get("project_description") or "")
     project_rules = ctx.get("project_rules") or []
@@ -84,6 +85,7 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         f"Description: {description}\n"
         f"Workspace ID: {workspace_id}\n"
         f"Project ID: {project_id}\n"
+        f"Current User ID: {actor_user_id}\n"
         f"Project Name: {project_name}\n"
         f"Instruction: {instruction}\n\n"
         "Context Pack:\n"
@@ -107,6 +109,13 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         "- Treat claims without an evidence_id as low confidence.\n"
         "- If project context conflicts with the latest explicit user instruction, follow the latest explicit user instruction.\n"
         "- You may call task-management MCP tools relevant to the request.\n"
+        "- For profile preference changes (theme/timezone/notifications), use MCP tools directly.\n"
+        "- For chat preference changes, the only valid target is Current User ID.\n"
+        "- Never target system/bot users for chat preference changes.\n"
+        "- For preference changes in chat, pass user_id=Current User ID in tool calls.\n"
+        "- For explicit theme targets, prefer set_my_theme(theme='light'|'dark') instead of toggle_my_theme.\n"
+        "- After any preference update, call get_my_preferences and verify the returned values.\n"
+        "- Never claim preference updates unless get_my_preferences confirms the new state.\n"
         "- Use graph_* MCP tools when you need relation-aware lookup across project resources.\n"
         "- Prefer bulk tools when operating on many tasks (avoid per-task loops when possible).\n"
         "- Prefer archive_all_notes/archive_all_tasks for 'archive everything' requests.\n"
@@ -291,6 +300,7 @@ def _run_codex_app_server_with_optional_stream(
     usage: dict[str, int] | None = None
     final_message = ""
     delta_parts: list[str] = []
+    stream_plain_text = output_schema is None
     lines: list[str] = []
     forced_shutdown = False
 
@@ -367,7 +377,7 @@ def _run_codex_app_server_with_optional_stream(
             if not delta:
                 continue
             delta_parts.append(delta)
-            if stream_events:
+            if stream_events and stream_plain_text:
                 _emit_stream_event({"type": "assistant_text", "delta": delta})
             continue
         if method == "item/completed":
@@ -412,6 +422,10 @@ def _run_codex_app_server_with_optional_stream(
 
     if not final_message:
         final_message = "".join(delta_parts).strip()
+    if stream_events and not stream_plain_text and final_message:
+        rendered = _render_stream_assistant_text(final_message)
+        if rendered:
+            _emit_stream_event({"type": "assistant_text", "delta": rendered})
     if stream_events and usage is not None:
         _emit_stream_event({"type": "usage", "usage": usage})
     return final_message, usage

@@ -71,6 +71,7 @@ def test_execute_task_automation_includes_project_description_in_context(tmp_pat
         instruction="Summarize project goals",
         workspace_id=ws_id,
         project_id=project["id"],
+        actor_user_id=bootstrap["current_user"]["id"],
         allow_mutations=True,
     )
 
@@ -80,6 +81,7 @@ def test_execute_task_automation_includes_project_description_in_context(tmp_pat
     assert captured["project_description"] == "# Project soul\nAlways include tests."
     assert captured["project_rules"][0]["title"] == "Definition of done"
     assert captured["project_rules"][0]["body"] == "Always add or update tests."
+    assert captured["actor_user_id"] == bootstrap["current_user"]["id"]
     assert captured["graph_context_markdown"] == "## Graph\nTask -> Specification"
 
 
@@ -95,6 +97,7 @@ def test_codex_prompt_includes_soul_md_section():
             "instruction": "Plan this feature",
             "workspace_id": "ws-1",
             "project_id": "pr-1",
+            "actor_user_id": "user-1",
             "project_name": "Alpha",
             "project_description": "## Soul\nUse strict acceptance criteria.",
             "project_rules": [{"title": "Quality", "body": "Do not skip tests."}],
@@ -107,6 +110,8 @@ def test_codex_prompt_includes_soul_md_section():
     assert "## Soul\nUse strict acceptance criteria." in prompt
     assert "File: ProjectRules.md (source: project_rules)" in prompt
     assert "Quality: Do not skip tests." in prompt
+    assert "Current User ID: user-1" in prompt
+    assert "pass user_id=Current User ID in tool calls" in prompt
     assert "File: GraphContext.md (source: knowledge_graph)" in prompt
     assert "Task A IMPLEMENTS Spec B" in prompt
 

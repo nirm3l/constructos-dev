@@ -71,6 +71,7 @@ from shared.knowledge_graph import (
 )
 from shared.models import User as UserModel
 from shared.settings import (
+    DEFAULT_USER_ID,
     MCP_ACTOR_USER_ID,
     MCP_DEFAULT_WORKSPACE_ID,
     MCP_ALLOWED_PROJECT_IDS,
@@ -148,12 +149,24 @@ class AgentTaskService:
         self._assert_project_allowed(state.project_id)
         return state
 
-    def _resolve_actor_user(self) -> UserModel:
+    def _resolve_actor_user(self, user_id: str | None = None) -> UserModel:
+        target_user_id = str(user_id or "").strip() or MCP_ACTOR_USER_ID
         with SessionLocal() as db:
-            user = db.get(User, MCP_ACTOR_USER_ID)
+            user = db.get(User, target_user_id)
             if not user:
                 raise HTTPException(status_code=401, detail="User not found")
             return user
+
+    def _resolve_preference_target_user_id(self, user_id: str | None) -> str:
+        explicit_user_id = str(user_id or "").strip()
+        if explicit_user_id:
+            return explicit_user_id
+        # In containerized runtime the MCP actor is often a dedicated bot account.
+        # Preference updates should default to the primary app user unless the caller
+        # explicitly targets a different user.
+        if MCP_ACTOR_USER_ID != DEFAULT_USER_ID:
+            return DEFAULT_USER_ID
+        return MCP_ACTOR_USER_ID
 
     def _resolve_workspace_for_create(self, *, db, explicit_workspace_id: str | None, project_id: str | None) -> tuple[str, str]:
         if not project_id:
@@ -587,9 +600,9 @@ class AgentTaskService:
             self._assert_project_allowed(state.project_id)
             return get_task_automation_status_read_model(db, user, task_id)
 
-    def get_my_preferences(self, *, auth_token: str | None = None) -> dict:
+    def get_my_preferences(self, *, auth_token: str | None = None, user_id: str | None = None) -> dict:
         self._require_token(auth_token)
-        user = self._resolve_actor_user()
+        user = self._resolve_actor_user(self._resolve_preference_target_user_id(user_id))
         return {
             "id": user.id,
             "theme": str(user.theme or "light"),
@@ -597,9 +610,16 @@ class AgentTaskService:
             "notifications_enabled": bool(user.notifications_enabled),
         }
 
-    def toggle_my_theme(self, *, auth_token: str | None = None, command_id: str | None = None) -> dict:
+    def toggle_my_theme(
+        self,
+        *,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict:
         self._require_token(auth_token)
-        user = self._resolve_actor_user()
+        target_user_id = self._resolve_preference_target_user_id(user_id)
+        user = self._resolve_actor_user(target_user_id)
         current_theme = str(user.theme or "light").strip().lower()
         next_theme = "light" if current_theme == "dark" else "dark"
         with SessionLocal() as db:
@@ -611,6 +631,30 @@ class AgentTaskService:
                 db,
                 actor,
                 command_id=command_id or f"mcp-theme-toggle-{uuid.uuid4()}",
+            ).patch_preferences(payload)
+
+    def set_my_theme(
+        self,
+        *,
+        theme: str,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        normalized = str(theme or "").strip().lower()
+        if normalized not in {"light", "dark"}:
+            raise HTTPException(status_code=422, detail="theme must be one of: light, dark")
+        user = self._resolve_actor_user(self._resolve_preference_target_user_id(user_id))
+        with SessionLocal() as db:
+            actor = db.get(User, user.id)
+            if not actor:
+                raise HTTPException(status_code=401, detail="User not found")
+            payload = UserPreferencesPatch(theme=normalized)
+            return UserApplicationService(
+                db,
+                actor,
+                command_id=command_id or f"mcp-theme-set-{uuid.uuid4()}",
             ).patch_preferences(payload)
 
     def _load_project_scope(self, *, db, project_id: str):
