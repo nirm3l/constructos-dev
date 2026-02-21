@@ -1,3 +1,4 @@
+import asyncio
 import os
 from importlib import reload
 from pathlib import Path
@@ -1520,6 +1521,79 @@ def test_ui_and_mcp_theme_updates_follow_same_gateway_path(tmp_path):
     refreshed = client.get('/api/bootstrap')
     assert refreshed.status_code == 200
     assert refreshed.json()['current_user']['theme'] == 'light'
+
+
+def test_notifications_stream_emits_refresh_when_user_state_changes_without_signal(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+
+    import features.notifications.api as notifications_api
+    from shared.models import SessionLocal, User
+
+    monkeypatch.setattr(notifications_api, 'emit_system_notifications', lambda db, user: 0)
+    class DummyRequest:
+        def __init__(self):
+            self.calls = 0
+
+        async def is_disconnected(self):
+            self.calls += 1
+            return self.calls > 4
+
+    class DummySubscription:
+        async def get(self):
+            await asyncio.sleep(999)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(notifications_api.realtime_hub, 'subscribe', lambda channels: DummySubscription())  # noqa: ARG005
+
+    with SessionLocal() as db:
+        user = db.execute(select(User).where(User.username == 'm4tr1x')).scalar_one()
+        user_id = user.id
+        before_theme = user.theme
+
+    wait_calls = {'count': 0}
+    toggled = {'done': False}
+
+    async def fake_wait_for_signal(subscription, timeout_seconds):  # noqa: ARG001
+        _ = subscription
+        wait_calls['count'] += 1
+        if not toggled['done']:
+            with SessionLocal() as db:
+                target = db.get(User, user_id)
+                target.theme = 'dark' if target.theme != 'dark' else 'light'
+                db.commit()
+            toggled['done'] = True
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(notifications_api, '_wait_for_signal', fake_wait_for_signal)
+
+    async def consume_stream_once():
+        with SessionLocal() as db:
+            local_user = db.get(User, user_id)
+            response = await notifications_api.notifications_stream(
+                request=DummyRequest(),
+                last_id=None,
+                workspace_id=None,
+                last_activity_id=0,
+                db=db,
+                user=local_user,
+            )
+            async for raw_chunk in response.body_iterator:
+                chunk = raw_chunk.decode() if isinstance(raw_chunk, (bytes, bytearray)) else str(raw_chunk)
+                if 'event: task_event' in chunk and 'data: {}' in chunk:
+                    return chunk
+        return ''
+
+    first_chunk = asyncio.run(consume_stream_once())
+
+    assert wait_calls['count'] >= 1
+    assert toggled['done'] is True
+    assert 'event: task_event' in first_chunk
+    assert 'data: {}' in first_chunk
+
+    refreshed_theme = client.get('/api/bootstrap').json()['current_user']['theme']
+    assert refreshed_theme != before_theme
 
 
 def test_agent_service_theme_without_user_id_targets_primary_user(tmp_path):

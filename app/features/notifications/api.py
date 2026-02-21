@@ -3,9 +3,18 @@ import json
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from shared.core import emit_system_notifications, ensure_role, get_command_id, get_current_user, get_db, serialize_notification
+from shared.core import (
+    User,
+    emit_system_notifications,
+    ensure_role,
+    get_command_id,
+    get_current_user,
+    get_db,
+    serialize_notification,
+)
 from shared.observability import incr
 from shared.realtime import realtime_hub
 
@@ -18,6 +27,17 @@ from .read_models import (
 )
 
 router = APIRouter()
+
+
+def _load_user_state_cursor(db: Session, user_id: str) -> str:
+    updated_at = db.execute(select(User.updated_at).where(User.id == user_id)).scalar_one_or_none()
+    if updated_at is None:
+        return ""
+    return updated_at.isoformat()
+
+
+async def _wait_for_signal(subscription, timeout_seconds: float) -> None:
+    await asyncio.wait_for(subscription.get(), timeout=timeout_seconds)
 
 
 @router.get("/api/notifications")
@@ -58,6 +78,7 @@ async def notifications_stream(
     async def event_generator():
         notification_cursor = last_id or ""
         activity_cursor = max(last_activity_id, 0)
+        user_state_cursor = _load_user_state_cursor(db, user.id)
         if workspace_id and activity_cursor == 0:
             # Tail mode by default: only stream new activity generated after this connection starts.
             activity_cursor = latest_workspace_activity_id_read_model(db, workspace_id)
@@ -72,13 +93,15 @@ async def notifications_stream(
 
                 if not flush_now:
                     try:
-                        await asyncio.wait_for(subscription.get(), timeout=30.0)
+                        await _wait_for_signal(subscription, timeout_seconds=30.0)
                         signal_received = True
+                        timed_out = False
                     except asyncio.TimeoutError:
-                        yield "event: ping\ndata: {}\n\n"
-                        continue
+                        signal_received = False
+                        timed_out = True
                 else:
                     signal_received = False
+                    timed_out = False
                 flush_now = False
                 emitted = False
 
@@ -101,10 +124,21 @@ async def notifications_stream(
                         activity_cursor = int(item["id"])
                         emitted = True
 
-                if signal_received and not emitted:
-                    # Forward a lightweight refresh event even when no new rows are
-                    # visible in current notification/activity cursors.
+                refreshed_user_state_cursor = _load_user_state_cursor(db, user.id)
+                if refreshed_user_state_cursor != user_state_cursor:
+                    user_state_cursor = refreshed_user_state_cursor
                     yield "event: task_event\ndata: {}\n\n"
+                    emitted = True
+
+                if not emitted:
+                    if signal_received:
+                        # Forward a lightweight refresh event even when no new rows are
+                        # visible in current notification/activity cursors.
+                        yield "event: task_event\ndata: {}\n\n"
+                    elif timed_out:
+                        # Keep the stream alive while still allowing timeout-based polling
+                        # to surface cross-process updates in later iterations.
+                        yield "event: ping\ndata: {}\n\n"
         finally:
             subscription.close()
 
