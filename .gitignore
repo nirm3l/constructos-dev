@@ -22,3 +22,10 @@ app/frontend/dist/
 app/frontend/*.tsbuildinfo
 app/frontend/vite.config.js
 app/frontend/vite.config.d.ts
+
+# License control-plane frontend artifacts
+license_control_plane/frontend/node_modules/
+license_control_plane/frontend/dist/
+license_control_plane/frontend/*.tsbuildinfo
+license_control_plane/frontend/vite.config.js
+license_control_plane/frontend/vite.config.d.ts

@@ -102,3 +102,52 @@ def test_admin_subscription_update_changes_installation_status(tmp_path: Path):
         assert installation_payload["subscription_status"] == "active"
         assert installation_payload["plan_code"] == "monthly"
         assert installation_payload["metadata"].get("billing_sync_source") == "external-billing-app"
+
+
+def test_admin_list_installations_supports_search_and_status_filter(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        first = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-tenant-alpha",
+                "workspace_id": "workspace-a",
+                "metadata": {"source": "test"},
+            },
+        )
+        assert first.status_code == 200
+
+        second = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-tenant-beta",
+                "workspace_id": "workspace-b",
+                "metadata": {"source": "test"},
+            },
+        )
+        assert second.status_code == 200
+
+        update = client.put(
+            "/v1/admin/installations/cp-tenant-beta/subscription",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "subscription_status": "active",
+                "plan_code": "monthly",
+                "customer_ref": "beta-customer",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "metadata": {"billing_sync_source": "external-billing-app"},
+            },
+        )
+        assert update.status_code == 200
+
+        listed = client.get(
+            "/v1/admin/installations?q=beta&status=active&limit=10&offset=0",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert listed.status_code == 200
+        payload = listed.json()
+        assert payload["ok"] is True
+        assert payload["total"] == 1
+        assert len(payload["items"]) == 1
+        assert payload["items"][0]["installation"]["installation_id"] == "cp-tenant-beta"

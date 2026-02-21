@@ -66,6 +66,8 @@ Override file:
 - `docker-compose.license-control-plane.yml`
 Default local URL used by app services in this mode:
 - `http://license-control-plane:8092`
+Local admin UI:
+- `http://localhost:8092`
 Optional hardening for signed entitlement tokens:
 - `LCP_SIGNING_PRIVATE_KEY_PEM` (Ed25519 private key in PEM form)
 - `LCP_SIGNING_KEY_ID` (token key identifier)
@@ -149,6 +151,7 @@ External billing sync:
 - `GET /api/events/{aggregate_type}/{aggregate_id}`
 - KurrentDB UI: `http://localhost:2113/web/index.html`
 - KurrentDB all-events feed: `http://localhost:2113/streams/%24all/head/backward/50?embed=body`
+- Optional control-plane admin UI: `GET http://localhost:8092/`
 - Optional control-plane local health: `GET http://localhost:8092/api/health`
 
 ### 5.2 Runtime Metrics

@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import DateTime, Integer, String, Text, create_engine, select
+from sqlalchemy import DateTime, Integer, String, Text, create_engine, func, or_, select
 from sqlalchemy.orm import Mapped, Session, declarative_base, mapped_column, sessionmaker
 
 try:
@@ -40,6 +43,9 @@ LCP_TOKEN_TTL_SECONDS = max(60, _env_int("LCP_TOKEN_TTL_SECONDS", 3600))
 LCP_SIGNING_PRIVATE_KEY_PEM = os.getenv("LCP_SIGNING_PRIVATE_KEY_PEM", "").strip()
 LCP_SIGNING_KEY_ID = os.getenv("LCP_SIGNING_KEY_ID", "default-ed25519").strip() or "default-ed25519"
 LCP_REQUIRE_SIGNED_TOKENS = _env_bool("LCP_REQUIRE_SIGNED_TOKENS", False)
+BASE_DIR = Path(__file__).resolve().parent
+STATIC_DIR = BASE_DIR / "static"
+INDEX_HTML = STATIC_DIR / "index.html"
 
 Base = declarative_base()
 
@@ -236,6 +242,21 @@ def _build_entitlement_bundle(entitlement_payload: dict[str, Any]) -> tuple[dict
     return entitlement_payload, signed_token
 
 
+def _serialize_installation(installation: Installation) -> dict[str, Any]:
+    return {
+        "installation_id": installation.installation_id,
+        "workspace_id": installation.workspace_id,
+        "customer_ref": installation.customer_ref,
+        "plan_code": installation.plan_code,
+        "subscription_status": installation.subscription_status,
+        "subscription_valid_until": installation.subscription_valid_until.isoformat() if installation.subscription_valid_until else None,
+        "trial_started_at": installation.trial_started_at.isoformat(),
+        "trial_ends_at": installation.trial_ends_at.isoformat(),
+        "metadata": _load_metadata(installation.metadata_json),
+        "updated_at": installation.updated_at.isoformat(),
+    }
+
+
 app = FastAPI(title="m4tr1x Licensing Control Plane")
 
 
@@ -298,6 +319,62 @@ def heartbeat_installation(
     return {"ok": True, "entitlement": entitlement, "entitlement_token": entitlement_token}
 
 
+@app.get("/v1/admin/installations")
+def admin_list_installations(
+    q: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    _auth: None = Depends(_require_api_token),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    filters = []
+    query_text = str(q or "").strip()
+    if query_text:
+        like = f"%{query_text.lower()}%"
+        filters.append(
+            or_(
+                func.lower(Installation.installation_id).like(like),
+                func.lower(func.coalesce(Installation.customer_ref, "")).like(like),
+                func.lower(func.coalesce(Installation.workspace_id, "")).like(like),
+            )
+        )
+
+    status_text = str(status or "").strip().lower()
+    if status_text:
+        filters.append(func.lower(Installation.subscription_status) == status_text)
+
+    total_stmt = select(func.count()).select_from(Installation)
+    rows_stmt = select(Installation)
+    if filters:
+        for clause in filters:
+            total_stmt = total_stmt.where(clause)
+            rows_stmt = rows_stmt.where(clause)
+
+    total = int(db.execute(total_stmt).scalar_one())
+    installations = db.execute(
+        rows_stmt.order_by(Installation.updated_at.desc(), Installation.id.desc()).offset(offset).limit(limit)
+    ).scalars().all()
+
+    items: list[dict[str, Any]] = []
+    for installation in installations:
+        entitlement = _compute_entitlement(installation)
+        items.append(
+            {
+                "installation": _serialize_installation(installation),
+                "entitlement": entitlement,
+            }
+        )
+
+    return {
+        "ok": True,
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
 @app.put("/v1/admin/installations/{installation_id}/subscription")
 def admin_update_subscription(
     installation_id: str,
@@ -353,18 +430,33 @@ def admin_get_installation(
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     return {
         "ok": True,
-        "installation": {
-            "installation_id": installation.installation_id,
-            "workspace_id": installation.workspace_id,
-            "customer_ref": installation.customer_ref,
-            "plan_code": installation.plan_code,
-            "subscription_status": installation.subscription_status,
-            "subscription_valid_until": installation.subscription_valid_until.isoformat() if installation.subscription_valid_until else None,
-            "trial_started_at": installation.trial_started_at.isoformat(),
-            "trial_ends_at": installation.trial_ends_at.isoformat(),
-            "metadata": _load_metadata(installation.metadata_json),
-            "updated_at": installation.updated_at.isoformat(),
-        },
+        "installation": _serialize_installation(installation),
         "entitlement": entitlement,
         "entitlement_token": entitlement_token,
     }
+
+
+@app.get("/", include_in_schema=False)
+def ui_root():
+    if INDEX_HTML.exists():
+        return FileResponse(
+            str(INDEX_HTML),
+            headers={
+                "Cache-Control": "no-store, max-age=0, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
+    return Response(status_code=404)
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    favicon_path = STATIC_DIR / "favicon.ico"
+    if favicon_path.exists():
+        return FileResponse(str(favicon_path), media_type="image/x-icon")
+    return Response(status_code=204)
+
+
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

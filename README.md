@@ -88,6 +88,7 @@ curl -sS http://localhost:8080/api/health
 - App/API: `http://localhost:8080`
 - Version: `http://localhost:8080/api/version`
 - License status: `http://localhost:8080/api/license/status`
+- Optional local control-plane admin UI: `http://localhost:8092`
 - Optional local control-plane health: `http://localhost:8092/api/health`
 - MCP endpoint (docker): `http://localhost:8091/mcp`
 - KurrentDB UI (event browser): `http://localhost:2113/web/index.html`
