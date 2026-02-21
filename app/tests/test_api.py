@@ -1529,6 +1529,51 @@ def test_agent_service_theme_without_user_id_targets_primary_user(tmp_path):
     assert bot['theme'] == 'dark'
 
 
+def test_agent_service_explicit_cross_user_theme_requires_admin(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
+
+    from fastapi import HTTPException
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+    from shared.models import SessionLocal, User, WorkspaceMember
+
+    member_user_id = '00000000-0000-0000-0000-000000000222'
+    with SessionLocal() as db:
+        if not db.get(User, member_user_id):
+            db.add(User(id=member_user_id, username='member-user', full_name='Member User', user_type='human'))
+        membership = db.query(WorkspaceMember).filter_by(
+            workspace_id=ws_id,
+            user_id=member_user_id,
+        ).first()
+        if not membership:
+            db.add(
+                WorkspaceMember(
+                    workspace_id=ws_id,
+                    user_id=member_user_id,
+                    role='Member',
+                )
+            )
+        else:
+            membership.role = 'Member'
+        db.commit()
+
+    monkeypatch.setattr(svc_module, 'MCP_ACTOR_USER_ID', member_user_id)
+    service = AgentTaskService()
+
+    try:
+        service.set_my_theme(
+            theme='dark',
+            user_id=svc_module.DEFAULT_USER_ID,
+            auth_token=svc_module.MCP_AUTH_TOKEN or None,
+            command_id='test-mcp-theme-cross-user-denied',
+        )
+        assert False, 'Expected HTTPException'
+    except HTTPException as exc:
+        assert exc.status_code == 403
+        assert 'Admin access required' in exc.detail
+
+
 def test_agent_service_rejects_invalid_set_my_theme_value(tmp_path):
     build_client(tmp_path)
 

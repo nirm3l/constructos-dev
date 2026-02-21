@@ -43,6 +43,7 @@ from shared.core import (
     TaskGroupPatch,
     TaskPatch,
     User,
+    WorkspaceMember,
     UserPreferencesPatch,
     load_note_command_state,
     load_note_group_command_state,
@@ -167,6 +168,43 @@ class AgentTaskService:
         if MCP_ACTOR_USER_ID != DEFAULT_USER_ID:
             return DEFAULT_USER_ID
         return MCP_ACTOR_USER_ID
+
+    def _is_explicit_targeting(self, target_user_id: str, explicit_user_id: str | None) -> bool:
+        explicit = str(explicit_user_id or "").strip()
+        return bool(explicit) and explicit == target_user_id
+
+    def _assert_actor_can_target_user(
+        self,
+        *,
+        db,
+        actor_user_id: str,
+        target_user_id: str,
+        explicit_target: bool,
+        require_admin_if_cross_user: bool = True,
+    ) -> None:
+        if actor_user_id == target_user_id:
+            return
+        if not explicit_target:
+            return
+        if not require_admin_if_cross_user:
+            return
+
+        actor_admin_workspace_ids = set(
+            db.execute(
+                select(WorkspaceMember.workspace_id).where(
+                    WorkspaceMember.user_id == actor_user_id,
+                    WorkspaceMember.role.in_(["Owner", "Admin"]),
+                )
+            ).scalars()
+        )
+        if not actor_admin_workspace_ids:
+            raise HTTPException(status_code=403, detail="Admin access required for cross-user actions")
+
+        target_workspace_ids = set(
+            db.execute(select(WorkspaceMember.workspace_id).where(WorkspaceMember.user_id == target_user_id)).scalars()
+        )
+        if actor_admin_workspace_ids.isdisjoint(target_workspace_ids):
+            raise HTTPException(status_code=403, detail="Admin access required for cross-user actions")
 
     def _resolve_workspace_for_create(self, *, db, explicit_workspace_id: str | None, project_id: str | None) -> tuple[str, str]:
         if not project_id:
@@ -602,7 +640,17 @@ class AgentTaskService:
 
     def get_my_preferences(self, *, auth_token: str | None = None, user_id: str | None = None) -> dict:
         self._require_token(auth_token)
-        user = self._resolve_actor_user(self._resolve_preference_target_user_id(user_id))
+        actor_user = self._resolve_actor_user()
+        target_user_id = self._resolve_preference_target_user_id(user_id)
+        explicit_target = self._is_explicit_targeting(target_user_id, user_id)
+        with SessionLocal() as db:
+            self._assert_actor_can_target_user(
+                db=db,
+                actor_user_id=actor_user.id,
+                target_user_id=target_user_id,
+                explicit_target=explicit_target,
+            )
+        user = self._resolve_actor_user(target_user_id)
         return {
             "id": user.id,
             "theme": str(user.theme or "light"),
@@ -618,7 +666,9 @@ class AgentTaskService:
         user_id: str | None = None,
     ) -> dict:
         self._require_token(auth_token)
+        actor_user = self._resolve_actor_user()
         target_user_id = self._resolve_preference_target_user_id(user_id)
+        explicit_target = self._is_explicit_targeting(target_user_id, user_id)
         user = self._resolve_actor_user(target_user_id)
         current_theme = str(user.theme or "light").strip().lower()
         next_theme = "light" if current_theme == "dark" else "dark"
@@ -636,6 +686,12 @@ class AgentTaskService:
             else f"mcp-theme-toggle-{uuid.uuid4()}"
         )
         with SessionLocal() as db:
+            self._assert_actor_can_target_user(
+                db=db,
+                actor_user_id=actor_user.id,
+                target_user_id=target_user_id,
+                explicit_target=explicit_target,
+            )
             actor = db.get(User, user.id)
             if not actor:
                 raise HTTPException(status_code=401, detail="User not found")
@@ -655,14 +711,23 @@ class AgentTaskService:
         user_id: str | None = None,
     ) -> dict:
         self._require_token(auth_token)
+        actor_user = self._resolve_actor_user()
         normalized = str(theme or "").strip().lower()
         if normalized not in {"light", "dark"}:
             raise HTTPException(status_code=422, detail="theme must be one of: light, dark")
-        user = self._resolve_actor_user(self._resolve_preference_target_user_id(user_id))
+        target_user_id = self._resolve_preference_target_user_id(user_id)
+        explicit_target = self._is_explicit_targeting(target_user_id, user_id)
+        user = self._resolve_actor_user(target_user_id)
         # Theme set is naturally idempotent by target value, so we avoid relying on
         # LLM-provided command_id values that may be unintentionally reused across turns.
         effective_command_id = f"mcp-theme-set-{uuid.uuid4()}"
         with SessionLocal() as db:
+            self._assert_actor_can_target_user(
+                db=db,
+                actor_user_id=actor_user.id,
+                target_user_id=target_user_id,
+                explicit_target=explicit_target,
+            )
             actor = db.get(User, user.id)
             if not actor:
                 raise HTTPException(status_code=401, detail="User not found")
