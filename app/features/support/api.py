@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from shared.core import User, get_current_user, get_db
 from shared.licensing import resolve_license_installation_id
-from shared.settings import APP_VERSION, LICENSE_SERVER_TOKEN, LICENSE_SERVER_URL
+from shared.settings import LICENSE_SERVER_TOKEN, LICENSE_SERVER_URL
 from .outbox import enqueue_bug_report, is_retryable_status_code
 
 router = APIRouter()
@@ -36,7 +36,6 @@ class BugReportSubmitRequest(BaseModel):
     expected_behavior: str | None = Field(default=None, max_length=2000)
     actual_behavior: str | None = Field(default=None, max_length=2000)
     severity: str = Field(default="medium", min_length=3, max_length=16)
-    include_diagnostics: bool = Field(default=True)
     context: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -134,11 +133,6 @@ def submit_bug_report(
 
     metadata = dict(payload.metadata or {})
     metadata["context"] = context
-    if payload.include_diagnostics:
-        metadata["diagnostics"] = {
-            "app_version": APP_VERSION,
-            "reported_via": "task-app-ui",
-        }
 
     control_plane_payload = {
         "installation_id": installation_id,

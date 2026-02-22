@@ -14,6 +14,7 @@ GHCR_REPO="${GHCR_REPO:-m4tr1x}"
 IMAGE_TAG="${IMAGE_TAG:-}"
 TASK_APP_IMAGE="${TASK_APP_IMAGE:-}"
 MCP_TOOLS_IMAGE="${MCP_TOOLS_IMAGE:-}"
+MARKETING_SITE_IMAGE="${MARKETING_SITE_IMAGE:-}"
 
 resolve_deploy_target() {
   if [[ "$DEPLOY_TARGET" != "auto" ]]; then
@@ -69,6 +70,7 @@ case "$DEPLOY_SOURCE" in
     APP_BUILD="$(date -u +"%Y%m%d%H%M%S")-${GIT_SHA}"
     TASK_APP_IMAGE="${TASK_APP_IMAGE:-task-management-task-app:local}"
     MCP_TOOLS_IMAGE="${MCP_TOOLS_IMAGE:-task-management-mcp-tools:local}"
+    MARKETING_SITE_IMAGE="${MARKETING_SITE_IMAGE:-task-management-marketing-site:local}"
     ;;
   ghcr)
     if [[ -z "$IMAGE_TAG" ]]; then
@@ -80,6 +82,7 @@ case "$DEPLOY_SOURCE" in
     APP_BUILD="ghcr-${IMAGE_TAG}-${GIT_SHA}"
     TASK_APP_IMAGE="${TASK_APP_IMAGE:-ghcr.io/${GHCR_OWNER}/${GHCR_REPO}-task-app:${IMAGE_TAG}}"
     MCP_TOOLS_IMAGE="${MCP_TOOLS_IMAGE:-ghcr.io/${GHCR_OWNER}/${GHCR_REPO}-mcp-tools:${IMAGE_TAG}}"
+    MARKETING_SITE_IMAGE="${MARKETING_SITE_IMAGE:-ghcr.io/${GHCR_OWNER}/${GHCR_REPO}-marketing-site:${IMAGE_TAG}}"
     ;;
   *)
     echo "Unsupported DEPLOY_SOURCE: $DEPLOY_SOURCE"
@@ -94,6 +97,7 @@ APP_BUILD=${APP_BUILD}
 APP_DEPLOYED_AT_UTC=${DEPLOYED_AT_UTC}
 TASK_APP_IMAGE=${TASK_APP_IMAGE}
 MCP_TOOLS_IMAGE=${MCP_TOOLS_IMAGE}
+MARKETING_SITE_IMAGE=${MARKETING_SITE_IMAGE}
 EOF
 
 echo "Deploying version ${APP_VERSION} (${APP_BUILD}) at ${DEPLOYED_AT_UTC}"
@@ -101,13 +105,14 @@ echo "Resolved deploy target: ${TARGET_RESOLVED}"
 echo "Deploy source: ${DEPLOY_SOURCE}"
 echo "task-app image: ${TASK_APP_IMAGE}"
 echo "mcp-tools image: ${MCP_TOOLS_IMAGE}"
+echo "marketing-site image: ${MARKETING_SITE_IMAGE}"
 echo "Compose files: ${COMPOSE_ARGS[*]}"
 
 if [[ "$DEPLOY_SOURCE" == "ghcr" ]]; then
   echo "Pulling GHCR images..."
-  docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env pull task-app mcp-tools
+  docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env pull task-app mcp-tools marketing-site
   if [[ "${DEPLOY_LICENSE_CONTROL_PLANE,,}" == "true" || "${DEPLOY_LICENSE_CONTROL_PLANE}" == "1" ]]; then
-    docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d --no-build task-app mcp-tools
+    docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d --no-build task-app mcp-tools marketing-site
     docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d license-control-plane
   else
     docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d --no-build

@@ -88,6 +88,7 @@ curl -sS http://localhost:8080/api/health
 ```
 3. Open app and APIs:
 - App/API: `http://localhost:8080`
+- Marketing site: `http://localhost:8082` (set `MARKETING_PORT` to change)
 - Version: `http://localhost:8080/api/version`
 - License status: `http://localhost:8080/api/license/status`
 - Optional local control-plane admin UI: `http://localhost:8092`
@@ -137,5 +138,6 @@ docker compose run --rm --build task-app pytest
 - `app/features/*` - vertical slices (tasks, projects, specs, notes, rules, agents...).
 - `app/shared/*` - eventing, projections, models, settings, bootstrap, graph.
 - `app/frontend/*` - SPA and UI state management.
+- `marketing-site/*` - static marketing website served by dedicated Nginx container.
 - `license_control_plane/*` - standalone licensing control-plane service (register/heartbeat/admin subscription update + activation code issuance + seat limits).
 - `scripts/*` - deploy, reset, and helper scripts.

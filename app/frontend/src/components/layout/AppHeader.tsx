@@ -45,22 +45,18 @@ export function AppHeader({
   onOpenSpecification,
   onOpenProject,
 }: AppHeaderProps) {
-  const brandSubTop = '3m0ry b3h1nd th3 c0d3'
-  const brandSubBottom = 'c0nt3xt und3r c0ntr0l...'
+  const brandSubTop = 'From spec to ship,'
+  const brandSubBottom = 'with context under control...'
 
   return (
     <header className="header card">
       <div className="title-row">
         <div className="brand" role="banner">
-          <div className="brand-badge" role="img" aria-label="m4tr1x logo">
-            <div className="brand-mark" data-text="m" aria-hidden="true">m</div>
+          <div className="brand-badge" role="img" aria-label="ConstructOS.dev logo">
+            <div className="brand-mark" data-text="C" aria-hidden="true">C</div>
             <div className="brand-lockup">
               <div className="brand-name" aria-hidden="true">
-                <span className="brand-glyph brand-glyph-1">4</span>
-                <span className="brand-glyph brand-glyph-2">t</span>
-                <span className="brand-glyph brand-glyph-3">r</span>
-                <span className="brand-glyph brand-glyph-4">1</span>
-                <span className="brand-glyph brand-glyph-5">x</span>
+                ConstructOS.dev
               </div>
               <div className="brand-sub-stack">
                 <div className="brand-sub brand-sub-top" data-text={brandSubTop}>{brandSubTop}</div>

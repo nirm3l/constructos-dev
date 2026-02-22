@@ -303,7 +303,6 @@ export type BugReportCreateRequest = {
   expected_behavior?: string | null
   actual_behavior?: string | null
   severity: BugReportSeverity
-  include_diagnostics: boolean
   context?: Record<string, unknown>
   metadata?: Record<string, unknown>
 }

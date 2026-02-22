@@ -299,7 +299,6 @@ function App({ logout }: { logout: () => void }) {
       expected_behavior?: string | null
       actual_behavior?: string | null
       severity: 'low' | 'medium' | 'high' | 'critical'
-      include_diagnostics: boolean
       context?: Record<string, unknown>
       metadata?: Record<string, unknown>
     }) => submitBugReport(userId, payload),

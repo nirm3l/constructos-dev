@@ -76,7 +76,6 @@ def test_submit_bug_report_forwards_to_control_plane(tmp_path: Path, monkeypatch
             "expected_behavior": "Task should save.",
             "actual_behavior": "Server returns 500.",
             "severity": "high",
-            "include_diagnostics": True,
             "context": {
                 "workspace_id": "ws-123",
                 "project_id": "project-123",
@@ -105,6 +104,7 @@ def test_submit_bug_report_forwards_to_control_plane(tmp_path: Path, monkeypatch
     assert forwarded["workspace_id"] == "ws-123"
     assert forwarded["reporter_username"] == "m4tr1x"
     assert forwarded["severity"] == "high"
+    assert "diagnostics" not in (forwarded.get("metadata") or {})
 
 
 

@@ -150,7 +150,6 @@ export function ProfilePanel({
   const [bugSteps, setBugSteps] = React.useState('')
   const [bugExpected, setBugExpected] = React.useState('')
   const [bugActual, setBugActual] = React.useState('')
-  const [bugIncludeDiagnostics, setBugIncludeDiagnostics] = React.useState(true)
   const [bugFeedback, setBugFeedback] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
 
   const resetBugForm = React.useCallback(() => {
@@ -160,7 +159,6 @@ export function ProfilePanel({
     setBugSteps('')
     setBugExpected('')
     setBugActual('')
-    setBugIncludeDiagnostics(true)
   }, [])
 
   const handleSubmitBugReport = React.useCallback(
@@ -184,7 +182,6 @@ export function ProfilePanel({
           expected_behavior: String(bugExpected || '').trim() || null,
           actual_behavior: String(bugActual || '').trim() || null,
           severity: bugSeverity,
-          include_diagnostics: bugIncludeDiagnostics,
           context: {},
           metadata: {},
         })
@@ -206,7 +203,6 @@ export function ProfilePanel({
       bugActual,
       bugDescription,
       bugExpected,
-      bugIncludeDiagnostics,
       bugSeverity,
       bugSteps,
       bugTitle,
@@ -335,14 +331,6 @@ export function ProfilePanel({
               rows={2}
               placeholder="What actually happens?"
             />
-          </label>
-          <label className="row archived-toggle">
-            <input
-              type="checkbox"
-              checked={bugIncludeDiagnostics}
-              onChange={(event) => setBugIncludeDiagnostics(event.target.checked)}
-            />
-            Include diagnostics
           </label>
           <div className="row wrap profile-actions">
             <button className="primary" type="submit" disabled={bugReportSubmitting || !bugTitle.trim() || !bugDescription.trim()}>
