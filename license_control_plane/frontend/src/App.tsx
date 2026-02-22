@@ -10,6 +10,7 @@ import {
   listContactRequests,
   listInstallations,
   listWaitlist,
+  openAdminEvents,
   updateInstallationSubscription
 } from './api'
 import type { ActivationCodeCreateRequest, ClientTokenCreateRequest, InstallationListItem, SubscriptionStatus, UpdateSubscriptionRequest } from './types'
@@ -79,6 +80,23 @@ function datetimeLocalFromNow(days: number): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
+const ICON_PATHS = {
+  save: 'M5 3h11l3 3v15H5z M8 3v6h8V3 M8 14h8',
+  clear: 'M6 6l12 12M18 6L6 18',
+  refresh: 'M20 12a8 8 0 1 1-2.34-5.66M20 4v4h-4',
+  generate: 'M12 5v14M5 12h14',
+  reset: 'M4 4v6h6M20 20v-6h-6M8 8l8 8',
+  filter: 'M3 5h18l-7 8v6l-4-2v-4z',
+} as const
+
+function ButtonIcon({ name }: { name: keyof typeof ICON_PATHS }) {
+  return (
+    <svg className="button-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+      <path d={ICON_PATHS[name]} strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
 export function App() {
   const queryClient = useQueryClient()
 
@@ -114,6 +132,9 @@ export function App() {
     customer_ref: '',
     metadata_text: '{}',
   })
+  const [liveFeedState, setLiveFeedState] = React.useState<'connecting' | 'online' | 'offline'>('offline')
+  const [liveFeedLastEventAt, setLiveFeedLastEventAt] = React.useState<string | null>(null)
+  const liveFeedRefetchAtRef = React.useRef(0)
 
   const health = useQuery({ queryKey: ['health'], queryFn: getHealth, refetchInterval: 30000 })
 
@@ -259,6 +280,60 @@ export function App() {
 
   const authError = installations.error instanceof ApiError && installations.error.status === 401
 
+  React.useEffect(() => {
+    setLiveFeedState('connecting')
+    const source = openAdminEvents(token)
+
+    const refreshQueries = () => {
+      const nowMs = Date.now()
+      if (nowMs - liveFeedRefetchAtRef.current < 1200) {
+        return
+      }
+      liveFeedRefetchAtRef.current = nowMs
+      void queryClient.invalidateQueries({ queryKey: ['health'] })
+      void queryClient.invalidateQueries({ queryKey: ['installations'] })
+      void queryClient.invalidateQueries({ queryKey: ['installation'] })
+      void queryClient.invalidateQueries({ queryKey: ['waitlist'] })
+      void queryClient.invalidateQueries({ queryKey: ['contact-requests'] })
+      void queryClient.invalidateQueries({ queryKey: ['bug-reports'] })
+    }
+
+    const handleSseMessage = (event: MessageEvent<string>, shouldRefresh: boolean) => {
+      setLiveFeedState('online')
+      setLiveFeedLastEventAt(new Date().toISOString())
+      if (shouldRefresh) {
+        refreshQueries()
+      }
+      try {
+        const payload = JSON.parse(String(event.data || '{}')) as Record<string, unknown>
+        const action = String(payload.action || '').trim().toLowerCase()
+        if (action && action !== 'heartbeat') {
+          refreshQueries()
+        }
+      } catch {
+        // Ignore invalid JSON payload and keep the stream alive.
+      }
+    }
+
+    source.onopen = () => {
+      setLiveFeedState('online')
+      setLiveFeedLastEventAt(new Date().toISOString())
+    }
+
+    source.onerror = () => {
+      setLiveFeedState(token.trim() ? 'connecting' : 'offline')
+    }
+
+    source.onmessage = (event) => handleSseMessage(event, true)
+    source.addEventListener('refresh', (event) => handleSseMessage(event as MessageEvent<string>, true))
+    source.addEventListener('heartbeat', (event) => handleSseMessage(event as MessageEvent<string>, false))
+
+    return () => {
+      source.close()
+      setLiveFeedState('offline')
+    }
+  }, [queryClient, token])
+
   const selectedFromList = installations.data?.items.find(
     (item) => item.installation.installation_id === selectedInstallationId
   )
@@ -271,6 +346,8 @@ export function App() {
     : health.data?.public_beta_free_until
       ? `ended (${formatDateTime(health.data?.public_beta_free_until ?? null)})`
       : 'not configured'
+  const liveFeedLabel = liveFeedState === 'online' ? 'online' : liveFeedState === 'connecting' ? 'connecting' : 'offline'
+  const liveFeedLastSeenLabel = formatDateTime(liveFeedLastEventAt)
 
   const saveToken = () => {
     const next = tokenInput.trim()
@@ -291,21 +368,36 @@ export function App() {
   return (
     <div className="page">
       <header className="header">
-        <div>
+        <div className="header-main">
           <h1>License Control Plane</h1>
-          <p className="muted">
-            Health: {health.data?.ok ? 'OK' : 'Unknown'} | Public beta: {publicBetaLabel} | Default trial duration for new installations: {health.data?.trial_days ?? '-'} days | Default max installations: {health.data?.default_max_installations ?? '-'}
-          </p>
+          <p className="muted">Realtime operations dashboard for licensing, waitlist, requests, and bug triage.</p>
+        </div>
+        <div className="status-strip">
+          <span className={`status-chip ${health.data?.ok ? 'status-chip-ok' : 'status-chip-warn'}`}>
+            API {health.data?.ok ? 'OK' : 'UNKNOWN'}
+          </span>
+          <span className={`status-chip ${liveFeedState === 'online' ? 'status-chip-ok' : 'status-chip-warn'}`}>
+            SSE {liveFeedLabel}
+          </span>
+          <span className="status-chip">
+            Beta {publicBetaLabel}
+          </span>
+          <span className="status-chip">
+            Trial {health.data?.trial_days ?? '-'}d
+          </span>
+          <span className="status-chip">
+            Seats {health.data?.default_max_installations ?? '-'}
+          </span>
+          <span className="status-chip">
+            Last event {liveFeedLastSeenLabel}
+          </span>
         </div>
       </header>
 
       <section className="panel">
-        <h2>Admin API Token (Optional)</h2>
+        <h2>Admin API Token</h2>
         <p className="muted">
-          This token protects admin endpoints on the control-plane. It is not a customer license key.
-        </p>
-        <p className="muted">
-          Use the same value configured on the server as <code>LCP_API_TOKEN</code>. In the local Docker setup, default is <code>dev-license-token</code> unless <code>LCP_API_TOKEN</code> is overridden.
+          Use <code>LCP_API_TOKEN</code> for admin endpoints. This is not a customer license key.
         </p>
         <div className="row">
           <input
@@ -314,10 +406,10 @@ export function App() {
             onChange={(event) => setTokenInput(event.target.value)}
             placeholder="Enter LCP_API_TOKEN value if this server requires auth"
           />
-          <button onClick={saveToken}>Save Token</button>
-          <button className="button-secondary" onClick={clearToken}>Clear</button>
+          <button onClick={saveToken}><ButtonIcon name="save" />Save</button>
+          <button className="button-secondary" onClick={clearToken}><ButtonIcon name="clear" />Clear</button>
           <button className="button-secondary" onClick={() => void installations.refetch()} disabled={!token}>
-            Reload
+            <ButtonIcon name="refresh" />Reload
           </button>
         </div>
         {authError && <p className="error">Authentication failed. Check the token value.</p>}
@@ -360,7 +452,8 @@ export function App() {
           </label>
           <div className="row">
             <button type="submit" disabled={!token || createClientTokenMutation.isPending}>
-              {createClientTokenMutation.isPending ? 'Generating...' : 'Generate Client Token'}
+              <ButtonIcon name="generate" />
+              {createClientTokenMutation.isPending ? 'Generating...' : 'Generate Token'}
             </button>
             <button
               type="button"
@@ -372,7 +465,7 @@ export function App() {
                 })
               }
             >
-              Reset
+              <ButtonIcon name="reset" />Reset
             </button>
           </div>
         </form>
@@ -448,7 +541,8 @@ export function App() {
           </label>
           <div className="row">
             <button type="submit" disabled={!token || createActivationCodeMutation.isPending}>
-              {createActivationCodeMutation.isPending ? 'Generating...' : 'Generate Activation Code'}
+              <ButtonIcon name="generate" />
+              {createActivationCodeMutation.isPending ? 'Generating...' : 'Generate Code'}
             </button>
             <button
               type="button"
@@ -463,7 +557,7 @@ export function App() {
                 })
               }
             >
-              Reset
+              <ButtonIcon name="reset" />Reset
             </button>
           </div>
         </form>
@@ -507,7 +601,7 @@ export function App() {
               setWaitlistSourceFilter('')
             }}
           >
-            Clear Filters
+            <ButtonIcon name="filter" />Clear Filters
           </button>
           <button
             type="button"
@@ -515,7 +609,7 @@ export function App() {
             onClick={() => void waitlist.refetch()}
             disabled={!token}
           >
-            Reload
+            <ButtonIcon name="refresh" />Reload
           </button>
         </div>
         {!token && <p className="muted">Save admin token to load waitlist entries.</p>}
@@ -531,34 +625,25 @@ export function App() {
             <p className="muted">
               Loaded items: {waitlistCount} | Total: {waitlist.data?.total ?? 0}
             </p>
-            <div className="waitlist-table-wrap">
-              <table className="waitlist-table">
-                <thead>
-                  <tr>
-                    <th>Email</th>
-                    <th>Source</th>
-                    <th>Status</th>
-                    <th>Campaign</th>
-                    <th>Created</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(waitlist.data?.items ?? []).map((entry) => {
-                    const metadata = entry.metadata ?? {}
-                    const campaignRaw = metadata.campaign
-                    const campaign = typeof campaignRaw === 'string' && campaignRaw.trim() ? campaignRaw.trim() : '-'
-                    return (
-                      <tr key={entry.id}>
-                        <td><code>{entry.email}</code></td>
-                        <td>{entry.source || '-'}</td>
-                        <td>{entry.status || '-'}</td>
-                        <td>{campaign}</td>
-                        <td>{formatDateTime(entry.created_at)}</td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
+            <div className="feed-list">
+              {(waitlist.data?.items ?? []).map((entry) => {
+                const metadata = entry.metadata ?? {}
+                const campaignRaw = metadata.campaign
+                const campaign = typeof campaignRaw === 'string' && campaignRaw.trim() ? campaignRaw.trim() : '-'
+                return (
+                  <article key={entry.id} className="feed-item">
+                    <div className="feed-item-head">
+                      <div className="feed-item-title"><code>{entry.email}</code></div>
+                      <div className="feed-item-chips">
+                        <span className="status-chip">{entry.status || '-'}</span>
+                        <span className="status-chip">{entry.source || '-'}</span>
+                      </div>
+                    </div>
+                    <p className="feed-item-line">Campaign: {campaign}</p>
+                    <p className="feed-item-line">Created: {formatDateTime(entry.created_at)}</p>
+                  </article>
+                )
+              })}
             </div>
           </>
         )}
@@ -610,7 +695,7 @@ export function App() {
               setContactRequestsSourceFilter('')
             }}
           >
-            Clear Filters
+            <ButtonIcon name="filter" />Clear Filters
           </button>
           <button
             type="button"
@@ -618,7 +703,7 @@ export function App() {
             onClick={() => void contactRequests.refetch()}
             disabled={!token}
           >
-            Reload
+            <ButtonIcon name="refresh" />Reload
           </button>
         </div>
         {!token && <p className="muted">Save admin token to load contact requests.</p>}
@@ -636,29 +721,20 @@ export function App() {
             <p className="muted">
               Loaded items: {contactRequestsCount} | Total: {contactRequests.data?.total ?? 0}
             </p>
-            <div className="waitlist-table-wrap">
-              <table className="waitlist-table">
-                <thead>
-                  <tr>
-                    <th>Email</th>
-                    <th>Request Type</th>
-                    <th>Source</th>
-                    <th>Status</th>
-                    <th>Created</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(contactRequests.data?.items ?? []).map((entry) => (
-                    <tr key={entry.id}>
-                      <td><code>{entry.email}</code></td>
-                      <td>{entry.request_type || '-'}</td>
-                      <td>{entry.source || '-'}</td>
-                      <td>{entry.status || '-'}</td>
-                      <td>{formatDateTime(entry.created_at)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="feed-list">
+              {(contactRequests.data?.items ?? []).map((entry) => (
+                <article key={entry.id} className="feed-item">
+                  <div className="feed-item-head">
+                    <div className="feed-item-title"><code>{entry.email}</code></div>
+                    <div className="feed-item-chips">
+                      <span className="status-chip">{entry.request_type || '-'}</span>
+                      <span className="status-chip">{entry.status || '-'}</span>
+                    </div>
+                  </div>
+                  <p className="feed-item-line">Source: {entry.source || '-'}</p>
+                  <p className="feed-item-line">Created: {formatDateTime(entry.created_at)}</p>
+                </article>
+              ))}
             </div>
           </>
         )}
@@ -714,7 +790,7 @@ export function App() {
               setBugReportsSourceFilter('')
             }}
           >
-            Clear Filters
+            <ButtonIcon name="filter" />Clear Filters
           </button>
           <button
             type="button"
@@ -722,7 +798,7 @@ export function App() {
             onClick={() => void bugReports.refetch()}
             disabled={!token}
           >
-            Reload
+            <ButtonIcon name="refresh" />Reload
           </button>
         </div>
         {!token && <p className="muted">Save admin token to load bug reports.</p>}
@@ -738,36 +814,28 @@ export function App() {
             <p className="muted">
               Loaded items: {bugReportsCount} | Total: {bugReports.data?.total ?? 0}
             </p>
-            <div className="waitlist-table-wrap">
-              <table className="waitlist-table">
-                <thead>
-                  <tr>
-                    <th>Report</th>
-                    <th>Severity</th>
-                    <th>Status</th>
-                    <th>Installation</th>
-                    <th>Reporter</th>
-                    <th>Title</th>
-                    <th>Created</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(bugReports.data?.items ?? []).map((entry) => (
-                    <tr key={entry.report_id}>
-                      <td><code>{entry.report_id}</code></td>
-                      <td>{entry.severity || '-'}</td>
-                      <td>{entry.status || '-'}</td>
-                      <td>
-                        <code>{entry.installation_id}</code>
-                        {entry.workspace_id ? <div className="muted">ws: {entry.workspace_id}</div> : null}
-                      </td>
-                      <td>{entry.reporter_username || entry.reporter_user_id || '-'}</td>
-                      <td title={entry.title}>{entry.title || '-'}</td>
-                      <td>{formatDateTime(entry.created_at)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="feed-list">
+              {(bugReports.data?.items ?? []).map((entry) => (
+                <article key={entry.report_id} className="feed-item">
+                  <div className="feed-item-head">
+                    <div>
+                      <div className="feed-item-title">{entry.title || '-'}</div>
+                      <div className="feed-item-subtitle"><code>{entry.report_id}</code></div>
+                    </div>
+                    <div className="feed-item-chips">
+                      <span className="status-chip">{entry.severity || '-'}</span>
+                      <span className="status-chip">{entry.status || '-'}</span>
+                    </div>
+                  </div>
+                  <p className="feed-item-line">
+                    Installation: <code>{entry.installation_id}</code>
+                    {entry.workspace_id ? <> | ws: <code>{entry.workspace_id}</code></> : null}
+                  </p>
+                  <p className="feed-item-line">Reporter: {entry.reporter_username || entry.reporter_user_id || '-'}</p>
+                  <p className="feed-item-line">Created: {formatDateTime(entry.created_at)}</p>
+                  <p className="feed-item-desc">{entry.description || '-'}</p>
+                </article>
+              ))}
             </div>
           </>
         )}
@@ -800,7 +868,7 @@ export function App() {
                 setStatusFilter('')
               }}
             >
-              Clear Filters
+              <ButtonIcon name="filter" />Clear Filters
             </button>
           </div>
           <p className="muted">Loaded items: {installationCount}</p>
@@ -938,6 +1006,7 @@ export function App() {
 
                   <div className="row">
                     <button type="submit" disabled={updateMutation.isPending}>
+                      <ButtonIcon name="save" />
                       {updateMutation.isPending ? 'Saving...' : 'Save Subscription'}
                     </button>
                     <button
@@ -949,7 +1018,7 @@ export function App() {
                         setFeedback('Form reset.')
                       }}
                     >
-                      Reset Form
+                      <ButtonIcon name="reset" />Reset Form
                     </button>
                   </div>
                 </form>

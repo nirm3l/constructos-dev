@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import secrets
 import string
 import hashlib
 import re
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
@@ -14,7 +16,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, func, or_, select
@@ -34,6 +36,16 @@ def _env_int(name: str, default: int) -> int:
     if not raw:
         return default
     return int(raw)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    raw = raw.strip()
+    if not raw:
+        return default
+    return float(raw)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -70,6 +82,8 @@ LCP_SIGNING_KEY_ID = os.getenv("LCP_SIGNING_KEY_ID", "default-ed25519").strip() 
 LCP_REQUIRE_SIGNED_TOKENS = _env_bool("LCP_REQUIRE_SIGNED_TOKENS", False)
 LCP_DEFAULT_MAX_INSTALLATIONS = max(1, _env_int("LCP_DEFAULT_MAX_INSTALLATIONS", 3))
 LCP_PUBLIC_BETA_FREE_UNTIL = _env_datetime_utc("LCP_PUBLIC_BETA_FREE_UNTIL")
+LCP_ADMIN_SSE_POLL_SECONDS = max(0.5, _env_float("LCP_ADMIN_SSE_POLL_SECONDS", 1.0))
+LCP_ADMIN_SSE_HEARTBEAT_SECONDS = max(5.0, _env_float("LCP_ADMIN_SSE_HEARTBEAT_SECONDS", 15.0))
 LCP_CORS_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
@@ -364,12 +378,61 @@ def _normalize_bug_report_status(value: str | None) -> str:
     return normalized
 
 
-def _require_admin_token(authorization: str | None = Header(default=None)) -> None:
+_admin_event_state_lock = threading.Lock()
+_admin_event_revision = 0
+_admin_event_payload: dict[str, Any] = {
+    "revision": 0,
+    "topic": "control-plane",
+    "action": "startup",
+    "at": datetime.now(timezone.utc).isoformat(),
+    "details": {},
+}
+
+
+def _publish_admin_event(topic: str, action: str, details: dict[str, Any] | None = None) -> None:
+    global _admin_event_revision, _admin_event_payload
+    with _admin_event_state_lock:
+        _admin_event_revision += 1
+        _admin_event_payload = {
+            "revision": _admin_event_revision,
+            "topic": str(topic or "").strip() or "control-plane",
+            "action": str(action or "").strip() or "changed",
+            "at": _now_utc().isoformat(),
+            "details": dict(details or {}),
+        }
+
+
+def _get_admin_event_snapshot() -> dict[str, Any]:
+    with _admin_event_state_lock:
+        return dict(_admin_event_payload)
+
+
+def _format_sse_message(event: str, payload: dict[str, Any], *, event_id: str | None = None) -> str:
+    lines: list[str] = []
+    if event_id:
+        lines.append(f"id: {event_id}")
+    lines.append(f"event: {event}")
+    serialized = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), default=str)
+    for line in serialized.splitlines() or ["{}"]:
+        lines.append(f"data: {line}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _validate_admin_auth_token(
+    *,
+    token_query: str | None = None,
+    authorization: str | None = None,
+) -> None:
     if not LCP_API_TOKEN:
         return
-    provided = _extract_bearer_secret(authorization)
+    provided = str(token_query or "").strip() or (_extract_bearer_secret(authorization) or "")
     if not provided or provided != LCP_API_TOKEN:
         raise HTTPException(status_code=401, detail="Invalid control-plane admin token")
+
+
+def _require_admin_token(authorization: str | None = Header(default=None)) -> None:
+    _validate_admin_auth_token(authorization=authorization)
 
 
 def _require_installation_auth(
@@ -768,6 +831,52 @@ def health() -> dict[str, Any]:
     }
 
 
+@app.get("/v1/admin/events")
+async def admin_events_stream(
+    request: Request,
+    token: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+) -> StreamingResponse:
+    _validate_admin_auth_token(token_query=token, authorization=authorization)
+
+    async def event_stream():
+        last_revision = -1
+        last_heartbeat = _now_utc()
+        while True:
+            if await request.is_disconnected():
+                break
+
+            snapshot = _get_admin_event_snapshot()
+            revision = int(snapshot.get("revision") or 0)
+            if revision != last_revision:
+                yield _format_sse_message("refresh", snapshot, event_id=str(revision))
+                last_revision = revision
+                last_heartbeat = _now_utc()
+            else:
+                now = _now_utc()
+                if (now - last_heartbeat).total_seconds() >= LCP_ADMIN_SSE_HEARTBEAT_SECONDS:
+                    yield _format_sse_message(
+                        "heartbeat",
+                        {
+                            "revision": revision,
+                            "at": now.isoformat(),
+                        },
+                        event_id=str(revision),
+                    )
+                    last_heartbeat = now
+            await asyncio.sleep(LCP_ADMIN_SSE_POLL_SECONDS)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.post("/v1/public/waitlist")
 def public_join_waitlist(
     payload: WaitlistJoinRequest,
@@ -795,6 +904,11 @@ def public_join_waitlist(
         existing.metadata_json = _dump_metadata(merged_metadata)
         db.commit()
         db.refresh(existing)
+        _publish_admin_event(
+            "waitlist",
+            "upserted",
+            {"email": existing.email, "created": False},
+        )
         return {
             "ok": True,
             "created": False,
@@ -810,6 +924,11 @@ def public_join_waitlist(
     db.add(record)
     db.commit()
     db.refresh(record)
+    _publish_admin_event(
+        "waitlist",
+        "created",
+        {"email": record.email, "created": True},
+    )
     return {
         "ok": True,
         "created": True,
@@ -848,6 +967,11 @@ def public_create_contact_request(
         existing.metadata_json = _dump_metadata(merged_metadata)
         db.commit()
         db.refresh(existing)
+        _publish_admin_event(
+            "contact_requests",
+            "upserted",
+            {"email": existing.email, "request_type": existing.request_type, "created": False},
+        )
         return {
             "ok": True,
             "created": False,
@@ -864,6 +988,11 @@ def public_create_contact_request(
     db.add(record)
     db.commit()
     db.refresh(record)
+    _publish_admin_event(
+        "contact_requests",
+        "created",
+        {"email": record.email, "request_type": record.request_type, "created": True},
+    )
     return {
         "ok": True,
         "created": True,
@@ -932,6 +1061,11 @@ def create_bug_report(
         existing.metadata_json = _dump_metadata(merged_metadata)
         db.commit()
         db.refresh(existing)
+        _publish_admin_event(
+            "bug_reports",
+            "upserted",
+            {"report_id": existing.report_id, "installation_id": existing.installation_id, "created": False},
+        )
         return {
             "ok": True,
             "created": False,
@@ -961,6 +1095,11 @@ def create_bug_report(
     db.add(record)
     db.commit()
     db.refresh(record)
+    _publish_admin_event(
+        "bug_reports",
+        "created",
+        {"report_id": record.report_id, "installation_id": record.installation_id, "created": True},
+    )
     return {
         "ok": True,
         "created": True,
@@ -979,6 +1118,11 @@ def register_installation(
     entitlement = _compute_entitlement(installation)
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
+    _publish_admin_event(
+        "installations",
+        "registered",
+        {"installation_id": installation.installation_id},
+    )
     return {
         "ok": True,
         "installation": {
@@ -1004,6 +1148,11 @@ def heartbeat_installation(
     entitlement = _compute_entitlement(installation)
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
+    _publish_admin_event(
+        "installations",
+        "heartbeat",
+        {"installation_id": installation.installation_id},
+    )
     return {"ok": True, "entitlement": entitlement, "entitlement_token": entitlement_token}
 
 
@@ -1091,6 +1240,11 @@ def activate_installation(
     entitlement = _compute_entitlement(installation)
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
+    _publish_admin_event(
+        "installations",
+        "activated",
+        {"installation_id": installation.installation_id, "customer_ref": installation.customer_ref},
+    )
 
     refreshed_active_count = len(_active_customer_installations(db, activation_code.customer_ref))
 
@@ -1150,6 +1304,11 @@ def admin_create_activation_code(
     db.add(record)
     db.commit()
     db.refresh(record)
+    _publish_admin_event(
+        "activation_codes",
+        "created",
+        {"code_id": record.id, "customer_ref": record.customer_ref},
+    )
     return {
         "ok": True,
         "activation_code": activation_code_raw,
@@ -1218,6 +1377,11 @@ def admin_deactivate_activation_code(
     record.is_active = False
     db.commit()
     db.refresh(record)
+    _publish_admin_event(
+        "activation_codes",
+        "deactivated",
+        {"code_id": record.id, "customer_ref": record.customer_ref},
+    )
     return {"ok": True, "activation_code_record": _serialize_activation_code(record)}
 
 
@@ -1256,6 +1420,11 @@ def admin_create_client_token(
     db.add(record)
     db.commit()
     db.refresh(record)
+    _publish_admin_event(
+        "client_tokens",
+        "created",
+        {"token_id": record.id, "customer_ref": record.customer_ref},
+    )
     return {
         "ok": True,
         "client_token": raw_token,
@@ -1323,6 +1492,11 @@ def admin_deactivate_client_token(
     record.is_active = False
     db.commit()
     db.refresh(record)
+    _publish_admin_event(
+        "client_tokens",
+        "deactivated",
+        {"token_id": record.id, "customer_ref": record.customer_ref},
+    )
     return {"ok": True, "client_token_record": _serialize_client_token(record)}
 
 
@@ -1533,6 +1707,11 @@ def admin_update_bug_report(
 
     db.commit()
     db.refresh(record)
+    _publish_admin_event(
+        "bug_reports",
+        "updated",
+        {"report_id": record.report_id, "status": record.status},
+    )
     return {
         "ok": True,
         "bug_report": _serialize_bug_report(record),
@@ -1624,6 +1803,11 @@ def admin_update_subscription(
     entitlement = _compute_entitlement(installation)
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
+    _publish_admin_event(
+        "installations",
+        "subscription_updated",
+        {"installation_id": installation.installation_id, "subscription_status": installation.subscription_status},
+    )
 
     return {
         "ok": True,

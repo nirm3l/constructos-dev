@@ -596,3 +596,10 @@ def test_support_bug_report_rejects_invalid_severity(tmp_path: Path):
         )
         assert invalid.status_code == 400
         assert "Unsupported severity" in invalid.json()["detail"]
+
+
+def test_admin_events_stream_requires_admin_token(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        unauthorized = client.get("/v1/admin/events")
+        assert unauthorized.status_code == 401
+        assert "Invalid control-plane admin token" in unauthorized.json()["detail"]

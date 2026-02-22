@@ -160,3 +160,14 @@ export function listBugReports(
   if (params.offset != null) search.set('offset', String(params.offset))
   return api<BugReportsListResponse>(`/v1/admin/bug-reports?${search.toString()}`, token)
 }
+
+export function openAdminEvents(token: string | null): EventSource {
+  const query = new URLSearchParams()
+  const normalizedToken = String(token || '').trim()
+  if (normalizedToken) {
+    query.set('token', normalizedToken)
+  }
+  const suffix = query.toString()
+  const url = suffix ? `/v1/admin/events?${suffix}` : '/v1/admin/events'
+  return new EventSource(url)
+}
