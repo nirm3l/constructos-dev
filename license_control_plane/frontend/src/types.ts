@@ -64,6 +64,8 @@ export type HealthResponse = {
   timestamp: string
   trial_days: number
   default_max_installations?: number
+  public_beta_free_until?: string | null
+  public_beta_active?: boolean
 }
 
 export type ActivationCodeRecord = {
@@ -148,6 +150,38 @@ export type ContactRequestRecord = {
 export type ContactRequestsListResponse = {
   ok: boolean
   items: ContactRequestRecord[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export type BugReportRecord = {
+  id: number
+  report_id: string
+  installation_id: string
+  workspace_id: string | null
+  customer_ref: string | null
+  source: string
+  status: string
+  severity: string
+  title: string
+  description: string
+  steps_to_reproduce: string | null
+  expected_behavior: string | null
+  actual_behavior: string | null
+  reporter_user_id: string | null
+  reporter_username: string | null
+  triage_note: string | null
+  assignee: string | null
+  dedup_key: string
+  metadata: Record<string, unknown>
+  updated_at: string
+  created_at: string
+}
+
+export type BugReportsListResponse = {
+  ok: boolean
+  items: BugReportRecord[]
   total: number
   limit: number
   offset: number

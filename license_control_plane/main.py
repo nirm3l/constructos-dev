@@ -6,6 +6,7 @@ import secrets
 import string
 import hashlib
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +43,24 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_datetime_utc(name: str) -> datetime | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    normalized = str(raw).strip()
+    if not normalized:
+        return None
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an ISO 8601 datetime (example: 2026-03-31T23:59:59Z)") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 LCP_DATABASE_URL = os.getenv("LCP_DATABASE_URL", "sqlite:////data/license-control-plane.db").strip() or "sqlite:////data/license-control-plane.db"
 LCP_API_TOKEN = os.getenv("LCP_API_TOKEN", "").strip()
 LCP_TRIAL_DAYS = max(1, _env_int("LCP_TRIAL_DAYS", 7))
@@ -50,6 +69,7 @@ LCP_SIGNING_PRIVATE_KEY_PEM = os.getenv("LCP_SIGNING_PRIVATE_KEY_PEM", "").strip
 LCP_SIGNING_KEY_ID = os.getenv("LCP_SIGNING_KEY_ID", "default-ed25519").strip() or "default-ed25519"
 LCP_REQUIRE_SIGNED_TOKENS = _env_bool("LCP_REQUIRE_SIGNED_TOKENS", False)
 LCP_DEFAULT_MAX_INSTALLATIONS = max(1, _env_int("LCP_DEFAULT_MAX_INSTALLATIONS", 3))
+LCP_PUBLIC_BETA_FREE_UNTIL = _env_datetime_utc("LCP_PUBLIC_BETA_FREE_UNTIL")
 LCP_CORS_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
@@ -63,6 +83,8 @@ STATIC_DIR = BASE_DIR / "static"
 INDEX_HTML = STATIC_DIR / "index.html"
 EMAIL_PATTERN = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
 PUBLIC_REQUEST_TYPES = {"demo", "onboarding", "plan_details"}
+BUG_REPORT_SEVERITIES = {"low", "medium", "high", "critical"}
+BUG_REPORT_STATUSES = {"new", "triaged", "in_progress", "resolved", "closed", "rejected"}
 
 Base = declarative_base()
 
@@ -160,6 +182,36 @@ class ContactRequest(Base):
     )
 
 
+class BugReport(Base):
+    __tablename__ = "bug_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    report_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    installation_id: Mapped[str] = mapped_column(String(128), index=True)
+    workspace_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    customer_ref: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    source: Mapped[str] = mapped_column(String(64), default="task-app", index=True)
+    status: Mapped[str] = mapped_column(String(32), default="new", index=True)
+    severity: Mapped[str] = mapped_column(String(16), default="medium", index=True)
+    title: Mapped[str] = mapped_column(String(140))
+    description: Mapped[str] = mapped_column(Text)
+    steps_to_reproduce: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expected_behavior: Mapped[str | None] = mapped_column(Text, nullable=True)
+    actual_behavior: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reporter_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    reporter_username: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    triage_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    assignee: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    dedup_key: Mapped[str] = mapped_column(String(128), index=True)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 engine = create_engine(
     LCP_DATABASE_URL,
     connect_args={"check_same_thread": False} if LCP_DATABASE_URL.startswith("sqlite") else {},
@@ -223,6 +275,27 @@ class ContactRequestCreateRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class BugReportCreateRequest(BaseModel):
+    installation_id: str = Field(min_length=3, max_length=128)
+    workspace_id: str | None = Field(default=None, max_length=64)
+    source: str | None = Field(default="task-app", max_length=64)
+    title: str = Field(min_length=3, max_length=140)
+    description: str = Field(min_length=5, max_length=4000)
+    steps_to_reproduce: str | None = Field(default=None, max_length=4000)
+    expected_behavior: str | None = Field(default=None, max_length=2000)
+    actual_behavior: str | None = Field(default=None, max_length=2000)
+    severity: str = Field(default="medium", min_length=3, max_length=16)
+    reporter_user_id: str | None = Field(default=None, max_length=64)
+    reporter_username: str | None = Field(default=None, max_length=128)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AdminBugReportUpdateRequest(BaseModel):
+    status: str | None = Field(default=None, max_length=32)
+    triage_note: str | None = Field(default=None, max_length=4000)
+    assignee: str | None = Field(default=None, max_length=128)
+
+
 @dataclass(frozen=True)
 class InstallationAuthContext:
     auth_type: str
@@ -270,6 +343,24 @@ def _normalize_public_request_type(value: str | None) -> str:
     if normalized not in PUBLIC_REQUEST_TYPES:
         allowed = ", ".join(sorted(PUBLIC_REQUEST_TYPES))
         raise HTTPException(status_code=400, detail=f"Unsupported request_type. Allowed values: {allowed}")
+    return normalized
+
+
+def _normalize_bug_report_severity(value: str | None) -> str:
+    normalized = str(value or "").strip().lower() or "medium"
+    if normalized not in BUG_REPORT_SEVERITIES:
+        allowed = ", ".join(sorted(BUG_REPORT_SEVERITIES))
+        raise HTTPException(status_code=400, detail=f"Unsupported severity. Allowed values: {allowed}")
+    return normalized
+
+
+def _normalize_bug_report_status(value: str | None) -> str:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="status is required")
+    if normalized not in BUG_REPORT_STATUSES:
+        allowed = ", ".join(sorted(BUG_REPORT_STATUSES))
+        raise HTTPException(status_code=400, detail=f"Unsupported status. Allowed values: {allowed}")
     return normalized
 
 
@@ -326,6 +417,13 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _is_public_beta_active(now: datetime | None = None) -> bool:
+    if LCP_PUBLIC_BETA_FREE_UNTIL is None:
+        return False
+    current = now or _now_utc()
+    return current < LCP_PUBLIC_BETA_FREE_UNTIL
 
 
 def _load_metadata(raw: str | None) -> dict[str, Any]:
@@ -437,6 +535,40 @@ def _serialize_contact_request(record: ContactRequest) -> dict[str, Any]:
     }
 
 
+def _serialize_bug_report(record: BugReport) -> dict[str, Any]:
+    return {
+        "id": record.id,
+        "report_id": record.report_id,
+        "installation_id": record.installation_id,
+        "workspace_id": record.workspace_id,
+        "customer_ref": record.customer_ref,
+        "source": record.source,
+        "status": record.status,
+        "severity": record.severity,
+        "title": record.title,
+        "description": record.description,
+        "steps_to_reproduce": record.steps_to_reproduce,
+        "expected_behavior": record.expected_behavior,
+        "actual_behavior": record.actual_behavior,
+        "reporter_user_id": record.reporter_user_id,
+        "reporter_username": record.reporter_username,
+        "triage_note": record.triage_note,
+        "assignee": record.assignee,
+        "dedup_key": record.dedup_key,
+        "metadata": _load_metadata(record.metadata_json),
+        "updated_at": record.updated_at.isoformat(),
+        "created_at": record.created_at.isoformat(),
+    }
+
+
+def _bug_report_dedup_key(*, installation_id: str, title: str, description: str, severity: str) -> str:
+    normalized_title = str(title or "").strip().lower()
+    normalized_description = str(description or "").strip().lower()
+    normalized_severity = str(severity or "").strip().lower()
+    raw = "||".join([installation_id, normalized_title, normalized_description, normalized_severity])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def _active_customer_installations(db: Session, customer_ref: str) -> list[Installation]:
     matches = db.execute(
         select(Installation).where(Installation.customer_ref == customer_ref)
@@ -477,26 +609,41 @@ def _compute_entitlement(installation: Installation) -> dict[str, Any]:
 
     status = "expired"
     plan_code = installation.plan_code or None
+    effective_valid_until = valid_until
+    is_public_beta_entitlement = False
     if subscription_status in {"active", "trialing"} and (valid_until is None or valid_until > now):
         status = "active"
     elif subscription_status in {"grace", "past_due"} and valid_until and valid_until > now:
         status = "grace"
+    elif _is_public_beta_active(now):
+        status = "active"
+        plan_code = plan_code or "beta_free"
+        effective_valid_until = LCP_PUBLIC_BETA_FREE_UNTIL
+        is_public_beta_entitlement = True
     elif trial_ends_at > now:
         status = "trial"
         if not plan_code:
             plan_code = "trial"
+        effective_valid_until = trial_ends_at
+    else:
+        effective_valid_until = None
 
     token_expires_at = now + timedelta(seconds=LCP_TOKEN_TTL_SECONDS)
+    metadata = _load_metadata(installation.metadata_json)
+    if is_public_beta_entitlement and LCP_PUBLIC_BETA_FREE_UNTIL:
+        metadata = dict(metadata)
+        metadata["public_beta"] = True
+        metadata["public_beta_free_until"] = LCP_PUBLIC_BETA_FREE_UNTIL.isoformat()
 
     return {
         "installation_id": installation.installation_id,
         "status": status,
         "plan_code": plan_code,
         "valid_from": now.isoformat(),
-        "valid_until": valid_until.isoformat() if valid_until else (trial_ends_at.isoformat() if status == "trial" else None),
+        "valid_until": effective_valid_until.isoformat() if effective_valid_until else None,
         "trial_ends_at": trial_ends_at.isoformat(),
         "token_expires_at": token_expires_at.isoformat(),
-        "metadata": _load_metadata(installation.metadata_json),
+        "metadata": metadata,
     }
 
 
@@ -522,6 +669,8 @@ def _upsert_installation(db: Session, payload: InstallationRegisterRequest | Ins
     now = _now_utc()
     if installation is None:
         trial_ends_at = now + timedelta(days=LCP_TRIAL_DAYS)
+        if LCP_PUBLIC_BETA_FREE_UNTIL and LCP_PUBLIC_BETA_FREE_UNTIL > trial_ends_at:
+            trial_ends_at = LCP_PUBLIC_BETA_FREE_UNTIL
         installation = Installation(
             installation_id=payload.installation_id,
             workspace_id=payload.workspace_id,
@@ -614,6 +763,8 @@ def health() -> dict[str, Any]:
         "timestamp": _now_utc().isoformat(),
         "trial_days": LCP_TRIAL_DAYS,
         "default_max_installations": LCP_DEFAULT_MAX_INSTALLATIONS,
+        "public_beta_free_until": LCP_PUBLIC_BETA_FREE_UNTIL.isoformat() if LCP_PUBLIC_BETA_FREE_UNTIL else None,
+        "public_beta_active": _is_public_beta_active(),
     }
 
 
@@ -717,6 +868,103 @@ def public_create_contact_request(
         "ok": True,
         "created": True,
         "contact_request": _serialize_contact_request(record),
+    }
+
+
+@app.post("/v1/support/bug-reports")
+def create_bug_report(
+    payload: BugReportCreateRequest,
+    request: Request,
+    auth_context: InstallationAuthContext = Depends(_require_installation_auth),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    installation_id = str(payload.installation_id or "").strip()
+    if not installation_id:
+        raise HTTPException(status_code=400, detail="installation_id is required")
+
+    title = str(payload.title or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title is required")
+
+    description = str(payload.description or "").strip()
+    if not description:
+        raise HTTPException(status_code=400, detail="description is required")
+
+    severity = _normalize_bug_report_severity(payload.severity)
+    source = str(payload.source or "").strip()[:64] or "task-app"
+
+    installation = db.execute(
+        select(Installation).where(Installation.installation_id == installation_id)
+    ).scalar_one_or_none()
+    token_customer_ref = str(auth_context.customer_ref or "").strip() or None
+    installation_customer_ref = str(installation.customer_ref or "").strip() if installation is not None else ""
+    if token_customer_ref and installation_customer_ref and token_customer_ref != installation_customer_ref:
+        raise HTTPException(status_code=403, detail="Token is not allowed for this installation")
+    if installation is not None and token_customer_ref and not installation_customer_ref:
+        installation.customer_ref = token_customer_ref
+
+    customer_ref = token_customer_ref or installation_customer_ref or None
+    workspace_id = str(payload.workspace_id or "").strip()[:64] or None
+
+    metadata = dict(payload.metadata or {})
+    request_ip = _resolve_request_ip(request)
+    user_agent = str(request.headers.get("user-agent") or "").strip()[:512]
+    if request_ip:
+        metadata["request_ip"] = request_ip
+    if user_agent:
+        metadata["user_agent"] = user_agent
+
+    dedup_key = _bug_report_dedup_key(
+        installation_id=installation_id,
+        title=title,
+        description=description,
+        severity=severity,
+    )
+    existing = db.execute(
+        select(BugReport).where(
+            BugReport.installation_id == installation_id,
+            BugReport.dedup_key == dedup_key,
+        ).order_by(BugReport.created_at.desc(), BugReport.id.desc()).limit(1)
+    ).scalar_one_or_none()
+    if existing is not None:
+        merged_metadata = _load_metadata(existing.metadata_json)
+        merged_metadata.update(metadata)
+        existing.metadata_json = _dump_metadata(merged_metadata)
+        db.commit()
+        db.refresh(existing)
+        return {
+            "ok": True,
+            "created": False,
+            "bug_report": _serialize_bug_report(existing),
+        }
+
+    record = BugReport(
+        report_id=f"bug_{uuid.uuid4()}",
+        installation_id=installation_id,
+        workspace_id=workspace_id,
+        customer_ref=customer_ref,
+        source=source,
+        status="new",
+        severity=severity,
+        title=title,
+        description=description,
+        steps_to_reproduce=str(payload.steps_to_reproduce or "").strip() or None,
+        expected_behavior=str(payload.expected_behavior or "").strip() or None,
+        actual_behavior=str(payload.actual_behavior or "").strip() or None,
+        reporter_user_id=str(payload.reporter_user_id or "").strip() or None,
+        reporter_username=str(payload.reporter_username or "").strip() or None,
+        triage_note=None,
+        assignee=None,
+        dedup_key=dedup_key,
+        metadata_json=_dump_metadata(metadata),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {
+        "ok": True,
+        "created": True,
+        "bug_report": _serialize_bug_report(record),
     }
 
 
@@ -1181,6 +1429,113 @@ def admin_list_contact_requests(
         "total": total,
         "limit": limit,
         "offset": offset,
+    }
+
+
+@app.get("/v1/admin/bug-reports")
+def admin_list_bug_reports(
+    q: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    severity: str | None = Query(default=None),
+    source: str | None = Query(default=None),
+    workspace_id: str | None = Query(default=None),
+    customer_ref: str | None = Query(default=None),
+    installation_id: str | None = Query(default=None),
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    _auth: None = Depends(_require_admin_token),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    filters = []
+    query_text = str(q or "").strip().lower()
+    if query_text:
+        like = f"%{query_text}%"
+        filters.append(
+            or_(
+                func.lower(BugReport.report_id).like(like),
+                func.lower(BugReport.installation_id).like(like),
+                func.lower(func.coalesce(BugReport.workspace_id, "")).like(like),
+                func.lower(func.coalesce(BugReport.customer_ref, "")).like(like),
+                func.lower(func.coalesce(BugReport.reporter_username, "")).like(like),
+                func.lower(func.coalesce(BugReport.title, "")).like(like),
+                func.lower(func.coalesce(BugReport.description, "")).like(like),
+            )
+        )
+
+    status_value = str(status or "").strip().lower()
+    if status_value:
+        filters.append(func.lower(BugReport.status) == status_value)
+
+    severity_value = str(severity or "").strip().lower()
+    if severity_value:
+        filters.append(func.lower(BugReport.severity) == severity_value)
+
+    source_value = str(source or "").strip().lower()
+    if source_value:
+        filters.append(func.lower(BugReport.source) == source_value)
+
+    workspace_value = str(workspace_id or "").strip()
+    if workspace_value:
+        filters.append(BugReport.workspace_id == workspace_value)
+
+    customer_value = str(customer_ref or "").strip()
+    if customer_value:
+        filters.append(BugReport.customer_ref == customer_value)
+
+    installation_value = str(installation_id or "").strip()
+    if installation_value:
+        filters.append(BugReport.installation_id == installation_value)
+
+    total_stmt = select(func.count()).select_from(BugReport)
+    rows_stmt = select(BugReport)
+    if filters:
+        for clause in filters:
+            total_stmt = total_stmt.where(clause)
+            rows_stmt = rows_stmt.where(clause)
+
+    total = int(db.execute(total_stmt).scalar_one())
+    rows = db.execute(
+        rows_stmt.order_by(BugReport.created_at.desc(), BugReport.id.desc()).offset(offset).limit(limit)
+    ).scalars().all()
+
+    return {
+        "ok": True,
+        "items": [_serialize_bug_report(row) for row in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.patch("/v1/admin/bug-reports/{report_id}")
+def admin_update_bug_report(
+    report_id: str,
+    payload: AdminBugReportUpdateRequest,
+    _auth: None = Depends(_require_admin_token),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    normalized_report_id = str(report_id or "").strip()
+    if not normalized_report_id:
+        raise HTTPException(status_code=400, detail="report_id is required")
+
+    record = db.execute(
+        select(BugReport).where(BugReport.report_id == normalized_report_id)
+    ).scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Bug report not found")
+
+    if payload.status is not None:
+        record.status = _normalize_bug_report_status(payload.status)
+    if payload.triage_note is not None:
+        record.triage_note = str(payload.triage_note or "").strip() or None
+    if payload.assignee is not None:
+        record.assignee = str(payload.assignee or "").strip() or None
+
+    db.commit()
+    db.refresh(record)
+    return {
+        "ok": True,
+        "bug_report": _serialize_bug_report(record),
     }
 
 

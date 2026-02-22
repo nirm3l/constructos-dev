@@ -13,6 +13,7 @@ import {
   linkTaskToSpecification,
   listAdminUsers,
   resetAdminUserPassword,
+  submitBugReport,
   updateAdminUserRole,
 } from '../api'
 import { useCoreQueries } from './useCoreQueries'
@@ -288,6 +289,27 @@ function App({ logout }: { logout: () => void }) {
     },
     onError: (error: unknown) => {
       setUiError(toErrorMessage(error, 'License activation failed'))
+    },
+  })
+  const submitBugReportMutation = useMutation({
+    mutationFn: (payload: {
+      title: string
+      description: string
+      steps_to_reproduce?: string | null
+      expected_behavior?: string | null
+      actual_behavior?: string | null
+      severity: 'low' | 'medium' | 'high' | 'critical'
+      include_diagnostics: boolean
+      context?: Record<string, unknown>
+      metadata?: Record<string, unknown>
+    }) => submitBugReport(userId, payload),
+    onSuccess: () => {
+      setUiError(null)
+      setUiInfo('Bug report sent to the control plane.')
+      setTimeout(() => setUiInfo(null), 2500)
+    },
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Bug report submission failed'))
     },
   })
   const { frontendVersion, backendVersion, backendBuild, backendDeployedAtUtc } = useAppVersion()
@@ -1693,6 +1715,8 @@ function App({ logout }: { logout: () => void }) {
       setTheme,
       setSpeechLang,
       themeMutation,
+      submitBugReport: submitBugReportMutation.mutateAsync,
+      submitBugReportPending: submitBugReportMutation.isPending,
       projectNames,
       taskNameMap,
       specificationNameMap,

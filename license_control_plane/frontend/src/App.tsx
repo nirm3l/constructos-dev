@@ -6,6 +6,7 @@ import {
   createClientToken,
   getHealth,
   getInstallation,
+  listBugReports,
   listContactRequests,
   listInstallations,
   listWaitlist,
@@ -93,6 +94,10 @@ export function App() {
   const [contactRequestsTypeFilter, setContactRequestsTypeFilter] = React.useState('')
   const [contactRequestsStatusFilter, setContactRequestsStatusFilter] = React.useState('')
   const [contactRequestsSourceFilter, setContactRequestsSourceFilter] = React.useState('')
+  const [bugReportsSearch, setBugReportsSearch] = React.useState('')
+  const [bugReportsStatusFilter, setBugReportsStatusFilter] = React.useState('')
+  const [bugReportsSeverityFilter, setBugReportsSeverityFilter] = React.useState('')
+  const [bugReportsSourceFilter, setBugReportsSourceFilter] = React.useState('')
   const [selectedInstallationId, setSelectedInstallationId] = React.useState<string | null>(null)
   const [form, setForm] = React.useState<FormState | null>(null)
   const [feedback, setFeedback] = React.useState<string>('')
@@ -138,6 +143,19 @@ export function App() {
         request_type: contactRequestsTypeFilter,
         status: contactRequestsStatusFilter,
         source: contactRequestsSourceFilter,
+        limit: 100,
+        offset: 0,
+      }),
+    enabled: Boolean(token),
+  })
+  const bugReports = useQuery({
+    queryKey: ['bug-reports', token, bugReportsSearch, bugReportsStatusFilter, bugReportsSeverityFilter, bugReportsSourceFilter],
+    queryFn: () =>
+      listBugReports(token, {
+        q: bugReportsSearch,
+        status: bugReportsStatusFilter,
+        severity: bugReportsSeverityFilter,
+        source: bugReportsSourceFilter,
         limit: 100,
         offset: 0,
       }),
@@ -247,6 +265,12 @@ export function App() {
   const installationCount = installations.data?.items.length ?? 0
   const waitlistCount = waitlist.data?.items.length ?? 0
   const contactRequestsCount = contactRequests.data?.items.length ?? 0
+  const bugReportsCount = bugReports.data?.items.length ?? 0
+  const publicBetaLabel = health.data?.public_beta_active
+    ? `active until ${formatDateTime(health.data?.public_beta_free_until ?? null)}`
+    : health.data?.public_beta_free_until
+      ? `ended (${formatDateTime(health.data?.public_beta_free_until ?? null)})`
+      : 'not configured'
 
   const saveToken = () => {
     const next = tokenInput.trim()
@@ -270,7 +294,7 @@ export function App() {
         <div>
           <h1>License Control Plane</h1>
           <p className="muted">
-            Health: {health.data?.ok ? 'OK' : 'Unknown'} | Default trial duration for new installations: {health.data?.trial_days ?? '-'} days | Default max installations: {health.data?.default_max_installations ?? '-'}
+            Health: {health.data?.ok ? 'OK' : 'Unknown'} | Public beta: {publicBetaLabel} | Default trial duration for new installations: {health.data?.trial_days ?? '-'} days | Default max installations: {health.data?.default_max_installations ?? '-'}
           </p>
         </div>
       </header>
@@ -630,6 +654,115 @@ export function App() {
                       <td>{entry.request_type || '-'}</td>
                       <td>{entry.source || '-'}</td>
                       <td>{entry.status || '-'}</td>
+                      <td>{formatDateTime(entry.created_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </section>
+
+      <section className="panel">
+        <h2>Bug Reports</h2>
+        <p className="muted">
+          Reports submitted from authenticated app users through the application server.
+        </p>
+        <div className="row compact">
+          <input
+            value={bugReportsSearch}
+            onChange={(event) => setBugReportsSearch(event.target.value)}
+            placeholder="Search by report ID, title, reporter, installation, workspace, or customer"
+          />
+          <select
+            value={bugReportsStatusFilter}
+            onChange={(event) => setBugReportsStatusFilter(event.target.value)}
+          >
+            <option value="">All statuses</option>
+            <option value="new">new</option>
+            <option value="triaged">triaged</option>
+            <option value="in_progress">in_progress</option>
+            <option value="resolved">resolved</option>
+            <option value="closed">closed</option>
+            <option value="rejected">rejected</option>
+          </select>
+          <select
+            value={bugReportsSeverityFilter}
+            onChange={(event) => setBugReportsSeverityFilter(event.target.value)}
+          >
+            <option value="">All severities</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="critical">critical</option>
+          </select>
+          <input
+            value={bugReportsSourceFilter}
+            onChange={(event) => setBugReportsSourceFilter(event.target.value)}
+            placeholder="Source (for example task-app-ui)"
+          />
+        </div>
+        <div className="row compact">
+          <button
+            type="button"
+            className="button-secondary"
+            onClick={() => {
+              setBugReportsSearch('')
+              setBugReportsStatusFilter('')
+              setBugReportsSeverityFilter('')
+              setBugReportsSourceFilter('')
+            }}
+          >
+            Clear Filters
+          </button>
+          <button
+            type="button"
+            className="button-secondary"
+            onClick={() => void bugReports.refetch()}
+            disabled={!token}
+          >
+            Reload
+          </button>
+        </div>
+        {!token && <p className="muted">Save admin token to load bug reports.</p>}
+        {bugReports.isLoading && token && <p className="muted">Loading bug reports...</p>}
+        {bugReports.isError && token && (
+          <p className="error">{bugReports.error instanceof Error ? bugReports.error.message : 'Failed to load bug reports.'}</p>
+        )}
+        {!bugReports.isLoading && !bugReports.isError && token && bugReportsCount === 0 && (
+          <p className="muted">No bug reports found for current filters.</p>
+        )}
+        {!bugReports.isLoading && !bugReports.isError && token && bugReportsCount > 0 && (
+          <>
+            <p className="muted">
+              Loaded items: {bugReportsCount} | Total: {bugReports.data?.total ?? 0}
+            </p>
+            <div className="waitlist-table-wrap">
+              <table className="waitlist-table">
+                <thead>
+                  <tr>
+                    <th>Report</th>
+                    <th>Severity</th>
+                    <th>Status</th>
+                    <th>Installation</th>
+                    <th>Reporter</th>
+                    <th>Title</th>
+                    <th>Created</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(bugReports.data?.items ?? []).map((entry) => (
+                    <tr key={entry.report_id}>
+                      <td><code>{entry.report_id}</code></td>
+                      <td>{entry.severity || '-'}</td>
+                      <td>{entry.status || '-'}</td>
+                      <td>
+                        <code>{entry.installation_id}</code>
+                        {entry.workspace_id ? <div className="muted">ws: {entry.workspace_id}</div> : null}
+                      </td>
+                      <td>{entry.reporter_username || entry.reporter_user_id || '-'}</td>
+                      <td title={entry.title}>{entry.title || '-'}</td>
                       <td>{formatDateTime(entry.created_at)}</td>
                     </tr>
                   ))}

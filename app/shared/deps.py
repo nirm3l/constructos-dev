@@ -35,6 +35,7 @@ LICENSE_WRITE_EXEMPT_PATHS = (
     "/api/auth/change-password",
     "/api/license/status",
     "/api/license/activate",
+    "/api/public",
 )
 
 

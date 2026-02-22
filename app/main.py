@@ -24,6 +24,7 @@ from features.agents.api import router as agents_router
 from features.attachments.api import router as attachments_router
 from features.notes.api import router as notes_router
 from features.note_groups.api import router as note_groups_router
+from features.support.api import router as support_router
 from features.agents.runner import start_automation_runner, stop_automation_runner
 from shared.core import bootstrap_data, start_projection_worker, startup_bootstrap, stop_projection_worker
 from shared.deps import is_license_write_allowed
@@ -113,3 +114,4 @@ app.include_router(views_router)
 app.include_router(agents_router)
 app.include_router(debug_router)
 app.include_router(licensing_router)
+app.include_router(support_router)

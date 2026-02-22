@@ -6,6 +6,8 @@ import type {
   AdminUsersPage,
   AuthMePayload,
   BootstrapPayload,
+  BugReportCreateRequest,
+  BugReportCreateResponse,
   LicenseActivationResponse,
   LicenseStatusResponse,
   AgentChatResponse,
@@ -120,6 +122,12 @@ export const getBootstrap = (userId: string) => api<BootstrapPayload>('/api/boot
 export const getLicenseStatus = (userId: string) => api<LicenseStatusResponse>('/api/license/status', userId)
 export const activateLicense = (userId: string, payload: { activation_code: string }) =>
   api<LicenseActivationResponse>('/api/license/activate', userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const submitBugReport = (userId: string, payload: BugReportCreateRequest) =>
+  api<BugReportCreateResponse>('/api/support/bug-reports', userId, {
     method: 'POST',
     body: JSON.stringify(payload),
   })

@@ -294,6 +294,27 @@ export type LicenseActivationResponse = {
   seat_usage: LicenseActivationSeatUsage | null
 }
 
+export type BugReportSeverity = 'low' | 'medium' | 'high' | 'critical'
+
+export type BugReportCreateRequest = {
+  title: string
+  description: string
+  steps_to_reproduce?: string | null
+  expected_behavior?: string | null
+  actual_behavior?: string | null
+  severity: BugReportSeverity
+  include_diagnostics: boolean
+  context?: Record<string, unknown>
+  metadata?: Record<string, unknown>
+}
+
+export type BugReportCreateResponse = {
+  ok: boolean
+  created: boolean
+  report_id: string | null
+  bug_report: Record<string, unknown>
+}
+
 export type AppVersionPayload = {
   backend_version: string
   backend_build: string | null

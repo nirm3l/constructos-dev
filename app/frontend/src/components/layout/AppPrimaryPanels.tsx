@@ -376,6 +376,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
               state.setTheme(next)
               state.themeMutation.mutate(next)
             }}
+            submitBugReport={state.submitBugReport}
+            bugReportSubmitting={state.submitBugReportPending}
           />
           {state.canManageUsers && (
             <AdminPanel

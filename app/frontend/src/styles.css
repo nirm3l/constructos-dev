@@ -658,7 +658,7 @@ body.md-fullscreen-open {
 
 @media (max-width: 720px) {
   .brand-badge {
-    max-width: 300px;
+    max-width: 270px;
     padding: 4px 10px 4px 5px;
     gap: 2px;
     border-radius: 14px;
@@ -672,7 +672,7 @@ body.md-fullscreen-open {
   }
 
   .brand-name {
-    font-size: 17px;
+    font-size: 15px;
     gap: 12px;
     transform: translateY(0.5px);
   }
@@ -693,13 +693,13 @@ body.md-fullscreen-open {
 
 @media (max-width: 520px) {
   .brand-badge {
-    max-width: 230px;
+    max-width: 205px;
     padding-right: 8px;
     gap: 4px;
   }
 
   .brand-name {
-    font-size: 14px;
+    font-size: 12px;
     gap: 9px;
     transform: translateY(0px);
   }
@@ -709,7 +709,8 @@ body.md-fullscreen-open {
   }
 
   .brand-sub {
-    font-size: 6.5px;
+    font-size: 6px;
+    letter-spacing: 0.045em;
   }
 
   .top-profile-btn {
@@ -740,7 +741,7 @@ body.md-fullscreen-open {
 
 @media (orientation: landscape) and (max-height: 520px) {
   .brand-badge {
-    max-width: 250px;
+    max-width: 220px;
     padding: 4px 8px 4px 5px;
     gap: 3px;
   }
@@ -753,7 +754,7 @@ body.md-fullscreen-open {
   }
 
   .brand-name {
-    font-size: 14px;
+    font-size: 12px;
     gap: 13px;
     transform: translateY(0);
   }
@@ -763,8 +764,8 @@ body.md-fullscreen-open {
   }
 
   .brand-sub {
-    font-size: 6.3px;
-    letter-spacing: 0.06em;
+    font-size: 5.8px;
+    letter-spacing: 0.045em;
   }
 
   .top-profile-btn {
@@ -2401,6 +2402,18 @@ button:disabled {
 .profile-actions {
   gap: 8px;
   justify-content: flex-end;
+}
+
+.profile-bug-report {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--line), var(--brand) 14%);
+  padding-top: 12px;
+}
+
+.profile-bug-form {
+  display: grid;
+  gap: 8px;
 }
 
 .profile-license {

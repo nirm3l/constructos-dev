@@ -1,5 +1,5 @@
 import React from 'react'
-import type { AdminWorkspaceUser, LicenseStatus, Note, Specification, Task } from '../types'
+import type { AdminWorkspaceUser, BugReportCreateRequest, LicenseStatus, Note, Specification, Task } from '../types'
 import { tagHue } from '../utils/ui'
 import { PopularTagFilters } from './shared/PopularTagFilters'
 import { Icon } from './shared/uiHelpers'
@@ -108,6 +108,8 @@ export function ProfilePanel({
   onLogout,
   onToggleTheme,
   onChangeSpeechLang,
+  submitBugReport,
+  bugReportSubmitting,
 }: {
   userName: string
   theme: 'light' | 'dark'
@@ -122,6 +124,8 @@ export function ProfilePanel({
   onLogout: () => void
   onToggleTheme: () => void
   onChangeSpeechLang: (value: string) => void
+  submitBugReport: (payload: BugReportCreateRequest) => Promise<void>
+  bugReportSubmitting: boolean
 }) {
   const nextTheme = theme === 'light' ? 'dark' : 'light'
   const licenseStatus = String(license?.status || '').trim().toLowerCase() || 'unknown'
@@ -132,6 +136,69 @@ export function ProfilePanel({
     if (Number.isNaN(parsed.getTime())) return value
     return parsed.toLocaleString()
   }
+  const [bugTitle, setBugTitle] = React.useState('')
+  const [bugDescription, setBugDescription] = React.useState('')
+  const [bugSeverity, setBugSeverity] = React.useState<'low' | 'medium' | 'high' | 'critical'>('medium')
+  const [bugSteps, setBugSteps] = React.useState('')
+  const [bugExpected, setBugExpected] = React.useState('')
+  const [bugActual, setBugActual] = React.useState('')
+  const [bugIncludeDiagnostics, setBugIncludeDiagnostics] = React.useState(true)
+  const [bugFeedback, setBugFeedback] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
+
+  const resetBugForm = React.useCallback(() => {
+    setBugTitle('')
+    setBugDescription('')
+    setBugSeverity('medium')
+    setBugSteps('')
+    setBugExpected('')
+    setBugActual('')
+    setBugIncludeDiagnostics(true)
+  }, [])
+
+  const handleSubmitBugReport = React.useCallback(
+    async (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault()
+      const title = String(bugTitle || '').trim()
+      const description = String(bugDescription || '').trim()
+      if (!title) {
+        setBugFeedback({ tone: 'error', message: 'Bug title is required.' })
+        return
+      }
+      if (!description) {
+        setBugFeedback({ tone: 'error', message: 'Bug description is required.' })
+        return
+      }
+      try {
+        await submitBugReport({
+          title,
+          description,
+          steps_to_reproduce: String(bugSteps || '').trim() || null,
+          expected_behavior: String(bugExpected || '').trim() || null,
+          actual_behavior: String(bugActual || '').trim() || null,
+          severity: bugSeverity,
+          include_diagnostics: bugIncludeDiagnostics,
+          context: {},
+          metadata: {},
+        })
+        resetBugForm()
+        setBugFeedback({ tone: 'success', message: 'Bug report was sent successfully.' })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to submit bug report.'
+        setBugFeedback({ tone: 'error', message })
+      }
+    },
+    [
+      bugActual,
+      bugDescription,
+      bugExpected,
+      bugIncludeDiagnostics,
+      bugSeverity,
+      bugSteps,
+      bugTitle,
+      resetBugForm,
+      submitBugReport,
+    ]
+  )
 
   return (
     <section className="card profile-panel">
@@ -192,6 +259,91 @@ export function ProfilePanel({
           Logout
         </button>
       </div>
+
+      <section className="profile-bug-report" aria-label="Bug reporting">
+        <div className="profile-license-head">
+          <h3>Report a bug</h3>
+          <span className="status-chip">Control Plane</span>
+        </div>
+        <form className="profile-bug-form" onSubmit={handleSubmitBugReport}>
+          <label className="field-control">
+            <span className="field-label">Title</span>
+            <input
+              value={bugTitle}
+              onChange={(event) => setBugTitle(event.target.value)}
+              placeholder="Short summary"
+              maxLength={140}
+              autoComplete="off"
+            />
+          </label>
+          <label className="field-control">
+            <span className="field-label">Severity</span>
+            <select value={bugSeverity} onChange={(event) => setBugSeverity(event.target.value as 'low' | 'medium' | 'high' | 'critical')}>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="critical">critical</option>
+            </select>
+          </label>
+          <label className="field-control">
+            <span className="field-label">Description</span>
+            <textarea
+              value={bugDescription}
+              onChange={(event) => setBugDescription(event.target.value)}
+              rows={4}
+              placeholder="What is happening?"
+            />
+          </label>
+          <label className="field-control">
+            <span className="field-label">Steps to reproduce (optional)</span>
+            <textarea
+              value={bugSteps}
+              onChange={(event) => setBugSteps(event.target.value)}
+              rows={3}
+              placeholder="Exact steps"
+            />
+          </label>
+          <label className="field-control">
+            <span className="field-label">Expected behavior (optional)</span>
+            <textarea
+              value={bugExpected}
+              onChange={(event) => setBugExpected(event.target.value)}
+              rows={2}
+              placeholder="What should happen?"
+            />
+          </label>
+          <label className="field-control">
+            <span className="field-label">Actual behavior (optional)</span>
+            <textarea
+              value={bugActual}
+              onChange={(event) => setBugActual(event.target.value)}
+              rows={2}
+              placeholder="What actually happens?"
+            />
+          </label>
+          <label className="row archived-toggle">
+            <input
+              type="checkbox"
+              checked={bugIncludeDiagnostics}
+              onChange={(event) => setBugIncludeDiagnostics(event.target.checked)}
+            />
+            Include diagnostics
+          </label>
+          <div className="row wrap profile-actions">
+            <button className="primary" type="submit" disabled={bugReportSubmitting || !bugTitle.trim() || !bugDescription.trim()}>
+              {bugReportSubmitting ? 'Submitting...' : 'Submit Bug Report'}
+            </button>
+            <button className="button-secondary" type="button" onClick={resetBugForm} disabled={bugReportSubmitting}>
+              Reset
+            </button>
+          </div>
+        </form>
+        {bugFeedback && (
+          <div className={`notice ${bugFeedback.tone === 'error' ? 'notice-error' : ''}`.trim()}>
+            {bugFeedback.message}
+          </div>
+        )}
+      </section>
 
       <section className="profile-license" aria-label="License details">
         <div className="profile-license-head">
