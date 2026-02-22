@@ -25,6 +25,7 @@ from features.attachments.api import router as attachments_router
 from features.notes.api import router as notes_router
 from features.note_groups.api import router as note_groups_router
 from features.support.api import router as support_router
+from features.support.outbox import start_bug_report_outbox_worker, stop_bug_report_outbox_worker
 from features.agents.runner import start_automation_runner, stop_automation_runner
 from shared.core import bootstrap_data, start_projection_worker, startup_bootstrap, stop_projection_worker
 from shared.deps import is_license_write_allowed
@@ -51,6 +52,7 @@ async def lifespan(_app: FastAPI):
     start_graph_projection_worker()
     start_vector_projection_worker()
     start_license_sync_worker()
+    start_bug_report_outbox_worker()
     start_system_notifications_worker()
     if AGENT_RUNNER_ENABLED:
         start_automation_runner()
@@ -58,6 +60,7 @@ async def lifespan(_app: FastAPI):
     if AGENT_RUNNER_ENABLED:
         stop_automation_runner()
     stop_system_notifications_worker()
+    stop_bug_report_outbox_worker()
     stop_license_sync_worker()
     stop_vector_projection_worker()
     stop_graph_projection_worker()

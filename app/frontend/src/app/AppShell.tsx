@@ -303,9 +303,13 @@ function App({ logout }: { logout: () => void }) {
       context?: Record<string, unknown>
       metadata?: Record<string, unknown>
     }) => submitBugReport(userId, payload),
-    onSuccess: () => {
+    onSuccess: (result) => {
       setUiError(null)
-      setUiInfo('Bug report sent to the control plane.')
+      if (result.queued) {
+        setUiInfo('Control plane unavailable. Bug report queued and will retry automatically.')
+      } else {
+        setUiInfo('Bug report sent to the control plane.')
+      }
       setTimeout(() => setUiInfo(null), 2500)
     },
     onError: (error: unknown) => {

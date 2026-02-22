@@ -2,7 +2,9 @@ import os
 from importlib import reload
 from pathlib import Path
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 
 def build_client(tmp_path: Path) -> TestClient:
@@ -92,6 +94,8 @@ def test_submit_bug_report_forwards_to_control_plane(tmp_path: Path, monkeypatch
     payload = res.json()
     assert payload["ok"] is True
     assert payload["created"] is True
+    assert payload["queued"] is False
+    assert payload["queue_id"] is None
     assert payload["report_id"] == "bug_test_123"
 
     assert str(captured.get("url") or "").endswith("/v1/support/bug-reports")
@@ -118,3 +122,72 @@ def test_submit_bug_report_rejects_invalid_severity(tmp_path: Path):
 
     assert res.status_code == 400
     assert "Unsupported severity" in res.json()["detail"]
+
+
+def test_submit_bug_report_queues_when_control_plane_unavailable(tmp_path: Path, monkeypatch):
+    client = build_client(tmp_path)
+
+    import features.support.api as support_api
+    from shared.models import SessionLocal, SupportBugReportOutbox
+
+    monkeypatch.setattr(support_api, "resolve_license_installation_id", lambda _db: "inst-test-queue")
+
+    def _mock_post_to_control_plane(path: str, payload: dict[str, object], request):
+        raise HTTPException(status_code=503, detail="Control-plane request failed: timeout")
+
+    monkeypatch.setattr(support_api, "_post_to_control_plane", _mock_post_to_control_plane)
+
+    res = client.post(
+        "/api/support/bug-reports",
+        json={
+            "title": "Queued bug report",
+            "description": "Cannot reach control plane from app.",
+            "severity": "medium",
+        },
+    )
+
+    assert res.status_code == 202
+    body = res.json()
+    assert body["ok"] is True
+    assert body["created"] is False
+    assert body["queued"] is True
+    assert isinstance(body["queue_id"], int)
+    assert body["report_id"] is None
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(SupportBugReportOutbox).where(SupportBugReportOutbox.sent_at.is_(None))
+        ).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].attempt_count == 0
+        assert rows[0].payload_json
+
+
+def test_submit_bug_report_does_not_queue_non_retryable_errors(tmp_path: Path, monkeypatch):
+    client = build_client(tmp_path)
+
+    import features.support.api as support_api
+    from shared.models import SessionLocal, SupportBugReportOutbox
+
+    monkeypatch.setattr(support_api, "resolve_license_installation_id", lambda _db: "inst-test-queue")
+
+    def _mock_post_to_control_plane(path: str, payload: dict[str, object], request):
+        raise HTTPException(status_code=400, detail="title is required")
+
+    monkeypatch.setattr(support_api, "_post_to_control_plane", _mock_post_to_control_plane)
+
+    res = client.post(
+        "/api/support/bug-reports",
+        json={
+            "title": "Invalid payload",
+            "description": "Non retryable control-plane validation error.",
+            "severity": "medium",
+        },
+    )
+
+    assert res.status_code == 400
+    assert "title is required" in res.json()["detail"]
+
+    with SessionLocal() as db:
+        rows = db.execute(select(SupportBugReportOutbox)).scalars().all()
+        assert rows == []

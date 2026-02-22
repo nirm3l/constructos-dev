@@ -1,5 +1,13 @@
 import React from 'react'
-import type { AdminWorkspaceUser, BugReportCreateRequest, LicenseStatus, Note, Specification, Task } from '../types'
+import type {
+  AdminWorkspaceUser,
+  BugReportCreateRequest,
+  BugReportCreateResponse,
+  LicenseStatus,
+  Note,
+  Specification,
+  Task,
+} from '../types'
 import { tagHue } from '../utils/ui'
 import { PopularTagFilters } from './shared/PopularTagFilters'
 import { Icon } from './shared/uiHelpers'
@@ -124,7 +132,7 @@ export function ProfilePanel({
   onLogout: () => void
   onToggleTheme: () => void
   onChangeSpeechLang: (value: string) => void
-  submitBugReport: (payload: BugReportCreateRequest) => Promise<void>
+  submitBugReport: (payload: BugReportCreateRequest) => Promise<BugReportCreateResponse>
   bugReportSubmitting: boolean
 }) {
   const nextTheme = theme === 'light' ? 'dark' : 'light'
@@ -169,7 +177,7 @@ export function ProfilePanel({
         return
       }
       try {
-        await submitBugReport({
+        const result = await submitBugReport({
           title,
           description,
           steps_to_reproduce: String(bugSteps || '').trim() || null,
@@ -181,7 +189,14 @@ export function ProfilePanel({
           metadata: {},
         })
         resetBugForm()
-        setBugFeedback({ tone: 'success', message: 'Bug report was sent successfully.' })
+        if (result.queued) {
+          setBugFeedback({
+            tone: 'success',
+            message: 'Control plane unavailable. Bug report was queued and will retry automatically.',
+          })
+        } else {
+          setBugFeedback({ tone: 'success', message: 'Bug report was sent successfully.' })
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Failed to submit bug report.'
         setBugFeedback({ tone: 'error', message })

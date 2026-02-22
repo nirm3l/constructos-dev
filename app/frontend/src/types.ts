@@ -311,6 +311,8 @@ export type BugReportCreateRequest = {
 export type BugReportCreateResponse = {
   ok: boolean
   created: boolean
+  queued: boolean
+  queue_id: number | null
   report_id: string | null
   bug_report: Record<string, unknown>
 }

@@ -3,13 +3,14 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from shared.core import User, get_current_user, get_db
 from shared.licensing import resolve_license_installation_id
 from shared.settings import APP_VERSION, LICENSE_SERVER_TOKEN, LICENSE_SERVER_URL
+from .outbox import enqueue_bug_report, is_retryable_status_code
 
 router = APIRouter()
 BUG_REPORT_SEVERITIES = {"low", "medium", "high", "critical"}
@@ -123,6 +124,7 @@ def proxy_waitlist_join(payload: WaitlistJoinProxyRequest, request: Request) -> 
 def submit_bug_report(
     payload: BugReportSubmitRequest,
     request: Request,
+    response: Response,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
@@ -138,29 +140,60 @@ def submit_bug_report(
             "reported_via": "task-app-ui",
         }
 
-    response = _post_to_control_plane(
-        "/v1/support/bug-reports",
-        {
-            "installation_id": installation_id,
-            "workspace_id": str(context.get("workspace_id") or "").strip() or None,
-            "source": "task-app-ui",
-            "title": str(payload.title or "").strip(),
-            "description": str(payload.description or "").strip(),
-            "steps_to_reproduce": str(payload.steps_to_reproduce or "").strip() or None,
-            "expected_behavior": str(payload.expected_behavior or "").strip() or None,
-            "actual_behavior": str(payload.actual_behavior or "").strip() or None,
-            "severity": severity,
-            "reporter_user_id": str(user.id or "").strip() or None,
-            "reporter_username": str(user.username or "").strip() or None,
-            "metadata": metadata,
-        },
-        request,
-    )
-    bug_report = response.get("bug_report") if isinstance(response.get("bug_report"), dict) else {}
+    control_plane_payload = {
+        "installation_id": installation_id,
+        "workspace_id": str(context.get("workspace_id") or "").strip() or None,
+        "source": "task-app-ui",
+        "title": str(payload.title or "").strip(),
+        "description": str(payload.description or "").strip(),
+        "steps_to_reproduce": str(payload.steps_to_reproduce or "").strip() or None,
+        "expected_behavior": str(payload.expected_behavior or "").strip() or None,
+        "actual_behavior": str(payload.actual_behavior or "").strip() or None,
+        "severity": severity,
+        "reporter_user_id": str(user.id or "").strip() or None,
+        "reporter_username": str(user.username or "").strip() or None,
+        "metadata": metadata,
+    }
+
+    try:
+        control_plane_response = _post_to_control_plane(
+            "/v1/support/bug-reports",
+            control_plane_payload,
+            request,
+        )
+    except HTTPException as exc:
+        if not is_retryable_status_code(exc.status_code):
+            raise
+        try:
+            record, _created = enqueue_bug_report(
+                db,
+                control_plane_payload,
+                last_error=str(exc.detail or "Control-plane request failed"),
+            )
+            db.commit()
+        except Exception as queue_exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=503,
+                detail=f"Control-plane request failed and outbox enqueue failed: {queue_exc}",
+            ) from queue_exc
+        response.status_code = 202
+        return {
+            "ok": True,
+            "created": False,
+            "queued": True,
+            "queue_id": record.id,
+            "report_id": None,
+            "bug_report": {},
+        }
+
+    bug_report = control_plane_response.get("bug_report") if isinstance(control_plane_response.get("bug_report"), dict) else {}
     report_id = str(bug_report.get("report_id") or "").strip() or None
     return {
-        "ok": bool(response.get("ok")),
-        "created": bool(response.get("created")),
+        "ok": bool(control_plane_response.get("ok")),
+        "created": bool(control_plane_response.get("created")),
+        "queued": False,
+        "queue_id": None,
         "report_id": report_id,
         "bug_report": bug_report,
     }

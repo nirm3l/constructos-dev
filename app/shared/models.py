@@ -353,6 +353,22 @@ class LicenseValidationLog(Base):
     details_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
+class SupportBugReportOutbox(Base, TimeMixin):
+    __tablename__ = "support_bug_report_outbox"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    dedup_key: Mapped[str] = mapped_column(String(128), index=True)
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+
 class AuthSession(Base, TimeMixin):
     __tablename__ = "auth_sessions"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
