@@ -692,9 +692,10 @@ def _compute_entitlement(installation: Installation) -> dict[str, Any]:
         effective_valid_until = None
 
     token_expires_at = now + timedelta(seconds=LCP_TOKEN_TTL_SECONDS)
-    metadata = _load_metadata(installation.metadata_json)
+    metadata = dict(_load_metadata(installation.metadata_json))
+    metadata["subscription_status"] = subscription_status
+    metadata["subscription_valid_until"] = valid_until.isoformat() if valid_until else None
     if is_public_beta_entitlement and LCP_PUBLIC_BETA_FREE_UNTIL:
-        metadata = dict(metadata)
         metadata["public_beta"] = True
         metadata["public_beta_free_until"] = LCP_PUBLIC_BETA_FREE_UNTIL.isoformat()
 

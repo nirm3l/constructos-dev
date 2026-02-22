@@ -144,6 +144,26 @@ export function ProfilePanel({
     if (Number.isNaN(parsed.getTime())) return value
     return parsed.toLocaleString()
   }
+  const formatLabel = (value: string): string => {
+    const normalized = String(value || '').trim().replace(/_/g, ' ')
+    if (!normalized) return 'n/a'
+    return normalized
+      .split(/\s+/)
+      .map((chunk) => chunk.charAt(0).toUpperCase() + chunk.slice(1))
+      .join(' ')
+  }
+  const licenseMetadata = (license?.metadata && typeof license.metadata === 'object'
+    ? (license.metadata as Record<string, unknown>)
+    : {}) as Record<string, unknown>
+  const subscriptionStatus = String(licenseMetadata.subscription_status ?? '').trim().toLowerCase()
+  const subscriptionValidUntil = String(licenseMetadata.subscription_valid_until ?? '').trim() || null
+  const publicBetaEnabled = licenseMetadata.public_beta === true
+  const publicBetaFreeUntil = String(licenseMetadata.public_beta_free_until ?? '').trim() || null
+  const entitlementSource = publicBetaEnabled
+    ? `Public beta until ${formatDateTime(publicBetaFreeUntil)}`
+    : subscriptionStatus
+      ? `Subscription (${formatLabel(subscriptionStatus)})`
+      : 'Trial fallback'
   const [bugTitle, setBugTitle] = React.useState('')
   const [bugDescription, setBugDescription] = React.useState('')
   const [bugSeverity, setBugSeverity] = React.useState<'low' | 'medium' | 'high' | 'critical'>('medium')
@@ -378,6 +398,18 @@ export function ProfilePanel({
         ) : (
           <dl className="profile-facts profile-license-facts">
             <div className="profile-fact">
+              <dt>Entitlement status</dt>
+              <dd>{formatLabel(license.status)}</dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Subscription status</dt>
+              <dd>{formatLabel(subscriptionStatus)}</dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Entitlement source</dt>
+              <dd>{entitlementSource}</dd>
+            </div>
+            <div className="profile-fact">
               <dt>Installation ID</dt>
               <dd>
                 <code>{license.installation_id || 'n/a'}</code>
@@ -386,6 +418,10 @@ export function ProfilePanel({
             <div className="profile-fact">
               <dt>Plan</dt>
               <dd>{license.plan_code || 'n/a'}</dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Subscription valid until</dt>
+              <dd>{formatDateTime(subscriptionValidUntil)}</dd>
             </div>
             <div className="profile-fact">
               <dt>Write access</dt>
