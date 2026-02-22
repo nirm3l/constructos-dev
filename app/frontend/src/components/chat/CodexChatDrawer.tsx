@@ -44,6 +44,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const speechStoppedManuallyRef = React.useRef(false)
   const [isListening, setIsListening] = React.useState(false)
   const [speechSupported, setSpeechSupported] = React.useState(false)
+  const [showVoiceLangHint, setShowVoiceLangHint] = React.useState(false)
 
   React.useEffect(() => {
     setChatAttachmentRefs([])
@@ -52,6 +53,14 @@ export function CodexChatDrawer({ state }: { state: any }) {
   React.useEffect(() => {
     setSpeechSupported(Boolean(getSpeechRecognitionCtor()))
   }, [])
+
+  React.useEffect(() => {
+    if (!showVoiceLangHint || isListening) return
+    const timer = window.setTimeout(() => {
+      setShowVoiceLangHint(false)
+    }, 5500)
+    return () => window.clearTimeout(timer)
+  }, [showVoiceLangHint, isListening])
 
   React.useEffect(() => {
     return () => {
@@ -121,6 +130,9 @@ export function CodexChatDrawer({ state }: { state: any }) {
     Boolean(state.workspaceId)
   const canQuickConfirmCreate =
     canUseProjectCreationStarter && Boolean(state.workspaceId) && state.codexChatTurns.length > 0
+  const activeSpeechLang = String(state.speechLang || '').trim() || 'en-US'
+  const speechLangName = activeSpeechLang === 'bs-BA' ? 'Bosnian' : 'English'
+  const speechLangLabel = `${speechLangName} (${activeSpeechLang})`
 
   const stopVoiceInput = () => {
     const recognition = recognitionRef.current
@@ -147,7 +159,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
     speechHadResultRef.current = false
     speechStoppedManuallyRef.current = false
 
-    recognition.lang = String(state.speechLang || '').trim() || 'bs-BA'
+    recognition.lang = activeSpeechLang
     recognition.continuous = false
     recognition.interimResults = true
     recognition.maxAlternatives = 1
@@ -423,6 +435,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
             <button
               className={`action-icon ${isListening ? 'primary' : ''}`}
               onClick={() => {
+                setShowVoiceLangHint(true)
                 if (isListening) {
                   stopVoiceInput()
                   return
@@ -432,13 +445,35 @@ export function CodexChatDrawer({ state }: { state: any }) {
               disabled={state.runAgentChatMutation.isPending || !speechSupported}
               title={
                 speechSupported
-                  ? (isListening ? 'Stop voice input' : 'Start voice input')
+                  ? `${isListening ? 'Stop voice input' : 'Start voice input'} (${speechLangLabel}). Change in Settings > Profile.`
                   : 'Voice input is not supported in this browser'
               }
               aria-label={isListening ? 'Stop voice input' : 'Start voice input'}
             >
               <Icon path="M12 15a3 3 0 0 0 3-3V7a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0m5 5v4m-4 0h8" />
             </button>
+            {showVoiceLangHint ? (
+              <button
+                type="button"
+                className="codex-chat-voice-chip"
+                onClick={() => {
+                  stopVoiceInput()
+                  setShowVoiceLangHint(false)
+                  try {
+                    window.sessionStorage.setItem('ui_profile_scroll_target', 'voice_language')
+                    window.dispatchEvent(new Event('ui:focus-voice-language'))
+                  } catch {
+                    // Ignore storage failures and still navigate.
+                  }
+                  state.setTab?.('profile')
+                  state.setShowCodexChat?.(false)
+                }}
+                title={`Voice language: ${speechLangLabel}. Open Settings > Profile to change.`}
+                aria-label="Open voice language settings"
+              >
+                Voice: {speechLangName}
+              </button>
+            ) : null}
             <button
               className="action-icon"
               onClick={() => {

@@ -154,6 +154,7 @@ export function AppOverlays({ state }: { state: any }) {
           codexChatTurns: state.codexChatTurns,
           codexChatInstruction: state.codexChatInstruction,
           speechLang: state.speechLang,
+          setTab: state.setTab,
           setCodexChatInstruction: state.setCodexChatInstruction,
           setCodexChatTurns: state.setCodexChatTurns,
           setCodexChatUsage: state.setCodexChatUsage,

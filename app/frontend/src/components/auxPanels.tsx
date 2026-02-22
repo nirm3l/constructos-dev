@@ -185,6 +185,86 @@ export function ProfilePanel({
   const [newPasswordInput, setNewPasswordInput] = React.useState('')
   const [confirmPasswordInput, setConfirmPasswordInput] = React.useState('')
   const [passwordFeedback, setPasswordFeedback] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
+  const voiceFactRef = React.useRef<HTMLDivElement | null>(null)
+  const voiceSelectRef = React.useRef<HTMLSelectElement | null>(null)
+
+  const scrollVoiceLanguageIntoView = React.useCallback(() => {
+    if (typeof window === 'undefined') return
+
+    const scrollNearestContainer = () => {
+      const target = voiceFactRef.current
+      if (!target) return
+
+      const findScrollableParent = (node: HTMLElement | null): HTMLElement | null => {
+        let current = node?.parentElement ?? null
+        while (current) {
+          const styles = window.getComputedStyle(current)
+          const overflowY = styles.overflowY
+          const isScrollable =
+            (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') &&
+            current.scrollHeight > current.clientHeight + 1
+          if (isScrollable) return current
+          current = current.parentElement
+        }
+        return null
+      }
+
+      target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })
+
+      const parent = findScrollableParent(target)
+      if (parent) {
+        const targetRect = target.getBoundingClientRect()
+        const parentRect = parent.getBoundingClientRect()
+        const nextTop = parent.scrollTop + (targetRect.top - parentRect.top) - parent.clientHeight * 0.35
+        parent.scrollTo({ top: Math.max(0, nextTop), behavior: 'smooth' })
+      }
+    }
+
+    const focusVoiceSelect = () => {
+      try {
+        voiceSelectRef.current?.focus({ preventScroll: true })
+      } catch {
+        voiceSelectRef.current?.focus()
+      }
+    }
+
+    scrollNearestContainer()
+    window.setTimeout(scrollNearestContainer, 120)
+    window.setTimeout(scrollNearestContainer, 300)
+    window.setTimeout(focusVoiceSelect, 340)
+  }, [])
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return
+    const handleVoiceFocus = () => {
+      scrollVoiceLanguageIntoView()
+    }
+
+    window.addEventListener('ui:focus-voice-language', handleVoiceFocus)
+
+    let shouldScroll = false
+    try {
+      shouldScroll = window.sessionStorage.getItem('ui_profile_scroll_target') === 'voice_language'
+      if (shouldScroll) {
+        window.sessionStorage.removeItem('ui_profile_scroll_target')
+      }
+    } catch {
+      shouldScroll = false
+    }
+    if (!shouldScroll) {
+      return () => {
+        window.removeEventListener('ui:focus-voice-language', handleVoiceFocus)
+      }
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      handleVoiceFocus()
+    })
+    return () => {
+      window.cancelAnimationFrame(frameId)
+      window.removeEventListener('ui:focus-voice-language', handleVoiceFocus)
+    }
+  }, [scrollVoiceLanguageIntoView])
 
   const resetBugForm = React.useCallback(() => {
     setBugTitle('')
@@ -307,21 +387,31 @@ export function ProfilePanel({
         <div className="profile-fact">
           <dt>User</dt>
           <dd>
-            <div className="profile-fact-user-name">{userName}</div>
-            <div className="row wrap profile-fact-actions">
-              <button className="primary" onClick={onToggleTheme}>
-                Switch to {nextTheme} theme
-              </button>
-              <button className="danger-ghost" onClick={onLogout}>
-                Logout
-              </button>
+            <div className="profile-fact-user-row">
+              <div className="profile-fact-user-name">{userName}</div>
+              <div className="row profile-fact-actions">
+                <button
+                  className="primary profile-action-button"
+                  onClick={onToggleTheme}
+                  title={`Switch to ${nextTheme} theme`}
+                >
+                  <Icon path="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79" />
+                  <span>{nextTheme === 'dark' ? 'Dark mode' : 'Light mode'}</span>
+                </button>
+                <button className="danger-ghost profile-action-button" onClick={onLogout} title="Logout">
+                  <Icon path="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" />
+                  <span>Logout</span>
+                </button>
+              </div>
             </div>
           </dd>
         </div>
-        <div className="profile-fact">
+        <div className="profile-fact" id="profile-voice-language" ref={voiceFactRef}>
           <dt>Voice language</dt>
           <dd>
             <select
+              ref={voiceSelectRef}
+              className="profile-voice-select"
               value={speechLang}
               onChange={(e) => onChangeSpeechLang(e.target.value)}
               aria-label="Voice recognition language"

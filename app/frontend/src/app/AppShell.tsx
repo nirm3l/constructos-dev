@@ -78,15 +78,11 @@ function normalizeSemanticText(value: string): string {
 }
 
 function resolveInitialSpeechLang(): string {
-  const fallback = 'bs-BA'
+  const fallback = 'en-US'
   if (typeof window !== 'undefined') {
     const stored = String(window.localStorage.getItem(VOICE_LANG_STORAGE_KEY) || '').trim()
     if (ALLOWED_VOICE_LANGS.has(stored)) return stored
   }
-  if (typeof navigator === 'undefined') return fallback
-  const raw = String(navigator.language || '').trim().toLowerCase()
-  if (raw.startsWith('bs') || raw.startsWith('hr') || raw.startsWith('sr')) return 'bs-BA'
-  if (raw.startsWith('en')) return 'en-US'
   return fallback
 }
 
@@ -241,7 +237,7 @@ function App({ logout }: { logout: () => void }) {
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return
-    const normalized = ALLOWED_VOICE_LANGS.has(speechLang) ? speechLang : 'bs-BA'
+    const normalized = ALLOWED_VOICE_LANGS.has(speechLang) ? speechLang : 'en-US'
     window.localStorage.setItem(VOICE_LANG_STORAGE_KEY, normalized)
   }, [speechLang])
 

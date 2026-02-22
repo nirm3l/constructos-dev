@@ -2392,10 +2392,49 @@ button:disabled {
   overflow-wrap: anywhere;
 }
 
-.profile-fact-actions {
-  margin-top: 10px;
+.profile-fact-user-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 8px;
-  justify-content: flex-start;
+  min-width: 0;
+}
+
+.profile-fact-actions {
+  gap: 6px;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.profile-action-button {
+  min-height: 32px;
+  border-radius: 10px;
+  padding: 6px 9px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.profile-action-button .icon {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+}
+
+.profile-voice-select {
+  min-height: 32px;
+  border-radius: 10px;
+  padding: 6px 9px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  width: auto;
+  max-width: 100%;
 }
 
 .profile-actions {
@@ -2557,6 +2596,7 @@ button:disabled {
   justify-content: flex-end;
   gap: 6px;
   min-height: 40px;
+  flex-wrap: nowrap;
 }
 
 .admin-skill-action-btn {
@@ -2565,6 +2605,8 @@ button:disabled {
   justify-content: center;
   gap: 6px;
   min-height: 34px;
+  width: 142px;
+  min-width: 142px;
   line-height: 1;
 }
 
@@ -2796,6 +2838,17 @@ button:disabled {
 }
 
 @media (max-width: 680px) {
+  .profile-fact-user-row {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .profile-fact-actions {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-start;
+  }
+
   .admin-create-grid {
     grid-template-columns: 1fr;
   }
@@ -2810,6 +2863,12 @@ button:disabled {
 
   .admin-skill-import-actions {
     justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .admin-skill-action-btn {
+    width: auto;
+    min-width: 132px;
   }
 
   .admin-user-row {
@@ -3411,6 +3470,26 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.codex-chat-voice-chip {
+  min-height: 32px;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 12px;
+  line-height: 1.2;
+  font-weight: 700;
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 22%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 22%);
+  color: color-mix(in srgb, var(--muted), var(--text) 36%);
+  white-space: nowrap;
+}
+
+.codex-chat-voice-chip:hover:not(:disabled),
+.codex-chat-voice-chip:focus-visible:not(:disabled) {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 26%);
+  color: color-mix(in srgb, var(--text), var(--brand) 20%);
+  background: color-mix(in srgb, var(--brand), var(--surface) 92%);
 }
 
 .codex-chat-input {
