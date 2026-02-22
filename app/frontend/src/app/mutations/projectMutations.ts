@@ -1,5 +1,18 @@
 import { useMutation } from '@tanstack/react-query'
-import { createProject, createProjectFromTemplate, createProjectRule, deleteProject, deleteProjectRule, patchProject, patchProjectRule, previewProjectFromTemplate } from '../../api'
+import {
+  createProject,
+  createProjectFromTemplate,
+  createProjectRule,
+  deleteProject,
+  deleteProjectRule,
+  deleteProjectSkill,
+  importProjectSkill,
+  importProjectSkillFile,
+  patchProject,
+  patchProjectRule,
+  patchProjectSkill,
+  previewProjectFromTemplate,
+} from '../../api'
 import { parseProjectEvidenceTopKInput, parseProjectStatusesText, parseTemplateParametersInput, toErrorMessage } from '../../utils/ui'
 
 export function useProjectMutations(c: any) {
@@ -181,6 +194,88 @@ export function useProjectMutations(c: any) {
     onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Rule delete failed')
   })
 
+  const importProjectSkillMutation = useMutation({
+    mutationFn: (payload: {
+      source_url: string
+      name?: string
+      skill_key?: string
+      mode?: 'advisory' | 'enforced'
+      trust_level?: 'verified' | 'reviewed' | 'untrusted'
+    }) =>
+      importProjectSkill(c.userId, {
+        workspace_id: c.workspaceId,
+        project_id: c.selectedProjectId,
+        source_url: payload.source_url,
+        name: payload.name,
+        skill_key: payload.skill_key,
+        mode: payload.mode,
+        trust_level: payload.trust_level,
+      }),
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.qc.invalidateQueries({ queryKey: ['project-skills'] })
+      await c.qc.invalidateQueries({ queryKey: ['project-rules'] })
+    },
+    onError: (err) => c.setUiError(toErrorMessage(err, 'Skill import failed')),
+  })
+
+  const importProjectSkillFileMutation = useMutation({
+    mutationFn: (payload: {
+      file: File
+      name?: string
+      skill_key?: string
+      mode?: 'advisory' | 'enforced'
+      trust_level?: 'verified' | 'reviewed' | 'untrusted'
+    }) =>
+      importProjectSkillFile(c.userId, {
+        workspace_id: c.workspaceId,
+        project_id: c.selectedProjectId,
+        file: payload.file,
+        name: payload.name,
+        skill_key: payload.skill_key,
+        mode: payload.mode,
+        trust_level: payload.trust_level,
+      }),
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.qc.invalidateQueries({ queryKey: ['project-skills'] })
+      await c.qc.invalidateQueries({ queryKey: ['project-rules'] })
+    },
+    onError: (err) => c.setUiError(toErrorMessage(err, 'Skill file import failed')),
+  })
+
+  const patchProjectSkillMutation = useMutation({
+    mutationFn: (payload: {
+      skillId: string
+      patch: {
+        name?: string
+        summary?: string
+        mode?: 'advisory' | 'enforced'
+        trust_level?: 'verified' | 'reviewed' | 'untrusted'
+        sync_project_rule?: boolean
+      }
+    }) => patchProjectSkill(c.userId, payload.skillId, payload.patch),
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.qc.invalidateQueries({ queryKey: ['project-skills'] })
+      await c.qc.invalidateQueries({ queryKey: ['project-rules'] })
+    },
+    onError: (err) => c.setUiError(toErrorMessage(err, 'Skill update failed')),
+  })
+
+  const deleteProjectSkillMutation = useMutation({
+    mutationFn: (payload: { skillId: string; delete_linked_rule?: boolean }) =>
+      deleteProjectSkill(c.userId, payload.skillId, {
+        delete_linked_rule: payload.delete_linked_rule ?? true,
+      }),
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.qc.invalidateQueries({ queryKey: ['project-skills'] })
+      await c.qc.invalidateQueries({ queryKey: ['project-rules'] })
+    },
+    onError: (err) => c.setUiError(toErrorMessage(err, 'Skill delete failed')),
+  })
+
   return {
     saveProjectMutation,
     previewProjectFromTemplateMutation,
@@ -189,5 +284,9 @@ export function useProjectMutations(c: any) {
     createProjectRuleMutation,
     patchProjectRuleMutation,
     deleteProjectRuleMutation,
+    importProjectSkillMutation,
+    importProjectSkillFileMutation,
+    patchProjectSkillMutation,
+    deleteProjectSkillMutation,
   }
 }

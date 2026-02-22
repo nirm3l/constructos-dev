@@ -98,6 +98,29 @@ class ProjectTemplateBinding(Base, TimeMixin):
     parameters_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
+class ProjectSkill(Base, TimeMixin):
+    __tablename__ = "project_skills"
+    __table_args__ = (UniqueConstraint("project_id", "skill_key", name="ux_project_skills_project_key"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    skill_key: Mapped[str] = mapped_column(String(128), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    summary: Mapped[str] = mapped_column(Text, default="")
+    source_type: Mapped[str] = mapped_column(String(32), default="url")
+    source_locator: Mapped[str] = mapped_column(Text, default="")
+    source_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    trust_level: Mapped[str] = mapped_column(String(24), default="reviewed")
+    mode: Mapped[str] = mapped_column(String(24), default="advisory")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    generated_rule_id: Mapped[str | None] = mapped_column(ForeignKey("project_rules.id"), nullable=True, index=True)
+    manifest_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    updated_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class TaskGroup(Base, TimeMixin):
     __tablename__ = "task_groups"
     __table_args__ = (UniqueConstraint("project_id", "name", name="ux_task_groups_project_name"),)

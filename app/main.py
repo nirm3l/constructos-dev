@@ -13,6 +13,7 @@ from features.licensing.api import router as licensing_router
 from features.licensing.sync import start_license_sync_worker, stop_license_sync_worker
 from features.notifications.api import router as notifications_router
 from features.project_templates.api import router as project_templates_router
+from features.project_skills.api import router as project_skills_router
 from features.projects.api import router as projects_router
 from features.rules.api import router as rules_router
 from features.specifications.api import router as specifications_router
@@ -104,6 +105,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 app.include_router(bootstrap_router)
 app.include_router(users_router)
 app.include_router(project_templates_router)
+app.include_router(project_skills_router)
 app.include_router(projects_router)
 app.include_router(rules_router)
 app.include_router(specifications_router)

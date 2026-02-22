@@ -30,6 +30,16 @@ class TemplateRule:
 
 
 @dataclass(frozen=True, slots=True)
+class TemplateSkill:
+    source_url: str
+    name: str = ""
+    skill_key: str = ""
+    mode: str = "advisory"
+    trust_level: str = "reviewed"
+    required: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class TemplateGraphNode:
     node_key: str
     label: str
@@ -58,6 +68,7 @@ class ProjectTemplateDefinition:
     specifications: tuple[TemplateSpecification, ...]
     tasks: tuple[TemplateTask, ...]
     rules: tuple[TemplateRule, ...]
+    skills: tuple[TemplateSkill, ...] = ()
     graph_nodes: tuple[TemplateGraphNode, ...] = ()
     graph_edges: tuple[TemplateGraphEdge, ...] = ()
 

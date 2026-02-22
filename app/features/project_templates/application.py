@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from features.projects.application import ProjectApplicationService
+from features.project_skills.application import ProjectSkillApplicationService
 from features.projects.command_handlers import (
     _normalize_context_pack_evidence_top_k,
     _normalize_project_statuses,
@@ -36,6 +37,7 @@ from .catalog import (
     DDD_PRODUCT_BUILD_KEY,
     MOBILE_BROWSER_GAME_KEY,
     ProjectTemplateDefinition,
+    TemplateSkill,
     get_template_definition,
     list_template_definitions,
 )
@@ -118,6 +120,7 @@ def _serialize_template(defn: ProjectTemplateDefinition) -> dict[str, Any]:
             "specifications": [asdict(item) for item in defn.specifications],
             "tasks": [asdict(item) for item in defn.tasks],
             "rules": [asdict(item) for item in defn.rules],
+            "skills": [asdict(item) for item in defn.skills],
             "graph": {
                 "nodes": [asdict(item) for item in defn.graph_nodes],
                 "edges": [asdict(item) for item in defn.graph_edges],
@@ -127,6 +130,7 @@ def _serialize_template(defn: ProjectTemplateDefinition) -> dict[str, Any]:
             "specifications": len(defn.specifications),
             "tasks": len(defn.tasks),
             "rules": len(defn.rules),
+            "skills": len(defn.skills),
             "graph_nodes": len(defn.graph_nodes),
             "graph_edges": len(defn.graph_edges),
         },
@@ -565,6 +569,93 @@ class ProjectTemplateApplicationService:
             created_task_ids.append(created["id"])
         return created_task_ids
 
+    def _seed_skills(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        template: ProjectTemplateDefinition,
+    ) -> dict[str, Any]:
+        created_skill_ids: list[str] = []
+        generated_rule_ids: list[str] = []
+        skipped: list[dict[str, str]] = []
+        for skill in template.skills:
+            if not isinstance(skill, TemplateSkill):
+                continue
+            source_url = str(skill.source_url or "").strip()
+            if not source_url:
+                if skill.required:
+                    raise HTTPException(status_code=422, detail="Template skill source_url cannot be empty")
+                skipped.append(
+                    {
+                        "skill_key": str(skill.skill_key or "").strip(),
+                        "name": str(skill.name or "").strip(),
+                        "source_url": "",
+                        "reason": "Template skill source_url is empty",
+                    }
+                )
+                continue
+
+            normalized_key = _normalize_text(skill.skill_key).replace(" ", "_").lower()
+            command_id = _stable_command_id(
+                prefix="tpl-seed-skill",
+                payload={
+                    "project_id": project_id,
+                    "template_key": template.key,
+                    "template_version": template.version,
+                    "skill_key": normalized_key,
+                    "source_url": source_url,
+                },
+            )
+            try:
+                created = ProjectSkillApplicationService(self.db, self.user, command_id=command_id).import_skill_from_url(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    source_url=source_url,
+                    name=skill.name,
+                    skill_key=skill.skill_key,
+                    mode=skill.mode,
+                    trust_level=skill.trust_level,
+                )
+            except HTTPException as exc:
+                if skill.required:
+                    raise
+                detail_value = exc.detail
+                reason = str(detail_value if isinstance(detail_value, str) else json.dumps(detail_value, ensure_ascii=True))
+                skipped.append(
+                    {
+                        "skill_key": str(skill.skill_key or "").strip(),
+                        "name": str(skill.name or "").strip(),
+                        "source_url": source_url,
+                        "reason": reason[:500],
+                    }
+                )
+                continue
+            except Exception as exc:
+                if skill.required:
+                    raise HTTPException(status_code=422, detail=f"Template skill import failed: {exc}") from exc
+                skipped.append(
+                    {
+                        "skill_key": str(skill.skill_key or "").strip(),
+                        "name": str(skill.name or "").strip(),
+                        "source_url": source_url,
+                        "reason": str(exc)[:500],
+                    }
+                )
+                continue
+
+            skill_id = str(created.get("id") or "").strip()
+            generated_rule_id = str(created.get("generated_rule_id") or "").strip()
+            if skill_id:
+                created_skill_ids.append(skill_id)
+            if generated_rule_id:
+                generated_rule_ids.append(generated_rule_id)
+        return {
+            "project_skill_ids": list(dict.fromkeys(created_skill_ids)),
+            "project_skill_rule_ids": list(dict.fromkeys(generated_rule_ids)),
+            "skipped": skipped,
+        }
+
     def preview_project_from_template(self, payload: ProjectFromTemplatePreview) -> dict[str, Any]:
         template = self._resolve_template(payload.template_key)
         seed_template, effective_parameters = self._resolve_seed_template(
@@ -615,6 +706,7 @@ class ProjectTemplateApplicationService:
                 "specification_count": len(seed_template.specifications),
                 "rule_count": len(seed_template.rules),
                 "task_count": len(seed_template.tasks),
+                "skill_count": len(seed_template.skills),
                 "graph_node_count": graph_node_count,
                 "graph_edge_count": graph_edge_count,
             },
@@ -622,6 +714,7 @@ class ProjectTemplateApplicationService:
                 "specifications": [asdict(item) for item in seed_template.specifications],
                 "tasks": [asdict(item) for item in seed_template.tasks],
                 "rules": [asdict(item) for item in seed_template.rules],
+                "skills": [asdict(item) for item in seed_template.skills],
                 "graph": {
                     "nodes": [asdict(item) for item in seed_template.graph_nodes],
                     "edges": [asdict(item) for item in seed_template.graph_edges],
@@ -707,6 +800,11 @@ class ProjectTemplateApplicationService:
             template=seed_template,
             specification_id_by_title=specification_id_by_title,
         )
+        skill_seed = self._seed_skills(
+            workspace_id=payload.workspace_id,
+            project_id=project_id,
+            template=seed_template,
+        )
         sync_template_graph_scaffold(
             project_id=project_id,
             workspace_id=payload.workspace_id,
@@ -725,10 +823,17 @@ class ProjectTemplateApplicationService:
                 "specification_count": len(specification_id_by_title),
                 "rule_count": len(rule_ids),
                 "task_count": len(task_ids),
+                "skill_count": len(skill_seed["project_skill_ids"]),
+                "skill_skip_count": len(skill_seed["skipped"]),
             },
             "seeded_entity_ids": {
                 "specification_ids": sorted(specification_id_by_title.values()),
                 "rule_ids": sorted(rule_ids),
                 "task_ids": sorted(task_ids),
+                "project_skill_ids": sorted(skill_seed["project_skill_ids"]),
+                "project_skill_rule_ids": sorted(skill_seed["project_skill_rule_ids"]),
+            },
+            "skill_seed_report": {
+                "skipped": skill_seed["skipped"],
             },
         }

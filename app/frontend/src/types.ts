@@ -125,6 +125,7 @@ export type ProjectTemplate = {
     specifications: number
     tasks: number
     rules: number
+    skills?: number
     graph_nodes?: number
     graph_edges?: number
   }
@@ -154,11 +155,18 @@ export type ProjectFromTemplateResponse = {
     specification_count: number
     rule_count: number
     task_count: number
+    skill_count?: number
+    skill_skip_count?: number
   }
   seeded_entity_ids: {
     specification_ids: string[]
     rule_ids: string[]
     task_ids: string[]
+    project_skill_ids?: string[]
+    project_skill_rule_ids?: string[]
+  }
+  skill_seed_report?: {
+    skipped: Array<Record<string, unknown>>
   }
 }
 
@@ -194,6 +202,7 @@ export type ProjectFromTemplatePreviewResponse = {
     specification_count: number
     rule_count: number
     task_count: number
+    skill_count?: number
     graph_node_count: number
     graph_edge_count: number
   }
@@ -201,6 +210,7 @@ export type ProjectFromTemplatePreviewResponse = {
     specifications: Array<Record<string, unknown>>
     tasks: Array<Record<string, unknown>>
     rules: Array<Record<string, unknown>>
+    skills?: Array<Record<string, unknown>>
     graph: {
       nodes: Array<Record<string, unknown>>
       edges: Array<Record<string, unknown>>
@@ -568,6 +578,33 @@ export type ProjectRule = {
 
 export type ProjectRulesPage = {
   items: ProjectRule[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export type ProjectSkill = {
+  id: string
+  workspace_id: string
+  project_id: string
+  skill_key: string
+  name: string
+  summary: string
+  source_type: string
+  source_locator: string
+  source_version: string | null
+  trust_level: 'verified' | 'reviewed' | 'untrusted' | string
+  mode: 'advisory' | 'enforced' | string
+  generated_rule_id: string | null
+  manifest: Record<string, unknown>
+  created_by: string
+  updated_by: string
+  created_at: string | null
+  updated_at: string | null
+}
+
+export type ProjectSkillsPage = {
+  items: ProjectSkill[]
   total: number
   limit: number
   offset: number

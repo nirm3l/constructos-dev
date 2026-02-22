@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from importlib import reload
 from pathlib import Path
 
@@ -85,6 +86,79 @@ def test_execute_task_automation_includes_project_description_in_context(tmp_pat
     assert captured["graph_context_markdown"] == "## Graph\nTask -> Specification"
 
 
+def test_execute_task_automation_includes_project_skills_in_context(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+    project = client.post(
+        "/api/projects",
+        json={"workspace_id": ws_id, "name": "Agent Skill Context"},
+    ).json()
+    actor_user_id = bootstrap["current_user"]["id"]
+
+    from shared.models import ProjectSkill, SessionLocal
+
+    with SessionLocal() as db:
+        db.add(
+            ProjectSkill(
+                id=str(uuid.uuid4()),
+                workspace_id=ws_id,
+                project_id=project["id"],
+                skill_key="release_quality",
+                name="Release Quality Skill",
+                summary="Require release notes and tests.",
+                source_type="url",
+                source_locator="https://example.com/skills/release-quality.md",
+                source_version="1.0.0",
+                trust_level="verified",
+                mode="enforced",
+                generated_rule_id=None,
+                manifest_json="{}",
+                created_by=actor_user_id,
+                updated_by=actor_user_id,
+                is_deleted=False,
+            )
+        )
+        db.commit()
+
+    from features.agents import executor as executor_module
+
+    monkeypatch.setattr(executor_module, "AGENT_EXECUTOR_MODE", "command")
+    monkeypatch.setattr(executor_module, "AGENT_CODEX_COMMAND", "dummy-exec")
+    monkeypatch.setattr(executor_module, "build_graph_context_markdown", lambda **_: "## Graph\nTask -> Specification")
+
+    captured: dict = {}
+
+    class DummyProcess:
+        returncode = 0
+        stdout = '{"action":"comment","summary":"ok","comment":null}'
+        stderr = ""
+
+    def fake_run(command, *, input, text, capture_output, timeout, check):  # noqa: A002
+        _ = (command, text, capture_output, timeout, check)
+        captured.update(json.loads(input))
+        return DummyProcess()
+
+    monkeypatch.setattr(executor_module.subprocess, "run", fake_run)
+
+    outcome = executor_module.execute_task_automation(
+        task_id="",
+        title="General Codex Chat",
+        description="chat",
+        status="To do",
+        instruction="Summarize project context",
+        workspace_id=ws_id,
+        project_id=project["id"],
+        actor_user_id=actor_user_id,
+        allow_mutations=True,
+    )
+    assert outcome.summary == "ok"
+    assert len(captured["project_skills"]) == 1
+    assert captured["project_skills"][0]["skill_key"] == "release_quality"
+    assert captured["project_skills"][0]["mode"] == "enforced"
+    assert captured["project_skills"][0]["trust_level"] == "verified"
+
+
 def test_codex_prompt_includes_soul_md_section():
     from features.agents.codex_mcp_adapter import _build_prompt
 
@@ -114,6 +188,42 @@ def test_codex_prompt_includes_soul_md_section():
     assert "set_user_theme(theme='light'|'dark')" in prompt
     assert "File: GraphContext.md (source: knowledge_graph)" in prompt
     assert "Task A IMPLEMENTS Spec B" in prompt
+
+
+def test_codex_prompt_includes_project_skills_section():
+    from features.agents.codex_mcp_adapter import _build_prompt
+
+    prompt = _build_prompt(
+        {
+            "task_id": "",
+            "title": "General Codex Chat",
+            "description": "chat",
+            "status": "To do",
+            "instruction": "Summarize project constraints",
+            "workspace_id": "ws-1",
+            "project_id": "pr-1",
+            "actor_user_id": "user-1",
+            "project_name": "Alpha",
+            "project_description": "",
+            "project_rules": [],
+            "project_skills": [
+                {
+                    "skill_key": "release_quality",
+                    "name": "Release Quality Skill",
+                    "summary": "Require release notes and tests.",
+                    "mode": "enforced",
+                    "trust_level": "verified",
+                    "source_locator": "https://example.com/skills/release-quality.md",
+                }
+            ],
+            "graph_context_markdown": "",
+        }
+    )
+
+    assert "File: ProjectSkills.md (source: project_skills)" in prompt
+    assert "Release Quality Skill (release_quality)" in prompt
+    assert "mode=enforced" in prompt
+    assert "trust=verified" in prompt
 
 
 def test_codex_prompt_includes_interactive_project_creation_guidance():

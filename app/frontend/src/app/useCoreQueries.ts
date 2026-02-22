@@ -8,6 +8,7 @@ import {
   getProjectGraphOverview,
   getProjectGraphSubgraph,
   getProjectRules,
+  getProjectSkills,
   listProjectTemplates,
   searchProjectKnowledge,
   getTaskGroups,
@@ -122,6 +123,15 @@ export function useCoreQueries(c: any) {
     queryKey: ['project-rules', c.userId, c.workspaceId, c.selectedProjectId],
     queryFn: () =>
       getProjectRules(c.userId, c.workspaceId, {
+        project_id: c.selectedProjectId,
+      }),
+    enabled: Boolean(c.workspaceId && c.selectedProjectId) && c.tab === 'projects'
+  })
+
+  const projectSkills = useQuery({
+    queryKey: ['project-skills', c.userId, c.workspaceId, c.selectedProjectId],
+    queryFn: () =>
+      getProjectSkills(c.userId, c.workspaceId, {
         project_id: c.selectedProjectId,
       }),
     enabled: Boolean(c.workspaceId && c.selectedProjectId) && c.tab === 'projects'
@@ -287,6 +297,7 @@ export function useCoreQueries(c: any) {
     taskNotes,
     projectTags,
     projectRules,
+    projectSkills,
     projectTemplates,
     projectGraphOverview,
     projectGraphContextPack,

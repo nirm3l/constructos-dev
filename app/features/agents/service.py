@@ -12,6 +12,12 @@ from sqlalchemy import select
 
 from features.projects.application import ProjectApplicationService
 from features.project_templates.application import ProjectTemplateApplicationService
+from features.project_skills.application import ProjectSkillApplicationService
+from features.project_skills.read_models import (
+    ProjectSkillListQuery,
+    list_project_skills_read_model,
+    load_project_skill_view,
+)
 from features.rules.application import ProjectRuleApplicationService
 from features.rules.read_models import ProjectRuleListQuery, list_project_rules_read_model
 from features.specifications.application import SpecificationApplicationService
@@ -71,7 +77,7 @@ from shared.knowledge_graph import (
     require_graph_available,
     search_project_knowledge as search_project_knowledge_query,
 )
-from shared.models import User as UserModel
+from shared.models import ProjectSkill, User as UserModel
 from shared.settings import (
     DEFAULT_USER_ID,
     MCP_ACTOR_USER_ID,
@@ -167,6 +173,16 @@ class AgentTaskService:
         self._assert_workspace_allowed(state.workspace_id)
         self._assert_project_allowed(state.project_id)
         return state
+
+    def _assert_project_skill_allowed(self, *, db, skill_id: str | None):
+        if not skill_id:
+            return None
+        skill = db.get(ProjectSkill, skill_id)
+        if skill is None or bool(skill.is_deleted):
+            raise HTTPException(status_code=404, detail="Project skill not found")
+        self._assert_workspace_allowed(skill.workspace_id)
+        self._assert_project_allowed(skill.project_id)
+        return skill
 
     def _assert_specification_allowed(self, *, db, specification_id: str | None):
         if not specification_id:
@@ -406,6 +422,8 @@ class AgentTaskService:
     ) -> dict:
         self._require_token(auth_token)
         self._assert_workspace_allowed(workspace_id)
+        if not project_id:
+            raise HTTPException(status_code=400, detail="project_id is required")
         self._assert_project_allowed(project_id)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
@@ -434,6 +452,8 @@ class AgentTaskService:
     ) -> dict:
         self._require_token(auth_token)
         self._assert_workspace_allowed(workspace_id)
+        if not project_id:
+            raise HTTPException(status_code=400, detail="project_id is required")
         self._assert_project_allowed(project_id)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
@@ -472,6 +492,36 @@ class AgentTaskService:
                 db,
                 user,
                 ProjectRuleListQuery(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    q=q,
+                    limit=limit,
+                    offset=offset,
+                ),
+            )
+
+    def list_project_skills(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        auth_token: str | None = None,
+        q: str | None = None,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> dict:
+        self._require_token(auth_token)
+        self._assert_workspace_allowed(workspace_id)
+        if not project_id:
+            raise HTTPException(status_code=400, detail="project_id is required")
+        self._assert_project_allowed(project_id)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            return list_project_skills_read_model(
+                db,
+                user,
+                ProjectSkillListQuery(
                     workspace_id=workspace_id,
                     project_id=project_id,
                     q=q,
@@ -555,8 +605,6 @@ class AgentTaskService:
         offset: int = 0,
     ) -> dict:
         self._require_token(auth_token)
-        if bool(str(focus_entity_type or "").strip()) != bool(str(focus_entity_id or "").strip()):
-            raise HTTPException(status_code=400, detail="focus_entity_type and focus_entity_id must be provided together")
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             spec_state = self._assert_specification_allowed(db=db, specification_id=specification_id)
@@ -619,6 +667,18 @@ class AgentTaskService:
             if not rule:
                 raise HTTPException(status_code=404, detail="Project rule not found")
             return rule
+
+    def get_project_skill(self, *, skill_id: str, auth_token: str | None = None) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            state = self._assert_project_skill_allowed(db=db, skill_id=skill_id)
+            assert state is not None
+            ensure_role(db, state.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            skill = load_project_skill_view(db, skill_id)
+            if not skill:
+                raise HTTPException(status_code=404, detail="Project skill not found")
+            return skill
 
     def get_specification(self, *, specification_id: str, auth_token: str | None = None) -> dict:
         self._require_token(auth_token)
@@ -1397,6 +1457,103 @@ class AgentTaskService:
                 db, user, command_id=effective_command_id
             ).create_project_rule(payload)
 
+    def import_project_skill(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        source_url: str,
+        auth_token: str | None = None,
+        name: str = "",
+        skill_key: str = "",
+        mode: str = "advisory",
+        trust_level: str = "reviewed",
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_create(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-project-skill-import",
+                payload={
+                    "workspace_id": resolved_workspace_id,
+                    "project_id": resolved_project_id,
+                    "source_url": source_url,
+                    "name": name or "",
+                    "skill_key": skill_key or "",
+                    "mode": mode,
+                    "trust_level": trust_level,
+                },
+            )
+            return ProjectSkillApplicationService(
+                db, user, command_id=effective_command_id
+            ).import_skill_from_url(
+                workspace_id=resolved_workspace_id,
+                project_id=resolved_project_id,
+                source_url=source_url,
+                name=name,
+                skill_key=skill_key,
+                mode=mode,
+                trust_level=trust_level,
+            )
+
+    def import_project_skill_file(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        file_name: str,
+        file_content: bytes,
+        file_content_type: str = "",
+        auth_token: str | None = None,
+        name: str = "",
+        skill_key: str = "",
+        mode: str = "advisory",
+        trust_level: str = "reviewed",
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        content_sha256 = hashlib.sha256(file_content).hexdigest() if file_content else ""
+        with SessionLocal() as db:
+            resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_create(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-project-skill-import-file",
+                payload={
+                    "workspace_id": resolved_workspace_id,
+                    "project_id": resolved_project_id,
+                    "file_name": file_name,
+                    "file_content_type": file_content_type or "",
+                    "file_content_sha256": content_sha256,
+                    "name": name or "",
+                    "skill_key": skill_key or "",
+                    "mode": mode,
+                    "trust_level": trust_level,
+                },
+            )
+            return ProjectSkillApplicationService(
+                db, user, command_id=effective_command_id
+            ).import_skill_from_file(
+                workspace_id=resolved_workspace_id,
+                project_id=resolved_project_id,
+                file_name=file_name,
+                file_content=file_content,
+                file_content_type=file_content_type,
+                name=name,
+                skill_key=skill_key,
+                mode=mode,
+                trust_level=trust_level,
+            )
+
     def create_specification(
         self,
         *,
@@ -1579,6 +1736,55 @@ class AgentTaskService:
             return ProjectRuleApplicationService(
                 db, user, command_id=command_id or f"mcp-project-rule-delete-{uuid.uuid4()}"
             ).delete_project_rule(rule_id)
+
+    def update_project_skill(
+        self,
+        *,
+        skill_id: str,
+        patch: dict,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            self._assert_project_skill_allowed(db=db, skill_id=skill_id)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-project-skill-patch",
+                payload={
+                    "skill_id": skill_id,
+                    "patch": patch or {},
+                },
+            )
+            return ProjectSkillApplicationService(
+                db, user, command_id=effective_command_id
+            ).patch_project_skill(skill_id, patch or {})
+
+    def delete_project_skill(
+        self,
+        *,
+        skill_id: str,
+        delete_linked_rule: bool = True,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            self._assert_project_skill_allowed(db=db, skill_id=skill_id)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-project-skill-delete",
+                payload={
+                    "skill_id": skill_id,
+                    "delete_linked_rule": bool(delete_linked_rule),
+                },
+            )
+            return ProjectSkillApplicationService(
+                db, user, command_id=effective_command_id
+            ).delete_project_skill(
+                skill_id,
+                delete_linked_rule=bool(delete_linked_rule),
+            )
 
     def update_specification(
         self, *, specification_id: str, patch: dict, auth_token: str | None = None, command_id: str | None = None

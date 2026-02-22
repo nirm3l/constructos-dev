@@ -5,6 +5,8 @@ import type {
   Project,
   ProjectRule,
   ProjectRulesPage,
+  ProjectSkill,
+  ProjectSkillsPage,
 } from '../../types'
 import { AttachmentRefList, ExternalRefEditor, Icon, MarkdownModeToggle } from '../shared/uiHelpers'
 import {
@@ -54,6 +56,7 @@ export function ProjectsInlineEditor({
   editProjectDescription,
   setEditProjectDescription,
   projectRules,
+  projectSkills,
   selectedProjectRuleId,
   setSelectedProjectRuleId,
   projectRuleTitle,
@@ -65,6 +68,10 @@ export function ProjectsInlineEditor({
   createProjectRuleMutation,
   patchProjectRuleMutation,
   deleteProjectRuleMutation,
+  importProjectSkillMutation,
+  importProjectSkillFileMutation,
+  patchProjectSkillMutation,
+  deleteProjectSkillMutation,
   toUserDateTime,
   userTimezone,
   editProjectExternalRefsText,
@@ -107,6 +114,7 @@ export function ProjectsInlineEditor({
   editProjectDescription: string
   setEditProjectDescription: React.Dispatch<React.SetStateAction<string>>
   projectRules: { data?: ProjectRulesPage }
+  projectSkills: { data?: ProjectSkillsPage; isLoading?: boolean; isFetching?: boolean }
   selectedProjectRuleId: string | null
   setSelectedProjectRuleId: React.Dispatch<React.SetStateAction<string | null>>
   projectRuleTitle: string
@@ -118,6 +126,10 @@ export function ProjectsInlineEditor({
   createProjectRuleMutation: ProjectMutation
   patchProjectRuleMutation: ProjectMutation
   deleteProjectRuleMutation: ProjectMutation
+  importProjectSkillMutation: ProjectMutation
+  importProjectSkillFileMutation: ProjectMutation
+  patchProjectSkillMutation: ProjectMutation
+  deleteProjectSkillMutation: ProjectMutation
   toUserDateTime: (iso: unknown, timezone: string | undefined) => string
   userTimezone: string | undefined
   editProjectExternalRefsText: string
@@ -167,6 +179,176 @@ export function ProjectsInlineEditor({
           : 'Not indexed'
   const vectorAvailable = Boolean(vectorStoreEnabled)
   const templateBinding = selectedProject.template_binding
+  const [selectedProjectSkillId, setSelectedProjectSkillId] = React.useState<string | null>(null)
+  const [skillImportSourceUrl, setSkillImportSourceUrl] = React.useState('')
+  const skillImportFileInputRef = React.useRef<HTMLInputElement | null>(null)
+  const rulesSectionRef = React.useRef<HTMLDivElement | null>(null)
+  const rulesFocusTimerRef = React.useRef<number | null>(null)
+  const [rulesSectionFocused, setRulesSectionFocused] = React.useState(false)
+  const skillsSectionRef = React.useRef<HTMLDivElement | null>(null)
+  const skillsFocusTimerRef = React.useRef<number | null>(null)
+  const [skillsSectionFocused, setSkillsSectionFocused] = React.useState(false)
+  const [skillImportKey, setSkillImportKey] = React.useState('')
+  const [skillImportMode, setSkillImportMode] = React.useState<'advisory' | 'enforced'>('advisory')
+  const [skillImportTrustLevel, setSkillImportTrustLevel] = React.useState<'verified' | 'reviewed' | 'untrusted'>(
+    'reviewed'
+  )
+  const [skillEditorName, setSkillEditorName] = React.useState('')
+  const [skillEditorSummary, setSkillEditorSummary] = React.useState('')
+  const [skillEditorMode, setSkillEditorMode] = React.useState<'advisory' | 'enforced'>('advisory')
+  const [skillEditorTrustLevel, setSkillEditorTrustLevel] = React.useState<'verified' | 'reviewed' | 'untrusted'>(
+    'reviewed'
+  )
+
+  const skillItems = projectSkills.data?.items ?? []
+  const activeProjectRuleIds = React.useMemo(() => {
+    const ids = new Set<string>()
+    for (const item of projectRules.data?.items ?? []) {
+      const id = String(item?.id || '').trim()
+      if (id) ids.add(id)
+    }
+    return ids
+  }, [projectRules.data?.items])
+  const skillByGeneratedRuleId = React.useMemo(() => {
+    const out = new Map<
+      string,
+      {
+        skillId: string
+        skillName: string
+        skillKey: string
+      }
+    >()
+    for (const skill of skillItems) {
+      const generatedRuleId = String(skill.generated_rule_id || '').trim()
+      if (!generatedRuleId || out.has(generatedRuleId)) continue
+      out.set(generatedRuleId, {
+        skillId: String(skill.id || '').trim(),
+        skillName: String(skill.name || '').trim(),
+        skillKey: String(skill.skill_key || '').trim(),
+      })
+    }
+    return out
+  }, [skillItems])
+  const selectedProjectSkill = React.useMemo(
+    () => skillItems.find((item: ProjectSkill) => item.id === selectedProjectSkillId) ?? null,
+    [selectedProjectSkillId, skillItems]
+  )
+  const selectedRuleLinkedSkill = React.useMemo(() => {
+    if (!selectedProjectRuleId) return null
+    return skillByGeneratedRuleId.get(selectedProjectRuleId) ?? null
+  }, [selectedProjectRuleId, skillByGeneratedRuleId])
+
+  React.useEffect(
+    () => () => {
+      if (rulesFocusTimerRef.current !== null) {
+        window.clearTimeout(rulesFocusTimerRef.current)
+        rulesFocusTimerRef.current = null
+      }
+      if (skillsFocusTimerRef.current !== null) {
+        window.clearTimeout(skillsFocusTimerRef.current)
+        skillsFocusTimerRef.current = null
+      }
+    },
+    []
+  )
+
+  const openLinkedRule = React.useCallback((ruleId: string | null | undefined) => {
+    const normalizedRuleId = String(ruleId || '').trim()
+    if (!normalizedRuleId) return
+    setSelectedProjectRuleId(normalizedRuleId)
+    setProjectRuleView('preview')
+    setRulesSectionFocused(true)
+    if (rulesFocusTimerRef.current !== null) {
+      window.clearTimeout(rulesFocusTimerRef.current)
+    }
+    rulesFocusTimerRef.current = window.setTimeout(() => {
+      setRulesSectionFocused(false)
+      rulesFocusTimerRef.current = null
+    }, 1400)
+    window.requestAnimationFrame(() => {
+      rulesSectionRef.current?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      })
+    })
+  }, [])
+
+  const openLinkedSkill = React.useCallback((skillId: string | null | undefined) => {
+    const normalizedSkillId = String(skillId || '').trim()
+    if (!normalizedSkillId) return
+    setSelectedProjectSkillId(normalizedSkillId)
+    setSkillsSectionFocused(true)
+    if (skillsFocusTimerRef.current !== null) {
+      window.clearTimeout(skillsFocusTimerRef.current)
+    }
+    skillsFocusTimerRef.current = window.setTimeout(() => {
+      setSkillsSectionFocused(false)
+      skillsFocusTimerRef.current = null
+    }, 1400)
+    window.requestAnimationFrame(() => {
+      skillsSectionRef.current?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      })
+    })
+  }, [])
+
+  React.useEffect(() => {
+    if (skillItems.length === 0) {
+      setSelectedProjectSkillId(null)
+      return
+    }
+    if (selectedProjectSkillId && skillItems.some((item: ProjectSkill) => item.id === selectedProjectSkillId)) {
+      return
+    }
+    const firstSkill = skillItems[0]
+    if (firstSkill?.id) {
+      setSelectedProjectSkillId(firstSkill.id)
+    }
+  }, [selectedProjectSkillId, skillItems])
+
+  React.useEffect(() => {
+    if (!selectedProjectSkill) {
+      setSkillEditorName('')
+      setSkillEditorSummary('')
+      setSkillEditorMode('advisory')
+      setSkillEditorTrustLevel('reviewed')
+      return
+    }
+    setSkillEditorName(String(selectedProjectSkill.name || ''))
+    setSkillEditorSummary(String(selectedProjectSkill.summary || ''))
+    setSkillEditorMode(
+      String(selectedProjectSkill.mode || '').toLowerCase() === 'enforced' ? 'enforced' : 'advisory'
+    )
+    const nextTrustLevel = String(selectedProjectSkill.trust_level || '').toLowerCase()
+    if (nextTrustLevel === 'verified' || nextTrustLevel === 'untrusted') {
+      setSkillEditorTrustLevel(nextTrustLevel)
+    } else {
+      setSkillEditorTrustLevel('reviewed')
+    }
+  }, [selectedProjectSkill])
+
+  const skillEditorDirty = React.useMemo(() => {
+    if (!selectedProjectSkill) return false
+    return (
+      skillEditorName.trim() !== String(selectedProjectSkill.name || '').trim() ||
+      skillEditorSummary !== String(selectedProjectSkill.summary || '') ||
+      skillEditorMode !==
+        (String(selectedProjectSkill.mode || '').toLowerCase() === 'enforced' ? 'enforced' : 'advisory') ||
+      skillEditorTrustLevel !==
+        (String(selectedProjectSkill.trust_level || '').toLowerCase() === 'verified'
+          ? 'verified'
+          : String(selectedProjectSkill.trust_level || '').toLowerCase() === 'untrusted'
+            ? 'untrusted'
+            : 'reviewed')
+    )
+  }, [
+    selectedProjectSkill,
+    skillEditorMode,
+    skillEditorName,
+    skillEditorSummary,
+    skillEditorTrustLevel,
+  ])
 
   return (
     <div className="project-inline-editor" style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
@@ -285,7 +467,11 @@ export function ProjectsInlineEditor({
           </div>
         ) : null}
       </div>
-      <div className="rules-studio" style={{ marginTop: 10, marginBottom: 14 }}>
+      <div
+        ref={rulesSectionRef}
+        className={`rules-studio ${rulesSectionFocused ? 'rules-studio-focus' : ''}`}
+        style={{ marginTop: 10, marginBottom: 14 }}
+      >
         <div className="row wrap rules-head-row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
           <h3 style={{ margin: 0 }}>Project Rules ({projectRules.data?.total ?? 0})</h3>
         </div>
@@ -296,16 +482,26 @@ export function ProjectsInlineEditor({
             ) : (
               (projectRules.data?.items ?? []).map((rule: ProjectRule) => {
                 const isSelected = selectedProjectRuleId === rule.id
+                const linkedSkill = skillByGeneratedRuleId.get(rule.id)
                 return (
                   <div
                     key={rule.id}
-                    className={`task-item rule-item ${isSelected ? 'selected' : ''}`}
+                    className={[
+                      'task-item',
+                      'rule-item',
+                      isSelected ? 'selected' : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' ')}
                     onClick={() => setSelectedProjectRuleId(rule.id)}
                     role="button"
                   >
                     <div className="task-main">
                       <div className="task-title">
-                        <strong>{rule.title || 'Untitled rule'}</strong>
+                        <div className="row" style={{ gap: 6, minWidth: 0 }}>
+                          {linkedSkill && <span className="rule-kind-chip">[SKILL]</span>}
+                          <strong>{rule.title || 'Untitled rule'}</strong>
+                        </div>
                         <div className="row" style={{ gap: 6 }}>
                           {isSelected && <span className="badge">Editing</span>}
                           <button
@@ -324,6 +520,11 @@ export function ProjectsInlineEditor({
                         </div>
                       </div>
                       <div className="meta">{(rule.body || '').replace(/\s+/g, ' ').slice(0, 120) || '(empty)'}</div>
+                      {linkedSkill ? (
+                        <div className="meta">
+                          Linked skill: {linkedSkill.skillName || linkedSkill.skillKey || linkedSkill.skillId}
+                        </div>
+                      ) : null}
                       <div className="meta">Updated: {toUserDateTime(rule.updated_at, userTimezone)}</div>
                     </div>
                   </div>
@@ -348,6 +549,23 @@ export function ProjectsInlineEditor({
             </div>
           </div>
           <div className="rules-editor">
+            {selectedRuleLinkedSkill ? (
+              <div className="row wrap" style={{ marginBottom: 8, gap: 8, alignItems: 'center' }}>
+                <span className="rule-kind-chip">[SKILL]</span>
+                <span className="meta">
+                  Source skill: {selectedRuleLinkedSkill.skillName || selectedRuleLinkedSkill.skillKey || selectedRuleLinkedSkill.skillId}
+                </span>
+                {selectedRuleLinkedSkill.skillId ? (
+                  <button
+                    className="status-chip"
+                    type="button"
+                    onClick={() => openLinkedSkill(selectedRuleLinkedSkill.skillId)}
+                  >
+                    Open linked skill
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
             <div className="row rule-title-row" style={{ marginBottom: 8, justifyContent: 'space-between', gap: 8 }}>
               <input
                 className="rule-title-input"
@@ -388,6 +606,306 @@ export function ProjectsInlineEditor({
                 )}
               </div>
             </div>
+          </div>
+        </div>
+      </div>
+      <div
+        ref={skillsSectionRef}
+        className={`rules-studio ${skillsSectionFocused ? 'rules-studio-focus' : ''}`}
+        style={{ marginTop: 10, marginBottom: 14 }}
+      >
+        <div className="row wrap rules-head-row" style={{ justifyContent: 'space-between', marginBottom: 8, gap: 8 }}>
+          <h3 style={{ margin: 0 }}>Project Skills ({projectSkills.data?.total ?? 0})</h3>
+          <div className="meta">Import reusable skills by URL or file. Existing skill keys are updated automatically.</div>
+        </div>
+        <div className="row wrap" style={{ gap: 8, marginBottom: 10, alignItems: 'center' }}>
+          <input
+            value={skillImportSourceUrl}
+            onChange={(e) => setSkillImportSourceUrl(e.target.value)}
+            placeholder="Skill source URL (https://...)"
+            style={{ flex: 2, minWidth: 260 }}
+          />
+          <input
+            value={skillImportKey}
+            onChange={(e) => setSkillImportKey(e.target.value)}
+            placeholder="Key (e.g. testing_skill)"
+            style={{ width: 170, minWidth: 140 }}
+          />
+          <select
+            value={skillImportMode}
+            title="Import mode"
+            aria-label="Import mode"
+            onChange={(e) => setSkillImportMode(e.target.value === 'enforced' ? 'enforced' : 'advisory')}
+            style={{ width: 120 }}
+          >
+            <option value="advisory">advisory</option>
+            <option value="enforced">enforced</option>
+          </select>
+          <select
+            value={skillImportTrustLevel}
+            title="Trust level"
+            aria-label="Trust level"
+            onChange={(e) => {
+              const next = e.target.value
+              if (next === 'verified' || next === 'untrusted') {
+                setSkillImportTrustLevel(next)
+              } else {
+                setSkillImportTrustLevel('reviewed')
+              }
+            }}
+            style={{ width: 120 }}
+          >
+            <option value="reviewed">reviewed</option>
+            <option value="verified">verified</option>
+            <option value="untrusted">untrusted</option>
+          </select>
+          <div className="row" style={{ gap: 6, marginLeft: 'auto', flexShrink: 0 }}>
+            <button
+              className="action-icon primary"
+              type="button"
+              disabled={importProjectSkillMutation.isPending || importProjectSkillFileMutation.isPending}
+              title="Import skill from URL"
+              aria-label="Import skill from URL"
+              onClick={() => {
+                const sourceUrl = String(skillImportSourceUrl || '').trim()
+                if (!sourceUrl) {
+                  setUiError('Skill source URL is required')
+                  return
+                }
+                importProjectSkillMutation.mutate(
+                  {
+                    source_url: sourceUrl,
+                    skill_key: String(skillImportKey || '').trim() || undefined,
+                    mode: skillImportMode,
+                    trust_level: skillImportTrustLevel,
+                  },
+                  {
+                    onSuccess: (created: ProjectSkill) => {
+                      setUiError(null)
+                      if (created?.id) setSelectedProjectSkillId(created.id)
+                      setSkillImportSourceUrl('')
+                      setSkillImportKey('')
+                      setSkillImportMode('advisory')
+                      setSkillImportTrustLevel('reviewed')
+                    },
+                  }
+                )
+              }}
+            >
+              {importProjectSkillMutation.isPending ? (
+                <Icon path="M12 5v14M5 12h14" />
+              ) : (
+                <Icon path="M12 5v10m0 0l4-4m-4 4l-4-4M4 21h16" />
+              )}
+            </button>
+            <button
+              className="action-icon"
+              type="button"
+              disabled={importProjectSkillMutation.isPending || importProjectSkillFileMutation.isPending}
+              title="Import skill from file"
+              aria-label="Import skill from file"
+              onClick={() => skillImportFileInputRef.current?.click()}
+            >
+              <Icon
+                path={
+                  importProjectSkillFileMutation.isPending
+                    ? 'M12 5v14M5 12h14'
+                    : 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6'
+                }
+              />
+            </button>
+          </div>
+          <input
+            ref={skillImportFileInputRef}
+            type="file"
+            accept=".md,.markdown,.txt,.json,text/plain,text/markdown,application/json"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const file = e.target.files?.[0]
+              e.currentTarget.value = ''
+              if (!file) return
+              importProjectSkillFileMutation.mutate(
+                {
+                  file,
+                  skill_key: String(skillImportKey || '').trim() || undefined,
+                  mode: skillImportMode,
+                  trust_level: skillImportTrustLevel,
+                },
+                {
+                  onSuccess: (created: ProjectSkill) => {
+                    setUiError(null)
+                    if (created?.id) setSelectedProjectSkillId(created.id)
+                    setSkillImportSourceUrl('')
+                    setSkillImportKey('')
+                    setSkillImportMode('advisory')
+                    setSkillImportTrustLevel('reviewed')
+                  },
+                }
+              )
+            }}
+          />
+        </div>
+        <div className="rules-layout">
+          <div className="rules-list">
+            {projectSkills.isLoading ? (
+              <div className="notice">Loading project skills...</div>
+            ) : skillItems.length === 0 ? (
+              <div className="notice">No skills imported yet for this project.</div>
+            ) : (
+              skillItems.map((skill: ProjectSkill) => {
+                const isSelected = selectedProjectSkillId === skill.id
+                return (
+                  <div
+                    key={skill.id}
+                    className={`task-item rule-item ${isSelected ? 'selected' : ''}`}
+                    onClick={() => setSelectedProjectSkillId(skill.id)}
+                    role="button"
+                  >
+                    <div className="task-main">
+                      <div className="task-title">
+                        <strong>{skill.name || skill.skill_key || 'Untitled skill'}</strong>
+                        <div className="row" style={{ gap: 6 }}>
+                          <button
+                            className="action-icon danger-ghost"
+                            disabled={deleteProjectSkillMutation.isPending}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              if (!window.confirm('Delete this skill and linked rule?')) return
+                              deleteProjectSkillMutation.mutate(
+                                {
+                                  skillId: skill.id,
+                                  delete_linked_rule: true,
+                                },
+                                {
+                                  onSuccess: () => {
+                                    if (selectedProjectSkillId === skill.id) setSelectedProjectSkillId(null)
+                                  },
+                                }
+                              )
+                            }}
+                            title="Delete skill"
+                            aria-label="Delete skill"
+                          >
+                            <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="meta">
+                        key: {skill.skill_key || '-'} | mode: {skill.mode || '-'} | trust: {skill.trust_level || '-'}
+                      </div>
+                      <div className="meta">
+                        {(skill.summary || '').replace(/\s+/g, ' ').slice(0, 140) || '(no summary)'}
+                      </div>
+                      <div className="meta">
+                        source: {skill.source_locator || '(none)'}
+                      </div>
+                      {String(skill.generated_rule_id || '').trim() &&
+                      activeProjectRuleIds.has(String(skill.generated_rule_id || '').trim()) ? (
+                        <div className="row" style={{ marginTop: 6, gap: 6 }}>
+                          <button
+                            className="status-chip"
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              openLinkedRule(String(skill.generated_rule_id || '').trim())
+                            }}
+                          >
+                            Open linked rule
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                )
+              })
+            )}
+          </div>
+          <div className="rules-editor">
+            {!selectedProjectSkill ? (
+              <div className="notice">Select a skill to edit its mode, trust, and summary.</div>
+            ) : (
+              <>
+                <div className="row rule-title-row" style={{ marginBottom: 8, justifyContent: 'space-between', gap: 8 }}>
+                  <input
+                    className="rule-title-input"
+                    value={skillEditorName}
+                    onChange={(e) => setSkillEditorName(e.target.value)}
+                    placeholder="Skill name"
+                  />
+                  <button
+                    className="action-icon primary"
+                    disabled={!skillEditorName.trim() || !skillEditorDirty || patchProjectSkillMutation.isPending}
+                    onClick={() => {
+                      patchProjectSkillMutation.mutate({
+                        skillId: selectedProjectSkill.id,
+                        patch: {
+                          name: skillEditorName.trim(),
+                          summary: skillEditorSummary,
+                          mode: skillEditorMode,
+                          trust_level: skillEditorTrustLevel,
+                          sync_project_rule: true,
+                        },
+                      })
+                    }}
+                    title="Save skill"
+                    aria-label="Save skill"
+                  >
+                    <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+                  </button>
+                </div>
+                <div className="row wrap" style={{ gap: 8, marginBottom: 8 }}>
+                  <label className="field-control" style={{ minWidth: 150, marginBottom: 0 }}>
+                    <span className="field-label">Mode</span>
+                    <select
+                      value={skillEditorMode}
+                      onChange={(e) => setSkillEditorMode(e.target.value === 'enforced' ? 'enforced' : 'advisory')}
+                    >
+                      <option value="advisory">advisory</option>
+                      <option value="enforced">enforced</option>
+                    </select>
+                  </label>
+                  <label className="field-control" style={{ minWidth: 170, marginBottom: 0 }}>
+                    <span className="field-label">Trust level</span>
+                    <select
+                      value={skillEditorTrustLevel}
+                      onChange={(e) => {
+                        const next = e.target.value
+                        if (next === 'verified' || next === 'untrusted') {
+                          setSkillEditorTrustLevel(next)
+                        } else {
+                          setSkillEditorTrustLevel('reviewed')
+                        }
+                      }}
+                    >
+                      <option value="reviewed">reviewed</option>
+                      <option value="verified">verified</option>
+                      <option value="untrusted">untrusted</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="md-editor-surface">
+                  <div className="md-editor-content">
+                    <textarea
+                      className="md-textarea"
+                      value={skillEditorSummary}
+                      onChange={(e) => setSkillEditorSummary(e.target.value)}
+                      placeholder="Skill summary"
+                      style={{ width: '100%', minHeight: 110 }}
+                    />
+                  </div>
+                </div>
+                <div className="meta" style={{ marginTop: 8 }}>
+                  Source: {selectedProjectSkill.source_locator || '(none)'}
+                </div>
+                <div className="meta">
+                  Linked rule:{' '}
+                  {String(selectedProjectSkill.generated_rule_id || '').trim() &&
+                  activeProjectRuleIds.has(String(selectedProjectSkill.generated_rule_id || '').trim())
+                    ? String(selectedProjectSkill.generated_rule_id || '').trim()
+                    : '(none)'}
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>

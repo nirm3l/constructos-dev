@@ -96,6 +96,7 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
             editProjectDescription={state.editProjectDescription}
             setEditProjectDescription={state.setEditProjectDescription}
             projectRules={state.projectRules}
+            projectSkills={state.projectSkills}
             selectedProjectRuleId={state.selectedProjectRuleId}
             setSelectedProjectRuleId={state.setSelectedProjectRuleId}
             projectRuleTitle={state.projectRuleTitle}
@@ -107,6 +108,10 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
             createProjectRuleMutation={state.createProjectRuleMutation}
             patchProjectRuleMutation={state.patchProjectRuleMutation}
             deleteProjectRuleMutation={state.deleteProjectRuleMutation}
+            importProjectSkillMutation={state.importProjectSkillMutation}
+            importProjectSkillFileMutation={state.importProjectSkillFileMutation}
+            patchProjectSkillMutation={state.patchProjectSkillMutation}
+            deleteProjectSkillMutation={state.deleteProjectSkillMutation}
             toUserDateTime={state.toUserDateTime}
             userTimezone={state.userTimezone}
             editProjectExternalRefsText={state.editProjectExternalRefsText}

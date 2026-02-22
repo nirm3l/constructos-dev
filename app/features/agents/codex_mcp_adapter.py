@@ -27,6 +27,7 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     project_name = ctx.get("project_name") or ""
     project_description = str(ctx.get("project_description") or "")
     project_rules = ctx.get("project_rules") or []
+    project_skills = ctx.get("project_skills") or []
     graph_context_markdown = str(ctx.get("graph_context_markdown") or "").strip()
     graph_evidence_json = str(ctx.get("graph_evidence_json") or "").strip()
     graph_summary_markdown = str(ctx.get("graph_summary_markdown") or "").strip()
@@ -49,6 +50,27 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         else:
             rules_md_lines.append(f"- {label}")
     rules_md = "\n".join(rules_md_lines) if rules_md_lines else "_(no project rules)_"
+    skills_md_lines: list[str] = []
+    for item in project_skills:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        skill_key = str(item.get("skill_key") or "").strip()
+        summary = str(item.get("summary") or "").strip()
+        mode = str(item.get("mode") or "").strip().lower() or "advisory"
+        trust_level = str(item.get("trust_level") or "").strip().lower() or "reviewed"
+        source_locator = str(item.get("source_locator") or "").strip()
+        if not name and not skill_key:
+            continue
+        label = name or skill_key
+        key_text = f" ({skill_key})" if skill_key else ""
+        source_text = f" source={source_locator}" if source_locator else ""
+        suffix_parts = [f"mode={mode}", f"trust={trust_level}"]
+        if summary:
+            suffix_parts.append(summary)
+        suffix_text = "; ".join(suffix_parts)
+        skills_md_lines.append(f"- {label}{key_text}: {suffix_text}{source_text}")
+    skills_md = "\n".join(skills_md_lines) if skills_md_lines else "_(no project skills)_"
     has_task_context = bool(str(task_id or "").strip())
     context_guidance = (
         "- First call MCP tool get_task(task_id) to validate current task data.\n"
@@ -93,6 +115,8 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         f"{soul_md}\n\n"
         "File: ProjectRules.md (source: project_rules)\n"
         f"{rules_md}\n\n"
+        "File: ProjectSkills.md (source: project_skills)\n"
+        f"{skills_md}\n\n"
         "File: GraphContext.md (source: knowledge_graph)\n"
         f"{graph_md}\n\n"
         "File: GraphEvidence.json (source: knowledge_graph.evidence)\n"
@@ -101,8 +125,11 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         f"{graph_summary}\n\n"
         "Guidance:\n"
         f"{context_guidance}"
-        "- Treat Soul.md, ProjectRules.md, GraphContext.md, GraphEvidence.json, and GraphSummary.md as durable project-level context.\n"
+        "- Treat Soul.md, ProjectRules.md, ProjectSkills.md, GraphContext.md, GraphEvidence.json, and GraphSummary.md as durable project-level context.\n"
         "- ProjectRules.md defines how you should behave within this project.\n"
+        "- ProjectSkills.md captures reusable skills configured for this project.\n"
+        "- Apply ProjectSkills with mode=enforced before advisory skills.\n"
+        "- If no enforced skill applies, use advisory skills as guidance alongside project rules.\n"
         "- GraphContext.md captures resource relations and should guide dependency-aware decisions.\n"
         "- GraphEvidence.json is the canonical evidence source for grounded claims.\n"
         "- GraphSummary.md can be used as a concise overview, but validate against GraphEvidence.json before acting.\n"

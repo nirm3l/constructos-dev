@@ -16,6 +16,7 @@ from shared.core import (
     ProjectMember,
     ProjectPatch,
     ProjectRule,
+    ProjectSkill,
     Specification,
     Task,
     User,
@@ -303,6 +304,12 @@ class DeleteProjectHandler:
                     "specification_id": specification.id,
                 },
             )
+        skills = self.ctx.db.execute(
+            select(ProjectSkill).where(ProjectSkill.project_id == self.project_id, ProjectSkill.is_deleted == False)
+        ).scalars().all()
+        for skill in skills:
+            skill.is_deleted = True
+            skill.updated_by = self.ctx.user.id
         aggregate = repo.load_with_class(
             aggregate_type="Project",
             aggregate_id=self.project_id,

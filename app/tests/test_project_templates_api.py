@@ -2,6 +2,7 @@ import os
 from importlib import reload
 from pathlib import Path
 
+import httpx
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -340,3 +341,65 @@ def test_agent_service_can_preview_project_from_template(tmp_path, monkeypatch):
     assert preview["mode"] == "preview"
     assert preview["template"]["key"] == "mobile_browser_game_development"
     assert preview["seed_summary"]["task_count"] >= 1
+
+
+def test_create_project_from_template_seeds_template_skills(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    workspace_id = client.get("/api/bootstrap").json()["workspaces"][0]["id"]
+
+    from dataclasses import replace
+
+    from features.project_templates import application as template_app
+    from features.project_templates.catalog import TemplateSkill, get_template_definition
+    from features.project_skills import application as skill_app
+
+    base_template = get_template_definition("ddd")
+    assert base_template is not None
+    template_with_skill = replace(
+        base_template,
+        skills=(
+            TemplateSkill(
+                source_url="https://example.com/skills/template-quality.md",
+                name="Template Quality Skill",
+                skill_key="template_quality",
+                mode="enforced",
+                trust_level="reviewed",
+                required=True,
+            ),
+        ),
+    )
+    monkeypatch.setattr(template_app, "get_template_definition", lambda template_key: template_with_skill)
+
+    def fake_get(url, timeout, follow_redirects, headers):  # noqa: ANN001, A002
+        _ = (url, timeout, follow_redirects, headers)
+        return httpx.Response(
+            status_code=200,
+            headers={"content-type": "text/markdown"},
+            text="# Template Quality Skill\nAlways add tests and release notes.",
+        )
+
+    monkeypatch.setattr(skill_app.httpx, "get", fake_get)
+
+    created = client.post(
+        "/api/projects/from-template",
+        json={
+            "workspace_id": workspace_id,
+            "template_key": "ddd",
+            "name": "DDD Skill Seed",
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    project_id = payload["project"]["id"]
+    assert payload["seed_summary"]["skill_count"] == 1
+    assert payload["seed_summary"]["skill_skip_count"] == 0
+    assert len(payload["seeded_entity_ids"]["project_skill_ids"]) == 1
+    assert len(payload["seeded_entity_ids"]["project_skill_rule_ids"]) == 1
+
+    listed_skills = client.get(f"/api/project-skills?workspace_id={workspace_id}&project_id={project_id}")
+    assert listed_skills.status_code == 200
+    items = listed_skills.json()["items"]
+    assert len(items) == 1
+    assert items[0]["skill_key"] == "template_quality"
+    assert items[0]["mode"] == "enforced"
+    assert items[0]["trust_level"] == "reviewed"

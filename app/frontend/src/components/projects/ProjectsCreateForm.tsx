@@ -138,6 +138,19 @@ export function ProjectsCreateForm({
     if (entries.length === 0) return ''
     return JSON.stringify(parameters, null, 2)
   }, [templatePreview])
+  const templatePreviewSkillNames = React.useMemo(() => {
+    const raw = templatePreview?.seed_blueprint?.skills
+    if (!Array.isArray(raw) || raw.length === 0) return []
+    return raw
+      .map((item) => {
+        if (!item || typeof item !== 'object') return ''
+        const payload = item as Record<string, unknown>
+        const name = String(payload.name || '').trim()
+        const key = String(payload.skill_key || '').trim()
+        return name || key
+      })
+      .filter(Boolean)
+  }, [templatePreview])
   const previewCanCreate = Boolean(templatePreview?.project_conflict?.can_create)
   const previewConflictStatus = String(templatePreview?.project_conflict?.status || '').trim()
   const canPreviewTemplatePlan =
@@ -275,11 +288,11 @@ export function ProjectsCreateForm({
             {selectedTemplate.description}
             {' · '}
             Seed specs: {selectedTemplate.seed_counts.specifications}, tasks: {selectedTemplate.seed_counts.tasks}, rules:{' '}
-            {selectedTemplate.seed_counts.rules}
+            {selectedTemplate.seed_counts.rules}, skills: {selectedTemplate.seed_counts.skills ?? 0}
           </div>
         ) : (
           <div className="meta" style={{ marginTop: 6 }}>
-            Use manual mode for a blank project, or pick a template to seed initial specs, tasks, and rules.
+            Use manual mode for a blank project, or pick a template to seed initial specs, tasks, rules, and skills.
           </div>
         )}
       </label>
@@ -295,8 +308,8 @@ export function ProjectsCreateForm({
           ) : (
             <div className="meta">
               Seed specs: {templatePreview.seed_summary.specification_count}, tasks: {templatePreview.seed_summary.task_count},
-              rules: {templatePreview.seed_summary.rule_count}, graph nodes: {templatePreview.seed_summary.graph_node_count},
-              graph edges: {templatePreview.seed_summary.graph_edge_count}.
+              rules: {templatePreview.seed_summary.rule_count}, skills: {templatePreview.seed_summary.skill_count ?? 0},
+              graph nodes: {templatePreview.seed_summary.graph_node_count}, graph edges: {templatePreview.seed_summary.graph_edge_count}.
               {' '}
               {conflictMessage}
             </div>
@@ -321,6 +334,11 @@ export function ProjectsCreateForm({
             <div className="meta" style={{ marginTop: 6 }}>
               Applied parameters:
               <pre style={{ margin: '6px 0 0', whiteSpace: 'pre-wrap' }}>{templatePreviewParametersJson}</pre>
+            </div>
+          ) : null}
+          {templatePreviewSkillNames.length > 0 ? (
+            <div className="meta" style={{ marginTop: 6 }}>
+              Seeded skills: {templatePreviewSkillNames.join(', ')}
             </div>
           ) : null}
         </div>

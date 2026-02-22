@@ -30,6 +30,8 @@ import type {
   ProjectFromTemplateResponse,
   ProjectRule,
   ProjectRulesPage,
+  ProjectSkill,
+  ProjectSkillsPage,
   ProjectTemplatesPage,
   Specification,
   SpecificationBulkTaskCreateResponse,
@@ -699,6 +701,88 @@ export const patchProjectRule = (
 
 export const deleteProjectRule = (userId: string, ruleId: string) =>
   api<{ ok: true }>(`/api/project-rules/${ruleId}/delete`, userId, { method: 'POST' })
+
+export const getProjectSkills = (
+  userId: string,
+  workspaceId: string,
+  params: { project_id: string; q?: string; limit?: number; offset?: number }
+) =>
+  api<ProjectSkillsPage>(
+    `/api/project-skills${queryString({
+      workspace_id: workspaceId,
+      project_id: params.project_id,
+      q: params.q,
+      limit: params.limit ?? 100,
+      offset: params.offset ?? 0,
+    })}`,
+    userId
+  )
+
+export const importProjectSkill = (
+  userId: string,
+  payload: {
+    workspace_id: string
+    project_id: string
+    source_url: string
+    name?: string
+    skill_key?: string
+    mode?: 'advisory' | 'enforced'
+    trust_level?: 'verified' | 'reviewed' | 'untrusted'
+  }
+) =>
+  api<ProjectSkill>('/api/project-skills/import', userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const importProjectSkillFile = async (
+  userId: string,
+  payload: {
+    workspace_id: string
+    project_id: string
+    file: File
+    name?: string
+    skill_key?: string
+    mode?: 'advisory' | 'enforced'
+    trust_level?: 'verified' | 'reviewed' | 'untrusted'
+  }
+) => {
+  const form = new FormData()
+  form.set('workspace_id', payload.workspace_id)
+  form.set('project_id', payload.project_id)
+  form.set('file', payload.file)
+  if (payload.name) form.set('name', payload.name)
+  if (payload.skill_key) form.set('skill_key', payload.skill_key)
+  if (payload.mode) form.set('mode', payload.mode)
+  if (payload.trust_level) form.set('trust_level', payload.trust_level)
+  return uploadApi<ProjectSkill>('/api/project-skills/import-file', userId, form)
+}
+
+export const patchProjectSkill = (
+  userId: string,
+  skillId: string,
+  payload: {
+    name?: string
+    summary?: string
+    mode?: 'advisory' | 'enforced'
+    trust_level?: 'verified' | 'reviewed' | 'untrusted'
+    sync_project_rule?: boolean
+  }
+) =>
+  api<ProjectSkill>(`/api/project-skills/${skillId}`, userId, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+
+export const deleteProjectSkill = (
+  userId: string,
+  skillId: string,
+  payload: { delete_linked_rule?: boolean } = {}
+) =>
+  api<{ ok: true }>(`/api/project-skills/${skillId}/delete`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
 
 export const patchMyPreferences = (
   userId: string,

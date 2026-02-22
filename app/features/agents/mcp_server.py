@@ -291,6 +291,25 @@ def create_mcp():
             offset=offset,
         )
 
+    @mcp.tool(description="List project skills in a workspace/project.")
+    def list_project_skills(
+        workspace_id: str,
+        project_id: str,
+        auth_token: str | None = None,
+        q: str | None = None,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.list_project_skills(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            auth_token=auth_token,
+            q=q,
+            limit=limit,
+            offset=offset,
+        )
+
     @mcp.tool(description="List specifications in a workspace/project.")
     def list_specifications(
         workspace_id: str,
@@ -354,6 +373,11 @@ def create_mcp():
     def get_project_rule(rule_id: str, auth_token: str | None = None) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
         return service.get_project_rule(rule_id=rule_id, auth_token=auth_token)
+
+    @mcp.tool(description="Get one project skill by id.")
+    def get_project_skill(skill_id: str, auth_token: str | None = None) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.get_project_skill(skill_id=skill_id, auth_token=auth_token)
 
     @mcp.tool(description="Get one specification by id.")
     def get_specification(specification_id: str, auth_token: str | None = None) -> dict[str, Any]:
@@ -767,6 +791,31 @@ def create_mcp():
             command_id=command_id,
         )
 
+    @mcp.tool(description="Import an external skill URL into a project and generate a linked project rule.")
+    def import_project_skill(
+        workspace_id: str,
+        project_id: str,
+        source_url: str,
+        auth_token: str | None = None,
+        name: str = "",
+        skill_key: str = "",
+        mode: str = "advisory",
+        trust_level: str = "reviewed",
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.import_project_skill(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            source_url=source_url,
+            auth_token=auth_token,
+            name=name,
+            skill_key=skill_key,
+            mode=mode,
+            trust_level=trust_level,
+            command_id=command_id,
+        )
+
     @mcp.tool(description="Create a specification in a workspace/project.")
     def create_specification(
         title: str,
@@ -941,6 +990,36 @@ def create_mcp():
     def delete_project_rule(rule_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
         return service.delete_project_rule(rule_id=rule_id, auth_token=auth_token, command_id=command_id)
+
+    @mcp.tool(description="Patch a project skill.")
+    def update_project_skill(
+        skill_id: str,
+        patch: dict[str, Any],
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.update_project_skill(
+            skill_id=skill_id,
+            patch=patch,
+            auth_token=auth_token,
+            command_id=command_id,
+        )
+
+    @mcp.tool(description="Soft-delete a project skill.")
+    def delete_project_skill(
+        skill_id: str,
+        auth_token: str | None = None,
+        delete_linked_rule: bool = True,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.delete_project_skill(
+            skill_id=skill_id,
+            delete_linked_rule=delete_linked_rule,
+            auth_token=auth_token,
+            command_id=command_id,
+        )
 
     @mcp.tool(description="Patch a task. Accepts the same fields as TaskPatch.")
     def update_task(task_id: str, patch: dict[str, Any], auth_token: str | None = None, command_id: str | None = None) -> dict[str, Any]:

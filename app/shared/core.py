@@ -67,6 +67,7 @@ from .models import (
     Notification,
     Project,
     ProjectMember,
+    ProjectSkill,
     ProjectionCheckpoint,
     ProjectTagIndex,
     ProjectRule,

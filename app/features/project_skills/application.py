@@ -1,0 +1,658 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from datetime import datetime, timezone
+from typing import Any
+from urllib.parse import urlparse
+
+import httpx
+from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from features.rules.application import ProjectRuleApplicationService
+from shared.core import Project, ProjectRuleCreate, ProjectRulePatch, User, ensure_project_access, ensure_role
+from shared.models import ProjectRule, ProjectSkill
+
+from .read_models import load_project_skill_view
+
+_ALLOWED_MODES = {"advisory", "enforced"}
+_ALLOWED_TRUST_LEVELS = {"verified", "reviewed", "untrusted"}
+_MAX_SOURCE_BYTES = 1024 * 1024
+_KEY_SANITIZER_RE = re.compile(r"[^a-z0-9]+")
+_FILE_NAME_SANITIZER_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_FRONTMATTER_FIELD_RE = re.compile(r"^([A-Za-z0-9_-]+)\s*:\s*(.*)$")
+
+
+def _normalize_mode(raw: str) -> str:
+    value = str(raw or "advisory").strip().lower()
+    if value not in _ALLOWED_MODES:
+        allowed = ", ".join(sorted(_ALLOWED_MODES))
+        raise HTTPException(status_code=422, detail=f"mode must be one of: {allowed}")
+    return value
+
+
+def _normalize_trust_level(raw: str) -> str:
+    value = str(raw or "reviewed").strip().lower()
+    if value not in _ALLOWED_TRUST_LEVELS:
+        allowed = ", ".join(sorted(_ALLOWED_TRUST_LEVELS))
+        raise HTTPException(status_code=422, detail=f"trust_level must be one of: {allowed}")
+    return value
+
+
+def _normalize_skill_key(raw: str, *, max_length: int = 128) -> str:
+    candidate = str(raw or "").strip().lower()
+    candidate = _KEY_SANITIZER_RE.sub("_", candidate).strip("_")
+    candidate = candidate[:max_length].strip("_")
+    if not candidate:
+        raise HTTPException(status_code=422, detail="skill_key cannot be empty")
+    return candidate
+
+
+def _sanitize_source_url(raw: str) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        raise HTTPException(status_code=422, detail="source_url is required")
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"}:
+        raise HTTPException(status_code=422, detail="source_url must use http or https")
+    if not parsed.netloc:
+        raise HTTPException(status_code=422, detail="source_url must include a valid host")
+    return _normalize_source_url(value)
+
+
+def _normalize_source_url(source_url: str) -> str:
+    parsed = urlparse(source_url)
+    host = str(parsed.netloc or "").strip().lower()
+    path = str(parsed.path or "")
+    if host in {"github.com", "www.github.com"}:
+        segments = [segment for segment in path.split("/") if segment]
+        # Normalize GitHub blob URLs to raw URLs so imports fetch actual markdown/text.
+        if len(segments) >= 5 and segments[2] == "blob":
+            owner = segments[0]
+            repo = segments[1]
+            ref = segments[3]
+            file_path = "/".join(segments[4:])
+            if owner and repo and ref and file_path:
+                return f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{file_path}"
+    if host in {"gist.github.com", "www.gist.github.com"}:
+        segments = [segment for segment in path.split("/") if segment]
+        if len(segments) >= 2:
+            user = segments[0]
+            gist_id = segments[1]
+            if user and gist_id:
+                return f"https://gist.githubusercontent.com/{user}/{gist_id}/raw"
+    return source_url
+
+
+def _default_skill_key_from_url(source_url: str) -> str:
+    parsed = urlparse(source_url)
+    host = str(parsed.netloc or "").strip().lower()
+    path = str(parsed.path or "").strip()
+    tail = path.rsplit("/", 1)[-1].strip() if path else ""
+    tail = tail.rsplit(".", 1)[0].strip()
+    base = tail or host or "imported_skill"
+    return _normalize_skill_key(base)
+
+
+def _sanitize_uploaded_filename(raw: str) -> str:
+    candidate = str(raw or "").strip().replace("\\", "/")
+    candidate = candidate.rsplit("/", 1)[-1].strip()
+    if not candidate:
+        candidate = "imported_skill.md"
+    normalized = _FILE_NAME_SANITIZER_RE.sub("_", candidate).strip("._")
+    normalized = normalized[:160].strip()
+    if not normalized:
+        normalized = "imported_skill.md"
+    return normalized
+
+
+def _extract_markdown_heading(text: str) -> str:
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            heading = stripped.lstrip("#").strip()
+            if heading:
+                return heading[:160]
+    return ""
+
+
+def _extract_summary(text: str) -> str:
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped in {"---", "..."}:
+            continue
+        if stripped.startswith("#"):
+            continue
+        if stripped.startswith("```"):
+            continue
+        return stripped[:400]
+    return ""
+
+
+def _normalize_frontmatter_value(value: str) -> str:
+    normalized = str(value or "").strip()
+    if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {'"', "'"}:
+        normalized = normalized[1:-1].strip()
+    return normalized
+
+
+def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    raw_text = str(text or "")
+    lines = raw_text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}, raw_text
+
+    end_index = -1
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == "---":
+            end_index = idx
+            break
+    if end_index < 0:
+        return {}, raw_text
+
+    metadata: dict[str, str] = {}
+    current_block_key = ""
+    current_block_lines: list[str] = []
+    for raw_line in lines[1:end_index]:
+        stripped = raw_line.strip()
+
+        if current_block_key:
+            if raw_line.startswith((" ", "\t")):
+                current_block_lines.append(stripped)
+                continue
+            metadata[current_block_key] = "\n".join(part for part in current_block_lines if part).strip()
+            current_block_key = ""
+            current_block_lines = []
+
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = _FRONTMATTER_FIELD_RE.match(stripped)
+        if not match:
+            continue
+
+        key = str(match.group(1) or "").strip().lower()
+        value = _normalize_frontmatter_value(match.group(2))
+        if not key:
+            continue
+        if value in {"|", ">", "|-", ">-"}:
+            current_block_key = key
+            current_block_lines = []
+            continue
+        metadata[key] = value
+
+    if current_block_key:
+        metadata[current_block_key] = "\n".join(part for part in current_block_lines if part).strip()
+
+    content = "\n".join(lines[end_index + 1:]).lstrip()
+    return metadata, content
+
+
+def _coerce_json_skill_content(payload: dict[str, Any]) -> str:
+    for key in ("content", "instructions", "body", "prompt"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    rules = payload.get("rules")
+    if isinstance(rules, list):
+        lines = [str(item).strip() for item in rules if str(item or "").strip()]
+        if lines:
+            return "\n".join(f"- {line}" for line in lines)
+    steps = payload.get("steps")
+    if isinstance(steps, list):
+        lines = [str(item).strip() for item in steps if str(item or "").strip()]
+        if lines:
+            return "\n".join(f"- {line}" for line in lines)
+    return ""
+
+
+def _extract_skill_document(
+    *,
+    raw_bytes: bytes,
+    content_type: str,
+    base_manifest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if len(raw_bytes) > _MAX_SOURCE_BYTES:
+        raise HTTPException(status_code=422, detail="Skill source payload is too large")
+
+    content_type_normalized = str(content_type or "").strip().lower()
+    manifest: dict[str, Any] = {"content_type": content_type_normalized, **(base_manifest or {})}
+    detected_name = ""
+    detected_summary = ""
+    content_text = ""
+    source_version = ""
+
+    decoded_text = raw_bytes.decode("utf-8", errors="replace")
+    frontmatter, content_without_frontmatter = _parse_frontmatter(decoded_text)
+    frontmatter_name = str(frontmatter.get("title") or frontmatter.get("name") or "").strip()[:160]
+    frontmatter_summary = str(frontmatter.get("summary") or frontmatter.get("description") or "").strip()[:400]
+    frontmatter_source_version = str(frontmatter.get("version") or frontmatter.get("skill_version") or "").strip()[:64]
+    if frontmatter:
+        manifest["frontmatter_keys"] = sorted(str(key) for key in frontmatter.keys())[:200]
+    should_try_json = "json" in content_type_normalized or decoded_text.lstrip().startswith("{")
+    if should_try_json:
+        payload: Any = None
+        try:
+            payload = json.loads(decoded_text)
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            detected_name = str(payload.get("name") or payload.get("title") or "").strip()[:160]
+            detected_summary = str(payload.get("summary") or payload.get("description") or "").strip()[:400]
+            source_version = str(payload.get("version") or payload.get("skill_version") or "").strip()[:64]
+            content_text = _coerce_json_skill_content(payload)
+            manifest["json_keys"] = sorted(str(key) for key in payload.keys())[:200]
+
+    if not content_text:
+        content_text = content_without_frontmatter.strip()
+
+    if not content_text:
+        raise HTTPException(status_code=422, detail="Imported skill source is empty")
+    content_text = content_text.strip()
+    if not content_text:
+        raise HTTPException(status_code=422, detail="Imported skill content is empty after normalization")
+
+    if not detected_name:
+        detected_name = _extract_markdown_heading(content_text)
+    if not detected_name:
+        detected_name = frontmatter_name
+    if not detected_summary:
+        detected_summary = frontmatter_summary
+    if not detected_summary:
+        detected_summary = _extract_summary(content_text)
+    if not source_version:
+        source_version = frontmatter_source_version
+
+    return {
+        "content": content_text,
+        "name": detected_name,
+        "summary": detected_summary,
+        "source_version": source_version or None,
+        "manifest": manifest,
+    }
+
+
+def _fetch_skill_document(source_url: str) -> dict[str, Any]:
+    try:
+        response = httpx.get(
+            source_url,
+            timeout=20.0,
+            follow_redirects=True,
+            headers={"User-Agent": "m4tr1x-skill-import/1.0"},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Skill source fetch failed: {exc}") from exc
+    if response.status_code >= 400:
+        raise HTTPException(status_code=422, detail=f"Skill source fetch failed with status {response.status_code}")
+    return _extract_skill_document(
+        raw_bytes=response.content or b"",
+        content_type=str(response.headers.get("content-type") or ""),
+        base_manifest={"source_status": int(response.status_code)},
+    )
+
+
+def _build_rule_body(
+    *,
+    skill_key: str,
+    source_locator: str,
+    trust_level: str,
+    mode: str,
+    source_version: str | None,
+    content: str,
+) -> str:
+    lines = [
+        "Imported skill context:",
+        f"- Skill key: `{skill_key}`",
+        f"- Source: {source_locator}",
+        f"- Trust level: {trust_level}",
+        f"- Mode: {mode}",
+    ]
+    if source_version:
+        lines.append(f"- Source version: {source_version}")
+    lines.extend(["", "Skill content:", content.strip()])
+    return "\n".join(lines).strip()
+
+
+def _stable_rule_command_id(*, workspace_id: str, project_id: str, skill_key: str, source_locator: str) -> str:
+    payload = f"{workspace_id}|{project_id}|{skill_key}|{source_locator}".encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()[:24]
+    return f"project-skill-rule-{digest}"
+
+
+def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> Project:
+    project = db.get(Project, project_id)
+    if not project or bool(project.is_deleted):
+        raise HTTPException(status_code=404, detail="Project not found")
+    if str(project.workspace_id) != str(workspace_id):
+        raise HTTPException(status_code=400, detail="Project does not belong to workspace")
+    return project
+
+
+class ProjectSkillApplicationService:
+    def __init__(self, db: Session, user: User, command_id: str | None = None):
+        self.db = db
+        self.user = user
+        self.command_id = command_id
+
+    def _import_skill_document(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        requested_source: str,
+        source_locator: str,
+        source_type: str,
+        fetched: dict[str, Any],
+        name: str = "",
+        skill_key: str = "",
+        mode: str = "advisory",
+        trust_level: str = "reviewed",
+    ) -> dict[str, Any]:
+        detected_name = str(fetched.get("name") or "").strip()
+        detected_summary = str(fetched.get("summary") or "").strip()
+        content = str(fetched.get("content") or "").strip()
+        source_version = str(fetched.get("source_version") or "").strip() or None
+        if not content:
+            raise HTTPException(status_code=422, detail="Imported skill content is empty")
+
+        normalized_mode = _normalize_mode(mode)
+        normalized_trust = _normalize_trust_level(trust_level)
+        effective_name = str(name or "").strip() or detected_name or "Imported Skill"
+        effective_summary = detected_summary or f"Imported from {source_locator}"
+        key_candidate = str(skill_key or "").strip() or effective_name or _default_skill_key_from_url(source_locator)
+        normalized_key = _normalize_skill_key(key_candidate)
+
+        existing = self.db.execute(
+            select(ProjectSkill).where(
+                ProjectSkill.workspace_id == workspace_id,
+                ProjectSkill.project_id == project_id,
+                ProjectSkill.skill_key == normalized_key,
+            )
+        ).scalar_one_or_none()
+        is_restore = existing is not None and bool(existing.is_deleted)
+        is_update_existing = existing is not None and (not bool(existing.is_deleted))
+
+        rule_title = f"Skill: {effective_name}"
+        rule_body = _build_rule_body(
+            skill_key=normalized_key,
+            source_locator=source_locator,
+            trust_level=normalized_trust,
+            mode=normalized_mode,
+            source_version=source_version,
+            content=content,
+        )
+        rule_command_id = self.command_id or _stable_rule_command_id(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            skill_key=normalized_key,
+            source_locator=source_locator,
+        )
+        rule_create_command_id = rule_command_id
+        rule_patch_command_id = rule_command_id
+        if is_restore or is_update_existing:
+            refresh_marker = datetime.now(timezone.utc).isoformat()
+            refresh_reason = "restore" if is_restore else "refresh"
+            refresh_payload = (
+                f"{workspace_id}|{project_id}|{normalized_key}|{source_locator}|{refresh_reason}|{refresh_marker}".encode(
+                    "utf-8"
+                )
+            )
+            refresh_digest = hashlib.sha256(refresh_payload).hexdigest()[:24]
+            rule_patch_command_id = f"project-skill-rule-patch-{refresh_digest}"
+            rule_create_command_id = f"project-skill-rule-{refresh_reason}-{refresh_digest}"
+        generated_rule_id: str | None = None
+        if existing is not None and (is_restore or is_update_existing):
+            existing_rule_id = str(existing.generated_rule_id or "").strip()
+            if existing_rule_id:
+                existing_rule = self.db.get(ProjectRule, existing_rule_id)
+                if existing_rule is not None and not bool(existing_rule.is_deleted):
+                    patch_payload = ProjectRulePatch(title=rule_title, body=rule_body)
+                    ProjectRuleApplicationService(self.db, self.user, command_id=rule_patch_command_id).patch_project_rule(
+                        existing_rule_id,
+                        patch_payload,
+                    )
+                    generated_rule_id = existing_rule_id
+        if not generated_rule_id:
+            created_rule = ProjectRuleApplicationService(self.db, self.user, command_id=rule_create_command_id).create_project_rule(
+                ProjectRuleCreate(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    title=rule_title,
+                    body=rule_body,
+                )
+            )
+            generated_rule_id = str(created_rule.get("id") or "").strip() or None
+
+        imported_at = datetime.now(timezone.utc).isoformat()
+        source_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        manifest = {
+            "requested_source_url": requested_source,
+            "source_url": source_locator,
+            "requested_source_locator": requested_source,
+            "source_locator": source_locator,
+            "source_version": source_version,
+            "detected_name": detected_name,
+            "detected_summary": detected_summary,
+            "source_content": content,
+            "source_content_sha256": source_hash,
+            "imported_at": imported_at,
+            **(fetched.get("manifest") if isinstance(fetched.get("manifest"), dict) else {}),
+        }
+        if existing is not None and (is_restore or is_update_existing):
+            existing.name = effective_name
+            existing.summary = effective_summary
+            existing.source_type = source_type
+            existing.source_locator = source_locator
+            existing.source_version = source_version
+            existing.trust_level = normalized_trust
+            existing.mode = normalized_mode
+            existing.generated_rule_id = generated_rule_id
+            existing.manifest_json = json.dumps(manifest, ensure_ascii=True, sort_keys=True)
+            existing.updated_by = self.user.id
+            existing.is_deleted = False
+            skill_entity = existing
+        else:
+            skill_entity = ProjectSkill(
+                workspace_id=workspace_id,
+                project_id=project_id,
+                skill_key=normalized_key,
+                name=effective_name,
+                summary=effective_summary,
+                source_type=source_type,
+                source_locator=source_locator,
+                source_version=source_version,
+                trust_level=normalized_trust,
+                mode=normalized_mode,
+                generated_rule_id=generated_rule_id,
+                manifest_json=json.dumps(manifest, ensure_ascii=True, sort_keys=True),
+                created_by=self.user.id,
+                updated_by=self.user.id,
+                is_deleted=False,
+            )
+            self.db.add(skill_entity)
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            if "ux_project_skills_project_key" in str(exc):
+                raise HTTPException(status_code=409, detail=f"Skill key already exists in project: {normalized_key}") from exc
+            raise
+        view = load_project_skill_view(self.db, skill_entity.id)
+        if view is None:
+            raise HTTPException(status_code=500, detail="Project skill was not created")
+        view["already_exists"] = False
+        view["updated_existing"] = bool(is_update_existing)
+        view["restored_existing"] = bool(is_restore)
+        return view
+
+    def import_skill_from_url(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        source_url: str,
+        name: str = "",
+        skill_key: str = "",
+        mode: str = "advisory",
+        trust_level: str = "reviewed",
+    ) -> dict[str, Any]:
+        ensure_role(self.db, workspace_id, self.user.id, {"Owner", "Admin", "Member"})
+        ensure_project_access(self.db, workspace_id, project_id, self.user.id, {"Owner", "Admin", "Member"})
+        _require_project_scope(self.db, workspace_id=workspace_id, project_id=project_id)
+
+        requested_source = str(source_url or "").strip()
+        source_locator = _sanitize_source_url(source_url)
+        fetched = _fetch_skill_document(source_locator)
+        return self._import_skill_document(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            requested_source=requested_source,
+            source_locator=source_locator,
+            source_type="url",
+            fetched=fetched,
+            name=name,
+            skill_key=skill_key,
+            mode=mode,
+            trust_level=trust_level,
+        )
+
+    def import_skill_from_file(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        file_name: str,
+        file_content: bytes,
+        file_content_type: str = "",
+        name: str = "",
+        skill_key: str = "",
+        mode: str = "advisory",
+        trust_level: str = "reviewed",
+    ) -> dict[str, Any]:
+        ensure_role(self.db, workspace_id, self.user.id, {"Owner", "Admin", "Member"})
+        ensure_project_access(self.db, workspace_id, project_id, self.user.id, {"Owner", "Admin", "Member"})
+        _require_project_scope(self.db, workspace_id=workspace_id, project_id=project_id)
+
+        normalized_file_name = _sanitize_uploaded_filename(file_name)
+        if not file_content:
+            raise HTTPException(status_code=422, detail="Skill file is empty")
+        source_locator = f"upload://{normalized_file_name}"
+        fetched = _extract_skill_document(
+            raw_bytes=file_content,
+            content_type=file_content_type,
+            base_manifest={
+                "upload_file_name": normalized_file_name,
+                "upload_content_type": str(file_content_type or "").strip(),
+                "upload_size_bytes": len(file_content),
+            },
+        )
+        return self._import_skill_document(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            requested_source=normalized_file_name,
+            source_locator=source_locator,
+            source_type="file",
+            fetched=fetched,
+            name=name,
+            skill_key=skill_key,
+            mode=mode,
+            trust_level=trust_level,
+        )
+
+    def patch_project_skill(self, skill_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        skill = self.db.get(ProjectSkill, skill_id)
+        if skill is None or bool(skill.is_deleted):
+            raise HTTPException(status_code=404, detail="Project skill not found")
+        ensure_project_access(self.db, skill.workspace_id, skill.project_id, self.user.id, {"Owner", "Admin", "Member"})
+        ensure_role(self.db, skill.workspace_id, self.user.id, {"Owner", "Admin", "Member"})
+
+        data = dict(patch or {})
+        sync_project_rule = bool(data.pop("sync_project_rule", True))
+        if "enabled" in data:
+            raise HTTPException(
+                status_code=422,
+                detail="enabled is no longer supported for project skills; delete the skill to disable it",
+            )
+
+        updates: dict[str, Any] = {}
+        if "name" in data and data["name"] is not None:
+            normalized_name = str(data["name"]).strip()
+            if not normalized_name:
+                raise HTTPException(status_code=422, detail="name cannot be empty")
+            updates["name"] = normalized_name
+        if "summary" in data and data["summary"] is not None:
+            updates["summary"] = str(data["summary"])
+        if "mode" in data and data["mode"] is not None:
+            updates["mode"] = _normalize_mode(str(data["mode"]))
+        if "trust_level" in data and data["trust_level"] is not None:
+            updates["trust_level"] = _normalize_trust_level(str(data["trust_level"]))
+
+        if updates:
+            for key, value in updates.items():
+                setattr(skill, key, value)
+            skill.updated_by = self.user.id
+
+        if sync_project_rule and skill.generated_rule_id:
+            manifest: dict[str, Any]
+            try:
+                parsed_manifest = json.loads(skill.manifest_json or "{}")
+                manifest = parsed_manifest if isinstance(parsed_manifest, dict) else {}
+            except Exception:
+                manifest = {}
+            source_content = str(manifest.get("source_content") or "").strip()
+            source_version = str(skill.source_version or "").strip() or None
+            if source_content:
+                rule_title = f"Skill: {skill.name}"
+                rule_body = _build_rule_body(
+                    skill_key=skill.skill_key,
+                    source_locator=skill.source_locator,
+                    trust_level=skill.trust_level,
+                    mode=skill.mode,
+                    source_version=source_version,
+                    content=source_content,
+                )
+                patch_payload = ProjectRulePatch(title=rule_title, body=rule_body)
+                try:
+                    ProjectRuleApplicationService(self.db, self.user, command_id=self.command_id).patch_project_rule(
+                        skill.generated_rule_id,
+                        patch_payload,
+                    )
+                except HTTPException as exc:
+                    if exc.status_code == 404:
+                        skill.generated_rule_id = None
+                    else:
+                        raise
+
+        self.db.commit()
+        view = load_project_skill_view(self.db, skill_id)
+        if view is None:
+            raise HTTPException(status_code=404, detail="Project skill not found")
+        return view
+
+    def delete_project_skill(self, skill_id: str, *, delete_linked_rule: bool = True) -> dict[str, Any]:
+        skill = self.db.get(ProjectSkill, skill_id)
+        if skill is None or bool(skill.is_deleted):
+            return {"ok": True}
+        ensure_project_access(self.db, skill.workspace_id, skill.project_id, self.user.id, {"Owner", "Admin", "Member"})
+        ensure_role(self.db, skill.workspace_id, self.user.id, {"Owner", "Admin", "Member"})
+
+        if delete_linked_rule and skill.generated_rule_id:
+            try:
+                ProjectRuleApplicationService(self.db, self.user, command_id=self.command_id).delete_project_rule(
+                    skill.generated_rule_id
+                )
+            except HTTPException as exc:
+                if exc.status_code != 404:
+                    raise
+
+        skill.is_deleted = True
+        skill.updated_by = self.user.id
+        self.db.commit()
+        return {"ok": True}

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 
 from shared.knowledge_graph import build_graph_context_markdown, build_graph_context_pack
-from shared.models import Project, ProjectRule, SessionLocal
+from shared.models import Project, ProjectRule, ProjectSkill, SessionLocal
 from shared.settings import AGENT_CODEX_COMMAND, AGENT_EXECUTOR_MODE, AGENT_EXECUTOR_TIMEOUT_SECONDS
 
 
@@ -57,9 +57,11 @@ def _graph_summary_to_markdown(summary: dict[str, object] | None) -> str:
     return "\n".join(lines).strip()
 
 
-def _load_project_context(project_id: str | None) -> tuple[str | None, str, list[dict[str, str]]]:
+def _load_project_context(
+    project_id: str | None,
+) -> tuple[str | None, str, list[dict[str, str]], list[dict[str, object]]]:
     if not project_id:
-        return None, "", []
+        return None, "", [], []
     with SessionLocal() as db:
         row = db.execute(
             select(Project.name, Project.description).where(Project.id == project_id, Project.is_deleted == False)
@@ -69,8 +71,25 @@ def _load_project_context(project_id: str | None) -> tuple[str | None, str, list
             .where(ProjectRule.project_id == project_id, ProjectRule.is_deleted == False)
             .order_by(ProjectRule.updated_at.desc())
         ).all()
+        skills = db.execute(
+            select(
+                ProjectSkill.id,
+                ProjectSkill.skill_key,
+                ProjectSkill.name,
+                ProjectSkill.summary,
+                ProjectSkill.mode,
+                ProjectSkill.trust_level,
+                ProjectSkill.source_locator,
+                ProjectSkill.generated_rule_id,
+            )
+            .where(
+                ProjectSkill.project_id == project_id,
+                ProjectSkill.is_deleted == False,
+            )
+            .order_by(ProjectSkill.updated_at.desc())
+        ).all()
     if not row:
-        return None, "", []
+        return None, "", [], []
     normalized_rules = [
         {
             "title": str(item[0] or "").strip(),
@@ -78,7 +97,20 @@ def _load_project_context(project_id: str | None) -> tuple[str | None, str, list
         }
         for item in rules
     ]
-    return str(row[0] or "").strip() or None, str(row[1] or ""), normalized_rules
+    normalized_skills = [
+        {
+            "id": str(item[0] or "").strip(),
+            "skill_key": str(item[1] or "").strip(),
+            "name": str(item[2] or "").strip(),
+            "summary": str(item[3] or "").strip(),
+            "mode": str(item[4] or "").strip(),
+            "trust_level": str(item[5] or "").strip(),
+            "source_locator": str(item[6] or "").strip(),
+            "generated_rule_id": str(item[7] or "").strip(),
+        }
+        for item in skills
+    ]
+    return str(row[0] or "").strip() or None, str(row[1] or ""), normalized_rules, normalized_skills
 
 
 def _placeholder_outcome(*, instruction: str, current_status: str) -> AutomationOutcome:
@@ -217,7 +249,7 @@ def execute_task_automation(
         raise RuntimeError("AGENT_EXECUTOR_MODE=command requires AGENT_CODEX_COMMAND")
 
     command = shlex.split(AGENT_CODEX_COMMAND)
-    project_name, project_description, project_rules = _load_project_context(project_id)
+    project_name, project_description, project_rules, project_skills = _load_project_context(project_id)
     graph_context_pack = build_graph_context_pack(
         project_id=project_id,
         focus_entity_type="Task" if str(task_id or "").strip() else None,
@@ -244,6 +276,7 @@ def execute_task_automation(
         "project_name": project_name,
         "project_description": project_description,
         "project_rules": project_rules,
+        "project_skills": project_skills,
         "graph_context_markdown": graph_context_markdown,
         "graph_evidence_json": graph_evidence_json,
         "graph_summary_markdown": graph_summary_markdown,
@@ -292,7 +325,7 @@ def execute_task_automation_stream(
         raise RuntimeError("AGENT_EXECUTOR_MODE=command requires AGENT_CODEX_COMMAND")
 
     command = shlex.split(AGENT_CODEX_COMMAND)
-    project_name, project_description, project_rules = _load_project_context(project_id)
+    project_name, project_description, project_rules, project_skills = _load_project_context(project_id)
     graph_context_pack = build_graph_context_pack(
         project_id=project_id,
         focus_entity_type="Task" if str(task_id or "").strip() else None,
@@ -319,6 +352,7 @@ def execute_task_automation_stream(
         "project_name": project_name,
         "project_description": project_description,
         "project_rules": project_rules,
+        "project_skills": project_skills,
         "graph_context_markdown": graph_context_markdown,
         "graph_evidence_json": graph_evidence_json,
         "graph_summary_markdown": graph_summary_markdown,
