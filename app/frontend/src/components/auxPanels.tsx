@@ -7,10 +7,13 @@ import type {
   Note,
   Specification,
   Task,
+  WorkspaceSkill,
+  WorkspaceSkillsPage,
 } from '../types'
 import { tagHue } from '../utils/ui'
+import { MarkdownView } from '../markdown/MarkdownView'
 import { PopularTagFilters } from './shared/PopularTagFilters'
-import { Icon } from './shared/uiHelpers'
+import { Icon, MarkdownModeToggle } from './shared/uiHelpers'
 import { TaskListItem } from './tasks/taskViews'
 
 const VOICE_LANG_OPTIONS = [
@@ -116,6 +119,8 @@ export function ProfilePanel({
   onLogout,
   onToggleTheme,
   onChangeSpeechLang,
+  changePassword,
+  passwordChangePending,
   submitBugReport,
   bugReportSubmitting,
 }: {
@@ -132,6 +137,8 @@ export function ProfilePanel({
   onLogout: () => void
   onToggleTheme: () => void
   onChangeSpeechLang: (value: string) => void
+  changePassword: (payload: { current_password: string; new_password: string }) => Promise<unknown>
+  passwordChangePending: boolean
   submitBugReport: (payload: BugReportCreateRequest) => Promise<BugReportCreateResponse>
   bugReportSubmitting: boolean
 }) {
@@ -164,6 +171,7 @@ export function ProfilePanel({
     : subscriptionStatus
       ? `Subscription (${formatLabel(subscriptionStatus)})`
       : 'Trial fallback'
+  const showTrialWindow = licenseStatus === 'trial' || licenseStatus === 'grace'
   const [bugTitle, setBugTitle] = React.useState('')
   const [bugDescription, setBugDescription] = React.useState('')
   const [bugSeverity, setBugSeverity] = React.useState<'low' | 'medium' | 'high' | 'critical'>('medium')
@@ -172,6 +180,11 @@ export function ProfilePanel({
   const [bugActual, setBugActual] = React.useState('')
   const [bugReportExpanded, setBugReportExpanded] = React.useState(false)
   const [bugFeedback, setBugFeedback] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
+  const [passwordExpanded, setPasswordExpanded] = React.useState(false)
+  const [currentPasswordInput, setCurrentPasswordInput] = React.useState('')
+  const [newPasswordInput, setNewPasswordInput] = React.useState('')
+  const [confirmPasswordInput, setConfirmPasswordInput] = React.useState('')
+  const [passwordFeedback, setPasswordFeedback] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
 
   const resetBugForm = React.useCallback(() => {
     setBugTitle('')
@@ -181,6 +194,49 @@ export function ProfilePanel({
     setBugExpected('')
     setBugActual('')
   }, [])
+
+  const resetPasswordForm = React.useCallback(() => {
+    setCurrentPasswordInput('')
+    setNewPasswordInput('')
+    setConfirmPasswordInput('')
+  }, [])
+
+  const handleSubmitPasswordChange = React.useCallback(
+    async (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault()
+      const currentPassword = String(currentPasswordInput || '').trim()
+      const nextPassword = String(newPasswordInput || '').trim()
+      const confirmedPassword = String(confirmPasswordInput || '').trim()
+      if (!currentPassword) {
+        setPasswordFeedback({ tone: 'error', message: 'Current password is required.' })
+        return
+      }
+      if (nextPassword.length < 8) {
+        setPasswordFeedback({ tone: 'error', message: 'New password must be at least 8 characters.' })
+        return
+      }
+      if (nextPassword !== confirmedPassword) {
+        setPasswordFeedback({ tone: 'error', message: 'Password confirmation does not match.' })
+        return
+      }
+      if (currentPassword === nextPassword) {
+        setPasswordFeedback({ tone: 'error', message: 'New password must be different from current password.' })
+        return
+      }
+      try {
+        await changePassword({
+          current_password: currentPassword,
+          new_password: nextPassword,
+        })
+        resetPasswordForm()
+        setPasswordFeedback({ tone: 'success', message: 'Password changed successfully.' })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to change password.'
+        setPasswordFeedback({ tone: 'error', message })
+      }
+    },
+    [changePassword, confirmPasswordInput, currentPasswordInput, newPasswordInput, resetPasswordForm]
+  )
 
   const handleSubmitBugReport = React.useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
@@ -241,7 +297,7 @@ export function ProfilePanel({
           </div>
           <div className="profile-head-copy">
             <h2>Profile</h2>
-            <p className="meta">Session and build details</p>
+            <p className="meta">Account settings</p>
           </div>
         </div>
         <span className="status-chip profile-theme-chip">{theme} mode</span>
@@ -251,21 +307,6 @@ export function ProfilePanel({
         <div className="profile-fact">
           <dt>User</dt>
           <dd>{userName}</dd>
-        </div>
-        <div className="profile-fact">
-          <dt>Frontend version</dt>
-          <dd>{frontendVersion}</dd>
-        </div>
-        <div className="profile-fact">
-          <dt>Backend version</dt>
-          <dd>
-            {backendVersion}
-            {backendBuild ? ` (${backendBuild})` : ''}
-          </dd>
-        </div>
-        <div className="profile-fact">
-          <dt>Deployed (UTC)</dt>
-          <dd>{deployedAtUtc ?? 'unknown'}</dd>
         </div>
         <div className="profile-fact">
           <dt>Voice language</dt>
@@ -291,6 +332,111 @@ export function ProfilePanel({
           Logout
         </button>
       </div>
+
+      <section className="profile-password" aria-label="Password settings">
+        <div className="profile-license-head">
+          <button
+            type="button"
+            className="profile-section-toggle"
+            aria-expanded={passwordExpanded}
+            aria-controls="profile-password-panel"
+            onClick={() => setPasswordExpanded((current) => !current)}
+          >
+            <span>Change password</span>
+            <span className="profile-section-toggle-icon" aria-hidden="true">
+              <Icon path="M9 6l6 6-6 6" />
+            </span>
+          </button>
+          <span className="status-chip">Security</span>
+        </div>
+        {passwordExpanded ? (
+          <div id="profile-password-panel">
+            <form className="profile-bug-form" onSubmit={handleSubmitPasswordChange}>
+              <label className="field-control">
+                <span className="field-label">Current password</span>
+                <input
+                  type="password"
+                  value={currentPasswordInput}
+                  onChange={(event) => setCurrentPasswordInput(event.target.value)}
+                  autoComplete="current-password"
+                  placeholder="Current password"
+                />
+              </label>
+              <label className="field-control">
+                <span className="field-label">New password</span>
+                <input
+                  type="password"
+                  value={newPasswordInput}
+                  onChange={(event) => setNewPasswordInput(event.target.value)}
+                  autoComplete="new-password"
+                  placeholder="New password"
+                />
+              </label>
+              <label className="field-control">
+                <span className="field-label">Confirm new password</span>
+                <input
+                  type="password"
+                  value={confirmPasswordInput}
+                  onChange={(event) => setConfirmPasswordInput(event.target.value)}
+                  autoComplete="new-password"
+                  placeholder="Confirm new password"
+                />
+              </label>
+              <div className="row wrap profile-actions">
+                <button
+                  className="primary"
+                  type="submit"
+                  disabled={
+                    passwordChangePending ||
+                    !currentPasswordInput.trim() ||
+                    !newPasswordInput.trim() ||
+                    !confirmPasswordInput.trim()
+                  }
+                >
+                  {passwordChangePending ? 'Saving...' : 'Save new password'}
+                </button>
+                <button
+                  className="button-secondary"
+                  type="button"
+                  onClick={resetPasswordForm}
+                  disabled={passwordChangePending}
+                >
+                  Reset
+                </button>
+              </div>
+            </form>
+            {passwordFeedback ? (
+              <div className={`notice ${passwordFeedback.tone === 'error' ? 'notice-error' : ''}`.trim()}>
+                {passwordFeedback.message}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </section>
+
+      <section className="profile-runtime" aria-label="Build details">
+        <div className="profile-license-head">
+          <h3>Build details</h3>
+          <span className="status-chip">Runtime</span>
+        </div>
+        <dl className="profile-facts">
+          <div className="profile-fact">
+            <dt>Frontend version</dt>
+            <dd>{frontendVersion}</dd>
+          </div>
+          <div className="profile-fact">
+            <dt>Backend version</dt>
+            <dd>
+              {backendVersion}
+              {backendBuild ? ` (${backendBuild})` : ''}
+            </dd>
+          </div>
+          <div className="profile-fact">
+            <dt>Deployed (UTC)</dt>
+            <dd>{deployedAtUtc ?? 'unknown'}</dd>
+          </div>
+        </dl>
+      </section>
 
       <section className="profile-bug-report" aria-label="Bug reporting">
         <div className="profile-license-head">
@@ -423,14 +569,18 @@ export function ProfilePanel({
               <dt>Subscription valid until</dt>
               <dd>{formatDateTime(subscriptionValidUntil)}</dd>
             </div>
-            <div className="profile-fact">
-              <dt>Trial ends</dt>
-              <dd>{formatDateTime(license.trial_ends_at)}</dd>
-            </div>
-            <div className="profile-fact">
-              <dt>Grace ends</dt>
-              <dd>{formatDateTime(license.grace_ends_at)}</dd>
-            </div>
+            {showTrialWindow && (
+              <div className="profile-fact">
+                <dt>Trial ends</dt>
+                <dd>{formatDateTime(license.trial_ends_at)}</dd>
+              </div>
+            )}
+            {showTrialWindow && (
+              <div className="profile-fact">
+                <dt>Grace ends</dt>
+                <dd>{formatDateTime(license.grace_ends_at)}</dd>
+              </div>
+            )}
           </dl>
         )}
       </section>
@@ -459,6 +609,16 @@ export function AdminPanel({
   updateRolePendingUserId,
   onDeactivateUser,
   deactivatePendingUserId,
+  workspaceSkills,
+  workspaceSkillsLoading,
+  importWorkspaceSkillPending,
+  importWorkspaceSkillFilePending,
+  patchWorkspaceSkillPending,
+  deleteWorkspaceSkillPending,
+  onImportWorkspaceSkill,
+  onImportWorkspaceSkillFile,
+  onPatchWorkspaceSkill,
+  onDeleteWorkspaceSkill,
 }: {
   canManageUsers: boolean
   workspaceId: string
@@ -480,7 +640,138 @@ export function AdminPanel({
   updateRolePendingUserId: string | null
   onDeactivateUser: (userId: string) => void
   deactivatePendingUserId: string | null
+  workspaceSkills: WorkspaceSkillsPage | undefined
+  workspaceSkillsLoading: boolean
+  importWorkspaceSkillPending: boolean
+  importWorkspaceSkillFilePending: boolean
+  patchWorkspaceSkillPending: boolean
+  deleteWorkspaceSkillPending: boolean
+  onImportWorkspaceSkill: (payload: {
+    source_url: string
+    skill_key?: string
+    mode?: 'advisory' | 'enforced'
+    trust_level?: 'verified' | 'reviewed' | 'untrusted'
+  }) => Promise<unknown>
+  onImportWorkspaceSkillFile: (payload: {
+    file: File
+    skill_key?: string
+    mode?: 'advisory' | 'enforced'
+    trust_level?: 'verified' | 'reviewed' | 'untrusted'
+  }) => Promise<unknown>
+  onPatchWorkspaceSkill: (payload: {
+    skillId: string
+    patch: {
+      name?: string
+      summary?: string
+      content?: string
+      mode?: 'advisory' | 'enforced'
+      trust_level?: 'verified' | 'reviewed' | 'untrusted'
+    }
+  }) => Promise<unknown>
+  onDeleteWorkspaceSkill: (skillId: string) => Promise<unknown>
 }) {
+  const [skillSourceUrl, setSkillSourceUrl] = React.useState('')
+  const [skillKey, setSkillKey] = React.useState('')
+  const [skillMode, setSkillMode] = React.useState<'advisory' | 'enforced'>('advisory')
+  const [skillTrustLevel, setSkillTrustLevel] = React.useState<'verified' | 'reviewed' | 'untrusted'>('reviewed')
+  const [workspaceSkillContentView, setWorkspaceSkillContentView] = React.useState<'write' | 'preview'>('write')
+  const [workspaceSkillEditorName, setWorkspaceSkillEditorName] = React.useState('')
+  const [workspaceSkillEditorSummary, setWorkspaceSkillEditorSummary] = React.useState('')
+  const [workspaceSkillEditorContent, setWorkspaceSkillEditorContent] = React.useState('')
+  const [workspaceSkillEditorMode, setWorkspaceSkillEditorMode] = React.useState<'advisory' | 'enforced'>('advisory')
+  const [workspaceSkillEditorTrustLevel, setWorkspaceSkillEditorTrustLevel] = React.useState<
+    'verified' | 'reviewed' | 'untrusted'
+  >('reviewed')
+  const [skillsSearchQ, setSkillsSearchQ] = React.useState('')
+  const [selectedWorkspaceSkillId, setSelectedWorkspaceSkillId] = React.useState<string | null>(null)
+  const workspaceSkillFileInputRef = React.useRef<HTMLInputElement | null>(null)
+  const workspaceSkillItems = workspaceSkills?.items ?? []
+  const getWorkspaceSkillSourceContent = React.useCallback((manifest: Record<string, unknown> | undefined): string => {
+    if (!manifest || typeof manifest !== 'object') return ''
+    const raw = (manifest as Record<string, unknown>).source_content
+    return typeof raw === 'string' ? raw : ''
+  }, [])
+  const selectedWorkspaceSkill = React.useMemo(
+    () => workspaceSkillItems.find((item) => item.id === selectedWorkspaceSkillId) ?? null,
+    [selectedWorkspaceSkillId, workspaceSkillItems]
+  )
+  const filteredWorkspaceSkillItems = React.useMemo(() => {
+    const query = String(skillsSearchQ || '').trim().toLowerCase()
+    if (!query) return workspaceSkillItems
+    return workspaceSkillItems.filter((item) => {
+      const haystack = [
+        String(item.name || ''),
+        String(item.skill_key || ''),
+        String(item.summary || ''),
+        String(item.source_locator || ''),
+      ]
+        .join(' ')
+        .toLowerCase()
+      return haystack.includes(query)
+    })
+  }, [skillsSearchQ, workspaceSkillItems])
+  const workspaceSkillEditorDirty = React.useMemo(() => {
+    if (!selectedWorkspaceSkill) return false
+    const currentMode = String(selectedWorkspaceSkill.mode || '').toLowerCase() === 'enforced' ? 'enforced' : 'advisory'
+    const currentTrustLevel =
+      String(selectedWorkspaceSkill.trust_level || '').toLowerCase() === 'verified'
+        ? 'verified'
+        : String(selectedWorkspaceSkill.trust_level || '').toLowerCase() === 'untrusted'
+          ? 'untrusted'
+          : 'reviewed'
+    return (
+      workspaceSkillEditorName.trim() !== String(selectedWorkspaceSkill.name || '').trim() ||
+      workspaceSkillEditorSummary !== String(selectedWorkspaceSkill.summary || '') ||
+      workspaceSkillEditorContent !==
+        getWorkspaceSkillSourceContent(selectedWorkspaceSkill?.manifest as Record<string, unknown> | undefined) ||
+      workspaceSkillEditorMode !== currentMode ||
+      workspaceSkillEditorTrustLevel !== currentTrustLevel
+    )
+  }, [
+    selectedWorkspaceSkill,
+    getWorkspaceSkillSourceContent,
+    workspaceSkillEditorContent,
+    workspaceSkillEditorMode,
+    workspaceSkillEditorName,
+    workspaceSkillEditorSummary,
+    workspaceSkillEditorTrustLevel,
+  ])
+
+  React.useEffect(() => {
+    if (workspaceSkillItems.length === 0) {
+      setSelectedWorkspaceSkillId(null)
+      return
+    }
+    if (!selectedWorkspaceSkillId) return
+    if (workspaceSkillItems.some((item) => item.id === selectedWorkspaceSkillId)) return
+    setSelectedWorkspaceSkillId(null)
+  }, [selectedWorkspaceSkillId, workspaceSkillItems])
+
+  React.useEffect(() => {
+    if (!selectedWorkspaceSkill) {
+      setWorkspaceSkillEditorName('')
+      setWorkspaceSkillEditorSummary('')
+      setWorkspaceSkillEditorContent('')
+      setWorkspaceSkillEditorMode('advisory')
+      setWorkspaceSkillEditorTrustLevel('reviewed')
+      return
+    }
+    setWorkspaceSkillEditorName(String(selectedWorkspaceSkill.name || ''))
+    setWorkspaceSkillEditorSummary(String(selectedWorkspaceSkill.summary || ''))
+    setWorkspaceSkillEditorContent(
+      getWorkspaceSkillSourceContent(selectedWorkspaceSkill?.manifest as Record<string, unknown> | undefined)
+    )
+    setWorkspaceSkillEditorMode(
+      String(selectedWorkspaceSkill.mode || '').toLowerCase() === 'enforced' ? 'enforced' : 'advisory'
+    )
+    const nextTrustLevel = String(selectedWorkspaceSkill.trust_level || '').toLowerCase()
+    if (nextTrustLevel === 'verified' || nextTrustLevel === 'untrusted') {
+      setWorkspaceSkillEditorTrustLevel(nextTrustLevel)
+    } else {
+      setWorkspaceSkillEditorTrustLevel('reviewed')
+    }
+  }, [getWorkspaceSkillSourceContent, selectedWorkspaceSkill])
+
   if (!canManageUsers) {
     return (
       <section className="card">
@@ -633,6 +924,303 @@ export function AdminPanel({
             })}
           </div>
         )}
+      </div>
+
+      <div className="admin-skills">
+        <div className="admin-users-head">
+          <h3>Skills Catalog</h3>
+          <span className="meta">{workspaceSkills?.total ?? workspaceSkillItems.length} total</span>
+        </div>
+        <div className="admin-create">
+          <div className="row wrap" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 8 }}>
+            <strong>Add New Skill</strong>
+            <span className="meta">Import from URL or upload a local file.</span>
+          </div>
+          <div className="admin-skill-import-grid">
+            <label className="field-control">
+              <span className="field-label">Source URL</span>
+              <input
+                value={skillSourceUrl}
+                onChange={(e) => setSkillSourceUrl(e.target.value)}
+                placeholder="https://example.com/skills/jira-execution.md"
+                autoComplete="off"
+              />
+            </label>
+            <label className="field-control">
+              <span className="field-label">Skill key (optional)</span>
+              <input
+                value={skillKey}
+                onChange={(e) => setSkillKey(e.target.value)}
+                placeholder="github_delivery"
+                autoComplete="off"
+              />
+            </label>
+            <label className="field-control">
+              <span className="field-label">Mode</span>
+              <select
+                value={skillMode}
+                onChange={(e) => setSkillMode(e.target.value === 'enforced' ? 'enforced' : 'advisory')}
+              >
+                <option value="advisory">advisory</option>
+                <option value="enforced">enforced</option>
+              </select>
+            </label>
+            <label className="field-control">
+              <span className="field-label">Trust level</span>
+              <select
+                value={skillTrustLevel}
+                onChange={(e) => {
+                  const next = e.target.value
+                  if (next === 'verified' || next === 'untrusted') {
+                    setSkillTrustLevel(next)
+                  } else {
+                    setSkillTrustLevel('reviewed')
+                  }
+                }}
+              >
+                <option value="reviewed">reviewed</option>
+                <option value="verified">verified</option>
+                <option value="untrusted">untrusted</option>
+              </select>
+            </label>
+            <div className="admin-skill-import-actions row wrap">
+              <button
+                className="status-chip admin-skill-action-btn"
+                type="button"
+                disabled={importWorkspaceSkillPending || importWorkspaceSkillFilePending || !String(skillSourceUrl || '').trim()}
+                title="Add skill from URL"
+                aria-label="Add skill from URL"
+                onClick={() => {
+                  const sourceUrl = String(skillSourceUrl || '').trim()
+                  if (!sourceUrl) return
+                  void onImportWorkspaceSkill({
+                    source_url: sourceUrl,
+                    skill_key: String(skillKey || '').trim() || undefined,
+                    mode: skillMode,
+                    trust_level: skillTrustLevel,
+                  })
+                    .then(() => {
+                      setSkillSourceUrl('')
+                      setSkillKey('')
+                      setSkillMode('advisory')
+                      setSkillTrustLevel('reviewed')
+                    })
+                    .catch(() => {
+                      // Error feedback is handled by app-level UI notice.
+                    })
+                }}
+              >
+                <Icon path={importWorkspaceSkillPending ? 'M12 5v14M5 12h14' : 'M12 5v10m0 0l4-4m-4 4l-4-4M4 21h16'} />
+                <span>{importWorkspaceSkillPending ? 'Adding...' : 'Add from URL'}</span>
+              </button>
+              <button
+                className="status-chip admin-skill-action-btn"
+                type="button"
+                disabled={importWorkspaceSkillPending || importWorkspaceSkillFilePending}
+                title="Upload skill file"
+                aria-label="Upload skill file"
+                onClick={() => workspaceSkillFileInputRef.current?.click()}
+              >
+                <Icon
+                  path={
+                    importWorkspaceSkillFilePending
+                      ? 'M12 5v14M5 12h14'
+                      : 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6'
+                  }
+                />
+                <span>{importWorkspaceSkillFilePending ? 'Uploading...' : 'Upload file'}</span>
+              </button>
+              <input
+                ref={workspaceSkillFileInputRef}
+                type="file"
+                accept=".md,.markdown,.txt,.json,text/plain,text/markdown,application/json"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0]
+                  e.currentTarget.value = ''
+                  if (!file) return
+                  void onImportWorkspaceSkillFile({
+                    file,
+                    skill_key: String(skillKey || '').trim() || undefined,
+                    mode: skillMode,
+                    trust_level: skillTrustLevel,
+                  })
+                    .then(() => {
+                      setSkillSourceUrl('')
+                      setSkillKey('')
+                      setSkillMode('advisory')
+                      setSkillTrustLevel('reviewed')
+                    })
+                    .catch(() => {
+                      // Error feedback is handled by app-level UI notice.
+                    })
+                }}
+              />
+            </div>
+          </div>
+        </div>
+        <div className="row wrap" style={{ marginTop: 8, marginBottom: 8 }}>
+          <input
+            value={skillsSearchQ}
+            onChange={(e) => setSkillsSearchQ(e.target.value)}
+            placeholder="Filter catalog by name, key, summary, or source"
+            style={{ flex: 1, minWidth: 240 }}
+          />
+        </div>
+        <div className="rules-list">
+          {workspaceSkillsLoading ? (
+            <div className="notice">Loading workspace catalog...</div>
+          ) : filteredWorkspaceSkillItems.length === 0 ? (
+            <div className="notice">No workspace skills found.</div>
+          ) : (
+            filteredWorkspaceSkillItems.map((skill) => {
+              const isExpanded = selectedWorkspaceSkillId === skill.id
+              const selectedThisSkill = isExpanded && selectedWorkspaceSkill?.id === skill.id
+              return (
+                <div
+                  key={skill.id}
+                  className={`task-item rule-item ${isExpanded ? 'selected' : ''}`.trim()}
+                  onClick={() => setSelectedWorkspaceSkillId((current) => (current === skill.id ? null : skill.id))}
+                  role="button"
+                  aria-expanded={isExpanded}
+                >
+                  <div className="task-main">
+                    <div className="task-title">
+                      <div className="row" style={{ gap: 6, minWidth: 0 }}>
+                        {skill.is_seeded ? <span className="rule-kind-chip">[SEEDED]</span> : null}
+                        <strong>{skill.name || skill.skill_key || 'Untitled catalog skill'}</strong>
+                      </div>
+                      <button
+                        className="action-icon danger-ghost"
+                        type="button"
+                        disabled={deleteWorkspaceSkillPending}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          const confirmed = window.confirm(`Delete catalog skill "${skill.name || skill.skill_key}"?`)
+                          if (!confirmed) return
+                          void onDeleteWorkspaceSkill(skill.id).catch(() => {
+                            // Error feedback is handled by app-level UI notice.
+                          })
+                        }}
+                        title="Delete catalog skill"
+                        aria-label="Delete catalog skill"
+                      >
+                        <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                      </button>
+                    </div>
+                    <div className="meta">
+                      key: {skill.skill_key || '-'} | mode: {skill.mode || '-'} | trust: {skill.trust_level || '-'}
+                    </div>
+                    <div className="meta">{(skill.summary || '').replace(/\s+/g, ' ').slice(0, 160) || '(no summary)'}</div>
+                    <div className="meta">source: {skill.source_locator || '(none)'}</div>
+                    {selectedThisSkill ? (
+                      <div className="note-accordion" onClick={(event) => event.stopPropagation()} role="region" aria-label="Catalog skill details">
+                        <div className="row rule-title-row" style={{ marginBottom: 8, justifyContent: 'space-between', gap: 8 }}>
+                          <input
+                            className="rule-title-input"
+                            value={workspaceSkillEditorName}
+                            onChange={(event) => setWorkspaceSkillEditorName(event.target.value)}
+                            placeholder="Skill name"
+                          />
+                          <button
+                            className="action-icon primary"
+                            type="button"
+                            disabled={!workspaceSkillEditorName.trim() || !workspaceSkillEditorDirty || patchWorkspaceSkillPending}
+                            onClick={() => {
+                              void onPatchWorkspaceSkill({
+                                skillId: skill.id,
+                                patch: {
+                                  name: workspaceSkillEditorName.trim(),
+                                  summary: workspaceSkillEditorSummary,
+                                  content: workspaceSkillEditorContent,
+                                  mode: workspaceSkillEditorMode,
+                                  trust_level: workspaceSkillEditorTrustLevel,
+                                },
+                              }).catch(() => {
+                                // Error feedback is handled by app-level UI notice.
+                              })
+                            }}
+                            title="Save skill changes"
+                            aria-label="Save skill changes"
+                          >
+                            <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+                          </button>
+                        </div>
+                        <div className="row wrap" style={{ gap: 8, marginBottom: 8 }}>
+                          <label className="field-control" style={{ minWidth: 150, marginBottom: 0 }}>
+                            <span className="field-label">Mode</span>
+                            <select
+                              value={workspaceSkillEditorMode}
+                              onChange={(event) =>
+                                setWorkspaceSkillEditorMode(event.target.value === 'enforced' ? 'enforced' : 'advisory')
+                              }
+                            >
+                              <option value="advisory">advisory</option>
+                              <option value="enforced">enforced</option>
+                            </select>
+                          </label>
+                          <label className="field-control" style={{ minWidth: 170, marginBottom: 0 }}>
+                            <span className="field-label">Trust level</span>
+                            <select
+                              value={workspaceSkillEditorTrustLevel}
+                              onChange={(event) => {
+                                const next = event.target.value
+                                if (next === 'verified' || next === 'untrusted') {
+                                  setWorkspaceSkillEditorTrustLevel(next)
+                                } else {
+                                  setWorkspaceSkillEditorTrustLevel('reviewed')
+                                }
+                              }}
+                            >
+                              <option value="reviewed">reviewed</option>
+                              <option value="verified">verified</option>
+                              <option value="untrusted">untrusted</option>
+                            </select>
+                          </label>
+                        </div>
+                        <div className="md-editor-surface">
+                          <div className="md-editor-content">
+                            <textarea
+                              className="md-textarea"
+                              value={workspaceSkillEditorSummary}
+                              onChange={(event) => setWorkspaceSkillEditorSummary(event.target.value)}
+                              placeholder="Skill summary"
+                              style={{ width: '100%', minHeight: 96 }}
+                            />
+                          </div>
+                        </div>
+                        <div className="meta" style={{ marginTop: 8 }}>
+                          Source: {skill.source_locator || '(none)'}
+                        </div>
+                        <div className="meta" style={{ marginTop: 8 }}>Skill content</div>
+                        <div className="md-editor-surface">
+                          <MarkdownModeToggle
+                            view={workspaceSkillContentView}
+                            onChange={setWorkspaceSkillContentView}
+                            ariaLabel="Catalog skill content editor view"
+                          />
+                          <div className="md-editor-content">
+                            {workspaceSkillContentView === 'write' ? (
+                              <textarea
+                                className="md-textarea"
+                                value={workspaceSkillEditorContent}
+                                onChange={(event) => setWorkspaceSkillEditorContent(event.target.value)}
+                                placeholder="Write skill content in Markdown..."
+                                style={{ width: '100%', minHeight: 180 }}
+                              />
+                            ) : (
+                              <MarkdownView value={workspaceSkillEditorContent} />
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              )
+            })
+          )}
+        </div>
       </div>
     </section>
   )

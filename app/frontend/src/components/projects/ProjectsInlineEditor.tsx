@@ -7,6 +7,8 @@ import type {
   ProjectRulesPage,
   ProjectSkill,
   ProjectSkillsPage,
+  WorkspaceSkill,
+  WorkspaceSkillsPage,
 } from '../../types'
 import { AttachmentRefList, ExternalRefEditor, Icon, MarkdownModeToggle } from '../shared/uiHelpers'
 import {
@@ -57,6 +59,7 @@ export function ProjectsInlineEditor({
   setEditProjectDescription,
   projectRules,
   projectSkills,
+  workspaceSkills,
   selectedProjectRuleId,
   setSelectedProjectRuleId,
   projectRuleTitle,
@@ -71,7 +74,9 @@ export function ProjectsInlineEditor({
   importProjectSkillMutation,
   importProjectSkillFileMutation,
   patchProjectSkillMutation,
+  applyProjectSkillMutation,
   deleteProjectSkillMutation,
+  attachWorkspaceSkillToProjectMutation,
   toUserDateTime,
   userTimezone,
   editProjectExternalRefsText,
@@ -115,6 +120,7 @@ export function ProjectsInlineEditor({
   setEditProjectDescription: React.Dispatch<React.SetStateAction<string>>
   projectRules: { data?: ProjectRulesPage }
   projectSkills: { data?: ProjectSkillsPage; isLoading?: boolean; isFetching?: boolean }
+  workspaceSkills: { data?: WorkspaceSkillsPage; isLoading?: boolean; isFetching?: boolean }
   selectedProjectRuleId: string | null
   setSelectedProjectRuleId: React.Dispatch<React.SetStateAction<string | null>>
   projectRuleTitle: string
@@ -129,7 +135,9 @@ export function ProjectsInlineEditor({
   importProjectSkillMutation: ProjectMutation
   importProjectSkillFileMutation: ProjectMutation
   patchProjectSkillMutation: ProjectMutation
+  applyProjectSkillMutation: ProjectMutation
   deleteProjectSkillMutation: ProjectMutation
+  attachWorkspaceSkillToProjectMutation: ProjectMutation
   toUserDateTime: (iso: unknown, timezone: string | undefined) => string
   userTimezone: string | undefined
   editProjectExternalRefsText: string
@@ -195,12 +203,17 @@ export function ProjectsInlineEditor({
   )
   const [skillEditorName, setSkillEditorName] = React.useState('')
   const [skillEditorSummary, setSkillEditorSummary] = React.useState('')
+  const [skillEditorContent, setSkillEditorContent] = React.useState('')
   const [skillEditorMode, setSkillEditorMode] = React.useState<'advisory' | 'enforced'>('advisory')
   const [skillEditorTrustLevel, setSkillEditorTrustLevel] = React.useState<'verified' | 'reviewed' | 'untrusted'>(
     'reviewed'
   )
+  const [skillContentView, setSkillContentView] = React.useState<'write' | 'preview'>('write')
+  const [showCatalogPicker, setShowCatalogPicker] = React.useState(false)
+  const [catalogSearchQ, setCatalogSearchQ] = React.useState('')
 
   const skillItems = projectSkills.data?.items ?? []
+  const workspaceSkillItems = workspaceSkills.data?.items ?? []
   const activeProjectRuleIds = React.useMemo(() => {
     const ids = new Set<string>()
     for (const item of projectRules.data?.items ?? []) {
@@ -298,25 +311,31 @@ export function ProjectsInlineEditor({
       setSelectedProjectSkillId(null)
       return
     }
-    if (selectedProjectSkillId && skillItems.some((item: ProjectSkill) => item.id === selectedProjectSkillId)) {
-      return
-    }
-    const firstSkill = skillItems[0]
-    if (firstSkill?.id) {
-      setSelectedProjectSkillId(firstSkill.id)
-    }
+    if (!selectedProjectSkillId) return
+    if (skillItems.some((item: ProjectSkill) => item.id === selectedProjectSkillId)) return
+    setSelectedProjectSkillId(null)
   }, [selectedProjectSkillId, skillItems])
+
+  const getSkillSourceContent = React.useCallback((manifest: Record<string, unknown> | undefined): string => {
+    if (!manifest || typeof manifest !== 'object') return ''
+    const raw = (manifest as Record<string, unknown>).source_content
+    return typeof raw === 'string' ? raw : ''
+  }, [])
 
   React.useEffect(() => {
     if (!selectedProjectSkill) {
       setSkillEditorName('')
       setSkillEditorSummary('')
+      setSkillEditorContent('')
       setSkillEditorMode('advisory')
       setSkillEditorTrustLevel('reviewed')
       return
     }
     setSkillEditorName(String(selectedProjectSkill.name || ''))
     setSkillEditorSummary(String(selectedProjectSkill.summary || ''))
+    setSkillEditorContent(
+      getSkillSourceContent(selectedProjectSkill?.manifest as Record<string, unknown> | undefined)
+    )
     setSkillEditorMode(
       String(selectedProjectSkill.mode || '').toLowerCase() === 'enforced' ? 'enforced' : 'advisory'
     )
@@ -326,13 +345,14 @@ export function ProjectsInlineEditor({
     } else {
       setSkillEditorTrustLevel('reviewed')
     }
-  }, [selectedProjectSkill])
+  }, [getSkillSourceContent, selectedProjectSkill])
 
   const skillEditorDirty = React.useMemo(() => {
     if (!selectedProjectSkill) return false
     return (
       skillEditorName.trim() !== String(selectedProjectSkill.name || '').trim() ||
       skillEditorSummary !== String(selectedProjectSkill.summary || '') ||
+      skillEditorContent !== getSkillSourceContent(selectedProjectSkill?.manifest as Record<string, unknown> | undefined) ||
       skillEditorMode !==
         (String(selectedProjectSkill.mode || '').toLowerCase() === 'enforced' ? 'enforced' : 'advisory') ||
       skillEditorTrustLevel !==
@@ -344,11 +364,32 @@ export function ProjectsInlineEditor({
     )
   }, [
     selectedProjectSkill,
+    getSkillSourceContent,
+    skillEditorContent,
     skillEditorMode,
     skillEditorName,
     skillEditorSummary,
     skillEditorTrustLevel,
   ])
+  const projectSkillKeys = React.useMemo(
+    () => new Set(skillItems.map((item: ProjectSkill) => String(item.skill_key || '').trim()).filter(Boolean)),
+    [skillItems]
+  )
+  const filteredWorkspaceSkillItems = React.useMemo(() => {
+    const query = String(catalogSearchQ || '').trim().toLowerCase()
+    if (!query) return workspaceSkillItems
+    return workspaceSkillItems.filter((item: WorkspaceSkill) => {
+      const haystack = [
+        String(item.name || ''),
+        String(item.skill_key || ''),
+        String(item.summary || ''),
+        String(item.source_locator || ''),
+      ]
+        .join(' ')
+        .toLowerCase()
+      return haystack.includes(query)
+    })
+  }, [catalogSearchQ, workspaceSkillItems])
 
   return (
     <div className="project-inline-editor" style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
@@ -616,7 +657,7 @@ export function ProjectsInlineEditor({
       >
         <div className="row wrap rules-head-row" style={{ justifyContent: 'space-between', marginBottom: 8, gap: 8 }}>
           <h3 style={{ margin: 0 }}>Project Skills ({projectSkills.data?.total ?? 0})</h3>
-          <div className="meta">Import reusable skills by URL or file. Existing skill keys are updated automatically.</div>
+          <div className="meta">Project-local skills. Import adds skill metadata to context; use Apply to include full skill content via linked rule.</div>
         </div>
         <div className="row wrap" style={{ gap: 8, marginBottom: 10, alignItems: 'center' }}>
           <input
@@ -664,8 +705,8 @@ export function ProjectsInlineEditor({
               className="action-icon primary"
               type="button"
               disabled={importProjectSkillMutation.isPending || importProjectSkillFileMutation.isPending}
-              title="Import skill from URL"
-              aria-label="Import skill from URL"
+              title="Import project skill from URL"
+              aria-label="Import project skill from URL"
               onClick={() => {
                 const sourceUrl = String(skillImportSourceUrl || '').trim()
                 if (!sourceUrl) {
@@ -692,18 +733,14 @@ export function ProjectsInlineEditor({
                 )
               }}
             >
-              {importProjectSkillMutation.isPending ? (
-                <Icon path="M12 5v14M5 12h14" />
-              ) : (
-                <Icon path="M12 5v10m0 0l4-4m-4 4l-4-4M4 21h16" />
-              )}
+              {importProjectSkillMutation.isPending ? <Icon path="M12 5v14M5 12h14" /> : <Icon path="M12 5v10m0 0l4-4m-4 4l-4-4M4 21h16" />}
             </button>
             <button
               className="action-icon"
               type="button"
               disabled={importProjectSkillMutation.isPending || importProjectSkillFileMutation.isPending}
-              title="Import skill from file"
-              aria-label="Import skill from file"
+              title="Import project skill from file"
+              aria-label="Import project skill from file"
               onClick={() => skillImportFileInputRef.current?.click()}
             >
               <Icon
@@ -713,6 +750,19 @@ export function ProjectsInlineEditor({
                     : 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6'
                 }
               />
+            </button>
+            <button
+              className="action-icon"
+              type="button"
+              disabled={attachWorkspaceSkillToProjectMutation.isPending}
+              title="Browse workspace catalog"
+              aria-label="Browse workspace catalog"
+              onClick={() => {
+                setCatalogSearchQ('')
+                setShowCatalogPicker(true)
+              }}
+            >
+              <Icon path="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2H3V6zm0 4h20v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-8zm7 3h7m-7 3h5" />
             </button>
           </div>
           <input
@@ -745,170 +795,264 @@ export function ProjectsInlineEditor({
             }}
           />
         </div>
-        <div className="rules-layout">
-          <div className="rules-list">
-            {projectSkills.isLoading ? (
-              <div className="notice">Loading project skills...</div>
-            ) : skillItems.length === 0 ? (
-              <div className="notice">No skills imported yet for this project.</div>
-            ) : (
-              skillItems.map((skill: ProjectSkill) => {
-                const isSelected = selectedProjectSkillId === skill.id
-                return (
-                  <div
-                    key={skill.id}
-                    className={`task-item rule-item ${isSelected ? 'selected' : ''}`}
-                    onClick={() => setSelectedProjectSkillId(skill.id)}
-                    role="button"
-                  >
-                    <div className="task-main">
-                      <div className="task-title">
-                        <strong>{skill.name || skill.skill_key || 'Untitled skill'}</strong>
-                        <div className="row" style={{ gap: 6 }}>
-                          <button
-                            className="action-icon danger-ghost"
-                            disabled={deleteProjectSkillMutation.isPending}
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              if (!window.confirm('Delete this skill and linked rule?')) return
-                              deleteProjectSkillMutation.mutate(
-                                {
-                                  skillId: skill.id,
-                                  delete_linked_rule: true,
+        <div className="rules-list">
+          {projectSkills.isLoading ? (
+            <div className="notice">Loading project skills...</div>
+          ) : skillItems.length === 0 ? (
+            <div className="notice">No skills imported yet for this project.</div>
+          ) : (
+            skillItems.map((skill: ProjectSkill) => {
+              const isExpanded = selectedProjectSkillId === skill.id
+              const selectedThisSkill = isExpanded && selectedProjectSkill?.id === skill.id
+              const linkedRuleId = String(skill.generated_rule_id || '').trim()
+              const hasLinkedRule = Boolean(linkedRuleId) && activeProjectRuleIds.has(linkedRuleId)
+              return (
+                <div
+                  key={skill.id}
+                  className={`task-item rule-item ${isExpanded ? 'selected' : ''}`}
+                  onClick={() => setSelectedProjectSkillId((current) => (current === skill.id ? null : skill.id))}
+                  role="button"
+                  aria-expanded={isExpanded}
+                >
+                  <div className="task-main">
+                    <div className="task-title">
+                      <strong>{skill.name || skill.skill_key || 'Untitled skill'}</strong>
+                      <div className="row" style={{ gap: 6 }}>
+                        <button
+                          className="action-icon danger-ghost"
+                          disabled={deleteProjectSkillMutation.isPending}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            if (!window.confirm('Delete this skill and linked rule?')) return
+                            deleteProjectSkillMutation.mutate(
+                              {
+                                skillId: skill.id,
+                                delete_linked_rule: true,
+                              },
+                              {
+                                onSuccess: () => {
+                                  if (selectedProjectSkillId === skill.id) setSelectedProjectSkillId(null)
                                 },
+                              }
+                            )
+                          }}
+                          title="Delete skill"
+                          aria-label="Delete skill"
+                        >
+                          <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="meta">
+                      key: {skill.skill_key || '-'} | mode: {skill.mode || '-'} | trust: {skill.trust_level || '-'}
+                    </div>
+                    <div className="meta">
+                      {(skill.summary || '').replace(/\s+/g, ' ').slice(0, 140) || '(no summary)'}
+                    </div>
+                    <div className="meta">source: {skill.source_locator || '(none)'}</div>
+                    {selectedThisSkill ? (
+                      <div className="note-accordion" onClick={(e) => e.stopPropagation()} role="region" aria-label="Skill editor">
+                        <div className="row rule-title-row" style={{ marginBottom: 8, justifyContent: 'space-between', gap: 8 }}>
+                          <input
+                            className="rule-title-input"
+                            value={skillEditorName}
+                            onChange={(e) => setSkillEditorName(e.target.value)}
+                            placeholder="Skill name"
+                          />
+                          <button
+                            className="action-icon primary"
+                            type="button"
+                            disabled={!skillEditorName.trim() || !skillEditorDirty || patchProjectSkillMutation.isPending}
+                            onClick={() => {
+                              patchProjectSkillMutation.mutate({
+                                skillId: skill.id,
+                                patch: {
+                                  name: skillEditorName.trim(),
+                                  summary: skillEditorSummary,
+                                  content: skillEditorContent,
+                                  mode: skillEditorMode,
+                                  trust_level: skillEditorTrustLevel,
+                                  sync_project_rule: true,
+                                },
+                              })
+                            }}
+                            title="Save skill changes"
+                            aria-label="Save skill changes"
+                          >
+                            <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+                          </button>
+                        </div>
+                        <div className="row wrap" style={{ gap: 8, marginBottom: 8 }}>
+                          <label className="field-control" style={{ minWidth: 150, marginBottom: 0 }}>
+                            <span className="field-label">Mode</span>
+                            <select
+                              value={skillEditorMode}
+                              onChange={(e) => setSkillEditorMode(e.target.value === 'enforced' ? 'enforced' : 'advisory')}
+                            >
+                              <option value="advisory">advisory</option>
+                              <option value="enforced">enforced</option>
+                            </select>
+                          </label>
+                          <label className="field-control" style={{ minWidth: 170, marginBottom: 0 }}>
+                            <span className="field-label">Trust level</span>
+                            <select
+                              value={skillEditorTrustLevel}
+                              onChange={(e) => {
+                                const next = e.target.value
+                                if (next === 'verified' || next === 'untrusted') {
+                                  setSkillEditorTrustLevel(next)
+                                } else {
+                                  setSkillEditorTrustLevel('reviewed')
+                                }
+                              }}
+                            >
+                              <option value="reviewed">reviewed</option>
+                              <option value="verified">verified</option>
+                              <option value="untrusted">untrusted</option>
+                            </select>
+                          </label>
+                        </div>
+                        <div className="md-editor-surface">
+                          <div className="md-editor-content">
+                            <textarea
+                              className="md-textarea"
+                              value={skillEditorSummary}
+                              onChange={(e) => setSkillEditorSummary(e.target.value)}
+                              placeholder="Skill summary"
+                              style={{ width: '100%', minHeight: 96 }}
+                            />
+                          </div>
+                        </div>
+                        <div className="row wrap" style={{ marginTop: 8, gap: 6 }}>
+                          <button
+                            className="status-chip"
+                            type="button"
+                            onClick={() => applyProjectSkillMutation.mutate({ skillId: skill.id })}
+                          >
+                            {hasLinkedRule ? 'Reapply to context' : 'Apply to context'}
+                          </button>
+                          {hasLinkedRule ? (
+                            <button
+                              className="status-chip"
+                              type="button"
+                              onClick={() => openLinkedRule(linkedRuleId)}
+                            >
+                              Open linked rule
+                            </button>
+                          ) : null}
+                        </div>
+                        <div className="meta" style={{ marginTop: 8 }}>
+                          Source: {skill.source_locator || '(none)'}
+                        </div>
+                        <div className="meta">
+                          Linked rule: {hasLinkedRule ? linkedRuleId : '(none)'}
+                        </div>
+                        <div className="meta" style={{ marginTop: 8 }}>Skill content</div>
+                        <div className="md-editor-surface">
+                          <MarkdownModeToggle
+                            view={skillContentView}
+                            onChange={setSkillContentView}
+                            ariaLabel="Skill content editor view"
+                          />
+                          <div className="md-editor-content">
+                            {skillContentView === 'write' ? (
+                              <textarea
+                                className="md-textarea"
+                                value={skillEditorContent}
+                                onChange={(e) => setSkillEditorContent(e.target.value)}
+                                placeholder="Write skill content in Markdown..."
+                                style={{ width: '100%', minHeight: 180 }}
+                              />
+                            ) : (
+                              <MarkdownView value={skillEditorContent} />
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              )
+            })
+          )}
+        </div>
+      </div>
+      {showCatalogPicker ? (
+        <div className="drawer open" onClick={() => setShowCatalogPicker(false)}>
+          <div className="drawer-body project-skill-catalog-drawer" onClick={(e) => e.stopPropagation()}>
+            <div className="drawer-header">
+              <div>
+                <h3 className="drawer-title" style={{ marginBottom: 4 }}>Workspace Skill Catalog</h3>
+                <div className="meta">Select a workspace skill and attach it to this project.</div>
+              </div>
+              <button
+                className="action-icon"
+                type="button"
+                onClick={() => setShowCatalogPicker(false)}
+                title="Close catalog"
+                aria-label="Close catalog"
+              >
+                <Icon path="M6 6l12 12M18 6 6 18" />
+              </button>
+            </div>
+            <div className="row wrap" style={{ marginTop: 10, marginBottom: 10 }}>
+              <input
+                value={catalogSearchQ}
+                onChange={(e) => setCatalogSearchQ(e.target.value)}
+                placeholder="Filter by name, key, or summary"
+                style={{ flex: 1, minWidth: 240 }}
+              />
+            </div>
+            <div className="task-list">
+              {workspaceSkills.isLoading ? (
+                <div className="notice">Loading workspace catalog...</div>
+              ) : filteredWorkspaceSkillItems.length === 0 ? (
+                <div className="notice">No matching workspace skills.</div>
+              ) : (
+                filteredWorkspaceSkillItems.map((skill: WorkspaceSkill) => {
+                  const alreadyAttached = projectSkillKeys.has(String(skill.skill_key || '').trim())
+                  return (
+                    <div key={skill.id} className="task-item rule-item">
+                      <div className="task-main">
+                        <div className="task-title">
+                          <div className="row" style={{ gap: 6, minWidth: 0 }}>
+                            {skill.is_seeded ? <span className="rule-kind-chip">[SEEDED]</span> : null}
+                            <strong>{skill.name || skill.skill_key || 'Untitled catalog skill'}</strong>
+                          </div>
+                          <button
+                            className="status-chip"
+                            type="button"
+                            disabled={alreadyAttached || attachWorkspaceSkillToProjectMutation.isPending}
+                            onClick={() => {
+                              attachWorkspaceSkillToProjectMutation.mutate(
+                                { skillId: skill.id },
                                 {
                                   onSuccess: () => {
-                                    if (selectedProjectSkillId === skill.id) setSelectedProjectSkillId(null)
+                                    setShowCatalogPicker(false)
                                   },
                                 }
                               )
                             }}
-                            title="Delete skill"
-                            aria-label="Delete skill"
                           >
-                            <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                            {alreadyAttached ? 'Attached' : 'Attach'}
                           </button>
                         </div>
-                      </div>
-                      <div className="meta">
-                        key: {skill.skill_key || '-'} | mode: {skill.mode || '-'} | trust: {skill.trust_level || '-'}
-                      </div>
-                      <div className="meta">
-                        {(skill.summary || '').replace(/\s+/g, ' ').slice(0, 140) || '(no summary)'}
-                      </div>
-                      <div className="meta">
-                        source: {skill.source_locator || '(none)'}
-                      </div>
-                      {String(skill.generated_rule_id || '').trim() &&
-                      activeProjectRuleIds.has(String(skill.generated_rule_id || '').trim()) ? (
-                        <div className="row" style={{ marginTop: 6, gap: 6 }}>
-                          <button
-                            className="status-chip"
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              openLinkedRule(String(skill.generated_rule_id || '').trim())
-                            }}
-                          >
-                            Open linked rule
-                          </button>
+                        <div className="meta">
+                          key: {skill.skill_key || '-'} | mode: {skill.mode || '-'} | trust: {skill.trust_level || '-'}
                         </div>
-                      ) : null}
+                        <div className="meta">
+                          {(skill.summary || '').replace(/\s+/g, ' ').slice(0, 200) || '(no summary)'}
+                        </div>
+                        <div className="meta">source: {skill.source_locator || '(none)'}</div>
+                      </div>
                     </div>
-                  </div>
-                )
-              })
-            )}
-          </div>
-          <div className="rules-editor">
-            {!selectedProjectSkill ? (
-              <div className="notice">Select a skill to edit its mode, trust, and summary.</div>
-            ) : (
-              <>
-                <div className="row rule-title-row" style={{ marginBottom: 8, justifyContent: 'space-between', gap: 8 }}>
-                  <input
-                    className="rule-title-input"
-                    value={skillEditorName}
-                    onChange={(e) => setSkillEditorName(e.target.value)}
-                    placeholder="Skill name"
-                  />
-                  <button
-                    className="action-icon primary"
-                    disabled={!skillEditorName.trim() || !skillEditorDirty || patchProjectSkillMutation.isPending}
-                    onClick={() => {
-                      patchProjectSkillMutation.mutate({
-                        skillId: selectedProjectSkill.id,
-                        patch: {
-                          name: skillEditorName.trim(),
-                          summary: skillEditorSummary,
-                          mode: skillEditorMode,
-                          trust_level: skillEditorTrustLevel,
-                          sync_project_rule: true,
-                        },
-                      })
-                    }}
-                    title="Save skill"
-                    aria-label="Save skill"
-                  >
-                    <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
-                  </button>
-                </div>
-                <div className="row wrap" style={{ gap: 8, marginBottom: 8 }}>
-                  <label className="field-control" style={{ minWidth: 150, marginBottom: 0 }}>
-                    <span className="field-label">Mode</span>
-                    <select
-                      value={skillEditorMode}
-                      onChange={(e) => setSkillEditorMode(e.target.value === 'enforced' ? 'enforced' : 'advisory')}
-                    >
-                      <option value="advisory">advisory</option>
-                      <option value="enforced">enforced</option>
-                    </select>
-                  </label>
-                  <label className="field-control" style={{ minWidth: 170, marginBottom: 0 }}>
-                    <span className="field-label">Trust level</span>
-                    <select
-                      value={skillEditorTrustLevel}
-                      onChange={(e) => {
-                        const next = e.target.value
-                        if (next === 'verified' || next === 'untrusted') {
-                          setSkillEditorTrustLevel(next)
-                        } else {
-                          setSkillEditorTrustLevel('reviewed')
-                        }
-                      }}
-                    >
-                      <option value="reviewed">reviewed</option>
-                      <option value="verified">verified</option>
-                      <option value="untrusted">untrusted</option>
-                    </select>
-                  </label>
-                </div>
-                <div className="md-editor-surface">
-                  <div className="md-editor-content">
-                    <textarea
-                      className="md-textarea"
-                      value={skillEditorSummary}
-                      onChange={(e) => setSkillEditorSummary(e.target.value)}
-                      placeholder="Skill summary"
-                      style={{ width: '100%', minHeight: 110 }}
-                    />
-                  </div>
-                </div>
-                <div className="meta" style={{ marginTop: 8 }}>
-                  Source: {selectedProjectSkill.source_locator || '(none)'}
-                </div>
-                <div className="meta">
-                  Linked rule:{' '}
-                  {String(selectedProjectSkill.generated_rule_id || '').trim() &&
-                  activeProjectRuleIds.has(String(selectedProjectSkill.generated_rule_id || '').trim())
-                    ? String(selectedProjectSkill.generated_rule_id || '').trim()
-                    : '(none)'}
-                </div>
-              </>
-            )}
+                  )
+                })
+              )}
+            </div>
           </div>
         </div>
-      </div>
+      ) : null}
       <div className="meta" style={{ marginTop: 10 }}>External links</div>
       <ExternalRefEditor
         refs={parseExternalRefsText(editProjectExternalRefsText)}

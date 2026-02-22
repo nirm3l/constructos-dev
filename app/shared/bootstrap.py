@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 import json
+import hashlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ from .models import (
     TaskWatcher,
     User,
     Workspace,
+    WorkspaceSkill,
     WorkspaceMember,
 )
 from .serializers import to_iso_utc
@@ -48,6 +50,52 @@ from .settings import (
     DEFAULT_USER_ID,
     DEFAULT_STATUSES,
     LICENSE_TRIAL_DAYS,
+)
+
+
+_DEFAULT_WORKSPACE_SKILLS: tuple[dict[str, str], ...] = (
+    {
+        "skill_key": "github_delivery",
+        "name": "GitHub Delivery Skill",
+        "summary": "Use this skill for repository workflows, pull requests, and release coordination.",
+        "source_locator": "seed://workspace-skills/github-delivery",
+        "mode": "advisory",
+        "trust_level": "verified",
+        "content": (
+            "# GitHub Delivery Skill\n\n"
+            "Use this skill when work involves GitHub repositories, pull requests, or release notes.\n\n"
+            "## Workflow\n"
+            "- Clarify target repository, default branch, and release expectations.\n"
+            "- Review open pull requests and CI status before proposing merges.\n"
+            "- Prefer small, reviewable commits with clear commit messages.\n"
+            "- Summarize risk, rollback approach, and post-merge validation.\n\n"
+            "## Guardrails\n"
+            "- Never force-push shared branches unless explicitly approved.\n"
+            "- Never merge failing checks without an explicit exception.\n"
+            "- Keep changelog and release notes aligned with merged changes.\n"
+        ),
+    },
+    {
+        "skill_key": "jira_execution",
+        "name": "Jira Execution Skill",
+        "summary": "Use this skill for Jira issue updates, workflow transitions, and sprint hygiene.",
+        "source_locator": "seed://workspace-skills/jira-execution",
+        "mode": "advisory",
+        "trust_level": "verified",
+        "content": (
+            "# Jira Execution Skill\n\n"
+            "Use this skill when work requires Jira issue planning, transitions, or reporting.\n\n"
+            "## Workflow\n"
+            "- Confirm project key, issue type, priority, and expected outcome.\n"
+            "- Keep issue summary concise and actionable.\n"
+            "- Record status transitions with a short reason.\n"
+            "- Keep worklogs and comments consistent with actual work.\n\n"
+            "## Guardrails\n"
+            "- Do not transition issues without validating required fields.\n"
+            "- Do not close issues without linking evidence (PR, commit, test result).\n"
+            "- Keep sprint scope changes explicit and documented.\n"
+        ),
+    },
 )
 
 
@@ -104,6 +152,59 @@ def ensure_non_human_workspace_admin_roles(db: Session):
             continue
         membership.role = "Admin"
         changed = True
+    if changed:
+        db.commit()
+
+
+def ensure_workspace_skill_catalog_seed(db: Session, *, workspace_id: str, actor_user_id: str):
+    changed = False
+    imported_at = datetime.now(timezone.utc).isoformat()
+    for default_skill in _DEFAULT_WORKSPACE_SKILLS:
+        skill_key = str(default_skill["skill_key"])
+        existing = db.execute(
+            select(WorkspaceSkill).where(
+                WorkspaceSkill.workspace_id == workspace_id,
+                WorkspaceSkill.skill_key == skill_key,
+            )
+        ).scalar_one_or_none()
+        manifest = {
+            "seeded_default": True,
+            "imported_at": imported_at,
+            "source_content": str(default_skill["content"]),
+            "source_content_sha256": "",
+            "source_locator": str(default_skill["source_locator"]),
+        }
+        manifest["source_content_sha256"] = hashlib.sha256(
+            str(manifest["source_content"]).encode("utf-8")
+        ).hexdigest()
+        if existing is None:
+            db.add(
+                WorkspaceSkill(
+                    workspace_id=workspace_id,
+                    skill_key=skill_key,
+                    name=str(default_skill["name"]),
+                    summary=str(default_skill["summary"]),
+                    source_type="seed",
+                    source_locator=str(default_skill["source_locator"]),
+                    source_version=None,
+                    trust_level=str(default_skill["trust_level"]),
+                    mode=str(default_skill["mode"]),
+                    manifest_json=json.dumps(manifest, ensure_ascii=True, sort_keys=True),
+                    is_seeded=True,
+                    created_by=actor_user_id,
+                    updated_by=actor_user_id,
+                    is_deleted=False,
+                )
+            )
+            changed = True
+            continue
+        if bool(existing.is_deleted):
+            existing.is_deleted = False
+            existing.is_seeded = True
+            existing.updated_by = actor_user_id
+            if not str(existing.manifest_json or "").strip():
+                existing.manifest_json = json.dumps(manifest, ensure_ascii=True, sort_keys=True)
+            changed = True
     if changed:
         db.commit()
 
@@ -398,6 +499,13 @@ def bootstrap_data():
         ensure_license_installation(db)
         ensure_user_password_defaults(db)
         ensure_non_human_workspace_admin_roles(db)
+        workspace_ids = db.execute(select(Workspace.id).where(Workspace.is_deleted == False)).scalars().all()
+        for workspace_id in workspace_ids:
+            ensure_workspace_skill_catalog_seed(
+                db,
+                workspace_id=str(workspace_id),
+                actor_user_id=DEFAULT_USER_ID,
+            )
 
         if current_version(db, "Project", BOOTSTRAP_PROJECT_ID) == 0:
             append_event(

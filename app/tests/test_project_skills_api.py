@@ -64,9 +64,14 @@ def test_project_skill_import_crud_flow(tmp_path: Path, monkeypatch):
     assert skill["project_id"] == project_id
     assert skill["skill_key"] == "python_testing"
     assert skill["already_exists"] is False
-    assert isinstance(skill["generated_rule_id"], str) and skill["generated_rule_id"]
+    assert skill["generated_rule_id"] is None
 
-    created_rule = client.get(f"/api/project-rules/{skill['generated_rule_id']}")
+    applied = client.post(f"/api/project-skills/{skill['id']}/apply")
+    assert applied.status_code == 200
+    applied_payload = applied.json()
+    assert isinstance(applied_payload["generated_rule_id"], str) and applied_payload["generated_rule_id"]
+
+    created_rule = client.get(f"/api/project-rules/{applied_payload['generated_rule_id']}")
     assert created_rule.status_code == 200
     created_rule_payload = created_rule.json()
     assert "Imported skill context:" in created_rule_payload["body"]
@@ -87,6 +92,7 @@ def test_project_skill_import_crud_flow(tmp_path: Path, monkeypatch):
             "mode": "enforced",
             "trust_level": "verified",
             "summary": "Enforced quality baseline for tests.",
+            "content": "# Python Testing Skill v2\nAlways add regression tests and smoke checks.",
         },
     )
     assert patched.status_code == 200
@@ -95,13 +101,18 @@ def test_project_skill_import_crud_flow(tmp_path: Path, monkeypatch):
     assert patched_payload["mode"] == "enforced"
     assert patched_payload["trust_level"] == "verified"
     assert patched_payload["summary"] == "Enforced quality baseline for tests."
+    assert (
+        str(patched_payload["manifest"].get("source_content", "")).strip()
+        == "# Python Testing Skill v2\nAlways add regression tests and smoke checks."
+    )
 
-    synced_rule = client.get(f"/api/project-rules/{skill['generated_rule_id']}")
+    synced_rule = client.get(f"/api/project-rules/{applied_payload['generated_rule_id']}")
     assert synced_rule.status_code == 200
     synced_rule_payload = synced_rule.json()
     assert synced_rule_payload["title"] == "Skill: Python Testing Skill v2"
     assert "- Mode: enforced" in synced_rule_payload["body"]
     assert "- Trust level: verified" in synced_rule_payload["body"]
+    assert "Always add regression tests and smoke checks." in synced_rule_payload["body"]
 
     deleted = client.post(
         f"/api/project-skills/{skill['id']}/delete",
@@ -112,7 +123,7 @@ def test_project_skill_import_crud_flow(tmp_path: Path, monkeypatch):
 
     missing_skill = client.get(f"/api/project-skills/{skill['id']}")
     assert missing_skill.status_code == 404
-    missing_rule = client.get(f"/api/project-rules/{skill['generated_rule_id']}")
+    missing_rule = client.get(f"/api/project-rules/{applied_payload['generated_rule_id']}")
     assert missing_rule.status_code == 404
 
 
@@ -173,6 +184,10 @@ def test_project_skill_reimport_updates_existing(tmp_path: Path, monkeypatch):
     first = client.post("/api/project-skills/import", json=payload)
     assert first.status_code == 200
     first_payload = first.json()
+    applied_first = client.post(f"/api/project-skills/{first_payload['id']}/apply")
+    assert applied_first.status_code == 200
+    first_rule_id = str(applied_first.json()["generated_rule_id"])
+    assert first_rule_id
 
     second = client.post(
         "/api/project-skills/import",
@@ -184,8 +199,9 @@ def test_project_skill_reimport_updates_existing(tmp_path: Path, monkeypatch):
     assert second_payload["already_exists"] is False
     assert second_payload["updated_existing"] is True
     assert second_payload["summary"] == "Updated behavior summary."
+    assert str(second_payload["generated_rule_id"] or "") == first_rule_id
 
-    generated_rule = client.get(f"/api/project-rules/{second_payload['generated_rule_id']}")
+    generated_rule = client.get(f"/api/project-rules/{first_rule_id}")
     assert generated_rule.status_code == 200
     generated_rule_payload = generated_rule.json()
     assert "Updated behavior summary." in generated_rule_payload["body"]
@@ -222,9 +238,14 @@ def test_project_skill_import_from_file(tmp_path: Path):
     assert payload["summary"] == "Always validate file payload structure before processing."
     assert str(payload["source_locator"]).startswith("upload://")
     assert payload["already_exists"] is False
-    assert isinstance(payload["generated_rule_id"], str) and payload["generated_rule_id"]
+    assert payload["generated_rule_id"] is None
 
-    generated_rule = client.get(f"/api/project-rules/{payload['generated_rule_id']}")
+    applied = client.post(f"/api/project-skills/{payload['id']}/apply")
+    assert applied.status_code == 200
+    applied_payload = applied.json()
+    assert isinstance(applied_payload["generated_rule_id"], str) and applied_payload["generated_rule_id"]
+
+    generated_rule = client.get(f"/api/project-rules/{applied_payload['generated_rule_id']}")
     assert generated_rule.status_code == 200
     generated_rule_payload = generated_rule.json()
     assert "Imported skill context:" in generated_rule_payload["body"]
@@ -258,6 +279,10 @@ def test_project_skill_import_from_file_updates_existing_when_requested(tmp_path
     )
     assert first.status_code == 200
     first_payload = first.json()
+    applied_first = client.post(f"/api/project-skills/{first_payload['id']}/apply")
+    assert applied_first.status_code == 200
+    first_rule_id = str(applied_first.json()["generated_rule_id"])
+    assert first_rule_id
 
     second = client.post(
         "/api/project-skills/import-file",
@@ -276,8 +301,9 @@ def test_project_skill_import_from_file_updates_existing_when_requested(tmp_path
     assert second_payload["already_exists"] is False
     assert second_payload["updated_existing"] is True
     assert second_payload["summary"] == "Updated file import content."
+    assert str(second_payload["generated_rule_id"] or "") == first_rule_id
 
-    generated_rule = client.get(f"/api/project-rules/{second_payload['generated_rule_id']}")
+    generated_rule = client.get(f"/api/project-rules/{first_rule_id}")
     assert generated_rule.status_code == 200
     generated_rule_payload = generated_rule.json()
     assert "Updated file import content." in generated_rule_payload["body"]
@@ -308,7 +334,10 @@ def test_project_skill_reimport_from_file_after_delete_restores_skill(tmp_path: 
     assert first.status_code == 200
     first_payload = first.json()
     first_skill_id = str(first_payload["id"])
-    first_rule_id = str(first_payload["generated_rule_id"])
+    applied_first = client.post(f"/api/project-skills/{first_skill_id}/apply")
+    assert applied_first.status_code == 200
+    first_rule_id = str(applied_first.json()["generated_rule_id"])
+    assert first_rule_id
 
     deleted = client.post(
         f"/api/project-skills/{first_skill_id}/delete",
@@ -322,9 +351,13 @@ def test_project_skill_reimport_from_file_after_delete_restores_skill(tmp_path: 
     second_payload = second.json()
     assert str(second_payload["id"]) == first_skill_id
     assert second_payload["already_exists"] is False
-    assert str(second_payload["generated_rule_id"])
+    assert second_payload["generated_rule_id"] is None
 
-    second_rule_id = str(second_payload["generated_rule_id"])
+    applied_second = client.post(f"/api/project-skills/{first_skill_id}/apply")
+    assert applied_second.status_code == 200
+    second_rule_id = str(applied_second.json()["generated_rule_id"])
+    assert second_rule_id
+
     if second_rule_id != first_rule_id:
         deleted_rule = client.get(f"/api/project-rules/{first_rule_id}")
         assert deleted_rule.status_code == 404
@@ -433,6 +466,61 @@ def test_project_skill_import_normalizes_github_blob_source_url(tmp_path: Path, 
     assert payload["manifest"]["source_url"] == expected_raw_url
 
 
+def test_workspace_skill_catalog_seed_and_attach_to_project(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    workspace_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={workspace_id}")
+    assert catalog.status_code == 200
+    items = catalog.json()["items"]
+    assert any(item["skill_key"] == "github_delivery" for item in items)
+    assert any(item["skill_key"] == "jira_execution" for item in items)
+
+    github_skill = next(item for item in items if item["skill_key"] == "github_delivery")
+    attached = client.post(
+        f"/api/workspace-skills/{github_skill['id']}/attach",
+        json={"workspace_id": workspace_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+    attached_payload = attached.json()
+    assert attached_payload["project_id"] == project_id
+    assert attached_payload["skill_key"] == "github_delivery"
+    assert attached_payload["generated_rule_id"] is None
+    assert attached_payload["attached_from_workspace_skill_id"] == github_skill["id"]
+
+
+def test_workspace_skill_patch_updates_content(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    workspace_id = bootstrap["workspaces"][0]["id"]
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={workspace_id}")
+    assert catalog.status_code == 200
+    github_skill = next(item for item in catalog.json()["items"] if item["skill_key"] == "github_delivery")
+
+    patched = client.patch(
+        f"/api/workspace-skills/{github_skill['id']}",
+        json={
+            "name": "GitHub Delivery Skill v2",
+            "summary": "Updated summary for delivery workflow.",
+            "mode": "enforced",
+            "trust_level": "verified",
+            "content": "# GitHub Delivery Skill v2\nPrefer squash merges and release tags.",
+        },
+    )
+    assert patched.status_code == 200
+    payload = patched.json()
+    assert payload["name"] == "GitHub Delivery Skill v2"
+    assert payload["summary"] == "Updated summary for delivery workflow."
+    assert payload["mode"] == "enforced"
+    assert payload["trust_level"] == "verified"
+    assert str(payload["manifest"].get("source_content", "")).strip() == (
+        "# GitHub Delivery Skill v2\nPrefer squash merges and release tags."
+    )
+
+
 def test_delete_project_soft_deletes_project_skills(tmp_path: Path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get("/api/bootstrap").json()
@@ -494,6 +582,10 @@ def test_agent_task_service_supports_project_skill_lifecycle(tmp_path: Path, mon
         skill_key="mcp_skill",
     )
     assert imported["skill_key"] == "mcp_skill"
+    assert imported["generated_rule_id"] is None
+
+    applied = service.apply_project_skill(skill_id=imported["id"])
+    assert isinstance(applied["generated_rule_id"], str) and applied["generated_rule_id"]
 
     listed = service.list_project_skills(workspace_id=workspace_id, project_id=project_id)
     assert any(item["id"] == imported["id"] for item in listed["items"])

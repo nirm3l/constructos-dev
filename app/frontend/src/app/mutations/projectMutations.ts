@@ -1,16 +1,22 @@
 import { useMutation } from '@tanstack/react-query'
 import {
+  applyProjectSkill,
+  attachWorkspaceSkillToProject,
   createProject,
   createProjectFromTemplate,
   createProjectRule,
   deleteProject,
   deleteProjectRule,
   deleteProjectSkill,
+  deleteWorkspaceSkill,
   importProjectSkill,
   importProjectSkillFile,
+  importWorkspaceSkill,
+  importWorkspaceSkillFile,
   patchProject,
   patchProjectRule,
   patchProjectSkill,
+  patchWorkspaceSkill,
   previewProjectFromTemplate,
 } from '../../api'
 import { parseProjectEvidenceTopKInput, parseProjectStatusesText, parseTemplateParametersInput, toErrorMessage } from '../../utils/ui'
@@ -250,6 +256,7 @@ export function useProjectMutations(c: any) {
       patch: {
         name?: string
         summary?: string
+        content?: string
         mode?: 'advisory' | 'enforced'
         trust_level?: 'verified' | 'reviewed' | 'untrusted'
         sync_project_rule?: boolean
@@ -261,6 +268,16 @@ export function useProjectMutations(c: any) {
       await c.qc.invalidateQueries({ queryKey: ['project-rules'] })
     },
     onError: (err) => c.setUiError(toErrorMessage(err, 'Skill update failed')),
+  })
+
+  const applyProjectSkillMutation = useMutation({
+    mutationFn: (payload: { skillId: string }) => applyProjectSkill(c.userId, payload.skillId),
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.qc.invalidateQueries({ queryKey: ['project-skills'] })
+      await c.qc.invalidateQueries({ queryKey: ['project-rules'] })
+    },
+    onError: (err) => c.setUiError(toErrorMessage(err, 'Skill apply failed')),
   })
 
   const deleteProjectSkillMutation = useMutation({
@@ -276,6 +293,92 @@ export function useProjectMutations(c: any) {
     onError: (err) => c.setUiError(toErrorMessage(err, 'Skill delete failed')),
   })
 
+  const importWorkspaceSkillMutation = useMutation({
+    mutationFn: (payload: {
+      source_url: string
+      name?: string
+      skill_key?: string
+      mode?: 'advisory' | 'enforced'
+      trust_level?: 'verified' | 'reviewed' | 'untrusted'
+    }) =>
+      importWorkspaceSkill(c.userId, {
+        workspace_id: c.workspaceId,
+        source_url: payload.source_url,
+        name: payload.name,
+        skill_key: payload.skill_key,
+        mode: payload.mode,
+        trust_level: payload.trust_level,
+      }),
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.qc.invalidateQueries({ queryKey: ['workspace-skills'] })
+    },
+    onError: (err) => c.setUiError(toErrorMessage(err, 'Workspace skill import failed')),
+  })
+
+  const importWorkspaceSkillFileMutation = useMutation({
+    mutationFn: (payload: {
+      file: File
+      name?: string
+      skill_key?: string
+      mode?: 'advisory' | 'enforced'
+      trust_level?: 'verified' | 'reviewed' | 'untrusted'
+    }) =>
+      importWorkspaceSkillFile(c.userId, {
+        workspace_id: c.workspaceId,
+        file: payload.file,
+        name: payload.name,
+        skill_key: payload.skill_key,
+        mode: payload.mode,
+        trust_level: payload.trust_level,
+      }),
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.qc.invalidateQueries({ queryKey: ['workspace-skills'] })
+    },
+    onError: (err) => c.setUiError(toErrorMessage(err, 'Workspace skill file import failed')),
+  })
+
+  const patchWorkspaceSkillMutation = useMutation({
+    mutationFn: (payload: {
+      skillId: string
+      patch: {
+        name?: string
+        summary?: string
+        content?: string
+        mode?: 'advisory' | 'enforced'
+        trust_level?: 'verified' | 'reviewed' | 'untrusted'
+      }
+    }) => patchWorkspaceSkill(c.userId, payload.skillId, payload.patch),
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.qc.invalidateQueries({ queryKey: ['workspace-skills'] })
+    },
+    onError: (err) => c.setUiError(toErrorMessage(err, 'Workspace skill update failed')),
+  })
+
+  const deleteWorkspaceSkillMutation = useMutation({
+    mutationFn: (payload: { skillId: string }) => deleteWorkspaceSkill(c.userId, payload.skillId),
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.qc.invalidateQueries({ queryKey: ['workspace-skills'] })
+    },
+    onError: (err) => c.setUiError(toErrorMessage(err, 'Workspace skill delete failed')),
+  })
+
+  const attachWorkspaceSkillToProjectMutation = useMutation({
+    mutationFn: (payload: { skillId: string }) =>
+      attachWorkspaceSkillToProject(c.userId, payload.skillId, {
+        workspace_id: c.workspaceId,
+        project_id: c.selectedProjectId,
+      }),
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.qc.invalidateQueries({ queryKey: ['project-skills'] })
+    },
+    onError: (err) => c.setUiError(toErrorMessage(err, 'Attach catalog skill failed')),
+  })
+
   return {
     saveProjectMutation,
     previewProjectFromTemplateMutation,
@@ -287,6 +390,12 @@ export function useProjectMutations(c: any) {
     importProjectSkillMutation,
     importProjectSkillFileMutation,
     patchProjectSkillMutation,
+    applyProjectSkillMutation,
     deleteProjectSkillMutation,
+    importWorkspaceSkillMutation,
+    importWorkspaceSkillFileMutation,
+    patchWorkspaceSkillMutation,
+    deleteWorkspaceSkillMutation,
+    attachWorkspaceSkillToProjectMutation,
   }
 }

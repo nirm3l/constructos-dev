@@ -315,6 +315,18 @@ function App({ logout }: { logout: () => void }) {
       setUiError(toErrorMessage(error, 'Bug report submission failed'))
     },
   })
+  const changeMyPasswordMutation = useMutation({
+    mutationFn: (payload: { current_password: string; new_password: string }) => authChangePassword(payload),
+    onSuccess: async () => {
+      setUiError(null)
+      setUiInfo('Password updated successfully.')
+      setTimeout(() => setUiInfo(null), 2500)
+      await qc.invalidateQueries({ queryKey: ['bootstrap', userId] })
+    },
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Password change failed'))
+    },
+  })
   const { frontendVersion, backendVersion, backendBuild, backendDeployedAtUtc } = useAppVersion()
   const workspaceId = bootstrap.data?.workspaces[0]?.id ?? ''
   const userTimezone = bootstrap.data?.current_user?.timezone
@@ -478,6 +490,7 @@ function App({ logout }: { logout: () => void }) {
     projectTags,
     projectRules,
     projectSkills,
+    workspaceSkills,
     projectTemplates,
     projectGraphOverview,
     projectGraphContextPack,
@@ -1148,7 +1161,13 @@ function App({ logout }: { logout: () => void }) {
     importProjectSkillMutation,
     importProjectSkillFileMutation,
     patchProjectSkillMutation,
+    applyProjectSkillMutation,
     deleteProjectSkillMutation,
+    importWorkspaceSkillMutation,
+    importWorkspaceSkillFileMutation,
+    patchWorkspaceSkillMutation,
+    deleteWorkspaceSkillMutation,
+    attachWorkspaceSkillToProjectMutation,
     createNoteMutation,
     createNoteGroupMutation,
     patchNoteGroupMutation,
@@ -1568,6 +1587,7 @@ function App({ logout }: { logout: () => void }) {
       setEditProjectDescription,
       projectRules,
       projectSkills,
+      workspaceSkills,
       projectTemplates,
       projectGraphOverview,
       projectGraphContextPack,
@@ -1586,7 +1606,13 @@ function App({ logout }: { logout: () => void }) {
       importProjectSkillMutation,
       importProjectSkillFileMutation,
       patchProjectSkillMutation,
+      applyProjectSkillMutation,
       deleteProjectSkillMutation,
+      importWorkspaceSkillMutation,
+      importWorkspaceSkillFileMutation,
+      patchWorkspaceSkillMutation,
+      deleteWorkspaceSkillMutation,
+      attachWorkspaceSkillToProjectMutation,
       toUserDateTime,
       userTimezone,
       editProjectExternalRefsText,
@@ -1728,6 +1754,8 @@ function App({ logout }: { logout: () => void }) {
       setTheme,
       setSpeechLang,
       themeMutation,
+      changeMyPassword: changeMyPasswordMutation.mutateAsync,
+      changeMyPasswordPending: changeMyPasswordMutation.isPending,
       submitBugReport: submitBugReportMutation.mutateAsync,
       submitBugReportPending: submitBugReportMutation.isPending,
       projectNames,

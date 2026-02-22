@@ -610,6 +610,32 @@ export type ProjectSkillsPage = {
   offset: number
 }
 
+export type WorkspaceSkill = {
+  id: string
+  workspace_id: string
+  skill_key: string
+  name: string
+  summary: string
+  source_type: string
+  source_locator: string
+  source_version: string | null
+  trust_level: 'verified' | 'reviewed' | 'untrusted' | string
+  mode: 'advisory' | 'enforced' | string
+  is_seeded: boolean
+  manifest: Record<string, unknown>
+  created_by: string
+  updated_by: string
+  created_at: string | null
+  updated_at: string | null
+}
+
+export type WorkspaceSkillsPage = {
+  items: WorkspaceSkill[]
+  total: number
+  limit: number
+  offset: number
+}
+
 export type AgentChatResponse = {
   ok: boolean
   action: 'complete' | 'comment'

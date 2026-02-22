@@ -136,6 +136,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             setEditProjectDescription: state.setEditProjectDescription,
             projectRules: state.projectRules,
             projectSkills: state.projectSkills,
+            workspaceSkills: state.workspaceSkills,
             projectTemplates: state.projectTemplates,
             projectGraphOverview: state.projectGraphOverview,
             projectGraphContextPack: state.projectGraphContextPack,
@@ -154,7 +155,10 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             importProjectSkillMutation: state.importProjectSkillMutation,
             importProjectSkillFileMutation: state.importProjectSkillFileMutation,
             patchProjectSkillMutation: state.patchProjectSkillMutation,
+            applyProjectSkillMutation: state.applyProjectSkillMutation,
             deleteProjectSkillMutation: state.deleteProjectSkillMutation,
+            attachWorkspaceSkillToProjectMutation: state.attachWorkspaceSkillToProjectMutation,
+            canManageUsers: state.canManageUsers,
             toUserDateTime: state.toUserDateTime,
             userTimezone: state.userTimezone,
             editProjectExternalRefsText: state.editProjectExternalRefsText,
@@ -381,6 +385,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
               state.setTheme(next)
               state.themeMutation.mutate(next)
             }}
+            changePassword={state.changeMyPassword}
+            passwordChangePending={state.changeMyPasswordPending}
             submitBugReport={state.submitBugReport}
             bugReportSubmitting={state.submitBugReportPending}
           />
@@ -406,6 +412,16 @@ export function AppPrimaryPanels({ state }: { state: any }) {
               updateRolePendingUserId={state.updateAdminRoleUserId}
               onDeactivateUser={state.onDeactivateAdminUser}
               deactivatePendingUserId={state.deactivateAdminUserId}
+              workspaceSkills={state.workspaceSkills.data}
+              workspaceSkillsLoading={Boolean(state.workspaceSkills.isLoading || state.workspaceSkills.isFetching)}
+              importWorkspaceSkillPending={state.importWorkspaceSkillMutation.isPending}
+              importWorkspaceSkillFilePending={state.importWorkspaceSkillFileMutation.isPending}
+              patchWorkspaceSkillPending={state.patchWorkspaceSkillMutation.isPending}
+              deleteWorkspaceSkillPending={state.deleteWorkspaceSkillMutation.isPending}
+              onImportWorkspaceSkill={(payload) => state.importWorkspaceSkillMutation.mutateAsync(payload)}
+              onImportWorkspaceSkillFile={(payload) => state.importWorkspaceSkillFileMutation.mutateAsync(payload)}
+              onPatchWorkspaceSkill={(payload) => state.patchWorkspaceSkillMutation.mutateAsync(payload)}
+              onDeleteWorkspaceSkill={(skillId) => state.deleteWorkspaceSkillMutation.mutateAsync({ skillId })}
             />
           )}
         </div>

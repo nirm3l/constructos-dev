@@ -68,6 +68,7 @@ from .models import (
     Project,
     ProjectMember,
     ProjectSkill,
+    WorkspaceSkill,
     ProjectionCheckpoint,
     ProjectTagIndex,
     ProjectRule,

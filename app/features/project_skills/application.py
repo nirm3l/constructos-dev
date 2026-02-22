@@ -15,9 +15,9 @@ from sqlalchemy.orm import Session
 
 from features.rules.application import ProjectRuleApplicationService
 from shared.core import Project, ProjectRuleCreate, ProjectRulePatch, User, ensure_project_access, ensure_role
-from shared.models import ProjectRule, ProjectSkill
+from shared.models import ProjectRule, ProjectSkill, WorkspaceSkill
 
-from .read_models import load_project_skill_view
+from .read_models import load_project_skill_view, load_workspace_skill_view
 
 _ALLOWED_MODES = {"advisory", "enforced"}
 _ALLOWED_TRUST_LEVELS = {"verified", "reviewed", "untrusted"}
@@ -320,12 +320,6 @@ def _build_rule_body(
     return "\n".join(lines).strip()
 
 
-def _stable_rule_command_id(*, workspace_id: str, project_id: str, skill_key: str, source_locator: str) -> str:
-    payload = f"{workspace_id}|{project_id}|{skill_key}|{source_locator}".encode("utf-8")
-    digest = hashlib.sha256(payload).hexdigest()[:24]
-    return f"project-skill-rule-{digest}"
-
-
 def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> Project:
     project = db.get(Project, project_id)
     if not project or bool(project.is_deleted):
@@ -335,11 +329,109 @@ def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -
     return project
 
 
+def _parse_manifest_json(raw: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw or "{}")
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return payload
+
+
+def _get_manifest_source_content(manifest_json: str) -> str:
+    manifest = _parse_manifest_json(manifest_json)
+    return str(manifest.get("source_content") or "").strip()
+
+
+def _update_manifest_source_content(
+    *,
+    manifest_json: str,
+    source_content: str,
+    actor_user_id: str,
+) -> str:
+    normalized_content = str(source_content or "").strip()
+    if not normalized_content:
+        raise HTTPException(status_code=422, detail="content cannot be empty")
+
+    manifest = _parse_manifest_json(manifest_json)
+    manifest["source_content"] = normalized_content
+    manifest["source_content_sha256"] = hashlib.sha256(normalized_content.encode("utf-8")).hexdigest()
+    manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
+    manifest["updated_by"] = actor_user_id
+    return json.dumps(manifest, ensure_ascii=True, sort_keys=True)
+
+
 class ProjectSkillApplicationService:
     def __init__(self, db: Session, user: User, command_id: str | None = None):
         self.db = db
         self.user = user
         self.command_id = command_id
+
+    def _build_project_rule_payload_for_skill(self, *, skill: ProjectSkill, source_content: str) -> tuple[str, str]:
+        source_version = str(skill.source_version or "").strip() or None
+        title = f"Skill: {skill.name}"
+        body = _build_rule_body(
+            skill_key=skill.skill_key,
+            source_locator=skill.source_locator,
+            trust_level=skill.trust_level,
+            mode=skill.mode,
+            source_version=source_version,
+            content=source_content,
+        )
+        return title, body
+
+    def _sync_project_rule_for_skill(
+        self,
+        *,
+        skill: ProjectSkill,
+        source_content: str,
+        create_if_missing: bool,
+    ) -> str | None:
+        normalized_content = str(source_content or "").strip()
+        if not normalized_content:
+            raise HTTPException(status_code=422, detail="Skill content is empty")
+
+        rule_title, rule_body = self._build_project_rule_payload_for_skill(skill=skill, source_content=normalized_content)
+        existing_rule_id = str(skill.generated_rule_id or "").strip()
+        if existing_rule_id:
+            existing_rule = self.db.get(ProjectRule, existing_rule_id)
+            if existing_rule is not None and not bool(existing_rule.is_deleted):
+                patch_payload = ProjectRulePatch(title=rule_title, body=rule_body)
+                ProjectRuleApplicationService(self.db, self.user, command_id=self.command_id).patch_project_rule(
+                    existing_rule_id,
+                    patch_payload,
+                )
+                return existing_rule_id
+            skill.generated_rule_id = None
+            self.db.flush()
+
+        if not create_if_missing:
+            return None
+
+        if self.command_id:
+            rule_command_id = self.command_id
+        else:
+            refresh_marker = datetime.now(timezone.utc).isoformat()
+            refresh_payload = (
+                f"{skill.workspace_id}|{skill.project_id}|{skill.skill_key}|{skill.source_locator}|apply|{refresh_marker}".encode(
+                    "utf-8"
+                )
+            )
+            refresh_digest = hashlib.sha256(refresh_payload).hexdigest()[:24]
+            rule_command_id = f"project-skill-rule-apply-{refresh_digest}"
+        created_rule = ProjectRuleApplicationService(self.db, self.user, command_id=rule_command_id).create_project_rule(
+            ProjectRuleCreate(
+                workspace_id=skill.workspace_id,
+                project_id=skill.project_id,
+                title=rule_title,
+                body=rule_body,
+            )
+        )
+        created_rule_id = str(created_rule.get("id") or "").strip() or None
+        if not created_rule_id:
+            raise HTTPException(status_code=500, detail="Skill rule creation failed")
+        return created_rule_id
 
     def _import_skill_document(
         self,
@@ -379,56 +471,27 @@ class ProjectSkillApplicationService:
         is_restore = existing is not None and bool(existing.is_deleted)
         is_update_existing = existing is not None and (not bool(existing.is_deleted))
 
-        rule_title = f"Skill: {effective_name}"
-        rule_body = _build_rule_body(
-            skill_key=normalized_key,
-            source_locator=source_locator,
-            trust_level=normalized_trust,
-            mode=normalized_mode,
-            source_version=source_version,
-            content=content,
-        )
-        rule_command_id = self.command_id or _stable_rule_command_id(
-            workspace_id=workspace_id,
-            project_id=project_id,
-            skill_key=normalized_key,
-            source_locator=source_locator,
-        )
-        rule_create_command_id = rule_command_id
-        rule_patch_command_id = rule_command_id
-        if is_restore or is_update_existing:
-            refresh_marker = datetime.now(timezone.utc).isoformat()
-            refresh_reason = "restore" if is_restore else "refresh"
-            refresh_payload = (
-                f"{workspace_id}|{project_id}|{normalized_key}|{source_locator}|{refresh_reason}|{refresh_marker}".encode(
-                    "utf-8"
-                )
-            )
-            refresh_digest = hashlib.sha256(refresh_payload).hexdigest()[:24]
-            rule_patch_command_id = f"project-skill-rule-patch-{refresh_digest}"
-            rule_create_command_id = f"project-skill-rule-{refresh_reason}-{refresh_digest}"
         generated_rule_id: str | None = None
         if existing is not None and (is_restore or is_update_existing):
             existing_rule_id = str(existing.generated_rule_id or "").strip()
             if existing_rule_id:
                 existing_rule = self.db.get(ProjectRule, existing_rule_id)
                 if existing_rule is not None and not bool(existing_rule.is_deleted):
+                    rule_title = f"Skill: {effective_name}"
+                    rule_body = _build_rule_body(
+                        skill_key=normalized_key,
+                        source_locator=source_locator,
+                        trust_level=normalized_trust,
+                        mode=normalized_mode,
+                        source_version=source_version,
+                        content=content,
+                    )
                     patch_payload = ProjectRulePatch(title=rule_title, body=rule_body)
-                    ProjectRuleApplicationService(self.db, self.user, command_id=rule_patch_command_id).patch_project_rule(
+                    ProjectRuleApplicationService(self.db, self.user, command_id=self.command_id).patch_project_rule(
                         existing_rule_id,
                         patch_payload,
                     )
                     generated_rule_id = existing_rule_id
-        if not generated_rule_id:
-            created_rule = ProjectRuleApplicationService(self.db, self.user, command_id=rule_create_command_id).create_project_rule(
-                ProjectRuleCreate(
-                    workspace_id=workspace_id,
-                    project_id=project_id,
-                    title=rule_title,
-                    body=rule_body,
-                )
-            )
-            generated_rule_id = str(created_rule.get("id") or "").strip() or None
 
         imported_at = datetime.now(timezone.utc).isoformat()
         source_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -566,6 +629,282 @@ class ProjectSkillApplicationService:
             trust_level=trust_level,
         )
 
+    def _import_workspace_skill_document(
+        self,
+        *,
+        workspace_id: str,
+        requested_source: str,
+        source_locator: str,
+        source_type: str,
+        fetched: dict[str, Any],
+        name: str = "",
+        skill_key: str = "",
+        mode: str = "advisory",
+        trust_level: str = "reviewed",
+    ) -> dict[str, Any]:
+        detected_name = str(fetched.get("name") or "").strip()
+        detected_summary = str(fetched.get("summary") or "").strip()
+        content = str(fetched.get("content") or "").strip()
+        source_version = str(fetched.get("source_version") or "").strip() or None
+        if not content:
+            raise HTTPException(status_code=422, detail="Imported skill content is empty")
+
+        normalized_mode = _normalize_mode(mode)
+        normalized_trust = _normalize_trust_level(trust_level)
+        effective_name = str(name or "").strip() or detected_name or "Imported Skill"
+        effective_summary = detected_summary or f"Imported from {source_locator}"
+        key_candidate = str(skill_key or "").strip() or effective_name or _default_skill_key_from_url(source_locator)
+        normalized_key = _normalize_skill_key(key_candidate)
+
+        existing = self.db.execute(
+            select(WorkspaceSkill).where(
+                WorkspaceSkill.workspace_id == workspace_id,
+                WorkspaceSkill.skill_key == normalized_key,
+            )
+        ).scalar_one_or_none()
+        is_restore = existing is not None and bool(existing.is_deleted)
+        is_update_existing = existing is not None and (not bool(existing.is_deleted))
+
+        imported_at = datetime.now(timezone.utc).isoformat()
+        source_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        manifest = {
+            "requested_source_url": requested_source,
+            "source_url": source_locator,
+            "requested_source_locator": requested_source,
+            "source_locator": source_locator,
+            "source_version": source_version,
+            "detected_name": detected_name,
+            "detected_summary": detected_summary,
+            "source_content": content,
+            "source_content_sha256": source_hash,
+            "imported_at": imported_at,
+            **(fetched.get("manifest") if isinstance(fetched.get("manifest"), dict) else {}),
+        }
+
+        if existing is not None and (is_restore or is_update_existing):
+            existing.name = effective_name
+            existing.summary = effective_summary
+            existing.source_type = source_type
+            existing.source_locator = source_locator
+            existing.source_version = source_version
+            existing.trust_level = normalized_trust
+            existing.mode = normalized_mode
+            existing.manifest_json = json.dumps(manifest, ensure_ascii=True, sort_keys=True)
+            existing.updated_by = self.user.id
+            existing.is_deleted = False
+            skill_entity = existing
+        else:
+            skill_entity = WorkspaceSkill(
+                workspace_id=workspace_id,
+                skill_key=normalized_key,
+                name=effective_name,
+                summary=effective_summary,
+                source_type=source_type,
+                source_locator=source_locator,
+                source_version=source_version,
+                trust_level=normalized_trust,
+                mode=normalized_mode,
+                manifest_json=json.dumps(manifest, ensure_ascii=True, sort_keys=True),
+                is_seeded=False,
+                created_by=self.user.id,
+                updated_by=self.user.id,
+                is_deleted=False,
+            )
+            self.db.add(skill_entity)
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            if "ux_workspace_skills_workspace_key" in str(exc):
+                raise HTTPException(status_code=409, detail=f"Skill key already exists in workspace: {normalized_key}") from exc
+            raise
+        view = load_workspace_skill_view(self.db, skill_entity.id)
+        if view is None:
+            raise HTTPException(status_code=500, detail="Workspace skill was not created")
+        view["already_exists"] = False
+        view["updated_existing"] = bool(is_update_existing)
+        view["restored_existing"] = bool(is_restore)
+        return view
+
+    def import_workspace_skill_from_url(
+        self,
+        *,
+        workspace_id: str,
+        source_url: str,
+        name: str = "",
+        skill_key: str = "",
+        mode: str = "advisory",
+        trust_level: str = "reviewed",
+    ) -> dict[str, Any]:
+        ensure_role(self.db, workspace_id, self.user.id, {"Owner", "Admin"})
+
+        requested_source = str(source_url or "").strip()
+        source_locator = _sanitize_source_url(source_url)
+        fetched = _fetch_skill_document(source_locator)
+        return self._import_workspace_skill_document(
+            workspace_id=workspace_id,
+            requested_source=requested_source,
+            source_locator=source_locator,
+            source_type="url",
+            fetched=fetched,
+            name=name,
+            skill_key=skill_key,
+            mode=mode,
+            trust_level=trust_level,
+        )
+
+    def import_workspace_skill_from_file(
+        self,
+        *,
+        workspace_id: str,
+        file_name: str,
+        file_content: bytes,
+        file_content_type: str = "",
+        name: str = "",
+        skill_key: str = "",
+        mode: str = "advisory",
+        trust_level: str = "reviewed",
+    ) -> dict[str, Any]:
+        ensure_role(self.db, workspace_id, self.user.id, {"Owner", "Admin"})
+
+        normalized_file_name = _sanitize_uploaded_filename(file_name)
+        if not file_content:
+            raise HTTPException(status_code=422, detail="Skill file is empty")
+        source_locator = f"upload://{normalized_file_name}"
+        fetched = _extract_skill_document(
+            raw_bytes=file_content,
+            content_type=file_content_type,
+            base_manifest={
+                "upload_file_name": normalized_file_name,
+                "upload_content_type": str(file_content_type or "").strip(),
+                "upload_size_bytes": len(file_content),
+            },
+        )
+        return self._import_workspace_skill_document(
+            workspace_id=workspace_id,
+            requested_source=normalized_file_name,
+            source_locator=source_locator,
+            source_type="file",
+            fetched=fetched,
+            name=name,
+            skill_key=skill_key,
+            mode=mode,
+            trust_level=trust_level,
+        )
+
+    def patch_workspace_skill(self, skill_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        skill = self.db.get(WorkspaceSkill, skill_id)
+        if skill is None or bool(skill.is_deleted):
+            raise HTTPException(status_code=404, detail="Workspace skill not found")
+        ensure_role(self.db, skill.workspace_id, self.user.id, {"Owner", "Admin"})
+
+        updates: dict[str, Any] = {}
+        if "name" in patch and patch["name"] is not None:
+            normalized_name = str(patch["name"]).strip()
+            if not normalized_name:
+                raise HTTPException(status_code=422, detail="name cannot be empty")
+            updates["name"] = normalized_name
+        if "summary" in patch and patch["summary"] is not None:
+            updates["summary"] = str(patch["summary"])
+        if "content" in patch and patch["content"] is not None:
+            updates["manifest_json"] = _update_manifest_source_content(
+                manifest_json=skill.manifest_json,
+                source_content=str(patch["content"]),
+                actor_user_id=self.user.id,
+            )
+        if "mode" in patch and patch["mode"] is not None:
+            updates["mode"] = _normalize_mode(str(patch["mode"]))
+        if "trust_level" in patch and patch["trust_level"] is not None:
+            updates["trust_level"] = _normalize_trust_level(str(patch["trust_level"]))
+        if not updates:
+            view = load_workspace_skill_view(self.db, skill_id)
+            if view is None:
+                raise HTTPException(status_code=404, detail="Workspace skill not found")
+            return view
+
+        for key, value in updates.items():
+            setattr(skill, key, value)
+        skill.updated_by = self.user.id
+        self.db.commit()
+        view = load_workspace_skill_view(self.db, skill_id)
+        if view is None:
+            raise HTTPException(status_code=404, detail="Workspace skill not found")
+        return view
+
+    def delete_workspace_skill(self, skill_id: str) -> dict[str, Any]:
+        skill = self.db.get(WorkspaceSkill, skill_id)
+        if skill is None or bool(skill.is_deleted):
+            return {"ok": True}
+        ensure_role(self.db, skill.workspace_id, self.user.id, {"Owner", "Admin"})
+        skill.is_deleted = True
+        skill.updated_by = self.user.id
+        self.db.commit()
+        return {"ok": True}
+
+    def attach_workspace_skill_to_project(self, *, workspace_skill_id: str, workspace_id: str, project_id: str) -> dict[str, Any]:
+        catalog_skill = self.db.get(WorkspaceSkill, workspace_skill_id)
+        if catalog_skill is None or bool(catalog_skill.is_deleted):
+            raise HTTPException(status_code=404, detail="Workspace skill not found")
+        if str(catalog_skill.workspace_id) != str(workspace_id):
+            raise HTTPException(status_code=400, detail="Workspace skill does not belong to workspace")
+
+        ensure_role(self.db, workspace_id, self.user.id, {"Owner", "Admin", "Member"})
+        ensure_project_access(self.db, workspace_id, project_id, self.user.id, {"Owner", "Admin", "Member"})
+        _require_project_scope(self.db, workspace_id=workspace_id, project_id=project_id)
+
+        source_content = _get_manifest_source_content(catalog_skill.manifest_json)
+        if not source_content:
+            raise HTTPException(status_code=422, detail="Workspace skill source content is missing")
+
+        created = self._import_skill_document(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            requested_source=f"workspace-skill://{catalog_skill.id}",
+            source_locator=catalog_skill.source_locator,
+            source_type="workspace_catalog",
+            fetched={
+                "name": catalog_skill.name,
+                "summary": catalog_skill.summary,
+                "content": source_content,
+                "source_version": catalog_skill.source_version,
+                "manifest": {
+                    "workspace_skill_id": catalog_skill.id,
+                    "workspace_skill_key": catalog_skill.skill_key,
+                },
+            },
+            name=catalog_skill.name,
+            skill_key=catalog_skill.skill_key,
+            mode=catalog_skill.mode,
+            trust_level=catalog_skill.trust_level,
+        )
+        created["attached_from_workspace_skill_id"] = catalog_skill.id
+        return created
+
+    def apply_project_skill(self, skill_id: str) -> dict[str, Any]:
+        skill = self.db.get(ProjectSkill, skill_id)
+        if skill is None or bool(skill.is_deleted):
+            raise HTTPException(status_code=404, detail="Project skill not found")
+        ensure_project_access(self.db, skill.workspace_id, skill.project_id, self.user.id, {"Owner", "Admin", "Member"})
+        ensure_role(self.db, skill.workspace_id, self.user.id, {"Owner", "Admin", "Member"})
+
+        source_content = _get_manifest_source_content(skill.manifest_json)
+        if not source_content:
+            raise HTTPException(status_code=422, detail="Skill source content is missing")
+
+        generated_rule_id = self._sync_project_rule_for_skill(
+            skill=skill,
+            source_content=source_content,
+            create_if_missing=True,
+        )
+        skill.generated_rule_id = generated_rule_id
+        skill.updated_by = self.user.id
+        self.db.commit()
+
+        view = load_project_skill_view(self.db, skill_id)
+        if view is None:
+            raise HTTPException(status_code=404, detail="Project skill not found")
+        return view
+
     def patch_project_skill(self, skill_id: str, patch: dict[str, Any]) -> dict[str, Any]:
         skill = self.db.get(ProjectSkill, skill_id)
         if skill is None or bool(skill.is_deleted):
@@ -589,6 +928,12 @@ class ProjectSkillApplicationService:
             updates["name"] = normalized_name
         if "summary" in data and data["summary"] is not None:
             updates["summary"] = str(data["summary"])
+        if "content" in data and data["content"] is not None:
+            updates["manifest_json"] = _update_manifest_source_content(
+                manifest_json=skill.manifest_json,
+                source_content=str(data["content"]),
+                actor_user_id=self.user.id,
+            )
         if "mode" in data and data["mode"] is not None:
             updates["mode"] = _normalize_mode(str(data["mode"]))
         if "trust_level" in data and data["trust_level"] is not None:
@@ -600,35 +945,13 @@ class ProjectSkillApplicationService:
             skill.updated_by = self.user.id
 
         if sync_project_rule and skill.generated_rule_id:
-            manifest: dict[str, Any]
-            try:
-                parsed_manifest = json.loads(skill.manifest_json or "{}")
-                manifest = parsed_manifest if isinstance(parsed_manifest, dict) else {}
-            except Exception:
-                manifest = {}
-            source_content = str(manifest.get("source_content") or "").strip()
-            source_version = str(skill.source_version or "").strip() or None
+            source_content = _get_manifest_source_content(skill.manifest_json)
             if source_content:
-                rule_title = f"Skill: {skill.name}"
-                rule_body = _build_rule_body(
-                    skill_key=skill.skill_key,
-                    source_locator=skill.source_locator,
-                    trust_level=skill.trust_level,
-                    mode=skill.mode,
-                    source_version=source_version,
-                    content=source_content,
+                skill.generated_rule_id = self._sync_project_rule_for_skill(
+                    skill=skill,
+                    source_content=source_content,
+                    create_if_missing=False,
                 )
-                patch_payload = ProjectRulePatch(title=rule_title, body=rule_body)
-                try:
-                    ProjectRuleApplicationService(self.db, self.user, command_id=self.command_id).patch_project_rule(
-                        skill.generated_rule_id,
-                        patch_payload,
-                    )
-                except HTTPException as exc:
-                    if exc.status_code == 404:
-                        skill.generated_rule_id = None
-                    else:
-                        raise
 
         self.db.commit()
         view = load_project_skill_view(self.db, skill_id)

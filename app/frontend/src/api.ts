@@ -32,6 +32,8 @@ import type {
   ProjectRulesPage,
   ProjectSkill,
   ProjectSkillsPage,
+  WorkspaceSkill,
+  WorkspaceSkillsPage,
   ProjectTemplatesPage,
   Specification,
   SpecificationBulkTaskCreateResponse,
@@ -764,6 +766,7 @@ export const patchProjectSkill = (
   payload: {
     name?: string
     summary?: string
+    content?: string
     mode?: 'advisory' | 'enforced'
     trust_level?: 'verified' | 'reviewed' | 'untrusted'
     sync_project_rule?: boolean
@@ -774,12 +777,98 @@ export const patchProjectSkill = (
     body: JSON.stringify(payload),
   })
 
+export const applyProjectSkill = (userId: string, skillId: string) =>
+  api<ProjectSkill>(`/api/project-skills/${skillId}/apply`, userId, { method: 'POST' })
+
 export const deleteProjectSkill = (
   userId: string,
   skillId: string,
   payload: { delete_linked_rule?: boolean } = {}
 ) =>
   api<{ ok: true }>(`/api/project-skills/${skillId}/delete`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const getWorkspaceSkills = (
+  userId: string,
+  workspaceId: string,
+  params?: { q?: string; limit?: number; offset?: number }
+) =>
+  api<WorkspaceSkillsPage>(
+    `/api/workspace-skills${queryString({
+      workspace_id: workspaceId,
+      q: params?.q,
+      limit: params?.limit ?? 100,
+      offset: params?.offset ?? 0,
+    })}`,
+    userId
+  )
+
+export const importWorkspaceSkill = (
+  userId: string,
+  payload: {
+    workspace_id: string
+    source_url: string
+    name?: string
+    skill_key?: string
+    mode?: 'advisory' | 'enforced'
+    trust_level?: 'verified' | 'reviewed' | 'untrusted'
+  }
+) =>
+  api<WorkspaceSkill>('/api/workspace-skills/import', userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const importWorkspaceSkillFile = async (
+  userId: string,
+  payload: {
+    workspace_id: string
+    file: File
+    name?: string
+    skill_key?: string
+    mode?: 'advisory' | 'enforced'
+    trust_level?: 'verified' | 'reviewed' | 'untrusted'
+  }
+) => {
+  const form = new FormData()
+  form.set('workspace_id', payload.workspace_id)
+  form.set('file', payload.file)
+  if (payload.name) form.set('name', payload.name)
+  if (payload.skill_key) form.set('skill_key', payload.skill_key)
+  if (payload.mode) form.set('mode', payload.mode)
+  if (payload.trust_level) form.set('trust_level', payload.trust_level)
+  return uploadApi<WorkspaceSkill>('/api/workspace-skills/import-file', userId, form)
+}
+
+export const patchWorkspaceSkill = (
+  userId: string,
+  skillId: string,
+  payload: {
+    name?: string
+    summary?: string
+    content?: string
+    mode?: 'advisory' | 'enforced'
+    trust_level?: 'verified' | 'reviewed' | 'untrusted'
+  }
+) =>
+  api<WorkspaceSkill>(`/api/workspace-skills/${skillId}`, userId, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+
+export const deleteWorkspaceSkill = (userId: string, skillId: string) =>
+  api<{ ok: true }>(`/api/workspace-skills/${skillId}/delete`, userId, {
+    method: 'POST',
+  })
+
+export const attachWorkspaceSkillToProject = (
+  userId: string,
+  skillId: string,
+  payload: { workspace_id: string; project_id: string }
+) =>
+  api<ProjectSkill>(`/api/workspace-skills/${skillId}/attach`, userId, {
     method: 'POST',
     body: JSON.stringify(payload),
   })

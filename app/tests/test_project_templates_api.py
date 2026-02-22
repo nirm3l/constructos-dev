@@ -394,7 +394,7 @@ def test_create_project_from_template_seeds_template_skills(tmp_path, monkeypatc
     assert payload["seed_summary"]["skill_count"] == 1
     assert payload["seed_summary"]["skill_skip_count"] == 0
     assert len(payload["seeded_entity_ids"]["project_skill_ids"]) == 1
-    assert len(payload["seeded_entity_ids"]["project_skill_rule_ids"]) == 1
+    assert len(payload["seeded_entity_ids"]["project_skill_rule_ids"]) == 0
 
     listed_skills = client.get(f"/api/project-skills?workspace_id={workspace_id}&project_id={project_id}")
     assert listed_skills.status_code == 200

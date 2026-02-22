@@ -15,8 +15,11 @@ from features.project_templates.application import ProjectTemplateApplicationSer
 from features.project_skills.application import ProjectSkillApplicationService
 from features.project_skills.read_models import (
     ProjectSkillListQuery,
+    WorkspaceSkillListQuery,
     list_project_skills_read_model,
+    list_workspace_skills_read_model,
     load_project_skill_view,
+    load_workspace_skill_view,
 )
 from features.rules.application import ProjectRuleApplicationService
 from features.rules.read_models import ProjectRuleListQuery, list_project_rules_read_model
@@ -77,7 +80,7 @@ from shared.knowledge_graph import (
     require_graph_available,
     search_project_knowledge as search_project_knowledge_query,
 )
-from shared.models import ProjectSkill, User as UserModel
+from shared.models import ProjectSkill, WorkspaceSkill, User as UserModel
 from shared.settings import (
     DEFAULT_USER_ID,
     MCP_ACTOR_USER_ID,
@@ -182,6 +185,15 @@ class AgentTaskService:
             raise HTTPException(status_code=404, detail="Project skill not found")
         self._assert_workspace_allowed(skill.workspace_id)
         self._assert_project_allowed(skill.project_id)
+        return skill
+
+    def _assert_workspace_skill_allowed(self, *, db, skill_id: str | None):
+        if not skill_id:
+            return None
+        skill = db.get(WorkspaceSkill, skill_id)
+        if skill is None or bool(skill.is_deleted):
+            raise HTTPException(status_code=404, detail="Workspace skill not found")
+        self._assert_workspace_allowed(skill.workspace_id)
         return skill
 
     def _assert_specification_allowed(self, *, db, specification_id: str | None):
@@ -530,6 +542,31 @@ class AgentTaskService:
                 ),
             )
 
+    def list_workspace_skills(
+        self,
+        *,
+        workspace_id: str,
+        auth_token: str | None = None,
+        q: str | None = None,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> dict:
+        self._require_token(auth_token)
+        self._assert_workspace_allowed(workspace_id)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            return list_workspace_skills_read_model(
+                db,
+                user,
+                WorkspaceSkillListQuery(
+                    workspace_id=workspace_id,
+                    q=q,
+                    limit=limit,
+                    offset=offset,
+                ),
+            )
+
     def list_specifications(
         self,
         *,
@@ -678,6 +715,18 @@ class AgentTaskService:
             skill = load_project_skill_view(db, skill_id)
             if not skill:
                 raise HTTPException(status_code=404, detail="Project skill not found")
+            return skill
+
+    def get_workspace_skill(self, *, skill_id: str, auth_token: str | None = None) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            state = self._assert_workspace_skill_allowed(db=db, skill_id=skill_id)
+            assert state is not None
+            ensure_role(db, state.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            skill = load_workspace_skill_view(db, skill_id)
+            if not skill:
+                raise HTTPException(status_code=404, detail="Workspace skill not found")
             return skill
 
     def get_specification(self, *, specification_id: str, auth_token: str | None = None) -> dict:
@@ -1552,6 +1601,182 @@ class AgentTaskService:
                 skill_key=skill_key,
                 mode=mode,
                 trust_level=trust_level,
+            )
+
+    def apply_project_skill(
+        self,
+        *,
+        skill_id: str,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            self._assert_project_skill_allowed(db=db, skill_id=skill_id)
+            effective_command_id = command_id or f"mcp-project-skill-apply-{uuid.uuid4()}"
+            return ProjectSkillApplicationService(
+                db, user, command_id=effective_command_id
+            ).apply_project_skill(skill_id)
+
+    def import_workspace_skill(
+        self,
+        *,
+        workspace_id: str,
+        source_url: str,
+        auth_token: str | None = None,
+        name: str = "",
+        skill_key: str = "",
+        mode: str = "advisory",
+        trust_level: str = "reviewed",
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        self._assert_workspace_allowed(workspace_id)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            ensure_role(db, workspace_id, user.id, {"Owner", "Admin"})
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-workspace-skill-import",
+                payload={
+                    "workspace_id": workspace_id,
+                    "source_url": source_url,
+                    "name": name or "",
+                    "skill_key": skill_key or "",
+                    "mode": mode,
+                    "trust_level": trust_level,
+                },
+            )
+            return ProjectSkillApplicationService(
+                db, user, command_id=effective_command_id
+            ).import_workspace_skill_from_url(
+                workspace_id=workspace_id,
+                source_url=source_url,
+                name=name,
+                skill_key=skill_key,
+                mode=mode,
+                trust_level=trust_level,
+            )
+
+    def import_workspace_skill_file(
+        self,
+        *,
+        workspace_id: str,
+        file_name: str,
+        file_content: bytes,
+        file_content_type: str = "",
+        auth_token: str | None = None,
+        name: str = "",
+        skill_key: str = "",
+        mode: str = "advisory",
+        trust_level: str = "reviewed",
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        self._assert_workspace_allowed(workspace_id)
+        user = self._resolve_actor_user()
+        content_sha256 = hashlib.sha256(file_content).hexdigest() if file_content else ""
+        with SessionLocal() as db:
+            ensure_role(db, workspace_id, user.id, {"Owner", "Admin"})
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-workspace-skill-import-file",
+                payload={
+                    "workspace_id": workspace_id,
+                    "file_name": file_name,
+                    "file_content_type": file_content_type or "",
+                    "file_content_sha256": content_sha256,
+                    "name": name or "",
+                    "skill_key": skill_key or "",
+                    "mode": mode,
+                    "trust_level": trust_level,
+                },
+            )
+            return ProjectSkillApplicationService(
+                db, user, command_id=effective_command_id
+            ).import_workspace_skill_from_file(
+                workspace_id=workspace_id,
+                file_name=file_name,
+                file_content=file_content,
+                file_content_type=file_content_type,
+                name=name,
+                skill_key=skill_key,
+                mode=mode,
+                trust_level=trust_level,
+            )
+
+    def update_workspace_skill(
+        self,
+        *,
+        skill_id: str,
+        patch: dict,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            state = self._assert_workspace_skill_allowed(db=db, skill_id=skill_id)
+            assert state is not None
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-workspace-skill-patch",
+                payload={"skill_id": skill_id, "patch": patch or {}},
+            )
+            return ProjectSkillApplicationService(
+                db, user, command_id=effective_command_id
+            ).patch_workspace_skill(
+                skill_id,
+                patch or {},
+            )
+
+    def delete_workspace_skill(
+        self,
+        *,
+        skill_id: str,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            self._assert_workspace_skill_allowed(db=db, skill_id=skill_id)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-workspace-skill-delete",
+                payload={"skill_id": skill_id},
+            )
+            return ProjectSkillApplicationService(
+                db, user, command_id=effective_command_id
+            ).delete_workspace_skill(skill_id)
+
+    def attach_workspace_skill_to_project(
+        self,
+        *,
+        workspace_skill_id: str,
+        workspace_id: str,
+        project_id: str,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        self._assert_workspace_allowed(workspace_id)
+        self._assert_project_allowed(project_id)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            self._assert_workspace_skill_allowed(db=db, skill_id=workspace_skill_id)
+            self._resolve_workspace_for_create(db=db, explicit_workspace_id=workspace_id, project_id=project_id)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-workspace-skill-attach",
+                payload={
+                    "workspace_skill_id": workspace_skill_id,
+                    "workspace_id": workspace_id,
+                    "project_id": project_id,
+                },
+            )
+            return ProjectSkillApplicationService(
+                db, user, command_id=effective_command_id
+            ).attach_workspace_skill_to_project(
+                workspace_skill_id=workspace_skill_id,
+                workspace_id=workspace_id,
+                project_id=project_id,
             )
 
     def create_specification(

@@ -791,7 +791,7 @@ def create_mcp():
             command_id=command_id,
         )
 
-    @mcp.tool(description="Import an external skill URL into a project and generate a linked project rule.")
+    @mcp.tool(description="Import an external skill URL into a project.")
     def import_project_skill(
         workspace_id: str,
         project_id: str,
@@ -813,6 +813,19 @@ def create_mcp():
             skill_key=skill_key,
             mode=mode,
             trust_level=trust_level,
+            command_id=command_id,
+        )
+
+    @mcp.tool(description="Apply a project skill to context by creating/updating its linked project rule.")
+    def apply_project_skill(
+        skill_id: str,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.apply_project_skill(
+            skill_id=skill_id,
+            auth_token=auth_token,
             command_id=command_id,
         )
 
