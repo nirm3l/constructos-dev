@@ -424,28 +424,12 @@ export function ProfilePanel({
               <dd>{formatDateTime(subscriptionValidUntil)}</dd>
             </div>
             <div className="profile-fact">
-              <dt>Write access</dt>
-              <dd>{license.write_access ? 'Allowed' : 'Read-only'}</dd>
-            </div>
-            <div className="profile-fact">
-              <dt>Enforcement</dt>
-              <dd>{license.enforcement_enabled ? 'Enabled' : 'Disabled'}</dd>
-            </div>
-            <div className="profile-fact">
               <dt>Trial ends</dt>
               <dd>{formatDateTime(license.trial_ends_at)}</dd>
             </div>
             <div className="profile-fact">
               <dt>Grace ends</dt>
               <dd>{formatDateTime(license.grace_ends_at)}</dd>
-            </div>
-            <div className="profile-fact">
-              <dt>Last validated</dt>
-              <dd>{formatDateTime(license.last_validated_at)}</dd>
-            </div>
-            <div className="profile-fact">
-              <dt>Token expires</dt>
-              <dd>{formatDateTime(license.token_expires_at)}</dd>
             </div>
           </dl>
         )}
