@@ -2387,6 +2387,17 @@ button:disabled {
   overflow-wrap: anywhere;
 }
 
+.profile-fact-user-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.profile-fact-actions {
+  margin-top: 10px;
+  gap: 8px;
+  justify-content: flex-start;
+}
+
 .profile-actions {
   gap: 8px;
   justify-content: flex-end;

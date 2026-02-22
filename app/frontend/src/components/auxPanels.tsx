@@ -306,7 +306,17 @@ export function ProfilePanel({
       <dl className="profile-facts">
         <div className="profile-fact">
           <dt>User</dt>
-          <dd>{userName}</dd>
+          <dd>
+            <div className="profile-fact-user-name">{userName}</div>
+            <div className="row wrap profile-fact-actions">
+              <button className="primary" onClick={onToggleTheme}>
+                Switch to {nextTheme} theme
+              </button>
+              <button className="danger-ghost" onClick={onLogout}>
+                Logout
+              </button>
+            </div>
+          </dd>
         </div>
         <div className="profile-fact">
           <dt>Voice language</dt>
@@ -323,15 +333,6 @@ export function ProfilePanel({
           </dd>
         </div>
       </dl>
-
-      <div className="row wrap profile-actions">
-        <button className="primary" onClick={onToggleTheme}>
-          Switch to {nextTheme} theme
-        </button>
-        <button className="danger-ghost" onClick={onLogout}>
-          Logout
-        </button>
-      </div>
 
       <section className="profile-password" aria-label="Password settings">
         <div className="profile-license-head">
