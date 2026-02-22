@@ -150,6 +150,7 @@ export function ProfilePanel({
   const [bugSteps, setBugSteps] = React.useState('')
   const [bugExpected, setBugExpected] = React.useState('')
   const [bugActual, setBugActual] = React.useState('')
+  const [bugReportExpanded, setBugReportExpanded] = React.useState(false)
   const [bugFeedback, setBugFeedback] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
 
   const resetBugForm = React.useCallback(() => {
@@ -273,77 +274,92 @@ export function ProfilePanel({
 
       <section className="profile-bug-report" aria-label="Bug reporting">
         <div className="profile-license-head">
-          <h3>Report a bug</h3>
+          <button
+            type="button"
+            className="profile-section-toggle"
+            aria-expanded={bugReportExpanded}
+            aria-controls="profile-bug-report-panel"
+            onClick={() => setBugReportExpanded((current) => !current)}
+          >
+            <span>Report a bug</span>
+            <span className="profile-section-toggle-icon" aria-hidden="true">
+              <Icon path="M9 6l6 6-6 6" />
+            </span>
+          </button>
           <span className="status-chip">Control Plane</span>
         </div>
-        <form className="profile-bug-form" onSubmit={handleSubmitBugReport}>
-          <label className="field-control">
-            <span className="field-label">Title</span>
-            <input
-              value={bugTitle}
-              onChange={(event) => setBugTitle(event.target.value)}
-              placeholder="Short summary"
-              maxLength={140}
-              autoComplete="off"
-            />
-          </label>
-          <label className="field-control">
-            <span className="field-label">Severity</span>
-            <select value={bugSeverity} onChange={(event) => setBugSeverity(event.target.value as 'low' | 'medium' | 'high' | 'critical')}>
-              <option value="low">low</option>
-              <option value="medium">medium</option>
-              <option value="high">high</option>
-              <option value="critical">critical</option>
-            </select>
-          </label>
-          <label className="field-control">
-            <span className="field-label">Description</span>
-            <textarea
-              value={bugDescription}
-              onChange={(event) => setBugDescription(event.target.value)}
-              rows={4}
-              placeholder="What is happening?"
-            />
-          </label>
-          <label className="field-control">
-            <span className="field-label">Steps to reproduce (optional)</span>
-            <textarea
-              value={bugSteps}
-              onChange={(event) => setBugSteps(event.target.value)}
-              rows={3}
-              placeholder="Exact steps"
-            />
-          </label>
-          <label className="field-control">
-            <span className="field-label">Expected behavior (optional)</span>
-            <textarea
-              value={bugExpected}
-              onChange={(event) => setBugExpected(event.target.value)}
-              rows={2}
-              placeholder="What should happen?"
-            />
-          </label>
-          <label className="field-control">
-            <span className="field-label">Actual behavior (optional)</span>
-            <textarea
-              value={bugActual}
-              onChange={(event) => setBugActual(event.target.value)}
-              rows={2}
-              placeholder="What actually happens?"
-            />
-          </label>
-          <div className="row wrap profile-actions">
-            <button className="primary" type="submit" disabled={bugReportSubmitting || !bugTitle.trim() || !bugDescription.trim()}>
-              {bugReportSubmitting ? 'Submitting...' : 'Submit Bug Report'}
-            </button>
-            <button className="button-secondary" type="button" onClick={resetBugForm} disabled={bugReportSubmitting}>
-              Reset
-            </button>
-          </div>
-        </form>
-        {bugFeedback && (
-          <div className={`notice ${bugFeedback.tone === 'error' ? 'notice-error' : ''}`.trim()}>
-            {bugFeedback.message}
+        {bugReportExpanded && (
+          <div id="profile-bug-report-panel">
+            <form className="profile-bug-form" onSubmit={handleSubmitBugReport}>
+              <label className="field-control">
+                <span className="field-label">Title</span>
+                <input
+                  value={bugTitle}
+                  onChange={(event) => setBugTitle(event.target.value)}
+                  placeholder="Short summary"
+                  maxLength={140}
+                  autoComplete="off"
+                />
+              </label>
+              <label className="field-control">
+                <span className="field-label">Severity</span>
+                <select value={bugSeverity} onChange={(event) => setBugSeverity(event.target.value as 'low' | 'medium' | 'high' | 'critical')}>
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="critical">critical</option>
+                </select>
+              </label>
+              <label className="field-control">
+                <span className="field-label">Description</span>
+                <textarea
+                  value={bugDescription}
+                  onChange={(event) => setBugDescription(event.target.value)}
+                  rows={4}
+                  placeholder="What is happening?"
+                />
+              </label>
+              <label className="field-control">
+                <span className="field-label">Steps to reproduce (optional)</span>
+                <textarea
+                  value={bugSteps}
+                  onChange={(event) => setBugSteps(event.target.value)}
+                  rows={3}
+                  placeholder="Exact steps"
+                />
+              </label>
+              <label className="field-control">
+                <span className="field-label">Expected behavior (optional)</span>
+                <textarea
+                  value={bugExpected}
+                  onChange={(event) => setBugExpected(event.target.value)}
+                  rows={2}
+                  placeholder="What should happen?"
+                />
+              </label>
+              <label className="field-control">
+                <span className="field-label">Actual behavior (optional)</span>
+                <textarea
+                  value={bugActual}
+                  onChange={(event) => setBugActual(event.target.value)}
+                  rows={2}
+                  placeholder="What actually happens?"
+                />
+              </label>
+              <div className="row wrap profile-actions">
+                <button className="primary" type="submit" disabled={bugReportSubmitting || !bugTitle.trim() || !bugDescription.trim()}>
+                  {bugReportSubmitting ? 'Submitting...' : 'Submit Bug Report'}
+                </button>
+                <button className="button-secondary" type="button" onClick={resetBugForm} disabled={bugReportSubmitting}>
+                  Reset
+                </button>
+              </div>
+            </form>
+            {bugFeedback && (
+              <div className={`notice ${bugFeedback.tone === 'error' ? 'notice-error' : ''}`.trim()}>
+                {bugFeedback.message}
+              </div>
+            )}
           </div>
         )}
       </section>

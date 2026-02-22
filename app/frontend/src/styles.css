@@ -2430,6 +2430,39 @@ button:disabled {
   gap: 10px;
 }
 
+.profile-section-toggle {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: inherit;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.profile-section-toggle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--brand), white 18%);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+.profile-section-toggle-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  transition: transform 0.16s ease;
+}
+
+.profile-section-toggle[aria-expanded="true"] .profile-section-toggle-icon {
+  transform: rotate(90deg);
+}
+
 .profile-license-head h3 {
   margin: 0;
   font-size: 14px;
