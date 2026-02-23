@@ -5,6 +5,7 @@ data/
 .deploy.env
 .env
 .env.jira-mcp
+.wrangler/
 
 __pycache__/
 *.pyc

@@ -3,25 +3,25 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CostructOS | Operational Memory and Execution Platform</title>
+    <title>ConstructOS | Operational Memory and Execution Platform</title>
     <meta
       name="description"
-      content="CostructOS is a self-hosted only platform for delivery teams with shared operational memory, vector search plus graph retrieval, spec-driven execution, AI automation, and full auditability."
+      content="ConstructOS is a self-hosted only platform for delivery teams with shared operational memory, vector search plus graph retrieval, spec-driven execution, AI automation, and full auditability."
     />
     <meta name="robots" content="index, follow" />
-    <link rel="canonical" href="https://costructos.dev/" />
+    <link rel="canonical" href="https://constructos.dev/" />
 
     <meta property="og:type" content="website" />
-    <meta property="og:url" content="https://costructos.dev/" />
-    <meta property="og:title" content="CostructOS | Operational Memory and Execution Platform" />
+    <meta property="og:url" content="https://constructos.dev/" />
+    <meta property="og:title" content="ConstructOS | Operational Memory and Execution Platform" />
     <meta
       property="og:description"
       content="Self-hosted only platform to unify project planning, execution, vector search, graph context, and AI automation."
     />
-    <meta property="og:site_name" content="CostructOS" />
+    <meta property="og:site_name" content="ConstructOS" />
 
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="CostructOS | Operational Memory and Execution Platform" />
+    <meta name="twitter:title" content="ConstructOS | Operational Memory and Execution Platform" />
     <meta
       name="twitter:description"
       content="Self-hosted only delivery platform with vector search, graph-linked knowledge, spec-linked tasks, and reliable AI operations."
@@ -35,11 +35,11 @@
       {
         "@context": "https://schema.org",
         "@type": "SoftwareApplication",
-        "name": "CostructOS",
+        "name": "ConstructOS",
         "applicationCategory": "BusinessApplication",
         "operatingSystem": "Web",
         "description": "Operational memory, vector-plus-graph retrieval, and execution platform for delivery teams.",
-        "url": "https://costructos.dev/",
+        "url": "https://constructos.dev/",
         "offers": {
           "@type": "AggregateOffer",
           "priceCurrency": "USD",
@@ -49,8 +49,8 @@
         },
         "provider": {
           "@type": "Organization",
-          "name": "CostructOS",
-          "url": "https://costructos.dev/"
+          "name": "ConstructOS",
+          "url": "https://constructos.dev/"
         }
       }
     </script>
@@ -94,7 +94,7 @@
           <p class="beta-banner">Public Beta • Free until March 31, 2026</p>
           <h1>Run delivery from one source of truth, not scattered tools.</h1>
           <p class="lead">
-            CostructOS connects project intent, specifications, tasks, notes, rules, and AI execution in a
+            ConstructOS connects project intent, specifications, tasks, notes, rules, and AI execution in a
             single operating layer. Your team keeps context with vector plus graph retrieval, moves faster, and
             keeps an audit trail.
             Deployment model is self-hosted only through Docker Compose.
@@ -402,7 +402,7 @@ Command IDs --> Idempotent Mutations</code></pre>
 
         <div class="faq-list">
           <article class="faq-item reveal delay-1">
-            <h3>Is CostructOS only for software teams?</h3>
+            <h3>Is ConstructOS only for software teams?</h3>
             <p>No. Any delivery team with structured work, dependencies, and knowledge-heavy workflows can use it.</p>
           </article>
           <article class="faq-item reveal delay-2">
@@ -415,12 +415,12 @@ Command IDs --> Idempotent Mutations</code></pre>
           </article>
           <article class="faq-item reveal delay-1">
             <h3>Do you support vector search?</h3>
-            <p>Yes. CostructOS supports semantic vector search combined with graph context traversal.</p>
+            <p>Yes. ConstructOS supports semantic vector search combined with graph context traversal.</p>
           </article>
           <article class="faq-item reveal delay-1">
             <h3>Which MCP integrations are highlighted?</h3>
             <p>
-              Jira MCP and GitHub MCP are highlighted integrations, and CostructOS also supports additional
+              Jira MCP and GitHub MCP are highlighted integrations, and ConstructOS also supports additional
               MCP integrations for broader workflows.
             </p>
           </article>
@@ -430,7 +430,7 @@ Command IDs --> Idempotent Mutations</code></pre>
           </article>
           <article class="faq-item reveal delay-1">
             <h3>Is there a hosted cloud app?</h3>
-            <p>No. CostructOS is self-hosted only and deployed through Docker Compose in your own environment.</p>
+            <p>No. ConstructOS is self-hosted only and deployed through Docker Compose in your own environment.</p>
           </article>
           <article class="faq-item reveal delay-1">
             <h3>Is there a free beta period?</h3>
@@ -449,7 +449,7 @@ Command IDs --> Idempotent Mutations</code></pre>
 
       <section class="section container final-cta reveal delay-2">
         <h2>Scale delivery without losing context.</h2>
-        <p>Use CostructOS as your execution layer for reliable output, clearer ownership, and safer automation.</p>
+        <p>Use ConstructOS as your execution layer for reliable output, clearer ownership, and safer automation.</p>
         <div class="hero-cta">
           <a class="btn btn-primary" href="#contact-onboarding">Get Self-Hosted Onboarding</a>
           <a class="btn btn-secondary" href="#contact-general">Contact Team</a>
@@ -459,11 +459,11 @@ Command IDs --> Idempotent Mutations</code></pre>
 
     <footer class="site-footer">
       <div class="container footer-inner">
-        <p>© 2026 CostructOS. All rights reserved.</p>
+        <p>© 2026 ConstructOS. All rights reserved.</p>
         <div class="footer-links">
-          <a href="https://costructos.dev/">Home</a>
-          <a href="mailto:privacy@costructos.dev">Privacy</a>
-          <a href="mailto:legal@costructos.dev">Terms</a>
+          <a href="https://constructos.dev/">Home</a>
+          <a href="mailto:privacy@constructos.dev">Privacy</a>
+          <a href="mailto:legal@constructos.dev">Terms</a>
         </div>
       </div>
     </footer>
@@ -484,24 +484,18 @@ Command IDs --> Idempotent Mutations</code></pre>
           if (tone) feedback.classList.add(tone)
         }
 
+        const controlPlaneBaseUrl = 'https://licence.constructos.dev'
+
         const resolveWaitlistApiUrl = () => {
           const configured = String(endpointMeta?.getAttribute('content') || '').trim()
           if (configured) return configured
-          const host = String(window.location.hostname || '').trim().toLowerCase()
-          if (host === 'localhost' || host === '127.0.0.1') {
-            return `${window.location.protocol}//${window.location.hostname}:8092/v1/public/waitlist`
-          }
-          return '/v1/public/waitlist'
+          return `${controlPlaneBaseUrl}/v1/public/waitlist`
         }
 
         const resolveContactRequestApiUrl = () => {
           const configured = String(contactEndpointMeta?.getAttribute('content') || '').trim()
           if (configured) return configured
-          const host = String(window.location.hostname || '').trim().toLowerCase()
-          if (host === 'localhost' || host === '127.0.0.1') {
-            return `${window.location.protocol}//${window.location.hostname}:8092/v1/public/contact-requests`
-          }
-          return '/v1/public/contact-requests'
+          return `${controlPlaneBaseUrl}/v1/public/contact-requests`
         }
 
         const bindContactRequestForm = ({

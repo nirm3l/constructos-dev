@@ -88,7 +88,7 @@ LCP_CORS_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
         "LCP_CORS_ORIGINS",
-        "http://localhost:8082,http://127.0.0.1:8082,https://costructos.dev,https://www.costructos.dev",
+        "http://localhost:8082,http://127.0.0.1:8082,https://constructos.dev,https://www.constructos.dev",
     ).split(",")
     if origin.strip()
 ]

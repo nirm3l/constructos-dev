@@ -17,6 +17,29 @@ MCP_TOOLS_IMAGE="${MCP_TOOLS_IMAGE:-}"
 MARKETING_SITE_IMAGE="${MARKETING_SITE_IMAGE:-}"
 CODEX_AUTH_FILE="${CODEX_AUTH_FILE:-/home/m4tr1x/.codex/auth.json}"
 
+resolve_compose_env_value() {
+  local var_name="$1"
+  local current_value="${!var_name:-}"
+  if [[ -n "$current_value" ]]; then
+    printf '%s' "$current_value"
+    return 0
+  fi
+  if [[ ! -f .env ]]; then
+    return 1
+  fi
+
+  # Read plain KEY=VALUE lines from .env without sourcing shell code.
+  local line
+  line="$(grep -E "^[[:space:]]*${var_name}=" .env | tail -n 1 || true)"
+  if [[ -z "$line" ]]; then
+    return 1
+  fi
+
+  line="${line#*=}"
+  line="${line%$'\r'}"
+  printf '%s' "$line"
+}
+
 resolve_deploy_target() {
   if [[ "$DEPLOY_TARGET" != "auto" ]]; then
     echo "$DEPLOY_TARGET"
@@ -92,6 +115,9 @@ case "$DEPLOY_SOURCE" in
     ;;
 esac
 
+LCP_API_TOKEN_VALUE="$(resolve_compose_env_value "LCP_API_TOKEN" || true)"
+LICENSE_SERVER_TOKEN_VALUE="$(resolve_compose_env_value "LICENSE_SERVER_TOKEN" || true)"
+
 cat > .deploy.env <<EOF
 APP_VERSION=${APP_VERSION}
 APP_BUILD=${APP_BUILD}
@@ -100,6 +126,13 @@ TASK_APP_IMAGE=${TASK_APP_IMAGE}
 MCP_TOOLS_IMAGE=${MCP_TOOLS_IMAGE}
 MARKETING_SITE_IMAGE=${MARKETING_SITE_IMAGE}
 EOF
+
+if [[ -n "$LCP_API_TOKEN_VALUE" ]]; then
+  printf 'LCP_API_TOKEN=%s\n' "$LCP_API_TOKEN_VALUE" >> .deploy.env
+fi
+if [[ -n "$LICENSE_SERVER_TOKEN_VALUE" ]]; then
+  printf 'LICENSE_SERVER_TOKEN=%s\n' "$LICENSE_SERVER_TOKEN_VALUE" >> .deploy.env
+fi
 
 if [[ -f "$CODEX_AUTH_FILE" ]]; then
   if ! chmod a+r "$CODEX_AUTH_FILE" 2>/dev/null; then
