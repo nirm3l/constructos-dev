@@ -63,8 +63,8 @@ Publish private, versioned images usable on amd64 and arm64 where possible.
 - Add deploy docs for image pulls with least-privilege credentials.
 
 ### Suggested Image Naming
-- `ghcr.io/nirm3l/m4tr1x-task-app:<tag>`
-- `ghcr.io/nirm3l/m4tr1x-mcp-tools:<tag>`
+- `ghcr.io/nirm3l/constructos-task-app:<tag>`
+- `ghcr.io/nirm3l/constructos-mcp-tools:<tag>`
 
 ## Phase 3: Dockerfile Hardening and Python Code Protection
 ### Reality Check

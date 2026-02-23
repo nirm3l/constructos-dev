@@ -63,6 +63,12 @@ graph LR
 - `DEPLOY_TARGET=auto|base|ubuntu-gpu|macos-m4` (default: `auto`)
 - `DEPLOY_SOURCE=local|ghcr` (default: `local`)
 - `DEPLOY_LICENSE_CONTROL_PLANE=true|false` (default: `false`)
+- `GHCR_IMAGE_PREFIX` (default: `constructos`)
+
+Client-safe entrypoint (always excludes `license-control-plane` and `marketing-site`):
+```bash
+./scripts/deploy-client.sh
+```
 
 Examples:
 ```bash
@@ -75,8 +81,19 @@ DEPLOY_TARGET=macos-m4 ./scripts/deploy.sh
 # pull private images from GHCR (no local build on client host)
 DEPLOY_SOURCE=ghcr IMAGE_TAG=v0.1.227 ./scripts/deploy.sh
 
+# client-safe GHCR deploy (recommended for customer hosts)
+DEPLOY_SOURCE=ghcr IMAGE_TAG=v0.1.227 ./scripts/deploy-client.sh
+
 # include bundled local licensing control-plane service
 DEPLOY_LICENSE_CONTROL_PLANE=true ./scripts/deploy.sh
+```
+Client one-liner installer (downloads minimal client bundle from `app.constructos.dev`):
+```bash
+curl -fsSL https://app.constructos.dev/install.sh | VERSION=v0.1.230 bash
+```
+Prepare static client-install content for your domain:
+```bash
+VERSION=v0.1.230 ./scripts/package-client-site.sh
 ```
 For signed entitlement enforcement, configure:
 - `LCP_SIGNING_PRIVATE_KEY_PEM` on control-plane
@@ -88,7 +105,6 @@ curl -sS http://localhost:8080/api/health
 ```
 3. Open app and APIs:
 - App/API: `http://localhost:8080`
-- Marketing site: `http://localhost:8082` (set `MARKETING_PORT` to change)
 - Version: `http://localhost:8080/api/version`
 - License status: `http://localhost:8080/api/license/status`
 - Optional local control-plane admin UI: `http://localhost:8092`

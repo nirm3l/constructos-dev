@@ -16,6 +16,10 @@ Optional override:
 ```bash
 ./scripts/deploy.sh
 ```
+Client-safe deploy entrypoint (no local control-plane, no marketing-site):
+```bash
+./scripts/deploy-client.sh
+```
 Effects:
 - bumps patch version (`VERSION` + frontend package version) for `DEPLOY_SOURCE=local`,
 - generates `.deploy.env` (`APP_VERSION`, `APP_BUILD`, `APP_DEPLOYED_AT_UTC`),
@@ -43,21 +47,43 @@ Does:
 ### 2.4 Private Image Release (GHCR)
 - Workflow file: `.github/workflows/release-images.yml`.
 - Trigger: push tag matching `v*` (for example `v1.3.0`) or manual dispatch.
-- Output image: `ghcr.io/<owner>/<repo>-task-app:<tag>`.
-- Output image: `ghcr.io/<owner>/<repo>-mcp-tools:<tag>`.
+- Output image: `ghcr.io/<owner>/constructos-task-app:<tag>`.
+- Output image: `ghcr.io/<owner>/constructos-mcp-tools:<tag>`.
 - Platforms: `linux/amd64` and `linux/arm64`.
 
 ### 2.5 Pull-Based Deployment From GHCR
 Use this when clients should only pull private images and not build from source.
 ```bash
-DEPLOY_SOURCE=ghcr IMAGE_TAG=v0.1.227 ./scripts/deploy.sh
+DEPLOY_SOURCE=ghcr IMAGE_TAG=v0.1.227 ./scripts/deploy-client.sh
 ```
 Required env for private pulls:
 - `GHCR_OWNER` (default: `nirm3l`)
-- `GHCR_REPO` (default: `m4tr1x`)
+- `GHCR_IMAGE_PREFIX` (default: `constructos`)
 - `IMAGE_TAG` (required when `DEPLOY_SOURCE=ghcr`)
 
-### 2.6 Local Licensing Control Plane (Optional Override)
+### 2.6 Minimal Client Bundle
+Build a minimal handoff package from repository root:
+```bash
+VERSION=v0.1.230 ./scripts/package-client-bundle.sh
+```
+Bundle content:
+- `docker-compose.client.yml` (client-only compose file)
+- `docker-compose.ubuntu-gpu.yml`
+- `docker-compose.macos-m4.yml`
+- `scripts/deploy-client.sh`
+- `scripts/deploy-core.sh`
+- `.env.example`
+
+### 2.7 Remote Client Installer (`curl | bash`)
+```bash
+curl -fsSL https://app.constructos.dev/install.sh | VERSION=v0.1.230 bash
+```
+Prepare domain content (installer + client bundle + latest marker):
+```bash
+VERSION=v0.1.230 ./scripts/package-client-site.sh
+```
+
+### 2.8 Local Licensing Control Plane (Optional Override)
 Enable bundled control-plane service:
 ```bash
 DEPLOY_LICENSE_CONTROL_PLANE=true ./scripts/deploy.sh

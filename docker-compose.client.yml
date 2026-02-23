@@ -1,0 +1,171 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-task_management}"
+      POSTGRES_USER: "${POSTGRES_USER:-m4tr1x}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-m4tr1x}"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-m4tr1x} -d ${POSTGRES_DB:-task_management}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  kurrentdb:
+    image: eventstore/eventstore:24.10.0-jammy
+    container_name: kurrentdb
+    environment:
+      EVENTSTORE_CLUSTER_SIZE: 1
+      EVENTSTORE_RUN_PROJECTIONS: All
+      EVENTSTORE_START_STANDARD_PROJECTIONS: "true"
+      EVENTSTORE_INSECURE: "true"
+      EVENTSTORE_ENABLE_ATOM_PUB_OVER_HTTP: "true"
+      EVENTSTORE_EXT_IP: 0.0.0.0
+      EVENTSTORE_INT_IP: 0.0.0.0
+    volumes:
+      - kurrent-data:/var/lib/eventstore
+    restart: unless-stopped
+
+  neo4j:
+    image: neo4j:5.26.0
+    container_name: neo4j
+    environment:
+      NEO4J_AUTH: "${NEO4J_AUTH:-neo4j/task-management-neo4j}"
+    volumes:
+      - neo4j-data:/data
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:0.16.2
+    container_name: ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: "30m"
+      OLLAMA_NUM_PARALLEL: "2"
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+
+  task-app:
+    image: "${TASK_APP_IMAGE:-task-management-task-app:local}"
+    container_name: task-app
+    depends_on:
+      - postgres
+      - kurrentdb
+      - neo4j
+      - mcp-tools
+    environment:
+      DATABASE_URL: "${DATABASE_URL:-postgresql+psycopg://m4tr1x:m4tr1x@postgres:5432/task_management}"
+      EVENTSTORE_URI: esdb://kurrentdb:2113?tls=false
+      APP_VERSION: "${APP_VERSION:-dev}"
+      APP_BUILD: "${APP_BUILD:-}"
+      APP_DEPLOYED_AT_UTC: "${APP_DEPLOYED_AT_UTC:-}"
+      AGENT_RUNNER_ENABLED: "${AGENT_RUNNER_ENABLED:-false}"
+      AGENT_RUNNER_INTERVAL_SECONDS: "3"
+      AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS: "true"
+      AGENT_EXECUTOR_MODE: "command"
+      AGENT_EXECUTOR_TIMEOUT_SECONDS: "180"
+      AGENT_CHAT_CONTEXT_LIMIT_TOKENS: "${AGENT_CHAT_CONTEXT_LIMIT_TOKENS:-400000}"
+      AGENT_CODEX_COMMAND: "python -m features.agents.codex_mcp_adapter"
+      AGENT_CODEX_MCP_URL: "http://mcp-tools:8090/mcp"
+      MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:-dev-mcp-token}"
+      MCP_ALLOWED_WORKSPACE_IDS: "${MCP_ALLOWED_WORKSPACE_IDS:-10000000-0000-0000-0000-000000000001}"
+      KNOWLEDGE_GRAPH_ENABLED: "true"
+      NEO4J_URI: "${NEO4J_URI:-bolt://neo4j:7687}"
+      NEO4J_USERNAME: "${NEO4J_USERNAME:-neo4j}"
+      NEO4J_PASSWORD: "${NEO4J_PASSWORD:-task-management-neo4j}"
+      NEO4J_DATABASE: "${NEO4J_DATABASE:-neo4j}"
+      GRAPH_RAG_ENABLED: "true"
+      GRAPH_RAG_CANARY_WORKSPACE_IDS: "${GRAPH_RAG_CANARY_WORKSPACE_IDS:-}"
+      GRAPH_RAG_CANARY_PROJECT_IDS: "${GRAPH_RAG_CANARY_PROJECT_IDS:-}"
+      GRAPH_RAG_SUMMARY_MODEL: "${GRAPH_RAG_SUMMARY_MODEL:-}"
+      GRAPH_RAG_SLO_CONTEXT_NO_SUMMARY_MS: "${GRAPH_RAG_SLO_CONTEXT_NO_SUMMARY_MS:-1200}"
+      GRAPH_RAG_SLO_CONTEXT_WITH_SUMMARY_MS: "${GRAPH_RAG_SLO_CONTEXT_WITH_SUMMARY_MS:-2500}"
+      GRAPH_RAG_SLO_EMBED_INGEST_P95_MS: "${GRAPH_RAG_SLO_EMBED_INGEST_P95_MS:-800}"
+      GRAPH_RAG_SLO_EMBED_CONTEXT_ERROR_RATE_PCT: "${GRAPH_RAG_SLO_EMBED_CONTEXT_ERROR_RATE_PCT:-0.1}"
+      VECTOR_STORE_ENABLED: "true"
+      CONTEXT_PACK_EVIDENCE_TOP_K: "12"
+      EMBEDDING_PROVIDER: "ollama"
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://ollama:11434}"
+      DEFAULT_EMBEDDING_MODEL: "${DEFAULT_EMBEDDING_MODEL:-nomic-embed-text}"
+      ALLOWED_EMBEDDING_MODELS: "${ALLOWED_EMBEDDING_MODELS:-nomic-embed-text,mxbai-embed-large,embeddinggemma}"
+      OLLAMA_EMBED_GPU_ENABLED: "${OLLAMA_EMBED_GPU_ENABLED:-true}"
+      LICENSE_SERVER_TOKEN: "${LICENSE_SERVER_TOKEN:-}"
+    ports:
+      - "${APP_PORT:-8080}:8000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+  mcp-tools:
+    image: "${MCP_TOOLS_IMAGE:-task-management-mcp-tools:local}"
+    container_name: mcp-tools
+    depends_on:
+      - postgres
+      - kurrentdb
+      - neo4j
+    command: ["python", "-m", "features.agents.mcp_server"]
+    environment:
+      DATABASE_URL: "${DATABASE_URL:-postgresql+psycopg://m4tr1x:m4tr1x@postgres:5432/task_management}"
+      EVENTSTORE_URI: esdb://kurrentdb:2113?tls=false
+      APP_VERSION: "${APP_VERSION:-dev}"
+      APP_BUILD: "${APP_BUILD:-}"
+      APP_DEPLOYED_AT_UTC: "${APP_DEPLOYED_AT_UTC:-}"
+      MCP_SERVER_TRANSPORT: streamable-http
+      MCP_SERVER_HOST: 0.0.0.0
+      MCP_SERVER_PORT: "8090"
+      MCP_SERVER_PATH: /mcp
+      MCP_SERVER_STATELESS_HTTP: "true"
+      AGENT_EXECUTOR_TIMEOUT_SECONDS: "180"
+      AGENT_CHAT_CONTEXT_LIMIT_TOKENS: "${AGENT_CHAT_CONTEXT_LIMIT_TOKENS:-400000}"
+      MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:-dev-mcp-token}"
+      MCP_TOOL_AUTH_TOKEN: "${MCP_TOOL_AUTH_TOKEN:-dev-mcp-token}"
+      MCP_ACTOR_USER_ID: "${MCP_ACTOR_USER_ID:-00000000-0000-0000-0000-000000000099}"
+      MCP_DEFAULT_WORKSPACE_ID: "${MCP_DEFAULT_WORKSPACE_ID:-10000000-0000-0000-0000-000000000001}"
+      MCP_ALLOWED_WORKSPACE_IDS: "${MCP_ALLOWED_WORKSPACE_IDS:-10000000-0000-0000-0000-000000000001}"
+      MCP_EMAIL_SMTP_HOST: "${MCP_EMAIL_SMTP_HOST:-}"
+      MCP_EMAIL_SMTP_PORT: "${MCP_EMAIL_SMTP_PORT:-587}"
+      MCP_EMAIL_SMTP_USERNAME: "${MCP_EMAIL_SMTP_USERNAME:-}"
+      MCP_EMAIL_SMTP_PASSWORD: "${MCP_EMAIL_SMTP_PASSWORD:-}"
+      MCP_EMAIL_SMTP_STARTTLS: "${MCP_EMAIL_SMTP_STARTTLS:-true}"
+      MCP_EMAIL_SMTP_SSL: "${MCP_EMAIL_SMTP_SSL:-false}"
+      MCP_EMAIL_FROM: "${MCP_EMAIL_FROM:-}"
+      MCP_EMAIL_ALLOWED_RECIPIENTS: "${MCP_EMAIL_ALLOWED_RECIPIENTS:-}"
+      MCP_EMAIL_ALLOWED_DOMAINS: "${MCP_EMAIL_ALLOWED_DOMAINS:-}"
+      KNOWLEDGE_GRAPH_ENABLED: "true"
+      NEO4J_URI: "${NEO4J_URI:-bolt://neo4j:7687}"
+      NEO4J_USERNAME: "${NEO4J_USERNAME:-neo4j}"
+      NEO4J_PASSWORD: "${NEO4J_PASSWORD:-task-management-neo4j}"
+      NEO4J_DATABASE: "${NEO4J_DATABASE:-neo4j}"
+      GRAPH_RAG_ENABLED: "true"
+      GRAPH_RAG_CANARY_WORKSPACE_IDS: "${GRAPH_RAG_CANARY_WORKSPACE_IDS:-}"
+      GRAPH_RAG_CANARY_PROJECT_IDS: "${GRAPH_RAG_CANARY_PROJECT_IDS:-}"
+      GRAPH_RAG_SUMMARY_MODEL: "${GRAPH_RAG_SUMMARY_MODEL:-}"
+      GRAPH_RAG_SLO_CONTEXT_NO_SUMMARY_MS: "${GRAPH_RAG_SLO_CONTEXT_NO_SUMMARY_MS:-1200}"
+      GRAPH_RAG_SLO_CONTEXT_WITH_SUMMARY_MS: "${GRAPH_RAG_SLO_CONTEXT_WITH_SUMMARY_MS:-2500}"
+      GRAPH_RAG_SLO_EMBED_INGEST_P95_MS: "${GRAPH_RAG_SLO_EMBED_INGEST_P95_MS:-800}"
+      GRAPH_RAG_SLO_EMBED_CONTEXT_ERROR_RATE_PCT: "${GRAPH_RAG_SLO_EMBED_CONTEXT_ERROR_RATE_PCT:-0.1}"
+      VECTOR_STORE_ENABLED: "true"
+      CONTEXT_PACK_EVIDENCE_TOP_K: "12"
+      EMBEDDING_PROVIDER: "ollama"
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://ollama:11434}"
+      DEFAULT_EMBEDDING_MODEL: "${DEFAULT_EMBEDDING_MODEL:-nomic-embed-text}"
+      ALLOWED_EMBEDDING_MODELS: "${ALLOWED_EMBEDDING_MODELS:-nomic-embed-text,mxbai-embed-large,embeddinggemma}"
+      OLLAMA_EMBED_GPU_ENABLED: "${OLLAMA_EMBED_GPU_ENABLED:-true}"
+      LICENSE_SERVER_TOKEN: "${LICENSE_SERVER_TOKEN:-}"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  kurrent-data:
+  neo4j-data:
+  ollama-data:
