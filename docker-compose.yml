@@ -104,7 +104,7 @@ services:
       DEFAULT_EMBEDDING_MODEL: "${DEFAULT_EMBEDDING_MODEL:-nomic-embed-text}"
       ALLOWED_EMBEDDING_MODELS: "${ALLOWED_EMBEDDING_MODELS:-nomic-embed-text,mxbai-embed-large,embeddinggemma}"
       OLLAMA_EMBED_GPU_ENABLED: "${OLLAMA_EMBED_GPU_ENABLED:-true}"
-      LICENSE_SERVER_TOKEN: "${LICENSE_SERVER_TOKEN:-}"
+      LICENSE_SERVER_TOKEN: "${LICENSE_SERVER_TOKEN:-dev-license-token}"
     volumes:
       - ./codex.task-app.toml:/home/app/.codex/config.toml:ro
       - /home/m4tr1x/.codex/auth.json:/home/app/.codex/auth.json:ro
@@ -172,13 +172,33 @@ services:
       DEFAULT_EMBEDDING_MODEL: "${DEFAULT_EMBEDDING_MODEL:-nomic-embed-text}"
       ALLOWED_EMBEDDING_MODELS: "${ALLOWED_EMBEDDING_MODELS:-nomic-embed-text,mxbai-embed-large,embeddinggemma}"
       OLLAMA_EMBED_GPU_ENABLED: "${OLLAMA_EMBED_GPU_ENABLED:-true}"
-      LICENSE_SERVER_TOKEN: "${LICENSE_SERVER_TOKEN:-}"
+      LICENSE_SERVER_TOKEN: "${LICENSE_SERVER_TOKEN:-dev-license-token}"
     ports:
       - "8091:8090"
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    restart: unless-stopped
+
+  license-control-plane:
+    build: ./license_control_plane
+    container_name: license-control-plane
+    environment:
+      LCP_DATABASE_URL: "${LCP_DATABASE_URL:-sqlite:////data/license-control-plane.db}"
+      LCP_API_TOKEN: "${LCP_API_TOKEN:-dev-license-token}"
+      LCP_TRIAL_DAYS: "${LICENSE_TRIAL_DAYS:-7}"
+      LCP_DEFAULT_MAX_INSTALLATIONS: "${LCP_DEFAULT_MAX_INSTALLATIONS:-3}"
+      LCP_TOKEN_TTL_SECONDS: "${LCP_TOKEN_TTL_SECONDS:-3600}"
+      LCP_SIGNING_PRIVATE_KEY_PEM: "${LCP_SIGNING_PRIVATE_KEY_PEM:-}"
+      LCP_SIGNING_KEY_ID: "${LCP_SIGNING_KEY_ID:-default-ed25519}"
+      LCP_REQUIRE_SIGNED_TOKENS: "${LCP_REQUIRE_SIGNED_TOKENS:-false}"
+      LCP_PUBLIC_BETA_FREE_UNTIL: "${LCP_PUBLIC_BETA_FREE_UNTIL:-2026-03-31T23:59:59Z}"
+      LCP_CORS_ORIGINS: "${LCP_CORS_ORIGINS:-http://localhost:8082,http://127.0.0.1:8082,https://constructos.dev,https://www.constructos.dev}"
+    ports:
+      - "8092:8092"
+    volumes:
+      - license-control-plane-data:/data
     restart: unless-stopped
 
   marketing-site:
@@ -196,3 +216,4 @@ volumes:
   kurrent-data:
   neo4j-data:
   ollama-data:
+  license-control-plane-data:

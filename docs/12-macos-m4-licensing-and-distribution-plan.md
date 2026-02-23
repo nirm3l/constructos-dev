@@ -38,17 +38,17 @@ Keep one shared Compose baseline and platform-specific overrides.
 
 ### Changes
 - Refactor `docker-compose.yml` into a platform-neutral base by removing Linux-only Ollama device/group settings and keeping `OLLAMA_BASE_URL` externally configurable.
-- Add `docker-compose.ubuntu-gpu.yml` that defines containerized Ollama with Linux GPU config and sets `OLLAMA_BASE_URL=http://ollama:11434`.
-- Add `docker-compose.macos-m4.yml` that sets `OLLAMA_BASE_URL=http://host.docker.internal:11434` and forces `kurrentdb.platform=linux/amd64`.
+- Add `docker-compose.owner.ubuntu-gpu.yml` that defines containerized Ollama with Linux GPU config and sets `OLLAMA_BASE_URL=http://ollama:11434`.
+- Add `docker-compose.owner.macos-m4.yml` that sets `OLLAMA_BASE_URL=http://host.docker.internal:11434` and forces `kurrentdb.platform=linux/amd64`.
 
 ### Run Commands
 - Ubuntu:
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.ubuntu-gpu.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.owner.ubuntu-gpu.yml up -d --build
 ```
 - macOS M4:
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.macos-m4.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.owner.macos-m4.yml up -d --build
 ```
 
 ## Phase 2: Multi-Arch Build and Private Image Distribution
@@ -169,9 +169,8 @@ Enable strict write-lock after grace period and complete operational runbook.
 
 ## Implementation Checklist (Repository-Level)
 - `docker-compose.yml`
-- `docker-compose.ubuntu-gpu.yml` (new)
-- `docker-compose.macos-m4.yml` (new)
-- `docker-compose.license-control-plane.yml` (new)
+- `docker-compose.owner.ubuntu-gpu.yml` (new)
+- `docker-compose.owner.macos-m4.yml` (new)
 - `app/Dockerfile`
 - `.github/workflows/release-images.yml` (new)
 - `app/shared/settings.py`

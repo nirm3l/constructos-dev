@@ -8,17 +8,13 @@ The default Docker Compose stack includes:
 - `kurrentdb`
 - `neo4j`
 
-Optional override:
-- `license-control-plane` (local licensing server, enabled via `docker-compose.license-control-plane.yml`)
+Owner/internal stack also includes:
+- `license-control-plane` (local licensing server)
 
 ## 2. Standard Operating Flow
 ### 2.1 Deploy
 ```bash
 ./scripts/deploy.sh
-```
-Client-safe deploy entrypoint (no local control-plane, no marketing-site):
-```bash
-./scripts/deploy-client.sh
 ```
 Effects:
 - bumps patch version (`VERSION` + frontend package version) for `DEPLOY_SOURCE=local`,
@@ -31,7 +27,7 @@ Effects:
 - `auto` resolves to `macos-m4` on `Darwin`.
 - `auto` resolves to `ubuntu-gpu` on `Linux` when `/dev/dri` exists.
 - `auto` resolves to `base` on all other cases.
-- `ubuntu-gpu`: enables Linux GPU-backed Ollama container config from `docker-compose.ubuntu-gpu.yml`.
+- `ubuntu-gpu`: enables Linux GPU-backed Ollama container config from `docker-compose.owner.ubuntu-gpu.yml`.
 - `macos-m4`: disables in-stack Ollama and points services to host-native Ollama (`host.docker.internal`), and forces `kurrentdb` on `linux/amd64`.
 - `base`: platform-neutral stack without GPU-specific overrides.
 
@@ -54,42 +50,24 @@ Does:
 ### 2.5 Pull-Based Deployment From GHCR
 Use this when clients should only pull private images and not build from source.
 ```bash
-DEPLOY_SOURCE=ghcr IMAGE_TAG=v0.1.227 ./scripts/deploy-client.sh
+DEPLOY_SOURCE=ghcr IMAGE_TAG=v0.1.227 ./scripts/deploy.sh
 ```
 Required env for private pulls:
 - `GHCR_OWNER` (default: `nirm3l`)
 - `GHCR_IMAGE_PREFIX` (default: `constructos`)
 - `IMAGE_TAG` (required when `DEPLOY_SOURCE=ghcr`)
 
-### 2.6 Minimal Client Bundle
-Build a minimal handoff package from repository root:
-```bash
-VERSION=v0.1.230 ./scripts/package-client-bundle.sh
-```
-Bundle content:
-- `docker-compose.client.yml` (client-only compose file)
-- `docker-compose.ubuntu-gpu.yml`
-- `docker-compose.macos-m4.yml`
-- `scripts/deploy-client.sh`
-- `scripts/deploy-core.sh`
-- `.env.example`
+### 2.6 Client Distribution Repository
+Client deployment artifacts are maintained in:
+`https://github.com/nirm3l/constructos`
 
-### 2.7 Remote Client Installer (`curl | bash`)
+### 2.7 Client Remote Installer (`curl | bash`)
 ```bash
-curl -fsSL https://app.constructos.dev/install.sh | VERSION=v0.1.230 bash
-```
-Prepare domain content (installer + client bundle + latest marker):
-```bash
-VERSION=v0.1.230 ./scripts/package-client-site.sh
+curl -fsSL https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh | IMAGE_TAG=v0.1.230 bash
 ```
 
-### 2.8 Local Licensing Control Plane (Optional Override)
-Enable bundled control-plane service:
-```bash
-DEPLOY_LICENSE_CONTROL_PLANE=true ./scripts/deploy.sh
-```
-Override file:
-- `docker-compose.license-control-plane.yml`
+### 2.8 Local Licensing Control Plane
+Included by default in owner/internal deploy (`./scripts/deploy.sh`).
 Default local URL used by app services in this mode:
 - `http://license-control-plane:8092`
 Local admin UI:
