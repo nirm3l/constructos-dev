@@ -1550,6 +1550,7 @@ button:disabled {
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 2px 8px;
+  min-height: 0;
   font-size: 11px;
   line-height: 1.35;
   font-weight: 700;
