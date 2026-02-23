@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from features.projects.application import ProjectApplicationService
 from features.project_templates.application import ProjectTemplateApplicationService
@@ -44,6 +44,7 @@ from shared.core import (
     NotePatch,
     Project,
     ProjectCreate,
+    ProjectRule,
     ProjectRuleCreate,
     ProjectRulePatch,
     ReorderPayload,
@@ -72,6 +73,7 @@ from shared.core import (
 from features.project_templates.schemas import ProjectFromTemplateCreate, ProjectFromTemplatePreview
 from shared.deps import ensure_role
 from shared.knowledge_graph import (
+    build_graph_context_pack,
     graph_context_pack as graph_context_pack_query,
     graph_find_related_resources as graph_find_related_resources_query,
     graph_get_dependency_path as graph_get_dependency_path_query,
@@ -89,6 +91,108 @@ from shared.settings import (
     MCP_ALLOWED_WORKSPACE_IDS,
     MCP_AUTH_TOKEN,
 )
+
+
+def _graph_summary_to_markdown(summary: dict[str, object] | None) -> str:
+    if not isinstance(summary, dict) or not summary:
+        return ""
+    lines: list[str] = []
+    executive = str(summary.get("executive") or "").strip()
+    if executive:
+        lines.append("# Grounded Summary")
+        lines.append("")
+        lines.append(executive)
+    key_points = summary.get("key_points")
+    if isinstance(key_points, list) and key_points:
+        if lines:
+            lines.append("")
+        lines.append("## Key Points")
+        for item in key_points:
+            if not isinstance(item, dict):
+                continue
+            claim = str(item.get("claim") or "").strip()
+            evidence_ids = [str(raw).strip() for raw in (item.get("evidence_ids") or []) if str(raw).strip()]
+            if not claim:
+                continue
+            suffix = f" [{', '.join(evidence_ids)}]" if evidence_ids else ""
+            lines.append(f"- {claim}{suffix}")
+    gaps = summary.get("gaps")
+    if isinstance(gaps, list) and gaps:
+        if lines:
+            lines.append("")
+        lines.append("## Gaps")
+        for gap in gaps:
+            text = str(gap or "").strip()
+            if text:
+                lines.append(f"- {text}")
+    return "\n".join(lines).strip()
+
+
+def _render_project_rules_markdown(rows: list[tuple[str, str]]) -> str:
+    lines: list[str] = []
+    for title, body in rows:
+        clean_title = str(title or "").strip()
+        clean_body = str(body or "").strip()
+        if not clean_title and not clean_body:
+            continue
+        label = clean_title or "Untitled rule"
+        if clean_body:
+            lines.append(f"- {label}: {clean_body}")
+        else:
+            lines.append(f"- {label}")
+    return "\n".join(lines) if lines else "_(no project rules)_"
+
+
+def _render_project_skills_markdown(rows: list[dict[str, str]]) -> str:
+    lines: list[str] = []
+    for row in rows:
+        name = str(row.get("name") or "").strip()
+        skill_key = str(row.get("skill_key") or "").strip()
+        summary = str(row.get("summary") or "").strip()
+        mode = str(row.get("mode") or "").strip().lower() or "advisory"
+        trust_level = str(row.get("trust_level") or "").strip().lower() or "reviewed"
+        source_locator = str(row.get("source_locator") or "").strip()
+        if not name and not skill_key:
+            continue
+        label = name or skill_key
+        key_text = f" ({skill_key})" if skill_key else ""
+        source_text = f" source={source_locator}" if source_locator else ""
+        suffix_parts = [f"mode={mode}", f"trust={trust_level}"]
+        if summary:
+            suffix_parts.append(summary)
+        suffix_text = "; ".join(suffix_parts)
+        lines.append(f"- {label}{key_text}: {suffix_text}{source_text}")
+    return "\n".join(lines) if lines else "_(no project skills)_"
+
+
+def _render_project_chat_context_markdown(
+    *,
+    soul_md: str,
+    rules_md: str,
+    skills_md: str,
+    graph_md: str,
+    graph_evidence_json: str,
+    graph_summary_md: str,
+) -> str:
+    return (
+        "Context Pack:\n"
+        "File: Soul.md (source: project.description)\n"
+        f"{soul_md}\n\n"
+        "File: ProjectRules.md (source: project_rules)\n"
+        f"{rules_md}\n\n"
+        "File: ProjectSkills.md (source: project_skills)\n"
+        f"{skills_md}\n\n"
+        "File: GraphContext.md (source: knowledge_graph)\n"
+        f"{graph_md}\n\n"
+        "File: GraphEvidence.json (source: knowledge_graph.evidence)\n"
+        f"{graph_evidence_json}\n\n"
+        "File: GraphSummary.md (source: knowledge_graph.summary)\n"
+        f"{graph_summary_md}\n\n"
+        "Refresh Policy:\n"
+        "- If required project details are missing, stale, or uncertain, call `get_project_chat_context` again before continuing.\n"
+        "- If project rules/skills or graph relations may have changed, refresh this context before making decisions.\n"
+        "- If claims are not backed by GraphEvidence IDs, refresh context and verify evidence before acting.\n"
+    ).strip()
 
 
 class AgentTaskService:
@@ -838,6 +942,183 @@ class AgentTaskService:
         self._assert_workspace_allowed(project.workspace_id)
         self._assert_project_allowed(project.id)
         return project
+
+    def _resolve_project_for_chat_context(
+        self,
+        *,
+        db,
+        user: UserModel,
+        project_ref: str,
+        workspace_id: str | None = None,
+    ) -> tuple[Project, str]:
+        normalized_ref = str(project_ref or "").strip()
+        if not normalized_ref:
+            raise HTTPException(status_code=400, detail="project_ref is required")
+        normalized_workspace_id = str(workspace_id or "").strip()
+        if normalized_workspace_id:
+            self._assert_workspace_allowed(normalized_workspace_id)
+
+        project = db.execute(
+            select(Project).where(
+                Project.id == normalized_ref,
+                Project.is_deleted == False,  # noqa: E712
+            )
+        ).scalar_one_or_none()
+        if project is not None:
+            if normalized_workspace_id and str(project.workspace_id) != normalized_workspace_id:
+                raise HTTPException(status_code=404, detail="Project not found in workspace")
+            self._assert_workspace_allowed(project.workspace_id)
+            self._assert_project_allowed(project.id)
+            ensure_role(db, project.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            return project, "id"
+
+        by_name_query = select(Project).where(
+            Project.is_deleted == False,  # noqa: E712
+            func.lower(Project.name) == normalized_ref.lower(),
+        )
+        if normalized_workspace_id:
+            by_name_query = by_name_query.where(Project.workspace_id == normalized_workspace_id)
+        if self._allowed_workspace_ids:
+            by_name_query = by_name_query.where(Project.workspace_id.in_(sorted(self._allowed_workspace_ids)))
+        if self._allowed_project_ids:
+            by_name_query = by_name_query.where(Project.id.in_(sorted(self._allowed_project_ids)))
+
+        matches = (
+            db.execute(
+                by_name_query.order_by(
+                    Project.updated_at.desc(),
+                    Project.created_at.desc(),
+                    Project.id.asc(),
+                ).limit(6)
+            )
+            .scalars()
+            .all()
+        )
+        if not matches:
+            raise HTTPException(status_code=404, detail="Project not found by id or name")
+        if len(matches) > 1:
+            candidate_ids = ", ".join(str(item.id) for item in matches[:3])
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Multiple projects match '{normalized_ref}'. "
+                    f"Use project id or provide workspace_id. Matches: {candidate_ids}"
+                ),
+            )
+        project = matches[0]
+        self._assert_workspace_allowed(project.workspace_id)
+        self._assert_project_allowed(project.id)
+        ensure_role(db, project.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+        return project, "name"
+
+    def get_project_chat_context(
+        self,
+        *,
+        project_ref: str,
+        workspace_id: str | None = None,
+        auth_token: str | None = None,
+        graph_limit: int = 20,
+    ) -> dict[str, Any]:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        safe_graph_limit = max(1, min(int(graph_limit or 20), 40))
+        resolved_by = "id"
+        project_id = ""
+        project_name = ""
+        project_workspace_id = ""
+        project_description = ""
+        with SessionLocal() as db:
+            project, resolved_by = self._resolve_project_for_chat_context(
+                db=db,
+                user=user,
+                project_ref=project_ref,
+                workspace_id=workspace_id,
+            )
+            project_id = str(project.id)
+            project_name = str(project.name or "")
+            project_workspace_id = str(project.workspace_id)
+            project_description = str(project.description or "")
+            rules_rows = db.execute(
+                select(ProjectRule.title, ProjectRule.body)
+                .where(
+                    ProjectRule.project_id == project.id,
+                    ProjectRule.is_deleted == False,  # noqa: E712
+                )
+                .order_by(ProjectRule.updated_at.desc())
+            ).all()
+            skills_rows = (
+                db.execute(
+                    select(
+                        ProjectSkill.skill_key,
+                        ProjectSkill.name,
+                        ProjectSkill.summary,
+                        ProjectSkill.mode,
+                        ProjectSkill.trust_level,
+                        ProjectSkill.source_locator,
+                    )
+                    .where(
+                        ProjectSkill.project_id == project.id,
+                        ProjectSkill.is_deleted == False,  # noqa: E712
+                    )
+                    .order_by(ProjectSkill.updated_at.desc())
+                )
+                .all()
+            )
+
+        soul_md = project_description.strip() or "_(empty)_"
+        rules_md = _render_project_rules_markdown([(str(title or ""), str(body or "")) for title, body in rules_rows])
+        normalized_skills = [
+            {
+                "skill_key": str(skill_key or ""),
+                "name": str(name or ""),
+                "summary": str(summary or ""),
+                "mode": str(mode or ""),
+                "trust_level": str(trust_level or ""),
+                "source_locator": str(source_locator or ""),
+            }
+            for skill_key, name, summary, mode, trust_level, source_locator in skills_rows
+        ]
+        skills_md = _render_project_skills_markdown(normalized_skills)
+
+        graph_pack = build_graph_context_pack(project_id=project_id, limit=safe_graph_limit)
+        graph_md = str(graph_pack.get("markdown") or "").strip() if graph_pack else ""
+        if not graph_md:
+            graph_md = "_(knowledge graph unavailable)_"
+        graph_evidence_json = json.dumps(graph_pack.get("evidence") or [], ensure_ascii=True) if graph_pack else "[]"
+        graph_summary_md = _graph_summary_to_markdown(graph_pack.get("summary")) if graph_pack else ""
+        if not graph_summary_md:
+            graph_summary_md = "_(summary unavailable)_"
+
+        refresh_policy = [
+            "If required project details are missing, stale, or uncertain, call `get_project_chat_context` again before continuing.",
+            "If project rules, skills, or graph relations may have changed, refresh this context before making decisions.",
+            "If claims are not backed by GraphEvidence IDs, refresh context and verify evidence before acting.",
+        ]
+        context_pack_markdown = _render_project_chat_context_markdown(
+            soul_md=soul_md,
+            rules_md=rules_md,
+            skills_md=skills_md,
+            graph_md=graph_md,
+            graph_evidence_json=graph_evidence_json,
+            graph_summary_md=graph_summary_md,
+        )
+
+        return {
+            "project_id": project_id,
+            "project_name": project_name,
+            "workspace_id": project_workspace_id,
+            "resolved_by": resolved_by,
+            "context_pack": {
+                "soul_md": soul_md,
+                "project_rules_md": rules_md,
+                "project_skills_md": skills_md,
+                "graph_context_md": graph_md,
+                "graph_evidence_json": graph_evidence_json,
+                "graph_summary_md": graph_summary_md,
+            },
+            "refresh_policy": refresh_policy,
+            "context_pack_markdown": context_pack_markdown,
+        }
 
     def graph_get_project_overview(
         self,

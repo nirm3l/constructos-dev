@@ -20,6 +20,7 @@ class AutomationOutcome:
     summary: str
     comment: str | None = None
     usage: dict[str, int] | None = None
+    codex_session_id: str | None = None
 
 
 def _graph_summary_to_markdown(summary: dict[str, object] | None) -> str:
@@ -137,6 +138,8 @@ def _parse_command_outcome(stdout: str) -> AutomationOutcome:
     summary = str(payload.get("summary", "")).strip()
     comment = payload.get("comment")
     usage_raw = payload.get("usage")
+    codex_session_id_raw = str(payload.get("codex_session_id") or "").strip()
+    codex_session_id = codex_session_id_raw or None
     usage: dict[str, int] | None = None
     if isinstance(usage_raw, dict):
         usage = {}
@@ -156,7 +159,13 @@ def _parse_command_outcome(stdout: str) -> AutomationOutcome:
         summary = "Automation run finished."
     if comment is not None:
         comment = str(comment)
-    return AutomationOutcome(action=action, summary=summary, comment=comment, usage=usage)
+    return AutomationOutcome(
+        action=action,
+        summary=summary,
+        comment=comment,
+        usage=usage,
+        codex_session_id=codex_session_id,
+    )
 
 
 def _run_command_streaming(
@@ -235,6 +244,7 @@ def execute_task_automation(
     project_id: str | None = None,
     actor_user_id: str | None = None,
     allow_mutations: bool = True,
+    mcp_servers: list[str] | None = None,
 ) -> AutomationOutcome:
     # Deterministic shortcut: users can explicitly complete a task via "#complete".
     # This should work regardless of executor mode, and avoids reliance on the LLM for a simple directive.
@@ -281,6 +291,7 @@ def execute_task_automation(
         "graph_evidence_json": graph_evidence_json,
         "graph_summary_markdown": graph_summary_markdown,
         "allow_mutations": allow_mutations,
+        "mcp_servers": mcp_servers,
     }
     try:
         proc = subprocess.run(
@@ -311,6 +322,7 @@ def execute_task_automation_stream(
     project_id: str | None = None,
     actor_user_id: str | None = None,
     allow_mutations: bool = True,
+    mcp_servers: list[str] | None = None,
     on_event: Callable[[dict[str, object]], None] | None = None,
 ) -> AutomationOutcome:
     # Deterministic shortcut for explicit completion requests.
@@ -357,6 +369,7 @@ def execute_task_automation_stream(
         "graph_evidence_json": graph_evidence_json,
         "graph_summary_markdown": graph_summary_markdown,
         "allow_mutations": allow_mutations,
+        "mcp_servers": mcp_servers,
         "stream_events": True,
         "stream_plain_text": not bool(str(task_id or "").strip()),
     }

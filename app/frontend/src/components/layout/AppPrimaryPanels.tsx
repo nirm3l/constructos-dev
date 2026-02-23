@@ -108,6 +108,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             embeddingDefaultModel: state.embeddingDefaultModel,
             vectorStoreEnabled: state.vectorStoreEnabled,
             contextPackEvidenceTopKDefault: state.contextPackEvidenceTopKDefault,
+            contextLimitTokensDefault: state.contextLimitTokensDefault,
             projectTemplateParametersText: state.projectTemplateParametersText,
             setProjectTemplateParametersText: state.setProjectTemplateParametersText,
             workspaceUsers: state.workspaceUsers,
@@ -181,6 +182,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             toggleEditProjectMember: state.toggleEditProjectMember,
             selectedProjectCreator: state.selectedProjectCreator,
             selectedProjectTimeMeta: state.selectedProjectTimeMeta,
+            codexChatProjectId: state.codexChatProjectId,
+            codexChatTurns: state.codexChatTurns,
           }}
         />
       )}

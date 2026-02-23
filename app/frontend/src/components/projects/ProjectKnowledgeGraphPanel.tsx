@@ -50,6 +50,121 @@ function formatEvidenceUpdated(value: string | null | undefined): string {
   return dt.toLocaleString()
 }
 
+type GraphCubeTile = {
+  key: string
+  label: string
+  color: string
+}
+
+type GraphPackSourceUsage = {
+  key: string
+  label: string
+  color: string
+  chars: number
+  lines: number
+  percent: number
+}
+
+function estimateTokenCount(charCount: number): number {
+  if (!Number.isFinite(charCount) || charCount <= 0) return 0
+  return Math.max(1, Math.round(charCount / 4))
+}
+
+function countLines(value: string): number {
+  if (!value.trim()) return 0
+  return value.split(/\r?\n/).length
+}
+
+function buildGraphCubeTiles(
+  slices: Array<{ key: string; label: string; color: string; value: number }>,
+  tileCount: number
+): GraphCubeTile[] {
+  const validSlices = slices.filter((slice) => slice.value > 0)
+  if (!validSlices.length || tileCount <= 0) return []
+
+  const totalValue = validSlices.reduce((sum, slice) => sum + slice.value, 0)
+  if (totalValue <= 0) return []
+
+  const rawCounts = validSlices.map((slice) => (slice.value / totalValue) * tileCount)
+  const counts = rawCounts.map((value) => Math.floor(value))
+  const order = rawCounts
+    .map((value, idx) => ({
+      idx,
+      remainder: value - (counts[idx] ?? 0),
+      value: validSlices[idx]?.value ?? 0,
+    }))
+    .sort((a, b) => b.remainder - a.remainder || b.value - a.value)
+
+  let remaining = tileCount - counts.reduce((sum, value) => sum + value, 0)
+  for (let i = 0; i < remaining; i += 1) {
+    const slot = order[i % order.length]
+    if (!slot) continue
+    counts[slot.idx] = (counts[slot.idx] ?? 0) + 1
+  }
+
+  const buckets: GraphCubeTile[][] = validSlices.map((slice, idx) => {
+    const bucket: GraphCubeTile[] = []
+    const tileAmount = counts[idx] ?? 0
+    for (let i = 0; i < tileAmount; i += 1) {
+      bucket.push({
+        key: `${slice.key}-${i}`,
+        label: slice.label,
+        color: slice.color,
+      })
+    }
+    return bucket
+  })
+
+  const output: GraphCubeTile[] = []
+  let layer = 0
+  while (output.length < tileCount) {
+    let appended = false
+    for (const bucket of buckets) {
+      const tile = bucket[layer]
+      if (!tile) continue
+      output.push(tile)
+      appended = true
+      if (output.length >= tileCount) break
+    }
+    if (!appended) break
+    layer += 1
+  }
+  return output
+}
+
+function renderGraphSummaryMarkdown(summary: GraphContextPack['summary'] | undefined): string {
+  if (!summary) return '_(summary unavailable)_'
+  const lines: string[] = []
+  const executive = String(summary.executive || '').trim()
+  if (executive) {
+    lines.push('# Grounded Summary')
+    lines.push('')
+    lines.push(executive)
+  }
+  const keyPoints = Array.isArray(summary.key_points) ? summary.key_points : []
+  if (keyPoints.length > 0) {
+    if (lines.length > 0) lines.push('')
+    lines.push('## Key Points')
+    for (const point of keyPoints) {
+      const claim = String(point?.claim || '').trim()
+      if (!claim) continue
+      const ids = (point?.evidence_ids ?? []).filter(Boolean)
+      lines.push(ids.length > 0 ? `- ${claim} [${ids.join(', ')}]` : `- ${claim}`)
+    }
+  }
+  const gaps = Array.isArray(summary.gaps) ? summary.gaps : []
+  if (gaps.length > 0) {
+    if (lines.length > 0) lines.push('')
+    lines.push('## Gaps')
+    for (const gap of gaps) {
+      const text = String(gap || '').trim()
+      if (text) lines.push(`- ${text}`)
+    }
+  }
+  const out = lines.join('\n').trim()
+  return out || '_(summary unavailable)_'
+}
+
 export function ProjectKnowledgeGraphPanel({
   projectName,
   overviewQuery,
@@ -183,6 +298,83 @@ export function ProjectKnowledgeGraphPanel({
     project_rules: 0,
     comments: 0,
   }
+  const graphPackSnapshot = React.useMemo(() => {
+    const graphContextMarkdown = String(contextPack?.markdown || '')
+    const graphEvidenceJson = evidenceItems.length > 0 ? JSON.stringify(evidenceItems) : '[]'
+    const graphSummaryMarkdown = renderGraphSummaryMarkdown(summary)
+    const graphMetadataText = JSON.stringify({
+      mode: contextPack?.mode || '',
+      focus_entity_type: contextPack?.focus?.entity_type || '',
+      focus_entity_id: contextPack?.focus?.entity_id || '',
+      gaps: contextPack?.gaps ?? [],
+    })
+    const sourceBase: GraphPackSourceUsage[] = [
+      {
+        key: 'graph-context-markdown',
+        label: 'GraphContext.md',
+        color: '#2563eb',
+        chars: graphContextMarkdown.length,
+        lines: countLines(graphContextMarkdown),
+        percent: 0,
+      },
+      {
+        key: 'graph-evidence-json',
+        label: 'GraphEvidence.json',
+        color: '#0ea5e9',
+        chars: graphEvidenceJson.length,
+        lines: countLines(graphEvidenceJson),
+        percent: 0,
+      },
+      {
+        key: 'graph-summary-markdown',
+        label: 'GraphSummary.md',
+        color: '#14b8a6',
+        chars: graphSummaryMarkdown.length,
+        lines: countLines(graphSummaryMarkdown),
+        percent: 0,
+      },
+      {
+        key: 'graph-pack-metadata',
+        label: 'KG metadata (mode/focus/gaps)',
+        color: '#64748b',
+        chars: graphMetadataText.length,
+        lines: countLines(graphMetadataText),
+        percent: 0,
+      },
+    ]
+    const totalChars = sourceBase.reduce((sum, section) => sum + section.chars, 0)
+    const sources = sourceBase
+      .filter((section) => section.chars > 0)
+      .map((section) => ({
+        ...section,
+        percent: totalChars > 0 ? (section.chars / totalChars) * 100 : 0,
+      }))
+    const tileCount = 72
+    const tiles = buildGraphCubeTiles(
+      sources.map((section) => ({
+        key: section.key,
+        label: section.label,
+        color: section.color,
+        value: section.chars,
+      })),
+      tileCount
+    )
+    return {
+      totalChars,
+      approxTokens: estimateTokenCount(totalChars),
+      totalLines: sources.reduce((sum, section) => sum + section.lines, 0),
+      sources,
+      tiles,
+    }
+  }, [
+    contextPack?.focus?.entity_id,
+    contextPack?.focus?.entity_type,
+    contextPack?.gaps,
+    contextPack?.markdown,
+    contextPack?.mode,
+    evidenceItems,
+    summary,
+  ])
 
   const filteredGraph = React.useMemo(() => {
     const nodeIds = new Set(graphNodes.map((node) => String(node.entity_id || '')))
@@ -871,6 +1063,39 @@ export function ProjectKnowledgeGraphPanel({
             <div className="meta">Context pack preview</div>
             <div className="graph-markdown-preview">
               <MarkdownView value={contextPack?.markdown || ''} />
+            </div>
+          </div>
+
+          <div className="graph-context-cube-block" style={{ marginTop: 12 }}>
+            <div className="meta">Knowledge graph pack composition</div>
+            {graphPackSnapshot.tiles.length === 0 ? (
+              <div className="meta" style={{ marginTop: 6 }}>No knowledge graph context has been produced yet.</div>
+            ) : (
+              <div className="graph-context-cube-grid graph-context-cube-grid-entities" role="img" aria-label="Knowledge graph context composition map">
+                {graphPackSnapshot.tiles.map((tile, idx) => (
+                  <span
+                    key={`kg-pack-cube-${idx}-${tile.key}`}
+                    className="graph-context-cube"
+                    style={{ backgroundColor: tile.color }}
+                    title={tile.label}
+                  />
+                ))}
+              </div>
+            )}
+            <div className="meta">
+              ~{graphPackSnapshot.approxTokens.toLocaleString()} tokens · {graphPackSnapshot.totalChars.toLocaleString()} chars · {graphPackSnapshot.totalLines.toLocaleString()} lines
+            </div>
+            <div className="graph-context-legend">
+              {graphPackSnapshot.sources.map((source) => (
+                <div key={`kg-pack-source-${source.key}`} className="graph-context-legend-row">
+                  <span className="graph-context-legend-swatch" style={{ backgroundColor: source.color }} />
+                  <span className="graph-context-legend-label">{source.label}</span>
+                  <span className="meta">
+                    {source.percent.toFixed(1)}% pack · {source.chars.toLocaleString()} chars
+                    {source.lines > 0 ? ` · ${source.lines} lines` : ''}
+                  </span>
+                </div>
+              ))}
             </div>
           </div>
         </>

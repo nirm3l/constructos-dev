@@ -2,6 +2,8 @@ import React from 'react'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import type {
   AttachmentRef,
+  GraphContextPack,
+  GraphProjectOverview,
   Project,
   ProjectRule,
   ProjectRulesPage,
@@ -11,6 +13,7 @@ import type {
   WorkspaceSkillsPage,
 } from '../../types'
 import { AttachmentRefList, ExternalRefEditor, Icon, MarkdownModeToggle } from '../shared/uiHelpers'
+import { ProjectContextSnapshotPanel } from './ProjectContextSnapshotPanel'
 import {
   attachmentRefsToText,
   externalRefsToText,
@@ -50,6 +53,9 @@ export function ProjectsInlineEditor({
   embeddingDefaultModel,
   vectorStoreEnabled,
   contextPackEvidenceTopKDefault,
+  contextLimitTokensDefault,
+  codexChatProjectId,
+  codexChatTurns,
   saveProjectMutation,
   deleteProjectMutation,
   editProjectDescriptionView,
@@ -59,6 +65,8 @@ export function ProjectsInlineEditor({
   setEditProjectDescription,
   projectRules,
   projectSkills,
+  projectGraphOverview,
+  projectGraphContextPack,
   workspaceSkills,
   selectedProjectRuleId,
   setSelectedProjectRuleId,
@@ -111,6 +119,9 @@ export function ProjectsInlineEditor({
   embeddingDefaultModel: string
   vectorStoreEnabled: boolean
   contextPackEvidenceTopKDefault: number
+  contextLimitTokensDefault: number
+  codexChatProjectId: string
+  codexChatTurns: Array<{ role?: string; content?: string }>
   saveProjectMutation: ProjectMutation
   deleteProjectMutation: ProjectMutation
   editProjectDescriptionView: 'write' | 'preview'
@@ -120,6 +131,8 @@ export function ProjectsInlineEditor({
   setEditProjectDescription: React.Dispatch<React.SetStateAction<string>>
   projectRules: { data?: ProjectRulesPage }
   projectSkills: { data?: ProjectSkillsPage; isLoading?: boolean; isFetching?: boolean }
+  projectGraphOverview?: { data?: GraphProjectOverview }
+  projectGraphContextPack?: { data?: GraphContextPack }
   workspaceSkills: { data?: WorkspaceSkillsPage; isLoading?: boolean; isFetching?: boolean }
   selectedProjectRuleId: string | null
   setSelectedProjectRuleId: React.Dispatch<React.SetStateAction<string | null>>
@@ -1128,6 +1141,18 @@ export function ProjectsInlineEditor({
           <div className="meta">Template: Manual project (no template binding)</div>
         )}
       </div>
+      <ProjectContextSnapshotPanel
+        projectId={selectedProject.id || project.id}
+        projectName={selectedProject.name || project.name}
+        projectDescription={String(selectedProject.description || '')}
+        projectRules={projectRules.data?.items ?? []}
+        projectSkills={skillItems}
+        overview={projectGraphOverview?.data}
+        contextPack={projectGraphContextPack?.data}
+        contextLimitTokens={contextLimitTokensDefault > 0 ? contextLimitTokensDefault : undefined}
+        activeChatProjectId={codexChatProjectId}
+        activeChatTurns={codexChatTurns}
+      />
     </div>
   )
 }

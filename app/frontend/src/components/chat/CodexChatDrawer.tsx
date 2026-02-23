@@ -34,6 +34,12 @@ function buildProjectCreationStarter(): string {
 const CHAT_INPUT_MIN_HEIGHT_PX = 64
 const CHAT_INPUT_MAX_HEIGHT_PX = 116
 
+function normalizeMcpLookupKey(value: string): string {
+  return String(value || '').trim().toLowerCase().replace(/_/g, '-')
+}
+
+const CORE_MCP_LOOKUP_KEYS = new Set(['task-management-tools'])
+
 export function CodexChatDrawer({ state }: { state: any }) {
   const fileInputRef = React.useRef<HTMLInputElement | null>(null)
   const inputRef = React.useRef<HTMLTextAreaElement | null>(null)
@@ -112,6 +118,73 @@ export function CodexChatDrawer({ state }: { state: any }) {
     })
     : null
   const hasMessages = state.codexChatTurns.length > 0
+  const availableMcpServers = (() => {
+    if (!Array.isArray(state.bootstrap.data?.agent_chat_available_mcp_servers)) return []
+    const seen = new Set<string>()
+    const out: Array<{
+      name: string
+      display_name: string
+      enabled: boolean
+      disabled_reason: string | null
+      auth_status: string | null
+    }> = []
+    for (const item of state.bootstrap.data.agent_chat_available_mcp_servers) {
+      const name = String(item?.name || '').trim()
+      if (!name) continue
+      const key = normalizeMcpLookupKey(name)
+      if (seen.has(key)) continue
+      seen.add(key)
+      const displayName = String(item?.display_name || '').trim() || name
+      out.push({
+        name,
+        display_name: displayName,
+        enabled: Boolean(item?.enabled),
+        disabled_reason: String(item?.disabled_reason || '').trim() || null,
+        auth_status: String(item?.auth_status || '').trim() || null,
+      })
+    }
+    return out
+  })()
+  const mcpAliasToName = new Map<string, string>()
+  for (const server of availableMcpServers) {
+    mcpAliasToName.set(normalizeMcpLookupKey(server.name), server.name)
+  }
+  const coreMcpServerName = availableMcpServers.find((server) => CORE_MCP_LOOKUP_KEYS.has(normalizeMcpLookupKey(server.name)))?.name || null
+  const selectedMcpServers = (() => {
+    const hasDiscoveredServers = availableMcpServers.length > 0
+    const rawSelection = Array.isArray(state.codexChatMcpServers) ? state.codexChatMcpServers : []
+    const normalizedSelection: string[] = []
+    const seen = new Set<string>()
+    for (const raw of rawSelection) {
+      const clean = String(raw || '').trim()
+      if (!clean) continue
+      const lookupKey = normalizeMcpLookupKey(clean)
+      const canonical = hasDiscoveredServers ? (mcpAliasToName.get(lookupKey) || '') : clean
+      if (!canonical) continue
+      const dedupeKey = normalizeMcpLookupKey(canonical)
+      if (seen.has(dedupeKey)) continue
+      seen.add(dedupeKey)
+      normalizedSelection.push(canonical)
+    }
+    const withCore = [...normalizedSelection]
+    if (coreMcpServerName && !withCore.some((name) => normalizeMcpLookupKey(name) === normalizeMcpLookupKey(coreMcpServerName))) {
+      withCore.unshift(coreMcpServerName)
+    }
+    if (withCore.length > 0) return withCore
+    if (!hasDiscoveredServers) return coreMcpServerName ? [coreMcpServerName] : []
+    const defaultEnabled = availableMcpServers.filter((server) => server.enabled).map((server) => server.name)
+    if (defaultEnabled.length > 0) {
+      if (coreMcpServerName && !defaultEnabled.some((name) => normalizeMcpLookupKey(name) === normalizeMcpLookupKey(coreMcpServerName))) {
+        defaultEnabled.unshift(coreMcpServerName)
+      }
+      return defaultEnabled
+    }
+    const allServers = availableMcpServers.map((server) => server.name)
+    if (coreMcpServerName && !allServers.some((name) => normalizeMcpLookupKey(name) === normalizeMcpLookupKey(coreMcpServerName))) {
+      allServers.unshift(coreMcpServerName)
+    }
+    return allServers
+  })()
   const lastTurnId = state.codexChatTurns.length > 0
     ? state.codexChatTurns[state.codexChatTurns.length - 1]?.id ?? null
     : null
@@ -233,6 +306,26 @@ export function CodexChatDrawer({ state }: { state: any }) {
     state.runAgentChatMutation.isPending &&
     typeof state.cancelAgentChat === 'function'
   )
+  const mcpControlsDisabled = state.runAgentChatMutation.isPending
+
+  const toggleMcpServer = (serverName: string, nextEnabled: boolean) => {
+    if (typeof state.setCodexChatMcpServers !== 'function') return
+    const serverLookupKey = normalizeMcpLookupKey(serverName)
+    if (CORE_MCP_LOOKUP_KEYS.has(serverLookupKey)) return
+    const current = [...selectedMcpServers]
+    const next = nextEnabled
+      ? [...current, serverName]
+      : current.filter((name) => normalizeMcpLookupKey(name) !== serverLookupKey)
+    const deduped: string[] = []
+    const seen = new Set<string>()
+    for (const name of next) {
+      const normalized = normalizeMcpLookupKey(name)
+      if (!normalized || seen.has(normalized)) continue
+      seen.add(normalized)
+      deduped.push(name)
+    }
+    state.setCodexChatMcpServers(deduped)
+  }
 
   const applyProjectCreationStarter = () => {
     if (!canUseProjectCreationStarter) return
@@ -263,6 +356,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
       history,
       sessionId: state.codexChatSessionId,
       projectId: state.codexChatProjectId.trim() ? state.codexChatProjectId : null,
+      mcpServers: selectedMcpServers,
       attachmentRefs: chatAttachmentRefs,
     })
   }
@@ -276,22 +370,59 @@ export function CodexChatDrawer({ state }: { state: any }) {
             <Icon path="M6 6l12 12M18 6 6 18" />
           </button>
         </div>
-        <div className="codex-chat-context">
-          <label className="meta codex-chat-context-label" htmlFor="codex-chat-project-context">Project</label>
-          <select
-            className="codex-chat-context-select"
-            id="codex-chat-project-context"
-            value={state.codexChatProjectId}
-            onChange={(e) => state.selectCodexChatProject(e.target.value)}
-            disabled={state.runAgentChatMutation.isPending}
-          >
-            <option value="">No project</option>
-            {(state.bootstrap.data?.projects ?? []).map((p: any) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
+        <div className="codex-chat-context-top-row">
+          <div className="codex-chat-context">
+            <label className="meta codex-chat-context-label" htmlFor="codex-chat-project-context">Project</label>
+            <select
+              className="codex-chat-context-select"
+              id="codex-chat-project-context"
+              value={state.codexChatProjectId}
+              onChange={(e) => state.selectCodexChatProject(e.target.value)}
+              disabled={state.runAgentChatMutation.isPending}
+            >
+              <option value="">No project</option>
+              {(state.bootstrap.data?.projects ?? []).map((p: any) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="codex-chat-mcp-row">
+            <span className="meta codex-chat-context-label">MCP</span>
+            <div className="codex-chat-mcp-chips">
+              {availableMcpServers.length === 0 && (
+                <span className="meta">No MCP servers</span>
+              )}
+              {availableMcpServers.map((server) => {
+                const serverLookupKey = normalizeMcpLookupKey(server.name)
+                const isCoreServer = CORE_MCP_LOOKUP_KEYS.has(serverLookupKey)
+                const selected = selectedMcpServers.some((name) => normalizeMcpLookupKey(name) === normalizeMcpLookupKey(server.name))
+                const chipDisabled = mcpControlsDisabled || !server.enabled || isCoreServer
+                const titleParts: string[] = []
+                if (isCoreServer) {
+                  titleParts.push('Core MCP server is always enabled in this chat session')
+                } else {
+                  titleParts.push(server.enabled ? `Use ${server.display_name} in this chat session` : `${server.display_name} is disabled`)
+                }
+                if (server.auth_status) titleParts.push(`Auth: ${server.auth_status}`)
+                if (server.disabled_reason) titleParts.push(server.disabled_reason)
+                return (
+                  <button
+                    key={server.name}
+                    type="button"
+                    className={`status-chip tag-filter-chip codex-chat-mcp-chip-btn ${selected ? 'active' : ''}`}
+                    disabled={chipDisabled}
+                    aria-pressed={selected}
+                    title={titleParts.join(' · ')}
+                    onClick={() => toggleMcpServer(server.name, !selected)}
+                  >
+                    {isCoreServer ? 'Core' : server.display_name}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
         </div>
         <div className="codex-chat-session-row">
           <label className="meta codex-chat-session-label" htmlFor="codex-chat-session-select">Session</label>

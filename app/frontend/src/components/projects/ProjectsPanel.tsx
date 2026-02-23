@@ -97,6 +97,8 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
             setEditProjectDescription={state.setEditProjectDescription}
             projectRules={state.projectRules}
             projectSkills={state.projectSkills}
+            projectGraphOverview={state.projectGraphOverview}
+            projectGraphContextPack={state.projectGraphContextPack}
             workspaceSkills={state.workspaceSkills}
             selectedProjectRuleId={state.selectedProjectRuleId}
             setSelectedProjectRuleId={state.setSelectedProjectRuleId}
@@ -134,6 +136,9 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
             embeddingDefaultModel={state.embeddingDefaultModel}
             vectorStoreEnabled={state.vectorStoreEnabled}
             contextPackEvidenceTopKDefault={state.contextPackEvidenceTopKDefault}
+            contextLimitTokensDefault={state.contextLimitTokensDefault}
+            codexChatProjectId={state.codexChatProjectId}
+            codexChatTurns={state.codexChatTurns}
             workspaceId={state.workspaceId}
             userId={state.userId}
             workspaceUsers={state.workspaceUsers}

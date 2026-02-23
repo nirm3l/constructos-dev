@@ -23,6 +23,7 @@ from shared.settings import (
 )
 
 from .executor import execute_task_automation, execute_task_automation_stream
+from .mcp_registry import normalize_chat_mcp_servers as normalize_chat_mcp_servers_registry
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -71,6 +72,13 @@ _TEXT_EXTENSIONS = {
 _MAX_CHAT_ATTACHMENT_FILES = 6
 _MAX_CHAT_ATTACHMENT_CHARS_PER_FILE = 12_000
 _MAX_CHAT_ATTACHMENT_CHARS_TOTAL = 36_000
+
+
+def _normalize_chat_mcp_servers(raw_servers: list[str] | None) -> list[str]:
+    try:
+        return normalize_chat_mcp_servers_registry(raw_servers, strict=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _upload_root() -> Path:
@@ -445,6 +453,7 @@ def agent_chat(
     user: User = Depends(get_current_user),
 ):
     ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    mcp_servers = _normalize_chat_mcp_servers(payload.mcp_servers)
     effective_instruction, _, compact_only = _prepare_chat_instruction(payload=payload, db=db, user=user)
     if compact_only:
         return {
@@ -453,6 +462,7 @@ def agent_chat(
             "summary": effective_instruction,
             "comment": None,
             "session_id": payload.session_id,
+            "codex_session_id": None,
             "usage": None,
         }
 
@@ -468,6 +478,7 @@ def agent_chat(
             project_id=payload.project_id,
             actor_user_id=user.id,
             allow_mutations=bool(payload.allow_mutations),
+            mcp_servers=mcp_servers,
         )
         return {
             "ok": True,
@@ -475,6 +486,7 @@ def agent_chat(
             "summary": outcome.summary,
             "comment": outcome.comment,
             "session_id": payload.session_id,
+            "codex_session_id": outcome.codex_session_id,
             "usage": outcome.usage,
         }
     except TimeoutError:
@@ -484,6 +496,7 @@ def agent_chat(
             "summary": f"Codex timed out after {AGENT_EXECUTOR_TIMEOUT_SECONDS:.0f}s.",
             "comment": "Try a narrower request (e.g. one project at a time) or run again.",
             "session_id": payload.session_id,
+            "codex_session_id": None,
             "usage": None,
         }
     except Exception as exc:
@@ -495,6 +508,7 @@ def agent_chat(
             "summary": "Codex failed to complete the request.",
             "comment": msg[:500],
             "session_id": payload.session_id,
+            "codex_session_id": None,
             "usage": None,
         }
 
@@ -506,6 +520,7 @@ def agent_chat_stream(
     user: User = Depends(get_current_user),
 ):
     ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    mcp_servers = _normalize_chat_mcp_servers(payload.mcp_servers)
     effective_instruction, _, compact_only = _prepare_chat_instruction(payload=payload, db=db, user=user)
     if compact_only:
         compact_response = {
@@ -514,6 +529,7 @@ def agent_chat_stream(
             "summary": effective_instruction,
             "comment": None,
             "session_id": payload.session_id,
+            "codex_session_id": None,
             "usage": None,
         }
 
@@ -542,6 +558,7 @@ def agent_chat_stream(
                     project_id=payload.project_id,
                     actor_user_id=user.id,
                     allow_mutations=bool(payload.allow_mutations),
+                    mcp_servers=mcp_servers,
                     on_event=_on_event,
                 )
                 final_payload = {
@@ -550,6 +567,7 @@ def agent_chat_stream(
                     "summary": outcome.summary,
                     "comment": outcome.comment,
                     "session_id": payload.session_id,
+                    "codex_session_id": outcome.codex_session_id,
                     "usage": outcome.usage,
                 }
                 event_queue.put({"type": "final", "response": final_payload})
@@ -560,6 +578,7 @@ def agent_chat_stream(
                     "summary": f"Codex timed out after {AGENT_EXECUTOR_TIMEOUT_SECONDS:.0f}s.",
                     "comment": "Try a narrower request (e.g. one project at a time) or run again.",
                     "session_id": payload.session_id,
+                    "codex_session_id": None,
                     "usage": None,
                 }
                 event_queue.put({"type": "final", "response": timeout_payload})
@@ -570,6 +589,7 @@ def agent_chat_stream(
                     "summary": "Codex failed to complete the request.",
                     "comment": str(exc)[:500],
                     "session_id": payload.session_id,
+                    "codex_session_id": None,
                     "usage": None,
                 }
                 event_queue.put({"type": "final", "response": error_payload})

@@ -279,3 +279,93 @@ def test_executor_parses_usage_payload():
     assert outcome.usage["cached_input_tokens"] == 9
     assert outcome.usage["output_tokens"] == 7
     assert outcome.usage["context_limit_tokens"] == 4096
+
+
+def test_executor_parses_codex_session_id():
+    from features.agents.executor import _parse_command_outcome
+
+    outcome = _parse_command_outcome(
+        '{"action":"comment","summary":"ok","comment":null,"codex_session_id":"thread-abc-123"}'
+    )
+    assert outcome.summary == "ok"
+    assert outcome.codex_session_id == "thread-abc-123"
+
+
+def test_plain_text_result_uses_first_non_empty_line_for_summary():
+    from features.agents.codex_mcp_adapter import _build_plain_text_result
+
+    payload = _build_plain_text_result("\n\nHello world\n\nSecond line")
+    assert payload["summary"] == "Hello world"
+    assert payload["comment"] == "Hello world\n\nSecond line"
+
+
+def test_plain_text_result_empty_message_uses_empty_assistant_summary():
+    from features.agents.codex_mcp_adapter import EMPTY_ASSISTANT_SUMMARY, _build_plain_text_result
+
+    payload = _build_plain_text_result("")
+    assert payload["summary"] == EMPTY_ASSISTANT_SUMMARY
+    assert payload["comment"] is None
+
+
+def test_extract_message_text_supports_content_blocks():
+    from features.agents.codex_mcp_adapter import _extract_message_text
+
+    item = {
+        "type": "assistant_message",
+        "content": [
+            {"type": "output_text", "text": "Alpha "},
+            {"type": "output_text", "text": "Beta"},
+        ],
+    }
+    assert _extract_message_text(item) == "Alpha Beta"
+
+
+def test_extract_delta_text_supports_nested_delta_payload():
+    from features.agents.codex_mcp_adapter import _extract_delta_text
+
+    params = {
+        "delta": {
+            "type": "output_text_delta",
+            "text": "Partial response",
+        }
+    }
+    assert _extract_delta_text(params) == "Partial response"
+
+
+def test_message_delta_method_recognizes_assistant_event_names():
+    from features.agents.codex_mcp_adapter import _is_message_delta_method
+
+    assert _is_message_delta_method("item/assistantMessage/delta")
+    assert _is_message_delta_method("item/agentMessage/delta")
+    assert not _is_message_delta_method("item/userMessage/delta")
+    assert not _is_message_delta_method("item/systemMessage/delta")
+    assert not _is_message_delta_method("item/toolCall/delta")
+
+
+def test_assistant_message_item_type_filter():
+    from features.agents.codex_mcp_adapter import _is_assistant_message_item_type
+
+    assert _is_assistant_message_item_type("assistant_message")
+    assert _is_assistant_message_item_type("agent_message")
+    assert _is_assistant_message_item_type("assistant-message")
+    assert not _is_assistant_message_item_type("user_message")
+    assert not _is_assistant_message_item_type("system_message")
+
+
+def test_extract_error_message_prefers_message_and_details():
+    from features.agents.codex_mcp_adapter import _extract_error_message
+
+    payload = {
+        "message": "Unauthorized",
+        "additionalDetails": "Missing bearer token",
+    }
+    assert _extract_error_message(payload) == "Unauthorized | Missing bearer token"
+
+
+def test_extract_error_message_supports_additional_details_snake_case():
+    from features.agents.codex_mcp_adapter import _extract_error_message
+
+    payload = {
+        "additional_details": "Only details present",
+    }
+    assert _extract_error_message(payload) == "Only details present"

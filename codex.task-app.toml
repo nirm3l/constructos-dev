@@ -1,3 +1,6 @@
+[mcp_servers.task-management-tools]
+url = "http://mcp-tools:8090/mcp"
+
 [mcp_servers.jira]
 url = "http://jira-mcp:9000/mcp"
 

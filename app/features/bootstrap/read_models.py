@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from features.agents.mcp_registry import list_available_mcp_servers
 from shared.models import (
     Notification,
     Project,
@@ -17,7 +18,12 @@ from shared.models import (
     WorkspaceMember,
 )
 from shared.serializers import load_created_by_map, serialize_notification, to_iso_utc
-from shared.settings import ALLOWED_EMBEDDING_MODELS, CONTEXT_PACK_EVIDENCE_TOP_K, DEFAULT_EMBEDDING_MODEL
+from shared.settings import (
+    AGENT_CHAT_CONTEXT_LIMIT_TOKENS,
+    ALLOWED_EMBEDDING_MODELS,
+    CONTEXT_PACK_EVIDENCE_TOP_K,
+    DEFAULT_EMBEDDING_MODEL,
+)
 from shared.vector_store import normalize_embedding_model, project_embedding_index_status, vector_store_enabled
 
 
@@ -111,6 +117,7 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
         default_embedding_model = embedding_models[0]
     if not embedding_models and default_embedding_model:
         embedding_models = [default_embedding_model]
+    agent_chat_available_mcp_servers = list_available_mcp_servers()
     return {
         "current_user": {
             "id": user.id,
@@ -127,12 +134,16 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
         "embedding_default_model": default_embedding_model,
         "vector_store_enabled": vector_enabled,
         "context_pack_evidence_top_k_default": int(CONTEXT_PACK_EVIDENCE_TOP_K or 10),
+        "agent_chat_context_limit_tokens_default": int(AGENT_CHAT_CONTEXT_LIMIT_TOKENS or 0),
+        "agent_chat_available_mcp_servers": agent_chat_available_mcp_servers,
         # Backward-compatible mirror for older UI bundles reading bootstrap.config.*
         "config": {
             "embedding_allowed_models": embedding_models,
             "embedding_default_model": default_embedding_model,
             "vector_store_enabled": vector_enabled,
             "context_pack_evidence_top_k_default": int(CONTEXT_PACK_EVIDENCE_TOP_K or 10),
+            "agent_chat_context_limit_tokens_default": int(AGENT_CHAT_CONTEXT_LIMIT_TOKENS or 0),
+            "agent_chat_available_mcp_servers": agent_chat_available_mcp_servers,
         },
         "users": [{"id": u.id, "username": u.username, "full_name": u.full_name, "user_type": u.user_type} for u in users],
         "project_members": [

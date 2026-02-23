@@ -15,6 +15,7 @@ IMAGE_TAG="${IMAGE_TAG:-}"
 TASK_APP_IMAGE="${TASK_APP_IMAGE:-}"
 MCP_TOOLS_IMAGE="${MCP_TOOLS_IMAGE:-}"
 MARKETING_SITE_IMAGE="${MARKETING_SITE_IMAGE:-}"
+CODEX_AUTH_FILE="${CODEX_AUTH_FILE:-/home/m4tr1x/.codex/auth.json}"
 
 resolve_deploy_target() {
   if [[ "$DEPLOY_TARGET" != "auto" ]]; then
@@ -99,6 +100,13 @@ TASK_APP_IMAGE=${TASK_APP_IMAGE}
 MCP_TOOLS_IMAGE=${MCP_TOOLS_IMAGE}
 MARKETING_SITE_IMAGE=${MARKETING_SITE_IMAGE}
 EOF
+
+if [[ -f "$CODEX_AUTH_FILE" ]]; then
+  if ! chmod a+r "$CODEX_AUTH_FILE" 2>/dev/null; then
+    echo "Warning: unable to adjust read permissions for $CODEX_AUTH_FILE"
+    echo "Codex chat in task-app may fail if the mounted auth file is not readable by container user."
+  fi
+fi
 
 echo "Deploying version ${APP_VERSION} (${APP_BUILD}) at ${DEPLOYED_AT_UTC}"
 echo "Resolved deploy target: ${TARGET_RESOLVED}"

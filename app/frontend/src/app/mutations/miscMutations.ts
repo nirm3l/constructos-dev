@@ -1,6 +1,7 @@
 import React from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { addComment, deleteComment, markNotificationRead, patchMyPreferences, runAgentChatStream } from '../../api'
+import type { ChatMcpServer } from '../../types'
 
 const ENTITY_ID_SOURCE = '[0-9a-fA-F]{8,}(?:-[0-9a-fA-F]{4,}){0,4}'
 const ENTITY_ID_PATTERN = /([0-9a-fA-F]{8,}(?:-[0-9a-fA-F]{4,}){0,4})/
@@ -135,6 +136,20 @@ export function useMiscMutations(c: any) {
     c.setCodexChatUsage(usage)
   }
 
+  const setChatCodexSessionForSession = (
+    sessionId: string,
+    codexSessionId: string | null | undefined
+  ) => {
+    const normalized = codexSessionId && String(codexSessionId).trim() ? String(codexSessionId).trim() : null
+    if (sessionId && typeof c.setCodexChatCodexSessionIdForSession === 'function') {
+      c.setCodexChatCodexSessionIdForSession(sessionId, normalized)
+      return
+    }
+    if (typeof c.setCodexChatCodexSessionId === 'function') {
+      c.setCodexChatCodexSessionId(normalized)
+    }
+  }
+
   const markReadMutation = useMutation({
     mutationFn: (id: string) => markNotificationRead(c.userId, id),
     onSuccess: async () => {
@@ -181,6 +196,7 @@ export function useMiscMutations(c: any) {
       history: Array<{ role: 'user' | 'assistant'; content: string }>
       projectId: string | null
       sessionId: string
+      mcpServers?: ChatMcpServer[]
       attachmentRefs?: Array<{ path: string; name?: string; mime_type?: string; size_bytes?: number }>
     }) => {
       const sessionId = payload.sessionId || c.codexChatSessionId
@@ -291,6 +307,7 @@ export function useMiscMutations(c: any) {
             instruction: payload.instruction,
             history: payload.history,
             attachment_refs: payload.attachmentRefs || [],
+            mcp_servers: payload.mcpServers,
             allow_mutations: true,
           },
           {
@@ -335,6 +352,7 @@ export function useMiscMutations(c: any) {
     onSuccess: async (result, variables) => {
       const { response, assistantTurnId, assistantCreatedAt, streamedReply, sessionId } = result
       c.setUiError(null)
+      setChatCodexSessionForSession(sessionId, response.codex_session_id ?? null)
       if (response.usage) {
         setChatUsageForSession(sessionId, response.usage)
       }

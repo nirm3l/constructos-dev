@@ -341,6 +341,8 @@ export type BootstrapPayload = {
   embedding_default_model: string
   vector_store_enabled: boolean
   context_pack_evidence_top_k_default: number
+  agent_chat_context_limit_tokens_default?: number
+  agent_chat_available_mcp_servers?: AgentChatMcpServer[]
   users: Array<{ id: string; username: string; full_name: string; user_type: 'human' | 'agent' }>
   project_members: Array<{ project_id: string; user_id: string; role: string }>
   notifications: Notification[]
@@ -642,7 +644,18 @@ export type AgentChatResponse = {
   summary: string
   comment: string | null
   session_id?: string | null
+  codex_session_id?: string | null
   usage?: AgentChatUsage | null
+}
+
+export type ChatMcpServer = string
+
+export type AgentChatMcpServer = {
+  name: string
+  display_name: string
+  enabled: boolean
+  disabled_reason?: string | null
+  auth_status?: string | null
 }
 
 export type AgentChatUsage = {

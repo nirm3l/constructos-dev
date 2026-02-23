@@ -471,6 +471,27 @@ def create_mcp():
             limit=limit,
         )
 
+    @mcp.tool(
+        description=(
+            "Fetch full project chat context (Soul, project rules, project skills, and graph context) "
+            "by project ID or exact project name. Use this before project implementation work, and "
+            "call it again if context becomes stale or incomplete."
+        )
+    )
+    def get_project_chat_context(
+        project_ref: str,
+        auth_token: str | None = None,
+        workspace_id: str | None = None,
+        graph_limit: int = 20,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.get_project_chat_context(
+            project_ref=project_ref,
+            workspace_id=workspace_id,
+            graph_limit=graph_limit,
+            auth_token=auth_token,
+        )
+
     @mcp.tool(description="Search project knowledge using vector retrieval and graph relevance signals.")
     def search_project_knowledge(
         project_id: str,

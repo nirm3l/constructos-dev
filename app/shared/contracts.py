@@ -84,6 +84,7 @@ class AgentChatRun(BaseModel):
     instruction: str = Field(min_length=1, max_length=4000)
     project_id: str | None = None
     session_id: str | None = None
+    mcp_servers: list[str] | None = None
     history: list[dict[str, str]] = Field(default_factory=list)
     attachment_refs: list[AttachmentRef] = Field(default_factory=list)
     allow_mutations: bool = True

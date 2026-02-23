@@ -1,18 +1,63 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
+from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 
+from features.agents.mcp_registry import build_selected_mcp_config_text, normalize_chat_mcp_servers
 from shared.settings import (
     AGENT_CHAT_CONTEXT_LIMIT_TOKENS,
     AGENT_CODEX_MCP_URL,
     AGENT_CODEX_MODEL,
     AGENT_EXECUTOR_TIMEOUT_SECONDS,
 )
+
+EMPTY_ASSISTANT_SUMMARY = "No assistant response content was returned."
+
+
+def _normalize_prompt_mcp_servers(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in value:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        lowered = name.lower()
+        if lowered in seen:
+            continue
+        out.append(name)
+        seen.add(lowered)
+    return out
+
+
+@contextmanager
+def _isolated_codex_home_env(*, mcp_config_text: str):
+    with tempfile.TemporaryDirectory(prefix="codex-home-") as temp_home:
+        temp_home_path = Path(temp_home)
+        codex_dir = temp_home_path / ".codex"
+        codex_dir.mkdir(parents=True, exist_ok=True)
+        config_path = codex_dir / "config.toml"
+        config_path.write_text(str(mcp_config_text or ""), encoding="utf-8")
+
+        source_auth_path = Path.home() / ".codex" / "auth.json"
+        if source_auth_path.exists() and source_auth_path.is_file():
+            try:
+                shutil.copy2(source_auth_path, codex_dir / "auth.json")
+            except Exception:
+                # Authentication can still be resolved by other providers/environment in some setups.
+                pass
+
+        env = os.environ.copy()
+        env["HOME"] = str(temp_home_path)
+        yield env
 
 
 def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
@@ -32,6 +77,8 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     graph_evidence_json = str(ctx.get("graph_evidence_json") or "").strip()
     graph_summary_markdown = str(ctx.get("graph_summary_markdown") or "").strip()
     allow_mutations = bool(ctx.get("allow_mutations", True))
+    mcp_servers = _normalize_prompt_mcp_servers(ctx.get("mcp_servers"))
+    enabled_mcp_servers_text = ", ".join(mcp_servers)
     soul_md = project_description.strip() or "_(empty)_"
     graph_md = graph_context_markdown or "_(knowledge graph unavailable)_"
     graph_evidence = graph_evidence_json or "[]"
@@ -125,6 +172,9 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         f"{graph_summary}\n\n"
         "Guidance:\n"
         f"{context_guidance}"
+        f"- Enabled MCP servers for this run: {enabled_mcp_servers_text}.\n"
+        "- If the user asks to implement/work on a specific project by ID or name (for example 'Implement project <id|name>'), call `get_project_chat_context(project_ref=..., workspace_id=...)` first.\n"
+        "- If `get_project_chat_context` returns ambiguous name matches, ask for a concrete project ID or workspace_id and then call it again.\n"
         "- Treat Soul.md, ProjectRules.md, ProjectSkills.md, GraphContext.md, GraphEvidence.json, and GraphSummary.md as durable project-level context.\n"
         "- ProjectRules.md defines how you should behave within this project.\n"
         "- ProjectSkills.md captures reusable skills configured for this project.\n"
@@ -255,18 +305,120 @@ def _normalize_app_server_usage(token_usage_raw: dict | None) -> dict[str, int] 
     return usage
 
 
+def _truncate_summary(text: str, *, limit: int = 200) -> str:
+    normalized = str(text or "").strip()
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[: max(0, limit - 3)]}..."
+
+
+def _derive_summary_from_text(text: str) -> str:
+    first_non_empty = next((line.strip() for line in str(text or "").splitlines() if line.strip()), "")
+    return _truncate_summary(first_non_empty)
+
+
+def _collect_message_text_parts(value: object, *, max_depth: int = 5) -> list[str]:
+    if max_depth <= 0:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            parts.extend(_collect_message_text_parts(item, max_depth=max_depth - 1))
+        return parts
+    if not isinstance(value, dict):
+        return []
+
+    parts: list[str] = []
+    for key in ("text", "markdown", "value", "output_text"):
+        raw = value.get(key)
+        if isinstance(raw, str) and raw:
+            parts.append(raw)
+    for key in ("delta", "content", "parts", "items", "message"):
+        if key not in value:
+            continue
+        parts.extend(_collect_message_text_parts(value.get(key), max_depth=max_depth - 1))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        if part in seen:
+            continue
+        seen.add(part)
+        deduped.append(part)
+    return deduped
+
+
+def _extract_message_text(item: object) -> str:
+    if isinstance(item, dict):
+        direct_text = item.get("text")
+        if isinstance(direct_text, str) and direct_text.strip():
+            return direct_text.strip()
+        parts = _collect_message_text_parts(item.get("content"))
+        if parts:
+            return "".join(parts).strip()
+    parts = _collect_message_text_parts(item)
+    return "".join(parts).strip()
+
+
+def _extract_delta_text(params: dict[str, object]) -> str:
+    raw_delta = params.get("delta")
+    if isinstance(raw_delta, str):
+        return raw_delta
+    if raw_delta is not None:
+        extracted = _extract_message_text(raw_delta)
+        if extracted:
+            return extracted
+
+    for key in ("text", "value", "output_text"):
+        raw = params.get(key)
+        if isinstance(raw, str):
+            return raw
+    item = params.get("item")
+    if item is not None:
+        extracted_item_text = _extract_message_text(item)
+        if extracted_item_text:
+            return extracted_item_text
+    return ""
+
+
+def _is_message_delta_method(method: str) -> bool:
+    normalized = str(method or "").strip().lower()
+    if not normalized.startswith("item/") or not normalized.endswith("/delta"):
+        return False
+    middle = normalized[len("item/") : -len("/delta")].replace("_", "").replace("-", "")
+    return middle in {"agentmessage", "assistantmessage"}
+
+
+def _is_assistant_message_item_type(item_type: str) -> bool:
+    normalized = str(item_type or "").strip().lower().replace("_", "").replace("-", "")
+    return normalized in {"agentmessage", "assistantmessage"}
+
+
+def _extract_error_message(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    message = str(payload.get("message") or "").strip()
+    additional = str(payload.get("additionalDetails") or payload.get("additional_details") or "").strip()
+    if message and additional:
+        return f"{message} | {additional}"
+    if message:
+        return message
+    if additional:
+        return additional
+    return ""
+
+
 def _build_plain_text_result(message_text: str) -> dict[str, object]:
     text = str(message_text or "").strip()
     if not text:
         return {
             "action": "comment",
-            "summary": "Codex execution completed.",
+            "summary": EMPTY_ASSISTANT_SUMMARY,
             "comment": None,
         }
-    first_non_empty = next((line.strip() for line in text.splitlines() if line.strip()), "")
-    summary = first_non_empty or "Codex execution completed."
-    if len(summary) > 200:
-        summary = f"{summary[:197]}..."
+    summary = _derive_summary_from_text(text) or EMPTY_ASSISTANT_SUMMARY
     return {
         "action": "comment",
         "summary": summary,
@@ -277,19 +429,17 @@ def _build_plain_text_result(message_text: str) -> dict[str, object]:
 def _run_codex_app_server_with_optional_stream(
     *,
     prompt: str,
-    mcp_url: str,
     timeout_seconds: float,
     stream_events: bool,
     model: str | None = None,
     output_schema: dict | None = None,
-) -> tuple[str, dict[str, int] | None]:
+    env: dict[str, str] | None = None,
+) -> tuple[str, dict[str, int] | None, str | None]:
     cmd = [
         "codex",
         "app-server",
         "--listen",
         "stdio://",
-        "-c",
-        f'mcp_servers.task_management_tools.url="{mcp_url}"',
     ]
     proc = subprocess.Popen(
         cmd,
@@ -298,6 +448,7 @@ def _run_codex_app_server_with_optional_stream(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        env=env,
     )
     timed_out = False
     done = threading.Event()
@@ -322,6 +473,9 @@ def _run_codex_app_server_with_optional_stream(
     pending_requests: dict[str, str] = {}
     thread_id = ""
     turn_completed = False
+    turn_failed = False
+    turn_failure_message = ""
+    last_error_message = ""
     usage: dict[str, int] | None = None
     final_message = ""
     delta_parts: list[str] = []
@@ -397,8 +551,8 @@ def _run_codex_app_server_with_optional_stream(
             if stream_events:
                 _emit_stream_event({"type": "status", "message": "Codex started processing the request."})
             continue
-        if method == "item/agentMessage/delta":
-            delta = str(params.get("delta") or "")
+        if _is_message_delta_method(method):
+            delta = _extract_delta_text(params)
             if not delta:
                 continue
             delta_parts.append(delta)
@@ -409,8 +563,8 @@ def _run_codex_app_server_with_optional_stream(
             item = params.get("item") if isinstance(params, dict) else None
             if isinstance(item, dict):
                 item_type = str(item.get("type") or "").strip().lower()
-                if item_type == "agent_message":
-                    text = str(item.get("text") or "").strip()
+                if _is_assistant_message_item_type(item_type):
+                    text = _extract_message_text(item)
                     if text:
                         final_message = text
                 elif item_type == "reasoning" and stream_events:
@@ -421,7 +575,19 @@ def _run_codex_app_server_with_optional_stream(
             if usage_candidate is not None:
                 usage = usage_candidate
             continue
+        if method == "error":
+            error_payload = params.get("error") if isinstance(params.get("error"), dict) else params
+            extracted = _extract_error_message(error_payload)
+            if extracted:
+                last_error_message = extracted
+            continue
         if method == "turn/completed":
+            turn_payload = params.get("turn") if isinstance(params, dict) and isinstance(params.get("turn"), dict) else None
+            turn_status = str((turn_payload or {}).get("status") if isinstance(turn_payload, dict) else "").strip().lower()
+            if turn_status == "failed":
+                turn_failed = True
+                turn_error_payload = (turn_payload or {}).get("error") if isinstance(turn_payload, dict) else None
+                turn_failure_message = _extract_error_message(turn_error_payload) or last_error_message
             turn_completed = True
             break
 
@@ -444,6 +610,9 @@ def _run_codex_app_server_with_optional_stream(
     if not turn_completed:
         err_text = "\n".join(lines).strip()
         raise RuntimeError(f"codex app-server did not emit turn/completed: {err_text[:600]}")
+    if turn_failed:
+        detail = turn_failure_message or "codex turn failed without error details"
+        raise RuntimeError(f"codex app-server turn failed: {detail[:600]}")
 
     if not final_message:
         final_message = "".join(delta_parts).strip()
@@ -453,7 +622,7 @@ def _run_codex_app_server_with_optional_stream(
             _emit_stream_event({"type": "assistant_text", "delta": rendered})
     if stream_events and usage is not None:
         _emit_stream_event({"type": "usage", "usage": usage})
-    return final_message, usage
+    return final_message, usage, (thread_id or None)
 
 
 def _coerce_structured_reply_payload(value: object) -> dict[str, object] | None:
@@ -523,6 +692,7 @@ def _run_codex_json_with_optional_stream(
     command: list[str],
     timeout_seconds: float,
     stream_events: bool,
+    env: dict[str, str] | None = None,
 ) -> str:
     proc = subprocess.Popen(
         command,
@@ -530,6 +700,7 @@ def _run_codex_json_with_optional_stream(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        env=env,
     )
     timed_out = False
     done = threading.Event()
@@ -601,6 +772,14 @@ def main() -> int:
 
     ctx = json.loads(raw)
     mcp_url = AGENT_CODEX_MCP_URL
+    selected_mcp_servers = normalize_chat_mcp_servers(
+        ctx.get("mcp_servers"),
+        strict=False,
+    )
+    mcp_config_text = build_selected_mcp_config_text(
+        selected_servers=selected_mcp_servers,
+        task_management_mcp_url=mcp_url,
+    )
     stream_events = bool(ctx.get("stream_events"))
     stream_plain_text = bool(ctx.get("stream_plain_text"))
     structured_response = not (stream_events and stream_plain_text)
@@ -615,66 +794,79 @@ def main() -> int:
         "required": ["action", "summary", "comment"],
         "additionalProperties": False,
     }
-    if stream_events:
-        final_message, usage = _run_codex_app_server_with_optional_stream(
-            prompt=prompt,
-            mcp_url=mcp_url,
-            timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
-            stream_events=True,
-            model=AGENT_CODEX_MODEL or None,
-            output_schema=schema if structured_response else None,
-        )
-        if structured_response:
-            parsed_payload = _try_parse_structured_reply_text(final_message)
-            if parsed_payload is None:
-                raise RuntimeError("codex app-server returned a non-JSON response while JSON schema was required")
-            out = parsed_payload
-        else:
-            out = _build_plain_text_result(final_message)
-    else:
-        with tempfile.TemporaryDirectory() as td:
-            schema_path = os.path.join(td, "schema.json")
-            output_path = os.path.join(td, "last_message.json")
-            with open(schema_path, "w", encoding="utf-8") as f:
-                json.dump(schema, f)
-
-            cmd = [
-                "codex",
-                "exec",
-                "--skip-git-repo-check",
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--json",
-                "--output-schema",
-                schema_path,
-                "--output-last-message",
-                output_path,
-                "-c",
-                f'mcp_servers.task_management_tools.url="{mcp_url}"',
-            ]
-            if AGENT_CODEX_MODEL:
-                cmd.extend(["-m", AGENT_CODEX_MODEL])
-            cmd.append(prompt)
-
-            stdout = _run_codex_json_with_optional_stream(
-                command=cmd,
+    codex_session_id: str | None = None
+    with _isolated_codex_home_env(mcp_config_text=mcp_config_text) as codex_env:
+        if stream_events:
+            final_message, usage, codex_session_id = _run_codex_app_server_with_optional_stream(
+                prompt=prompt,
                 timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
-                stream_events=False,
+                stream_events=True,
+                model=AGENT_CODEX_MODEL or None,
+                output_schema=schema if structured_response else None,
+                env=codex_env,
             )
-            usage = _extract_turn_usage(stdout or "")
+            if structured_response:
+                parsed_payload = _try_parse_structured_reply_text(final_message)
+                if parsed_payload is None:
+                    raise RuntimeError("codex app-server returned a non-JSON response while JSON schema was required")
+                out = parsed_payload
+            else:
+                out = _build_plain_text_result(final_message)
+        else:
+            with tempfile.TemporaryDirectory() as td:
+                schema_path = os.path.join(td, "schema.json")
+                output_path = os.path.join(td, "last_message.json")
+                with open(schema_path, "w", encoding="utf-8") as f:
+                    json.dump(schema, f)
 
-            with open(output_path, "r", encoding="utf-8") as f:
-                out = json.loads(f.read().strip() or "{}")
+                cmd = [
+                    "codex",
+                    "exec",
+                    "--skip-git-repo-check",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "--json",
+                    "--output-schema",
+                    schema_path,
+                    "--output-last-message",
+                    output_path,
+                ]
+                if AGENT_CODEX_MODEL:
+                    cmd.extend(["-m", AGENT_CODEX_MODEL])
+                cmd.append(prompt)
+
+                stdout = _run_codex_json_with_optional_stream(
+                    command=cmd,
+                    timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
+                    stream_events=False,
+                    env=codex_env,
+                )
+                usage = _extract_turn_usage(stdout or "")
+
+                with open(output_path, "r", encoding="utf-8") as f:
+                    out = json.loads(f.read().strip() or "{}")
 
     action = str(out.get("action", "")).strip().lower()
     summary = str(out.get("summary", "")).strip()
     comment = out.get("comment")
     if action not in {"complete", "comment"}:
         raise RuntimeError("codex adapter received invalid action")
-    if not summary:
-        summary = "Codex execution completed."
     if comment is not None:
         comment = str(comment)
-    print(json.dumps({"action": action, "summary": summary, "comment": comment, "usage": usage}))
+    if not summary and comment:
+        summary = _derive_summary_from_text(comment)
+    if not summary:
+        summary = EMPTY_ASSISTANT_SUMMARY
+    print(
+        json.dumps(
+            {
+                "action": action,
+                "summary": summary,
+                "comment": comment,
+                "usage": usage,
+                "codex_session_id": codex_session_id,
+            }
+        )
+    )
     return 0
 
 

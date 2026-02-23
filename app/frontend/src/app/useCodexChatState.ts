@@ -1,5 +1,5 @@
 import React from 'react'
-import type { AgentChatUsage } from '../types'
+import type { AgentChatUsage, ChatMcpServer } from '../types'
 
 export type ChatRole = 'user' | 'assistant'
 export type ChatTurn = { id: string; role: ChatRole; content: string; createdAt: number }
@@ -10,6 +10,8 @@ export type ChatSession = {
   projectId: string
   turns: ChatTurn[]
   usage: AgentChatUsage | null
+  mcpServers: ChatMcpServer[]
+  codexSessionId: string | null
   createdAt: number
   updatedAt: number
   lastTaskEventAt: number | null
@@ -45,6 +47,21 @@ function normalizeUsage(value: unknown): AgentChatUsage | null {
   if (Number.isFinite(cached) && cached >= 0) normalized.cached_input_tokens = Math.floor(cached)
   if (Number.isFinite(contextLimit) && contextLimit > 0) normalized.context_limit_tokens = Math.floor(contextLimit)
   return normalized
+}
+
+function normalizeMcpServers(value: unknown): ChatMcpServer[] {
+  if (!Array.isArray(value)) return []
+  const out: ChatMcpServer[] = []
+  const seen = new Set<string>()
+  for (const item of value) {
+    const normalized = String(item || '').trim()
+    if (!normalized) continue
+    const key = normalized.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(normalized)
+  }
+  return out
 }
 
 function normalizeTurns(value: unknown): ChatTurn[] {
@@ -100,6 +117,8 @@ function createSession(title: string, projectId = ''): ChatSession {
     projectId,
     turns: [],
     usage: null,
+    mcpServers: [],
+    codexSessionId: null,
     createdAt: now,
     updatedAt: now,
     lastTaskEventAt: null,
@@ -125,6 +144,10 @@ function normalizeSession(value: unknown): ChatSession | null {
   const createdAt = Number.isFinite(createdAtRaw) && createdAtRaw > 0 ? Math.floor(createdAtRaw) : Date.now()
   const updatedAt = Number.isFinite(updatedAtRaw) && updatedAtRaw > 0 ? Math.floor(updatedAtRaw) : createdAt
   const lastTaskEventAtRaw = Number(session.lastTaskEventAt)
+  const codexSessionId =
+    typeof session.codexSessionId === 'string' && session.codexSessionId.trim()
+      ? session.codexSessionId.trim()
+      : null
   return {
     id,
     title: typeof session.title === 'string' && session.title.trim()
@@ -133,6 +156,8 @@ function normalizeSession(value: unknown): ChatSession | null {
     projectId: typeof session.projectId === 'string' ? session.projectId : '',
     turns,
     usage: normalizeUsage(session.usage),
+    mcpServers: normalizeMcpServers(session.mcpServers),
+    codexSessionId,
     createdAt,
     updatedAt,
     lastTaskEventAt:
@@ -262,6 +287,22 @@ export function useCodexChatState() {
     }))
   }, [patchSession])
 
+  const setCodexChatMcpServersForSession = React.useCallback((sessionId: string, servers: ChatMcpServer[]) => {
+    patchSession(sessionId, (session) => ({
+      ...session,
+      mcpServers: normalizeMcpServers(servers),
+      updatedAt: Date.now(),
+    }))
+  }, [patchSession])
+
+  const setCodexChatCodexSessionIdForSession = React.useCallback((sessionId: string, codexSessionId: string | null) => {
+    patchSession(sessionId, (session) => ({
+      ...session,
+      codexSessionId: codexSessionId && codexSessionId.trim() ? codexSessionId.trim() : null,
+      updatedAt: Date.now(),
+    }))
+  }, [patchSession])
+
   const setCodexChatLastTaskEventAtForSession = React.useCallback((sessionId: string, at: number | null) => {
     patchSession(sessionId, (session) => ({
       ...session,
@@ -324,6 +365,8 @@ export function useCodexChatState() {
   const codexChatProjectId = activeSession?.projectId ?? ''
   const codexChatTurns = activeSession?.turns ?? []
   const codexChatUsage = activeSession?.usage ?? null
+  const codexChatMcpServers = normalizeMcpServers(activeSession?.mcpServers)
+  const codexChatCodexSessionId = activeSession?.codexSessionId ?? null
   const codexChatLastTaskEventAt = activeSession?.lastTaskEventAt ?? null
   const codexChatActiveSessionTitle = activeSession?.title ?? ''
   const codexChatProjectSessions = React.useMemo(() => {
@@ -351,6 +394,16 @@ export function useCodexChatState() {
     setCodexChatUsageForSession(codexChatSessionId, usage)
   }, [codexChatSessionId, setCodexChatUsageForSession])
 
+  const setCodexChatMcpServers = React.useCallback((servers: ChatMcpServer[]) => {
+    if (!codexChatSessionId) return
+    setCodexChatMcpServersForSession(codexChatSessionId, servers)
+  }, [codexChatSessionId, setCodexChatMcpServersForSession])
+
+  const setCodexChatCodexSessionId = React.useCallback((codexSessionId: string | null) => {
+    if (!codexChatSessionId) return
+    setCodexChatCodexSessionIdForSession(codexChatSessionId, codexSessionId)
+  }, [codexChatSessionId, setCodexChatCodexSessionIdForSession])
+
   const setCodexChatLastTaskEventAt = React.useCallback((at: number | null) => {
     if (!codexChatSessionId) return
     setCodexChatLastTaskEventAtForSession(codexChatSessionId, at)
@@ -369,6 +422,8 @@ export function useCodexChatState() {
     deleteCodexChatSession,
     codexChatProjectId,
     setCodexChatProjectId,
+    codexChatMcpServers,
+    setCodexChatMcpServers,
     codexChatInstruction,
     setCodexChatInstruction,
     codexChatTurns,
@@ -387,5 +442,9 @@ export function useCodexChatState() {
     codexChatUsage,
     setCodexChatUsage,
     setCodexChatUsageForSession,
+    codexChatCodexSessionId,
+    setCodexChatCodexSessionId,
+    setCodexChatCodexSessionIdForSession,
+    setCodexChatMcpServersForSession,
   }
 }

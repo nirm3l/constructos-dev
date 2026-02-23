@@ -11,6 +11,7 @@ import type {
   LicenseActivationResponse,
   LicenseStatusResponse,
   AgentChatResponse,
+  ChatMcpServer,
   GraphContextPack,
   ProjectKnowledgeSearchResult,
   GraphProjectOverview,
@@ -408,6 +409,7 @@ export const runAgentChat = (
     session_id?: string | null
     history?: Array<{ role: 'user' | 'assistant'; content: string }>
     attachment_refs?: AttachmentRef[]
+    mcp_servers?: ChatMcpServer[]
     allow_mutations?: boolean
   }
 ) =>
@@ -425,6 +427,7 @@ export async function runAgentChatStream(
     session_id?: string | null
     history?: Array<{ role: 'user' | 'assistant'; content: string }>
     attachment_refs?: AttachmentRef[]
+    mcp_servers?: ChatMcpServer[]
     allow_mutations?: boolean
   },
   handlers?: {

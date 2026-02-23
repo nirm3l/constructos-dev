@@ -282,7 +282,30 @@ def test_create_project(tmp_path):
     assert payload['workspace_id'] == ws_id
 
 
-def test_bootstrap_exposes_embedding_runtime_config(tmp_path):
+def test_bootstrap_exposes_embedding_runtime_config(tmp_path, monkeypatch):
+    from features.agents import mcp_registry
+
+    monkeypatch_rows = [
+        {
+            'name': 'task-management-tools',
+            'display_name': 'Task Management Tools',
+            'enabled': True,
+            'disabled_reason': None,
+            'auth_status': None,
+            'config': {'url': 'http://mcp-tools:8090/mcp'},
+        },
+        {
+            'name': 'jira',
+            'display_name': 'Jira',
+            'enabled': True,
+            'disabled_reason': None,
+            'auth_status': 'authorized',
+            'config': {'url': 'http://jira-mcp:9000/mcp'},
+        },
+    ]
+
+    monkeypatch.setattr(mcp_registry, '_get_rows', lambda force_refresh=False: monkeypatch_rows)
+
     client = build_client(tmp_path)
     payload = client.get('/api/bootstrap').json()
 
@@ -292,6 +315,22 @@ def test_bootstrap_exposes_embedding_runtime_config(tmp_path):
     assert payload['embedding_default_model'] in payload['embedding_allowed_models']
     assert isinstance(payload.get('vector_store_enabled'), bool)
     assert isinstance(payload.get('context_pack_evidence_top_k_default'), int)
+    assert payload.get('agent_chat_available_mcp_servers') == [
+        {
+            'name': 'task-management-tools',
+            'display_name': 'Task Management Tools',
+            'enabled': True,
+            'disabled_reason': None,
+            'auth_status': None,
+        },
+        {
+            'name': 'jira',
+            'display_name': 'Jira',
+            'enabled': True,
+            'disabled_reason': None,
+            'auth_status': 'authorized',
+        },
+    ]
 
 
 def test_project_embedding_config_and_index_status_roundtrip(tmp_path):
@@ -1878,6 +1917,106 @@ def test_agent_service_search_project_knowledge(tmp_path, monkeypatch):
     assert payload['items'][0]['entity_type'] == 'Task'
 
 
+def test_agent_service_get_project_chat_context_by_id(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(
+        svc_module,
+        "build_graph_context_pack",
+        lambda **_: {
+            "markdown": "## Graph\nTask A IMPLEMENTS Spec B",
+            "evidence": [{"evidence_id": "E1", "claim": "Task A implements Spec B"}],
+            "summary": {
+                "executive": "Graph summary",
+                "key_points": [{"claim": "Task A implements Spec B", "evidence_ids": ["E1"]}],
+            },
+        },
+    )
+
+    service = AgentTaskService()
+    payload = service.get_project_chat_context(
+        project_ref=project_id,
+        workspace_id=ws_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert payload['project_id'] == project_id
+    assert payload['resolved_by'] == 'id'
+    assert payload['workspace_id'] == ws_id
+    assert 'Soul.md' in payload['context_pack_markdown']
+    assert 'ProjectRules.md' in payload['context_pack_markdown']
+    assert 'ProjectSkills.md' in payload['context_pack_markdown']
+    assert 'Task A IMPLEMENTS Spec B' in payload['context_pack']['graph_context_md']
+    assert any('get_project_chat_context' in item for item in payload['refresh_policy'])
+
+
+def test_agent_service_get_project_chat_context_by_name(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project = client.post('/api/projects', json={'workspace_id': ws_id, 'name': 'Context By Name Project'}).json()
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(
+        svc_module,
+        "build_graph_context_pack",
+        lambda **_: {"markdown": "", "evidence": [], "summary": None},
+    )
+
+    service = AgentTaskService()
+    payload = service.get_project_chat_context(
+        project_ref=project['name'],
+        workspace_id=ws_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert payload['project_id'] == project['id']
+    assert payload['resolved_by'] == 'name'
+    assert payload['project_name'] == project['name']
+
+
+def test_agent_service_get_project_chat_context_rejects_ambiguous_name(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    user_id = bootstrap['current_user']['id']
+    shared_name = 'Duplicate Context Project'
+    first = client.post('/api/projects', json={'workspace_id': ws_id, 'name': shared_name}).json()
+
+    from uuid import uuid4
+    from shared.core import SessionLocal, Workspace, WorkspaceMember
+    with SessionLocal() as db:
+        second_workspace_id = str(uuid4())
+        db.add(Workspace(id=second_workspace_id, name='Second Workspace', type='team'))
+        db.add(WorkspaceMember(workspace_id=second_workspace_id, user_id=user_id, role='Owner'))
+        db.commit()
+    second = client.post('/api/projects', json={'workspace_id': second_workspace_id, 'name': shared_name}).json()
+    assert first['id'] != second['id']
+
+    from fastapi import HTTPException
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id, second_workspace_id})
+    service = AgentTaskService()
+    try:
+        service.get_project_chat_context(
+            project_ref=shared_name,
+            workspace_id=None,
+            auth_token=svc_module.MCP_AUTH_TOKEN or None,
+        )
+        assert False, 'Expected HTTPException for ambiguous project name'
+    except HTTPException as exc:
+        assert exc.status_code == 409
+        assert 'multiple projects match' in str(exc.detail).lower()
+
+
 def test_workspace_activity_cursor_read_model_returns_new_rows(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -1916,6 +2055,146 @@ def test_agents_chat_endpoint_returns_executor_response(tmp_path):
     assert payload['action'] in {'complete', 'comment'}
     assert isinstance(payload['summary'], str)
     assert payload['session_id'] == 'test-session-1'
+
+
+def test_agents_chat_endpoint_returns_codex_session_id_when_available(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    monkeypatch.setattr(
+        agents_api,
+        'execute_task_automation',
+        lambda **_: AutomationOutcome(
+            action='comment',
+            summary='ok',
+            comment=None,
+            usage=None,
+            codex_session_id='thread-123',
+        ),
+    )
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Return session id',
+            'session_id': 'test-session-2',
+        },
+    )
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload['ok'] is True
+    assert payload['codex_session_id'] == 'thread-123'
+
+
+def test_agents_chat_endpoint_normalizes_selected_mcp_servers(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents import mcp_registry
+    from features.agents.executor import AutomationOutcome
+
+    captured: dict[str, object] = {}
+
+    def _fake_execute_task_automation(**kwargs):
+        captured.update(kwargs)
+        return AutomationOutcome(action='comment', summary='ok', comment=None, usage=None)
+
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+    monkeypatch.setattr(
+        mcp_registry,
+        '_get_rows',
+        lambda force_refresh=False: [
+            {
+                'name': 'task-management-tools',
+                'display_name': 'Task Management Tools',
+                'enabled': True,
+                'disabled_reason': None,
+                'auth_status': None,
+                'config': {'url': 'http://mcp-tools:8090/mcp'},
+            },
+            {
+                'name': 'jira',
+                'display_name': 'Jira',
+                'enabled': True,
+                'disabled_reason': None,
+                'auth_status': None,
+                'config': {'url': 'http://jira-mcp:9000/mcp'},
+            },
+            {
+                'name': 'github',
+                'display_name': 'GitHub',
+                'enabled': True,
+                'disabled_reason': None,
+                'auth_status': None,
+                'config': {'url': 'https://api.githubcopilot.com/mcp/'},
+            },
+        ],
+    )
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Use selected MCP servers',
+            'mcp_servers': ['jira', 'github', 'jira'],
+        },
+    )
+    assert res.status_code == 200
+    assert captured['mcp_servers'] == ['task-management-tools', 'jira', 'github']
+
+
+def test_agents_chat_endpoint_rejects_invalid_mcp_server(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    from features.agents import mcp_registry
+
+    monkeypatch.setattr(
+        mcp_registry,
+        '_get_rows',
+        lambda force_refresh=False: [
+            {
+                'name': 'jira',
+                'display_name': 'Jira',
+                'enabled': True,
+                'disabled_reason': None,
+                'auth_status': None,
+                'config': {'url': 'http://jira-mcp:9000/mcp'},
+            },
+            {
+                'name': 'github',
+                'display_name': 'GitHub',
+                'enabled': True,
+                'disabled_reason': None,
+                'auth_status': None,
+                'config': {'url': 'https://api.githubcopilot.com/mcp/'},
+            },
+        ],
+    )
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Invalid MCP server',
+            'mcp_servers': ['invalid-server'],
+        },
+    )
+    assert res.status_code == 400
+    assert 'unsupported mcp server' in res.text.lower()
 
 
 def test_agents_chat_endpoint_includes_text_attachment_context(tmp_path, monkeypatch):

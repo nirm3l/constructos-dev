@@ -186,6 +186,7 @@ export function useAppActions(c: any) {
       }
     })
     await c.qc.invalidateQueries({ queryKey: ['bootstrap', c.userId] })
+    await c.qc.invalidateQueries({ queryKey: ['project-graph-context-pack', c.userId, c.selectedProjectId] })
   }, [
     c.editProjectAttachmentRefsText,
     c.editProjectCustomStatusesText,
