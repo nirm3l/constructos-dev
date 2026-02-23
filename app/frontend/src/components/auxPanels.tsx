@@ -1325,6 +1325,7 @@ export function TaskResultsPanel({
   specificationNames,
   onOpenSpecification,
   onOpen,
+  onTagClick,
   onRestore,
   onReopen,
   onComplete,
@@ -1336,6 +1337,7 @@ export function TaskResultsPanel({
   specificationNames: Record<string, string>
   onOpenSpecification: (specificationId: string, projectId: string) => void
   onOpen: (taskId: string) => void
+  onTagClick?: (tag: string) => void
   onRestore: (taskId: string) => void
   onReopen: (taskId: string) => void
   onComplete: (taskId: string) => void
@@ -1350,6 +1352,7 @@ export function TaskResultsPanel({
             task={task}
             onOpen={onOpen}
             onOpenSpecification={onOpenSpecification}
+            onTagClick={onTagClick}
             onRestore={onRestore}
             onReopen={onReopen}
             onComplete={onComplete}
@@ -1374,6 +1377,9 @@ export function GlobalSearchResultsPanel({
   specificationNames,
   onOpenSpecification,
   onOpenTask,
+  onTaskTagClick,
+  onNoteTagClick,
+  onSpecificationTagClick,
   onRestoreTask,
   onReopenTask,
   onCompleteTask,
@@ -1389,6 +1395,9 @@ export function GlobalSearchResultsPanel({
   specificationNames: Record<string, string>
   onOpenSpecification: (specificationId: string, projectId: string) => void
   onOpenTask: (taskId: string) => void
+  onTaskTagClick: (tag: string) => void
+  onNoteTagClick: (tag: string) => void
+  onSpecificationTagClick: (tag: string) => void
   onRestoreTask: (taskId: string) => void
   onReopenTask: (taskId: string) => void
   onCompleteTask: (taskId: string) => void
@@ -1408,6 +1417,7 @@ export function GlobalSearchResultsPanel({
                 task={task}
                 onOpen={onOpenTask}
                 onOpenSpecification={onOpenSpecification}
+                onTagClick={onTaskTagClick}
                 onRestore={onRestoreTask}
                 onReopen={onReopenTask}
                 onComplete={onCompleteTask}
@@ -1438,9 +1448,12 @@ export function GlobalSearchResultsPanel({
                 {(note.tags ?? []).length > 0 && (
                   <div className="note-tags" style={{ marginTop: 8 }}>
                     {(note.tags ?? []).map((tag) => (
-                      <span
+                      <button
                         key={`${note.id}-${tag}`}
-                        className="tag-mini"
+                        type="button"
+                        className="tag-mini tag-clickable"
+                        onClick={() => onNoteTagClick(tag)}
+                        title={`Filter by tag: ${tag}`}
                         style={{
                           backgroundColor: `hsl(${tagHue(tag)}, 70%, 92%)`,
                           borderColor: `hsl(${tagHue(tag)}, 70%, 78%)`,
@@ -1448,7 +1461,7 @@ export function GlobalSearchResultsPanel({
                         }}
                       >
                         #{tag}
-                      </span>
+                      </button>
                     ))}
                   </div>
                 )}
@@ -1491,9 +1504,12 @@ export function GlobalSearchResultsPanel({
                 {(specification.tags ?? []).length > 0 && (
                   <div className="task-tags" style={{ marginTop: 8 }}>
                     {(specification.tags ?? []).map((tag) => (
-                      <span
+                      <button
                         key={`${specification.id}-${tag}`}
-                        className="tag-mini"
+                        type="button"
+                        className="tag-mini tag-clickable"
+                        onClick={() => onSpecificationTagClick(tag)}
+                        title={`Filter by tag: ${tag}`}
                         style={{
                           backgroundColor: `hsl(${tagHue(tag)}, 70%, 92%)`,
                           borderColor: `hsl(${tagHue(tag)}, 70%, 78%)`,
@@ -1501,7 +1517,7 @@ export function GlobalSearchResultsPanel({
                         }}
                       >
                         #{tag}
-                      </span>
+                      </button>
                     ))}
                   </div>
                 )}

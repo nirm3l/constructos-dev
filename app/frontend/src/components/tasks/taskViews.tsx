@@ -44,6 +44,7 @@ export function TaskListItem({
   task,
   onOpen,
   onOpenSpecification,
+  onTagClick,
   onRestore,
   onReopen,
   onComplete,
@@ -54,6 +55,7 @@ export function TaskListItem({
   task: Task
   onOpen: (taskId: string) => void
   onOpenSpecification?: (specificationId: string, projectId: string) => void
+  onTagClick?: (tag: string) => void
   onRestore: (taskId: string) => void
   onReopen: (taskId: string) => void
   onComplete: (taskId: string) => void
@@ -101,9 +103,15 @@ export function TaskListItem({
         {(task.labels ?? []).length > 0 && (
           <div className="task-tags">
             {(task.labels ?? []).map((t) => (
-              <span
+              <button
                 key={t}
-                className="tag-mini"
+                type="button"
+                className="tag-mini tag-clickable"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onTagClick?.(t)
+                }}
+                title={`Filter by tag: ${t}`}
                 style={{
                   backgroundColor: `hsl(${tagHue(t)}, 70%, 92%)`,
                   borderColor: `hsl(${tagHue(t)}, 70%, 78%)`,
@@ -111,7 +119,7 @@ export function TaskListItem({
                 }}
               >
                 {t}
-              </span>
+              </button>
             ))}
           </div>
         )}

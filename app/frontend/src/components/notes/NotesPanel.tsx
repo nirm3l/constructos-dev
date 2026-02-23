@@ -235,9 +235,15 @@ export function NotesPanel({
         {(n.tags ?? []).length > 0 && (
           <div className="note-tags">
             {(n.tags ?? []).map((t) => (
-              <span
+              <button
                 key={t}
-                className="tag-mini"
+                type="button"
+                className="tag-mini tag-clickable"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  state.toggleNoteFilterTag(t)
+                }}
+                title={`Filter by tag: ${t}`}
                 style={{
                   backgroundColor: `hsl(${state.tagHue(t)}, 70%, 92%)`,
                   borderColor: `hsl(${state.tagHue(t)}, 70%, 78%)`,
@@ -245,7 +251,7 @@ export function NotesPanel({
                 }}
               >
                 {t}
-              </span>
+              </button>
             ))}
           </div>
         )}

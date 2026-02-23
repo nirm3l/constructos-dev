@@ -22,8 +22,6 @@ type BoardGroupSection = {
   managed: boolean
 }
 
-const ALL_TASKS_KEY = '__all_tasks__'
-
 function formatBoardScheduleTrigger(iso: string | null | undefined): string {
   if (!iso) return 'At: not set'
   const date = new Date(iso)
@@ -52,6 +50,7 @@ type BoardTaskCardProps = {
   status: string
   statuses: string[]
   targetGroupId: string | null
+  onTagClick: (tag: string) => void
   onOpenTaskEditor: (taskId: string) => void
   onMoveTaskStatus: (taskId: string, nextStatus: string, nextTaskGroupId?: string | null) => void
   onDragStart: (e: React.DragEvent<HTMLDivElement>, taskId: string) => void
@@ -63,6 +62,7 @@ function BoardTaskCard({
   status,
   statuses,
   targetGroupId,
+  onTagClick,
   onOpenTaskEditor,
   onMoveTaskStatus,
   onDragStart,
@@ -101,9 +101,15 @@ function BoardTaskCard({
       {(task.labels ?? []).length > 0 && (
         <div className="task-tags">
           {(task.labels ?? []).map((tag) => (
-            <span
+            <button
               key={`${task.id}-${tag}`}
-              className="tag-mini"
+              type="button"
+              className="tag-mini tag-clickable"
+              onClick={(event) => {
+                event.stopPropagation()
+                onTagClick(tag)
+              }}
+              title={`Filter by tag: ${tag}`}
               style={{
                 backgroundColor: `hsl(${tagHue(tag)}, 70%, 92%)`,
                 borderColor: `hsl(${tagHue(tag)}, 70%, 78%)`,
@@ -111,7 +117,7 @@ function BoardTaskCard({
               }}
             >
               #{tag}
-            </span>
+            </button>
           ))}
         </div>
       )}
@@ -192,8 +198,8 @@ export function TasksPanel({
   }, [tasks, selectedGroupFilter])
 
   const ungroupedTasks = React.useMemo(
-    () => tasks.filter((task) => !task.task_group_id),
-    [tasks]
+    () => filteredTasks.filter((task) => !task.task_group_id),
+    [filteredTasks]
   )
 
   const boardLanes = React.useMemo(() => {
@@ -270,16 +276,7 @@ export function TasksPanel({
   }, [])
 
   const taskSections = React.useMemo<TaskSection[]>(() => {
-    if (taskGroups.length === 0) {
-      return [{
-        key: ALL_TASKS_KEY,
-        groupId: null,
-        name: 'All tasks',
-        color: null,
-        tasks: filteredTasks,
-        managed: false,
-      }]
-    }
+    if (taskGroups.length === 0) return []
 
     const sourceGroups = selectedGroupFilter
       ? taskGroups.filter((group) => group.id === selectedGroupFilter)
@@ -485,6 +482,7 @@ export function TasksPanel({
                                 status={status}
                                 statuses={boardData.statuses}
                                 targetGroupId={null}
+                                onTagClick={toggleSearchTag}
                                 onOpenTaskEditor={onOpenTaskEditor}
                                 onMoveTaskStatus={onMoveTaskStatus}
                                 onDragStart={onBoardCardDragStart}
@@ -592,6 +590,7 @@ export function TasksPanel({
                                   status={status}
                                   statuses={boardData.statuses}
                                   targetGroupId={group.groupId}
+                                  onTagClick={toggleSearchTag}
                                   onOpenTaskEditor={onOpenTaskEditor}
                                   onMoveTaskStatus={onMoveTaskStatus}
                                   onDragStart={onBoardCardDragStart}
@@ -643,6 +642,7 @@ export function TasksPanel({
                               status={status}
                               statuses={boardData.statuses}
                               targetGroupId={null}
+                              onTagClick={toggleSearchTag}
                               onOpenTaskEditor={onOpenTaskEditor}
                               onMoveTaskStatus={onMoveTaskStatus}
                               onDragStart={onBoardCardDragStart}
@@ -665,40 +665,59 @@ export function TasksPanel({
 
       {projectsMode === 'list' && (
         <div className="task-list tasks-list" style={{ marginTop: 12 }}>
-          {hasGroups && ungroupedTasks.length > 0 && (
-            <div
-              className="task-list-dropzone"
-              style={dropTargetKey === 'list:plain' ? { outline: '2px dashed rgba(59, 130, 246, 0.55)', borderRadius: 10, padding: 6, marginBottom: 10 } : { marginBottom: 10 }}
-              onDragOver={(event) => {
-                event.preventDefault()
-                maybeAutoScrollWhileDragging(event)
-                setDropTargetKey('list:plain')
-              }}
-              onDragLeave={() => {
-                setDropTargetKey((prev) => (prev === 'list:plain' ? null : prev))
-              }}
-              onDrop={(event) => onListSectionDrop(event, null)}
-            >
-              {ungroupedTasks.map((task) => (
-                <div
-                  key={task.id}
-                  draggable
-                  onDragStart={(event) => onBoardCardDragStart(event, task.id)}
-                  onDragEnd={onBoardCardDragEnd}
-                >
+          {ungroupedTasks.length > 0 && (
+            hasGroups ? (
+              <div
+                className="task-list-dropzone"
+                style={dropTargetKey === 'list:plain' ? { outline: '2px dashed rgba(59, 130, 246, 0.55)', borderRadius: 10, padding: 6, marginBottom: 10 } : { marginBottom: 10 }}
+                onDragOver={(event) => {
+                  event.preventDefault()
+                  maybeAutoScrollWhileDragging(event)
+                  setDropTargetKey('list:plain')
+                }}
+                onDragLeave={() => {
+                  setDropTargetKey((prev) => (prev === 'list:plain' ? null : prev))
+                }}
+                onDrop={(event) => onListSectionDrop(event, null)}
+              >
+                {ungroupedTasks.map((task) => (
+                  <div
+                    key={task.id}
+                    draggable
+                    onDragStart={(event) => onBoardCardDragStart(event, task.id)}
+                    onDragEnd={onBoardCardDragEnd}
+                  >
+                    <TaskListItem
+                      task={task}
+                      onOpen={onOpenTaskEditor}
+                      onOpenSpecification={onOpenSpecification}
+                      onTagClick={toggleSearchTag}
+                      onRestore={onRestoreTask}
+                      onReopen={onReopenTask}
+                      onComplete={onCompleteTask}
+                      specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
+                    />
+                  </div>
+                ))}
+                {ungroupedTasks.length === 0 && <div className="meta">Drop task here</div>}
+              </div>
+            ) : (
+              <div style={{ marginBottom: 10 }}>
+                {ungroupedTasks.map((task) => (
                   <TaskListItem
+                    key={task.id}
                     task={task}
                     onOpen={onOpenTaskEditor}
                     onOpenSpecification={onOpenSpecification}
+                    onTagClick={toggleSearchTag}
                     onRestore={onRestoreTask}
                     onReopen={onReopenTask}
                     onComplete={onCompleteTask}
                     specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
                   />
-                </div>
-              ))}
-              {ungroupedTasks.length === 0 && <div className="meta">Drop task here</div>}
-            </div>
+                ))}
+              </div>
+            )
           )}
           {taskSections.map((section) => {
             const collapsed = Boolean(collapsedSectionMap[section.key])
@@ -804,6 +823,7 @@ export function TasksPanel({
                           task={task}
                           onOpen={onOpenTaskEditor}
                           onOpenSpecification={onOpenSpecification}
+                          onTagClick={toggleSearchTag}
                           onRestore={onRestoreTask}
                           onReopen={onReopenTask}
                           onComplete={onCompleteTask}
@@ -822,7 +842,7 @@ export function TasksPanel({
             )
           })}
 
-          {taskSections.length === 0 && (!hasGroups || ungroupedTasks.length === 0) && (
+          {filteredTasks.length === 0 && (
             <div className="notice" style={{ marginTop: 10 }}>No tasks in this project.</div>
           )}
         </div>

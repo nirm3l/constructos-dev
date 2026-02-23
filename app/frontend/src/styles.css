@@ -1555,6 +1555,13 @@ button:disabled {
   font-weight: 700;
 }
 
+.tag-clickable {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
 .tag-bar {
   display: flex;
   align-items: center;

@@ -440,6 +440,18 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           specificationNames={state.specificationNameMap}
           onOpenSpecification={state.openSpecification}
           onOpenTask={state.openTaskEditor}
+          onTaskTagClick={(tag) => {
+            state.toggleSearchTag(tag)
+            state.setTab('tasks')
+          }}
+          onNoteTagClick={(tag) => {
+            state.toggleNoteFilterTag(tag)
+            state.setTab('notes')
+          }}
+          onSpecificationTagClick={(tag) => {
+            state.toggleSpecificationFilterTag(tag)
+            state.setTab('specifications')
+          }}
           onRestoreTask={(taskId) => state.restoreTaskMutation.mutate(taskId)}
           onReopenTask={(taskId) => state.reopenTaskMutation.mutate(taskId)}
           onCompleteTask={(taskId) => state.completeTaskMutation.mutate(taskId)}

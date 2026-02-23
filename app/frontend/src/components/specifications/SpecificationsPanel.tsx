@@ -210,9 +210,15 @@ export function SpecificationsPanel({ state }: { state: any }) {
                 {(specification.tags ?? []).length > 0 && (
                   <div className="task-tags" style={{ marginTop: 8 }}>
                     {(specification.tags ?? []).map((tag) => (
-                      <span
+                      <button
                         key={`${specification.id}-${tag}`}
-                        className="tag-mini"
+                        type="button"
+                        className="tag-mini tag-clickable"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          state.toggleSpecificationFilterTag(tag)
+                        }}
+                        title={`Filter by tag: ${tag}`}
                         style={{
                           backgroundColor: `hsl(${state.tagHue(tag)}, 70%, 92%)`,
                           borderColor: `hsl(${state.tagHue(tag)}, 70%, 78%)`,
@@ -220,7 +226,7 @@ export function SpecificationsPanel({ state }: { state: any }) {
                         }}
                       >
                         #{tag}
-                      </span>
+                      </button>
                     ))}
                   </div>
                 )}
