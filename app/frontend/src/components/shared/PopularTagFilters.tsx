@@ -35,21 +35,17 @@ export function PopularTagFilters({
 
   return (
     <>
-      {visibleTags.map((tag) => {
-        const usageCount = getTagUsage(tag)
-        return (
-          <button
-            key={`${idPrefix}-${tag}`}
-            className={`status-chip tag-filter-chip ${selectedTags.includes(tag.toLowerCase()) ? 'active' : ''}`}
-            onClick={() => onToggleTag(tag)}
-            aria-pressed={selectedTags.includes(tag.toLowerCase())}
-            title={usageCount > 0 ? `Used in ${usageCount} items` : 'Tag'}
-          >
-            <span>#{tag}</span>
-            {usageCount > 0 && <span className="tag-filter-count">{usageCount}</span>}
-          </button>
-        )
-      })}
+      {visibleTags.map((tag) => (
+        <button
+          key={`${idPrefix}-${tag}`}
+          className={`status-chip tag-filter-chip ${selectedTags.includes(tag.toLowerCase()) ? 'active' : ''}`}
+          onClick={() => onToggleTag(tag)}
+          aria-pressed={selectedTags.includes(tag.toLowerCase())}
+          title="Tag"
+        >
+          <span>#{tag}</span>
+        </button>
+      ))}
 
       {!showAll && remainingCount > 0 && (
         <button
@@ -58,7 +54,7 @@ export function PopularTagFilters({
           onClick={() => setShowAll(true)}
           aria-label={`Show ${remainingCount} more tags`}
         >
-          +{remainingCount} more
+          More
         </button>
       )}
 
