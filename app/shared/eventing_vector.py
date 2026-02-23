@@ -6,12 +6,20 @@ from typing import Any
 
 from sqlalchemy import select
 
+from features.chat.domain import (
+    EVENT_ASSISTANT_MESSAGE_APPENDED as CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_APPENDED,
+    EVENT_ASSISTANT_MESSAGE_UPDATED as CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_UPDATED,
+    EVENT_ATTACHMENT_LINKED as CHAT_SESSION_EVENT_ATTACHMENT_LINKED,
+    EVENT_MESSAGE_DELETED as CHAT_SESSION_EVENT_MESSAGE_DELETED,
+    EVENT_USER_MESSAGE_APPENDED as CHAT_SESSION_EVENT_USER_MESSAGE_APPENDED,
+)
 from features.projects.domain import (
     EVENT_CREATED as PROJECT_EVENT_CREATED,
     EVENT_DELETED as PROJECT_EVENT_DELETED,
     EVENT_UPDATED as PROJECT_EVENT_UPDATED,
 )
 
+from .chat_indexing import project_chat_indexing_policy
 from .contracts import EventEnvelope
 from .eventing_rebuild import rebuild_state
 from .eventing_store import get_kurrent_client
@@ -148,6 +156,78 @@ def _emit_project_index_activity(
     enqueue_realtime_channel(db, f"workspace:{workspace_id}")
 
 
+def _load_project_chat_policy(db, *, project_id: str):
+    from .models import Project
+
+    project = db.get(Project, project_id)
+    if project is None or bool(project.is_deleted):
+        return None, None
+    policy = project_chat_indexing_policy(
+        chat_index_mode=getattr(project, "chat_index_mode", None),
+        chat_attachment_ingestion_mode=getattr(project, "chat_attachment_ingestion_mode", None),
+    )
+    return project, policy
+
+
+def _index_chat_message_state(db, *, message_id: str) -> None:
+    from .models import ChatMessage
+
+    message = db.get(ChatMessage, message_id)
+    if message is None:
+        return
+    project_id = str(message.project_id or "").strip()
+    if not project_id:
+        return
+    _, policy = _load_project_chat_policy(db, project_id=project_id)
+    if policy is None or not policy.vector_enabled:
+        return
+    index_entity_state(
+        db,
+        entity_type="ChatMessage",
+        entity_id=message.id,
+        state={
+            "workspace_id": message.workspace_id,
+            "project_id": message.project_id,
+            "role": message.role or "",
+            "content": message.content or "",
+            "is_deleted": bool(message.is_deleted),
+            "updated_at": message.updated_at,
+        },
+    )
+
+
+def _index_chat_attachment_state(db, *, attachment_id: str) -> None:
+    from .models import ChatAttachment
+
+    attachment = db.get(ChatAttachment, attachment_id)
+    if attachment is None:
+        return
+    project_id = str(attachment.project_id or "").strip()
+    if not project_id:
+        return
+    _, policy = _load_project_chat_policy(db, project_id=project_id)
+    if policy is None or not policy.vector_enabled:
+        return
+    index_entity_state(
+        db,
+        entity_type="ChatAttachment",
+        entity_id=attachment.id,
+        state={
+            "workspace_id": attachment.workspace_id,
+            "project_id": attachment.project_id,
+            "path": attachment.path or "",
+            "name": attachment.name or "",
+            "mime_type": attachment.mime_type or "",
+            "size_bytes": attachment.size_bytes,
+            "extraction_status": attachment.extraction_status or "pending",
+            "extracted_text": attachment.extracted_text or "",
+            "chat_attachment_ingestion_mode": policy.attachment_ingestion_mode,
+            "is_deleted": bool(attachment.is_deleted),
+            "updated_at": attachment.updated_at,
+        },
+    )
+
+
 def _project_vector_event(db, ev: EventEnvelope) -> None:
     if ev.event_type == PROJECT_EVENT_DELETED:
         purge_project_chunks(db, project_id=ev.aggregate_id)
@@ -158,7 +238,12 @@ def _project_vector_event(db, ev: EventEnvelope) -> None:
         should_reindex = False
         if ev.event_type == PROJECT_EVENT_CREATED and bool(payload.get("embedding_enabled", False)):
             should_reindex = True
-        if "embedding_enabled" in payload or "embedding_model" in payload:
+        if (
+            "embedding_enabled" in payload
+            or "embedding_model" in payload
+            or "chat_index_mode" in payload
+            or "chat_attachment_ingestion_mode" in payload
+        ):
             should_reindex = True
         if should_reindex:
             indexed_chunks = maybe_reindex_project(
@@ -185,6 +270,24 @@ def _project_vector_event(db, ev: EventEnvelope) -> None:
                 indexed_chunks=indexed_chunks,
                 embedding_model=payload.get("embedding_model"),
             )
+            return
+
+    if ev.aggregate_type == "ChatSession":
+        payload = ev.payload or {}
+        if ev.event_type in {
+            CHAT_SESSION_EVENT_USER_MESSAGE_APPENDED,
+            CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_APPENDED,
+            CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_UPDATED,
+            CHAT_SESSION_EVENT_MESSAGE_DELETED,
+        }:
+            message_id = str(payload.get("message_id") or "").strip()
+            if message_id:
+                _index_chat_message_state(db, message_id=message_id)
+            return
+        if ev.event_type == CHAT_SESSION_EVENT_ATTACHMENT_LINKED:
+            attachment_id = str(payload.get("attachment_id") or "").strip()
+            if attachment_id:
+                _index_chat_attachment_state(db, attachment_id=attachment_id)
             return
 
     if ev.aggregate_type not in {"Task", "Note", "Specification", "ProjectRule"}:

@@ -1725,6 +1725,8 @@ class AgentTaskService:
         embedding_enabled: bool = False,
         embedding_model: str | None = None,
         context_pack_evidence_top_k: int | None = None,
+        chat_index_mode: str = "OFF",
+        chat_attachment_ingestion_mode: str = "METADATA_ONLY",
         member_user_ids: list[str] | None = None,
         command_id: str | None = None,
     ) -> dict:
@@ -1746,6 +1748,8 @@ class AgentTaskService:
                 embedding_enabled=bool(embedding_enabled),
                 embedding_model=embedding_model,
                 context_pack_evidence_top_k=context_pack_evidence_top_k,
+                chat_index_mode=chat_index_mode,
+                chat_attachment_ingestion_mode=chat_attachment_ingestion_mode,
                 member_user_ids=member_user_ids or [],
             )
             return ProjectApplicationService(db, user, command_id=effective_command_id).create_project(payload)

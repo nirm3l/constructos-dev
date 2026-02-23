@@ -27,6 +27,8 @@ class ProjectAggregate(Aggregate):
         embedding_enabled: bool = False,
         embedding_model: str | None = None,
         context_pack_evidence_top_k: int | None = None,
+        chat_index_mode: str = "OFF",
+        chat_attachment_ingestion_mode: str = "METADATA_ONLY",
         status: str = "Active",
     ) -> None:
         _ = id
@@ -39,6 +41,8 @@ class ProjectAggregate(Aggregate):
         self.embedding_enabled = embedding_enabled
         self.embedding_model = embedding_model
         self.context_pack_evidence_top_k = context_pack_evidence_top_k
+        self.chat_index_mode = chat_index_mode
+        self.chat_attachment_ingestion_mode = chat_attachment_ingestion_mode
         self.status = status
         self.is_deleted = False
         self.member_roles: dict[str, str] = {}
@@ -54,6 +58,8 @@ class ProjectAggregate(Aggregate):
         embedding_enabled: bool | None = None,
         embedding_model: str | None = None,
         context_pack_evidence_top_k: int | None = None,
+        chat_index_mode: str | None = None,
+        chat_attachment_ingestion_mode: str | None = None,
     ) -> None:
         if name is not None:
             self.name = name
@@ -71,6 +77,10 @@ class ProjectAggregate(Aggregate):
             self.embedding_model = embedding_model
         if context_pack_evidence_top_k is not None:
             self.context_pack_evidence_top_k = context_pack_evidence_top_k
+        if chat_index_mode is not None:
+            self.chat_index_mode = chat_index_mode
+        if chat_attachment_ingestion_mode is not None:
+            self.chat_attachment_ingestion_mode = chat_attachment_ingestion_mode
 
     @event("Deleted")
     def delete(self, deleted_tasks: int = 0, deleted_notes: int = 0) -> None:

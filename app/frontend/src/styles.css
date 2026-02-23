@@ -3579,6 +3579,53 @@ button:disabled {
   overflow-y: hidden;
 }
 
+.codex-chat-attachments {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px dashed color-mix(in srgb, var(--line), var(--muted) 20%);
+  display: grid;
+  gap: 6px;
+}
+
+.codex-chat-attachments-label {
+  font-size: 11px;
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--muted), var(--text) 18%);
+}
+
+.codex-chat-attachments .resource-ref-list {
+  display: grid;
+  gap: 6px;
+}
+
+.codex-chat-attachments .resource-ref-item {
+  width: 100%;
+}
+
+.codex-chat-attachments .resource-ref-chip {
+  width: 100%;
+  max-width: 100%;
+  min-height: 30px;
+  border-radius: 10px;
+  justify-content: flex-start;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 24%);
+  border-color: color-mix(in srgb, var(--line), var(--brand) 14%);
+}
+
+.codex-chat-bubble.user .codex-chat-attachments .resource-ref-chip {
+  background: color-mix(in srgb, var(--surface), white 20%);
+  border-color: color-mix(in srgb, var(--line), var(--primary) 20%);
+}
+
+.codex-chat-attachments .resource-ref-chip:hover,
+.codex-chat-attachments .resource-ref-chip:focus-visible {
+  background: color-mix(in srgb, var(--surface-alt), var(--brand) 6%);
+  border-color: color-mix(in srgb, var(--brand), var(--line) 35%);
+}
+
 .codex-chat-role {
   font-size: 12px;
   color: var(--muted);

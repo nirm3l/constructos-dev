@@ -2093,6 +2093,74 @@ def test_agents_chat_endpoint_returns_codex_session_id_when_available(tmp_path, 
     assert payload['codex_session_id'] == 'thread-123'
 
 
+def test_agents_chat_endpoint_links_created_resources_to_assistant_message(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+    from features.agents.service import AgentTaskService
+
+    def _fake_execute_task_automation(**_kwargs):
+        service = AgentTaskService()
+        service.create_task(
+            workspace_id=ws_id,
+            project_id=project_id,
+            title='Chat-linked task',
+        )
+        service.create_note(
+            workspace_id=ws_id,
+            project_id=project_id,
+            title='Chat-linked note',
+            body='Created during chat run.',
+        )
+        return AutomationOutcome(action='comment', summary='Created resources', comment='linked', usage=None)
+
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Create a task and a note',
+            'session_id': 'chat-resource-linking-session',
+            'history': [],
+        },
+    )
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload['ok'] is True
+
+    from shared.models import ChatMessage, ChatMessageResourceLink, ChatSession, SessionLocal
+
+    with SessionLocal() as db:
+        session = (
+            db.query(ChatSession)
+            .filter(ChatSession.workspace_id == ws_id, ChatSession.session_key == 'chat-resource-linking-session')
+            .first()
+        )
+        assert session is not None
+        assistant = (
+            db.query(ChatMessage)
+            .filter(ChatMessage.session_id == session.id, ChatMessage.role == 'assistant')
+            .order_by(ChatMessage.order_index.desc())
+            .first()
+        )
+        assert assistant is not None
+        links = (
+            db.query(ChatMessageResourceLink)
+            .filter(ChatMessageResourceLink.session_id == session.id, ChatMessageResourceLink.message_id == assistant.id)
+            .all()
+        )
+        assert len(links) >= 2
+        linked_types = {str(link.resource_type) for link in links}
+        assert 'task' in linked_types
+        assert 'note' in linked_types
+
+
 def test_agents_chat_endpoint_normalizes_selected_mcp_servers(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -2238,6 +2306,194 @@ def test_agents_chat_endpoint_includes_text_attachment_context(tmp_path, monkeyp
     assert 'hello from attachment file' in captured['instruction']
     assert attachment_ref['path'] in captured['instruction']
     assert captured['actor_user_id'] == bootstrap['current_user']['id']
+
+    from shared.models import ChatAttachment, SessionLocal
+
+    with SessionLocal() as db:
+        attachment = (
+            db.query(ChatAttachment)
+            .filter(ChatAttachment.workspace_id == ws_id, ChatAttachment.path == attachment_ref['path'])
+            .order_by(ChatAttachment.created_at.desc())
+            .first()
+        )
+        assert attachment is not None
+        assert attachment.extraction_status in {'extracted', 'truncated'}
+        assert 'hello from attachment file' in str(attachment.extracted_text or '')
+
+
+def test_chat_session_context_patch_persists_session_attachments(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    session_id = 'chat-session-context-patch-test'
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    monkeypatch.setattr(
+        agents_api,
+        'execute_task_automation',
+        lambda **_: AutomationOutcome(action='comment', summary='ok', comment=None, usage=None),
+    )
+
+    created = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Create session for context patch',
+            'session_id': session_id,
+            'history': [],
+        },
+    )
+    assert created.status_code == 200
+
+    uploaded = client.post(
+        '/api/attachments/upload',
+        data={'workspace_id': ws_id, 'project_id': project_id},
+        files={'file': ('session-pin.txt', BytesIO(b'session pinned file body'), 'text/plain')},
+    )
+    assert uploaded.status_code == 200
+    attachment_ref = uploaded.json()
+
+    patched = client.patch(
+        f'/api/chat/sessions/{session_id}',
+        json={
+            'workspace_id': ws_id,
+            'session_attachment_refs': [attachment_ref],
+        },
+    )
+    assert patched.status_code == 200
+    patched_payload = patched.json()
+    assert patched_payload['id'] == session_id
+    assert patched_payload['session_attachment_refs'][0]['path'] == attachment_ref['path']
+
+    listed = client.get(
+        '/api/chat/sessions',
+        params={'workspace_id': ws_id},
+    )
+    assert listed.status_code == 200
+    sessions = listed.json()
+    target = next((item for item in sessions if item.get('id') == session_id), None)
+    assert target is not None
+    assert target['session_attachment_refs'][0]['path'] == attachment_ref['path']
+
+
+def test_agents_chat_endpoint_uses_persisted_session_attachment_context(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    session_id = 'chat-session-context-auto-load-test'
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    captured: dict[str, object] = {}
+
+    def _fake_execute_task_automation(**kwargs):
+        captured.update(kwargs)
+        return AutomationOutcome(action='comment', summary='ok', comment=None, usage=None)
+
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+
+    created = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Create session for persisted attachment context',
+            'session_id': session_id,
+            'history': [],
+        },
+    )
+    assert created.status_code == 200
+
+    uploaded = client.post(
+        '/api/attachments/upload',
+        data={'workspace_id': ws_id, 'project_id': project_id},
+        files={'file': ('session-auto.txt', BytesIO(b'autoloaded session attachment text'), 'text/plain')},
+    )
+    assert uploaded.status_code == 200
+    attachment_ref = uploaded.json()
+
+    patched = client.patch(
+        f'/api/chat/sessions/{session_id}',
+        json={
+            'workspace_id': ws_id,
+            'session_attachment_refs': [attachment_ref],
+        },
+    )
+    assert patched.status_code == 200
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Use session-pinned file only',
+            'session_id': session_id,
+            'history': [],
+        },
+    )
+    assert res.status_code == 200
+    instruction = str(captured.get('instruction') or '')
+    assert 'Attached file context:' in instruction
+    assert 'autoloaded session attachment text' in instruction
+    assert attachment_ref['path'] in instruction
+
+
+def test_agents_chat_stream_endpoint_persists_attachment_without_fk_error(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    uploaded = client.post(
+        '/api/attachments/upload',
+        data={'workspace_id': ws_id, 'project_id': project_id},
+        files={'file': ('stream-context.txt', BytesIO(b'attachment content for stream chat'), 'text/plain')},
+    )
+    assert uploaded.status_code == 200
+    attachment_ref = uploaded.json()
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    def _fake_execute_task_automation_stream(**kwargs):
+        on_event = kwargs.get('on_event')
+        if callable(on_event):
+            on_event({'type': 'assistant_text', 'delta': 'Streamed response with attachment.'})
+        return AutomationOutcome(action='comment', summary='stream ok', comment=None, usage=None)
+
+    monkeypatch.setattr(agents_api, 'execute_task_automation_stream', _fake_execute_task_automation_stream)
+
+    res = client.post(
+        '/api/agents/chat/stream',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Use stream attachment',
+            'session_id': 'chat-stream-attachment-test',
+            'history': [],
+            'attachment_refs': [attachment_ref],
+        },
+    )
+    assert res.status_code == 200
+    lines = [line for line in (res.text or '').splitlines() if line.strip()]
+    assert any('"type": "final"' in line for line in lines)
+
+    from shared.models import ChatAttachment, SessionLocal
+
+    with SessionLocal() as db:
+        stored = (
+            db.query(ChatAttachment)
+            .filter(ChatAttachment.workspace_id == ws_id, ChatAttachment.path == attachment_ref['path'])
+            .order_by(ChatAttachment.created_at.desc())
+            .first()
+        )
+        assert stored is not None
 
 
 def test_agents_chat_endpoint_includes_docx_attachment_context(tmp_path, monkeypatch):
@@ -2904,3 +3160,77 @@ def test_task_watch_projection_is_idempotent_and_dedupes(tmp_path):
 
         after_off = db.query(TaskWatcher).filter(TaskWatcher.task_id == task['id'], TaskWatcher.user_id == user_id).all()
         assert len(after_off) == 0
+
+
+def test_chat_attachment_projection_handles_attachment_before_message(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    user_id = bootstrap['current_user']['id']
+
+    from shared.core import EventEnvelope
+    from shared.eventing_rebuild import project_event
+    from shared.models import ChatAttachment, ChatMessage, ChatSession, SessionLocal
+
+    aggregate_id = '44444444-4444-4444-4444-444444444444'
+    message_id = '55555555-5555-4555-8555-555555555555'
+    attachment_id = '66666666-6666-4666-8666-666666666666'
+    session_key = 'chat-attachment-ordering-test'
+
+    attachment_event = EventEnvelope(
+        aggregate_type='ChatSession',
+        aggregate_id=aggregate_id,
+        version=1,
+        event_type='ChatSessionAttachmentLinked',
+        payload={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'session_key': session_key,
+            'attachment_id': attachment_id,
+            'message_id': message_id,
+            'path': 'workspace/test/path.txt',
+            'name': 'path.txt',
+            'mime_type': 'text/plain',
+            'size_bytes': 10,
+            'extraction_status': 'pending',
+        },
+        metadata={'actor_id': user_id, 'workspace_id': ws_id, 'project_id': project_id, 'session_id': session_key},
+    )
+    message_event = EventEnvelope(
+        aggregate_type='ChatSession',
+        aggregate_id=aggregate_id,
+        version=2,
+        event_type='ChatSessionUserMessageAppended',
+        payload={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'session_key': session_key,
+            'message_id': message_id,
+            'content': 'Message with attachment',
+            'order_index': 1,
+            'created_at': '2026-02-23T21:00:00+00:00',
+            'attachment_refs': [{'path': 'workspace/test/path.txt', 'name': 'path.txt'}],
+        },
+        metadata={'actor_id': user_id, 'workspace_id': ws_id, 'project_id': project_id, 'session_id': session_key},
+    )
+
+    with SessionLocal() as db:
+        project_event(db, attachment_event)
+        project_event(db, message_event)
+        db.commit()
+
+        session = db.get(ChatSession, aggregate_id)
+        assert session is not None
+        assert session.session_key == session_key
+
+        message = db.get(ChatMessage, message_id)
+        assert message is not None
+        assert message.session_id == aggregate_id
+        assert message.content == 'Message with attachment'
+        assert message.order_index == 1
+
+        attachment = db.get(ChatAttachment, attachment_id)
+        assert attachment is not None
+        assert attachment.message_id == message_id
+        assert attachment.session_id == aggregate_id

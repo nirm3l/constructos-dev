@@ -48,6 +48,12 @@ _ENTITY_LABELS = {
     "template_version": "TemplateVersion",
     "task": "Task",
     "note": "Note",
+    "chatsession": "ChatSession",
+    "chat_session": "ChatSession",
+    "chatmessage": "ChatMessage",
+    "chat_message": "ChatMessage",
+    "chatattachment": "ChatAttachment",
+    "chat_attachment": "ChatAttachment",
     "comment": "Comment",
     "taskcomment": "Comment",
     "task_comment": "Comment",
@@ -213,6 +219,9 @@ def ensure_graph_schema() -> None:
             "CREATE CONSTRAINT template_version_id_unique IF NOT EXISTS FOR (n:TemplateVersion) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT task_id_unique IF NOT EXISTS FOR (n:Task) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT note_id_unique IF NOT EXISTS FOR (n:Note) REQUIRE n.id IS UNIQUE",
+            "CREATE CONSTRAINT chat_session_id_unique IF NOT EXISTS FOR (n:ChatSession) REQUIRE n.id IS UNIQUE",
+            "CREATE CONSTRAINT chat_message_id_unique IF NOT EXISTS FOR (n:ChatMessage) REQUIRE n.id IS UNIQUE",
+            "CREATE CONSTRAINT chat_attachment_id_unique IF NOT EXISTS FOR (n:ChatAttachment) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT specification_id_unique IF NOT EXISTS FOR (n:Specification) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT project_rule_id_unique IF NOT EXISTS FOR (n:ProjectRule) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT user_id_unique IF NOT EXISTS FOR (n:User) REQUIRE n.id IS UNIQUE",
@@ -221,6 +230,9 @@ def ensure_graph_schema() -> None:
             "CREATE INDEX template_key_idx IF NOT EXISTS FOR (n:Template) ON (n.key)",
             "CREATE INDEX task_project_idx IF NOT EXISTS FOR (n:Task) ON (n.project_id)",
             "CREATE INDEX note_project_idx IF NOT EXISTS FOR (n:Note) ON (n.project_id)",
+            "CREATE INDEX chat_session_project_idx IF NOT EXISTS FOR (n:ChatSession) ON (n.project_id)",
+            "CREATE INDEX chat_message_project_idx IF NOT EXISTS FOR (n:ChatMessage) ON (n.project_id)",
+            "CREATE INDEX chat_attachment_project_idx IF NOT EXISTS FOR (n:ChatAttachment) ON (n.project_id)",
             "CREATE INDEX specification_project_idx IF NOT EXISTS FOR (n:Specification) ON (n.project_id)",
             "CREATE INDEX project_rule_project_idx IF NOT EXISTS FOR (n:ProjectRule) ON (n.project_id)",
         ]
@@ -450,7 +462,19 @@ def graph_get_project_subgraph(
     for values in buckets.values():
         values.sort(key=lambda item: str(item.get("title") or "").lower())
 
-    preferred_order = ["specification", "comment", "task", "note", "projectrule", "user", "tag", "workspace"]
+    preferred_order = [
+        "specification",
+        "comment",
+        "task",
+        "note",
+        "chatmessage",
+        "chatattachment",
+        "chatsession",
+        "projectrule",
+        "user",
+        "tag",
+        "workspace",
+    ]
     ordered_types = preferred_order + sorted([key for key in buckets.keys() if key not in preferred_order])
     selected_rows: list[dict[str, str]] = []
     comment_slot_reserve = min(8, max(2, safe_nodes // 5))
@@ -1154,6 +1178,12 @@ def _score_entity_priority(entity_type: str) -> float:
         return 0.8
     if key == "projectrule":
         return 0.75
+    if key == "chatmessage":
+        return 0.68
+    if key == "chatattachment":
+        return 0.64
+    if key == "chatsession":
+        return 0.58
     if key == "comment":
         return 0.6
     return 0.5
@@ -1333,7 +1363,7 @@ def _load_graph_only_evidence_candidates(
     candidates: list[dict[str, Any]],
     limit: int,
 ) -> list[dict[str, Any]]:
-    from .models import Note, ProjectRule, SessionLocal, Specification, Task
+    from .models import ChatAttachment, ChatMessage, Note, ProjectRule, SessionLocal, Specification, Task
 
     out: list[dict[str, Any]] = []
     if not candidates:
@@ -1379,6 +1409,32 @@ def _load_graph_only_evidence_candidates(
                     ("project_rule.title", rule.title or "", rule.updated_at),
                     ("project_rule.body", rule.body or "", rule.updated_at),
                 ]
+            elif key == "chatmessage":
+                message = db.get(ChatMessage, entity_id)
+                if not message or message.project_id != project_id or message.is_deleted:
+                    continue
+                snippets = [
+                    (f"chat_message.{str(message.role or '').strip().lower() or 'message'}", message.content or "", message.updated_at),
+                ]
+            elif key == "chatattachment":
+                attachment = db.get(ChatAttachment, entity_id)
+                if not attachment or attachment.project_id != project_id or attachment.is_deleted:
+                    continue
+                metadata_parts: list[str] = []
+                if str(attachment.name or "").strip():
+                    metadata_parts.append(f"name: {attachment.name}")
+                if str(attachment.path or "").strip():
+                    metadata_parts.append(f"path: {attachment.path}")
+                if str(attachment.mime_type or "").strip():
+                    metadata_parts.append(f"mime_type: {attachment.mime_type}")
+                if isinstance(attachment.size_bytes, int) and attachment.size_bytes >= 0:
+                    metadata_parts.append(f"size_bytes: {attachment.size_bytes}")
+                metadata_text = "\n".join(metadata_parts).strip()
+                snippets = []
+                if metadata_text:
+                    snippets.append(("chat_attachment.metadata", metadata_text, attachment.updated_at))
+                if str(attachment.extracted_text or "").strip():
+                    snippets.append(("chat_attachment.text", attachment.extracted_text or "", attachment.updated_at))
             else:
                 continue
 

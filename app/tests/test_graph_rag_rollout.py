@@ -39,3 +39,35 @@ def test_graph_rag_scope_is_enabled_without_canary_lists(monkeypatch):
     monkeypatch.setattr(knowledge_graph, "GRAPH_RAG_CANARY_WORKSPACE_IDS", set())
 
     assert knowledge_graph.graph_rag_enabled_for_scope(project_id="any-project", workspace_id="any-workspace") is True
+
+
+def test_chat_attachment_sources_follow_ingestion_mode():
+    from shared import vector_store
+
+    base_state = {
+        "path": "workspace/w1/project/p1/file.txt",
+        "name": "file.txt",
+        "mime_type": "text/plain",
+        "size_bytes": 128,
+        "extracted_text": "Attachment extracted content.",
+    }
+
+    off_sources = vector_store._entity_state_sources(
+        "ChatAttachment",
+        {**base_state, "chat_attachment_ingestion_mode": "OFF"},
+    )
+    assert off_sources == []
+
+    metadata_sources = vector_store._entity_state_sources(
+        "ChatAttachment",
+        {**base_state, "chat_attachment_ingestion_mode": "METADATA_ONLY"},
+    )
+    assert any(source_type == "chat_attachment.metadata" for source_type, _ in metadata_sources)
+    assert not any(source_type == "chat_attachment.text" for source_type, _ in metadata_sources)
+
+    full_text_sources = vector_store._entity_state_sources(
+        "ChatAttachment",
+        {**base_state, "chat_attachment_ingestion_mode": "FULL_TEXT"},
+    )
+    assert any(source_type == "chat_attachment.metadata" for source_type, _ in full_text_sources)
+    assert any(source_type == "chat_attachment.text" for source_type, _ in full_text_sources)

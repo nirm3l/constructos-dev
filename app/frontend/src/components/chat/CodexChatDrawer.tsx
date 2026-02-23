@@ -1,4 +1,5 @@
 import React from 'react'
+import { updateChatSessionContext } from '../../api'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import type { AttachmentRef } from '../../types'
 import { AttachmentRefList, Icon } from '../shared/uiHelpers'
@@ -40,10 +41,26 @@ function normalizeMcpLookupKey(value: string): string {
 
 const CORE_MCP_LOOKUP_KEYS = new Set(['task-management-tools'])
 
+function dedupeAttachmentRefs(refs: AttachmentRef[]): AttachmentRef[] {
+  const seen = new Set<string>()
+  const out: AttachmentRef[] = []
+  for (const ref of refs) {
+    const path = String(ref.path || '').trim()
+    if (!path) continue
+    const key = path.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(ref)
+  }
+  return out
+}
+
 export function CodexChatDrawer({ state }: { state: any }) {
   const fileInputRef = React.useRef<HTMLInputElement | null>(null)
   const inputRef = React.useRef<HTMLTextAreaElement | null>(null)
   const [chatAttachmentRefs, setChatAttachmentRefs] = React.useState<AttachmentRef[]>([])
+  const [isUploadingAttachments, setIsUploadingAttachments] = React.useState(false)
+  const [isUpdatingSessionAttachments, setIsUpdatingSessionAttachments] = React.useState(false)
   const recognitionRef = React.useRef<any>(null)
   const speechBaseInstructionRef = React.useRef('')
   const speechHadResultRef = React.useRef(false)
@@ -150,6 +167,8 @@ export function CodexChatDrawer({ state }: { state: any }) {
     mcpAliasToName.set(normalizeMcpLookupKey(server.name), server.name)
   }
   const coreMcpServerName = availableMcpServers.find((server) => CORE_MCP_LOOKUP_KEYS.has(normalizeMcpLookupKey(server.name)))?.name || null
+  const hasOptionalMcpServers = availableMcpServers.some((server) => !CORE_MCP_LOOKUP_KEYS.has(normalizeMcpLookupKey(server.name)))
+  const showMcpSection = hasOptionalMcpServers
   const selectedMcpServers = (() => {
     const hasDiscoveredServers = availableMcpServers.length > 0
     const rawSelection = Array.isArray(state.codexChatMcpServers) ? state.codexChatMcpServers : []
@@ -206,6 +225,11 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const activeSpeechLang = String(state.speechLang || '').trim() || 'en-US'
   const speechLangName = activeSpeechLang === 'bs-BA' ? 'Bosnian' : 'English'
   const speechLangLabel = `${speechLangName} (${activeSpeechLang})`
+  const sessionAttachmentRefs = dedupeAttachmentRefs(
+    Array.isArray(state.codexChatSessionAttachmentRefs)
+      ? state.codexChatSessionAttachmentRefs
+      : []
+  )
 
   const stopVoiceInput = () => {
     const recognition = recognitionRef.current
@@ -296,11 +320,15 @@ export function CodexChatDrawer({ state }: { state: any }) {
     }
   }
 
-  const statusText = state.isCodexChatRunning
-    ? `Executing tools... ${state.codexChatElapsedSeconds}s`
-    : isListening
-      ? 'Listening...'
-      : ''
+  const statusText = isUploadingAttachments
+    ? 'Uploading files...'
+    : isUpdatingSessionAttachments
+      ? 'Updating session context...'
+    : state.isCodexChatRunning
+      ? `Executing tools... ${state.codexChatElapsedSeconds}s`
+      : isListening
+        ? 'Listening...'
+        : ''
   const canStopChat = Boolean(
     state.isCodexChatRunning &&
     state.runAgentChatMutation.isPending &&
@@ -333,21 +361,59 @@ export function CodexChatDrawer({ state }: { state: any }) {
     sendChatInstruction(buildProjectCreationStarter())
   }
 
+  const persistSessionAttachmentRefs = async (nextRefs: AttachmentRef[]) => {
+    if (!state.workspaceId || !state.codexChatSessionId || !state.userId) return
+    if (typeof state.setCodexChatSessionAttachmentRefs !== 'function') return
+    setIsUpdatingSessionAttachments(true)
+    const normalized = dedupeAttachmentRefs(nextRefs)
+    try {
+      const updated = await updateChatSessionContext(state.userId, state.codexChatSessionId, {
+        workspace_id: state.workspaceId,
+        session_attachment_refs: normalized,
+      })
+      const persisted = dedupeAttachmentRefs(
+        Array.isArray(updated?.session_attachment_refs)
+          ? updated.session_attachment_refs
+          : normalized
+      )
+      state.setCodexChatSessionAttachmentRefs(persisted)
+      state.setUiError(null)
+    } catch (err: any) {
+      state.setUiError(err?.message || 'Failed to update session attachments')
+    } finally {
+      setIsUpdatingSessionAttachments(false)
+    }
+  }
+
+  const pinDraftAttachmentsToSession = async () => {
+    if (chatAttachmentRefs.length === 0) return
+    await persistSessionAttachmentRefs([...sessionAttachmentRefs, ...chatAttachmentRefs])
+  }
+
   const sendChatInstruction = (rawInstruction: string, opts?: { clearInput?: boolean }) => {
     if (isListening) stopVoiceInput()
     const instruction = String(rawInstruction || '').trim()
-    if (!instruction || state.runAgentChatMutation.isPending || !state.workspaceId) return
+    if (
+      !instruction
+      || state.runAgentChatMutation.isPending
+      || !state.workspaceId
+      || isUploadingAttachments
+      || isUpdatingSessionAttachments
+    ) return
     if (opts?.clearInput) state.setCodexChatInstruction('')
+    const attachedRefs = [...chatAttachmentRefs]
     const nextUserTurn = {
       id: globalThis.crypto?.randomUUID?.() ?? `u-${Date.now()}`,
       role: 'user',
       content: instruction,
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      attachmentRefs: attachedRefs,
     }
     const history = [...state.codexChatTurns, nextUserTurn]
       .slice(-80)
       .map((t: any) => ({ role: t.role, content: t.content }))
     state.setCodexChatTurns((prev: any) => [...prev, nextUserTurn])
+    setChatAttachmentRefs([])
     state.setIsCodexChatRunning(true)
     state.setCodexChatRunStartedAt(Date.now())
     state.setCodexChatElapsedSeconds(0)
@@ -357,7 +423,8 @@ export function CodexChatDrawer({ state }: { state: any }) {
       sessionId: state.codexChatSessionId,
       projectId: state.codexChatProjectId.trim() ? state.codexChatProjectId : null,
       mcpServers: selectedMcpServers,
-      attachmentRefs: chatAttachmentRefs,
+      attachmentRefs: attachedRefs,
+      sessionAttachmentRefs,
     })
   }
 
@@ -388,41 +455,40 @@ export function CodexChatDrawer({ state }: { state: any }) {
               ))}
             </select>
           </div>
-          <div className="codex-chat-mcp-row">
-            <span className="meta codex-chat-context-label">MCP</span>
-            <div className="codex-chat-mcp-chips">
-              {availableMcpServers.length === 0 && (
-                <span className="meta">No MCP servers</span>
-              )}
-              {availableMcpServers.map((server) => {
-                const serverLookupKey = normalizeMcpLookupKey(server.name)
-                const isCoreServer = CORE_MCP_LOOKUP_KEYS.has(serverLookupKey)
-                const selected = selectedMcpServers.some((name) => normalizeMcpLookupKey(name) === normalizeMcpLookupKey(server.name))
-                const chipDisabled = mcpControlsDisabled || !server.enabled || isCoreServer
-                const titleParts: string[] = []
-                if (isCoreServer) {
-                  titleParts.push('Core MCP server is always enabled in this chat session')
-                } else {
-                  titleParts.push(server.enabled ? `Use ${server.display_name} in this chat session` : `${server.display_name} is disabled`)
-                }
-                if (server.auth_status) titleParts.push(`Auth: ${server.auth_status}`)
-                if (server.disabled_reason) titleParts.push(server.disabled_reason)
-                return (
-                  <button
-                    key={server.name}
-                    type="button"
-                    className={`status-chip tag-filter-chip codex-chat-mcp-chip-btn ${selected ? 'active' : ''}`}
-                    disabled={chipDisabled}
-                    aria-pressed={selected}
-                    title={titleParts.join(' · ')}
-                    onClick={() => toggleMcpServer(server.name, !selected)}
-                  >
-                    {isCoreServer ? 'Core' : server.display_name}
-                  </button>
-                )
-              })}
+          {showMcpSection && (
+            <div className="codex-chat-mcp-row">
+              <span className="meta codex-chat-context-label">MCP</span>
+              <div className="codex-chat-mcp-chips">
+                {availableMcpServers.map((server) => {
+                  const serverLookupKey = normalizeMcpLookupKey(server.name)
+                  const isCoreServer = CORE_MCP_LOOKUP_KEYS.has(serverLookupKey)
+                  const selected = selectedMcpServers.some((name) => normalizeMcpLookupKey(name) === normalizeMcpLookupKey(server.name))
+                  const chipDisabled = mcpControlsDisabled || !server.enabled || isCoreServer
+                  const titleParts: string[] = []
+                  if (isCoreServer) {
+                    titleParts.push('Core MCP server is always enabled in this chat session')
+                  } else {
+                    titleParts.push(server.enabled ? `Use ${server.display_name} in this chat session` : `${server.display_name} is disabled`)
+                  }
+                  if (server.auth_status) titleParts.push(`Auth: ${server.auth_status}`)
+                  if (server.disabled_reason) titleParts.push(server.disabled_reason)
+                  return (
+                    <button
+                      key={server.name}
+                      type="button"
+                      className={`status-chip tag-filter-chip codex-chat-mcp-chip-btn ${selected ? 'active' : ''}`}
+                      disabled={chipDisabled}
+                      aria-pressed={selected}
+                      title={titleParts.join(' · ')}
+                      onClick={() => toggleMcpServer(server.name, !selected)}
+                    >
+                      {isCoreServer ? 'Core' : server.display_name}
+                    </button>
+                  )
+                })}
+              </div>
             </div>
-          </div>
+          )}
         </div>
         <div className="codex-chat-session-row">
           <label className="meta codex-chat-session-label" htmlFor="codex-chat-session-select">Session</label>
@@ -504,6 +570,18 @@ export function CodexChatDrawer({ state }: { state: any }) {
               ) : (
                 <div>{turn.content}</div>
               )}
+              {Array.isArray(turn.attachmentRefs) && turn.attachmentRefs.length > 0 && (
+                <div className="codex-chat-attachments">
+                  <div className="codex-chat-attachments-label">
+                    {turn.attachmentRefs.length === 1 ? 'Attachment' : 'Attachments'}
+                  </div>
+                  <AttachmentRefList
+                    refs={turn.attachmentRefs}
+                    workspaceId={state.workspaceId}
+                    userId={state.userId}
+                  />
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -542,17 +620,42 @@ export function CodexChatDrawer({ state }: { state: any }) {
           <input
             ref={fileInputRef}
             type="file"
+            multiple
             style={{ display: 'none' }}
             onChange={async (e) => {
-              const file = e.target.files?.[0]
+              const files = Array.from(e.target.files ?? [])
               e.target.value = ''
-              if (!file || !state.codexChatProjectId.trim()) return
+              if (files.length === 0 || !state.codexChatProjectId.trim()) return
               try {
-                const ref = await state.uploadAttachmentRef(file, { project_id: state.codexChatProjectId })
-                setChatAttachmentRefs((prev) => [...prev, ref])
-                state.setUiError(null)
+                setIsUploadingAttachments(true)
+                const uploads = await Promise.allSettled(
+                  files.map((file) => state.uploadAttachmentRef(file, { project_id: state.codexChatProjectId }))
+                )
+                const successful = uploads
+                  .filter((result): result is PromiseFulfilledResult<AttachmentRef> => result.status === 'fulfilled')
+                  .map((result) => result.value)
+                const failed = uploads.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+
+                if (successful.length > 0) {
+                  setChatAttachmentRefs((prev) => dedupeAttachmentRefs([...prev, ...successful]))
+                }
+
+                if (failed.length === 0) {
+                  state.setUiError(null)
+                } else {
+                  const firstError = failed
+                    .map((result) => (result.reason instanceof Error ? result.reason.message : String(result.reason || '').trim()))
+                    .find((message) => Boolean(message)) || 'Chat attachment upload failed'
+                  if (successful.length > 0) {
+                    state.setUiError(`Uploaded ${successful.length}/${files.length} files. ${firstError}`)
+                  } else {
+                    state.setUiError(firstError)
+                  }
+                }
               } catch (err: any) {
                 state.setUiError(err?.message || 'Chat attachment upload failed')
+              } finally {
+                setIsUploadingAttachments(false)
               }
             }}
           />
@@ -562,6 +665,35 @@ export function CodexChatDrawer({ state }: { state: any }) {
             userId={state.userId}
             onRemovePath={(path) => setChatAttachmentRefs((prev) => prev.filter((ref) => ref.path !== path))}
           />
+          {chatAttachmentRefs.length > 0 && (
+            <div className="row wrap" style={{ marginTop: 6, gap: 8, alignItems: 'center' }}>
+              <button
+                className="status-chip"
+                type="button"
+                disabled={isUpdatingSessionAttachments || isUploadingAttachments}
+                onClick={() => {
+                  void pinDraftAttachmentsToSession()
+                }}
+              >
+                Pin selected to session
+              </button>
+              <span className="meta">Pinned files are included in every next chat request for this session.</span>
+            </div>
+          )}
+          {sessionAttachmentRefs.length > 0 && (
+            <div className="codex-chat-attachments" style={{ marginTop: 8 }}>
+              <div className="codex-chat-attachments-label">Pinned to session</div>
+              <AttachmentRefList
+                refs={sessionAttachmentRefs}
+                workspaceId={state.workspaceId}
+                userId={state.userId}
+                onRemovePath={(path) => {
+                  const next = sessionAttachmentRefs.filter((ref) => ref.path !== path)
+                  void persistSessionAttachmentRefs(next)
+                }}
+              />
+            </div>
+          )}
           <div className="codex-chat-toolbar">
             <button
               className={`action-icon ${isListening ? 'primary' : ''}`}
@@ -614,9 +746,9 @@ export function CodexChatDrawer({ state }: { state: any }) {
                 }
                 fileInputRef.current?.click()
               }}
-              disabled={state.runAgentChatMutation.isPending}
-              title="Attach file"
-              aria-label="Attach file"
+              disabled={state.runAgentChatMutation.isPending || isUploadingAttachments || isUpdatingSessionAttachments}
+              title="Attach files"
+              aria-label="Attach files"
             >
               <Icon path="M21.44 11.05l-8.49 8.49a5.5 5.5 0 0 1-7.78-7.78l9.19-9.2a3.5 3.5 0 1 1 4.95 4.95l-9.2 9.19a1.5 1.5 0 0 1-2.12-2.12l8.48-8.49" />
             </button>
@@ -634,7 +766,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
             >
               <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
             </button>
-            <span className={`codex-chat-status ${state.isCodexChatRunning || isListening ? 'codex-progress' : ''}`}>
+            <span className={`codex-chat-status ${state.isCodexChatRunning || isListening || isUploadingAttachments || isUpdatingSessionAttachments ? 'codex-progress' : ''}`}>
               {statusText}
             </span>
             {canStopChat && (
@@ -654,7 +786,13 @@ export function CodexChatDrawer({ state }: { state: any }) {
               onClick={() => {
                 sendChatInstruction(state.codexChatInstruction, { clearInput: true })
               }}
-              disabled={state.runAgentChatMutation.isPending || !state.codexChatInstruction.trim() || !state.workspaceId}
+              disabled={
+                state.runAgentChatMutation.isPending
+                || isUploadingAttachments
+                || isUpdatingSessionAttachments
+                || !state.codexChatInstruction.trim()
+                || !state.workspaceId
+              }
               title="Send"
               aria-label="Send"
             >

@@ -13,6 +13,18 @@ from features.notes.domain import (
     EVENT_UNPINNED as NOTE_EVENT_UNPINNED,
     EVENT_UPDATED as NOTE_EVENT_UPDATED,
 )
+from features.chat.domain import (
+    EVENT_ARCHIVED as CHAT_SESSION_EVENT_ARCHIVED,
+    EVENT_ASSISTANT_MESSAGE_APPENDED as CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_APPENDED,
+    EVENT_ASSISTANT_MESSAGE_UPDATED as CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_UPDATED,
+    EVENT_ATTACHMENT_LINKED as CHAT_SESSION_EVENT_ATTACHMENT_LINKED,
+    EVENT_CONTEXT_UPDATED as CHAT_SESSION_EVENT_CONTEXT_UPDATED,
+    EVENT_MESSAGE_DELETED as CHAT_SESSION_EVENT_MESSAGE_DELETED,
+    EVENT_RENAMED as CHAT_SESSION_EVENT_RENAMED,
+    EVENT_RESOURCE_LINKED as CHAT_SESSION_EVENT_RESOURCE_LINKED,
+    EVENT_STARTED as CHAT_SESSION_EVENT_STARTED,
+    EVENT_USER_MESSAGE_APPENDED as CHAT_SESSION_EVENT_USER_MESSAGE_APPENDED,
+)
 from features.projects.domain import (
     EVENT_CREATED as PROJECT_EVENT_CREATED,
     EVENT_DELETED as PROJECT_EVENT_DELETED,
@@ -56,6 +68,7 @@ from features.tasks.domain import (
 
 from .contracts import EventEnvelope
 from .eventing_store import get_kurrent_client
+from .chat_indexing import normalize_chat_index_mode, project_chat_indexing_policy
 from .knowledge_graph import ensure_graph_schema, graph_enabled, run_graph_query
 from .observability import incr, set_value
 from .settings import (
@@ -173,6 +186,55 @@ def _as_tag_list(raw: Any) -> list[str]:
         if tag not in tags:
             tags.append(tag)
     return tags
+
+
+def _chat_graph_enabled_for_project(project_id: str | None) -> bool:
+    pid = _as_str(project_id)
+    if not pid:
+        return False
+    rows = run_graph_query(
+        """
+        MATCH (p:Project {id:$project_id})
+        RETURN coalesce(p.chat_index_mode, 'OFF') AS chat_index_mode, coalesce(p.is_deleted, false) AS is_deleted
+        LIMIT 1
+        """,
+        {"project_id": pid},
+        write=False,
+    )
+    if not rows:
+        return False
+    row = rows[0]
+    if bool(row.get("is_deleted", False)):
+        return False
+    policy = project_chat_indexing_policy(
+        chat_index_mode=normalize_chat_index_mode(str(row.get("chat_index_mode") or "OFF")),
+        chat_attachment_ingestion_mode=None,
+    )
+    return bool(policy.graph_enabled)
+
+
+def _chat_resource_label(resource_type: str | None) -> str | None:
+    key = str(resource_type or "").strip().lower().replace("-", "").replace("_", "")
+    if key == "task":
+        return "Task"
+    if key == "note":
+        return "Note"
+    if key == "specification":
+        return "Specification"
+    if key in {"projectrule", "rule"}:
+        return "ProjectRule"
+    return None
+
+
+def _chat_relation_type(relation: str | None) -> str:
+    raw = str(relation or "").strip().upper().replace("-", "_").replace(" ", "_")
+    if raw == "CREATED":
+        return "CREATED"
+    if raw in {"MENTIONED", "MENTIONS"}:
+        return "MENTIONS"
+    if raw in {"UPDATED", "MODIFIED"}:
+        return "UPDATED"
+    return "LINKED"
 
 
 def _merge_node(label: str, node_id: str | None, props: dict[str, Any]) -> None:
@@ -349,6 +411,8 @@ def _project_project_event(ev: EventEnvelope, commit_position: int) -> None:
         "embedding_enabled",
         "embedding_model",
         "context_pack_evidence_top_k",
+        "chat_index_mode",
+        "chat_attachment_ingestion_mode",
     ):
         if key in p:
             props[key] = p.get(key)
@@ -749,6 +813,288 @@ def _project_project_rule_event(ev: EventEnvelope, commit_position: int) -> None
     )
 
 
+def _project_chat_session_event(ev: EventEnvelope, commit_position: int) -> None:
+    p = ev.payload or {}
+    m = ev.metadata or {}
+    session_id = _as_str(ev.aggregate_id)
+    if not session_id:
+        return
+    workspace_id = _as_str(p.get("workspace_id") or m.get("workspace_id"))
+    project_id = _as_str(p.get("project_id") or m.get("project_id"))
+    if project_id and not _chat_graph_enabled_for_project(project_id):
+        return
+
+    props: dict[str, Any] = {
+        "workspace_id": workspace_id,
+        "project_id": project_id,
+        "last_event_type": ev.event_type,
+        "last_event_version": ev.version,
+        "last_commit_position": commit_position,
+    }
+    for key in (
+        "session_key",
+        "title",
+        "created_by",
+        "is_archived",
+        "codex_session_id",
+        "mcp_servers",
+        "session_attachment_refs",
+        "usage",
+        "last_message_at",
+        "last_message_preview",
+        "last_task_event_at",
+    ):
+        if key in p:
+            props[key] = p.get(key)
+    if ev.event_type == CHAT_SESSION_EVENT_ARCHIVED:
+        props["is_archived"] = True
+
+    _merge_node("ChatSession", session_id, props)
+    if workspace_id:
+        _merge_node("Workspace", workspace_id, {})
+    _sync_optional_relation(
+        source_label="ChatSession",
+        source_id=session_id,
+        relation="IN_WORKSPACE",
+        target_label="Workspace",
+        target_id=workspace_id,
+    )
+    _sync_optional_relation(
+        source_label="ChatSession",
+        source_id=session_id,
+        relation="IN_PROJECT",
+        target_label="Project",
+        target_id=project_id,
+        target_props={"workspace_id": workspace_id},
+    )
+
+    created_by = _as_str(p.get("created_by"))
+    if created_by:
+        _merge_node("User", created_by, {})
+        run_graph_query(
+            """
+            MATCH (s:ChatSession {id:$session_id})
+            MATCH (u:User {id:$user_id})
+            MERGE (s)-[:STARTED_BY]->(u)
+            """,
+            {
+                "session_id": session_id,
+                "user_id": created_by,
+            },
+            write=True,
+        )
+
+
+def _project_chat_message_event(ev: EventEnvelope, commit_position: int) -> None:
+    p = ev.payload or {}
+    m = ev.metadata or {}
+    session_id = _as_str(ev.aggregate_id)
+    message_id = _as_str(p.get("message_id"))
+    if not session_id or not message_id:
+        return
+    workspace_id = _as_str(p.get("workspace_id") or m.get("workspace_id"))
+    project_id = _as_str(p.get("project_id") or m.get("project_id"))
+    if project_id and not _chat_graph_enabled_for_project(project_id):
+        return
+
+    role = str(p.get("role") or "").strip().lower()
+    if not role:
+        role = "assistant" if ev.event_type in {CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_APPENDED, CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_UPDATED} else "user"
+    props: dict[str, Any] = {
+        "workspace_id": workspace_id,
+        "project_id": project_id,
+        "session_id": session_id,
+        "role": role,
+        "last_event_type": ev.event_type,
+        "last_event_version": ev.version,
+        "last_commit_position": commit_position,
+    }
+    for key in ("content", "order_index", "created_at", "attachment_refs", "usage"):
+        if key in p:
+            props[key] = p.get(key)
+    if ev.event_type == CHAT_SESSION_EVENT_MESSAGE_DELETED:
+        props["is_deleted"] = True
+
+    _merge_node(
+        "ChatSession",
+        session_id,
+        {
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "last_commit_position": commit_position,
+        },
+    )
+    _merge_node("ChatMessage", message_id, props)
+    if workspace_id:
+        _merge_node("Workspace", workspace_id, {})
+    _sync_optional_relation(
+        source_label="ChatMessage",
+        source_id=message_id,
+        relation="IN_WORKSPACE",
+        target_label="Workspace",
+        target_id=workspace_id,
+    )
+    _sync_optional_relation(
+        source_label="ChatMessage",
+        source_id=message_id,
+        relation="IN_PROJECT",
+        target_label="Project",
+        target_id=project_id,
+        target_props={"workspace_id": workspace_id},
+    )
+    run_graph_query(
+        """
+        MATCH (s:ChatSession {id:$session_id})
+        MATCH (m:ChatMessage {id:$message_id})
+        MERGE (s)-[:HAS_MESSAGE]->(m)
+        """,
+        {
+            "session_id": session_id,
+            "message_id": message_id,
+        },
+        write=True,
+    )
+
+
+def _project_chat_attachment_event(ev: EventEnvelope, commit_position: int) -> None:
+    p = ev.payload or {}
+    m = ev.metadata or {}
+    session_id = _as_str(ev.aggregate_id)
+    message_id = _as_str(p.get("message_id"))
+    attachment_id = _as_str(p.get("attachment_id"))
+    if not session_id or not message_id or not attachment_id:
+        return
+    workspace_id = _as_str(p.get("workspace_id") or m.get("workspace_id"))
+    project_id = _as_str(p.get("project_id") or m.get("project_id"))
+    if project_id and not _chat_graph_enabled_for_project(project_id):
+        return
+
+    props: dict[str, Any] = {
+        "workspace_id": workspace_id,
+        "project_id": project_id,
+        "session_id": session_id,
+        "message_id": message_id,
+        "last_event_type": ev.event_type,
+        "last_event_version": ev.version,
+        "last_commit_position": commit_position,
+    }
+    for key in ("path", "name", "mime_type", "size_bytes", "checksum", "extraction_status", "extracted_text"):
+        if key in p:
+            props[key] = p.get(key)
+    _merge_node("ChatAttachment", attachment_id, props)
+    if workspace_id:
+        _merge_node("Workspace", workspace_id, {})
+    _sync_optional_relation(
+        source_label="ChatAttachment",
+        source_id=attachment_id,
+        relation="IN_WORKSPACE",
+        target_label="Workspace",
+        target_id=workspace_id,
+    )
+    _sync_optional_relation(
+        source_label="ChatAttachment",
+        source_id=attachment_id,
+        relation="IN_PROJECT",
+        target_label="Project",
+        target_id=project_id,
+        target_props={"workspace_id": workspace_id},
+    )
+    run_graph_query(
+        """
+        MATCH (m:ChatMessage {id:$message_id})
+        MATCH (a:ChatAttachment {id:$attachment_id})
+        MERGE (m)-[:HAS_ATTACHMENT]->(a)
+        """,
+        {
+            "message_id": message_id,
+            "attachment_id": attachment_id,
+        },
+        write=True,
+    )
+    run_graph_query(
+        """
+        MATCH (s:ChatSession {id:$session_id})
+        MATCH (a:ChatAttachment {id:$attachment_id})
+        MERGE (s)-[:HAS_ATTACHMENT]->(a)
+        """,
+        {
+            "session_id": session_id,
+            "attachment_id": attachment_id,
+        },
+        write=True,
+    )
+
+
+def _project_chat_resource_link_event(ev: EventEnvelope, commit_position: int) -> None:
+    p = ev.payload or {}
+    m = ev.metadata or {}
+    session_id = _as_str(ev.aggregate_id)
+    message_id = _as_str(p.get("message_id"))
+    resource_id = _as_str(p.get("resource_id"))
+    resource_label = _chat_resource_label(p.get("resource_type"))
+    if not session_id or not message_id or not resource_id or not resource_label:
+        return
+    workspace_id = _as_str(p.get("workspace_id") or m.get("workspace_id"))
+    project_id = _as_str(p.get("project_id") or m.get("project_id"))
+    if project_id and not _chat_graph_enabled_for_project(project_id):
+        return
+
+    _merge_node(
+        "ChatSession",
+        session_id,
+        {
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "last_commit_position": commit_position,
+        },
+    )
+    _merge_node(
+        "ChatMessage",
+        message_id,
+        {
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "session_id": session_id,
+            "last_commit_position": commit_position,
+        },
+    )
+    _merge_node(
+        resource_label,
+        resource_id,
+        {
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+        },
+    )
+
+    relation_type = _chat_relation_type(p.get("relation"))
+    run_graph_query(
+        f"""
+        MATCH (m:ChatMessage {{id:$message_id}})
+        MATCH (r:{resource_label} {{id:$resource_id}})
+        MERGE (m)-[:{relation_type}]->(r)
+        """,
+        {
+            "message_id": message_id,
+            "resource_id": resource_id,
+        },
+        write=True,
+    )
+    run_graph_query(
+        f"""
+        MATCH (s:ChatSession {{id:$session_id}})
+        MATCH (r:{resource_label} {{id:$resource_id}})
+        MERGE (r)-[:DISCUSSED_IN]->(s)
+        MERGE (s)-[:REFERENCES_RESOURCE]->(r)
+        """,
+        {
+            "session_id": session_id,
+            "resource_id": resource_id,
+        },
+        write=True,
+    )
+
+
 def _project_graph_event(ev: EventEnvelope, commit_position: int) -> None:
     metadata = ev.metadata or {}
     actor_id = _as_str(metadata.get("actor_id"))
@@ -813,6 +1159,32 @@ def _project_graph_event(ev: EventEnvelope, commit_position: int) -> None:
         PROJECT_RULE_EVENT_DELETED,
     }:
         _project_project_rule_event(ev, commit_position)
+        return
+
+    if ev.event_type in {
+        CHAT_SESSION_EVENT_STARTED,
+        CHAT_SESSION_EVENT_RENAMED,
+        CHAT_SESSION_EVENT_ARCHIVED,
+        CHAT_SESSION_EVENT_CONTEXT_UPDATED,
+    }:
+        _project_chat_session_event(ev, commit_position)
+        return
+
+    if ev.event_type in {
+        CHAT_SESSION_EVENT_USER_MESSAGE_APPENDED,
+        CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_APPENDED,
+        CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_UPDATED,
+        CHAT_SESSION_EVENT_MESSAGE_DELETED,
+    }:
+        _project_chat_message_event(ev, commit_position)
+        return
+
+    if ev.event_type == CHAT_SESSION_EVENT_ATTACHMENT_LINKED:
+        _project_chat_attachment_event(ev, commit_position)
+        return
+
+    if ev.event_type == CHAT_SESSION_EVENT_RESOURCE_LINKED:
+        _project_chat_resource_link_event(ev, commit_position)
 
 
 def project_kurrent_graph_once(limit: int | None = None) -> int:

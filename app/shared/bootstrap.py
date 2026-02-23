@@ -326,6 +326,17 @@ def ensure_project_table_columns(db: Session):
         db.execute(text("ALTER TABLE projects ADD COLUMN embedding_model VARCHAR(128)"))
     if "context_pack_evidence_top_k" not in existing:
         db.execute(text("ALTER TABLE projects ADD COLUMN context_pack_evidence_top_k INTEGER"))
+    if "chat_index_mode" not in existing:
+        db.execute(text("ALTER TABLE projects ADD COLUMN chat_index_mode VARCHAR(32) DEFAULT 'OFF'"))
+    if "chat_attachment_ingestion_mode" not in existing:
+        db.execute(text("ALTER TABLE projects ADD COLUMN chat_attachment_ingestion_mode VARCHAR(32) DEFAULT 'METADATA_ONLY'"))
+    db.execute(text("UPDATE projects SET chat_index_mode='OFF' WHERE chat_index_mode IS NULL OR chat_index_mode = ''"))
+    db.execute(
+        text(
+            "UPDATE projects SET chat_attachment_ingestion_mode='METADATA_ONLY' "
+            "WHERE chat_attachment_ingestion_mode IS NULL OR chat_attachment_ingestion_mode = ''"
+        )
+    )
     db.commit()
 
 
@@ -372,6 +383,19 @@ def ensure_task_comment_table_columns(db: Session):
     if "event_version" not in existing:
         db.execute(text("ALTER TABLE task_comments ADD COLUMN event_version INTEGER"))
     db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_task_comments_task_event_version ON task_comments(task_id, event_version)"))
+    db.commit()
+
+
+def ensure_chat_table_columns(db: Session):
+    existing_sessions = {column["name"] for column in inspect(db.bind).get_columns("chat_sessions")}
+    if "session_attachment_refs" not in existing_sessions:
+        db.execute(text("ALTER TABLE chat_sessions ADD COLUMN session_attachment_refs TEXT DEFAULT '[]'"))
+    db.execute(
+        text(
+            "UPDATE chat_sessions SET session_attachment_refs='[]' "
+            "WHERE session_attachment_refs IS NULL OR session_attachment_refs = ''"
+        )
+    )
     db.commit()
 
 
@@ -443,6 +467,7 @@ def bootstrap_data():
         ensure_task_group_tables(db)
         ensure_saved_view_table_columns(db)
         ensure_task_comment_table_columns(db)
+        ensure_chat_table_columns(db)
         ensure_task_watcher_table_constraints(db)
         ensure_system_users(db)
         default_user = db.get(User, DEFAULT_USER_ID)
@@ -520,6 +545,8 @@ def bootstrap_data():
                     "custom_statuses": DEFAULT_STATUSES,
                     "external_refs": [],
                     "attachment_refs": [],
+                    "chat_index_mode": "OFF",
+                    "chat_attachment_ingestion_mode": "METADATA_ONLY",
                 },
                 metadata={"actor_id": DEFAULT_USER_ID, "workspace_id": BOOTSTRAP_WORKSPACE_ID, "project_id": BOOTSTRAP_PROJECT_ID},
                 expected_version=0,
@@ -616,22 +643,26 @@ def _backfill_project_streams_from_read_model(db: Session) -> None:
             attachment_refs = json.loads(p.attachment_refs or "[]")
         except Exception:
             attachment_refs = []
-        append_event(
-            db,
-            aggregate_type="Project",
-            aggregate_id=p.id,
-            event_type=PROJECT_EVENT_CREATED,
+            append_event(
+                db,
+                aggregate_type="Project",
+                aggregate_id=p.id,
+                event_type=PROJECT_EVENT_CREATED,
             payload={
                 "workspace_id": p.workspace_id,
                 "name": p.name,
-                "description": p.description or "",
-                "custom_statuses": custom_statuses or DEFAULT_STATUSES,
-                "external_refs": external_refs,
-                "attachment_refs": attachment_refs,
-            },
-            metadata={"actor_id": DEFAULT_USER_ID, "workspace_id": p.workspace_id, "project_id": p.id},
-            expected_version=0,
-        )
+                    "description": p.description or "",
+                    "custom_statuses": custom_statuses or DEFAULT_STATUSES,
+                    "external_refs": external_refs,
+                    "attachment_refs": attachment_refs,
+                    "chat_index_mode": str(getattr(p, "chat_index_mode", "") or "OFF"),
+                    "chat_attachment_ingestion_mode": str(
+                        getattr(p, "chat_attachment_ingestion_mode", "") or "METADATA_ONLY"
+                    ),
+                },
+                metadata={"actor_id": DEFAULT_USER_ID, "workspace_id": p.workspace_id, "project_id": p.id},
+                expected_version=0,
+            )
 
 
 def _backfill_task_streams_from_read_model(db: Session) -> None:

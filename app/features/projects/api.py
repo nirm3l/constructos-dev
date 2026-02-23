@@ -56,6 +56,8 @@ def create_project(
         embedding_enabled=payload.embedding_enabled,
         embedding_model=payload.embedding_model,
         context_pack_evidence_top_k=payload.context_pack_evidence_top_k,
+        chat_index_mode=payload.chat_index_mode,
+        chat_attachment_ingestion_mode=payload.chat_attachment_ingestion_mode,
         member_user_ids=payload.member_user_ids,
         command_id=command_id,
     )

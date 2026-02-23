@@ -24,6 +24,16 @@ from .settings import (
     VECTOR_STORE_ENABLED,
     logger,
 )
+from .chat_indexing import (
+    CHAT_ATTACHMENT_INGESTION_FULL_TEXT,
+    CHAT_ATTACHMENT_INGESTION_FULL_TEXT_OCR,
+    CHAT_ATTACHMENT_INGESTION_METADATA_ONLY,
+    CHAT_ATTACHMENT_INGESTION_OFF,
+    CHAT_INDEX_MODE_KG_AND_VECTOR,
+    CHAT_INDEX_MODE_VECTOR_ONLY,
+    normalize_chat_attachment_ingestion_mode,
+    normalize_chat_index_mode,
+)
 
 _WORD_RE = re.compile(r"\S+")
 _CONTEXT_ERROR_MARKERS = (
@@ -273,6 +283,41 @@ def _entity_state_sources(entity_type: str, state: dict[str, Any]) -> list[tuple
             sources.append(("project_rule.title", title))
         if body:
             sources.append(("project_rule.body", body))
+    elif et == "chatmessage":
+        content = str(state.get("content") or "").strip()
+        role = str(state.get("role") or "").strip().lower()
+        if content:
+            normalized_role = role if role in {"user", "assistant"} else "message"
+            sources.append((f"chat_message.{normalized_role}", content))
+    elif et == "chatattachment":
+        ingestion_mode = normalize_chat_attachment_ingestion_mode(state.get("chat_attachment_ingestion_mode"))
+        if ingestion_mode != CHAT_ATTACHMENT_INGESTION_OFF:
+            name = str(state.get("name") or "").strip()
+            path = str(state.get("path") or "").strip()
+            mime_type = str(state.get("mime_type") or "").strip()
+            size_bytes = state.get("size_bytes")
+            metadata_parts: list[str] = []
+            if name:
+                metadata_parts.append(f"name: {name}")
+            if path:
+                metadata_parts.append(f"path: {path}")
+            if mime_type:
+                metadata_parts.append(f"mime_type: {mime_type}")
+            if isinstance(size_bytes, int) and size_bytes >= 0:
+                metadata_parts.append(f"size_bytes: {size_bytes}")
+            if metadata_parts and ingestion_mode in {
+                CHAT_ATTACHMENT_INGESTION_METADATA_ONLY,
+                CHAT_ATTACHMENT_INGESTION_FULL_TEXT,
+                CHAT_ATTACHMENT_INGESTION_FULL_TEXT_OCR,
+            }:
+                sources.append(("chat_attachment.metadata", "\n".join(metadata_parts)))
+
+        extracted_text = str(state.get("extracted_text") or "").strip()
+        if extracted_text and ingestion_mode in {
+            CHAT_ATTACHMENT_INGESTION_FULL_TEXT,
+            CHAT_ATTACHMENT_INGESTION_FULL_TEXT_OCR,
+        }:
+            sources.append(("chat_attachment.text", extracted_text))
     return sources
 
 
@@ -286,8 +331,17 @@ def _state_is_indexable(entity_type: str, state: dict[str, Any]) -> bool:
         return False
     if et == "task" and not str(state.get("project_id") or "").strip():
         return False
-    if et in {"task", "note", "specification", "projectrule"} and not str(state.get("project_id") or "").strip():
+    if et in {"task", "note", "specification", "projectrule", "chatmessage", "chatattachment"} and not str(
+        state.get("project_id") or ""
+    ).strip():
         return False
+    if et == "chatattachment":
+        ingestion_mode = normalize_chat_attachment_ingestion_mode(state.get("chat_attachment_ingestion_mode"))
+        if ingestion_mode == CHAT_ATTACHMENT_INGESTION_OFF:
+            return False
+    if et == "chatmessage":
+        if not str(state.get("content") or "").strip():
+            return False
     return True
 
 
@@ -507,7 +561,7 @@ def maybe_reindex_project(
 
 
 def reindex_project_with_runtime(db: Session, *, project_id: str, runtime: ProjectEmbeddingRuntime) -> int:
-    from .models import Note, Project, ProjectRule, Specification, Task
+    from .models import ChatAttachment, ChatMessage, Note, Project, ProjectRule, Specification, Task
 
     project = db.get(Project, project_id)
     if project is None or project.is_deleted:
@@ -616,6 +670,62 @@ def reindex_project_with_runtime(db: Session, *, project_id: str, runtime: Proje
             force_reindex=True,
             runtime_override=runtime,
         )
+
+    chat_index_mode = normalize_chat_index_mode(getattr(project, "chat_index_mode", None))
+    chat_attachment_ingestion_mode = normalize_chat_attachment_ingestion_mode(
+        getattr(project, "chat_attachment_ingestion_mode", None)
+    )
+    if chat_index_mode in {CHAT_INDEX_MODE_VECTOR_ONLY, CHAT_INDEX_MODE_KG_AND_VECTOR}:
+        messages = db.execute(
+            select(ChatMessage).where(
+                ChatMessage.project_id == project_id,
+                ChatMessage.is_deleted == False,
+            )
+        ).scalars().all()
+        for message in messages:
+            total += index_entity_state(
+                db,
+                entity_type="ChatMessage",
+                entity_id=message.id,
+                state={
+                    "workspace_id": message.workspace_id,
+                    "project_id": message.project_id,
+                    "role": message.role or "",
+                    "content": message.content or "",
+                    "is_deleted": bool(message.is_deleted),
+                    "updated_at": message.updated_at,
+                },
+                force_reindex=True,
+                runtime_override=runtime,
+            )
+
+        attachments = db.execute(
+            select(ChatAttachment).where(
+                ChatAttachment.project_id == project_id,
+                ChatAttachment.is_deleted == False,
+            )
+        ).scalars().all()
+        for attachment in attachments:
+            total += index_entity_state(
+                db,
+                entity_type="ChatAttachment",
+                entity_id=attachment.id,
+                state={
+                    "workspace_id": attachment.workspace_id,
+                    "project_id": attachment.project_id,
+                    "path": attachment.path or "",
+                    "name": attachment.name or "",
+                    "mime_type": attachment.mime_type or "",
+                    "size_bytes": attachment.size_bytes,
+                    "extraction_status": attachment.extraction_status or "pending",
+                    "extracted_text": attachment.extracted_text or "",
+                    "chat_attachment_ingestion_mode": chat_attachment_ingestion_mode,
+                    "is_deleted": bool(attachment.is_deleted),
+                    "updated_at": attachment.updated_at,
+                },
+                force_reindex=True,
+                runtime_override=runtime,
+            )
 
     return total
 

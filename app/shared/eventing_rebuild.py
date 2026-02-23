@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import logging
@@ -88,6 +89,18 @@ from features.task_groups.domain import (
 from features.project_templates.domain import (
     EVENT_BOUND as PROJECT_TEMPLATE_EVENT_BOUND,
 )
+from features.chat.domain import (
+    EVENT_ARCHIVED as CHAT_SESSION_EVENT_ARCHIVED,
+    EVENT_ASSISTANT_MESSAGE_APPENDED as CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_APPENDED,
+    EVENT_ASSISTANT_MESSAGE_UPDATED as CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_UPDATED,
+    EVENT_ATTACHMENT_LINKED as CHAT_SESSION_EVENT_ATTACHMENT_LINKED,
+    EVENT_CONTEXT_UPDATED as CHAT_SESSION_EVENT_CONTEXT_UPDATED,
+    EVENT_MESSAGE_DELETED as CHAT_SESSION_EVENT_MESSAGE_DELETED,
+    EVENT_RENAMED as CHAT_SESSION_EVENT_RENAMED,
+    EVENT_RESOURCE_LINKED as CHAT_SESSION_EVENT_RESOURCE_LINKED,
+    EVENT_STARTED as CHAT_SESSION_EVENT_STARTED,
+    EVENT_USER_MESSAGE_APPENDED as CHAT_SESSION_EVENT_USER_MESSAGE_APPENDED,
+)
 from features.users.domain import (
     EVENT_CREATED as USER_EVENT_CREATED,
     EVENT_DEACTIVATED as USER_EVENT_DEACTIVATED,
@@ -101,6 +114,10 @@ from .models import (
     ActivityLog,
     AggregateSnapshot,
     AuthSession,
+    ChatAttachment,
+    ChatMessage,
+    ChatMessageResourceLink,
+    ChatSession,
     Note,
     NoteGroup,
     Notification,
@@ -416,6 +433,10 @@ def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str
             "embedding_enabled": bool(p.get("embedding_enabled", False)),
             "embedding_model": p.get("embedding_model"),
             "context_pack_evidence_top_k": p.get("context_pack_evidence_top_k"),
+            "chat_index_mode": str(p.get("chat_index_mode") or "OFF"),
+            "chat_attachment_ingestion_mode": str(
+                p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
+            ),
             "is_deleted": False,
         }
     elif event.event_type == PROJECT_EVENT_DELETED:
@@ -438,6 +459,12 @@ def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str
             s["embedding_model"] = p.get("embedding_model")
         if "context_pack_evidence_top_k" in p:
             s["context_pack_evidence_top_k"] = p.get("context_pack_evidence_top_k")
+        if "chat_index_mode" in p:
+            s["chat_index_mode"] = str(p.get("chat_index_mode") or "OFF")
+        if "chat_attachment_ingestion_mode" in p:
+            s["chat_attachment_ingestion_mode"] = str(
+                p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
+            )
     return s
 
 
@@ -598,6 +625,165 @@ def apply_specification_event(state: dict[str, Any], event: EventEnvelope) -> di
     return s
 
 
+def _parse_datetime_or_none(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    text_value = str(value).strip()
+    if not text_value:
+        return None
+    try:
+        return datetime.fromisoformat(text_value)
+    except ValueError:
+        return None
+
+
+def _normalize_json_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    return []
+
+
+def _normalize_json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def _placeholder_chat_message_order_index(message_id: str) -> int:
+    digest = hashlib.sha1(str(message_id or "").encode("utf-8")).hexdigest()
+    # Keep placeholder order indices negative so normal chat order remains positive.
+    return -((int(digest[:8], 16) % 1_000_000_000) + 1)
+
+
+def _ensure_chat_message_placeholder(
+    db: Session,
+    *,
+    aggregate_id: str,
+    message_id: str,
+    workspace_id: str,
+    project_id: str | None,
+    actor_id: str,
+    session_key: str | None = None,
+) -> ChatMessage:
+    existing = db.get(ChatMessage, message_id)
+    if existing is not None:
+        return existing
+
+    session = db.get(ChatSession, aggregate_id)
+    if session is None:
+        session = ChatSession(
+            id=aggregate_id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            session_key=str(session_key or aggregate_id),
+            title="Session",
+            created_by=str(actor_id or ""),
+        )
+        db.add(session)
+    else:
+        if not session.workspace_id and workspace_id:
+            session.workspace_id = workspace_id
+        if session.project_id is None and project_id is not None:
+            session.project_id = project_id
+        if not session.session_key:
+            session.session_key = str(session_key or aggregate_id)
+        if not session.created_by and actor_id:
+            session.created_by = str(actor_id)
+
+    placeholder = ChatMessage(
+        id=message_id,
+        workspace_id=session.workspace_id or workspace_id,
+        project_id=session.project_id if session.project_id is not None else project_id,
+        session_id=session.id,
+        role="user",
+        content="",
+        order_index=_placeholder_chat_message_order_index(message_id),
+        attachment_refs="[]",
+        usage_json="{}",
+        is_deleted=False,
+        turn_created_at=None,
+    )
+    db.add(placeholder)
+    return placeholder
+
+
+def apply_chat_session_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, Any]:
+    s = dict(state)
+    p = event.payload or {}
+
+    if event.event_type == CHAT_SESSION_EVENT_STARTED:
+        s = {
+            "id": event.aggregate_id,
+            "workspace_id": p.get("workspace_id"),
+            "project_id": p.get("project_id"),
+            "session_key": p.get("session_key", event.aggregate_id),
+            "title": p.get("title", "Session"),
+            "created_by": p.get("created_by"),
+            "is_archived": bool(p.get("is_archived", False)),
+            "codex_session_id": p.get("codex_session_id"),
+            "mcp_servers": _normalize_json_list(p.get("mcp_servers")),
+            "usage": _normalize_json_dict(p.get("usage")),
+            "last_message_at": p.get("last_message_at"),
+            "last_message_preview": p.get("last_message_preview", ""),
+            "last_task_event_at": p.get("last_task_event_at"),
+            "next_message_index": int(p.get("next_message_index", 0) or 0),
+        }
+        return s
+
+    if event.event_type == CHAT_SESSION_EVENT_RENAMED:
+        s["title"] = str(p.get("title") or s.get("title") or "Session")
+        return s
+
+    if event.event_type == CHAT_SESSION_EVENT_ARCHIVED:
+        s["is_archived"] = True
+        return s
+
+    if event.event_type == CHAT_SESSION_EVENT_CONTEXT_UPDATED:
+        if "project_id" in p:
+            s["project_id"] = p.get("project_id")
+        if "mcp_servers" in p:
+            s["mcp_servers"] = _normalize_json_list(p.get("mcp_servers"))
+        if "codex_session_id" in p:
+            s["codex_session_id"] = p.get("codex_session_id")
+        if "usage" in p:
+            s["usage"] = _normalize_json_dict(p.get("usage"))
+        if "last_task_event_at" in p:
+            s["last_task_event_at"] = p.get("last_task_event_at")
+        return s
+
+    if event.event_type in {CHAT_SESSION_EVENT_USER_MESSAGE_APPENDED, CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_APPENDED}:
+        order_index = int(p.get("order_index") or 0)
+        if order_index > int(s.get("next_message_index") or 0):
+            s["next_message_index"] = order_index
+        s["last_message_preview"] = str(p.get("content") or "")[:240]
+        s["last_message_at"] = p.get("created_at")
+        if event.event_type == CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_APPENDED:
+            if "codex_session_id" in p:
+                s["codex_session_id"] = p.get("codex_session_id")
+            if "usage" in p:
+                s["usage"] = _normalize_json_dict(p.get("usage"))
+        return s
+
+    if event.event_type == CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_UPDATED:
+        s["last_message_preview"] = str(p.get("content") or "")[:240]
+        if "codex_session_id" in p:
+            s["codex_session_id"] = p.get("codex_session_id")
+        if "usage" in p:
+            s["usage"] = _normalize_json_dict(p.get("usage"))
+        return s
+
+    if event.event_type in {
+        CHAT_SESSION_EVENT_MESSAGE_DELETED,
+        CHAT_SESSION_EVENT_ATTACHMENT_LINKED,
+        CHAT_SESSION_EVENT_RESOURCE_LINKED,
+    }:
+        return s
+
+    return s
+
+
 def rebuild_state(db: Session, aggregate_type: str, aggregate_id: str) -> tuple[dict[str, Any], int]:
     state, version = load_snapshot(db, aggregate_type, aggregate_id)
     for ev in load_events_after(db, aggregate_type, aggregate_id, version):
@@ -615,6 +801,8 @@ def rebuild_state(db: Session, aggregate_type: str, aggregate_id: str) -> tuple[
             state = apply_project_rule_event(state, ev)
         elif aggregate_type == "Specification":
             state = apply_specification_event(state, ev)
+        elif aggregate_type == "ChatSession":
+            state = apply_chat_session_event(state, ev)
         version = ev.version
     return state, version
 
@@ -669,6 +857,10 @@ def project_event(db: Session, ev: EventEnvelope):
         project.embedding_enabled = bool(p.get("embedding_enabled", False))
         project.embedding_model = p.get("embedding_model")
         project.context_pack_evidence_top_k = p.get("context_pack_evidence_top_k")
+        project.chat_index_mode = str(p.get("chat_index_mode") or "OFF")
+        project.chat_attachment_ingestion_mode = str(
+            p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
+        )
     elif ev.event_type == PROJECT_EVENT_DELETED:
         project = db.get(Project, ev.aggregate_id)
         if project:
@@ -695,6 +887,12 @@ def project_event(db: Session, ev: EventEnvelope):
                 project.embedding_model = p.get("embedding_model")
             if "context_pack_evidence_top_k" in p:
                 project.context_pack_evidence_top_k = p.get("context_pack_evidence_top_k")
+            if "chat_index_mode" in p:
+                project.chat_index_mode = str(p.get("chat_index_mode") or "OFF")
+            if "chat_attachment_ingestion_mode" in p:
+                project.chat_attachment_ingestion_mode = str(
+                    p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
+                )
     elif ev.event_type == PROJECT_EVENT_MEMBER_UPSERTED:
         project_id = p.get("project_id") or ev.aggregate_id
         workspace_id = p.get("workspace_id") or m.get("workspace_id")
@@ -848,6 +1046,229 @@ def project_event(db: Session, ev: EventEnvelope):
         group.color = p.get("color")
         group.order_index = int(p.get("order_index", 0))
         group.is_deleted = bool(p.get("is_deleted", False))
+    elif ev.event_type == CHAT_SESSION_EVENT_STARTED:
+        session = db.get(ChatSession, ev.aggregate_id)
+        if session is None:
+            session = ChatSession(
+                id=ev.aggregate_id,
+                workspace_id=p.get("workspace_id") or m.get("workspace_id") or "",
+                project_id=p.get("project_id") or m.get("project_id"),
+                session_key=str(p.get("session_key") or m.get("session_id") or ev.aggregate_id),
+                title=str(p.get("title") or "Session"),
+                created_by=str(p.get("created_by") or m.get("actor_id") or ""),
+            )
+            db.add(session)
+        session.workspace_id = p.get("workspace_id") or m.get("workspace_id") or session.workspace_id
+        session.project_id = p.get("project_id") if "project_id" in p else (m.get("project_id") or session.project_id)
+        session.session_key = str(p.get("session_key") or session.session_key or ev.aggregate_id)
+        session.title = str(p.get("title") or session.title or "Session")
+        session.created_by = str(p.get("created_by") or session.created_by or m.get("actor_id") or "")
+        session.is_archived = bool(p.get("is_archived", False))
+        session.codex_session_id = p.get("codex_session_id")
+        session.mcp_servers = json.dumps(_normalize_json_list(p.get("mcp_servers")), ensure_ascii=True)
+        session.session_attachment_refs = json.dumps(
+            _normalize_json_list(p.get("session_attachment_refs")),
+            ensure_ascii=True,
+        )
+        session.usage_json = json.dumps(_normalize_json_dict(p.get("usage")), ensure_ascii=True)
+        session.last_message_at = _parse_datetime_or_none(p.get("last_message_at"))
+        session.last_message_preview = str(p.get("last_message_preview") or "")
+        session.last_task_event_at = _parse_datetime_or_none(p.get("last_task_event_at"))
+    elif ev.event_type == CHAT_SESSION_EVENT_RENAMED:
+        session = db.get(ChatSession, ev.aggregate_id)
+        if session:
+            session.title = str(p.get("title") or session.title or "Session")
+    elif ev.event_type == CHAT_SESSION_EVENT_ARCHIVED:
+        session = db.get(ChatSession, ev.aggregate_id)
+        if session:
+            session.is_archived = True
+    elif ev.event_type == CHAT_SESSION_EVENT_CONTEXT_UPDATED:
+        session = db.get(ChatSession, ev.aggregate_id)
+        if session:
+            if "project_id" in p:
+                session.project_id = p.get("project_id")
+            if "mcp_servers" in p:
+                session.mcp_servers = json.dumps(_normalize_json_list(p.get("mcp_servers")), ensure_ascii=True)
+            if "session_attachment_refs" in p:
+                session.session_attachment_refs = json.dumps(
+                    _normalize_json_list(p.get("session_attachment_refs")),
+                    ensure_ascii=True,
+                )
+            if "codex_session_id" in p:
+                session.codex_session_id = p.get("codex_session_id")
+            if "usage" in p:
+                session.usage_json = json.dumps(_normalize_json_dict(p.get("usage")), ensure_ascii=True)
+            if "last_task_event_at" in p:
+                session.last_task_event_at = _parse_datetime_or_none(p.get("last_task_event_at"))
+    elif ev.event_type in {CHAT_SESSION_EVENT_USER_MESSAGE_APPENDED, CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_APPENDED}:
+        role = "assistant" if ev.event_type == CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_APPENDED else "user"
+        message_id = str(p.get("message_id") or "").strip()
+        order_index = int(p.get("order_index") or 0)
+        turn_created_at = _parse_datetime_or_none(p.get("created_at")) or datetime.now(timezone.utc)
+        attachment_refs = _normalize_json_list(p.get("attachment_refs"))
+        usage_payload = _normalize_json_dict(p.get("usage"))
+        session = db.get(ChatSession, ev.aggregate_id)
+        if session is None:
+            session = ChatSession(
+                id=ev.aggregate_id,
+                workspace_id=str(p.get("workspace_id") or m.get("workspace_id") or ""),
+                project_id=p.get("project_id") if "project_id" in p else m.get("project_id"),
+                session_key=str(p.get("session_key") or m.get("session_id") or ev.aggregate_id),
+                title="Session",
+                created_by=str(m.get("actor_id") or ""),
+            )
+            db.add(session)
+        if "project_id" in p:
+            session.project_id = p.get("project_id")
+        if "mcp_servers" in p:
+            session.mcp_servers = json.dumps(_normalize_json_list(p.get("mcp_servers")), ensure_ascii=True)
+        if role == "assistant":
+            if "codex_session_id" in p:
+                session.codex_session_id = p.get("codex_session_id")
+            if "usage" in p:
+                session.usage_json = json.dumps(usage_payload, ensure_ascii=True)
+        session.last_message_at = turn_created_at
+        session.last_message_preview = str(p.get("content") or "")[:240]
+
+        if message_id:
+            message = db.get(ChatMessage, message_id)
+            if message is None:
+                message = ChatMessage(
+                    id=message_id,
+                    workspace_id=session.workspace_id,
+                    project_id=session.project_id,
+                    session_id=session.id,
+                    role=role,
+                    content=str(p.get("content") or ""),
+                    order_index=order_index,
+                    attachment_refs=json.dumps(attachment_refs, ensure_ascii=True),
+                    usage_json=json.dumps(usage_payload if role == "assistant" else {}, ensure_ascii=True),
+                    is_deleted=False,
+                    turn_created_at=turn_created_at,
+                )
+                db.add(message)
+            else:
+                message.workspace_id = session.workspace_id
+                message.project_id = session.project_id
+                message.session_id = session.id
+                message.role = role
+                message.content = str(p.get("content") or "")
+                message.order_index = order_index
+                message.attachment_refs = json.dumps(attachment_refs, ensure_ascii=True)
+                if role == "assistant":
+                    message.usage_json = json.dumps(usage_payload, ensure_ascii=True)
+                message.turn_created_at = turn_created_at
+                message.is_deleted = False
+    elif ev.event_type == CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_UPDATED:
+        message_id = str(p.get("message_id") or "").strip()
+        usage_payload = _normalize_json_dict(p.get("usage"))
+        message = db.get(ChatMessage, message_id) if message_id else None
+        if message:
+            message.content = str(p.get("content") or message.content or "")
+            if "usage" in p:
+                message.usage_json = json.dumps(usage_payload, ensure_ascii=True)
+            if "is_deleted" in p:
+                message.is_deleted = bool(p.get("is_deleted"))
+        session = db.get(ChatSession, ev.aggregate_id)
+        if session:
+            session.last_message_preview = str(p.get("content") or session.last_message_preview or "")[:240]
+            if "codex_session_id" in p:
+                session.codex_session_id = p.get("codex_session_id")
+            if "usage" in p:
+                session.usage_json = json.dumps(usage_payload, ensure_ascii=True)
+    elif ev.event_type == CHAT_SESSION_EVENT_MESSAGE_DELETED:
+        message_id = str(p.get("message_id") or "").strip()
+        message = db.get(ChatMessage, message_id) if message_id else None
+        if message:
+            message.is_deleted = True
+    elif ev.event_type == CHAT_SESSION_EVENT_ATTACHMENT_LINKED:
+        attachment_id = str(p.get("attachment_id") or "").strip()
+        message_id = str(p.get("message_id") or "").strip()
+        if attachment_id and message_id:
+            workspace_id = str(p.get("workspace_id") or m.get("workspace_id") or "")
+            project_id = p.get("project_id") if "project_id" in p else m.get("project_id")
+            _ensure_chat_message_placeholder(
+                db,
+                aggregate_id=ev.aggregate_id,
+                message_id=message_id,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                actor_id=str(m.get("actor_id") or ""),
+                session_key=str(p.get("session_key") or m.get("session_id") or ev.aggregate_id),
+            )
+            attachment = db.get(ChatAttachment, attachment_id)
+            if attachment is None:
+                attachment = ChatAttachment(
+                    id=attachment_id,
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    session_id=ev.aggregate_id,
+                    message_id=message_id,
+                    path=str(p.get("path") or ""),
+                    name=str(p.get("name") or ""),
+                    mime_type=p.get("mime_type"),
+                    size_bytes=p.get("size_bytes"),
+                    checksum=p.get("checksum"),
+                    extraction_status=str(p.get("extraction_status") or "pending"),
+                    extracted_text=p.get("extracted_text"),
+                    is_deleted=bool(p.get("is_deleted", False)),
+                )
+                db.add(attachment)
+            else:
+                attachment.workspace_id = str(p.get("workspace_id") or m.get("workspace_id") or attachment.workspace_id)
+                if "project_id" in p:
+                    attachment.project_id = p.get("project_id")
+                attachment.session_id = ev.aggregate_id
+                attachment.message_id = message_id
+                attachment.path = str(p.get("path") or attachment.path or "")
+                attachment.name = str(p.get("name") or attachment.name or "")
+                attachment.mime_type = p.get("mime_type")
+                attachment.size_bytes = p.get("size_bytes")
+                attachment.checksum = p.get("checksum")
+                if "extraction_status" in p:
+                    attachment.extraction_status = str(p.get("extraction_status") or "pending")
+                if "extracted_text" in p:
+                    attachment.extracted_text = p.get("extracted_text")
+                if "is_deleted" in p:
+                    attachment.is_deleted = bool(p.get("is_deleted"))
+    elif ev.event_type == CHAT_SESSION_EVENT_RESOURCE_LINKED:
+        message_id = str(p.get("message_id") or "").strip()
+        resource_type = str(p.get("resource_type") or "").strip()
+        resource_id = str(p.get("resource_id") or "").strip()
+        relation = str(p.get("relation") or "created").strip() or "created"
+        if message_id and resource_type and resource_id:
+            workspace_id = str(p.get("workspace_id") or m.get("workspace_id") or "")
+            project_id = p.get("project_id") if "project_id" in p else m.get("project_id")
+            _ensure_chat_message_placeholder(
+                db,
+                aggregate_id=ev.aggregate_id,
+                message_id=message_id,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                actor_id=str(m.get("actor_id") or ""),
+                session_key=str(p.get("session_key") or m.get("session_id") or ev.aggregate_id),
+            )
+            existing = db.execute(
+                select(ChatMessageResourceLink).where(
+                    ChatMessageResourceLink.session_id == ev.aggregate_id,
+                    ChatMessageResourceLink.message_id == message_id,
+                    ChatMessageResourceLink.resource_type == resource_type,
+                    ChatMessageResourceLink.resource_id == resource_id,
+                    ChatMessageResourceLink.relation == relation,
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                db.add(
+                    ChatMessageResourceLink(
+                        workspace_id=workspace_id,
+                        project_id=project_id,
+                        session_id=ev.aggregate_id,
+                        message_id=message_id,
+                        resource_type=resource_type,
+                        resource_id=resource_id,
+                        relation=relation,
+                    )
+                )
     elif ev.event_type in NOTE_MUTATION_EVENTS:
         note = db.get(Note, ev.aggregate_id)
         if note:

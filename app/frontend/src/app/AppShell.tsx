@@ -202,12 +202,14 @@ function App({ logout }: { logout: () => void }) {
     showCodexChat, setShowCodexChat, codexChatSessions, codexChatProjectSessions, codexChatActiveSessionId,
     setCodexChatActiveSessionId, codexChatActiveSessionTitle, createCodexChatSession, selectCodexChatProject,
     deleteCodexChatSession, codexChatProjectId, setCodexChatProjectId, codexChatMcpServers, setCodexChatMcpServers,
+    codexChatSessionAttachmentRefs, setCodexChatSessionAttachmentRefs,
     codexChatInstruction, setCodexChatInstruction,
     codexChatTurns, setCodexChatTurns, setCodexChatTurnsForSession, codexChatSessionId, isCodexChatRunning,
     setIsCodexChatRunning, codexChatRunStartedAt, setCodexChatRunStartedAt, codexChatElapsedSeconds,
     setCodexChatElapsedSeconds, codexChatLastTaskEventAt, setCodexChatLastTaskEventAt, codexChatUsage,
     setCodexChatUsage, setCodexChatUsageForSession, codexChatCodexSessionId, setCodexChatCodexSessionId,
     setCodexChatCodexSessionIdForSession,
+    mergeCodexChatSessionsFromServer,
   } = useCodexChatState()
   const [fabHidden, setFabHidden] = React.useState(false)
   const [showNotificationsPanel, setShowNotificationsPanel] = React.useState(false)
@@ -541,6 +543,8 @@ function App({ logout }: { logout: () => void }) {
     setCodexChatElapsedSeconds,
     codexChatHistoryRef,
     codexChatTurns,
+    codexChatActiveSessionId,
+    mergeCodexChatSessionsFromServer,
   })
 
   const selectedTask = React.useMemo(() => tasks.data?.items.find((t) => t.id === selectedTaskId) ?? null, [tasks.data?.items, selectedTaskId])
@@ -1862,6 +1866,8 @@ function App({ logout }: { logout: () => void }) {
       codexChatUsage,
       codexChatMcpServers,
       setCodexChatMcpServers,
+      codexChatSessionAttachmentRefs,
+      setCodexChatSessionAttachmentRefs,
       codexChatCodexSessionId,
       runAgentChatMutation,
       cancelAgentChat,

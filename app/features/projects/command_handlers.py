@@ -27,6 +27,15 @@ from shared.core import (
     load_project_view,
 )
 from shared.settings import ALLOWED_EMBEDDING_MODELS, DEFAULT_EMBEDDING_MODEL
+from shared.chat_indexing import (
+    CHAT_ATTACHMENT_INGESTION_FULL_TEXT,
+    CHAT_ATTACHMENT_INGESTION_FULL_TEXT_OCR,
+    CHAT_ATTACHMENT_INGESTION_METADATA_ONLY,
+    CHAT_ATTACHMENT_INGESTION_OFF,
+    CHAT_INDEX_MODE_KG_AND_VECTOR,
+    CHAT_INDEX_MODE_OFF,
+    CHAT_INDEX_MODE_VECTOR_ONLY,
+)
 from ..notes.domain import NoteAggregate
 from ..rules.domain import ProjectRuleAggregate
 from ..specifications.domain import SpecificationAggregate
@@ -150,6 +159,34 @@ def _normalize_context_pack_evidence_top_k(value: int | None) -> int | None:
     return out
 
 
+_CHAT_INDEX_MODES = {CHAT_INDEX_MODE_OFF, CHAT_INDEX_MODE_VECTOR_ONLY, CHAT_INDEX_MODE_KG_AND_VECTOR}
+_CHAT_ATTACHMENT_INGESTION_MODES = {
+    CHAT_ATTACHMENT_INGESTION_OFF,
+    CHAT_ATTACHMENT_INGESTION_METADATA_ONLY,
+    CHAT_ATTACHMENT_INGESTION_FULL_TEXT,
+    CHAT_ATTACHMENT_INGESTION_FULL_TEXT_OCR,
+}
+
+
+def _normalize_chat_index_mode(value: str | None) -> str:
+    mode = str(value or "").strip().upper() or CHAT_INDEX_MODE_OFF
+    if mode not in _CHAT_INDEX_MODES:
+        allowed = ", ".join(sorted(_CHAT_INDEX_MODES))
+        raise HTTPException(status_code=422, detail=f"chat_index_mode must be one of: {allowed}")
+    return mode
+
+
+def _normalize_chat_attachment_ingestion_mode(value: str | None) -> str:
+    mode = str(value or "").strip().upper() or CHAT_ATTACHMENT_INGESTION_METADATA_ONLY
+    if mode not in _CHAT_ATTACHMENT_INGESTION_MODES:
+        allowed = ", ".join(sorted(_CHAT_ATTACHMENT_INGESTION_MODES))
+        raise HTTPException(
+            status_code=422,
+            detail=f"chat_attachment_ingestion_mode must be one of: {allowed}",
+        )
+    return mode
+
+
 @dataclass(frozen=True, slots=True)
 class CreateProjectHandler:
     ctx: CommandContext
@@ -201,6 +238,10 @@ class CreateProjectHandler:
             embedding_enabled=embedding_enabled,
             embedding_model=embedding_model,
             context_pack_evidence_top_k=_normalize_context_pack_evidence_top_k(self.payload.context_pack_evidence_top_k),
+            chat_index_mode=_normalize_chat_index_mode(self.payload.chat_index_mode),
+            chat_attachment_ingestion_mode=_normalize_chat_attachment_ingestion_mode(
+                self.payload.chat_attachment_ingestion_mode
+            ),
             status="Active",
         )
         for uid in deduped_member_ids:
@@ -371,6 +412,12 @@ class PatchProjectHandler:
         if "context_pack_evidence_top_k" in data:
             event_payload["context_pack_evidence_top_k"] = _normalize_context_pack_evidence_top_k(
                 data.get("context_pack_evidence_top_k")
+            )
+        if "chat_index_mode" in data and data["chat_index_mode"] is not None:
+            event_payload["chat_index_mode"] = _normalize_chat_index_mode(data.get("chat_index_mode"))
+        if "chat_attachment_ingestion_mode" in data and data["chat_attachment_ingestion_mode"] is not None:
+            event_payload["chat_attachment_ingestion_mode"] = _normalize_chat_attachment_ingestion_mode(
+                data.get("chat_attachment_ingestion_mode")
             )
 
         if not event_payload:

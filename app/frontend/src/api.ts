@@ -11,7 +11,9 @@ import type {
   LicenseActivationResponse,
   LicenseStatusResponse,
   AgentChatResponse,
+  ChatMessageRecord,
   ChatMcpServer,
+  ChatSessionRecord,
   GraphContextPack,
   ProjectKnowledgeSearchResult,
   GraphProjectOverview,
@@ -409,6 +411,7 @@ export const runAgentChat = (
     session_id?: string | null
     history?: Array<{ role: 'user' | 'assistant'; content: string }>
     attachment_refs?: AttachmentRef[]
+    session_attachment_refs?: AttachmentRef[]
     mcp_servers?: ChatMcpServer[]
     allow_mutations?: boolean
   }
@@ -417,6 +420,57 @@ export const runAgentChat = (
     method: 'POST',
     body: JSON.stringify(payload)
   })
+
+export const listChatSessions = (
+  userId: string,
+  workspaceId: string,
+  params?: {
+    project_id?: string | null
+    include_archived?: boolean
+    limit?: number
+  }
+) =>
+  api<ChatSessionRecord[]>(
+    `/api/chat/sessions${queryString({
+      workspace_id: workspaceId,
+      project_id: params?.project_id ?? undefined,
+      include_archived: params?.include_archived ?? false,
+      limit: params?.limit ?? 40,
+    })}`,
+    userId
+  )
+
+export const updateChatSessionContext = (
+  userId: string,
+  sessionId: string,
+  payload: {
+    workspace_id: string
+    session_attachment_refs?: AttachmentRef[]
+  }
+) =>
+  api<ChatSessionRecord>(
+    `/api/chat/sessions/${encodeURIComponent(sessionId)}`,
+    userId,
+    { method: 'PATCH', body: JSON.stringify(payload) }
+  )
+
+export const listChatSessionMessages = (
+  userId: string,
+  workspaceId: string,
+  sessionId: string,
+  params?: {
+    include_deleted?: boolean
+    limit?: number
+  }
+) =>
+  api<ChatMessageRecord[]>(
+    `/api/chat/sessions/${encodeURIComponent(sessionId)}/messages${queryString({
+      workspace_id: workspaceId,
+      include_deleted: params?.include_deleted ?? false,
+      limit: params?.limit ?? 400,
+    })}`,
+    userId
+  )
 
 export async function runAgentChatStream(
   userId: string,
@@ -427,6 +481,7 @@ export async function runAgentChatStream(
     session_id?: string | null
     history?: Array<{ role: 'user' | 'assistant'; content: string }>
     attachment_refs?: AttachmentRef[]
+    session_attachment_refs?: AttachmentRef[]
     mcp_servers?: ChatMcpServer[]
     allow_mutations?: boolean
   },

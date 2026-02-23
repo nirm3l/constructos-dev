@@ -1,8 +1,14 @@
 import React from 'react'
-import type { AgentChatUsage, ChatMcpServer } from '../types'
+import type { AgentChatUsage, AttachmentRef, ChatMcpServer } from '../types'
 
 export type ChatRole = 'user' | 'assistant'
-export type ChatTurn = { id: string; role: ChatRole; content: string; createdAt: number }
+export type ChatTurn = {
+  id: string
+  role: ChatRole
+  content: string
+  createdAt: number
+  attachmentRefs: AttachmentRef[]
+}
 
 export type ChatSession = {
   id: string
@@ -11,10 +17,25 @@ export type ChatSession = {
   turns: ChatTurn[]
   usage: AgentChatUsage | null
   mcpServers: ChatMcpServer[]
+  sessionAttachmentRefs: AttachmentRef[]
   codexSessionId: string | null
   createdAt: number
   updatedAt: number
   lastTaskEventAt: number | null
+}
+
+export type ChatSessionServerSnapshot = {
+  id: string
+  title?: string
+  projectId?: string
+  turns?: ChatTurn[]
+  usage?: AgentChatUsage | null
+  mcpServers?: ChatMcpServer[]
+  sessionAttachmentRefs?: AttachmentRef[]
+  codexSessionId?: string | null
+  createdAt?: number
+  updatedAt?: number
+  lastTaskEventAt?: number | null
 }
 
 type PersistedCodexChatState = {
@@ -64,6 +85,30 @@ function normalizeMcpServers(value: unknown): ChatMcpServer[] {
   return out
 }
 
+function normalizeAttachmentRefs(value: unknown): AttachmentRef[] {
+  if (!Array.isArray(value)) return []
+  const out: AttachmentRef[] = []
+  const seen = new Set<string>()
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue
+    const attachment = item as Record<string, unknown>
+    const path = typeof attachment.path === 'string' ? attachment.path.trim() : ''
+    if (!path) continue
+    const dedupeKey = path.toLowerCase()
+    if (seen.has(dedupeKey)) continue
+    seen.add(dedupeKey)
+    const normalized: AttachmentRef = { path }
+    const name = typeof attachment.name === 'string' ? attachment.name.trim() : ''
+    const mimeType = typeof attachment.mime_type === 'string' ? attachment.mime_type.trim() : ''
+    const sizeBytes = Number(attachment.size_bytes)
+    if (name) normalized.name = name
+    if (mimeType) normalized.mime_type = mimeType
+    if (Number.isFinite(sizeBytes) && sizeBytes >= 0) normalized.size_bytes = Math.floor(sizeBytes)
+    out.push(normalized)
+  }
+  return out
+}
+
 function normalizeTurns(value: unknown): ChatTurn[] {
   if (!Array.isArray(value)) return []
   const out: ChatTurn[] = []
@@ -79,6 +124,7 @@ function normalizeTurns(value: unknown): ChatTurn[] {
       role,
       content,
       createdAt: Number.isFinite(createdAtRaw) && createdAtRaw > 0 ? Math.floor(createdAtRaw) : Date.now(),
+      attachmentRefs: normalizeAttachmentRefs(turn.attachmentRefs ?? turn.attachment_refs),
     })
   }
   return out.slice(-MAX_TURNS_PER_SESSION)
@@ -118,6 +164,7 @@ function createSession(title: string, projectId = ''): ChatSession {
     turns: [],
     usage: null,
     mcpServers: [],
+    sessionAttachmentRefs: [],
     codexSessionId: null,
     createdAt: now,
     updatedAt: now,
@@ -157,12 +204,19 @@ function normalizeSession(value: unknown): ChatSession | null {
     turns,
     usage: normalizeUsage(session.usage),
     mcpServers: normalizeMcpServers(session.mcpServers),
+    sessionAttachmentRefs: normalizeAttachmentRefs(session.sessionAttachmentRefs ?? session.session_attachment_refs),
     codexSessionId,
     createdAt,
     updatedAt,
     lastTaskEventAt:
       Number.isFinite(lastTaskEventAtRaw) && lastTaskEventAtRaw > 0 ? Math.floor(lastTaskEventAtRaw) : null,
   }
+}
+
+function normalizeTimestampMs(value: unknown, fallback: number): number {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) return fallback
+  return Math.floor(numeric)
 }
 
 function loadPersistedState(): PersistedCodexChatState | null {
@@ -295,6 +349,17 @@ export function useCodexChatState() {
     }))
   }, [patchSession])
 
+  const setCodexChatSessionAttachmentRefsForSession = React.useCallback((
+    sessionId: string,
+    refs: AttachmentRef[]
+  ) => {
+    patchSession(sessionId, (session) => ({
+      ...session,
+      sessionAttachmentRefs: normalizeAttachmentRefs(refs),
+      updatedAt: Date.now(),
+    }))
+  }, [patchSession])
+
   const setCodexChatCodexSessionIdForSession = React.useCallback((sessionId: string, codexSessionId: string | null) => {
     patchSession(sessionId, (session) => ({
       ...session,
@@ -310,6 +375,84 @@ export function useCodexChatState() {
       updatedAt: Date.now(),
     }))
   }, [patchSession])
+
+  const mergeCodexChatSessionsFromServer = React.useCallback((
+    incomingSnapshots: ChatSessionServerSnapshot[],
+    opts?: { activeSessionId?: string | null }
+  ) => {
+    let nextActiveSessionId = ''
+    setCodexChatSessions((prev) => {
+      const byId = new Map<string, ChatSession>(prev.map((session) => [session.id, session]))
+      const now = Date.now()
+
+      for (const snapshot of incomingSnapshots) {
+        const id = String(snapshot?.id || '').trim()
+        if (!id) continue
+        const existing = byId.get(id)
+        const createdAt = normalizeTimestampMs(snapshot.createdAt, existing?.createdAt ?? now)
+        const updatedAt = normalizeTimestampMs(snapshot.updatedAt, existing?.updatedAt ?? createdAt)
+        const turns = normalizeTurns(snapshot.turns ?? existing?.turns ?? [])
+        const lastTaskEventAt = snapshot.lastTaskEventAt === null
+          ? null
+          : snapshot.lastTaskEventAt === undefined
+            ? (existing?.lastTaskEventAt ?? null)
+            : normalizeTimestampMs(snapshot.lastTaskEventAt, existing?.lastTaskEventAt ?? now)
+        byId.set(id, {
+          id,
+          title: String(snapshot.title || existing?.title || `${DEFAULT_SESSION_TITLE_PREFIX} 1`).trim()
+            || `${DEFAULT_SESSION_TITLE_PREFIX} 1`,
+          projectId: String(snapshot.projectId ?? existing?.projectId ?? ''),
+          turns,
+          usage: normalizeUsage(snapshot.usage ?? existing?.usage ?? null),
+          mcpServers: normalizeMcpServers(snapshot.mcpServers ?? existing?.mcpServers ?? []),
+          sessionAttachmentRefs: normalizeAttachmentRefs(
+            snapshot.sessionAttachmentRefs
+            ?? existing?.sessionAttachmentRefs
+            ?? []
+          ),
+          codexSessionId:
+            snapshot.codexSessionId !== undefined
+              ? (snapshot.codexSessionId && String(snapshot.codexSessionId).trim()
+                ? String(snapshot.codexSessionId).trim()
+                : null)
+              : (existing?.codexSessionId ?? null),
+          createdAt,
+          updatedAt,
+          lastTaskEventAt,
+        })
+      }
+
+      const merged = Array.from(byId.values())
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, MAX_SESSIONS)
+
+      const preferredActiveId = String(opts?.activeSessionId || '').trim()
+      const incomingIds = new Set(
+        incomingSnapshots
+          .map((item) => String(item?.id || '').trim())
+          .filter(Boolean)
+      )
+      const currentActive = merged.find((session) => session.id === codexChatActiveSessionId) ?? null
+      const shouldKeepCurrentActive = Boolean(
+        currentActive
+        && (incomingIds.size === 0
+          || incomingIds.has(currentActive.id)
+          || currentActive.turns.length > 0)
+      )
+
+      if (shouldKeepCurrentActive) {
+        nextActiveSessionId = codexChatActiveSessionId
+      } else if (preferredActiveId && merged.some((session) => session.id === preferredActiveId)) {
+        nextActiveSessionId = preferredActiveId
+      } else {
+        nextActiveSessionId = merged[0]?.id ?? ''
+      }
+      return merged
+    })
+    if (nextActiveSessionId && nextActiveSessionId !== codexChatActiveSessionId) {
+      setCodexChatActiveSessionId(nextActiveSessionId)
+    }
+  }, [codexChatActiveSessionId])
 
   const createCodexChatSession = React.useCallback((opts?: { title?: string; projectId?: string }) => {
     const projectId = String(opts?.projectId ?? '')
@@ -366,6 +509,7 @@ export function useCodexChatState() {
   const codexChatTurns = activeSession?.turns ?? []
   const codexChatUsage = activeSession?.usage ?? null
   const codexChatMcpServers = normalizeMcpServers(activeSession?.mcpServers)
+  const codexChatSessionAttachmentRefs = normalizeAttachmentRefs(activeSession?.sessionAttachmentRefs)
   const codexChatCodexSessionId = activeSession?.codexSessionId ?? null
   const codexChatLastTaskEventAt = activeSession?.lastTaskEventAt ?? null
   const codexChatActiveSessionTitle = activeSession?.title ?? ''
@@ -399,6 +543,11 @@ export function useCodexChatState() {
     setCodexChatMcpServersForSession(codexChatSessionId, servers)
   }, [codexChatSessionId, setCodexChatMcpServersForSession])
 
+  const setCodexChatSessionAttachmentRefs = React.useCallback((refs: AttachmentRef[]) => {
+    if (!codexChatSessionId) return
+    setCodexChatSessionAttachmentRefsForSession(codexChatSessionId, refs)
+  }, [codexChatSessionId, setCodexChatSessionAttachmentRefsForSession])
+
   const setCodexChatCodexSessionId = React.useCallback((codexSessionId: string | null) => {
     if (!codexChatSessionId) return
     setCodexChatCodexSessionIdForSession(codexChatSessionId, codexSessionId)
@@ -424,6 +573,9 @@ export function useCodexChatState() {
     setCodexChatProjectId,
     codexChatMcpServers,
     setCodexChatMcpServers,
+    codexChatSessionAttachmentRefs,
+    setCodexChatSessionAttachmentRefs,
+    setCodexChatSessionAttachmentRefsForSession,
     codexChatInstruction,
     setCodexChatInstruction,
     codexChatTurns,
@@ -446,5 +598,6 @@ export function useCodexChatState() {
     setCodexChatCodexSessionId,
     setCodexChatCodexSessionIdForSession,
     setCodexChatMcpServersForSession,
+    mergeCodexChatSessionsFromServer,
   }
 }

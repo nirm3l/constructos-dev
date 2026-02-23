@@ -18,6 +18,9 @@ class AttachmentRef(BaseModel):
     name: str | None = None
     mime_type: str | None = None
     size_bytes: int | None = None
+    checksum: str | None = None
+    extraction_status: str | None = None
+    extracted_text: str | None = None
 
 
 class TaskCreate(BaseModel):
@@ -87,6 +90,7 @@ class AgentChatRun(BaseModel):
     mcp_servers: list[str] | None = None
     history: list[dict[str, str]] = Field(default_factory=list)
     attachment_refs: list[AttachmentRef] = Field(default_factory=list)
+    session_attachment_refs: list[AttachmentRef] = Field(default_factory=list)
     allow_mutations: bool = True
 
 
@@ -136,6 +140,8 @@ class ProjectCreate(BaseModel):
     embedding_enabled: bool = False
     embedding_model: str | None = None
     context_pack_evidence_top_k: int | None = Field(default=None, ge=1, le=40)
+    chat_index_mode: str = "OFF"
+    chat_attachment_ingestion_mode: str = "METADATA_ONLY"
     member_user_ids: list[str] = Field(default_factory=list)
 
 
@@ -148,6 +154,8 @@ class ProjectPatch(BaseModel):
     embedding_enabled: bool | None = None
     embedding_model: str | None = None
     context_pack_evidence_top_k: int | None = Field(default=None, ge=1, le=40)
+    chat_index_mode: str | None = None
+    chat_attachment_ingestion_mode: str | None = None
 
 
 class ProjectMemberUpsert(BaseModel):

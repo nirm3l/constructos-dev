@@ -198,6 +198,7 @@ export function useMiscMutations(c: any) {
       sessionId: string
       mcpServers?: ChatMcpServer[]
       attachmentRefs?: Array<{ path: string; name?: string; mime_type?: string; size_bytes?: number }>
+      sessionAttachmentRefs?: Array<{ path: string; name?: string; mime_type?: string; size_bytes?: number }>
     }) => {
       const sessionId = payload.sessionId || c.codexChatSessionId
       const assistantTurnId = globalThis.crypto?.randomUUID?.() ?? `a-${Date.now()}`
@@ -307,6 +308,7 @@ export function useMiscMutations(c: any) {
             instruction: payload.instruction,
             history: payload.history,
             attachment_refs: payload.attachmentRefs || [],
+            session_attachment_refs: payload.sessionAttachmentRefs || [],
             mcp_servers: payload.mcpServers,
             allow_mutations: true,
           },

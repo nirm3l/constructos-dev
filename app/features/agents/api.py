@@ -1,20 +1,25 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import mimetypes
 import os
 import queue
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import threading
+import uuid
 import zipfile
 import xml.etree.ElementTree as ET
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from shared.core import AgentChatRun, User, ensure_project_access, ensure_role, get_current_user, get_db
+from shared.core import AgentChatRun, User, ensure_project_access, ensure_role, get_command_id, get_current_user, get_db
+from shared.models import ActivityLog, ChatMessage, ChatSession
 from shared.settings import (
     ATTACHMENTS_DIR,
     AGENT_CHAT_HISTORY_COMPACT_THRESHOLD,
@@ -24,6 +29,12 @@ from shared.settings import (
 
 from .executor import execute_task_automation, execute_task_automation_stream
 from .mcp_registry import normalize_chat_mcp_servers as normalize_chat_mcp_servers_registry
+from features.chat.application import ChatApplicationService
+from features.chat.command_handlers import (
+    AppendAssistantMessagePayload,
+    AppendUserMessagePayload,
+    LinkMessageResourcePayload,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -72,6 +83,12 @@ _TEXT_EXTENSIONS = {
 _MAX_CHAT_ATTACHMENT_FILES = 6
 _MAX_CHAT_ATTACHMENT_CHARS_PER_FILE = 12_000
 _MAX_CHAT_ATTACHMENT_CHARS_TOTAL = 36_000
+_CREATED_RESOURCE_ACTIONS: dict[str, str] = {
+    "TaskCreated": "task",
+    "NoteCreated": "note",
+    "SpecificationCreated": "specification",
+    "ProjectRuleCreated": "project_rule",
+}
 
 
 def _normalize_chat_mcp_servers(raw_servers: list[str] | None) -> list[str]:
@@ -235,17 +252,51 @@ def _build_attachment_context(
     payload: AgentChatRun,
     db: Session,
     user: User,
-) -> str:
-    refs = payload.attachment_refs or []
-    if not refs:
-        return ""
+) -> tuple[str, list[dict[str, object]], list[dict[str, object]]]:
+    def _ref_value(ref: object, field: str) -> object:
+        if isinstance(ref, dict):
+            return ref.get(field)
+        return getattr(ref, field, None)
 
-    lines: list[str] = []
-    total_chars = 0
-    for index, ref in enumerate(refs[:_MAX_CHAT_ATTACHMENT_FILES], start=1):
-        path = str(ref.path or "").strip()
+    message_refs = list(payload.attachment_refs or [])
+    session_refs = list(payload.session_attachment_refs or [])
+    if not message_refs and not session_refs:
+        return "", [], []
+
+    refs: list = []
+    seen_paths: set[str] = set()
+    for ref in [*message_refs, *session_refs]:
+        path = str(_ref_value(ref, "path") or "").strip()
         if not path:
             continue
+        dedupe_key = path.lower()
+        if dedupe_key in seen_paths:
+            continue
+        seen_paths.add(dedupe_key)
+        refs.append(ref)
+    if not refs:
+        return "", [], []
+
+    message_ref_paths = {
+        str(_ref_value(ref, "path") or "").strip().lower()
+        for ref in message_refs
+        if str(_ref_value(ref, "path") or "").strip()
+    }
+    session_ref_paths = {
+        str(_ref_value(ref, "path") or "").strip().lower()
+        for ref in session_refs
+        if str(_ref_value(ref, "path") or "").strip()
+    }
+
+    lines: list[str] = []
+    processed_message_refs: list[dict[str, object]] = []
+    processed_session_refs: list[dict[str, object]] = []
+    total_chars = 0
+    for index, ref in enumerate(refs[:_MAX_CHAT_ATTACHMENT_FILES], start=1):
+        path = str(_ref_value(ref, "path") or "").strip()
+        if not path:
+            continue
+        path_key = path.lower()
         candidate = _resolve_attachment_candidate(payload.workspace_id, path)
         project_id = _project_id_from_path(path)
         if project_id:
@@ -255,8 +306,15 @@ def _build_attachment_context(
         if not candidate.exists() or not candidate.is_file():
             raise HTTPException(status_code=404, detail=f"Attachment not found: {path}")
 
-        display_name = str(ref.name or Path(path).name or f"attachment-{index}").strip()
-        mime_type = str(ref.mime_type or "").strip() or mimetypes.guess_type(display_name)[0] or ""
+        display_name = str(_ref_value(ref, "name") or Path(path).name or f"attachment-{index}").strip()
+        mime_type = str(_ref_value(ref, "mime_type") or "").strip() or mimetypes.guess_type(display_name)[0] or ""
+        normalized_ref: dict[str, object] = {
+            "path": path,
+            "name": display_name,
+            "mime_type": mime_type or None,
+            "size_bytes": int(candidate.stat().st_size),
+            "extraction_status": "pending",
+        }
 
         lines.append(f"Attachment {index}: {display_name}")
         lines.append(f"Path: {path}")
@@ -265,6 +323,11 @@ def _build_attachment_context(
         remaining_chars = _MAX_CHAT_ATTACHMENT_CHARS_TOTAL - total_chars
         if remaining_chars <= 0:
             lines.append("Content: omitted (chat attachment context limit reached).")
+            normalized_ref["extraction_status"] = "skipped_limit"
+            if path_key in message_ref_paths:
+                processed_message_refs.append(normalized_ref)
+            if path_key in session_ref_paths:
+                processed_session_refs.append(normalized_ref)
             lines.append("")
             break
 
@@ -281,18 +344,54 @@ def _build_attachment_context(
             status_message = "Content: omitted (unsupported binary file type)."
 
         if snippet:
+            normalized_ref["extraction_status"] = "extracted" if not truncated else "truncated"
+            normalized_ref["extracted_text"] = snippet
             lines.append("Content:")
             lines.append(snippet)
             if truncated:
                 lines.append("[truncated]")
             total_chars += len(snippet)
         else:
+            normalized_ref["extraction_status"] = "skipped"
             lines.append(status_message or "Content: omitted (empty or unreadable file).")
+        if path_key in message_ref_paths:
+            processed_message_refs.append(normalized_ref)
+        if path_key in session_ref_paths:
+            processed_session_refs.append(normalized_ref)
         lines.append("")
 
+    for ref in refs[_MAX_CHAT_ATTACHMENT_FILES:]:
+        path = str(_ref_value(ref, "path") or "").strip()
+        if not path:
+            continue
+        path_key = path.lower()
+        candidate = _resolve_attachment_candidate(payload.workspace_id, path)
+        project_id = _project_id_from_path(path)
+        if project_id:
+            ensure_project_access(db, payload.workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+        if payload.project_id and project_id and project_id != payload.project_id:
+            raise HTTPException(status_code=400, detail="Attachment project mismatch with selected chat project")
+        if not candidate.exists() or not candidate.is_file():
+            raise HTTPException(status_code=404, detail=f"Attachment not found: {path}")
+        display_name = str(_ref_value(ref, "name") or Path(path).name or "attachment").strip()
+        mime_type = str(_ref_value(ref, "mime_type") or "").strip() or mimetypes.guess_type(display_name)[0] or ""
+        normalized_ref = {
+            "path": path,
+            "name": display_name,
+            "mime_type": mime_type or None,
+            "size_bytes": int(_ref_value(ref, "size_bytes") or 0)
+            if isinstance(_ref_value(ref, "size_bytes"), int) and int(_ref_value(ref, "size_bytes")) >= 0
+            else None,
+            "extraction_status": "skipped_file_limit",
+        }
+        if path_key in message_ref_paths:
+            processed_message_refs.append(normalized_ref)
+        if path_key in session_ref_paths:
+            processed_session_refs.append(normalized_ref)
+
     if not lines:
-        return ""
-    return "Attached file context:\n" + "\n".join(lines).rstrip()
+        return "", processed_message_refs, processed_session_refs
+    return "Attached file context:\n" + "\n".join(lines).rstrip(), processed_message_refs, processed_session_refs
 
 
 def _compose_chat_instruction(current_instruction: str, history: list[dict[str, str]]) -> str:
@@ -322,6 +421,286 @@ def _normalize_history(history: list[dict[str, str]]) -> list[dict[str, str]]:
             continue
         normalized.append({"role": role, "content": content})
     return normalized
+
+
+def _resolve_chat_session_id(raw: str | None) -> str:
+    session_id = str(raw or "").strip()
+    if not session_id:
+        return str(uuid.uuid4())
+    if len(session_id) > 128:
+        return session_id[:128]
+    return session_id
+
+
+def _command_id_with_suffix(command_id: str | None, suffix: str) -> str | None:
+    normalized = str(command_id or "").strip()
+    if not normalized:
+        return None
+    full = f"{normalized}:{suffix}"
+    return full[:64]
+
+
+def _assistant_text(summary: str | None, comment: str | None) -> str:
+    return "\n\n".join(part for part in [str(summary or "").strip(), str(comment or "").strip()] if part).strip()
+
+
+def _parse_event_key_aggregate_id(event_key: str | None) -> str | None:
+    text = str(event_key or "").strip()
+    if not text:
+        return None
+    parts = text.split(":")
+    if len(parts) < 2:
+        return None
+    aggregate_id = str(parts[1] or "").strip()
+    return aggregate_id or None
+
+
+def _collect_created_resources(
+    *,
+    db: Session,
+    workspace_id: str,
+    project_id: str | None,
+    actor_id: str,
+    started_at: datetime,
+    ended_at: datetime,
+) -> list[dict[str, str]]:
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_project_id:
+        return []
+    window_start = started_at - timedelta(seconds=2)
+    window_end = ended_at + timedelta(seconds=2)
+    query = (
+        select(ActivityLog.action, ActivityLog.details)
+        .where(
+            ActivityLog.workspace_id == workspace_id,
+            ActivityLog.project_id == normalized_project_id,
+            ActivityLog.actor_id == actor_id,
+            ActivityLog.action.in_(tuple(_CREATED_RESOURCE_ACTIONS.keys())),
+            ActivityLog.created_at >= window_start,
+            ActivityLog.created_at <= window_end,
+        )
+        .order_by(ActivityLog.created_at.asc(), ActivityLog.id.asc())
+    )
+    rows = db.execute(query).all()
+    out: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for action, details_raw in rows:
+        resource_type = _CREATED_RESOURCE_ACTIONS.get(str(action or "").strip())
+        if not resource_type:
+            continue
+        details: dict[str, object] = {}
+        try:
+            loaded = json.loads(str(details_raw or "{}"))
+            if isinstance(loaded, dict):
+                details = loaded
+        except Exception:
+            details = {}
+        resource_id = _parse_event_key_aggregate_id(details.get("_event_key"))
+        if not resource_id:
+            continue
+        key = (resource_type, resource_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"resource_type": resource_type, "resource_id": resource_id})
+    return out
+
+
+def _link_created_resources_to_chat_message(
+    *,
+    db: Session,
+    user: User,
+    command_id: str | None,
+    workspace_id: str,
+    project_id: str | None,
+    session_id: str,
+    message_id: str | None,
+    resources: list[dict[str, str]],
+) -> None:
+    normalized_message_id = str(message_id or "").strip()
+    if not normalized_message_id or not resources:
+        return
+    for item in resources:
+        resource_type = str(item.get("resource_type") or "").strip()
+        resource_id = str(item.get("resource_id") or "").strip()
+        if not resource_type or not resource_id:
+            continue
+        resource_key = hashlib.sha1(f"{resource_type}:{resource_id}".encode("utf-8")).hexdigest()[:10]
+        try:
+            ChatApplicationService(
+                db,
+                user,
+                command_id=_command_id_with_suffix(command_id, f"chat-link-{resource_key}"),
+            ).link_message_resource(
+                LinkMessageResourcePayload(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    session_id=session_id,
+                    message_id=normalized_message_id,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    relation="created",
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "Chat resource auto-link failed workspace_id=%s project_id=%s session_id=%s message_id=%s type=%s id=%s err=%s",
+                workspace_id,
+                project_id,
+                session_id,
+                normalized_message_id,
+                resource_type,
+                resource_id,
+                exc,
+            )
+
+
+def _persist_assistant_message_with_links(
+    *,
+    db: Session,
+    user: User,
+    command_id: str | None,
+    workspace_id: str,
+    project_id: str | None,
+    session_id: str,
+    mcp_servers: list[str],
+    content: str,
+    usage: dict[str, object] | None,
+    codex_session_id: str | None,
+    run_started_at: datetime | None = None,
+) -> str | None:
+    assistant_content = str(content or "").strip()
+    if not assistant_content:
+        return None
+    append_result = ChatApplicationService(
+        db,
+        user,
+        command_id=_command_id_with_suffix(command_id, "chat-assistant"),
+    ).append_assistant_message(
+        AppendAssistantMessagePayload(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            session_id=session_id,
+            message_id=None,
+            content=assistant_content,
+            usage=usage if isinstance(usage, dict) else {},
+            codex_session_id=str(codex_session_id or "").strip() or None,
+            mcp_servers=mcp_servers,
+        )
+    )
+    message_id = str(append_result.get("message_id") or "").strip() or None
+    if run_started_at and message_id:
+        created_resources = _collect_created_resources(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            actor_id=user.id,
+            started_at=run_started_at,
+            ended_at=datetime.now(timezone.utc),
+        )
+        _link_created_resources_to_chat_message(
+            db=db,
+            user=user,
+            command_id=command_id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            session_id=session_id,
+            message_id=message_id,
+            resources=created_resources,
+        )
+    return message_id
+
+
+def _load_persisted_chat_history(
+    *,
+    db: Session,
+    user: User,
+    workspace_id: str,
+    session_id: str | None,
+    max_turns: int = 120,
+) -> list[dict[str, str]]:
+    session_key = str(session_id or "").strip()
+    if not session_key:
+        return []
+    session = db.execute(
+        select(ChatSession).where(
+            ChatSession.workspace_id == workspace_id,
+            ChatSession.session_key == session_key,
+        )
+    ).scalar_one_or_none()
+    if session is None:
+        return []
+    if session.project_id:
+        ensure_project_access(db, workspace_id, session.project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    rows = db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.session_id == session.id, ChatMessage.is_deleted == False)
+        .order_by(ChatMessage.order_index.desc(), ChatMessage.turn_created_at.desc(), ChatMessage.created_at.desc())
+        .limit(max(1, int(max_turns)))
+    ).scalars().all()
+    out: list[dict[str, str]] = []
+    for row in reversed(rows):
+        role = "assistant" if str(row.role or "").strip().lower() == "assistant" else "user"
+        content = str(row.content or "").strip()
+        if not content:
+            continue
+        out.append({"role": role, "content": content})
+    return out
+
+
+def _load_persisted_session_attachment_refs(
+    *,
+    db: Session,
+    user: User,
+    workspace_id: str,
+    session_id: str | None,
+) -> list[dict[str, object]]:
+    session_key = str(session_id or "").strip()
+    if not session_key:
+        return []
+    session = db.execute(
+        select(ChatSession).where(
+            ChatSession.workspace_id == workspace_id,
+            ChatSession.session_key == session_key,
+        )
+    ).scalar_one_or_none()
+    if session is None:
+        return []
+    if session.project_id:
+        ensure_project_access(db, workspace_id, session.project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    try:
+        raw = json.loads(session.session_attachment_refs or "[]")
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        if not path:
+            continue
+        dedupe_key = path.lower()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        normalized: dict[str, object] = {"path": path}
+        name = str(item.get("name") or "").strip()
+        mime_type = str(item.get("mime_type") or "").strip()
+        if name:
+            normalized["name"] = name
+        if mime_type:
+            normalized["mime_type"] = mime_type
+        size_bytes = item.get("size_bytes")
+        if isinstance(size_bytes, int) and size_bytes >= 0:
+            normalized["size_bytes"] = size_bytes
+        checksum = str(item.get("checksum") or "").strip()
+        if checksum:
+            normalized["checksum"] = checksum
+        out.append(normalized)
+    return out
 
 
 def _parse_compact_command(instruction: str) -> tuple[bool, str]:
@@ -410,16 +789,36 @@ def _prepare_chat_instruction(
     payload: AgentChatRun,
     db: Session,
     user: User,
-) -> tuple[str, list[dict[str, str]], bool]:
+) -> tuple[str, list[dict[str, str]], bool, list[dict[str, object]], list[dict[str, object]]]:
     raw_instruction = (payload.instruction or "").strip()
     force_compact, instruction = _parse_compact_command(raw_instruction)
     if not raw_instruction:
         raise HTTPException(status_code=400, detail="instruction is required")
     history = _normalize_history(payload.history or [])
+    if not history:
+        history = _load_persisted_chat_history(
+            db=db,
+            user=user,
+            workspace_id=payload.workspace_id,
+            session_id=payload.session_id,
+        )
     # Frontend includes the current user turn in `history`; when using /compact, avoid
     # compacting the command text itself.
     if force_compact and history and history[-1]["role"] == "user" and history[-1]["content"] == raw_instruction:
         history = history[:-1]
+    persisted_session_attachment_refs: list[dict[str, object]] = []
+    if not payload.session_attachment_refs:
+        persisted_session_attachment_refs = _load_persisted_session_attachment_refs(
+            db=db,
+            user=user,
+            workspace_id=payload.workspace_id,
+            session_id=payload.session_id,
+        )
+    payload_for_attachments = payload
+    if persisted_session_attachment_refs:
+        payload_for_attachments = payload.model_copy(
+            update={"session_attachment_refs": persisted_session_attachment_refs}
+        )
     compacted_history, compacted_applied = _maybe_compact_history(
         history=history,
         workspace_id=payload.workspace_id,
@@ -434,16 +833,20 @@ def _prepare_chat_instruction(
             summary = "Chat history compacted."
         else:
             summary = "Chat history compaction skipped."
-        return summary, compacted_history, True
+        return summary, compacted_history, True, [], []
     if not instruction:
         raise HTTPException(status_code=400, detail="instruction is required")
 
-    attachment_context = _build_attachment_context(payload=payload, db=db, user=user)
+    attachment_context, prepared_attachment_refs, prepared_session_attachment_refs = _build_attachment_context(
+        payload=payload_for_attachments,
+        db=db,
+        user=user,
+    )
     instruction_with_context = instruction
     if attachment_context:
         instruction_with_context = f"{instruction}\n\n{attachment_context}"
     effective_instruction = _compose_chat_instruction(instruction_with_context, compacted_history)
-    return effective_instruction, compacted_history, False
+    return effective_instruction, compacted_history, False, prepared_attachment_refs, prepared_session_attachment_refs
 
 
 @router.post("/api/agents/chat")
@@ -451,22 +854,71 @@ def agent_chat(
     payload: AgentChatRun,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    command_id: str | None = Depends(get_command_id),
 ):
     ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     mcp_servers = _normalize_chat_mcp_servers(payload.mcp_servers)
-    effective_instruction, _, compact_only = _prepare_chat_instruction(payload=payload, db=db, user=user)
+    session_id = _resolve_chat_session_id(payload.session_id)
+    payload_with_session = payload.model_copy(update={"session_id": session_id})
+    (
+        effective_instruction,
+        _,
+        compact_only,
+        prepared_attachment_refs,
+        prepared_session_attachment_refs,
+    ) = _prepare_chat_instruction(
+        payload=payload_with_session,
+        db=db,
+        user=user,
+    )
+
+    attachment_refs = prepared_attachment_refs or [item.model_dump() for item in payload.attachment_refs or []]
+    session_attachment_refs = (
+        prepared_session_attachment_refs
+        or [item.model_dump() for item in payload.session_attachment_refs or []]
+    )
+    ChatApplicationService(
+        db,
+        user,
+        command_id=_command_id_with_suffix(command_id, "chat-user"),
+    ).append_user_message(
+        AppendUserMessagePayload(
+            workspace_id=payload.workspace_id,
+            project_id=payload.project_id,
+            session_id=session_id,
+            message_id=None,
+            content=(payload.instruction or "").strip(),
+            mcp_servers=mcp_servers,
+            attachment_refs=attachment_refs,
+            session_attachment_refs=session_attachment_refs,
+        )
+    )
+
     if compact_only:
+        _persist_assistant_message_with_links(
+            db=db,
+            user=user,
+            command_id=command_id,
+            workspace_id=payload.workspace_id,
+            project_id=payload.project_id,
+            session_id=session_id,
+            mcp_servers=mcp_servers,
+            content=effective_instruction,
+            usage={},
+            codex_session_id=None,
+        )
         return {
             "ok": True,
             "action": "comment",
             "summary": effective_instruction,
             "comment": None,
-            "session_id": payload.session_id,
+            "session_id": session_id,
             "codex_session_id": None,
             "usage": None,
         }
 
     description = f"General Codex chat context. workspace_id={payload.workspace_id}; project_id={payload.project_id or ''}"
+    run_started_at = datetime.now(timezone.utc)
     try:
         outcome = execute_task_automation(
             task_id="",
@@ -480,34 +932,77 @@ def agent_chat(
             allow_mutations=bool(payload.allow_mutations),
             mcp_servers=mcp_servers,
         )
+        _persist_assistant_message_with_links(
+            db=db,
+            user=user,
+            command_id=command_id,
+            workspace_id=payload.workspace_id,
+            project_id=payload.project_id,
+            session_id=session_id,
+            mcp_servers=mcp_servers,
+            content=_assistant_text(outcome.summary, outcome.comment),
+            usage=outcome.usage or {},
+            codex_session_id=outcome.codex_session_id,
+            run_started_at=run_started_at,
+        )
         return {
             "ok": True,
             "action": outcome.action,
             "summary": outcome.summary,
             "comment": outcome.comment,
-            "session_id": payload.session_id,
+            "session_id": session_id,
             "codex_session_id": outcome.codex_session_id,
             "usage": outcome.usage,
         }
     except TimeoutError:
+        timeout_summary = f"Codex timed out after {AGENT_EXECUTOR_TIMEOUT_SECONDS:.0f}s."
+        timeout_comment = "Try a narrower request (e.g. one project at a time) or run again."
+        _persist_assistant_message_with_links(
+            db=db,
+            user=user,
+            command_id=command_id,
+            workspace_id=payload.workspace_id,
+            project_id=payload.project_id,
+            session_id=session_id,
+            mcp_servers=mcp_servers,
+            content=_assistant_text(timeout_summary, timeout_comment),
+            usage={},
+            codex_session_id=None,
+            run_started_at=run_started_at,
+        )
         return {
             "ok": False,
             "action": "comment",
-            "summary": f"Codex timed out after {AGENT_EXECUTOR_TIMEOUT_SECONDS:.0f}s.",
-            "comment": "Try a narrower request (e.g. one project at a time) or run again.",
-            "session_id": payload.session_id,
+            "summary": timeout_summary,
+            "comment": timeout_comment,
+            "session_id": session_id,
             "codex_session_id": None,
             "usage": None,
         }
     except Exception as exc:
         # Avoid bubbling internal exceptions to the client as 500 errors.
         msg = str(exc)
+        error_summary = "Codex failed to complete the request."
+        error_comment = msg[:500]
+        _persist_assistant_message_with_links(
+            db=db,
+            user=user,
+            command_id=command_id,
+            workspace_id=payload.workspace_id,
+            project_id=payload.project_id,
+            session_id=session_id,
+            mcp_servers=mcp_servers,
+            content=_assistant_text(error_summary, error_comment),
+            usage={},
+            codex_session_id=None,
+            run_started_at=run_started_at,
+        )
         return {
             "ok": False,
             "action": "comment",
-            "summary": "Codex failed to complete the request.",
-            "comment": msg[:500],
-            "session_id": payload.session_id,
+            "summary": error_summary,
+            "comment": error_comment,
+            "session_id": session_id,
             "codex_session_id": None,
             "usage": None,
         }
@@ -518,17 +1013,65 @@ def agent_chat_stream(
     payload: AgentChatRun,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    command_id: str | None = Depends(get_command_id),
 ):
     ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     mcp_servers = _normalize_chat_mcp_servers(payload.mcp_servers)
-    effective_instruction, _, compact_only = _prepare_chat_instruction(payload=payload, db=db, user=user)
+    session_id = _resolve_chat_session_id(payload.session_id)
+    payload_with_session = payload.model_copy(update={"session_id": session_id})
+    (
+        effective_instruction,
+        _,
+        compact_only,
+        prepared_attachment_refs,
+        prepared_session_attachment_refs,
+    ) = _prepare_chat_instruction(
+        payload=payload_with_session,
+        db=db,
+        user=user,
+    )
+
+    attachment_refs = prepared_attachment_refs or [item.model_dump() for item in payload.attachment_refs or []]
+    session_attachment_refs = (
+        prepared_session_attachment_refs
+        or [item.model_dump() for item in payload.session_attachment_refs or []]
+    )
+    ChatApplicationService(
+        db,
+        user,
+        command_id=_command_id_with_suffix(command_id, "chat-user"),
+    ).append_user_message(
+        AppendUserMessagePayload(
+            workspace_id=payload.workspace_id,
+            project_id=payload.project_id,
+            session_id=session_id,
+            message_id=None,
+            content=(payload.instruction or "").strip(),
+            mcp_servers=mcp_servers,
+            attachment_refs=attachment_refs,
+            session_attachment_refs=session_attachment_refs,
+        )
+    )
+
     if compact_only:
+        _persist_assistant_message_with_links(
+            db=db,
+            user=user,
+            command_id=command_id,
+            workspace_id=payload.workspace_id,
+            project_id=payload.project_id,
+            session_id=session_id,
+            mcp_servers=mcp_servers,
+            content=effective_instruction,
+            usage={},
+            codex_session_id=None,
+        )
         compact_response = {
             "ok": True,
             "action": "comment",
             "summary": effective_instruction,
             "comment": None,
-            "session_id": payload.session_id,
+            "session_id": session_id,
             "codex_session_id": None,
             "usage": None,
         }
@@ -539,6 +1082,7 @@ def agent_chat_stream(
         return StreamingResponse(_compact_stream(), media_type="application/x-ndjson")
 
     description = f"General Codex chat context. workspace_id={payload.workspace_id}; project_id={payload.project_id or ''}"
+    run_started_at = datetime.now(timezone.utc)
 
     def _stream() -> object:
         event_queue: queue.Queue[dict[str, object] | None] = queue.Queue()
@@ -566,7 +1110,7 @@ def agent_chat_stream(
                     "action": outcome.action,
                     "summary": outcome.summary,
                     "comment": outcome.comment,
-                    "session_id": payload.session_id,
+                    "session_id": session_id,
                     "codex_session_id": outcome.codex_session_id,
                     "usage": outcome.usage,
                 }
@@ -577,7 +1121,7 @@ def agent_chat_stream(
                     "action": "comment",
                     "summary": f"Codex timed out after {AGENT_EXECUTOR_TIMEOUT_SECONDS:.0f}s.",
                     "comment": "Try a narrower request (e.g. one project at a time) or run again.",
-                    "session_id": payload.session_id,
+                    "session_id": session_id,
                     "codex_session_id": None,
                     "usage": None,
                 }
@@ -588,7 +1132,7 @@ def agent_chat_stream(
                     "action": "comment",
                     "summary": "Codex failed to complete the request.",
                     "comment": str(exc)[:500],
-                    "session_id": payload.session_id,
+                    "session_id": session_id,
                     "codex_session_id": None,
                     "usage": None,
                 }
@@ -598,11 +1142,37 @@ def agent_chat_stream(
 
         worker = threading.Thread(target=_worker, daemon=True)
         worker.start()
+        streamed_assistant_text_parts: list[str] = []
 
         while True:
             item = event_queue.get()
             if item is None:
                 break
+            item_type = str(item.get("type") or "").strip().lower()
+            if item_type == "assistant_text":
+                streamed_assistant_text_parts.append(str(item.get("delta") or ""))
+            if item_type == "final":
+                response = item.get("response")
+                if isinstance(response, dict):
+                    assistant_content = "".join(streamed_assistant_text_parts).strip()
+                    if not assistant_content:
+                        assistant_content = _assistant_text(
+                            str(response.get("summary") or ""),
+                            str(response.get("comment") or ""),
+                        )
+                    _persist_assistant_message_with_links(
+                        db=db,
+                        user=user,
+                        command_id=command_id,
+                        workspace_id=payload.workspace_id,
+                        project_id=payload.project_id,
+                        session_id=session_id,
+                        mcp_servers=mcp_servers,
+                        content=assistant_content,
+                        usage=response.get("usage") if isinstance(response.get("usage"), dict) else {},
+                        codex_session_id=str(response.get("codex_session_id") or "").strip() or None,
+                        run_started_at=run_started_at,
+                    )
             yield json.dumps(item, ensure_ascii=True) + "\n"
 
     return StreamingResponse(_stream(), media_type="application/x-ndjson")

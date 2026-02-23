@@ -148,6 +148,8 @@ export function AppOverlays({ state }: { state: any }) {
           codexChatUsage: state.codexChatUsage,
           codexChatMcpServers: state.codexChatMcpServers,
           setCodexChatMcpServers: state.setCodexChatMcpServers,
+          codexChatSessionAttachmentRefs: state.codexChatSessionAttachmentRefs,
+          setCodexChatSessionAttachmentRefs: state.setCodexChatSessionAttachmentRefs,
           codexChatCodexSessionId: state.codexChatCodexSessionId,
           setCodexChatProjectId: state.setCodexChatProjectId,
           runAgentChatMutation: state.runAgentChatMutation,

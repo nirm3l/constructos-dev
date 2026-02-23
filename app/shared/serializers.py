@@ -502,6 +502,10 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
             "embedding_enabled": bool(project.embedding_enabled),
             "embedding_model": project.embedding_model,
             "context_pack_evidence_top_k": project.context_pack_evidence_top_k,
+            "chat_index_mode": str(project.chat_index_mode or "OFF"),
+            "chat_attachment_ingestion_mode": str(
+                project.chat_attachment_ingestion_mode or "METADATA_ONLY"
+            ),
             "embedding_index_status": index_status,
             "created_by": created_by,
             "created_at": to_iso_utc(project.created_at),
@@ -534,6 +538,10 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
         "embedding_enabled": bool(state.get("embedding_enabled", False)),
         "embedding_model": state.get("embedding_model"),
         "context_pack_evidence_top_k": state.get("context_pack_evidence_top_k"),
+        "chat_index_mode": str(state.get("chat_index_mode") or "OFF"),
+        "chat_attachment_ingestion_mode": str(
+            state.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
+        ),
         "embedding_index_status": index_status,
         "created_by": created_by,
         "created_at": None,

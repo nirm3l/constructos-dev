@@ -30,6 +30,15 @@
     <meta name="contact-request-api-url" content="" />
 
     <link rel="stylesheet" href="/styles.css" />
+    <script>
+      ;(() => {
+        const currentHost = window.location.hostname.toLowerCase()
+        if (currentHost === 'constructis.dev' || currentHost === 'www.constructis.dev') {
+          const targetUrl = `https://constructos.dev${window.location.pathname}${window.location.search}${window.location.hash}`
+          window.location.replace(targetUrl)
+        }
+      })()
+    </script>
 
     <script type="application/ld+json">
       {

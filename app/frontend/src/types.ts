@@ -665,6 +665,39 @@ export type AgentChatUsage = {
   context_limit_tokens?: number
 }
 
+export type ChatSessionRecord = {
+  id: string
+  aggregate_id: string
+  workspace_id: string
+  project_id: string | null
+  title: string
+  is_archived: boolean
+  codex_session_id: string | null
+  mcp_servers: string[]
+  session_attachment_refs: AttachmentRef[]
+  usage: AgentChatUsage | null
+  last_message_at: string | null
+  last_message_preview: string
+  last_task_event_at: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+export type ChatMessageRecord = {
+  id: string
+  session_id: string
+  workspace_id: string
+  project_id: string | null
+  role: 'user' | 'assistant' | string
+  content: string
+  order_index: number
+  attachment_refs: AttachmentRef[]
+  usage: AgentChatUsage | null
+  is_deleted: boolean
+  created_at: string | null
+  updated_at: string | null
+}
+
 export type Note = {
   id: string
   workspace_id: string
