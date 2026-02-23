@@ -75,7 +75,11 @@ DEPLOY_TARGET=macos-m4 ./scripts/deploy.sh
 # pull private images from GHCR (no local build on client host)
 DEPLOY_SOURCE=ghcr IMAGE_TAG=v0.1.227 ./scripts/deploy.sh
 ```
-Internal owner deploy includes local `license-control-plane` by default.
+`deploy.sh` deploys app services only (no local `license-control-plane`).
+Deploy local control-plane separately:
+```bash
+./scripts/deploy-control-plane.sh up
+```
 Client deployment assets are maintained in a separate repository:
 `https://github.com/nirm3l/constructos`
 

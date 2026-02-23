@@ -1,0 +1,23 @@
+services:
+  license-control-plane:
+    build: ./license_control_plane
+    container_name: license-control-plane
+    environment:
+      LCP_DATABASE_URL: "${LCP_DATABASE_URL:-sqlite:////data/license-control-plane.db}"
+      LCP_API_TOKEN: "${LCP_API_TOKEN:-dev-license-token}"
+      LCP_TRIAL_DAYS: "${LICENSE_TRIAL_DAYS:-7}"
+      LCP_DEFAULT_MAX_INSTALLATIONS: "${LCP_DEFAULT_MAX_INSTALLATIONS:-3}"
+      LCP_TOKEN_TTL_SECONDS: "${LCP_TOKEN_TTL_SECONDS:-3600}"
+      LCP_SIGNING_PRIVATE_KEY_PEM: "${LCP_SIGNING_PRIVATE_KEY_PEM:-}"
+      LCP_SIGNING_KEY_ID: "${LCP_SIGNING_KEY_ID:-default-ed25519}"
+      LCP_REQUIRE_SIGNED_TOKENS: "${LCP_REQUIRE_SIGNED_TOKENS:-false}"
+      LCP_PUBLIC_BETA_FREE_UNTIL: "${LCP_PUBLIC_BETA_FREE_UNTIL:-2026-03-31T23:59:59Z}"
+      LCP_CORS_ORIGINS: "${LCP_CORS_ORIGINS:-http://localhost:8082,http://127.0.0.1:8082,https://constructos.dev,https://www.constructos.dev}"
+    ports:
+      - "8092:8092"
+    volumes:
+      - license-control-plane-data:/data
+    restart: unless-stopped
+
+volumes:
+  license-control-plane-data:

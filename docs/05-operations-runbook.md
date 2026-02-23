@@ -8,8 +8,8 @@ The default Docker Compose stack includes:
 - `kurrentdb`
 - `neo4j`
 
-Owner/internal stack also includes:
-- `license-control-plane` (local licensing server)
+Optional separate stack:
+- `license-control-plane` (local licensing server, deployed separately)
 
 ## 2. Standard Operating Flow
 ### 2.1 Deploy
@@ -39,6 +39,7 @@ Does:
 - uses the same resolved compose files as deploy target for `down` and `ps`,
 - clears local DB/upload paths,
 - performs fresh deploy + health/version checks.
+- does not deploy or remove local `license-control-plane` data.
 
 ### 2.4 Private Image Release (GHCR)
 - Workflow file: `.github/workflows/release-images.yml`.
@@ -67,7 +68,17 @@ curl -fsSL https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh 
 ```
 
 ### 2.8 Local Licensing Control Plane
-Included by default in owner/internal deploy (`./scripts/deploy.sh`).
+Deploy separately from app stack:
+```bash
+./scripts/deploy-control-plane.sh up
+```
+Stop without deleting control-plane data:
+```bash
+./scripts/deploy-control-plane.sh down
+```
+Compose file:
+- `docker-compose.license-control-plane.yml`
+
 Default local URL used by app services in this mode:
 - `http://license-control-plane:8092`
 Local admin UI:

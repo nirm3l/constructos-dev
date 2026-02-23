@@ -110,9 +110,6 @@ DEPLOY_SERVICES=(task-app mcp-tools)
 if [[ "$TARGET_RESOLVED" != "macos-m4" ]]; then
   DEPLOY_SERVICES+=(ollama)
 fi
-BUILD_ONLY_SERVICES=(license-control-plane)
-
-LCP_API_TOKEN_VALUE="$(resolve_compose_env_value "LCP_API_TOKEN" || true)"
 LICENSE_SERVER_TOKEN_VALUE="$(resolve_compose_env_value "LICENSE_SERVER_TOKEN" || true)"
 
 cat > .deploy.env <<EOF
@@ -123,9 +120,6 @@ TASK_APP_IMAGE=${TASK_APP_IMAGE}
 MCP_TOOLS_IMAGE=${MCP_TOOLS_IMAGE}
 EOF
 
-if [[ -n "$LCP_API_TOKEN_VALUE" ]]; then
-  printf 'LCP_API_TOKEN=%s\n' "$LCP_API_TOKEN_VALUE" >> .deploy.env
-fi
 if [[ -n "$LICENSE_SERVER_TOKEN_VALUE" ]]; then
   printf 'LICENSE_SERVER_TOKEN=%s\n' "$LICENSE_SERVER_TOKEN_VALUE" >> .deploy.env
 fi
@@ -145,13 +139,11 @@ echo "task-app image: ${TASK_APP_IMAGE}"
 echo "mcp-tools image: ${MCP_TOOLS_IMAGE}"
 echo "Compose files: ${COMPOSE_ARGS[*]}"
 echo "Deploy services: ${DEPLOY_SERVICES[*]}"
-echo "Extra build services: ${BUILD_ONLY_SERVICES[*]}"
 
 if [[ "$DEPLOY_SOURCE" == "ghcr" ]]; then
   echo "Pulling images..."
   docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env pull "${DEPLOY_SERVICES[@]}"
   docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d --no-build "${DEPLOY_SERVICES[@]}"
-  docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d "${BUILD_ONLY_SERVICES[@]}"
 else
-  docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d --build "${DEPLOY_SERVICES[@]}" "${BUILD_ONLY_SERVICES[@]}"
+  docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d --build "${DEPLOY_SERVICES[@]}"
 fi

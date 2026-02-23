@@ -49,8 +49,8 @@ case "$TARGET_RESOLVED" in
     ;;
 esac
 
-echo "[1/5] Stopping Docker Compose stack and removing volumes..."
-docker compose "${COMPOSE_ARGS[@]}" down -v --remove-orphans || true
+echo "[1/5] Stopping app stack and removing app volumes..."
+docker compose "${COMPOSE_ARGS[@]}" down -v || true
 
 echo "[2/5] Cleaning local projection DB and uploaded files..."
 rm -f data/*.db
