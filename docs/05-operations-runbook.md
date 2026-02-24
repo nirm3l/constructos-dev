@@ -43,7 +43,10 @@ Does:
 
 ### 2.4 Private Image Release (GHCR)
 - Workflow file: `.github/workflows/release-images.yml`.
-- Trigger: push tag matching `v*` (for example `v1.3.0`) or manual dispatch.
+- Trigger:
+  - push to default branch (`master`/`main`) -> publishes `main` + `sha-<commit>`
+  - push tag matching `v*` (for example `v1.3.0`) -> publishes `<tag>` + `sha-<commit>`
+  - manual dispatch
 - Output image: `ghcr.io/<owner>/constructos-task-app:<tag>`.
 - Output image: `ghcr.io/<owner>/constructos-mcp-tools:<tag>`.
 - Platforms: `linux/amd64` and `linux/arm64`.
