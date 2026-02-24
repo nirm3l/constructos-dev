@@ -80,12 +80,27 @@ Deploy local control-plane separately:
 ```bash
 ./scripts/deploy-control-plane.sh up
 ```
+Optional control-plane email test setup (Resend):
+```bash
+export LCP_EMAIL_RESEND_API_KEY='re_xxx'
+export LCP_EMAIL_FROM='ConstructOS Onboarding <onboarding@constructos.dev>'
+export LCP_EMAIL_REPLY_TO='support@constructos.dev'
+export LCP_CUSTOMER_REF_SECRET='replace-with-long-random-secret'
+export LCP_ONBOARDING_IMAGE_TAG='main'
+export LCP_ONBOARDING_INSTALL_SCRIPT_URL='https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh'
+export LCP_ONBOARDING_SUPPORT_EMAIL='support@constructos.dev'
+./scripts/deploy-control-plane.sh restart
+```
+Then open control-plane UI and use:
+- **Onboarding Package** for one-step email -> customer_ref/token/activation generation + branded onboarding mail
+- **Email Delivery Test** for generic smoke tests
+
 Client deployment assets are maintained in a separate repository:
 `https://github.com/nirm3l/constructos`
 
 Client one-liner installer:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh | IMAGE_TAG=v0.1.230 bash
+curl -fsSL https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh | ACTIVATION_CODE=ACT-XXXX-XXXX-XXXX-XXXX-XXXX IMAGE_TAG=main AUTO_DEPLOY=1 bash
 ```
 For signed entitlement enforcement, configure:
 - `LCP_SIGNING_PRIVATE_KEY_PEM` on control-plane

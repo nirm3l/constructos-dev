@@ -31,6 +31,7 @@ def _build_client(
     client_token_bundle_password: str = "",
     client_token_delimiter: str = ".",
     client_token_bundle_segment_index: int = 2,
+    customer_ref_secret: str = "",
 ) -> TestClient:
     db_file = tmp_path / "control-plane.db"
     os.environ["LCP_DATABASE_URL"] = f"sqlite:///{db_file}"
@@ -45,6 +46,10 @@ def _build_client(
     os.environ["LCP_CLIENT_TOKEN_BUNDLE_PASSWORD"] = client_token_bundle_password
     os.environ["LCP_CLIENT_TOKEN_DELIMITER"] = client_token_delimiter
     os.environ["LCP_CLIENT_TOKEN_BUNDLE_SEGMENT_INDEX"] = str(client_token_bundle_segment_index)
+    os.environ["LCP_EMAIL_RESEND_API_KEY"] = ""
+    os.environ["LCP_EMAIL_FROM"] = ""
+    os.environ["LCP_EMAIL_REPLY_TO"] = ""
+    os.environ["LCP_CUSTOMER_REF_SECRET"] = customer_ref_secret
 
     import license_control_plane.main as lcp_main
 
@@ -229,6 +234,100 @@ def test_activation_code_flow_enforces_three_device_limit(tmp_path: Path):
         assert list_payload["ok"] is True
         assert list_payload["total"] == 1
         assert list_payload["items"][0]["usage_count"] == 3
+
+
+def test_install_exchange_issues_client_token_for_activation_code(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-install-exchange",
+                "plan_code": "monthly",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+                "metadata": {
+                    "image_tag": "main",
+                    "install_script_url": "https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh",
+                },
+            },
+        )
+        assert create_code.status_code == 200
+        activation_code = create_code.json()["activation_code"]
+
+        exchange = client.post(
+            "/v1/install/exchange",
+            headers={"X-Forwarded-For": "203.0.113.27"},
+            json={"activation_code": activation_code},
+        )
+        assert exchange.status_code == 200
+        payload = exchange.json()
+        assert payload["ok"] is True
+        assert payload["customer_ref"] == "customer-install-exchange"
+        assert str(payload["license_server_token"]).startswith("lcp_")
+        assert payload["image_tag"] == "main"
+        assert payload["install_script_url"] == "https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh"
+        assert payload["activation_code_record"]["metadata"]["install_exchange_count"] == 1
+        assert payload["activation_code_record"]["metadata"]["install_exchange_last_ip"] == "203.0.113.27"
+
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": f"Bearer {payload['license_server_token']}"},
+            json={
+                "installation_id": "cp-exchange-installation",
+                "workspace_id": "workspace-exchange",
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert register.status_code == 200
+        assert register.json()["installation"]["customer_ref"] == "customer-install-exchange"
+
+        second_exchange = client.post(
+            "/v1/install/exchange",
+            json={"activation_code": activation_code},
+        )
+        assert second_exchange.status_code == 200
+        second_payload = second_exchange.json()
+        assert str(second_payload["license_server_token"]).startswith("lcp_")
+        assert second_payload["license_server_token"] != payload["license_server_token"]
+        assert second_payload["activation_code_record"]["metadata"]["install_exchange_count"] == 2
+
+
+def test_install_exchange_rejects_invalid_and_inactive_codes(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        invalid = client.post(
+            "/v1/install/exchange",
+            json={"activation_code": "ACT-INVALID-0000-0000-0000"},
+        )
+        assert invalid.status_code == 404
+        assert invalid.json()["detail"] == "Invalid activation code"
+
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-install-inactive",
+                "plan_code": "monthly",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+            },
+        )
+        assert create_code.status_code == 200
+        code_id = create_code.json()["activation_code_record"]["id"]
+        activation_code = create_code.json()["activation_code"]
+
+        deactivate = client.post(
+            f"/v1/admin/activation-codes/{code_id}/deactivate",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert deactivate.status_code == 200
+
+        inactive = client.post(
+            "/v1/install/exchange",
+            json={"activation_code": activation_code},
+        )
+        assert inactive.status_code == 400
+        assert inactive.json()["detail"] == "Activation code is inactive"
 
 
 def test_client_token_allows_installation_endpoints_and_blocks_admin_endpoints(tmp_path: Path):
@@ -624,6 +723,173 @@ def test_support_bug_report_rejects_invalid_severity(tmp_path: Path):
         )
         assert invalid.status_code == 400
         assert "Unsupported severity" in invalid.json()["detail"]
+
+
+def test_admin_send_email_requires_configuration(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        response = client.post(
+            "/v1/admin/email/send",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "to_email": "ops@example.com",
+                "subject": "Smoke test",
+                "text_body": "Hello from control-plane.",
+            },
+        )
+        assert response.status_code == 503
+        assert "Email delivery is not configured" in response.json()["detail"]
+
+
+def test_admin_send_email_succeeds_with_configured_sender(monkeypatch, tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        import license_control_plane.main as lcp_main
+
+        captured: dict[str, str] = {}
+
+        def _fake_send(*, to_email: str, subject: str, text_body: str) -> str:
+            captured["to_email"] = to_email
+            captured["subject"] = subject
+            captured["text_body"] = text_body
+            return "re_test_message_id"
+
+        monkeypatch.setattr(lcp_main, "_send_email_via_resend", _fake_send)
+
+        response = client.post(
+            "/v1/admin/email/send",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "to_email": "ops@example.com",
+                "subject": "Smoke test",
+                "text_body": "Hello from control-plane.",
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["provider"] == "resend"
+        assert payload["to_email"] == "ops@example.com"
+        assert payload["message_id"] == "re_test_message_id"
+        assert captured["to_email"] == "ops@example.com"
+        assert captured["subject"] == "Smoke test"
+        assert captured["text_body"] == "Hello from control-plane."
+
+
+def test_admin_send_onboarding_email_succeeds_with_template(monkeypatch, tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        import license_control_plane.main as lcp_main
+
+        captured: dict[str, str] = {}
+
+        def _fake_send(*, to_email: str, subject: str, text_body: str, html_body: str | None = None) -> str:
+            captured["to_email"] = to_email
+            captured["subject"] = subject
+            captured["text_body"] = text_body
+            captured["html_body"] = str(html_body or "")
+            return "re_onboarding_message_id"
+
+        monkeypatch.setattr(lcp_main, "_send_email_via_resend", _fake_send)
+
+        response = client.post(
+            "/v1/admin/email/send-onboarding",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "to_email": "ops@example.com",
+                "customer_ref": "cust_example",
+                "activation_code": "ACT-TEST-0001",
+                "image_tag": "main",
+                "install_script_url": "https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh",
+                "support_email": "support@constructos.dev",
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["provider"] == "resend"
+        assert payload["to_email"] == "ops@example.com"
+        assert payload["customer_ref"] == "cust_example"
+        assert payload["message_id"] == "re_onboarding_message_id"
+        assert "ConstructOS onboarding package" in payload["subject"]
+        assert captured["to_email"] == "ops@example.com"
+        assert "ACTIVATION_CODE=ACT-TEST-0001" in captured["text_body"]
+        assert "AUTO_DEPLOY=1" in captured["text_body"]
+        assert "LICENSE_SERVER_TOKEN=" not in captured["text_body"]
+        assert "ACT-TEST-0001" in captured["text_body"]
+        assert "ConstructOS" in captured["html_body"]
+        assert "cust_example" in captured["html_body"]
+
+
+def test_admin_send_onboarding_email_rejects_non_https_script_url(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        response = client.post(
+            "/v1/admin/email/send-onboarding",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "to_email": "ops@example.com",
+                "customer_ref": "cust_example",
+                "client_token": "lcp_test.client.bundle",
+                "activation_code": "ACT-TEST-0001",
+                "install_script_url": "http://example.com/install.sh",
+            },
+        )
+        assert response.status_code == 400
+        assert "install_script_url must start with https://" in response.json()["detail"]
+
+
+def test_admin_provision_onboarding_requires_customer_ref_secret(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        response = client.post(
+            "/v1/admin/onboarding/provision",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={"to_email": "ops@example.com"},
+        )
+        assert response.status_code == 503
+        assert "LCP_CUSTOMER_REF_SECRET" in response.json()["detail"]
+
+
+def test_admin_provision_onboarding_generates_and_sends_package(monkeypatch, tmp_path: Path):
+    with _build_client(tmp_path, customer_ref_secret="test-customer-ref-secret") as client:
+        import license_control_plane.main as lcp_main
+
+        captured: dict[str, str] = {}
+
+        def _fake_send(*, to_email: str, subject: str, text_body: str, html_body: str | None = None) -> str:
+            captured["to_email"] = to_email
+            captured["subject"] = subject
+            captured["text_body"] = text_body
+            captured["html_body"] = str(html_body or "")
+            return "re_onboarding_package_message_id"
+
+        monkeypatch.setattr(lcp_main, "_send_email_via_resend", _fake_send)
+
+        response = client.post(
+            "/v1/admin/onboarding/provision",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "to_email": "ops@example.com",
+                "max_installations": 3,
+                "image_tag": "main",
+                "install_script_url": "https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh",
+                "support_email": "support@constructos.dev",
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["provider"] == "resend"
+        assert payload["to_email"] == "ops@example.com"
+        assert payload["message_id"] == "re_onboarding_package_message_id"
+        assert str(payload["customer_ref"]).startswith("cust_")
+        assert str(payload["client_token"]).startswith("lcp_")
+        assert str(payload["activation_code"]).startswith("ACT-")
+        assert payload["activation_code_record"]["customer_ref"] == payload["customer_ref"]
+        assert payload["client_token_record"]["customer_ref"] == payload["customer_ref"]
+        assert payload["activation_code_record"]["max_installations"] == 3
+        assert captured["to_email"] == "ops@example.com"
+        assert f"ACTIVATION_CODE={payload['activation_code']}" in captured["text_body"]
+        assert "AUTO_DEPLOY=1" in captured["text_body"]
+        assert "LICENSE_SERVER_TOKEN=" not in captured["text_body"]
+        assert payload["activation_code"] in captured["text_body"]
+        assert payload["customer_ref"] in captured["html_body"]
 
 
 def test_admin_events_stream_requires_admin_token(tmp_path: Path):

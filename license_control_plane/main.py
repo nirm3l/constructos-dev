@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import html
+import hmac
 import json
 import os
 import secrets
@@ -14,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -87,6 +91,19 @@ LCP_CLIENT_TOKEN_BUNDLE_PASSWORD = os.getenv(
 ).strip()
 LCP_CLIENT_TOKEN_DELIMITER = os.getenv("LCP_CLIENT_TOKEN_DELIMITER", ".").strip() or "."
 LCP_CLIENT_TOKEN_BUNDLE_SEGMENT_INDEX = _env_int("LCP_CLIENT_TOKEN_BUNDLE_SEGMENT_INDEX", 2)
+LCP_EMAIL_RESEND_API_KEY = os.getenv("LCP_EMAIL_RESEND_API_KEY", "").strip()
+LCP_EMAIL_FROM = os.getenv("LCP_EMAIL_FROM", "").strip()
+LCP_EMAIL_REPLY_TO = os.getenv("LCP_EMAIL_REPLY_TO", "").strip()
+LCP_EMAIL_REQUEST_TIMEOUT_SECONDS = max(2.0, _env_float("LCP_EMAIL_REQUEST_TIMEOUT_SECONDS", 10.0))
+LCP_CUSTOMER_REF_SECRET = os.getenv("LCP_CUSTOMER_REF_SECRET", "").strip()
+LCP_CUSTOMER_REF_PREFIX = os.getenv("LCP_CUSTOMER_REF_PREFIX", "cust").strip() or "cust"
+LCP_CUSTOMER_REF_LENGTH = max(8, min(48, _env_int("LCP_CUSTOMER_REF_LENGTH", 20)))
+LCP_ONBOARDING_IMAGE_TAG = os.getenv("LCP_ONBOARDING_IMAGE_TAG", "main").strip() or "main"
+LCP_ONBOARDING_INSTALL_SCRIPT_URL = (
+    os.getenv("LCP_ONBOARDING_INSTALL_SCRIPT_URL", "https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh").strip()
+    or "https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh"
+)
+LCP_ONBOARDING_SUPPORT_EMAIL = os.getenv("LCP_ONBOARDING_SUPPORT_EMAIL", "support@constructos.dev").strip() or "support@constructos.dev"
 LCP_PUBLIC_BETA_FREE_UNTIL = _env_datetime_utc("LCP_PUBLIC_BETA_FREE_UNTIL")
 LCP_ADMIN_SSE_POLL_SECONDS = max(0.5, _env_float("LCP_ADMIN_SSE_POLL_SECONDS", 1.0))
 LCP_ADMIN_SSE_HEARTBEAT_SECONDS = max(5.0, _env_float("LCP_ADMIN_SSE_HEARTBEAT_SECONDS", 15.0))
@@ -284,8 +301,39 @@ class InstallationActivateRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class InstallExchangeRequest(BaseModel):
+    activation_code: str = Field(min_length=8, max_length=128)
+
+
 class AdminClientTokenCreateRequest(BaseModel):
     customer_ref: str = Field(min_length=2, max_length=128)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AdminEmailSendRequest(BaseModel):
+    to_email: str = Field(min_length=5, max_length=320)
+    subject: str = Field(min_length=1, max_length=200)
+    text_body: str = Field(min_length=1, max_length=20000)
+
+
+class AdminOnboardingEmailSendRequest(BaseModel):
+    to_email: str = Field(min_length=5, max_length=320)
+    customer_ref: str = Field(min_length=2, max_length=128)
+    client_token: str | None = Field(default=None, max_length=4096)
+    activation_code: str = Field(min_length=8, max_length=128)
+    image_tag: str | None = Field(default=None, max_length=128)
+    install_script_url: str | None = Field(default=None, max_length=1024)
+    support_email: str | None = Field(default=None, max_length=320)
+
+
+class AdminProvisionOnboardingRequest(BaseModel):
+    to_email: str = Field(min_length=5, max_length=320)
+    plan_code: str | None = Field(default="monthly", max_length=64)
+    valid_until: str | None = None
+    max_installations: int = Field(default=LCP_DEFAULT_MAX_INSTALLATIONS, ge=1, le=100)
+    image_tag: str | None = Field(default=None, max_length=128)
+    install_script_url: str | None = Field(default=None, max_length=1024)
+    support_email: str | None = Field(default=None, max_length=320)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -361,6 +409,315 @@ def _normalize_email(value: str | None) -> str:
     if not EMAIL_PATTERN.fullmatch(normalized):
         raise HTTPException(status_code=400, detail="Invalid email format")
     return normalized
+
+
+def _normalize_email_subject(value: str | None) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="subject is required")
+    if len(normalized) > 200:
+        raise HTTPException(status_code=400, detail="subject is too long")
+    return normalized
+
+
+def _normalize_email_body(value: str | None) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="text_body is required")
+    if len(normalized) > 20000:
+        raise HTTPException(status_code=400, detail="text_body is too long")
+    return normalized
+
+
+def _normalize_customer_ref(value: str | None) -> str:
+    normalized = str(value or "").strip()
+    if len(normalized) < 2:
+        raise HTTPException(status_code=400, detail="customer_ref is required")
+    if len(normalized) > 128:
+        raise HTTPException(status_code=400, detail="customer_ref is too long")
+    return normalized
+
+
+def _normalize_client_token(value: str | None) -> str:
+    normalized = str(value or "").strip()
+    if len(normalized) < 8:
+        raise HTTPException(status_code=400, detail="client_token is required")
+    if len(normalized) > 4096:
+        raise HTTPException(status_code=400, detail="client_token is too long")
+    return normalized
+
+
+def _normalize_activation_code_value(value: str | None) -> str:
+    normalized = str(value or "").strip()
+    if len(normalized) < 8:
+        raise HTTPException(status_code=400, detail="activation_code is required")
+    if len(normalized) > 128:
+        raise HTTPException(status_code=400, detail="activation_code is too long")
+    return normalized
+
+
+def _normalize_image_tag(value: str | None) -> str:
+    normalized = str(value or "").strip() or LCP_ONBOARDING_IMAGE_TAG
+    if len(normalized) > 128:
+        raise HTTPException(status_code=400, detail="image_tag is too long")
+    return normalized
+
+
+def _normalize_install_script_url(value: str | None) -> str:
+    normalized = str(value or "").strip() or LCP_ONBOARDING_INSTALL_SCRIPT_URL
+    if len(normalized) > 1024:
+        raise HTTPException(status_code=400, detail="install_script_url is too long")
+    if not normalized.startswith("https://"):
+        raise HTTPException(status_code=400, detail="install_script_url must start with https://")
+    return normalized
+
+
+def _normalize_support_email(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return _normalize_email(LCP_ONBOARDING_SUPPORT_EMAIL)
+    return _normalize_email(raw)
+
+
+def _customer_ref_prefix() -> str:
+    raw = str(LCP_CUSTOMER_REF_PREFIX or "").strip().lower()
+    safe = re.sub(r"[^a-z0-9_-]+", "", raw).strip("_-")
+    return safe or "cust"
+
+
+def _require_customer_ref_secret() -> str:
+    secret = str(LCP_CUSTOMER_REF_SECRET or "").strip()
+    if not secret:
+        raise HTTPException(status_code=503, detail="Customer reference generation is not configured (LCP_CUSTOMER_REF_SECRET)")
+    return secret
+
+
+def _customer_ref_from_email(email: str) -> str:
+    secret = _require_customer_ref_secret()
+    digest = hmac.new(
+        secret.encode("utf-8"),
+        email.encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    encoded = base64.b32encode(digest).decode("ascii").rstrip("=").lower()
+    return f"{_customer_ref_prefix()}_{encoded[:LCP_CUSTOMER_REF_LENGTH]}"
+
+
+def _require_email_delivery_config() -> None:
+    missing: list[str] = []
+    if not LCP_EMAIL_RESEND_API_KEY:
+        missing.append("LCP_EMAIL_RESEND_API_KEY")
+    if not LCP_EMAIL_FROM:
+        missing.append("LCP_EMAIL_FROM")
+    if missing:
+        joined = ", ".join(missing)
+        raise HTTPException(status_code=503, detail=f"Email delivery is not configured ({joined})")
+
+
+def _resend_error_detail(response: httpx.Response) -> str:
+    fallback = f"Resend API request failed ({response.status_code})"
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        for key in ("message", "error", "detail"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    text = str(response.text or "").strip()
+    return text or fallback
+
+
+def _send_email_via_resend(*, to_email: str, subject: str, text_body: str, html_body: str | None = None) -> str | None:
+    _require_email_delivery_config()
+    headers = {
+        "Authorization": f"Bearer {LCP_EMAIL_RESEND_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload: dict[str, Any] = {
+        "from": LCP_EMAIL_FROM,
+        "to": [to_email],
+        "subject": subject,
+        "text": text_body,
+    }
+    html_value = str(html_body or "").strip()
+    if html_value:
+        payload["html"] = html_value
+    if LCP_EMAIL_REPLY_TO:
+        payload["reply_to"] = LCP_EMAIL_REPLY_TO
+    response = httpx.post(
+        "https://api.resend.com/emails",
+        headers=headers,
+        json=payload,
+        timeout=LCP_EMAIL_REQUEST_TIMEOUT_SECONDS,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(_resend_error_detail(response))
+    try:
+        parsed = response.json()
+    except Exception:
+        return None
+    if isinstance(parsed, dict):
+        raw_id = parsed.get("id")
+        if raw_id is not None:
+            normalized = str(raw_id).strip()
+            return normalized or None
+    return None
+
+
+def _build_onboarding_email_template(
+    *,
+    customer_ref: str,
+    activation_code: str,
+    image_tag: str,
+    install_script_url: str,
+    support_email: str,
+    max_installations: int = LCP_DEFAULT_MAX_INSTALLATIONS,
+) -> tuple[str, str, str]:
+    subject = f"ConstructOS onboarding package ({customer_ref})"
+    install_command = (
+        f"curl -fsSL {install_script_url} | "
+        f"ACTIVATION_CODE={activation_code} IMAGE_TAG={image_tag} AUTO_DEPLOY=1 bash"
+    )
+
+    text_body = (
+        "Hello,\n\n"
+        "Your ConstructOS onboarding package is ready.\n\n"
+        "1) Run the installer (it will exchange activation code for token automatically):\n"
+        f"{install_command}\n\n"
+        "2) If needed, manual deploy from install directory:\n"
+        "cd constructos-client\n"
+        f"IMAGE_TAG={image_tag} bash ./scripts/deploy.sh\n\n"
+        "3) Activate license in app with this activation code:\n"
+        f"{activation_code}\n\n"
+        "Details:\n"
+        f"- customer_ref: {customer_ref}\n"
+        f"- seat limit: {int(max_installations)} installations max\n\n"
+        f"Support: {support_email}\n"
+    )
+
+    html_body = f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{html.escape(subject)}</title>
+  </head>
+  <body style="margin:0;padding:0;background:#050b07;color:#dfffe9;font-family:'Avenir Next','Trebuchet MS','Gill Sans',Segoe UI,Arial,sans-serif;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#050b07;padding:28px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="640" cellspacing="0" cellpadding="0" style="width:640px;max-width:92%;background:linear-gradient(180deg,rgba(14,29,21,0.93),rgba(9,19,14,0.96));background-color:#0a140f;border:1px solid rgba(97,224,142,0.28);border-radius:20px;overflow:hidden;box-shadow:0 20px 40px rgba(0,0,0,0.45);">
+            <tr>
+              <td style="padding:20px 24px;background:linear-gradient(180deg,#143022 0%,#10241a 100%);border-bottom:1px solid rgba(122,255,170,0.46);">
+                <div style="font-size:12px;letter-spacing:0.12em;text-transform:uppercase;color:#73e7a1;font-family:'JetBrains Mono','Fira Code','SFMono-Regular',Menlo,monospace;">ConstructOS.dev</div>
+                <div style="font-size:22px;font-weight:800;color:#ebffef;margin-top:6px;font-family:'JetBrains Mono','Fira Code','SFMono-Regular',Menlo,monospace;">Onboarding Package</div>
+                <div style="font-size:13px;color:#84bc98;margin-top:6px;">Customer reference: <code style="background:rgba(8,22,14,0.9);border:1px solid rgba(90,218,141,0.45);border-radius:8px;padding:2px 6px;color:#bfffd4;font-family:'JetBrains Mono','Fira Code','SFMono-Regular',Menlo,monospace;">{html.escape(customer_ref)}</code></div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:20px 24px;">
+                <p style="margin:0 0 12px 0;color:#84bc98;font-size:14px;line-height:1.6;">Your deployment bundle is ready. Run the installer command below:</p>
+                <pre style="margin:0 0 16px 0;background:rgba(6,17,11,0.92);border:1px solid rgba(89,220,141,0.3);border-radius:10px;padding:12px 14px;overflow:auto;color:#b0ffd0;font-size:13px;line-height:1.5;font-family:'JetBrains Mono','Fira Code','SFMono-Regular',Menlo,monospace;">{html.escape(install_command)}</pre>
+
+                <p style="margin:0 0 8px 0;color:#84bc98;font-size:14px;">Activation code:</p>
+                <pre style="margin:0 0 16px 0;background:rgba(6,17,11,0.92);border:1px solid rgba(89,220,141,0.3);border-radius:10px;padding:12px 14px;overflow:auto;color:#dfffe9;font-size:13px;line-height:1.5;font-family:'JetBrains Mono','Fira Code','SFMono-Regular',Menlo,monospace;">{html.escape(activation_code)}</pre>
+
+                <p style="margin:0 0 8px 0;color:#84bc98;font-size:14px;">Manual deploy command (optional):</p>
+                <pre style="margin:0 0 16px 0;background:rgba(6,17,11,0.92);border:1px solid rgba(89,220,141,0.3);border-radius:10px;padding:12px 14px;overflow:auto;color:#b0ffd0;font-size:13px;line-height:1.5;font-family:'JetBrains Mono','Fira Code','SFMono-Regular',Menlo,monospace;">IMAGE_TAG={html.escape(image_tag)} bash ./scripts/deploy.sh</pre>
+
+                <div style="margin:0;padding:10px 12px;background:rgba(11,25,18,0.86);border:1px solid rgba(122,255,170,0.46);border-radius:10px;color:#dfffe9;font-size:13px;line-height:1.55;">
+                  Seat policy: up to {int(max_installations)} active installations per customer reference.
+                </div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:14px 24px;border-top:1px solid rgba(97,224,142,0.28);color:#84bc98;font-size:12px;">
+                Need help? Contact <a href="mailto:{html.escape(support_email)}" style="color:#73e7a1;text-decoration:none;">{html.escape(support_email)}</a>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+"""
+    return subject, text_body, html_body
+
+
+def _create_client_token_record(
+    db: Session,
+    *,
+    customer_ref: str,
+    metadata: dict[str, Any] | None = None,
+) -> tuple[str, ClientToken]:
+    raw_token = ""
+    token_hash = ""
+    for _ in range(10):
+        candidate = _generate_client_token()
+        candidate_hash = _secret_hash(candidate)
+        exists = db.execute(
+            select(ClientToken.id).where(ClientToken.token_hash == candidate_hash)
+        ).scalar_one_or_none()
+        if exists is None:
+            raw_token = candidate
+            token_hash = candidate_hash
+            break
+    if not raw_token:
+        raise HTTPException(status_code=500, detail="Failed to allocate client token")
+
+    record = ClientToken(
+        token_hash=token_hash,
+        token_suffix=_client_token_suffix(raw_token),
+        customer_ref=customer_ref,
+        is_active=True,
+        metadata_json=_dump_metadata(metadata or {}),
+    )
+    db.add(record)
+    db.flush()
+    return raw_token, record
+
+
+def _create_activation_code_record(
+    db: Session,
+    *,
+    customer_ref: str,
+    plan_code: str,
+    valid_until: datetime | None,
+    max_installations: int,
+    metadata: dict[str, Any] | None = None,
+) -> tuple[str, ActivationCode]:
+    activation_code_raw = ""
+    activation_code_hash = ""
+    for _ in range(10):
+        candidate = _generate_activation_code()
+        candidate_hash = _activation_code_hash(candidate)
+        exists = db.execute(
+            select(ActivationCode.id).where(ActivationCode.code_hash == candidate_hash)
+        ).scalar_one_or_none()
+        if exists is None:
+            activation_code_raw = candidate
+            activation_code_hash = candidate_hash
+            break
+    if not activation_code_raw:
+        raise HTTPException(status_code=500, detail="Failed to allocate activation code")
+
+    record = ActivationCode(
+        code_hash=activation_code_hash,
+        code_suffix=_activation_code_suffix(activation_code_raw),
+        customer_ref=customer_ref,
+        plan_code=plan_code,
+        valid_until=valid_until,
+        max_installations=max_installations,
+        is_active=True,
+        usage_count=0,
+        metadata_json=_dump_metadata(metadata or {}),
+    )
+    db.add(record)
+    db.flush()
+    return activation_code_raw, record
 
 
 def _normalize_public_request_type(value: str | None) -> str:
@@ -1168,6 +1525,92 @@ def register_installation(
     }
 
 
+@app.post("/v1/install/exchange")
+def install_exchange_token(
+    payload: InstallExchangeRequest,
+    request: Request,
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    normalized_code = _normalize_activation_code(payload.activation_code)
+    if not normalized_code:
+        raise HTTPException(status_code=400, detail="Activation code is required")
+
+    code_hash = _activation_code_hash(normalized_code)
+    activation_code = db.execute(
+        select(ActivationCode).where(ActivationCode.code_hash == code_hash)
+    ).scalar_one_or_none()
+    if activation_code is None:
+        raise HTTPException(status_code=404, detail="Invalid activation code")
+    if not activation_code.is_active:
+        raise HTTPException(status_code=400, detail="Activation code is inactive")
+
+    now = _now_utc()
+    code_valid_until = activation_code.valid_until
+    if code_valid_until and code_valid_until.tzinfo is None:
+        code_valid_until = code_valid_until.replace(tzinfo=timezone.utc)
+    if code_valid_until:
+        code_valid_until = code_valid_until.astimezone(timezone.utc)
+    if code_valid_until and code_valid_until <= now:
+        raise HTTPException(status_code=400, detail="Activation code has expired")
+
+    code_metadata = _load_metadata(activation_code.metadata_json)
+    prior_exchange_count_raw = code_metadata.get("install_exchange_count", 0)
+    try:
+        prior_exchange_count = int(prior_exchange_count_raw)
+    except Exception:
+        prior_exchange_count = 0
+    if prior_exchange_count < 0:
+        prior_exchange_count = 0
+
+    code_metadata["install_exchange_count"] = prior_exchange_count + 1
+    code_metadata["install_exchange_last_at"] = now.isoformat()
+    activation_ip = _resolve_request_ip(request)
+    if activation_ip:
+        code_metadata["install_exchange_last_ip"] = activation_ip
+    activation_code.metadata_json = _dump_metadata(code_metadata)
+
+    token_metadata = {
+        "source": "install-exchange",
+        "activation_code_id": activation_code.id,
+        "activation_code_suffix": activation_code.code_suffix,
+    }
+    if activation_ip:
+        token_metadata["issued_ip"] = activation_ip
+    client_token_raw, client_token_record = _create_client_token_record(
+        db,
+        customer_ref=activation_code.customer_ref,
+        metadata=token_metadata,
+    )
+
+    db.commit()
+    db.refresh(client_token_record)
+    db.refresh(activation_code)
+
+    image_tag = str(code_metadata.get("image_tag") or "").strip() or LCP_ONBOARDING_IMAGE_TAG
+    install_script_url = (
+        str(code_metadata.get("install_script_url") or "").strip() or LCP_ONBOARDING_INSTALL_SCRIPT_URL
+    )
+
+    _publish_admin_event(
+        "onboarding",
+        "install_token_exchanged",
+        {
+            "customer_ref": activation_code.customer_ref,
+            "activation_code_id": activation_code.id,
+            "client_token_id": client_token_record.id,
+            "exchange_count": code_metadata["install_exchange_count"],
+        },
+    )
+    return {
+        "ok": True,
+        "customer_ref": activation_code.customer_ref,
+        "license_server_token": client_token_raw,
+        "image_tag": image_tag,
+        "install_script_url": install_script_url,
+        "activation_code_record": _serialize_activation_code(activation_code),
+    }
+
+
 @app.post("/v1/installations/heartbeat")
 def heartbeat_installation(
     payload: InstallationHeartbeatRequest,
@@ -1302,37 +1745,21 @@ def admin_create_activation_code(
     if not customer_ref:
         raise HTTPException(status_code=400, detail="customer_ref is required")
 
-    valid_until = _parse_iso_datetime(payload.valid_until)
+    try:
+        valid_until = _parse_iso_datetime(payload.valid_until)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid valid_until value: {exc}") from exc
     if valid_until and valid_until <= _now_utc():
         raise HTTPException(status_code=400, detail="valid_until must be in the future")
 
-    activation_code_raw = ""
-    activation_code_hash = ""
-    for _ in range(10):
-        candidate = _generate_activation_code()
-        candidate_hash = _activation_code_hash(candidate)
-        exists = db.execute(
-            select(ActivationCode.id).where(ActivationCode.code_hash == candidate_hash)
-        ).scalar_one_or_none()
-        if exists is None:
-            activation_code_raw = candidate
-            activation_code_hash = candidate_hash
-            break
-    if not activation_code_raw:
-        raise HTTPException(status_code=500, detail="Failed to allocate activation code")
-
-    record = ActivationCode(
-        code_hash=activation_code_hash,
-        code_suffix=_activation_code_suffix(activation_code_raw),
+    activation_code_raw, record = _create_activation_code_record(
+        db,
         customer_ref=customer_ref,
         plan_code=str(payload.plan_code or "").strip() or "monthly",
         valid_until=valid_until,
         max_installations=int(payload.max_installations or LCP_DEFAULT_MAX_INSTALLATIONS),
-        is_active=True,
-        usage_count=0,
-        metadata_json=_dump_metadata(payload.metadata or {}),
+        metadata=payload.metadata or {},
     )
-    db.add(record)
     db.commit()
     db.refresh(record)
     _publish_admin_event(
@@ -1426,29 +1853,11 @@ def admin_create_client_token(
     if not customer_ref:
         raise HTTPException(status_code=400, detail="customer_ref is required")
 
-    raw_token = ""
-    token_hash = ""
-    for _ in range(10):
-        candidate = _generate_client_token()
-        candidate_hash = _secret_hash(candidate)
-        exists = db.execute(
-            select(ClientToken.id).where(ClientToken.token_hash == candidate_hash)
-        ).scalar_one_or_none()
-        if exists is None:
-            raw_token = candidate
-            token_hash = candidate_hash
-            break
-    if not raw_token:
-        raise HTTPException(status_code=500, detail="Failed to allocate client token")
-
-    record = ClientToken(
-        token_hash=token_hash,
-        token_suffix=_client_token_suffix(raw_token),
+    raw_token, record = _create_client_token_record(
+        db,
         customer_ref=customer_ref,
-        is_active=True,
-        metadata_json=_dump_metadata(payload.metadata or {}),
+        metadata=payload.metadata or {},
     )
-    db.add(record)
     db.commit()
     db.refresh(record)
     _publish_admin_event(
@@ -1460,6 +1869,195 @@ def admin_create_client_token(
         "ok": True,
         "client_token": raw_token,
         "client_token_record": _serialize_client_token(record),
+    }
+
+
+@app.post("/v1/admin/email/send")
+def admin_send_email(
+    payload: AdminEmailSendRequest,
+    _auth: None = Depends(_require_admin_token),
+) -> dict[str, Any]:
+    to_email = _normalize_email(payload.to_email)
+    subject = _normalize_email_subject(payload.subject)
+    text_body = _normalize_email_body(payload.text_body)
+    try:
+        message_id = _send_email_via_resend(
+            to_email=to_email,
+            subject=subject,
+            text_body=text_body,
+        )
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to send email: {exc}") from exc
+
+    _publish_admin_event(
+        "email",
+        "sent",
+        {
+            "to_email": to_email,
+            "provider": "resend",
+            "message_id": message_id,
+        },
+    )
+    return {
+        "ok": True,
+        "provider": "resend",
+        "to_email": to_email,
+        "message_id": message_id,
+    }
+
+
+@app.post("/v1/admin/email/send-onboarding")
+def admin_send_onboarding_email(
+    payload: AdminOnboardingEmailSendRequest,
+    _auth: None = Depends(_require_admin_token),
+) -> dict[str, Any]:
+    to_email = _normalize_email(payload.to_email)
+    customer_ref = _normalize_customer_ref(payload.customer_ref)
+    if str(payload.client_token or "").strip():
+        _normalize_client_token(payload.client_token)
+    activation_code = _normalize_activation_code_value(payload.activation_code)
+    image_tag = _normalize_image_tag(payload.image_tag)
+    install_script_url = _normalize_install_script_url(payload.install_script_url)
+    support_email = _normalize_support_email(payload.support_email)
+
+    subject, text_body, html_body = _build_onboarding_email_template(
+        customer_ref=customer_ref,
+        activation_code=activation_code,
+        image_tag=image_tag,
+        install_script_url=install_script_url,
+        support_email=support_email,
+    )
+    try:
+        message_id = _send_email_via_resend(
+            to_email=to_email,
+            subject=subject,
+            text_body=text_body,
+            html_body=html_body,
+        )
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to send onboarding email: {exc}") from exc
+
+    _publish_admin_event(
+        "email",
+        "onboarding_sent",
+        {
+            "to_email": to_email,
+            "customer_ref": customer_ref,
+            "provider": "resend",
+            "message_id": message_id,
+        },
+    )
+    return {
+        "ok": True,
+        "provider": "resend",
+        "to_email": to_email,
+        "customer_ref": customer_ref,
+        "subject": subject,
+        "message_id": message_id,
+    }
+
+
+@app.post("/v1/admin/onboarding/provision")
+def admin_provision_onboarding(
+    payload: AdminProvisionOnboardingRequest,
+    _auth: None = Depends(_require_admin_token),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    to_email = _normalize_email(payload.to_email)
+    customer_ref = _customer_ref_from_email(to_email)
+
+    try:
+        valid_until = _parse_iso_datetime(payload.valid_until)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid valid_until value: {exc}") from exc
+    if valid_until and valid_until <= _now_utc():
+        raise HTTPException(status_code=400, detail="valid_until must be in the future")
+
+    plan_code = str(payload.plan_code or "").strip() or "monthly"
+    max_installations = int(payload.max_installations or LCP_DEFAULT_MAX_INSTALLATIONS)
+    image_tag = _normalize_image_tag(payload.image_tag)
+    install_script_url = _normalize_install_script_url(payload.install_script_url)
+    support_email = _normalize_support_email(payload.support_email)
+
+    metadata = dict(payload.metadata or {})
+    metadata.setdefault("issued_to_email", to_email)
+    metadata.setdefault("source", "admin-onboarding-provision")
+    metadata.setdefault("image_tag", image_tag)
+    metadata.setdefault("install_script_url", install_script_url)
+
+    try:
+        client_token_raw, client_token_record = _create_client_token_record(
+            db,
+            customer_ref=customer_ref,
+            metadata=metadata,
+        )
+        activation_code_raw, activation_code_record = _create_activation_code_record(
+            db,
+            customer_ref=customer_ref,
+            plan_code=plan_code,
+            valid_until=valid_until,
+            max_installations=max_installations,
+            metadata=metadata,
+        )
+
+        subject, text_body, html_body = _build_onboarding_email_template(
+            customer_ref=customer_ref,
+            activation_code=activation_code_raw,
+            image_tag=image_tag,
+            install_script_url=install_script_url,
+            support_email=support_email,
+            max_installations=max_installations,
+        )
+        message_id = _send_email_via_resend(
+            to_email=to_email,
+            subject=subject,
+            text_body=text_body,
+            html_body=html_body,
+        )
+
+        db.commit()
+        db.refresh(client_token_record)
+        db.refresh(activation_code_record)
+    except HTTPException:
+        db.rollback()
+        raise
+    except RuntimeError as exc:
+        db.rollback()
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=502, detail=f"Failed to provision onboarding package: {exc}") from exc
+
+    _publish_admin_event(
+        "onboarding",
+        "provisioned",
+        {
+            "to_email": to_email,
+            "customer_ref": customer_ref,
+            "client_token_id": client_token_record.id,
+            "activation_code_id": activation_code_record.id,
+            "message_id": message_id,
+        },
+    )
+    return {
+        "ok": True,
+        "provider": "resend",
+        "to_email": to_email,
+        "customer_ref": customer_ref,
+        "subject": subject,
+        "message_id": message_id,
+        "client_token": client_token_raw,
+        "client_token_record": _serialize_client_token(client_token_record),
+        "activation_code": activation_code_raw,
+        "activation_code_record": _serialize_activation_code(activation_code_record),
     }
 
 
