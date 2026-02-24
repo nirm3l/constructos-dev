@@ -45,3 +45,52 @@ class MarkNotificationReadHandler:
         )
         self.ctx.db.commit()
         return {"ok": True}
+
+
+@dataclass(frozen=True, slots=True)
+class MarkAllNotificationsReadHandler:
+    ctx: CommandContext
+
+    def __call__(self) -> dict:
+        notification_ids = (
+            self.ctx.db.execute(
+                select(Notification.id).where(
+                    Notification.user_id == self.ctx.user.id,
+                    Notification.is_read == False,  # noqa: E712
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not notification_ids:
+            return {"ok": True, "updated": 0}
+
+        workspace_id = (
+            self.ctx.db.execute(
+                select(WorkspaceMember.workspace_id).where(
+                    WorkspaceMember.user_id == self.ctx.user.id
+                )
+            ).scalar()
+            or BOOTSTRAP_WORKSPACE_ID
+        )
+
+        repo = AggregateEventRepository(self.ctx.db)
+        updated = 0
+        for notification_id in notification_ids:
+            aggregate = repo.load_with_class(
+                aggregate_type="Notification",
+                aggregate_id=notification_id,
+                aggregate_cls=NotificationAggregate,
+            )
+            aggregate.mark_read(notification_id=notification_id, user_id=self.ctx.user.id)
+            repo.persist(
+                aggregate,
+                base_metadata={
+                    "actor_id": self.ctx.user.id,
+                    "workspace_id": workspace_id,
+                },
+            )
+            updated += 1
+
+        self.ctx.db.commit()
+        return {"ok": True, "updated": updated}

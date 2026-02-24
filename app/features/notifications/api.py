@@ -63,6 +63,15 @@ def list_notifications(db: Session = Depends(get_db), user=Depends(get_current_u
     return list_notifications_read_model(db, user.id, limit=100)
 
 
+@router.post("/api/notifications/read-all")
+def mark_all_notifications(
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+    command_id: str | None = Depends(get_command_id),
+):
+    return NotificationApplicationService(db, user, command_id=command_id).mark_all_read()
+
+
 @router.post("/api/notifications/{notification_id}/read")
 def mark_notification(
     notification_id: str,

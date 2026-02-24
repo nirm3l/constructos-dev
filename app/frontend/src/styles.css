@@ -31,6 +31,34 @@ html, body, #root {
   min-height: 100%;
 }
 
+/* Keep layout width stable when overlays temporarily lock page scroll. */
+html {
+  scrollbar-gutter: stable both-edges;
+}
+
+/* Radix/RemoveScroll may add body margin compensation that reintroduces width shifts. */
+html body[data-scroll-locked],
+html body.with-scroll-bars-hidden[data-scroll-locked] {
+  --removed-body-scroll-bar-size: 0px !important;
+  margin-right: 0 !important;
+  padding-right: 0 !important;
+}
+
+html body[data-scroll-locked] .right-scroll-bar-position {
+  right: 0 !important;
+}
+
+html body[data-scroll-locked] .width-before-scroll-bar {
+  margin-right: 0 !important;
+}
+
+/* Fallback for browsers without scrollbar-gutter support. */
+@supports not (scrollbar-gutter: stable) {
+  html {
+    overflow-y: scroll;
+  }
+}
+
 body {
   font-family: "Avenir Next", "Trebuchet MS", "Gill Sans", sans-serif;
   background:
@@ -386,6 +414,12 @@ body {
   color: color-mix(in srgb, var(--text), var(--brand-strong) 24%);
 }
 
+.top-profile-btn.active {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 50%);
+  background: color-mix(in srgb, var(--brand), var(--surface) 92%);
+  color: color-mix(in srgb, var(--text), var(--brand-strong) 24%);
+}
+
 .top-profile-btn .icon {
   width: 16px;
   height: 16px;
@@ -428,9 +462,153 @@ body {
   flex-wrap: wrap;
 }
 
-.header-project-scope select {
+.header-project-trigger {
   min-width: 220px;
   flex: 1;
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 16%);
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--text);
+  text-align: left;
+}
+
+.header-project-trigger[data-state="open"] {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 35%);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand), transparent 82%);
+}
+
+.header-project-trigger-icon {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
+}
+
+.header-project-content {
+  z-index: 1415;
+  min-width: var(--radix-select-trigger-width);
+  max-width: min(360px, 92vw);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 12%);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.header-project-viewport {
+  max-height: 280px;
+  overflow: auto;
+  padding: 6px;
+}
+
+.header-project-item {
+  position: relative;
+  border-radius: 10px;
+  padding: 8px 30px 8px 10px;
+  cursor: pointer;
+  outline: none;
+  font-size: 13px;
+}
+
+.header-project-item[data-highlighted] {
+  background: color-mix(in srgb, var(--brand), var(--surface) 88%);
+}
+
+.header-project-item[data-state="checked"] {
+  background: color-mix(in srgb, var(--brand), var(--surface) 86%);
+}
+
+.header-project-item-indicator {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 14px;
+  height: 14px;
+  color: var(--brand-strong);
+}
+
+.header-tooltip-content {
+  z-index: 1510;
+  max-width: min(280px, 86vw);
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 20%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 12%);
+  color: var(--text);
+  padding: 7px 9px;
+  font-size: 12px;
+  line-height: 1.25;
+  box-shadow: var(--shadow-lg);
+}
+
+.header-tooltip-arrow {
+  fill: color-mix(in srgb, var(--surface), var(--surface-alt) 12%);
+}
+
+.header-notifications-popover {
+  z-index: 1510;
+  width: min(560px, calc(100vw - 24px));
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 18%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 10%);
+  box-shadow: var(--shadow-lg);
+  padding: 10px;
+}
+
+.header-notifications-popover-arrow {
+  fill: color-mix(in srgb, var(--surface), var(--surface-alt) 10%);
+}
+
+.header-notifications-header {
+  justify-content: space-between;
+}
+
+.header-notifications-actions {
+  margin-left: auto;
+}
+
+.header-notifications-list {
+  margin-top: 10px;
+  max-height: min(56vh, 360px);
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.header-settings-menu-content {
+  z-index: 1510;
+  min-width: 220px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 18%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 10%);
+  box-shadow: var(--shadow-lg);
+  padding: 6px;
+}
+
+.header-settings-menu-item {
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.2;
+  cursor: pointer;
+  outline: none;
+}
+
+.header-settings-menu-item[data-highlighted] {
+  background: color-mix(in srgb, var(--brand), var(--surface) 86%);
+}
+
+.header-settings-menu-separator {
+  height: 1px;
+  margin: 5px 2px;
+  background: color-mix(in srgb, var(--line), var(--surface) 20%);
 }
 
 .seg {
@@ -640,7 +818,7 @@ body.md-fullscreen-open {
   .top-search {
     min-width: 0;
   }
-  .header-project-scope select {
+  .header-project-trigger {
     min-width: 0;
     width: 100%;
   }

@@ -1133,6 +1133,41 @@ def test_notifications_endpoint_tolerates_duplicate_messages(tmp_path):
     assert res.status_code == 200
 
 
+def test_mark_all_notifications_read(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    due_utc = datetime.now(timezone.utc) + timedelta(minutes=25)
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Mark all notifications test',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'due_date': due_utc.isoformat(),
+        },
+    )
+    assert created.status_code == 200
+
+    first = client.get('/api/notifications')
+    assert first.status_code == 200
+    unread_before = [item for item in first.json() if not item.get('is_read')]
+    assert unread_before
+
+    mark_all = client.post('/api/notifications/read-all')
+    assert mark_all.status_code == 200
+    payload = mark_all.json()
+    assert payload['ok'] is True
+    assert int(payload.get('updated', 0)) >= len(unread_before)
+
+    second = client.get('/api/notifications')
+    assert second.status_code == 200
+    unread_after = [item for item in second.json() if not item.get('is_read')]
+    assert unread_after == []
+
+
 def test_command_id_idempotency_for_create_task(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
