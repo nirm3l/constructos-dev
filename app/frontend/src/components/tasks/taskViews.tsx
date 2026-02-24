@@ -1,4 +1,5 @@
 import React from 'react'
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Tabs from '@radix-ui/react-tabs'
 import { createPortal } from 'react-dom'
 import type { Task } from '../../types'
@@ -102,6 +103,23 @@ export function TaskListItem({
   const scheduleTrigger = formatScheduleTrigger(task.scheduled_at_utc)
   const scheduleRepeat = formatRecurringRuleCompact(task.recurring_rule)
   const scheduleState = formatScheduleState(task.schedule_state)
+  const primaryAction = task.archived
+    ? {
+        label: 'Restore task',
+        iconPath: 'M20 16v5H4v-5M12 3v12M7 8l5-5 5 5',
+        onSelect: () => onRestore(task.id),
+      }
+    : task.status === 'Done'
+      ? {
+          label: 'Reopen task',
+          iconPath: 'M3 12a9 9 0 1 0 3-6.7M3 4v5h5',
+          onSelect: () => onReopen(task.id),
+        }
+      : {
+          label: 'Complete task',
+          iconPath: 'm5 13 4 4L19 7',
+          onSelect: () => onComplete(task.id),
+        }
 
   return (
     <div key={task.id} className={`task-item ${isScheduled ? 'scheduled' : ''}`}>
@@ -179,19 +197,31 @@ export function TaskListItem({
           </span>
         </div>
       </div>
-      {task.archived ? (
-        <button className="action-icon" onClick={() => onRestore(task.id)} title="Restore" aria-label="Restore">
-          <Icon path="M20 16v5H4v-5M12 3v12M7 8l5-5 5 5" />
-        </button>
-      ) : task.status === 'Done' ? (
-        <button className="action-icon" onClick={() => onReopen(task.id)} title="Reopen" aria-label="Reopen">
-          <Icon path="M3 12a9 9 0 1 0 3-6.7M3 4v5h5" />
-        </button>
-      ) : (
-        <button className="action-icon" onClick={() => onComplete(task.id)} title="Complete" aria-label="Complete">
-          <Icon path="m5 13 4 4L19 7" />
-        </button>
-      )}
+      <DropdownMenu.Root>
+        <DropdownMenu.Trigger asChild>
+          <button
+            className="action-icon task-item-actions-trigger"
+            type="button"
+            title="Task actions"
+            aria-label="Task actions"
+          >
+            <Icon path="M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0" />
+          </button>
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Portal>
+          <DropdownMenu.Content className="task-group-menu-content task-item-actions-menu-content" sideOffset={8} align="end">
+            <DropdownMenu.Item className="task-group-menu-item" onSelect={() => onOpen(task.id)}>
+              <Icon path="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6zm9 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
+              <span>Open task</span>
+            </DropdownMenu.Item>
+            <DropdownMenu.Separator className="task-group-menu-separator" />
+            <DropdownMenu.Item className="task-group-menu-item" onSelect={primaryAction.onSelect}>
+              <Icon path={primaryAction.iconPath} />
+              <span>{primaryAction.label}</span>
+            </DropdownMenu.Item>
+          </DropdownMenu.Content>
+        </DropdownMenu.Portal>
+      </DropdownMenu.Root>
     </div>
   )
 }

@@ -54,10 +54,12 @@ export function AppPrimaryPanels({ state }: { state: any }) {
         }}
       />
 
-      {state.tab === 'tasks' && (
+      {(state.tab === 'tasks' || state.tab === 'today') && (
         <TasksPanel
-          projectsMode={state.projectsMode}
-          setProjectsMode={state.setProjectsMode}
+          panelTitle={state.tab === 'today' ? 'Today' : 'Tasks'}
+          allowBoardView={state.tab !== 'today'}
+          projectsMode={state.tab === 'today' ? 'list' : state.projectsMode}
+          setProjectsMode={state.tab === 'today' ? (() => undefined) : state.setProjectsMode}
           taskGroups={state.taskGroups.data?.items ?? []}
           taskGroupFilterId={state.taskGroupFilterId}
           setTaskGroupFilterId={state.setTaskGroupFilterId}
@@ -70,7 +72,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           toggleSearchTag={state.toggleSearchTag}
           clearSearchTags={state.clearSearchTags}
           getTagUsage={state.getTagUsage}
-          boardData={state.board.data}
+          boardData={state.tab === 'today' ? undefined : state.board.data}
           onOpenTaskEditor={state.openTaskEditor}
           onOpenSpecification={state.openSpecification}
           specificationNames={state.specificationNameMap}
