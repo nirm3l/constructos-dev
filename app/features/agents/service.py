@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import inspect
 import json
 import uuid
 from datetime import datetime
@@ -91,6 +92,40 @@ from shared.settings import (
     MCP_ALLOWED_WORKSPACE_IDS,
     MCP_AUTH_TOKEN,
 )
+
+_READ_ONLY_MCP_METHODS = frozenset(
+    {
+        "list_tasks",
+        "list_notes",
+        "list_task_groups",
+        "list_note_groups",
+        "list_project_rules",
+        "list_project_skills",
+        "list_workspace_skills",
+        "list_specifications",
+        "list_spec_tasks",
+        "list_spec_notes",
+        "get_note",
+        "get_task",
+        "get_project_rule",
+        "get_project_skill",
+        "get_workspace_skill",
+        "get_specification",
+        "get_task_automation_status",
+        "get_my_preferences",
+        "get_project_chat_context",
+        "graph_get_project_overview",
+        "graph_get_neighbors",
+        "graph_find_related_resources",
+        "graph_get_dependency_path",
+        "graph_context_pack",
+        "search_project_knowledge",
+        "list_project_templates",
+        "get_project_template",
+        "preview_project_from_template",
+    }
+)
+_LICENSE_WRITE_BLOCKED_MESSAGE = "License expired. Write access is disabled until subscription is reactivated."
 
 
 def _graph_summary_to_markdown(summary: dict[str, object] | None) -> str:
@@ -223,13 +258,39 @@ class AgentTaskService:
             else str(default_workspace_id or "").strip()
         )
 
+    def _calling_method_name(self) -> str:
+        frame = inspect.currentframe()
+        if frame is None:
+            return ""
+        caller = frame.f_back
+        if caller is None:
+            return ""
+        service_method_frame = caller.f_back
+        if service_method_frame is None:
+            return ""
+        return str(service_method_frame.f_code.co_name or "")
+
+    def _is_write_operation_call(self, method_name: str) -> bool:
+        if not method_name or method_name.startswith("_"):
+            return False
+        return method_name not in _READ_ONLY_MCP_METHODS
+
+    def _enforce_license_write_access(self) -> None:
+        from features.licensing.read_models import license_status_read_model
+
+        with SessionLocal() as db:
+            payload = license_status_read_model(db)
+        if bool(payload.get("write_access")):
+            return
+        raise HTTPException(status_code=402, detail=_LICENSE_WRITE_BLOCKED_MESSAGE)
+
     def _require_token(self, auth_token: str | None):
-        if not self._require_mcp_token:
-            return
-        if not MCP_AUTH_TOKEN:
-            return
-        if not auth_token or not hmac.compare_digest(auth_token, MCP_AUTH_TOKEN):
-            raise HTTPException(status_code=401, detail="Invalid MCP token")
+        if self._require_mcp_token and MCP_AUTH_TOKEN:
+            if not auth_token or not hmac.compare_digest(auth_token, MCP_AUTH_TOKEN):
+                raise HTTPException(status_code=401, detail="Invalid MCP token")
+
+        if self._is_write_operation_call(self._calling_method_name()):
+            self._enforce_license_write_access()
 
     def _assert_workspace_allowed(self, workspace_id: str):
         if self._allowed_workspace_ids and workspace_id not in self._allowed_workspace_ids:

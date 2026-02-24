@@ -579,6 +579,9 @@ export const getNotifications = (userId: string) => api<Notification[]>('/api/no
 export const markNotificationRead = (userId: string, id: string) =>
   api<{ ok: true }>(`/api/notifications/${id}/read`, userId, { method: 'POST' })
 
+export const markAllNotificationsRead = (userId: string) =>
+  api<{ ok: true; updated: number }>('/api/notifications/read-all', userId, { method: 'POST' })
+
 export const createProject = (
   userId: string,
   payload: {

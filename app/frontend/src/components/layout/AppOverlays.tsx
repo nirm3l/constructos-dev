@@ -93,6 +93,7 @@ export function AppOverlays({ state }: { state: any }) {
           setUiError: state.setUiError,
           setTaskEditorError: state.setTaskEditorError,
           editTaskAttachmentRefsText: state.editTaskAttachmentRefsText,
+          setEditTaskAttachmentRefsText: state.setEditTaskAttachmentRefsText,
           workspaceId: state.workspaceId,
           userId: state.userId,
           removeAttachmentByPath: state.removeAttachmentByPath,

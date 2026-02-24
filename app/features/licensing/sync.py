@@ -34,6 +34,24 @@ class LicenseActivationError(RuntimeError):
         self.detail = str(detail or "Activation failed")
 
 
+class LicenseStartupError(RuntimeError):
+    def __init__(self, payload: dict[str, Any]):
+        status = str(payload.get("status") or "unlicensed")
+        super().__init__(
+            f"License startup check failed: status={status}; "
+            "write access is disabled until subscription is reactivated"
+        )
+        self.payload = payload
+
+
+def assert_license_startup_write_access() -> dict[str, Any]:
+    with SessionLocal() as db:
+        payload = license_status_read_model(db)
+    if bool(payload.get("write_access")):
+        return payload
+    raise LicenseStartupError(payload)
+
+
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 

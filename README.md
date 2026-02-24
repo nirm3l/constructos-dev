@@ -80,16 +80,51 @@ Deploy local control-plane separately:
 ```bash
 ./scripts/deploy-control-plane.sh up
 ```
+Optional control-plane email test setup (Resend):
+```bash
+export LCP_EMAIL_RESEND_API_KEY='re_xxx'
+export LCP_EMAIL_FROM='ConstructOS Onboarding <onboarding@constructos.dev>'
+export LCP_EMAIL_REPLY_TO='support@constructos.dev'
+export LCP_CUSTOMER_REF_SECRET='replace-with-long-random-secret'
+export LCP_ONBOARDING_IMAGE_TAG='main'
+export LCP_ONBOARDING_INSTALL_SCRIPT_URL='https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh'
+export LCP_ONBOARDING_SUPPORT_EMAIL='support@constructos.dev'
+./scripts/deploy-control-plane.sh restart
+```
+Then open control-plane UI and use:
+- **Onboarding Package** for one-step email -> customer_ref/token/activation generation + branded onboarding mail
+- **Email Delivery Test** for generic smoke tests
+
 Client deployment assets are maintained in a separate repository:
 `https://github.com/nirm3l/constructos`
 
 Client one-liner installer:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh | IMAGE_TAG=v0.1.230 bash
+curl -fsSL https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh | ACTIVATION_CODE=ACT-XXXX-XXXX-XXXX-XXXX-XXXX IMAGE_TAG=main AUTO_DEPLOY=1 bash
 ```
 For signed entitlement enforcement, configure:
 - `LCP_SIGNING_PRIVATE_KEY_PEM` on control-plane
 - matching `LICENSE_PUBLIC_KEY` on app services
+
+Optional encrypted runtime bundle (PoC only, not strong IP protection):
+```bash
+export APP_BUNDLE_PASSWORD='bundle-secret-segment'
+
+docker build \
+  -f app/Dockerfile \
+  --build-arg APP_BUNDLE_ENCRYPT=true \
+  --build-arg APP_BUNDLE_PASSWORD="${APP_BUNDLE_PASSWORD}" \
+  -t ghcr.io/nirm3l/constructos-task-app:encrypted-poc \
+  ./app
+```
+Runtime env for decrypt-on-start:
+- `APP_ENCRYPTED_BUNDLE_ENABLED=true`
+- `APP_BUNDLE_TOKEN_SEGMENT_INDEX=2` (0-based token segment; for `a.b.c`, this uses `c`)
+- `LICENSE_SERVER_TOKEN=<token-containing-bundle-secret-segment>`
+- Control-plane token generator can embed the same secret segment when `LCP_CLIENT_TOKEN_BUNDLE_PASSWORD` is set.
+  `docker-compose.license-control-plane.yml` maps this from `APP_BUNDLE_PASSWORD` by default, so one `.env` value can drive both build-time encryption and issued token format.
+
+The image can still be reverse-engineered by a host operator. Treat this as obfuscation, not a security boundary.
 
 2. Check health:
 ```bash
