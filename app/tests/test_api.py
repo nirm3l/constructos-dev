@@ -1345,6 +1345,64 @@ def test_agent_service_rejects_invalid_mcp_token(tmp_path, monkeypatch):
         assert exc.status_code == 401
 
 
+def test_agent_service_blocks_write_when_license_is_expired(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+    from shared.models import LicenseInstallation, SessionLocal
+
+    with SessionLocal() as db:
+        installation = db.execute(select(LicenseInstallation).order_by(LicenseInstallation.id.asc())).scalars().first()
+        assert installation is not None
+        installation.status = "trial"
+        installation.trial_ends_at = datetime.now(timezone.utc) - timedelta(days=10)
+        db.commit()
+
+    service = AgentTaskService()
+    try:
+        service.create_task(
+            title='Should be blocked by license',
+            workspace_id=ws_id,
+            project_id=project_id,
+            auth_token=svc_module.MCP_AUTH_TOKEN or None,
+        )
+        assert False, "Expected HTTPException"
+    except HTTPException as exc:
+        assert exc.status_code == 402
+        assert "License expired" in str(exc.detail)
+
+
+def test_agent_service_allows_read_when_license_is_expired(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+    from shared.models import LicenseInstallation, SessionLocal
+
+    with SessionLocal() as db:
+        installation = db.execute(select(LicenseInstallation).order_by(LicenseInstallation.id.asc())).scalars().first()
+        assert installation is not None
+        installation.status = "trial"
+        installation.trial_ends_at = datetime.now(timezone.utc) - timedelta(days=10)
+        db.commit()
+
+    service = AgentTaskService()
+    payload = service.list_tasks(
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert isinstance(payload, dict)
+    assert "items" in payload
+
+
 def test_agent_service_enforces_workspace_allowlist(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()

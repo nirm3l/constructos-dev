@@ -12,15 +12,25 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     HOME=/home/app \
-    PATH="/home/app/.local/bin:${PATH}"
+    PATH="/home/app/.local/bin:${PATH}" \
+    APP_ENCRYPTED_BUNDLE_ENABLED=false \
+    APP_ENCRYPTED_BUNDLE_PATH=/opt/constructos/app.tar.gz.enc \
+    APP_BUNDLE_KDF_ITERATIONS=200000 \
+    APP_BUNDLE_TOKEN_SEGMENT_INDEX=2 \
+    APP_BUNDLE_TOKEN_DELIMITER=. \
+    APP_RUNTIME_APP_DIR=/app \
+    APP_DECRYPTED_APP_DIR=/tmp/constructos-app
 
 ARG APP_UID=10001
 ARG APP_GID=10001
+ARG APP_BUNDLE_ENCRYPT=false
+ARG APP_BUNDLE_PASSWORD=""
+ARG APP_BUNDLE_KDF_ITERATIONS=200000
 
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends nodejs npm dumb-init ca-certificates \
+    && apt-get install -y --no-install-recommends nodejs npm dumb-init ca-certificates openssl bash \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt
@@ -29,14 +39,35 @@ RUN npm install -g @openai/codex && npm cache clean --force
 
 COPY . /app
 COPY --from=frontend-builder /frontend/dist /app/static
+COPY scripts/runtime_entrypoint.sh /usr/local/bin/constructos-entrypoint.sh
 
-RUN groupadd --gid "${APP_GID}" app \
+RUN chmod 0755 /usr/local/bin/constructos-entrypoint.sh \
+    && if [ "${APP_BUNDLE_ENCRYPT}" = "true" ]; then \
+        if [ -z "${APP_BUNDLE_PASSWORD}" ]; then \
+          echo "APP_BUNDLE_PASSWORD is required when APP_BUNDLE_ENCRYPT=true" >&2; \
+          exit 1; \
+        fi; \
+        mkdir -p /opt/constructos; \
+        tar -czf /tmp/constructos-app.tar.gz -C /app .; \
+        openssl enc \
+          -aes-256-cbc \
+          -pbkdf2 \
+          -iter "${APP_BUNDLE_KDF_ITERATIONS}" \
+          -in /tmp/constructos-app.tar.gz \
+          -out /opt/constructos/app.tar.gz.enc \
+          -pass "pass:${APP_BUNDLE_PASSWORD}"; \
+        rm -f /tmp/constructos-app.tar.gz; \
+        find /app -mindepth 1 -delete; \
+        touch /app/.encrypted_bundle_placeholder; \
+      fi \
+    && mkdir -p /opt/constructos \
+    && groupadd --gid "${APP_GID}" app \
     && useradd --uid "${APP_UID}" --gid app --create-home --home-dir /home/app app \
     && mkdir -p /data/uploads /home/app/.codex \
-    && chown -R app:app /app /data/uploads /home/app
+    && chown -R app:app /app /data/uploads /home/app /opt/constructos
 
 USER app
 
 EXPOSE 8000
-ENTRYPOINT ["dumb-init", "--"]
+ENTRYPOINT ["dumb-init", "--", "/usr/local/bin/constructos-entrypoint.sh"]
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

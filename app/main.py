@@ -10,7 +10,11 @@ from fastapi.staticfiles import StaticFiles
 from features.bootstrap.api import router as bootstrap_router
 from features.debug.api import router as debug_router
 from features.licensing.api import router as licensing_router
-from features.licensing.sync import start_license_sync_worker, stop_license_sync_worker
+from features.licensing.sync import (
+    assert_license_startup_write_access,
+    start_license_sync_worker,
+    stop_license_sync_worker,
+)
 from features.notifications.api import router as notifications_router
 from features.project_templates.api import router as project_templates_router
 from features.project_skills.api import router as project_skills_router
@@ -49,6 +53,7 @@ register_realtime_session_hooks(SessionLocal)
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     startup_bootstrap()
+    assert_license_startup_write_access()
     ensure_persistent_subscriptions()
     start_projection_worker()
     start_graph_projection_worker()

@@ -5,6 +5,7 @@ import json
 import base64
 from importlib import reload
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -313,3 +314,81 @@ def test_sync_license_once_rejects_invalid_signed_token(tmp_path: Path, monkeypa
         ).scalars().first()
         assert validation is not None
         assert validation.result == "error"
+
+
+def test_assert_license_startup_write_access_allows_trial(tmp_path: Path, monkeypatch):
+    db_file = tmp_path / "startup-trial.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_file}")
+    monkeypatch.setenv("ATTACHMENTS_DIR", str(tmp_path / "uploads"))
+    monkeypatch.delenv("DB_PATH", raising=False)
+    monkeypatch.setenv("EVENTSTORE_URI", "")
+    monkeypatch.setenv("LICENSE_ENFORCEMENT_ENABLED", "true")
+    monkeypatch.setenv("LICENSE_INSTALLATION_ID", "startup-trial-installation")
+    monkeypatch.setenv("LICENSE_TRIAL_DAYS", "7")
+    monkeypatch.delenv("LICENSE_PUBLIC_KEY", raising=False)
+
+    import shared.models as shared_models
+    import shared.licensing as shared_licensing
+    import shared.settings as shared_settings
+
+    reload(shared_settings)
+    reload(shared_models)
+    reload(shared_licensing)
+    shared_licensing.reset_license_installation_id_cache()
+
+    import main
+
+    main = reload(main)
+    main.bootstrap_data()
+
+    from features.licensing import sync
+
+    sync = reload(sync)
+    payload = sync.assert_license_startup_write_access()
+    assert payload["status"] in {"trial", "active", "grace"}
+    assert payload["write_access"] is True
+
+
+def test_assert_license_startup_write_access_raises_when_expired(tmp_path: Path, monkeypatch):
+    db_file = tmp_path / "startup-expired.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_file}")
+    monkeypatch.setenv("ATTACHMENTS_DIR", str(tmp_path / "uploads"))
+    monkeypatch.delenv("DB_PATH", raising=False)
+    monkeypatch.setenv("EVENTSTORE_URI", "")
+    monkeypatch.setenv("LICENSE_ENFORCEMENT_ENABLED", "true")
+    monkeypatch.setenv("LICENSE_INSTALLATION_ID", "startup-expired-installation")
+    monkeypatch.setenv("LICENSE_TRIAL_DAYS", "7")
+    monkeypatch.delenv("LICENSE_PUBLIC_KEY", raising=False)
+
+    import shared.models as shared_models
+    import shared.licensing as shared_licensing
+    import shared.settings as shared_settings
+
+    reload(shared_settings)
+    reload(shared_models)
+    reload(shared_licensing)
+    shared_licensing.reset_license_installation_id_cache()
+
+    import main
+
+    main = reload(main)
+    main.bootstrap_data()
+
+    from shared.models import LicenseInstallation, SessionLocal
+
+    with SessionLocal() as db:
+        installation = db.execute(
+            select(LicenseInstallation).where(LicenseInstallation.installation_id == "startup-expired-installation")
+        ).scalar_one()
+        installation.status = "trial"
+        installation.trial_ends_at = datetime.now(timezone.utc) - timedelta(days=10)
+        db.commit()
+
+    from features.licensing import sync
+
+    sync = reload(sync)
+    try:
+        sync.assert_license_startup_write_access()
+        assert False, "Expected LicenseStartupError"
+    except sync.LicenseStartupError as exc:
+        assert "status=expired" in str(exc)

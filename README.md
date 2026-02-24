@@ -91,6 +91,22 @@ For signed entitlement enforcement, configure:
 - `LCP_SIGNING_PRIVATE_KEY_PEM` on control-plane
 - matching `LICENSE_PUBLIC_KEY` on app services
 
+Optional encrypted runtime bundle (PoC only, not strong IP protection):
+```bash
+docker build \
+  -f app/Dockerfile \
+  --build-arg APP_BUNDLE_ENCRYPT=true \
+  --build-arg APP_BUNDLE_PASSWORD='bundle-secret-segment' \
+  -t ghcr.io/nirm3l/constructos-task-app:encrypted-poc \
+  ./app
+```
+Runtime env for decrypt-on-start:
+- `APP_ENCRYPTED_BUNDLE_ENABLED=true`
+- `APP_BUNDLE_TOKEN_SEGMENT_INDEX=2` (0-based token segment; for `a.b.c`, this uses `c`)
+- `LICENSE_SERVER_TOKEN=<token-containing-bundle-secret-segment>`
+
+The image can still be reverse-engineered by a host operator. Treat this as obfuscation, not a security boundary.
+
 2. Check health:
 ```bash
 curl -sS http://localhost:8080/api/health
