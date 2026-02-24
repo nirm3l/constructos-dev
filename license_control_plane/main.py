@@ -575,7 +575,7 @@ def _build_onboarding_email_template(
     support_email: str,
     max_installations: int = LCP_DEFAULT_MAX_INSTALLATIONS,
 ) -> tuple[str, str, str]:
-    subject = f"ConstructOS onboarding package ({customer_ref})"
+    subject = "ConstructOS onboarding package"
     install_command = (
         f"curl -fsSL {install_script_url} | "
         f"ACTIVATION_CODE={activation_code} IMAGE_TAG={image_tag} AUTO_DEPLOY=1 bash"
@@ -604,8 +604,8 @@ def _build_onboarding_email_template(
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{html.escape(subject)}</title>
   </head>
-  <body style="margin:0;padding:0;background:#050b07;color:#dfffe9;font-family:'Avenir Next','Trebuchet MS','Gill Sans',Segoe UI,Arial,sans-serif;">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#050b07;padding:28px 0;">
+  <body style="margin:0;padding:0;background:#0f1f18;color:#dfffe9;font-family:'Avenir Next','Trebuchet MS','Gill Sans',Segoe UI,Arial,sans-serif;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:linear-gradient(180deg,#132920 0%,#0f1f18 45%,#11261d 100%);padding:28px 0;">
       <tr>
         <td align="center">
           <table role="presentation" width="640" cellspacing="0" cellpadding="0" style="width:640px;max-width:92%;background:linear-gradient(180deg,rgba(14,29,21,0.93),rgba(9,19,14,0.96));background-color:#0a140f;border:1px solid rgba(97,224,142,0.28);border-radius:20px;overflow:hidden;box-shadow:0 20px 40px rgba(0,0,0,0.45);">
