@@ -36,20 +36,29 @@ export function useSpecificationMutations(c: any) {
   })
 
   const createSpecificationMutation = useMutation({
-    mutationFn: () =>
+    mutationFn: (payload?: {
+      title?: string
+      body?: string
+      status?: 'Draft' | 'Ready' | 'In progress' | 'Implemented' | 'Archived'
+      force_new?: boolean
+    }) =>
       createSpecification(c.userId, {
         workspace_id: c.workspaceId,
         project_id: c.selectedProjectId,
-        title: 'Untitled spec',
-        body: '',
-        status: 'Draft',
+        title: payload?.title?.trim() || 'Untitled spec',
+        body: payload?.body ?? '',
+        status: payload?.status ?? 'Draft',
         tags: [],
+        force_new: payload?.force_new ?? true,
       }),
     onSuccess: async (specification) => {
       c.setUiError(null)
       c.setTab('specifications')
-      c.setSelectedSpecificationId(specification.id)
+      c.clearSpecificationFilterTags()
+      c.setSpecificationStatus('')
+      c.setSpecificationArchived(false)
       await c.invalidateAll()
+      c.setSelectedSpecificationId(specification.id)
     },
     onError: (err) => c.setUiError(toErrorMessage(err, 'Specification create failed')),
   })
