@@ -4484,6 +4484,356 @@ button:disabled {
   color: var(--brand-strong);
 }
 
+.taskdrawer-select-trigger {
+  width: 100%;
+  min-width: 0;
+}
+
+.taskdrawer-select-content {
+  z-index: 1520;
+}
+
+.taskdrawer-meta-panel {
+  margin-top: 8px;
+  margin-bottom: 10px;
+  display: grid;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--surface) 24%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 14%);
+}
+
+.taskdrawer-meta-item {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.taskdrawer-meta-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.taskdrawer-meta-code {
+  display: inline-block;
+  width: fit-content;
+  max-width: 100%;
+  padding: 2px 7px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--surface) 18%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 22%);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.taskdrawer-meta-value {
+  font-size: 12px;
+  color: color-mix(in srgb, var(--text), var(--muted) 24%);
+  line-height: 1.35;
+}
+
+.taskdrawer-recurring-unit-trigger {
+  width: min(170px, 100%);
+  min-height: 36px;
+  font-size: 12px;
+  padding: 5px 9px;
+}
+
+.taskdrawer-type-toggle-group {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.taskdrawer-type-toggle-item {
+  min-height: 38px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--surface) 28%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 16%);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.taskdrawer-type-toggle-item[data-state="on"] {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 20%);
+  background: color-mix(in srgb, var(--brand), var(--surface) 88%);
+}
+
+.taskdrawer-type-toggle-item:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--brand), transparent 70%);
+  outline-offset: 1px;
+}
+
+.taskdrawer-due-popover {
+  width: min(260px, calc(100vw - 24px));
+}
+
+.taskdrawer-sections {
+  margin-bottom: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.taskdrawer-section-item {
+  border: 1px solid color-mix(in srgb, var(--line), var(--surface) 20%);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 12%);
+  overflow: hidden;
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--surface-alt), transparent 78%);
+}
+
+.taskdrawer-section-headrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-right: 8px;
+}
+
+.taskdrawer-section-header {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.taskdrawer-section-trigger {
+  width: 100%;
+  min-height: 46px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.taskdrawer-section-trigger[data-state="open"] {
+  background: color-mix(in srgb, var(--surface), var(--brand) 9%);
+}
+
+.taskdrawer-section-trigger:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--brand), transparent 72%);
+  outline-offset: -2px;
+}
+
+.taskdrawer-section-icon {
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--brand), var(--line) 46%);
+  background: color-mix(in srgb, var(--brand), var(--surface) 85%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: color-mix(in srgb, var(--brand-strong), var(--text) 24%);
+}
+
+.taskdrawer-section-trigger[data-state="open"] .taskdrawer-section-icon {
+  background: color-mix(in srgb, var(--brand), var(--surface) 76%);
+  border-color: color-mix(in srgb, var(--brand), var(--line) 28%);
+  color: color-mix(in srgb, var(--brand-strong), var(--text) 14%);
+}
+
+.taskdrawer-section-head {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.taskdrawer-section-title {
+  font-size: 13px;
+  font-weight: 700;
+  text-align: left;
+  letter-spacing: 0.01em;
+}
+
+.taskdrawer-section-meta {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+.taskdrawer-section-badge {
+  min-width: 22px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--surface) 20%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 25%);
+  color: var(--muted);
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.taskdrawer-section-chevron {
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
+  transition: transform 180ms ease, color 140ms ease;
+}
+
+.taskdrawer-section-quick-action {
+  flex: 0 0 auto;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-color: color-mix(in srgb, var(--brand), var(--line) 45%);
+  background: color-mix(in srgb, var(--brand), var(--surface) 88%);
+}
+
+.taskdrawer-section-quick-action svg {
+  width: 14px;
+  height: 14px;
+}
+
+.taskdrawer-section-trigger[data-state="open"] .taskdrawer-section-chevron {
+  transform: rotate(180deg);
+  color: color-mix(in srgb, var(--brand), var(--text) 28%);
+}
+
+.taskdrawer-section-content {
+  padding: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--line), var(--surface) 28%);
+  display: grid;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.taskdrawer-section-content[data-state="open"] {
+  animation: taskdrawerAccordionSlideDown 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.taskdrawer-section-content[data-state="closed"] {
+  animation: taskdrawerAccordionSlideUp 140ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes taskdrawerAccordionSlideDown {
+  from {
+    opacity: 0.35;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes taskdrawerAccordionSlideUp {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0.35;
+    transform: translateY(-3px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .taskdrawer-section-content[data-state="open"],
+  .taskdrawer-section-content[data-state="closed"] {
+    animation: none;
+  }
+}
+
+.taskdrawer-tag-popover {
+  width: min(440px, calc(100vw - 24px));
+}
+
+.taskdrawer-actions-menu-content {
+  z-index: 1520;
+  min-width: 220px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 18%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 10%);
+  box-shadow: var(--shadow-lg);
+  padding: 6px;
+}
+
+.taskdrawer-actions-menu-item {
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.2;
+  cursor: pointer;
+  outline: none;
+}
+
+.taskdrawer-actions-menu-item[data-highlighted] {
+  background: color-mix(in srgb, var(--brand), var(--surface) 86%);
+}
+
+.taskdrawer-insights-tabs {
+  margin-top: 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.taskdrawer-insights-tabs-list {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.taskdrawer-insights-tab-trigger {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--surface) 30%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 16%);
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.taskdrawer-insights-tab-trigger[data-state="active"] {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 25%);
+  background: color-mix(in srgb, var(--brand), var(--surface) 88%);
+}
+
+.taskdrawer-insights-tab-meta {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--surface) 25%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 24%);
+}
+
+.taskdrawer-insights-content {
+  display: grid;
+  gap: 10px;
+}
+
 .quickadd-due {
   position: relative;
   min-width: 0;
