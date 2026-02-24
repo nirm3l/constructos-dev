@@ -28,6 +28,9 @@ def _build_client(
     *,
     private_key_pem: str = "",
     public_beta_free_until: str = "",
+    client_token_bundle_password: str = "",
+    client_token_delimiter: str = ".",
+    client_token_bundle_segment_index: int = 2,
 ) -> TestClient:
     db_file = tmp_path / "control-plane.db"
     os.environ["LCP_DATABASE_URL"] = f"sqlite:///{db_file}"
@@ -38,6 +41,10 @@ def _build_client(
     os.environ["LCP_SIGNING_KEY_ID"] = "test-key"
     os.environ["LCP_REQUIRE_SIGNED_TOKENS"] = "false"
     os.environ["LCP_PUBLIC_BETA_FREE_UNTIL"] = public_beta_free_until
+    os.environ["APP_BUNDLE_PASSWORD"] = ""
+    os.environ["LCP_CLIENT_TOKEN_BUNDLE_PASSWORD"] = client_token_bundle_password
+    os.environ["LCP_CLIENT_TOKEN_DELIMITER"] = client_token_delimiter
+    os.environ["LCP_CLIENT_TOKEN_BUNDLE_SEGMENT_INDEX"] = str(client_token_bundle_segment_index)
 
     import license_control_plane.main as lcp_main
 
@@ -315,6 +322,27 @@ def test_client_token_allows_installation_endpoints_and_blocks_admin_endpoints(t
             },
         )
         assert wrong_activate.status_code == 403
+
+
+def test_client_token_embeds_bundle_password_segment_when_configured(tmp_path: Path):
+    with _build_client(tmp_path, client_token_bundle_password="bundle-pass-segment") as client:
+        create_client_token = client.post(
+            "/v1/admin/client-tokens",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-client-token",
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert create_client_token.status_code == 200
+        payload = create_client_token.json()
+        assert payload["ok"] is True
+        client_token = payload["client_token"]
+        assert isinstance(client_token, str)
+        segments = client_token.split(".")
+        assert len(segments) >= 3
+        assert segments[0].startswith("lcp_")
+        assert segments[2] == "bundle-pass-segment"
 
 
 def test_public_waitlist_join_creates_and_deduplicates_email(tmp_path: Path):

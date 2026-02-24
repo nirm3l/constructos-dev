@@ -81,6 +81,12 @@ LCP_SIGNING_PRIVATE_KEY_PEM = os.getenv("LCP_SIGNING_PRIVATE_KEY_PEM", "").strip
 LCP_SIGNING_KEY_ID = os.getenv("LCP_SIGNING_KEY_ID", "default-ed25519").strip() or "default-ed25519"
 LCP_REQUIRE_SIGNED_TOKENS = _env_bool("LCP_REQUIRE_SIGNED_TOKENS", False)
 LCP_DEFAULT_MAX_INSTALLATIONS = max(1, _env_int("LCP_DEFAULT_MAX_INSTALLATIONS", 3))
+LCP_CLIENT_TOKEN_BUNDLE_PASSWORD = os.getenv(
+    "LCP_CLIENT_TOKEN_BUNDLE_PASSWORD",
+    os.getenv("APP_BUNDLE_PASSWORD", ""),
+).strip()
+LCP_CLIENT_TOKEN_DELIMITER = os.getenv("LCP_CLIENT_TOKEN_DELIMITER", ".").strip() or "."
+LCP_CLIENT_TOKEN_BUNDLE_SEGMENT_INDEX = _env_int("LCP_CLIENT_TOKEN_BUNDLE_SEGMENT_INDEX", 2)
 LCP_PUBLIC_BETA_FREE_UNTIL = _env_datetime_utc("LCP_PUBLIC_BETA_FREE_UNTIL")
 LCP_ADMIN_SSE_POLL_SECONDS = max(0.5, _env_float("LCP_ADMIN_SSE_POLL_SECONDS", 1.0))
 LCP_ADMIN_SSE_HEARTBEAT_SECONDS = max(5.0, _env_float("LCP_ADMIN_SSE_HEARTBEAT_SECONDS", 15.0))
@@ -537,7 +543,20 @@ def _client_token_suffix(value: str | None) -> str:
 
 
 def _generate_client_token() -> str:
-    return f"lcp_{secrets.token_urlsafe(30)}"
+    if not LCP_CLIENT_TOKEN_BUNDLE_PASSWORD:
+        return f"lcp_{secrets.token_urlsafe(30)}"
+
+    segment_index = LCP_CLIENT_TOKEN_BUNDLE_SEGMENT_INDEX
+    if segment_index < 0:
+        raise RuntimeError("LCP_CLIENT_TOKEN_BUNDLE_SEGMENT_INDEX must be zero or greater")
+
+    # Keep the historical `lcp_` prefix while exposing a deterministic segment
+    # for runtime bundle decryption.
+    segments: list[str] = [f"lcp_{secrets.token_hex(16)}", secrets.token_hex(8), secrets.token_hex(8)]
+    if segment_index >= len(segments):
+        segments.extend(secrets.token_hex(8) for _ in range(segment_index - len(segments) + 1))
+    segments[segment_index] = LCP_CLIENT_TOKEN_BUNDLE_PASSWORD
+    return LCP_CLIENT_TOKEN_DELIMITER.join(segments)
 
 
 def _generate_activation_code() -> str:
@@ -819,6 +838,10 @@ def _startup() -> None:
     Base.metadata.create_all(bind=engine)
     if LCP_REQUIRE_SIGNED_TOKENS and not LCP_SIGNING_PRIVATE_KEY_PEM:
         raise RuntimeError("LCP_REQUIRE_SIGNED_TOKENS is enabled but LCP_SIGNING_PRIVATE_KEY_PEM is not configured")
+    if LCP_CLIENT_TOKEN_BUNDLE_SEGMENT_INDEX < 0:
+        raise RuntimeError("LCP_CLIENT_TOKEN_BUNDLE_SEGMENT_INDEX must be zero or greater")
+    if LCP_CLIENT_TOKEN_BUNDLE_PASSWORD and LCP_CLIENT_TOKEN_DELIMITER in LCP_CLIENT_TOKEN_BUNDLE_PASSWORD:
+        raise RuntimeError("LCP_CLIENT_TOKEN_BUNDLE_PASSWORD must not contain LCP_CLIENT_TOKEN_DELIMITER")
     if LCP_SIGNING_PRIVATE_KEY_PEM:
         # Fail fast on invalid keys during startup.
         try:
