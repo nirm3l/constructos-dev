@@ -2,8 +2,6 @@ import React from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ApiError,
-  createActivationCode,
-  createClientToken,
   getHealth,
   getInstallation,
   listBugReports,
@@ -11,9 +9,17 @@ import {
   listInstallations,
   listWaitlist,
   openAdminEvents,
+  provisionOnboardingPackage,
+  sendAdminEmail,
   updateInstallationSubscription
 } from './api'
-import type { ActivationCodeCreateRequest, ClientTokenCreateRequest, InstallationListItem, SubscriptionStatus, UpdateSubscriptionRequest } from './types'
+import type {
+  AdminProvisionOnboardingRequest,
+  AdminSendEmailRequest,
+  InstallationListItem,
+  SubscriptionStatus,
+  UpdateSubscriptionRequest,
+} from './types'
 
 const TOKEN_STORAGE_KEY = 'lcp_admin_token'
 const STATUS_OPTIONS: SubscriptionStatus[] = ['none', 'active', 'trialing', 'grace', 'past_due', 'canceled']
@@ -26,16 +32,20 @@ type FormState = {
   metadata_text: string
 }
 
-type ActivationCodeFormState = {
-  customer_ref: string
+type EmailFormState = {
+  to_email: string
+  subject: string
+  text_body: string
+}
+
+type OnboardingProvisionFormState = {
+  to_email: string
   plan_code: string
   valid_until: string
   max_installations: string
-  metadata_text: string
-}
-
-type ClientTokenFormState = {
-  customer_ref: string
+  image_tag: string
+  install_script_url: string
+  support_email: string
   metadata_text: string
 }
 
@@ -119,18 +129,24 @@ export function App() {
   const [selectedInstallationId, setSelectedInstallationId] = React.useState<string | null>(null)
   const [form, setForm] = React.useState<FormState | null>(null)
   const [feedback, setFeedback] = React.useState<string>('')
-  const [createdActivationCode, setCreatedActivationCode] = React.useState<string>('')
-  const [createdClientToken, setCreatedClientToken] = React.useState<string>('')
-  const [activationCodeForm, setActivationCodeForm] = React.useState<ActivationCodeFormState>({
-    customer_ref: '',
+  const [onboardingProvisionForm, setOnboardingProvisionForm] = React.useState<OnboardingProvisionFormState>({
+    to_email: '',
     plan_code: 'monthly',
     valid_until: datetimeLocalFromNow(30),
     max_installations: '3',
-    metadata_text: '{}',
+    image_tag: 'main',
+    install_script_url: 'https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh',
+    support_email: 'support@constructos.dev',
+    metadata_text: '{"source":"control-plane-ui"}',
   })
-  const [clientTokenForm, setClientTokenForm] = React.useState<ClientTokenFormState>({
-    customer_ref: '',
-    metadata_text: '{}',
+  const [provisionedCustomerRef, setProvisionedCustomerRef] = React.useState<string>('')
+  const [provisionedClientToken, setProvisionedClientToken] = React.useState<string>('')
+  const [provisionedActivationCode, setProvisionedActivationCode] = React.useState<string>('')
+  const [provisionedMessageId, setProvisionedMessageId] = React.useState<string>('')
+  const [emailForm, setEmailForm] = React.useState<EmailFormState>({
+    to_email: '',
+    subject: 'ConstructOS onboarding package',
+    text_body: 'Hello,\n\nThis is a test email sent from the ConstructOS license control-plane admin panel.\n',
   })
   const [liveFeedState, setLiveFeedState] = React.useState<'connecting' | 'online' | 'offline'>('offline')
   const [liveFeedLastEventAt, setLiveFeedLastEventAt] = React.useState<string | null>(null)
@@ -221,63 +237,79 @@ export function App() {
       setFeedback(message)
     },
   })
-  const createActivationCodeMutation = useMutation({
+  const provisionOnboardingMutation = useMutation({
     mutationFn: async () => {
       if (!token) {
-        throw new Error('Admin token is required to create activation codes')
+        throw new Error('Admin token is required to provision onboarding package')
       }
-      const customerRef = String(activationCodeForm.customer_ref || '').trim()
-      if (!customerRef) {
-        throw new Error('customer_ref is required')
+      const toEmail = String(onboardingProvisionForm.to_email || '').trim()
+      const maxInstallations = Number.parseInt(String(onboardingProvisionForm.max_installations || '').trim(), 10)
+      if (!toEmail) {
+        throw new Error('to_email is required')
       }
-      const maxInstallations = Number.parseInt(String(activationCodeForm.max_installations || '').trim(), 10)
       if (!Number.isFinite(maxInstallations) || maxInstallations < 1 || maxInstallations > 100) {
         throw new Error('max_installations must be between 1 and 100')
       }
-      const payload: ActivationCodeCreateRequest = {
-        customer_ref: customerRef,
-        plan_code: String(activationCodeForm.plan_code || '').trim() || null,
-        valid_until: activationCodeForm.valid_until ? new Date(activationCodeForm.valid_until).toISOString() : null,
+      const payload: AdminProvisionOnboardingRequest = {
+        to_email: toEmail,
+        plan_code: String(onboardingProvisionForm.plan_code || '').trim() || null,
+        valid_until: onboardingProvisionForm.valid_until
+          ? new Date(onboardingProvisionForm.valid_until).toISOString()
+          : null,
         max_installations: maxInstallations,
-        metadata: parseMetadata(activationCodeForm.metadata_text),
+        image_tag: String(onboardingProvisionForm.image_tag || '').trim() || 'main',
+        install_script_url: String(onboardingProvisionForm.install_script_url || '').trim(),
+        support_email: String(onboardingProvisionForm.support_email || '').trim() || 'support@constructos.dev',
+        metadata: parseMetadata(onboardingProvisionForm.metadata_text),
       }
-      return createActivationCode(token, payload)
+      return provisionOnboardingPackage(token, payload)
     },
     onSuccess: async (response) => {
-      setCreatedActivationCode(response.activation_code)
-      setFeedback('Activation code created successfully.')
+      setProvisionedCustomerRef(response.customer_ref)
+      setProvisionedClientToken(response.client_token)
+      setProvisionedActivationCode(response.activation_code)
+      setProvisionedMessageId(String(response.message_id || '').trim())
+      setFeedback(`Onboarding package generated and sent to ${response.to_email}.`)
       await queryClient.invalidateQueries({ queryKey: ['installations'] })
     },
     onError: (error: unknown) => {
-      const message = error instanceof Error ? error.message : 'Failed to create activation code'
+      const message = error instanceof Error ? error.message : 'Failed to provision onboarding package'
       setFeedback(message)
     },
   })
-  const createClientTokenMutation = useMutation({
+  const sendEmailMutation = useMutation({
     mutationFn: async () => {
       if (!token) {
-        throw new Error('Admin token is required to create client tokens')
+        throw new Error('Admin token is required to send emails')
       }
-      const customerRef = String(clientTokenForm.customer_ref || '').trim()
-      if (!customerRef) {
-        throw new Error('customer_ref is required')
+      const toEmail = String(emailForm.to_email || '').trim()
+      const subject = String(emailForm.subject || '').trim()
+      const textBody = String(emailForm.text_body || '').trim()
+      if (!toEmail) {
+        throw new Error('to_email is required')
       }
-      const payload: ClientTokenCreateRequest = {
-        customer_ref: customerRef,
-        metadata: parseMetadata(clientTokenForm.metadata_text),
+      if (!subject) {
+        throw new Error('subject is required')
       }
-      return createClientToken(token, payload)
+      if (!textBody) {
+        throw new Error('text_body is required')
+      }
+      const payload: AdminSendEmailRequest = {
+        to_email: toEmail,
+        subject,
+        text_body: textBody,
+      }
+      return sendAdminEmail(token, payload)
     },
     onSuccess: (response) => {
-      setCreatedClientToken(response.client_token)
-      setFeedback('Client token created successfully.')
+      const suffix = response.message_id ? ` (id: ${response.message_id})` : ''
+      setFeedback(`Email sent successfully via ${response.provider}.${suffix}`)
     },
     onError: (error: unknown) => {
-      const message = error instanceof Error ? error.message : 'Failed to create client token'
+      const message = error instanceof Error ? error.message : 'Failed to send email'
       setFeedback(message)
     },
   })
-
   const authError = installations.error instanceof ApiError && installations.error.status === 401
 
   React.useEffect(() => {
@@ -417,94 +449,35 @@ export function App() {
       </section>
 
       <section className="panel">
-        <h2>Client API Tokens</h2>
+        <h2>Onboarding Package</h2>
         <p className="muted">
-          Issue a dedicated deployment token per customer. This token is used as <code>LICENSE_SERVER_TOKEN</code> on the customer host.
+          Enter customer email. The control-plane generates customer reference (from email hash), client token,
+          activation code, and sends a branded onboarding email in one action.
         </p>
         <form
           onSubmit={(event) => {
             event.preventDefault()
             setFeedback('')
-            createClientTokenMutation.mutate()
+            provisionOnboardingMutation.mutate()
           }}
         >
           <div className="form-grid">
             <label>
-              Customer reference
+              Recipient email
               <input
-                value={clientTokenForm.customer_ref}
+                value={onboardingProvisionForm.to_email}
                 onChange={(event) =>
-                  setClientTokenForm((prev) => ({ ...prev, customer_ref: event.target.value }))
+                  setOnboardingProvisionForm((prev) => ({ ...prev, to_email: event.target.value }))
                 }
-                placeholder="customer-001"
-              />
-            </label>
-          </div>
-          <label>
-            Metadata (JSON object)
-            <textarea
-              value={clientTokenForm.metadata_text}
-              onChange={(event) =>
-                setClientTokenForm((prev) => ({ ...prev, metadata_text: event.target.value }))
-              }
-              rows={4}
-            />
-          </label>
-          <div className="row">
-            <button type="submit" disabled={!token || createClientTokenMutation.isPending}>
-              <ButtonIcon name="generate" />
-              {createClientTokenMutation.isPending ? 'Generating...' : 'Generate Token'}
-            </button>
-            <button
-              type="button"
-              className="button-secondary"
-              onClick={() =>
-                setClientTokenForm({
-                  customer_ref: '',
-                  metadata_text: '{}',
-                })
-              }
-            >
-              <ButtonIcon name="reset" />Reset
-            </button>
-          </div>
-        </form>
-        {createdClientToken && (
-          <p className="generated-code">
-            New client token: <code>{createdClientToken}</code>
-          </p>
-        )}
-      </section>
-
-      <section className="panel">
-        <h2>Activation Codes</h2>
-        <p className="muted">
-          Generate reusable customer activation codes. Seats are enforced per code via <code>max_installations</code>.
-        </p>
-        <form
-          onSubmit={(event) => {
-            event.preventDefault()
-            setFeedback('')
-            createActivationCodeMutation.mutate()
-          }}
-        >
-          <div className="form-grid">
-            <label>
-              Customer reference
-              <input
-                value={activationCodeForm.customer_ref}
-                onChange={(event) =>
-                  setActivationCodeForm((prev) => ({ ...prev, customer_ref: event.target.value }))
-                }
-                placeholder="customer-001"
+                placeholder="support@constructos.dev"
               />
             </label>
             <label>
               Plan code
               <input
-                value={activationCodeForm.plan_code}
+                value={onboardingProvisionForm.plan_code}
                 onChange={(event) =>
-                  setActivationCodeForm((prev) => ({ ...prev, plan_code: event.target.value }))
+                  setOnboardingProvisionForm((prev) => ({ ...prev, plan_code: event.target.value }))
                 }
                 placeholder="monthly"
               />
@@ -513,47 +486,80 @@ export function App() {
               Valid until
               <input
                 type="datetime-local"
-                value={activationCodeForm.valid_until}
+                value={onboardingProvisionForm.valid_until}
                 onChange={(event) =>
-                  setActivationCodeForm((prev) => ({ ...prev, valid_until: event.target.value }))
+                  setOnboardingProvisionForm((prev) => ({ ...prev, valid_until: event.target.value }))
                 }
               />
             </label>
             <label>
               Max installations
               <input
-                value={activationCodeForm.max_installations}
+                value={onboardingProvisionForm.max_installations}
                 onChange={(event) =>
-                  setActivationCodeForm((prev) => ({ ...prev, max_installations: event.target.value }))
+                  setOnboardingProvisionForm((prev) => ({ ...prev, max_installations: event.target.value }))
                 }
+              />
+            </label>
+            <label>
+              Image tag
+              <input
+                value={onboardingProvisionForm.image_tag}
+                onChange={(event) =>
+                  setOnboardingProvisionForm((prev) => ({ ...prev, image_tag: event.target.value }))
+                }
+                placeholder="main"
+              />
+            </label>
+            <label>
+              Support email
+              <input
+                value={onboardingProvisionForm.support_email}
+                onChange={(event) =>
+                  setOnboardingProvisionForm((prev) => ({ ...prev, support_email: event.target.value }))
+                }
+                placeholder="support@constructos.dev"
               />
             </label>
           </div>
           <label>
+            Install script URL
+            <input
+              value={onboardingProvisionForm.install_script_url}
+              onChange={(event) =>
+                setOnboardingProvisionForm((prev) => ({ ...prev, install_script_url: event.target.value }))
+              }
+              placeholder="https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh"
+            />
+          </label>
+          <label>
             Metadata (JSON object)
             <textarea
-              value={activationCodeForm.metadata_text}
+              value={onboardingProvisionForm.metadata_text}
               onChange={(event) =>
-                setActivationCodeForm((prev) => ({ ...prev, metadata_text: event.target.value }))
+                setOnboardingProvisionForm((prev) => ({ ...prev, metadata_text: event.target.value }))
               }
               rows={4}
             />
           </label>
           <div className="row">
-            <button type="submit" disabled={!token || createActivationCodeMutation.isPending}>
+            <button type="submit" disabled={!token || provisionOnboardingMutation.isPending}>
               <ButtonIcon name="generate" />
-              {createActivationCodeMutation.isPending ? 'Generating...' : 'Generate Code'}
+              {provisionOnboardingMutation.isPending ? 'Provisioning...' : 'Generate + Send Package'}
             </button>
             <button
               type="button"
               className="button-secondary"
               onClick={() =>
-                setActivationCodeForm({
-                  customer_ref: '',
+                setOnboardingProvisionForm({
+                  to_email: '',
                   plan_code: 'monthly',
                   valid_until: datetimeLocalFromNow(30),
                   max_installations: String(health.data?.default_max_installations ?? 3),
-                  metadata_text: '{}',
+                  image_tag: 'main',
+                  install_script_url: 'https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh',
+                  support_email: 'support@constructos.dev',
+                  metadata_text: '{"source":"control-plane-ui"}',
                 })
               }
             >
@@ -561,11 +567,89 @@ export function App() {
             </button>
           </div>
         </form>
-        {createdActivationCode && (
+        {provisionedCustomerRef && (
           <p className="generated-code">
-            New activation code: <code>{createdActivationCode}</code>
+            Customer reference: <code>{provisionedCustomerRef}</code>
+            <br />
+            Client token: <code>{provisionedClientToken}</code>
+            <br />
+            Activation code: <code>{provisionedActivationCode}</code>
+            {provisionedMessageId ? (
+              <>
+                <br />
+                Resend message id: <code>{provisionedMessageId}</code>
+              </>
+            ) : null}
           </p>
         )}
+      </section>
+
+      <section className="panel">
+        <h2>Email Delivery Test</h2>
+        <p className="muted">
+          Send a test email via Resend using control-plane environment variables{' '}
+          <code>LCP_EMAIL_RESEND_API_KEY</code> and <code>LCP_EMAIL_FROM</code>.
+        </p>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault()
+            setFeedback('')
+            sendEmailMutation.mutate()
+          }}
+        >
+          <div className="form-grid">
+            <label>
+              Recipient email
+              <input
+                value={emailForm.to_email}
+                onChange={(event) =>
+                  setEmailForm((prev) => ({ ...prev, to_email: event.target.value }))
+                }
+                placeholder="ops@example.com"
+              />
+            </label>
+            <label>
+              Subject
+              <input
+                value={emailForm.subject}
+                onChange={(event) =>
+                  setEmailForm((prev) => ({ ...prev, subject: event.target.value }))
+                }
+                placeholder="ConstructOS onboarding package"
+              />
+            </label>
+          </div>
+          <label>
+            Text body
+            <textarea
+              value={emailForm.text_body}
+              onChange={(event) =>
+                setEmailForm((prev) => ({ ...prev, text_body: event.target.value }))
+              }
+              rows={6}
+            />
+          </label>
+          <div className="row">
+            <button type="submit" disabled={!token || sendEmailMutation.isPending}>
+              <ButtonIcon name="generate" />
+              {sendEmailMutation.isPending ? 'Sending...' : 'Send Test Email'}
+            </button>
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={() =>
+                setEmailForm({
+                  to_email: '',
+                  subject: 'ConstructOS onboarding package',
+                  text_body:
+                    'Hello,\n\nThis is a test email sent from the ConstructOS license control-plane admin panel.\n',
+                })
+              }
+            >
+              <ButtonIcon name="reset" />Reset
+            </button>
+          </div>
+        </form>
       </section>
 
       <section className="panel">

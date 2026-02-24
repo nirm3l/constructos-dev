@@ -1,4 +1,10 @@
 import type {
+  AdminProvisionOnboardingRequest,
+  AdminProvisionOnboardingResponse,
+  AdminSendOnboardingEmailRequest,
+  AdminSendOnboardingEmailResponse,
+  AdminSendEmailRequest,
+  AdminSendEmailResponse,
   ActivationCodeCreateRequest,
   ActivationCodeCreateResponse,
   BugReportsListResponse,
@@ -102,6 +108,36 @@ export function createClientToken(
   payload: ClientTokenCreateRequest
 ): Promise<ClientTokenCreateResponse> {
   return api<ClientTokenCreateResponse>('/v1/admin/client-tokens', token, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function sendAdminEmail(
+  token: string,
+  payload: AdminSendEmailRequest
+): Promise<AdminSendEmailResponse> {
+  return api<AdminSendEmailResponse>('/v1/admin/email/send', token, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function sendAdminOnboardingEmail(
+  token: string,
+  payload: AdminSendOnboardingEmailRequest
+): Promise<AdminSendOnboardingEmailResponse> {
+  return api<AdminSendOnboardingEmailResponse>('/v1/admin/email/send-onboarding', token, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function provisionOnboardingPackage(
+  token: string,
+  payload: AdminProvisionOnboardingRequest
+): Promise<AdminProvisionOnboardingResponse> {
+  return api<AdminProvisionOnboardingResponse>('/v1/admin/onboarding/provision', token, {
     method: 'POST',
     body: JSON.stringify(payload),
   })

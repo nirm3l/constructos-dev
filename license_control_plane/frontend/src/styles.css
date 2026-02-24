@@ -1,16 +1,16 @@
 :root {
-  --bg-0: #05080d;
-  --bg-1: #0a1220;
-  --bg-2: #0d1728;
-  --surface: rgba(14, 22, 36, 0.86);
-  --surface-strong: #101d30;
-  --border: #1c3a4f;
-  --border-strong: #2b5a78;
-  --text: #c8f5df;
-  --muted: #7fab96;
-  --accent: #5ef2b8;
-  --accent-strong: #8df8cf;
-  --ok: #53efae;
+  --bg-0: #020202;
+  --bg-1: #060606;
+  --bg-2: #0a0a0a;
+  --surface: rgba(12, 12, 12, 0.9);
+  --surface-strong: #111111;
+  --border: #242424;
+  --border-strong: #363636;
+  --text: #9dffb2;
+  --muted: #66c97c;
+  --accent: #86ff9e;
+  --accent-strong: #c0ffcb;
+  --ok: #9dffb2;
   --warn: #ffd17c;
   --danger: #ff9d9d;
   --shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
@@ -30,8 +30,8 @@ body {
   margin: 0;
   color: var(--text);
   background:
-    radial-gradient(circle at 15% 0%, rgba(46, 120, 255, 0.18), transparent 35%),
-    radial-gradient(circle at 85% 0%, rgba(82, 255, 199, 0.14), transparent 32%),
+    radial-gradient(circle at 15% 0%, rgba(255, 255, 255, 0.06), transparent 35%),
+    radial-gradient(circle at 85% 0%, rgba(255, 255, 255, 0.04), transparent 32%),
     linear-gradient(180deg, var(--bg-0) 0%, var(--bg-1) 45%, var(--bg-2) 100%);
   font-family: 'IBM Plex Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Mono', monospace;
 }
@@ -42,8 +42,8 @@ body::before {
   inset: 0;
   pointer-events: none;
   background-image:
-    linear-gradient(rgba(66, 110, 143, 0.08) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(66, 110, 143, 0.08) 1px, transparent 1px);
+    linear-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
   background-size: 28px 28px;
   opacity: 0.45;
 }
@@ -98,7 +98,7 @@ h2 {
   padding: 0.18rem 0.5rem;
   border-radius: 999px;
   border: 1px solid var(--border);
-  background: rgba(16, 29, 48, 0.92);
+  background: rgba(20, 20, 20, 0.92);
   color: var(--muted);
   font-size: 0.72rem;
   line-height: 1.2;
@@ -154,7 +154,7 @@ select,
 textarea {
   width: 100%;
   color: var(--text);
-  background: #091425;
+  background: #0c0c0c;
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0.43rem 0.58rem;
@@ -163,7 +163,7 @@ textarea {
 
 input::placeholder,
 textarea::placeholder {
-  color: #709084;
+  color: #4d8a5c;
 }
 
 textarea {
@@ -175,7 +175,7 @@ button {
   align-items: center;
   gap: 0.35rem;
   border: 1px solid var(--border-strong);
-  background: linear-gradient(180deg, #11243a 0%, #0f1f34 100%);
+  background: linear-gradient(180deg, #171717 0%, #111111 100%);
   color: var(--accent);
   border-radius: 8px;
   padding: 0.43rem 0.58rem;
@@ -197,7 +197,7 @@ button:disabled {
 }
 
 .button-secondary {
-  background: #0c1728;
+  background: #121212;
   color: var(--muted);
   border-color: var(--border);
 }
@@ -240,7 +240,7 @@ label {
 code {
   font-family: inherit;
   font-size: 0.78rem;
-  background: rgba(10, 21, 37, 0.86);
+  background: rgba(18, 18, 18, 0.9);
   border: 1px solid var(--border);
   border-radius: 5px;
   padding: 0.05rem 0.25rem;
@@ -251,7 +251,7 @@ code {
   padding: 0.5rem 0.58rem;
   border-radius: 8px;
   border: 1px solid var(--border);
-  background: rgba(8, 16, 28, 0.86);
+  background: rgba(16, 16, 16, 0.92);
 }
 
 .feed-list {
@@ -267,7 +267,7 @@ code {
   border: 1px solid var(--border);
   border-left: 2px solid var(--accent);
   border-radius: 8px;
-  background: rgba(8, 16, 28, 0.95);
+  background: rgba(14, 14, 14, 0.95);
   padding: 0.48rem 0.56rem;
 }
 
@@ -335,7 +335,7 @@ code {
 .installation-list li button {
   width: 100%;
   text-align: left;
-  background: #0b1524;
+  background: #101010;
   color: var(--text);
   border: 1px solid var(--border);
   display: flex;
@@ -352,7 +352,7 @@ code {
 
 .installation-list li.active button {
   border-color: var(--accent);
-  box-shadow: inset 0 0 0 1px rgba(94, 242, 184, 0.2);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
 }
 
 .steps {

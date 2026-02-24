@@ -118,6 +118,62 @@ export type ClientTokenCreateResponse = {
   client_token_record: ClientTokenRecord
 }
 
+export type AdminSendEmailRequest = {
+  to_email: string
+  subject: string
+  text_body: string
+}
+
+export type AdminSendEmailResponse = {
+  ok: boolean
+  provider: string
+  to_email: string
+  message_id: string | null
+}
+
+export type AdminSendOnboardingEmailRequest = {
+  to_email: string
+  customer_ref: string
+  client_token: string
+  activation_code: string
+  image_tag: string
+  install_script_url: string
+  support_email: string
+}
+
+export type AdminSendOnboardingEmailResponse = {
+  ok: boolean
+  provider: string
+  to_email: string
+  customer_ref: string
+  subject: string
+  message_id: string | null
+}
+
+export type AdminProvisionOnboardingRequest = {
+  to_email: string
+  plan_code: string | null
+  valid_until: string | null
+  max_installations: number
+  image_tag: string
+  install_script_url: string
+  support_email: string
+  metadata: Record<string, unknown>
+}
+
+export type AdminProvisionOnboardingResponse = {
+  ok: boolean
+  provider: string
+  to_email: string
+  customer_ref: string
+  subject: string
+  message_id: string | null
+  client_token: string
+  client_token_record: ClientTokenRecord
+  activation_code: string
+  activation_code_record: ActivationCodeRecord
+}
+
 export type WaitlistEntryRecord = {
   id: number
   email: string
