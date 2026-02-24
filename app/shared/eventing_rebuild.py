@@ -839,8 +839,7 @@ def maybe_snapshot(db: Session, aggregate_type: str, aggregate_id: str, version:
 
 
 def project_event(db: Session, ev: EventEnvelope):
-    p = ev.payload
-    m = ev.metadata
+    p, m = upcast_event(ev.event_type, ev.payload, ev.metadata)
 
     if ev.event_type == PROJECT_EVENT_CREATED:
         project = db.get(Project, ev.aggregate_id)

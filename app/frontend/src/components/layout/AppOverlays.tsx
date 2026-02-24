@@ -14,6 +14,8 @@ export function AppOverlays({ state }: { state: any }) {
           fabHidden: state.fabHidden,
           codexChatProjectId: state.codexChatProjectId,
           setQuickProjectId: state.setQuickProjectId,
+          setQuickTaskGroupId: state.setQuickTaskGroupId,
+          setQuickTaskAssigneeId: state.setQuickTaskAssigneeId,
           selectedProjectId: state.selectedProjectId,
           bootstrap: state.bootstrap,
           setQuickTaskExternalRefsText: state.setQuickTaskExternalRefsText,

@@ -86,6 +86,16 @@ function resolveInitialSpeechLang(): string {
   return fallback
 }
 
+function resolveLocalTimezone(): string {
+  if (typeof Intl === 'undefined' || typeof Intl.DateTimeFormat !== 'function') return 'UTC'
+  try {
+    const value = String(Intl.DateTimeFormat().resolvedOptions().timeZone || '').trim()
+    return value || 'UTC'
+  } catch {
+    return 'UTC'
+  }
+}
+
 function App({ logout }: { logout: () => void }) {
   const initialUrlStateRef = React.useRef<{
     tab: Tab | null
@@ -126,6 +136,7 @@ function App({ logout }: { logout: () => void }) {
   })
   const [theme, setTheme] = React.useState<'light' | 'dark'>('light')
   const [speechLang, setSpeechLang] = React.useState<string>(resolveInitialSpeechLang)
+  const quickTaskLocalTimezone = React.useMemo(() => resolveLocalTimezone(), [])
   const [taskTitle, setTaskTitle] = React.useState('')
   const [quickDueDate, setQuickDueDate] = React.useState('')
   const [quickDueDateFocused, setQuickDueDateFocused] = React.useState(false)
@@ -153,6 +164,13 @@ function App({ logout }: { logout: () => void }) {
     setSelectedProjectId, projectsMode, setProjectsMode,
   } = useProjectState()
   const [quickProjectId, setQuickProjectId] = React.useState<string>('')
+  const [quickTaskGroupId, setQuickTaskGroupId] = React.useState<string>('')
+  const [quickTaskAssigneeId, setQuickTaskAssigneeId] = React.useState<string>('')
+  const [quickTaskPriority, setQuickTaskPriority] = React.useState<'Low' | 'Med' | 'High'>('Med')
+  const [quickTaskType, setQuickTaskType] = React.useState<'manual' | 'scheduled_instruction'>('manual')
+  const [quickTaskScheduledInstruction, setQuickTaskScheduledInstruction] = React.useState('')
+  const [quickTaskScheduleTimezone, setQuickTaskScheduleTimezone] = React.useState<string>(quickTaskLocalTimezone)
+  const [quickTaskCreateAnother, setQuickTaskCreateAnother] = React.useState(false)
   const [quickTaskTags, setQuickTaskTags] = React.useState<string[]>([])
   const [quickTaskExternalRefsText, setQuickTaskExternalRefsText] = React.useState('')
   const [quickTaskAttachmentRefsText, setQuickTaskAttachmentRefsText] = React.useState('')
@@ -1217,8 +1235,17 @@ function App({ logout }: { logout: () => void }) {
     taskTitle,
     workspaceId,
     quickProjectId,
+    quickTaskGroupId,
+    quickTaskAssigneeId,
     selectedProjectId,
     quickDueDate,
+    setQuickDueDateFocused,
+    quickTaskPriority,
+    quickTaskType,
+    quickTaskScheduledInstruction,
+    quickTaskScheduleTimezone,
+    quickTaskLocalTimezone,
+    quickTaskCreateAnother,
     quickTaskTags,
     parseExternalRefsText,
     quickTaskExternalRefsText,
@@ -1226,6 +1253,13 @@ function App({ logout }: { logout: () => void }) {
     quickTaskAttachmentRefsText,
     setTaskTitle,
     setQuickDueDate,
+    setQuickTaskGroupId,
+    setQuickTaskAssigneeId,
+    setQuickTaskPriority,
+    setQuickTaskType,
+    setQuickTaskScheduledInstruction,
+    setQuickTaskScheduleTimezone,
+    setQuickTaskCreateAnother,
     setQuickTaskTags,
     setQuickTaskExternalRefsText,
     setQuickTaskAttachmentRefsText,
@@ -1482,12 +1516,29 @@ function App({ logout }: { logout: () => void }) {
       setTaskTitle,
       quickProjectId,
       setQuickProjectId,
+      quickTaskGroupId,
+      setQuickTaskGroupId,
+      quickTaskAssigneeId,
+      setQuickTaskAssigneeId,
       createTaskMutation,
+      userId,
+      workspaceId,
       quickDueDate,
       setQuickDueDate,
       quickDueDateFocused,
       setQuickDueDateFocused,
+      quickTaskPriority,
+      setQuickTaskPriority,
+      quickTaskType,
+      setQuickTaskType,
+      quickTaskScheduledInstruction,
+      setQuickTaskScheduledInstruction,
+      quickTaskScheduleTimezone,
+      setQuickTaskScheduleTimezone,
+      quickTaskCreateAnother,
+      setQuickTaskCreateAnother,
       quickTaskTags,
+      setQuickTaskTags,
       tagHue,
       setShowQuickTaskTagPicker,
       showQuickTaskTagPicker,
@@ -1569,7 +1620,6 @@ function App({ logout }: { logout: () => void }) {
       projectNoteCountQueries,
       projectRuleCountQueries,
       projectMemberCounts,
-      workspaceId,
       canManageUsers,
       adminUsers,
       adminUsersLoading: adminUsersQuery.isLoading,
@@ -1589,7 +1639,6 @@ function App({ logout }: { logout: () => void }) {
       updateAdminRoleUserId,
       onDeactivateAdminUser,
       deactivateAdminUserId,
-      userId,
       logout,
       toggleProjectEditor,
       createTaskFromGraphSummary,

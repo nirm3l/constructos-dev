@@ -225,31 +225,35 @@ class CreateTaskHandler:
         if not title:
             raise HTTPException(status_code=422, detail="title cannot be empty")
         tid = _task_aggregate_id(self.payload.project_id, title)
-        existing_task = self.ctx.db.get(Task, tid)
-        if existing_task and not existing_task.is_deleted:
+        existing_task_state = load_task_command_state(self.ctx.db, tid)
+        if existing_task_state and not existing_task_state.is_deleted:
             task_view = load_task_view(self.ctx.db, tid)
             if task_view is None:
                 raise HTTPException(status_code=404, detail="Task not found")
             return task_view
-        if existing_task and existing_task.is_deleted:
+        if existing_task_state and existing_task_state.is_deleted:
             raise HTTPException(
                 status_code=409,
                 detail="Task with this title already exists in deleted state; restore is not supported",
             )
 
-        if self.payload.specification_id:
+        specification_id = (self.payload.specification_id or "").strip() or None
+        task_group_id = (self.payload.task_group_id or "").strip() or None
+        assignee_id = (self.payload.assignee_id or "").strip() or None
+
+        if specification_id:
             _require_specification_scope(
                 self.ctx.db,
                 workspace_id=self.payload.workspace_id,
                 project_id=self.payload.project_id,
-                specification_id=self.payload.specification_id,
+                specification_id=specification_id,
             )
-        if self.payload.task_group_id:
+        if task_group_id:
             _require_task_group_scope(
                 self.ctx.db,
                 workspace_id=self.payload.workspace_id,
                 project_id=self.payload.project_id,
-                task_group_id=self.payload.task_group_id,
+                task_group_id=task_group_id,
             )
         try:
             statuses = json.loads(project.custom_statuses or "[]")
@@ -276,14 +280,14 @@ class CreateTaskHandler:
             id=coerce_originator_id(tid),
             workspace_id=self.payload.workspace_id,
             project_id=self.payload.project_id,
-            task_group_id=self.payload.task_group_id,
-            specification_id=self.payload.specification_id,
+            task_group_id=task_group_id,
+            specification_id=specification_id,
             title=title,
             description=self.payload.description,
             status=initial_status,
             priority=self.payload.priority,
             due_date=to_iso_utc(normalize_datetime_to_utc(self.payload.due_date, user_tz)),
-            assignee_id=self.payload.assignee_id,
+            assignee_id=assignee_id,
             labels=_normalize_tags(self.payload.labels),
             subtasks=self.payload.subtasks,
             attachments=attachment_refs,

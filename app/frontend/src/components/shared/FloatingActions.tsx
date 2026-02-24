@@ -8,6 +8,8 @@ export function FloatingActions({ state }: { state: any }) {
         className={`fab fab-task ${state.fabHidden ? 'fab-hide' : ''}`}
         onClick={() => {
           state.setQuickProjectId(state.selectedProjectId || state.bootstrap.data?.projects?.[0]?.id || '')
+          state.setQuickTaskGroupId('')
+          state.setQuickTaskAssigneeId('')
           state.setQuickTaskExternalRefsText('')
           state.setQuickTaskAttachmentRefsText('')
           state.setShowQuickAdd(true)
@@ -15,7 +17,7 @@ export function FloatingActions({ state }: { state: any }) {
         title="New Task"
         aria-label="New Task"
       >
-        <Icon path="M12 5v14M5 12h14" />
+        <Icon path="M12 4v16M4 12h16" />
       </button>
 
       <button

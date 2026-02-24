@@ -4,6 +4,11 @@ from copy import deepcopy
 from typing import Any
 
 
+def _normalize_optional_id(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
 def upcast_event(
     event_type: str,
     payload: dict[str, Any],
@@ -19,6 +24,17 @@ def upcast_event(
         if p.get("priority") == "Medium":
             p["priority"] = "Med"
         m["schema_version"] = 2
+
+    if event_type in {"TaskCreated", "TaskUpdated"}:
+        if "taskGroupId" in p and "task_group_id" not in p:
+            p["task_group_id"] = p.pop("taskGroupId")
+        if "specificationId" in p and "specification_id" not in p:
+            p["specification_id"] = p.pop("specificationId")
+        if "assigneeId" in p and "assignee_id" not in p:
+            p["assignee_id"] = p.pop("assigneeId")
+        for key in ("task_group_id", "specification_id", "assignee_id"):
+            if key in p:
+                p[key] = _normalize_optional_id(p.get(key))
 
     return p, m
 

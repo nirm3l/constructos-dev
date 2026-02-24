@@ -1,4 +1,5 @@
 import React from 'react'
+import * as Tabs from '@radix-ui/react-tabs'
 import { createPortal } from 'react-dom'
 import type { Task } from '../../types'
 import type { Tab } from '../../utils/ui'
@@ -39,6 +40,39 @@ function formatScheduleState(state: Task['schedule_state'] | null | undefined): 
   if (!raw) return 'State: Unknown'
   return `State: ${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
 }
+
+const BOTTOM_TAB_ITEMS: Array<{ value: Tab; label: string; shortLabel: string; iconPath: string }> = [
+  {
+    value: 'today',
+    label: 'Today',
+    shortLabel: 'Today',
+    iconPath: 'M8 3v4M16 3v4M4 10h16M4 5h16v15H4z',
+  },
+  {
+    value: 'tasks',
+    label: 'Tasks',
+    shortLabel: 'Tasks',
+    iconPath: 'M4 6h16M4 12h10M4 18h13',
+  },
+  {
+    value: 'notes',
+    label: 'Notes',
+    shortLabel: 'Notes',
+    iconPath: 'M6 2h9l3 3v17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm8 1v3h3',
+  },
+  {
+    value: 'specifications',
+    label: 'Specifications',
+    shortLabel: 'Specs',
+    iconPath: 'M6 2h12a2 2 0 0 1 2 2v16l-4 2-4-2-4 2-4-2V4a2 2 0 0 1 2-2zm3 5h6m-6 4h6m-6 4h4',
+  },
+  {
+    value: 'projects',
+    label: 'Projects',
+    shortLabel: 'Projects',
+    iconPath: 'M3 7h7l2 2h9v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 7V5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2',
+  },
+]
 
 export function TaskListItem({
   task,
@@ -170,6 +204,7 @@ export function BottomTabs({
   onSelectTab: (tab: Tab) => void
 }) {
   const [portalTarget, setPortalTarget] = React.useState<HTMLElement | null>(null)
+  const tabValue = BOTTOM_TAB_ITEMS.some((item) => item.value === tab) ? tab : '__none__'
 
   React.useEffect(() => {
     setPortalTarget(document.body)
@@ -177,26 +212,24 @@ export function BottomTabs({
 
   const nav = (
     <nav className="bottom-tabs" style={{ position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 1200 }}>
-      <button className={tab === 'today' ? 'primary' : ''} onClick={() => onSelectTab('today')} title="Today" aria-label="Today">
-        <Icon path="M8 3v4M16 3v4M4 10h16M4 5h16v15H4z" />
-        <span className="tab-label">Today</span>
-      </button>
-      <button className={tab === 'tasks' ? 'primary' : ''} onClick={() => onSelectTab('tasks')} title="Tasks" aria-label="Tasks">
-        <Icon path="M4 6h16M4 12h10M4 18h13" />
-        <span className="tab-label">Tasks</span>
-      </button>
-      <button className={tab === 'notes' ? 'primary' : ''} onClick={() => onSelectTab('notes')} title="Notes" aria-label="Notes">
-        <Icon path="M6 2h9l3 3v17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm8 1v3h3" />
-        <span className="tab-label">Notes</span>
-      </button>
-      <button className={tab === 'specifications' ? 'primary' : ''} onClick={() => onSelectTab('specifications')} title="Specifications" aria-label="Specifications">
-        <Icon path="M6 2h12a2 2 0 0 1 2 2v16l-4 2-4-2-4 2-4-2V4a2 2 0 0 1 2-2zm3 5h6m-6 4h6m-6 4h4" />
-        <span className="tab-label">Specs</span>
-      </button>
-      <button className={tab === 'projects' ? 'primary' : ''} onClick={() => onSelectTab('projects')} title="Projects" aria-label="Projects">
-        <Icon path="M3 7h7l2 2h9v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 7V5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2" />
-        <span className="tab-label">Projects</span>
-      </button>
+      <Tabs.Root
+        className="bottom-tabs-root"
+        value={tabValue}
+        onValueChange={(value) => {
+          const next = String(value || '').trim()
+          if (!next || next === '__none__') return
+          onSelectTab(next as Tab)
+        }}
+      >
+        <Tabs.List className="bottom-tabs-list" aria-label="Primary sections">
+          {BOTTOM_TAB_ITEMS.map((item) => (
+            <Tabs.Trigger key={item.value} value={item.value} className="bottom-tab-trigger" title={item.label} aria-label={item.label}>
+              <Icon path={item.iconPath} />
+              <span className="tab-label">{item.shortLabel}</span>
+            </Tabs.Trigger>
+          ))}
+        </Tabs.List>
+      </Tabs.Root>
     </nav>
   )
 

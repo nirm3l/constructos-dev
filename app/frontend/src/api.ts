@@ -291,10 +291,17 @@ export const createTask = (
     task_group_id?: string | null
     description?: string
     specification_id?: string | null
+    priority?: string
     due_date?: string | null
+    assignee_id?: string | null
     labels?: string[]
     external_refs?: ExternalRef[]
     attachment_refs?: AttachmentRef[]
+    recurring_rule?: string | null
+    task_type?: 'manual' | 'scheduled_instruction'
+    scheduled_instruction?: string | null
+    scheduled_at_utc?: string | null
+    schedule_timezone?: string | null
   }
 ) => api<Task>('/api/tasks', userId, { method: 'POST', body: JSON.stringify(payload) })
 

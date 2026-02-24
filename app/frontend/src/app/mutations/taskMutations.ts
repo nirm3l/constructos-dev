@@ -13,6 +13,26 @@ import {
 } from '../../api'
 
 export function useTaskMutations(c: any) {
+  const resetQuickTaskComposer = (mode: 'full' | 'title-only' = 'full') => {
+    c.setTaskTitle('')
+    c.setShowQuickTaskTagPicker(false)
+    c.setQuickTaskTagQuery('')
+    if (mode === 'title-only') return
+
+    c.setQuickDueDate('')
+    c.setQuickDueDateFocused(false)
+    c.setQuickTaskGroupId('')
+    c.setQuickTaskAssigneeId('')
+    c.setQuickTaskTags([])
+    c.setQuickTaskExternalRefsText('')
+    c.setQuickTaskAttachmentRefsText('')
+    c.setQuickTaskPriority('Med')
+    c.setQuickTaskType('manual')
+    c.setQuickTaskScheduledInstruction('')
+    c.setQuickTaskScheduleTimezone(c.quickTaskLocalTimezone || 'UTC')
+    c.setQuickTaskCreateAnother(false)
+  }
+
   const saveTaskMutation = useMutation({
     mutationFn: () => c.saveTaskNow(),
     onSuccess: () => {
@@ -32,37 +52,93 @@ export function useTaskMutations(c: any) {
       description?: string
       project_id?: string
       task_group_id?: string | null
+      assignee_id?: string | null
       due_date?: string | null
+      priority?: string
       labels?: string[]
+      task_type?: 'manual' | 'scheduled_instruction'
+      scheduled_instruction?: string | null
+      scheduled_at_utc?: string | null
+      schedule_timezone?: string | null
+      recurring_rule?: string | null
       open_task?: boolean
+      keep_open?: boolean
     }) =>
-      createTask(c.userId, {
-        title: payload?.title?.trim() || c.taskTitle.trim(),
-        workspace_id: c.workspaceId,
-        project_id: payload?.project_id || c.quickProjectId || c.selectedProjectId,
-        task_group_id: payload?.task_group_id ?? null,
-        description: payload?.description ?? '',
-        due_date:
+      {
+        const normalizeOptionalId = (value: unknown): string | null => {
+          const cleaned = String(value ?? '').trim()
+          return cleaned || null
+        }
+        const payloadHasTaskGroupId =
+          payload !== undefined && Object.prototype.hasOwnProperty.call(payload, 'task_group_id')
+        const payloadHasAssigneeId =
+          payload !== undefined && Object.prototype.hasOwnProperty.call(payload, 'assignee_id')
+        const resolvedTaskGroupId = payloadHasTaskGroupId
+          ? normalizeOptionalId(payload?.task_group_id)
+          : normalizeOptionalId(c.quickTaskGroupId)
+        const resolvedAssigneeId = payloadHasAssigneeId
+          ? normalizeOptionalId(payload?.assignee_id)
+          : normalizeOptionalId(c.quickTaskAssigneeId)
+
+        const effectiveTaskType = (payload?.task_type ?? c.quickTaskType ?? 'manual') as 'manual' | 'scheduled_instruction'
+        const resolvedTimezone =
+          String(c.quickTaskScheduleTimezone || '').trim() ||
+          c.quickTaskLocalTimezone ||
+          (typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : '') ||
+          'UTC'
+        const dueDate =
           payload?.due_date !== undefined
             ? payload.due_date
-            : (c.quickDueDate ? new Date(c.quickDueDate).toISOString() : null),
-        labels: payload?.labels ?? c.quickTaskTags,
-        external_refs: c.parseExternalRefsText(c.quickTaskExternalRefsText),
-        attachment_refs: c.parseAttachmentRefsText(c.quickTaskAttachmentRefsText),
-      }),
+            : effectiveTaskType === 'scheduled_instruction'
+              ? null
+              : (c.quickDueDate ? new Date(c.quickDueDate).toISOString() : null)
+        const scheduledAtUtc =
+          payload?.scheduled_at_utc !== undefined
+            ? payload.scheduled_at_utc
+            : effectiveTaskType === 'scheduled_instruction' && c.quickDueDate
+              ? new Date(c.quickDueDate).toISOString()
+              : null
+        const scheduledInstruction =
+          payload?.scheduled_instruction !== undefined
+            ? payload.scheduled_instruction
+            : effectiveTaskType === 'scheduled_instruction'
+              ? (String(c.quickTaskScheduledInstruction || '').trim() || null)
+              : null
+        const scheduleTimezone =
+          payload?.schedule_timezone !== undefined
+            ? payload.schedule_timezone
+            : effectiveTaskType === 'scheduled_instruction'
+              ? resolvedTimezone
+              : null
+
+        return createTask(c.userId, {
+          title: payload?.title?.trim() || c.taskTitle.trim(),
+          workspace_id: c.workspaceId,
+          project_id: payload?.project_id || c.quickProjectId || c.selectedProjectId,
+          task_group_id: resolvedTaskGroupId,
+          assignee_id: resolvedAssigneeId,
+          description: payload?.description ?? '',
+          priority: payload?.priority ?? c.quickTaskPriority ?? 'Med',
+          due_date: dueDate,
+          labels: payload?.labels ?? c.quickTaskTags,
+          external_refs: c.parseExternalRefsText(c.quickTaskExternalRefsText),
+          attachment_refs: c.parseAttachmentRefsText(c.quickTaskAttachmentRefsText),
+          recurring_rule: payload?.recurring_rule ?? null,
+          task_type: effectiveTaskType,
+          scheduled_instruction: scheduledInstruction,
+          scheduled_at_utc: scheduledAtUtc,
+          schedule_timezone: scheduleTimezone,
+        })
+      },
     onSuccess: async (task, payload) => {
       c.setUiError(null)
       if (payload?.open_task) {
         c.setSelectedTaskId(task.id)
         c.setTab('tasks')
+      } else if (payload?.keep_open) {
+        resetQuickTaskComposer('title-only')
       } else {
-        c.setTaskTitle('')
-        c.setQuickDueDate('')
-        c.setQuickTaskTags([])
-        c.setQuickTaskExternalRefsText('')
-        c.setQuickTaskAttachmentRefsText('')
-        c.setShowQuickTaskTagPicker(false)
-        c.setQuickTaskTagQuery('')
+        resetQuickTaskComposer('full')
         c.setShowQuickAdd(false)
       }
       await c.invalidateAll()
