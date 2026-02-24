@@ -12,6 +12,10 @@ export function useProjectState() {
   const [projectEmbeddingEnabled, setProjectEmbeddingEnabled] = React.useState(false)
   const [projectEmbeddingModel, setProjectEmbeddingModel] = React.useState('')
   const [projectContextPackEvidenceTopKText, setProjectContextPackEvidenceTopKText] = React.useState('')
+  const [projectChatIndexMode, setProjectChatIndexMode] = React.useState<'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'>('OFF')
+  const [projectChatAttachmentIngestionMode, setProjectChatAttachmentIngestionMode] = React.useState<
+    'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
+  >('METADATA_ONLY')
   const [projectTemplateParametersText, setProjectTemplateParametersText] = React.useState('')
   const [projectDescriptionView, setProjectDescriptionView] = React.useState<'write' | 'preview'>('write')
   const [showProjectCreateForm, setShowProjectCreateForm] = React.useState(false)
@@ -24,6 +28,12 @@ export function useProjectState() {
   const [editProjectEmbeddingEnabled, setEditProjectEmbeddingEnabled] = React.useState(false)
   const [editProjectEmbeddingModel, setEditProjectEmbeddingModel] = React.useState('')
   const [editProjectContextPackEvidenceTopKText, setEditProjectContextPackEvidenceTopKText] = React.useState('')
+  const [editProjectChatIndexMode, setEditProjectChatIndexMode] = React.useState<'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'>(
+    'OFF'
+  )
+  const [editProjectChatAttachmentIngestionMode, setEditProjectChatAttachmentIngestionMode] = React.useState<
+    'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
+  >('METADATA_ONLY')
   const [createProjectMemberIds, setCreateProjectMemberIds] = React.useState<string[]>([])
   const [editProjectMemberIds, setEditProjectMemberIds] = React.useState<string[]>([])
   const [editProjectDescriptionView, setEditProjectDescriptionView] = React.useState<'write' | 'preview'>('write')
@@ -66,6 +76,10 @@ export function useProjectState() {
     setProjectEmbeddingModel,
     projectContextPackEvidenceTopKText,
     setProjectContextPackEvidenceTopKText,
+    projectChatIndexMode,
+    setProjectChatIndexMode,
+    projectChatAttachmentIngestionMode,
+    setProjectChatAttachmentIngestionMode,
     projectTemplateParametersText,
     setProjectTemplateParametersText,
     projectDescriptionView,
@@ -90,6 +104,10 @@ export function useProjectState() {
     setEditProjectEmbeddingModel,
     editProjectContextPackEvidenceTopKText,
     setEditProjectContextPackEvidenceTopKText,
+    editProjectChatIndexMode,
+    setEditProjectChatIndexMode,
+    editProjectChatAttachmentIngestionMode,
+    setEditProjectChatAttachmentIngestionMode,
     createProjectMemberIds,
     setCreateProjectMemberIds,
     editProjectMemberIds,

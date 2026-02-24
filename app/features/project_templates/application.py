@@ -32,6 +32,10 @@ from shared.core import (
     initialize_aggregate,
 )
 from shared.models import Project, ProjectTemplateBinding, WorkspaceMember
+from shared.chat_indexing import (
+    normalize_chat_attachment_ingestion_mode,
+    normalize_chat_index_mode,
+)
 
 from .catalog import (
     DDD_PRODUCT_BUILD_KEY,
@@ -360,6 +364,8 @@ class ProjectTemplateApplicationService:
         embedding_enabled: bool | None,
         embedding_model: str | None,
         context_pack_evidence_top_k: int | None,
+        chat_index_mode: str | None,
+        chat_attachment_ingestion_mode: str | None,
     ) -> dict[str, Any]:
         ensure_role(self.db, workspace_id, self.user.id, {"Owner", "Admin", "Member"})
 
@@ -385,6 +391,10 @@ class ProjectTemplateApplicationService:
         if resolved_context_top_k is None:
             resolved_context_top_k = template.default_context_pack_evidence_top_k
         resolved_context_top_k = _normalize_context_pack_evidence_top_k(resolved_context_top_k)
+        resolved_chat_index_mode = normalize_chat_index_mode(chat_index_mode)
+        resolved_chat_attachment_ingestion_mode = normalize_chat_attachment_ingestion_mode(
+            chat_attachment_ingestion_mode
+        )
 
         normalized_name = _normalize_text(name)
         project_id = _project_aggregate_id(workspace_id, normalized_name) if normalized_name else None
@@ -408,6 +418,8 @@ class ProjectTemplateApplicationService:
             "embedding_enabled": resolved_embedding_enabled,
             "embedding_model": resolved_embedding_model,
             "context_pack_evidence_top_k": resolved_context_top_k,
+            "chat_index_mode": resolved_chat_index_mode,
+            "chat_attachment_ingestion_mode": resolved_chat_attachment_ingestion_mode,
             "project_conflict_status": conflict_status,
         }
 
@@ -671,6 +683,8 @@ class ProjectTemplateApplicationService:
             embedding_enabled=payload.embedding_enabled,
             embedding_model=payload.embedding_model,
             context_pack_evidence_top_k=payload.context_pack_evidence_top_k,
+            chat_index_mode=payload.chat_index_mode,
+            chat_attachment_ingestion_mode=payload.chat_attachment_ingestion_mode,
         )
         graph_node_count = len(seed_template.graph_nodes)
         graph_edge_count = len(seed_template.graph_edges)
@@ -693,6 +707,8 @@ class ProjectTemplateApplicationService:
                 "embedding_enabled": resolved["embedding_enabled"],
                 "embedding_model": resolved["embedding_model"],
                 "context_pack_evidence_top_k": resolved["context_pack_evidence_top_k"],
+                "chat_index_mode": resolved["chat_index_mode"],
+                "chat_attachment_ingestion_mode": resolved["chat_attachment_ingestion_mode"],
             },
             "binding_preview": {
                 "workspace_id": payload.workspace_id,
@@ -752,6 +768,8 @@ class ProjectTemplateApplicationService:
             embedding_enabled=payload.embedding_enabled,
             embedding_model=payload.embedding_model,
             context_pack_evidence_top_k=payload.context_pack_evidence_top_k,
+            chat_index_mode=payload.chat_index_mode,
+            chat_attachment_ingestion_mode=payload.chat_attachment_ingestion_mode,
         )
 
         project_command_id = self.command_id or _stable_command_id(
@@ -772,6 +790,8 @@ class ProjectTemplateApplicationService:
                 embedding_enabled=bool(resolved["embedding_enabled"]),
                 embedding_model=resolved["embedding_model"],
                 context_pack_evidence_top_k=resolved["context_pack_evidence_top_k"],
+                chat_index_mode=resolved["chat_index_mode"],
+                chat_attachment_ingestion_mode=resolved["chat_attachment_ingestion_mode"],
             )
         )
         project_id = created_project["id"]

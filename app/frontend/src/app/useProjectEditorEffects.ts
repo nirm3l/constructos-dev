@@ -1,6 +1,21 @@
 import React from 'react'
 import { attachmentRefsToText, externalRefsToText, projectStatusesToText } from '../utils/ui'
 
+function normalizeChatIndexMode(value: unknown): 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR' {
+  const mode = String(value || '').trim().toUpperCase()
+  if (mode === 'VECTOR_ONLY') return 'VECTOR_ONLY'
+  if (mode === 'KG_AND_VECTOR') return 'KG_AND_VECTOR'
+  return 'OFF'
+}
+
+function normalizeChatAttachmentIngestionMode(value: unknown): 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT' {
+  const mode = String(value || '').trim().toUpperCase()
+  if (mode === 'OFF') return 'OFF'
+  if (mode === 'FULL_TEXT_OCR') return 'FULL_TEXT'
+  if (mode === 'FULL_TEXT') return 'FULL_TEXT'
+  return 'METADATA_ONLY'
+}
+
 export function useProjectEditorEffects(c: any) {
   React.useEffect(() => {
     if (!c.selectedProject) {
@@ -12,6 +27,8 @@ export function useProjectEditorEffects(c: any) {
       c.setEditProjectEmbeddingEnabled(false)
       c.setEditProjectEmbeddingModel('')
       c.setEditProjectContextPackEvidenceTopKText('')
+      c.setEditProjectChatIndexMode('OFF')
+      c.setEditProjectChatAttachmentIngestionMode('METADATA_ONLY')
       c.setEditProjectDescriptionView('write')
       if (!c.selectedProjectId) c.setShowProjectEditForm(false)
       c.setSelectedProjectRuleId(null)
@@ -29,6 +46,10 @@ export function useProjectEditorEffects(c: any) {
     c.setEditProjectEmbeddingModel(String(c.selectedProject.embedding_model || ''))
     c.setEditProjectContextPackEvidenceTopKText(
       c.selectedProject.context_pack_evidence_top_k == null ? '' : String(c.selectedProject.context_pack_evidence_top_k)
+    )
+    c.setEditProjectChatIndexMode(normalizeChatIndexMode(c.selectedProject.chat_index_mode))
+    c.setEditProjectChatAttachmentIngestionMode(
+      normalizeChatAttachmentIngestionMode(c.selectedProject.chat_attachment_ingestion_mode)
     )
     const hasDescription = Boolean((c.selectedProject.description ?? '').trim())
     c.setEditProjectDescriptionView(hasDescription ? 'preview' : 'write')

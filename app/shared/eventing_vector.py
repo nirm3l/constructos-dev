@@ -40,6 +40,7 @@ from .vector_store import (
     maybe_reindex_project,
     project_embedding_index_status,
     purge_project_chunks,
+    sync_project_chat_vector_chunks,
     vector_store_enabled,
 )
 
@@ -169,6 +170,24 @@ def _load_project_chat_policy(db, *, project_id: str):
     return project, policy
 
 
+def _resolve_project_chat_policy_override(db, *, project_id: str, payload: dict[str, Any]):
+    if "chat_index_mode" not in payload and "chat_attachment_ingestion_mode" not in payload:
+        return None
+    chat_index_mode = payload.get("chat_index_mode")
+    chat_attachment_ingestion_mode = payload.get("chat_attachment_ingestion_mode")
+    if (chat_index_mode is None or chat_attachment_ingestion_mode is None) and db is not None:
+        project, _ = _load_project_chat_policy(db, project_id=project_id)
+        if project is not None:
+            if chat_index_mode is None:
+                chat_index_mode = getattr(project, "chat_index_mode", None)
+            if chat_attachment_ingestion_mode is None:
+                chat_attachment_ingestion_mode = getattr(project, "chat_attachment_ingestion_mode", None)
+    return project_chat_indexing_policy(
+        chat_index_mode=chat_index_mode,
+        chat_attachment_ingestion_mode=chat_attachment_ingestion_mode,
+    )
+
+
 def _index_chat_message_state(db, *, message_id: str) -> None:
     from .models import ChatMessage
 
@@ -235,22 +254,26 @@ def _project_vector_event(db, ev: EventEnvelope) -> None:
 
     if ev.event_type in {PROJECT_EVENT_CREATED, PROJECT_EVENT_UPDATED}:
         payload = ev.payload or {}
-        should_reindex = False
-        if ev.event_type == PROJECT_EVENT_CREATED and bool(payload.get("embedding_enabled", False)):
-            should_reindex = True
-        if (
-            "embedding_enabled" in payload
+        embedding_reindex = bool(
+            (ev.event_type == PROJECT_EVENT_CREATED and bool(payload.get("embedding_enabled", False)))
+            or "embedding_enabled" in payload
             or "embedding_model" in payload
-            or "chat_index_mode" in payload
-            or "chat_attachment_ingestion_mode" in payload
-        ):
-            should_reindex = True
-        if should_reindex:
+        )
+        chat_policy_changed = bool("chat_index_mode" in payload or "chat_attachment_ingestion_mode" in payload)
+
+        if embedding_reindex:
+            policy_override = _resolve_project_chat_policy_override(db, project_id=ev.aggregate_id, payload=payload)
             indexed_chunks = maybe_reindex_project(
                 db,
                 project_id=ev.aggregate_id,
                 embedding_enabled=payload.get("embedding_enabled"),
                 embedding_model=payload.get("embedding_model"),
+                chat_index_mode=(policy_override.index_mode if policy_override is not None else payload.get("chat_index_mode")),
+                chat_attachment_ingestion_mode=(
+                    policy_override.attachment_ingestion_mode
+                    if policy_override is not None
+                    else payload.get("chat_attachment_ingestion_mode")
+                ),
             )
             status = project_embedding_index_status(
                 db,
@@ -269,6 +292,14 @@ def _project_vector_event(db, ev: EventEnvelope) -> None:
                 status=status,
                 indexed_chunks=indexed_chunks,
                 embedding_model=payload.get("embedding_model"),
+            )
+            return
+        if chat_policy_changed:
+            policy_override = _resolve_project_chat_policy_override(db, project_id=ev.aggregate_id, payload=payload)
+            sync_project_chat_vector_chunks(
+                db,
+                project_id=ev.aggregate_id,
+                policy_override=policy_override,
             )
             return
 

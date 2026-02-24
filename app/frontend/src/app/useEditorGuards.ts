@@ -37,6 +37,10 @@ export function useEditorGuards(c: any) {
       String(c.editProjectEmbeddingModel || '').trim() !== String(c.selectedProject.embedding_model || '').trim() ||
       String(c.editProjectContextPackEvidenceTopKText || '').trim() !==
         String(c.selectedProject.context_pack_evidence_top_k ?? '').trim() ||
+      String(c.editProjectChatIndexMode || 'OFF').trim().toUpperCase() !==
+        String(c.selectedProject.chat_index_mode || 'OFF').trim().toUpperCase() ||
+      String(c.editProjectChatAttachmentIngestionMode || 'METADATA_ONLY').trim().toUpperCase() !==
+        String(c.selectedProject.chat_attachment_ingestion_mode || 'METADATA_ONLY').trim().toUpperCase() ||
       stableJson(c.parseExternalRefsText(c.editProjectExternalRefsText)) !== stableJson(c.selectedProject.external_refs ?? []) ||
       stableJson(c.parseAttachmentRefsText(c.editProjectAttachmentRefsText)) !== stableJson(c.selectedProject.attachment_refs ?? []) ||
       stableJson(Array.from(new Set(c.editProjectMemberIds.filter(Boolean))).sort()) !== stableJson(selectedProjectMemberIds)
@@ -48,6 +52,8 @@ export function useEditorGuards(c: any) {
     c.editProjectEmbeddingEnabled,
     c.editProjectEmbeddingModel,
     c.editProjectContextPackEvidenceTopKText,
+    c.editProjectChatIndexMode,
+    c.editProjectChatAttachmentIngestionMode,
     c.editProjectExternalRefsText,
     c.editProjectMemberIds,
     c.editProjectName,

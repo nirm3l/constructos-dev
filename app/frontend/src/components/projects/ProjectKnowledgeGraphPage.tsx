@@ -17,6 +17,8 @@ type ProjectKnowledgeGraphPageProps = {
   userId: string
   selectedProjectId: string
   selectedProjectName: string
+  selectedProjectChatIndexMode?: string
+  selectedProjectChatAttachmentIngestionMode?: string
   overviewQuery: QueryLike<GraphProjectOverview>
   contextPackQuery: QueryLike<GraphContextPack>
   subgraphQuery: QueryLike<GraphProjectSubgraph>
@@ -29,6 +31,8 @@ export function ProjectKnowledgeGraphPage({
   userId,
   selectedProjectId,
   selectedProjectName,
+  selectedProjectChatIndexMode,
+  selectedProjectChatAttachmentIngestionMode,
   overviewQuery,
   contextPackQuery,
   subgraphQuery,
@@ -65,6 +69,8 @@ export function ProjectKnowledgeGraphPage({
     <section className="card">
       <ProjectKnowledgeGraphPanel
         projectName={selectedProjectName || 'Selected project'}
+        projectChatIndexMode={selectedProjectChatIndexMode}
+        projectChatAttachmentIngestionMode={selectedProjectChatAttachmentIngestionMode}
         overviewQuery={overviewQuery}
         contextPackQuery={contextPackQuery}
         subgraphQuery={subgraphQuery}

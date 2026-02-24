@@ -1304,6 +1304,8 @@ class AgentTaskService:
         embedding_enabled: bool | None = None,
         embedding_model: str | None = None,
         context_pack_evidence_top_k: int | None = None,
+        chat_index_mode: str | None = None,
+        chat_attachment_ingestion_mode: str | None = None,
         parameters: dict[str, Any] | None = None,
     ) -> dict:
         self._require_token(auth_token)
@@ -1320,6 +1322,8 @@ class AgentTaskService:
                 embedding_enabled=embedding_enabled,
                 embedding_model=embedding_model,
                 context_pack_evidence_top_k=context_pack_evidence_top_k,
+                chat_index_mode=chat_index_mode,
+                chat_attachment_ingestion_mode=chat_attachment_ingestion_mode,
                 parameters=parameters or {},
             )
             return ProjectTemplateApplicationService(db, user).preview_project_from_template(payload)
@@ -1337,6 +1341,8 @@ class AgentTaskService:
         embedding_enabled: bool | None = None,
         embedding_model: str | None = None,
         context_pack_evidence_top_k: int | None = None,
+        chat_index_mode: str | None = None,
+        chat_attachment_ingestion_mode: str | None = None,
         parameters: dict[str, Any] | None = None,
         command_id: str | None = None,
     ) -> dict:
@@ -1359,6 +1365,8 @@ class AgentTaskService:
                 embedding_enabled=embedding_enabled,
                 embedding_model=embedding_model,
                 context_pack_evidence_top_k=context_pack_evidence_top_k,
+                chat_index_mode=chat_index_mode,
+                chat_attachment_ingestion_mode=chat_attachment_ingestion_mode,
                 parameters=parameters or {},
             )
             return ProjectTemplateApplicationService(

@@ -21,6 +21,26 @@ import {
 } from '../../api'
 import { parseProjectEvidenceTopKInput, parseProjectStatusesText, parseTemplateParametersInput, toErrorMessage } from '../../utils/ui'
 
+function resolveProjectChatPolicy(
+  embeddingEnabled: boolean,
+  chatIndexMode: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR',
+  chatAttachmentIngestionMode: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
+): {
+  chat_index_mode: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'
+  chat_attachment_ingestion_mode: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
+} {
+  if (!embeddingEnabled || chatIndexMode === 'OFF') {
+    return {
+      chat_index_mode: 'OFF',
+      chat_attachment_ingestion_mode: 'METADATA_ONLY',
+    }
+  }
+  return {
+    chat_index_mode: chatIndexMode,
+    chat_attachment_ingestion_mode: chatAttachmentIngestionMode,
+  }
+}
+
 export function useProjectMutations(c: any) {
   const saveProjectMutation = useMutation({
     mutationFn: () => c.saveProjectNow(),
@@ -36,6 +56,12 @@ export function useProjectMutations(c: any) {
       if (!normalizedTemplateKey) {
         throw new Error('Select a project template to preview')
       }
+      const embeddingEnabled = Boolean(c.projectEmbeddingEnabled)
+      const chatPolicy = resolveProjectChatPolicy(
+        embeddingEnabled,
+        c.projectChatIndexMode,
+        c.projectChatAttachmentIngestionMode
+      )
       const contextPackEvidenceTopK = parseProjectEvidenceTopKInput(c.projectContextPackEvidenceTopKText)
       const hasCustomStatuses = Boolean(String(c.projectCustomStatusesText || '').trim())
       const customStatuses = hasCustomStatuses ? parseProjectStatusesText(c.projectCustomStatusesText) : undefined
@@ -47,9 +73,10 @@ export function useProjectMutations(c: any) {
         description: c.projectDescription,
         custom_statuses: customStatuses,
         member_user_ids: Array.from(new Set(c.createProjectMemberIds)),
-        embedding_enabled: Boolean(c.projectEmbeddingEnabled),
+        embedding_enabled: embeddingEnabled,
         embedding_model: String(c.projectEmbeddingModel || '').trim() || null,
         context_pack_evidence_top_k: contextPackEvidenceTopK,
+        ...chatPolicy,
         parameters,
       })
     },
@@ -61,6 +88,12 @@ export function useProjectMutations(c: any) {
 
   const createProjectMutation = useMutation({
     mutationFn: () => {
+      const embeddingEnabled = Boolean(c.projectEmbeddingEnabled)
+      const chatPolicy = resolveProjectChatPolicy(
+        embeddingEnabled,
+        c.projectChatIndexMode,
+        c.projectChatAttachmentIngestionMode
+      )
       const contextPackEvidenceTopK = parseProjectEvidenceTopKInput(c.projectContextPackEvidenceTopKText)
       const normalizedTemplateKey = String(c.projectTemplateKey || '').trim()
       const hasCustomStatuses = Boolean(String(c.projectCustomStatusesText || '').trim())
@@ -74,9 +107,10 @@ export function useProjectMutations(c: any) {
           description: c.projectDescription,
           custom_statuses: customStatuses,
           member_user_ids: Array.from(new Set(c.createProjectMemberIds)),
-          embedding_enabled: Boolean(c.projectEmbeddingEnabled),
+          embedding_enabled: embeddingEnabled,
           embedding_model: String(c.projectEmbeddingModel || '').trim() || null,
           context_pack_evidence_top_k: contextPackEvidenceTopK,
+          ...chatPolicy,
           parameters,
         })
       }
@@ -87,9 +121,10 @@ export function useProjectMutations(c: any) {
         custom_statuses: customStatuses,
         external_refs: c.parseExternalRefsText(c.projectExternalRefsText),
         attachment_refs: c.parseAttachmentRefsText(c.projectAttachmentRefsText),
-        embedding_enabled: Boolean(c.projectEmbeddingEnabled),
+        embedding_enabled: embeddingEnabled,
         embedding_model: String(c.projectEmbeddingModel || '').trim() || null,
         context_pack_evidence_top_k: contextPackEvidenceTopK,
+        ...chatPolicy,
         member_user_ids: Array.from(new Set(c.createProjectMemberIds)),
       })
     },
@@ -135,6 +170,8 @@ export function useProjectMutations(c: any) {
       c.setProjectEmbeddingEnabled(false)
       c.setProjectEmbeddingModel('')
       c.setProjectContextPackEvidenceTopKText('')
+      c.setProjectChatIndexMode('OFF')
+      c.setProjectChatAttachmentIngestionMode('METADATA_ONLY')
       c.setProjectTemplateParametersText('')
       c.setProjectDescriptionView('write')
       c.setCreateProjectMemberIds([])

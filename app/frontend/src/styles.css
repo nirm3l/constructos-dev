@@ -938,6 +938,24 @@ body.md-fullscreen-open {
   width: 100%;
 }
 
+.project-chat-policy-inline {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.project-chat-policy-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.project-chat-policy-select {
+  min-width: 0;
+}
+
 input, select, button {
   font: inherit;
   border-radius: 12px;
@@ -2967,6 +2985,12 @@ button:disabled {
   margin-top: 10px;
   display: grid;
   gap: 6px;
+  border: 1px solid color-mix(in srgb, var(--line), transparent 8%);
+  border-radius: 12px;
+  padding: 10px;
+  background:
+    radial-gradient(circle at 12% 0%, color-mix(in srgb, var(--surface-alt), transparent 70%), transparent 42%),
+    linear-gradient(180deg, color-mix(in srgb, var(--surface), var(--surface-alt) 18%), color-mix(in srgb, var(--surface), var(--surface-alt) 8%));
 }
 
 .graph-context-cube-grid {
@@ -2975,17 +2999,32 @@ button:disabled {
   grid-template-columns: repeat(20, minmax(0, 1fr));
 }
 
+.graph-context-cube-grid-dense {
+  gap: 2px;
+  grid-template-columns: repeat(32, minmax(0, 1fr));
+}
+
 .graph-context-cube-grid-entities {
   grid-template-columns: repeat(18, minmax(0, 1fr));
+}
+
+.graph-context-cube-grid-entities.graph-context-cube-grid-dense {
+  grid-template-columns: repeat(30, minmax(0, 1fr));
 }
 
 .graph-context-cube {
   aspect-ratio: 1 / 1;
   border-radius: 4px;
-  border: 1px solid color-mix(in srgb, var(--line), #0f172a 12%);
+  border: 1px solid color-mix(in srgb, var(--line), #0f172a 16%);
   box-shadow:
     inset 0 1px 0 color-mix(in srgb, #fff, transparent 68%),
-    inset 0 -1px 0 color-mix(in srgb, #0f172a, transparent 72%);
+    inset 0 -1px 0 color-mix(in srgb, #0f172a, transparent 74%);
+}
+
+.graph-context-cube-grid-dense .graph-context-cube {
+  border-radius: 2px;
+  border-color: color-mix(in srgb, var(--line), #0f172a 24%);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff, transparent 78%);
 }
 
 .graph-context-legend {
@@ -2999,8 +3038,8 @@ button:disabled {
   padding: 6px 8px;
   background: color-mix(in srgb, var(--surface), var(--surface-alt) 16%);
   display: grid;
-  grid-template-columns: auto auto 1fr;
-  align-items: center;
+  grid-template-columns: auto minmax(132px, 220px) minmax(0, 1fr);
+  align-items: start;
   gap: 8px;
 }
 
@@ -3020,6 +3059,14 @@ button:disabled {
   font-size: 12px;
   font-weight: 700;
   color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.graph-context-legend-row > .meta {
+  min-width: 0;
+  line-height: 1.34;
 }
 
 .graph-count-grid {
@@ -3701,9 +3748,103 @@ button:disabled {
   font-size: 12px;
 }
 
-.codex-chat-session-select {
+.codex-chat-session-trigger {
   flex: 1;
   min-width: 0;
+  width: 100%;
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 16%);
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--text);
+  text-align: left;
+}
+
+.codex-chat-session-trigger[data-state="open"] {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 35%);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand), transparent 82%);
+}
+
+.codex-chat-session-trigger[data-disabled] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.codex-chat-session-trigger-icon {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
+}
+
+.codex-chat-session-content {
+  z-index: 1405;
+  min-width: var(--radix-select-trigger-width);
+  max-width: min(420px, 92vw);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 12%);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.codex-chat-session-viewport {
+  max-height: 320px;
+  overflow: auto;
+  padding: 6px;
+}
+
+.codex-chat-session-item {
+  position: relative;
+  border-radius: 10px;
+  padding: 8px 34px 8px 10px;
+  display: grid;
+  gap: 3px;
+  cursor: pointer;
+  outline: none;
+}
+
+.codex-chat-session-item[data-highlighted] {
+  background: color-mix(in srgb, var(--brand), var(--surface) 88%);
+}
+
+.codex-chat-session-item[data-state="checked"] {
+  background: color-mix(in srgb, var(--brand), var(--surface) 86%);
+}
+
+.codex-chat-session-item-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.codex-chat-session-item-meta {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.2;
+}
+
+.codex-chat-session-item-indicator {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 14px;
+  height: 14px;
+  color: var(--brand-strong);
+}
+
+.codex-chat-session-empty {
+  padding: 10px;
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .codex-chat-session-meta {
@@ -3923,7 +4064,7 @@ button:disabled {
     display: none;
   }
 
-  .codex-chat-session-select {
+  .codex-chat-session-trigger {
     width: 100%;
   }
 
@@ -4232,6 +4373,7 @@ button:disabled {
 
 [data-theme="dark"] .graph-stat,
 [data-theme="dark"] .graph-context-metric,
+[data-theme="dark"] .graph-context-cube-block,
 [data-theme="dark"] .graph-context-legend-row,
 [data-theme="dark"] .graph-connected-row,
 [data-theme="dark"] .graph-evidence-item,
@@ -4249,6 +4391,11 @@ button:disabled {
   box-shadow:
     inset 0 1px 0 rgba(226, 232, 240, 0.2),
     inset 0 -1px 0 rgba(2, 8, 20, 0.55);
+}
+
+[data-theme="dark"] .graph-context-cube-grid-dense .graph-context-cube {
+  border-color: #31507f;
+  box-shadow: inset 0 1px 0 rgba(226, 232, 240, 0.12);
 }
 
 [data-theme="dark"] .graph-context-legend-swatch-empty {
@@ -4634,6 +4781,16 @@ textarea {
     max-width: 100%;
   }
 
+  .project-chat-policy-inline {
+    grid-template-columns: 1fr;
+    gap: 6px;
+    align-items: stretch;
+  }
+
+  .project-chat-policy-controls {
+    grid-template-columns: 1fr;
+  }
+
   .project-item.open {
     display: block;
   }
@@ -4662,6 +4819,41 @@ textarea {
   .graph-context-cube-grid,
   .graph-context-cube-grid-entities {
     grid-template-columns: repeat(12, minmax(0, 1fr));
+  }
+
+  .graph-context-cube-grid-dense {
+    grid-template-columns: repeat(20, minmax(0, 1fr));
+  }
+
+  .graph-context-cube-grid-entities.graph-context-cube-grid-dense {
+    grid-template-columns: repeat(18, minmax(0, 1fr));
+  }
+
+  .graph-context-legend-row {
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas:
+      "swatch label"
+      ". meta";
+    row-gap: 4px;
+  }
+
+  .graph-context-legend-swatch {
+    grid-area: swatch;
+    margin-top: 2px;
+  }
+
+  .graph-context-legend-label {
+    grid-area: label;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    line-height: 1.25;
+  }
+
+  .graph-context-legend-row > .meta {
+    grid-area: meta;
+    font-size: 11px;
+    line-height: 1.36;
   }
 
   .graph-viz-shell {

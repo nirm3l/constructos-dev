@@ -29,7 +29,7 @@ from .contracts import (
 )
 from .models import Note, NoteGroup, Notification, Project, ProjectRule, SavedView, Specification, StoredEvent, Task, TaskGroup
 from .settings import DEFAULT_STATUSES
-from .vector_store import project_embedding_index_status
+from .vector_store import project_embedding_index_snapshot
 
 
 def to_iso_utc(value: datetime | None) -> str | None:
@@ -484,11 +484,13 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
     project = db.get(Project, project_id)
     if project and not project.is_deleted:
         created_by = load_created_by(db, "Project", project.id)
-        index_status = project_embedding_index_status(
+        index_snapshot = project_embedding_index_snapshot(
             db,
             project_id=project.id,
             embedding_enabled=bool(project.embedding_enabled),
             embedding_model=project.embedding_model,
+            chat_index_mode=getattr(project, "chat_index_mode", None),
+            chat_attachment_ingestion_mode=getattr(project, "chat_attachment_ingestion_mode", None),
         )
         return {
             "id": project.id,
@@ -506,7 +508,11 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
             "chat_attachment_ingestion_mode": str(
                 project.chat_attachment_ingestion_mode or "METADATA_ONLY"
             ),
-            "embedding_index_status": index_status,
+            "embedding_index_status": str(index_snapshot.get("status") or "not_indexed"),
+            "embedding_index_progress_pct": index_snapshot.get("progress_pct"),
+            "embedding_indexed_entities": int(index_snapshot.get("indexed_entities") or 0),
+            "embedding_index_expected_entities": int(index_snapshot.get("expected_entities") or 0),
+            "embedding_indexed_chunks": int(index_snapshot.get("indexed_chunks") or 0),
             "created_by": created_by,
             "created_at": to_iso_utc(project.created_at),
             "updated_at": to_iso_utc(project.updated_at),
@@ -520,11 +526,13 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
     if not state or state.get("is_deleted"):
         return None
     created_by = str(state.get("created_by") or "") or load_created_by(db, "Project", project_id)
-    index_status = project_embedding_index_status(
+    index_snapshot = project_embedding_index_snapshot(
         db,
         project_id=project_id,
         embedding_enabled=bool(state.get("embedding_enabled", False)),
         embedding_model=state.get("embedding_model"),
+        chat_index_mode=state.get("chat_index_mode"),
+        chat_attachment_ingestion_mode=state.get("chat_attachment_ingestion_mode"),
     )
     return {
         "id": project_id,
@@ -542,7 +550,11 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
         "chat_attachment_ingestion_mode": str(
             state.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
         ),
-        "embedding_index_status": index_status,
+        "embedding_index_status": str(index_snapshot.get("status") or "not_indexed"),
+        "embedding_index_progress_pct": index_snapshot.get("progress_pct"),
+        "embedding_indexed_entities": int(index_snapshot.get("indexed_entities") or 0),
+        "embedding_index_expected_entities": int(index_snapshot.get("expected_entities") or 0),
+        "embedding_indexed_chunks": int(index_snapshot.get("indexed_chunks") or 0),
         "created_by": created_by,
         "created_at": None,
         "updated_at": None,

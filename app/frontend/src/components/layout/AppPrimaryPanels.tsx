@@ -178,6 +178,10 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             setEditProjectEmbeddingModel: state.setEditProjectEmbeddingModel,
             editProjectContextPackEvidenceTopKText: state.editProjectContextPackEvidenceTopKText,
             setEditProjectContextPackEvidenceTopKText: state.setEditProjectContextPackEvidenceTopKText,
+            editProjectChatIndexMode: state.editProjectChatIndexMode,
+            setEditProjectChatIndexMode: state.setEditProjectChatIndexMode,
+            editProjectChatAttachmentIngestionMode: state.editProjectChatAttachmentIngestionMode,
+            setEditProjectChatAttachmentIngestionMode: state.setEditProjectChatAttachmentIngestionMode,
             editProjectMemberIds: state.editProjectMemberIds,
             toggleEditProjectMember: state.toggleEditProjectMember,
             selectedProjectCreator: state.selectedProjectCreator,
@@ -193,6 +197,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           userId={state.userId}
           selectedProjectId={state.selectedProjectId}
           selectedProjectName={state.selectedProject?.name || ''}
+          selectedProjectChatIndexMode={state.selectedProject?.chat_index_mode}
+          selectedProjectChatAttachmentIngestionMode={state.selectedProject?.chat_attachment_ingestion_mode}
           overviewQuery={state.projectGraphOverview}
           contextPackQuery={state.projectGraphContextPack}
           subgraphQuery={state.projectGraphSubgraph}

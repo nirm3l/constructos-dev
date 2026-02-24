@@ -106,7 +106,13 @@ export type Project = {
   embedding_enabled: boolean
   embedding_model: string | null
   context_pack_evidence_top_k: number | null
+  chat_index_mode: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR' | string
+  chat_attachment_ingestion_mode: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT' | string
   embedding_index_status: 'not_indexed' | 'indexing' | 'ready' | 'stale'
+  embedding_index_progress_pct: number | null
+  embedding_indexed_entities: number
+  embedding_index_expected_entities: number
+  embedding_indexed_chunks: number
   created_by: string
   created_at: string | null
   updated_at: string | null
@@ -189,6 +195,8 @@ export type ProjectFromTemplatePreviewResponse = {
     embedding_enabled: boolean
     embedding_model: string | null
     context_pack_evidence_top_k: number | null
+    chat_index_mode: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR' | string
+    chat_attachment_ingestion_mode: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT' | string
   }
   binding_preview: {
     workspace_id: string

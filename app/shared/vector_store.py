@@ -11,12 +11,13 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from .observability import incr, observe
 from .settings import (
     ALLOWED_EMBEDDING_MODELS,
+    CHAT_VECTOR_RETENTION_MODE,
     DEFAULT_EMBEDDING_MODEL,
     EMBEDDING_PROVIDER,
     OLLAMA_BASE_URL,
@@ -26,13 +27,13 @@ from .settings import (
 )
 from .chat_indexing import (
     CHAT_ATTACHMENT_INGESTION_FULL_TEXT,
-    CHAT_ATTACHMENT_INGESTION_FULL_TEXT_OCR,
     CHAT_ATTACHMENT_INGESTION_METADATA_ONLY,
     CHAT_ATTACHMENT_INGESTION_OFF,
     CHAT_INDEX_MODE_KG_AND_VECTOR,
     CHAT_INDEX_MODE_VECTOR_ONLY,
     normalize_chat_attachment_ingestion_mode,
     normalize_chat_index_mode,
+    project_chat_indexing_policy,
 )
 
 _WORD_RE = re.compile(r"\S+")
@@ -308,14 +309,12 @@ def _entity_state_sources(entity_type: str, state: dict[str, Any]) -> list[tuple
             if metadata_parts and ingestion_mode in {
                 CHAT_ATTACHMENT_INGESTION_METADATA_ONLY,
                 CHAT_ATTACHMENT_INGESTION_FULL_TEXT,
-                CHAT_ATTACHMENT_INGESTION_FULL_TEXT_OCR,
             }:
                 sources.append(("chat_attachment.metadata", "\n".join(metadata_parts)))
 
         extracted_text = str(state.get("extracted_text") or "").strip()
         if extracted_text and ingestion_mode in {
             CHAT_ATTACHMENT_INGESTION_FULL_TEXT,
-            CHAT_ATTACHMENT_INGESTION_FULL_TEXT_OCR,
         }:
             sources.append(("chat_attachment.text", extracted_text))
     return sources
@@ -363,6 +362,108 @@ def purge_project_chunks(db: Session, *, project_id: str) -> int:
 
     result = db.execute(delete(VectorChunk).where(VectorChunk.project_id == project_id))
     return int(result.rowcount or 0)
+
+
+def _retention_mode_purges(retention_mode: str | None) -> bool:
+    normalized = str(retention_mode or "purge").strip().lower()
+    return normalized != "keep"
+
+
+def purge_project_chat_chunks(db: Session, *, project_id: str) -> int:
+    from .models import VectorChunk
+
+    result = db.execute(
+        delete(VectorChunk).where(
+            VectorChunk.project_id == project_id,
+            VectorChunk.entity_type.in_(("ChatMessage", "ChatAttachment")),
+        )
+    )
+    return int(result.rowcount or 0)
+
+
+def sync_project_chat_vector_chunks(
+    db: Session,
+    *,
+    project_id: str,
+    retention_mode: str | None = None,
+    runtime_override: ProjectEmbeddingRuntime | None = None,
+    policy_override: Any | None = None,
+) -> tuple[int, int]:
+    from .models import ChatAttachment, ChatMessage, Project
+
+    project = db.get(Project, project_id)
+    if project is None or bool(project.is_deleted):
+        return 0, purge_project_chat_chunks(db, project_id=project_id)
+
+    policy = policy_override or project_chat_indexing_policy(
+        chat_index_mode=getattr(project, "chat_index_mode", None),
+        chat_attachment_ingestion_mode=getattr(project, "chat_attachment_ingestion_mode", None),
+    )
+    runtime = runtime_override or resolve_project_embedding_runtime(db, project_id)
+    should_purge = _retention_mode_purges(retention_mode if retention_mode is not None else CHAT_VECTOR_RETENTION_MODE)
+
+    if not should_purge and (not runtime.enabled or not policy.vector_enabled):
+        return 0, 0
+
+    purged = purge_project_chat_chunks(db, project_id=project_id)
+    if not runtime.enabled or not policy.vector_enabled:
+        return 0, purged
+
+    indexed = 0
+    messages = db.execute(
+        select(ChatMessage).where(
+            ChatMessage.project_id == project_id,
+            ChatMessage.is_deleted == False,
+        )
+    ).scalars().all()
+    for message in messages:
+        indexed += index_entity_state(
+            db,
+            entity_type="ChatMessage",
+            entity_id=message.id,
+            state={
+                "workspace_id": message.workspace_id,
+                "project_id": message.project_id,
+                "role": message.role or "",
+                "content": message.content or "",
+                "is_deleted": bool(message.is_deleted),
+                "updated_at": message.updated_at,
+            },
+            force_reindex=True,
+            runtime_override=runtime,
+        )
+
+    if policy.attachment_ingestion_mode == CHAT_ATTACHMENT_INGESTION_OFF:
+        return indexed, purged
+
+    attachments = db.execute(
+        select(ChatAttachment).where(
+            ChatAttachment.project_id == project_id,
+            ChatAttachment.is_deleted == False,
+        )
+    ).scalars().all()
+    for attachment in attachments:
+        indexed += index_entity_state(
+            db,
+            entity_type="ChatAttachment",
+            entity_id=attachment.id,
+            state={
+                "workspace_id": attachment.workspace_id,
+                "project_id": attachment.project_id,
+                "path": attachment.path or "",
+                "name": attachment.name or "",
+                "mime_type": attachment.mime_type or "",
+                "size_bytes": attachment.size_bytes,
+                "extraction_status": attachment.extraction_status or "pending",
+                "extracted_text": attachment.extracted_text or "",
+                "chat_attachment_ingestion_mode": policy.attachment_ingestion_mode,
+                "is_deleted": bool(attachment.is_deleted),
+                "updated_at": attachment.updated_at,
+            },
+            force_reindex=True,
+            runtime_override=runtime,
+        )
+    return indexed, purged
 
 
 def index_entity_state(
@@ -538,6 +639,8 @@ def maybe_reindex_project(
     project_id: str,
     embedding_enabled: bool | None = None,
     embedding_model: str | None = None,
+    chat_index_mode: str | None = None,
+    chat_attachment_ingestion_mode: str | None = None,
 ) -> int:
     from .models import Project
 
@@ -554,20 +657,34 @@ def maybe_reindex_project(
     try:
         if runtime_override is None:
             return reindex_project(db, project_id=project_id)
-        return reindex_project_with_runtime(db, project_id=project_id, runtime=runtime_override)
+        return reindex_project_with_runtime(
+            db,
+            project_id=project_id,
+            runtime=runtime_override,
+            chat_index_mode=chat_index_mode,
+            chat_attachment_ingestion_mode=chat_attachment_ingestion_mode,
+        )
     except Exception as exc:
         logger.warning("Vector project reindex failed project_id=%s err=%s", project_id, exc)
         return 0
 
 
-def reindex_project_with_runtime(db: Session, *, project_id: str, runtime: ProjectEmbeddingRuntime) -> int:
-    from .models import ChatAttachment, ChatMessage, Note, Project, ProjectRule, Specification, Task
+def reindex_project_with_runtime(
+    db: Session,
+    *,
+    project_id: str,
+    runtime: ProjectEmbeddingRuntime,
+    chat_index_mode: str | None = None,
+    chat_attachment_ingestion_mode: str | None = None,
+) -> int:
+    from .models import Note, Project, ProjectRule, Specification, Task
 
     project = db.get(Project, project_id)
     if project is None or project.is_deleted:
         purge_project_chunks(db, project_id=project_id)
         return 0
     if not runtime.enabled:
+        purge_project_chunks(db, project_id=project_id)
         return 0
 
     purge_project_chunks(db, project_id=project_id)
@@ -671,61 +788,23 @@ def reindex_project_with_runtime(db: Session, *, project_id: str, runtime: Proje
             runtime_override=runtime,
         )
 
-    chat_index_mode = normalize_chat_index_mode(getattr(project, "chat_index_mode", None))
-    chat_attachment_ingestion_mode = normalize_chat_attachment_ingestion_mode(
-        getattr(project, "chat_attachment_ingestion_mode", None)
+    policy = project_chat_indexing_policy(
+        chat_index_mode=(getattr(project, "chat_index_mode", None) if chat_index_mode is None else chat_index_mode),
+        chat_attachment_ingestion_mode=(
+            getattr(project, "chat_attachment_ingestion_mode", None)
+            if chat_attachment_ingestion_mode is None
+            else chat_attachment_ingestion_mode
+        ),
     )
-    if chat_index_mode in {CHAT_INDEX_MODE_VECTOR_ONLY, CHAT_INDEX_MODE_KG_AND_VECTOR}:
-        messages = db.execute(
-            select(ChatMessage).where(
-                ChatMessage.project_id == project_id,
-                ChatMessage.is_deleted == False,
-            )
-        ).scalars().all()
-        for message in messages:
-            total += index_entity_state(
-                db,
-                entity_type="ChatMessage",
-                entity_id=message.id,
-                state={
-                    "workspace_id": message.workspace_id,
-                    "project_id": message.project_id,
-                    "role": message.role or "",
-                    "content": message.content or "",
-                    "is_deleted": bool(message.is_deleted),
-                    "updated_at": message.updated_at,
-                },
-                force_reindex=True,
-                runtime_override=runtime,
-            )
-
-        attachments = db.execute(
-            select(ChatAttachment).where(
-                ChatAttachment.project_id == project_id,
-                ChatAttachment.is_deleted == False,
-            )
-        ).scalars().all()
-        for attachment in attachments:
-            total += index_entity_state(
-                db,
-                entity_type="ChatAttachment",
-                entity_id=attachment.id,
-                state={
-                    "workspace_id": attachment.workspace_id,
-                    "project_id": attachment.project_id,
-                    "path": attachment.path or "",
-                    "name": attachment.name or "",
-                    "mime_type": attachment.mime_type or "",
-                    "size_bytes": attachment.size_bytes,
-                    "extraction_status": attachment.extraction_status or "pending",
-                    "extracted_text": attachment.extracted_text or "",
-                    "chat_attachment_ingestion_mode": chat_attachment_ingestion_mode,
-                    "is_deleted": bool(attachment.is_deleted),
-                    "updated_at": attachment.updated_at,
-                },
-                force_reindex=True,
-                runtime_override=runtime,
-            )
+    if policy.index_mode in {CHAT_INDEX_MODE_VECTOR_ONLY, CHAT_INDEX_MODE_KG_AND_VECTOR}:
+        chat_indexed, _ = sync_project_chat_vector_chunks(
+            db,
+            project_id=project_id,
+            retention_mode="purge",
+            runtime_override=runtime,
+            policy_override=policy,
+        )
+        total += chat_indexed
 
     return total
 
@@ -737,25 +816,176 @@ def project_embedding_index_status(
     embedding_enabled: bool | None = None,
     embedding_model: str | None = None,
 ) -> str:
+    snapshot = project_embedding_index_snapshot(
+        db,
+        project_id=project_id,
+        embedding_enabled=embedding_enabled,
+        embedding_model=embedding_model,
+    )
+    return str(snapshot.get("status") or "not_indexed")
+
+
+def _non_empty_text_column(column) -> Any:
+    return func.length(func.trim(func.coalesce(column, ""))) > 0
+
+
+def _project_indexable_entity_count(
+    db: Session,
+    *,
+    project_id: str,
+    policy,
+) -> int:
+    from .models import ChatAttachment, ChatMessage, Note, ProjectRule, Specification, Task
+
+    total = 0
+
+    task_count = db.execute(
+        select(func.count(Task.id)).where(
+            Task.project_id == project_id,
+            Task.is_deleted == False,
+            Task.archived == False,
+            or_(_non_empty_text_column(Task.title), _non_empty_text_column(Task.description)),
+        )
+    ).scalar_one()
+    total += int(task_count or 0)
+
+    note_count = db.execute(
+        select(func.count(Note.id)).where(
+            Note.project_id == project_id,
+            Note.is_deleted == False,
+            Note.archived == False,
+            or_(_non_empty_text_column(Note.title), _non_empty_text_column(Note.body)),
+        )
+    ).scalar_one()
+    total += int(note_count or 0)
+
+    specification_count = db.execute(
+        select(func.count(Specification.id)).where(
+            Specification.project_id == project_id,
+            Specification.is_deleted == False,
+            Specification.archived == False,
+            or_(_non_empty_text_column(Specification.title), _non_empty_text_column(Specification.body)),
+        )
+    ).scalar_one()
+    total += int(specification_count or 0)
+
+    rule_count = db.execute(
+        select(func.count(ProjectRule.id)).where(
+            ProjectRule.project_id == project_id,
+            ProjectRule.is_deleted == False,
+            or_(_non_empty_text_column(ProjectRule.title), _non_empty_text_column(ProjectRule.body)),
+        )
+    ).scalar_one()
+    total += int(rule_count or 0)
+
+    if not bool(getattr(policy, "vector_enabled", False)):
+        return total
+
+    message_count = db.execute(
+        select(func.count(ChatMessage.id)).where(
+            ChatMessage.project_id == project_id,
+            ChatMessage.is_deleted == False,
+            _non_empty_text_column(ChatMessage.content),
+        )
+    ).scalar_one()
+    total += int(message_count or 0)
+
+    attachment_mode = str(getattr(policy, "attachment_ingestion_mode", "") or "").strip().upper()
+    if attachment_mode == CHAT_ATTACHMENT_INGESTION_OFF:
+        return total
+
+    attachment_metadata_present = or_(
+        _non_empty_text_column(ChatAttachment.path),
+        _non_empty_text_column(ChatAttachment.name),
+        _non_empty_text_column(ChatAttachment.mime_type),
+        ChatAttachment.size_bytes.is_not(None),
+    )
+    attachment_indexable = attachment_metadata_present
+    if attachment_mode == CHAT_ATTACHMENT_INGESTION_FULL_TEXT:
+        attachment_indexable = or_(attachment_metadata_present, _non_empty_text_column(ChatAttachment.extracted_text))
+
+    attachment_count = db.execute(
+        select(func.count(ChatAttachment.id)).where(
+            ChatAttachment.project_id == project_id,
+            ChatAttachment.is_deleted == False,
+            attachment_indexable,
+        )
+    ).scalar_one()
+    total += int(attachment_count or 0)
+    return total
+
+
+def project_embedding_index_snapshot(
+    db: Session,
+    *,
+    project_id: str,
+    embedding_enabled: bool | None = None,
+    embedding_model: str | None = None,
+    chat_index_mode: str | None = None,
+    chat_attachment_ingestion_mode: str | None = None,
+) -> dict[str, Any]:
     from .models import Project, VectorChunk
 
     enabled = embedding_enabled
     model = embedding_model
-    if enabled is None or model is None:
+    chat_mode = chat_index_mode
+    attachment_mode = chat_attachment_ingestion_mode
+    if enabled is None or model is None or chat_mode is None or attachment_mode is None:
         project = db.get(Project, project_id)
         if project is None or project.is_deleted:
-            return "not_indexed"
+            return {
+                "status": "not_indexed",
+                "progress_pct": None,
+                "indexed_entities": 0,
+                "expected_entities": 0,
+                "indexed_chunks": 0,
+            }
         if enabled is None:
             enabled = bool(project.embedding_enabled)
         if model is None:
             model = project.embedding_model
+        if chat_mode is None:
+            chat_mode = getattr(project, "chat_index_mode", None)
+        if attachment_mode is None:
+            attachment_mode = getattr(project, "chat_attachment_ingestion_mode", None)
 
     if not bool(enabled):
-        return "not_indexed"
+        return {
+            "status": "not_indexed",
+            "progress_pct": None,
+            "indexed_entities": 0,
+            "expected_entities": 0,
+            "indexed_chunks": 0,
+        }
     if not vector_store_enabled():
-        return "not_indexed"
+        return {
+            "status": "not_indexed",
+            "progress_pct": None,
+            "indexed_entities": 0,
+            "expected_entities": 0,
+            "indexed_chunks": 0,
+        }
 
     expected_model = normalize_embedding_model(model)
+    policy = project_chat_indexing_policy(
+        chat_index_mode=chat_mode,
+        chat_attachment_ingestion_mode=attachment_mode,
+    )
+    expected_entities = _project_indexable_entity_count(db, project_id=project_id, policy=policy)
+    indexed_entities = int(
+        db.execute(
+            select(func.count()).select_from(
+                select(VectorChunk.entity_type, VectorChunk.entity_id)
+                .where(
+                    VectorChunk.project_id == project_id,
+                    VectorChunk.is_deleted == False,
+                )
+                .distinct()
+                .subquery()
+            )
+        ).scalar_one()
+        or 0
+    )
     stats = db.execute(
         select(
             func.count(VectorChunk.id).label("chunk_count"),
@@ -768,19 +998,35 @@ def project_embedding_index_status(
         )
     ).mappings().first()
     if not stats:
-        return "indexing"
-
+        stats = {}
     chunk_count = int(stats.get("chunk_count") or 0)
-    if chunk_count <= 0:
-        return "indexing"
 
     model_count = int(stats.get("model_count") or 0)
     max_model = str(stats.get("max_model") or "").strip()
     min_model = str(stats.get("min_model") or "").strip()
+    status = "ready"
     if model_count > 1:
-        return "stale"
-    if max_model and min_model and max_model != min_model:
-        return "stale"
-    if expected_model and max_model and normalize_embedding_model(max_model) != expected_model:
-        return "stale"
-    return "ready"
+        status = "stale"
+    elif max_model and min_model and max_model != min_model:
+        status = "stale"
+    elif expected_model and max_model and normalize_embedding_model(max_model) != expected_model:
+        status = "stale"
+    elif expected_entities <= 0:
+        status = "ready"
+    elif chunk_count <= 0 or indexed_entities < expected_entities:
+        status = "indexing"
+
+    progress_pct: int | None = None
+    if expected_entities <= 0:
+        progress_pct = 100
+    else:
+        ratio = min(1.0, max(0.0, float(indexed_entities) / float(expected_entities)))
+        progress_pct = int(round(ratio * 100))
+
+    return {
+        "status": status,
+        "progress_pct": progress_pct,
+        "indexed_entities": indexed_entities,
+        "expected_entities": expected_entities,
+        "indexed_chunks": chunk_count,
+    }

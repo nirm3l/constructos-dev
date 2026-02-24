@@ -49,6 +49,8 @@ def create_project_from_template(
         embedding_enabled=payload.embedding_enabled,
         embedding_model=payload.embedding_model,
         context_pack_evidence_top_k=payload.context_pack_evidence_top_k,
+        chat_index_mode=payload.chat_index_mode,
+        chat_attachment_ingestion_mode=payload.chat_attachment_ingestion_mode,
         parameters=payload.parameters,
         command_id=command_id,
     )
@@ -71,5 +73,7 @@ def preview_project_from_template(
         embedding_enabled=payload.embedding_enabled,
         embedding_model=payload.embedding_model,
         context_pack_evidence_top_k=payload.context_pack_evidence_top_k,
+        chat_index_mode=payload.chat_index_mode,
+        chat_attachment_ingestion_mode=payload.chat_attachment_ingestion_mode,
         parameters=payload.parameters,
     )

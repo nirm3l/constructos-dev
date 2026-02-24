@@ -1,4 +1,5 @@
 import React from 'react'
+import * as Select from '@radix-ui/react-select'
 import { updateChatSessionContext } from '../../api'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import type { AttachmentRef } from '../../types'
@@ -53,6 +54,34 @@ function dedupeAttachmentRefs(refs: AttachmentRef[]): AttachmentRef[] {
     out.push(ref)
   }
   return out
+}
+
+function resolveSessionLastMessageAtMs(session: any): number {
+  const turns = Array.isArray(session?.turns) ? session.turns : []
+  let lastTurnAt = 0
+  for (const turn of turns) {
+    const createdAt = Number(turn?.createdAt)
+    if (Number.isFinite(createdAt) && createdAt > lastTurnAt) lastTurnAt = createdAt
+  }
+  return lastTurnAt
+}
+
+function resolveSessionSortAtMs(session: any): number {
+  const lastMessageAtMs = resolveSessionLastMessageAtMs(session)
+  if (lastMessageAtMs > 0) return lastMessageAtMs
+  const updatedAt = Number(session?.updatedAt)
+  if (Number.isFinite(updatedAt) && updatedAt > 0) return Math.floor(updatedAt)
+  return 0
+}
+
+function formatSessionTimestamp(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return 'No messages yet'
+  return new Date(value).toLocaleString(undefined, {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 export function CodexChatDrawer({ state }: { state: any }) {
@@ -124,16 +153,19 @@ export function CodexChatDrawer({ state }: { state: any }) {
     : Array.isArray(state.codexChatSessions)
       ? [...state.codexChatSessions].filter((session: any) => String(session?.projectId || '') === String(state.codexChatProjectId || ''))
       : []
-  sessions.sort((a: any, b: any) => (Number(b?.updatedAt) || 0) - (Number(a?.updatedAt) || 0))
+  sessions.sort((a: any, b: any) => resolveSessionSortAtMs(b) - resolveSessionSortAtMs(a))
   const activeSession = sessions.find((session: any) => session.id === state.codexChatActiveSessionId) ?? null
-  const activeSessionUpdatedAt = activeSession?.updatedAt
-    ? new Date(activeSession.updatedAt).toLocaleString(undefined, {
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    })
-    : null
+  const activeSessionUpdatedAtRaw = activeSession ? resolveSessionLastMessageAtMs(activeSession) : 0
+  const activeSessionUpdatedAt = activeSessionUpdatedAtRaw > 0 ? formatSessionTimestamp(activeSessionUpdatedAtRaw) : null
+  const sessionOptions = sessions.map((session: any) => {
+    const lastMessageAtMs = resolveSessionLastMessageAtMs(session)
+    const lastMessageLabel = formatSessionTimestamp(lastMessageAtMs)
+    return {
+      id: String(session?.id || ''),
+      title: String(session?.title || 'Session'),
+      lastMessageLabel,
+    }
+  })
   const hasMessages = state.codexChatTurns.length > 0
   const availableMcpServers = (() => {
     if (!Array.isArray(state.bootstrap.data?.agent_chat_available_mcp_servers)) return []
@@ -492,18 +524,45 @@ export function CodexChatDrawer({ state }: { state: any }) {
         </div>
         <div className="codex-chat-session-row">
           <label className="meta codex-chat-session-label" htmlFor="codex-chat-session-select">Session</label>
-          <select
-            className="codex-chat-session-select"
-            id="codex-chat-session-select"
+          <Select.Root
             value={state.codexChatActiveSessionId}
-            onChange={(e) => state.setCodexChatActiveSessionId(e.target.value)}
+            onValueChange={(value) => state.setCodexChatActiveSessionId(value)}
             disabled={state.runAgentChatMutation.isPending || sessions.length === 0}
           >
-            {sessions.length === 0 && <option value="">No sessions</option>}
-            {sessions.map((session: any) => (
-              <option key={session.id} value={session.id}>{session.title}</option>
-            ))}
-          </select>
+            <Select.Trigger
+              id="codex-chat-session-select"
+              className="codex-chat-session-trigger"
+              aria-label="Session"
+            >
+              <Select.Value placeholder="No sessions" />
+              <Select.Icon asChild>
+                <span className="codex-chat-session-trigger-icon" aria-hidden="true">
+                  <Icon path="M6 9l6 6 6-6" />
+                </span>
+              </Select.Icon>
+            </Select.Trigger>
+            <Select.Portal>
+              <Select.Content className="codex-chat-session-content" position="popper" sideOffset={6}>
+                <Select.Viewport className="codex-chat-session-viewport">
+                  {sessionOptions.length === 0 ? (
+                    <div className="codex-chat-session-empty">No sessions</div>
+                  ) : (
+                    sessionOptions.map((session) => (
+                      <Select.Item key={session.id} value={session.id} className="codex-chat-session-item">
+                        <Select.ItemText>
+                          <span className="codex-chat-session-item-title">{session.title}</span>
+                        </Select.ItemText>
+                        <span className="codex-chat-session-item-meta">{session.lastMessageLabel}</span>
+                        <Select.ItemIndicator className="codex-chat-session-item-indicator">
+                          <Icon path="M5 13l4 4L19 7" />
+                        </Select.ItemIndicator>
+                      </Select.Item>
+                    ))
+                  )}
+                </Select.Viewport>
+              </Select.Content>
+            </Select.Portal>
+          </Select.Root>
           <button
             className="action-icon"
             onClick={() => {

@@ -29,6 +29,7 @@ _GRAPH_FILTER_INCLUDE = (
     r"Note::.*",
     r"Specification::.*",
     r"ProjectRule::.*",
+    r"ChatSession::.*",
 )
 _VECTOR_FILTER_INCLUDE = (
     r"Project::.*",
@@ -36,6 +37,7 @@ _VECTOR_FILTER_INCLUDE = (
     r"Note::.*",
     r"Specification::.*",
     r"ProjectRule::.*",
+    r"ChatSession::.*",
 )
 
 

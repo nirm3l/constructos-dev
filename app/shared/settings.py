@@ -125,18 +125,20 @@ GRAPH_RAG_SLO_EMBED_INGEST_P95_MS = _env_int("GRAPH_RAG_SLO_EMBED_INGEST_P95_MS"
 GRAPH_RAG_SLO_EMBED_CONTEXT_ERROR_RATE_PCT = _env_float("GRAPH_RAG_SLO_EMBED_CONTEXT_ERROR_RATE_PCT", 0.1)
 VECTOR_STORE_ENABLED = _env_bool("VECTOR_STORE_ENABLED", False)
 CONTEXT_PACK_EVIDENCE_TOP_K = _env_int("CONTEXT_PACK_EVIDENCE_TOP_K", 10)
+CHAT_VECTOR_RETENTION_MODE = os.getenv("CHAT_VECTOR_RETENTION_MODE", "purge").strip().lower() or "purge"
+CHAT_GRAPH_RETENTION_MODE = os.getenv("CHAT_GRAPH_RETENTION_MODE", "purge").strip().lower() or "purge"
 
 PERSISTENT_SUBSCRIPTION_READ_MODEL_GROUP = (
     os.getenv("PERSISTENT_SUBSCRIPTION_READ_MODEL_GROUP", "task-management-read-model").strip()
     or "task-management-read-model"
 )
 PERSISTENT_SUBSCRIPTION_GRAPH_GROUP = (
-    os.getenv("PERSISTENT_SUBSCRIPTION_GRAPH_GROUP", "task-management-graph").strip()
-    or "task-management-graph"
+    os.getenv("PERSISTENT_SUBSCRIPTION_GRAPH_GROUP", "task-management-graph-v2").strip()
+    or "task-management-graph-v2"
 )
 PERSISTENT_SUBSCRIPTION_VECTOR_GROUP = (
-    os.getenv("PERSISTENT_SUBSCRIPTION_VECTOR_GROUP", "task-management-vector").strip()
-    or "task-management-vector"
+    os.getenv("PERSISTENT_SUBSCRIPTION_VECTOR_GROUP", "task-management-vector-v2").strip()
+    or "task-management-vector-v2"
 )
 PERSISTENT_SUBSCRIPTION_EVENT_BUFFER_SIZE = _env_int("PERSISTENT_SUBSCRIPTION_EVENT_BUFFER_SIZE", 150)
 PERSISTENT_SUBSCRIPTION_MAX_ACK_BATCH_SIZE = _env_int("PERSISTENT_SUBSCRIPTION_MAX_ACK_BATCH_SIZE", 50)

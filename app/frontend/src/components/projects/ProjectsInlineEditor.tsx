@@ -49,6 +49,10 @@ export function ProjectsInlineEditor({
   setEditProjectEmbeddingModel,
   editProjectContextPackEvidenceTopKText,
   setEditProjectContextPackEvidenceTopKText,
+  editProjectChatIndexMode,
+  setEditProjectChatIndexMode,
+  editProjectChatAttachmentIngestionMode,
+  setEditProjectChatAttachmentIngestionMode,
   embeddingAllowedModels,
   embeddingDefaultModel,
   vectorStoreEnabled,
@@ -115,6 +119,12 @@ export function ProjectsInlineEditor({
   setEditProjectEmbeddingModel: React.Dispatch<React.SetStateAction<string>>
   editProjectContextPackEvidenceTopKText: string
   setEditProjectContextPackEvidenceTopKText: React.Dispatch<React.SetStateAction<string>>
+  editProjectChatIndexMode: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'
+  setEditProjectChatIndexMode: React.Dispatch<React.SetStateAction<'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'>>
+  editProjectChatAttachmentIngestionMode: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
+  setEditProjectChatAttachmentIngestionMode: React.Dispatch<
+    React.SetStateAction<'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'>
+  >
   embeddingAllowedModels: string[]
   embeddingDefaultModel: string
   vectorStoreEnabled: boolean
@@ -198,7 +208,41 @@ export function ProjectsInlineEditor({
         : embeddingStatus === 'stale'
           ? 'Stale'
           : 'Not indexed'
+  const embeddingIndexedEntities = Math.max(0, Number(selectedProject.embedding_indexed_entities ?? 0))
+  const embeddingExpectedEntities = Math.max(0, Number(selectedProject.embedding_index_expected_entities ?? 0))
+  const embeddingIndexedChunks = Math.max(0, Number(selectedProject.embedding_indexed_chunks ?? 0))
+  const rawEmbeddingProgressPct = selectedProject.embedding_index_progress_pct
+  const embeddingProgressPct =
+    typeof rawEmbeddingProgressPct === 'number' && Number.isFinite(rawEmbeddingProgressPct)
+      ? Math.max(0, Math.min(100, Math.round(rawEmbeddingProgressPct)))
+      : null
+  const embeddingStatusBadgeLabel = React.useMemo(() => {
+    let label = `Index: ${embeddingStatusLabel}`
+    if (embeddingStatus !== 'indexing') return label
+    if (embeddingExpectedEntities > 0) {
+      const computedPct =
+        embeddingProgressPct == null
+          ? Math.round((embeddingIndexedEntities / embeddingExpectedEntities) * 100)
+          : embeddingProgressPct
+      label += ` ${embeddingIndexedEntities}/${embeddingExpectedEntities} (${Math.max(0, Math.min(100, computedPct))}%)`
+      return label
+    }
+    label += ` ${embeddingIndexedChunks} chunks`
+    return label
+  }, [
+    embeddingExpectedEntities,
+    embeddingIndexedChunks,
+    embeddingIndexedEntities,
+    embeddingProgressPct,
+    embeddingStatus,
+    embeddingStatusLabel,
+  ])
   const vectorAvailable = Boolean(vectorStoreEnabled)
+  const chatPolicyDisabled = !editProjectEmbeddingEnabled
+  const effectiveChatIndexMode: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR' = chatPolicyDisabled
+    ? 'OFF'
+    : editProjectChatIndexMode
+  const chatAttachmentDisabled = chatPolicyDisabled || effectiveChatIndexMode === 'OFF'
   const templateBinding = selectedProject.template_binding
   const [selectedProjectSkillId, setSelectedProjectSkillId] = React.useState<string | null>(null)
   const [skillImportSourceUrl, setSkillImportSourceUrl] = React.useState('')
@@ -478,6 +522,10 @@ export function ProjectsInlineEditor({
                 if (next && !String(editProjectEmbeddingModel || '').trim() && defaultModel) {
                   setEditProjectEmbeddingModel(defaultModel)
                 }
+                if (!next) {
+                  setEditProjectChatIndexMode('OFF')
+                  setEditProjectChatAttachmentIngestionMode('METADATA_ONLY')
+                }
               }}
             />
             <span>Embedding enabled</span>
@@ -493,7 +541,7 @@ export function ProjectsInlineEditor({
               </option>
             ))}
           </select>
-          <span className="badge">Index: {embeddingStatusLabel}</span>
+          <span className="badge">{embeddingStatusBadgeLabel}</span>
         </div>
         <label className="field-control" style={{ marginTop: 8 }}>
           <span className="field-label">Context pack evidence top K (optional override)</span>
@@ -520,6 +568,70 @@ export function ProjectsInlineEditor({
             Vector store is enabled globally. Enable embeddings for this project to use graph+vector retrieval.
           </div>
         ) : null}
+      </div>
+      <div className="field-control" style={{ marginBottom: 10 }}>
+        <div className="project-chat-policy-inline">
+          <span className="field-label">Chat indexing policy</span>
+          <div className="project-chat-policy-controls">
+            <label className="field-control project-chat-policy-select">
+              <span className="field-label">Messages</span>
+              <select
+                value={effectiveChatIndexMode}
+                disabled={chatPolicyDisabled}
+                onChange={(e) => {
+                  const next = e.target.value
+                  if (next === 'VECTOR_ONLY' || next === 'KG_AND_VECTOR') {
+                    setEditProjectChatIndexMode(next)
+                    return
+                  }
+                  setEditProjectChatIndexMode('OFF')
+                }}
+                aria-label="Chat message indexing mode"
+              >
+                <option value="OFF">OFF</option>
+                <option value="VECTOR_ONLY">VECTOR_ONLY</option>
+                <option value="KG_AND_VECTOR">KG_AND_VECTOR</option>
+              </select>
+            </label>
+            <label className="field-control project-chat-policy-select">
+              <span className="field-label">Attachments</span>
+              <select
+                value={editProjectChatAttachmentIngestionMode}
+                disabled={chatAttachmentDisabled}
+                onChange={(e) => {
+                  const next = e.target.value
+                  if (next === 'OFF' || next === 'FULL_TEXT') {
+                    setEditProjectChatAttachmentIngestionMode(next)
+                    return
+                  }
+                  setEditProjectChatAttachmentIngestionMode('METADATA_ONLY')
+                }}
+                aria-label="Chat attachment ingestion mode"
+              >
+                <option value="METADATA_ONLY">METADATA_ONLY</option>
+                <option value="OFF">OFF</option>
+                <option value="FULL_TEXT">FULL_TEXT</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        {chatPolicyDisabled ? (
+          <div className="meta" style={{ marginTop: 6 }}>
+            Enable embeddings to configure chat indexing. While embeddings are disabled, chat indexing mode is forced to OFF.
+          </div>
+        ) : effectiveChatIndexMode === 'OFF' ? (
+          <div className="meta" style={{ marginTop: 6 }}>
+            Chat history is excluded from Knowledge Graph and vector retrieval for this project.
+          </div>
+        ) : effectiveChatIndexMode === 'VECTOR_ONLY' ? (
+          <div className="meta" style={{ marginTop: 6 }}>
+            Chat history contributes to semantic vector search only, without graph relation extraction.
+          </div>
+        ) : (
+          <div className="meta" style={{ marginTop: 6 }}>
+            Chat history contributes to both Knowledge Graph relations and semantic vector retrieval.
+          </div>
+        )}
       </div>
       <div
         ref={rulesSectionRef}
@@ -1152,6 +1264,8 @@ export function ProjectsInlineEditor({
         contextLimitTokens={contextLimitTokensDefault > 0 ? contextLimitTokensDefault : undefined}
         activeChatProjectId={codexChatProjectId}
         activeChatTurns={codexChatTurns}
+        projectChatIndexMode={selectedProject.chat_index_mode}
+        projectChatAttachmentIngestionMode={selectedProject.chat_attachment_ingestion_mode}
       />
     </div>
   )

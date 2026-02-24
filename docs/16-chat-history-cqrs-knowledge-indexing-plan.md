@@ -35,7 +35,7 @@ Expected ranking of impact:
 
 Project-level indexing policy (default safe):
 - `chat_index_mode`: `OFF | VECTOR_ONLY | KG_AND_VECTOR` (default `OFF`).
-- `chat_attachment_ingestion_mode`: `OFF | METADATA_ONLY | FULL_TEXT | FULL_TEXT_OCR` (default `METADATA_ONLY`).
+- `chat_attachment_ingestion_mode`: `OFF | METADATA_ONLY | FULL_TEXT` (default `METADATA_ONLY`).
 - Optional retention:
   - `chat_retention_days` nullable (`null` means keep until explicit delete/archive policy).
 
@@ -269,11 +269,15 @@ Read side and bootstrap:
   - Knowledge graph projection now supports `ChatSession`, `ChatMessage`, `ChatAttachment`, and message-to-resource links.
   - Automatic chat-to-created-resource linking implemented via activity-log window detection after each chat run.
   - Chat attachment extraction snippets are persisted in chat attachment events for downstream retrieval use.
+  - Policy transition sync implemented:
+    - project chat policy updates now run chat-only vector sync/backfill/deindex,
+    - project chat policy updates now run chat graph backfill or purge.
+  - Retention/deindex strategy implemented via env switches:
+    - `CHAT_VECTOR_RETENTION_MODE=purge|keep`,
+    - `CHAT_GRAPH_RETENTION_MODE=purge|keep`.
 
 - Remaining:
-  - Explicit backfill jobs for historical chat reindexing/reprojection on policy transitions.
-  - Optional retention/deindex worker and policy-driven cleanup strategy.
-  - Frontend project settings UI controls for chat policy toggles.
+  - `import-local` endpoint for one-time browser localStorage migration (explicitly optional).
 - `app/shared/models.py`
 - `app/shared/serializers.py`
 - `app/shared/bootstrap.py`

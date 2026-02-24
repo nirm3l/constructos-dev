@@ -65,6 +65,8 @@ type GraphPackSourceUsage = {
   percent: number
 }
 
+const KG_PACK_TILE_COUNT = 360
+
 function estimateTokenCount(charCount: number): number {
   if (!Number.isFinite(charCount) || charCount <= 0) return 0
   return Math.max(1, Math.round(charCount / 4))
@@ -73,6 +75,36 @@ function estimateTokenCount(charCount: number): number {
 function countLines(value: string): number {
   if (!value.trim()) return 0
   return value.split(/\r?\n/).length
+}
+
+function normalizeChatIndexMode(mode: unknown): 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR' {
+  const normalized = String(mode || '').trim().toUpperCase()
+  if (normalized === 'VECTOR_ONLY' || normalized === 'KG_AND_VECTOR') return normalized
+  return 'OFF'
+}
+
+function normalizeChatAttachmentIngestionMode(mode: unknown): 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT' {
+  const normalized = String(mode || '').trim().toUpperCase()
+  if (normalized === 'OFF' || normalized === 'FULL_TEXT') return normalized
+  if (normalized === 'FULL_TEXT_OCR') return 'FULL_TEXT'
+  return 'METADATA_ONLY'
+}
+
+function isChatEntityType(entityType: unknown): boolean {
+  const normalized = String(entityType || '').trim().toLowerCase().replace(/[_\s-]+/g, '')
+  return normalized === 'chatmessage' || normalized === 'chatattachment' || normalized === 'chatsession'
+}
+
+function chatIndexModeLabel(mode: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'): string {
+  if (mode === 'KG_AND_VECTOR') return 'Knowledge Graph + Vector'
+  if (mode === 'VECTOR_ONLY') return 'Vector only'
+  return 'Off'
+}
+
+function chatAttachmentModeLabel(mode: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'): string {
+  if (mode === 'FULL_TEXT') return 'Full text'
+  if (mode === 'METADATA_ONLY') return 'Metadata only'
+  return 'Off'
 }
 
 function buildGraphCubeTiles(
@@ -95,41 +127,27 @@ function buildGraphCubeTiles(
     }))
     .sort((a, b) => b.remainder - a.remainder || b.value - a.value)
 
-  let remaining = tileCount - counts.reduce((sum, value) => sum + value, 0)
+  const remaining = tileCount - counts.reduce((sum, value) => sum + value, 0)
   for (let i = 0; i < remaining; i += 1) {
     const slot = order[i % order.length]
     if (!slot) continue
     counts[slot.idx] = (counts[slot.idx] ?? 0) + 1
   }
 
-  const buckets: GraphCubeTile[][] = validSlices.map((slice, idx) => {
-    const bucket: GraphCubeTile[] = []
+  const output: GraphCubeTile[] = []
+  for (let idx = 0; idx < validSlices.length; idx += 1) {
+    const slice = validSlices[idx]
+    if (!slice) continue
     const tileAmount = counts[idx] ?? 0
     for (let i = 0; i < tileAmount; i += 1) {
-      bucket.push({
+      output.push({
         key: `${slice.key}-${i}`,
         label: slice.label,
         color: slice.color,
       })
     }
-    return bucket
-  })
-
-  const output: GraphCubeTile[] = []
-  let layer = 0
-  while (output.length < tileCount) {
-    let appended = false
-    for (const bucket of buckets) {
-      const tile = bucket[layer]
-      if (!tile) continue
-      output.push(tile)
-      appended = true
-      if (output.length >= tileCount) break
-    }
-    if (!appended) break
-    layer += 1
   }
-  return output
+  return output.slice(0, tileCount)
 }
 
 function renderGraphSummaryMarkdown(summary: GraphContextPack['summary'] | undefined): string {
@@ -167,6 +185,8 @@ function renderGraphSummaryMarkdown(summary: GraphContextPack['summary'] | undef
 
 export function ProjectKnowledgeGraphPanel({
   projectName,
+  projectChatIndexMode,
+  projectChatAttachmentIngestionMode,
   overviewQuery,
   contextPackQuery,
   subgraphQuery,
@@ -178,6 +198,8 @@ export function ProjectKnowledgeGraphPanel({
   onLinkFocusTaskToSpecification,
 }: {
   projectName: string
+  projectChatIndexMode?: string
+  projectChatAttachmentIngestionMode?: string
   overviewQuery: QueryLike<GraphProjectOverview>
   contextPackQuery: QueryLike<GraphContextPack>
   subgraphQuery: QueryLike<GraphProjectSubgraph>
@@ -224,6 +246,8 @@ export function ProjectKnowledgeGraphPanel({
   const contextPack = contextPackQuery.data
   const structure = contextPack?.structure
   const evidenceItems = contextPack?.evidence ?? []
+  const normalizedChatIndexMode = normalizeChatIndexMode(projectChatIndexMode)
+  const normalizedChatAttachmentMode = normalizeChatAttachmentIngestionMode(projectChatAttachmentIngestionMode)
   const summary = contextPack?.summary
   const focusNeighbors = structure?.focus_neighbors ?? []
   const dependencyPaths = structure?.dependency_paths ?? []
@@ -300,13 +324,18 @@ export function ProjectKnowledgeGraphPanel({
   }
   const graphPackSnapshot = React.useMemo(() => {
     const graphContextMarkdown = String(contextPack?.markdown || '')
-    const graphEvidenceJson = evidenceItems.length > 0 ? JSON.stringify(evidenceItems) : '[]'
+    const chatEvidenceItems = evidenceItems.filter((item) => isChatEntityType(item.entity_type))
+    const nonChatEvidenceItems = evidenceItems.filter((item) => !isChatEntityType(item.entity_type))
+    const chatEvidenceJson = chatEvidenceItems.length > 0 ? JSON.stringify(chatEvidenceItems) : ''
+    const nonChatEvidenceJson = nonChatEvidenceItems.length > 0 ? JSON.stringify(nonChatEvidenceItems) : ''
     const graphSummaryMarkdown = renderGraphSummaryMarkdown(summary)
     const graphMetadataText = JSON.stringify({
       mode: contextPack?.mode || '',
       focus_entity_type: contextPack?.focus?.entity_type || '',
       focus_entity_id: contextPack?.focus?.entity_id || '',
       gaps: contextPack?.gaps ?? [],
+      chat_index_mode: normalizedChatIndexMode,
+      chat_attachment_ingestion_mode: normalizedChatAttachmentMode,
     })
     const sourceBase: GraphPackSourceUsage[] = [
       {
@@ -318,11 +347,19 @@ export function ProjectKnowledgeGraphPanel({
         percent: 0,
       },
       {
-        key: 'graph-evidence-json',
-        label: 'GraphEvidence.json',
+        key: 'graph-evidence-json-non-chat',
+        label: 'GraphEvidence.json (non-chat entities)',
         color: '#0ea5e9',
-        chars: graphEvidenceJson.length,
-        lines: countLines(graphEvidenceJson),
+        chars: nonChatEvidenceJson.length,
+        lines: countLines(nonChatEvidenceJson),
+        percent: 0,
+      },
+      {
+        key: 'graph-evidence-json-chat',
+        label: 'GraphEvidence.json (chat entities)',
+        color: '#16a34a',
+        chars: chatEvidenceJson.length,
+        lines: countLines(chatEvidenceJson),
         percent: 0,
       },
       {
@@ -349,7 +386,7 @@ export function ProjectKnowledgeGraphPanel({
         ...section,
         percent: totalChars > 0 ? (section.chars / totalChars) * 100 : 0,
       }))
-    const tileCount = 72
+    const tileCount = KG_PACK_TILE_COUNT
     const tiles = buildGraphCubeTiles(
       sources.map((section) => ({
         key: section.key,
@@ -363,8 +400,16 @@ export function ProjectKnowledgeGraphPanel({
       totalChars,
       approxTokens: estimateTokenCount(totalChars),
       totalLines: sources.reduce((sum, section) => sum + section.lines, 0),
+      tileCount,
+      charsPerTile: totalChars > 0 ? totalChars / tileCount : 0,
       sources,
       tiles,
+      chatEvidenceCount: chatEvidenceItems.length,
+      nonChatEvidenceCount: nonChatEvidenceItems.length,
+      chatEvidenceSharePct: evidenceItems.length > 0 ? (chatEvidenceItems.length / evidenceItems.length) * 100 : 0,
+      chatEvidenceEntityCount: new Set(
+        chatEvidenceItems.map((item) => `${String(item.entity_type || '').trim()}:${String(item.entity_id || '').trim()}`)
+      ).size,
     }
   }, [
     contextPack?.focus?.entity_id,
@@ -373,6 +418,8 @@ export function ProjectKnowledgeGraphPanel({
     contextPack?.markdown,
     contextPack?.mode,
     evidenceItems,
+    normalizedChatAttachmentMode,
+    normalizedChatIndexMode,
     summary,
   ])
 
@@ -1071,7 +1118,7 @@ export function ProjectKnowledgeGraphPanel({
             {graphPackSnapshot.tiles.length === 0 ? (
               <div className="meta" style={{ marginTop: 6 }}>No knowledge graph context has been produced yet.</div>
             ) : (
-              <div className="graph-context-cube-grid graph-context-cube-grid-entities" role="img" aria-label="Knowledge graph context composition map">
+              <div className="graph-context-cube-grid graph-context-cube-grid-dense graph-context-cube-grid-entities" role="img" aria-label="Knowledge graph context composition map">
                 {graphPackSnapshot.tiles.map((tile, idx) => (
                   <span
                     key={`kg-pack-cube-${idx}-${tile.key}`}
@@ -1084,6 +1131,15 @@ export function ProjectKnowledgeGraphPanel({
             )}
             <div className="meta">
               ~{graphPackSnapshot.approxTokens.toLocaleString()} tokens · {graphPackSnapshot.totalChars.toLocaleString()} chars · {graphPackSnapshot.totalLines.toLocaleString()} lines
+            </div>
+            <div className="meta">
+              Resolution: {graphPackSnapshot.tileCount.toLocaleString()} cells · ~{Math.max(1, Math.round(graphPackSnapshot.charsPerTile || 0)).toLocaleString()} chars per cell
+            </div>
+            <div className="meta">
+              Chat indexing policy: {chatIndexModeLabel(normalizedChatIndexMode)} · Attachment ingestion: {chatAttachmentModeLabel(normalizedChatAttachmentMode)}
+            </div>
+            <div className="meta">
+              Chat-derived evidence: {graphPackSnapshot.chatEvidenceCount} / {graphPackSnapshot.chatEvidenceCount + graphPackSnapshot.nonChatEvidenceCount} ({graphPackSnapshot.chatEvidenceSharePct.toFixed(1)}%) · Distinct chat entities: {graphPackSnapshot.chatEvidenceEntityCount}
             </div>
             <div className="graph-context-legend">
               {graphPackSnapshot.sources.map((source) => (

@@ -55,6 +55,10 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
           setProjectEmbeddingModel={state.setProjectEmbeddingModel}
           projectContextPackEvidenceTopKText={state.projectContextPackEvidenceTopKText}
           setProjectContextPackEvidenceTopKText={state.setProjectContextPackEvidenceTopKText}
+          projectChatIndexMode={state.projectChatIndexMode}
+          setProjectChatIndexMode={state.setProjectChatIndexMode}
+          projectChatAttachmentIngestionMode={state.projectChatAttachmentIngestionMode}
+          setProjectChatAttachmentIngestionMode={state.setProjectChatAttachmentIngestionMode}
           embeddingAllowedModels={state.embeddingAllowedModels}
           embeddingDefaultModel={state.embeddingDefaultModel}
           vectorStoreEnabled={state.vectorStoreEnabled}
@@ -132,6 +136,10 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
             setEditProjectEmbeddingModel={state.setEditProjectEmbeddingModel}
             editProjectContextPackEvidenceTopKText={state.editProjectContextPackEvidenceTopKText}
             setEditProjectContextPackEvidenceTopKText={state.setEditProjectContextPackEvidenceTopKText}
+            editProjectChatIndexMode={state.editProjectChatIndexMode}
+            setEditProjectChatIndexMode={state.setEditProjectChatIndexMode}
+            editProjectChatAttachmentIngestionMode={state.editProjectChatAttachmentIngestionMode}
+            setEditProjectChatAttachmentIngestionMode={state.setEditProjectChatAttachmentIngestionMode}
             embeddingAllowedModels={state.embeddingAllowedModels}
             embeddingDefaultModel={state.embeddingDefaultModel}
             vectorStoreEnabled={state.vectorStoreEnabled}

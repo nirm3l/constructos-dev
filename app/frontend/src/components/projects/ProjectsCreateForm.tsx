@@ -29,6 +29,10 @@ export function ProjectsCreateForm({
   setProjectEmbeddingModel,
   projectContextPackEvidenceTopKText,
   setProjectContextPackEvidenceTopKText,
+  projectChatIndexMode,
+  setProjectChatIndexMode,
+  projectChatAttachmentIngestionMode,
+  setProjectChatAttachmentIngestionMode,
   projectTemplateParametersText,
   setProjectTemplateParametersText,
   embeddingAllowedModels,
@@ -77,6 +81,12 @@ export function ProjectsCreateForm({
   setProjectEmbeddingModel: React.Dispatch<React.SetStateAction<string>>
   projectContextPackEvidenceTopKText: string
   setProjectContextPackEvidenceTopKText: React.Dispatch<React.SetStateAction<string>>
+  projectChatIndexMode: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'
+  setProjectChatIndexMode: React.Dispatch<React.SetStateAction<'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'>>
+  projectChatAttachmentIngestionMode: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
+  setProjectChatAttachmentIngestionMode: React.Dispatch<
+    React.SetStateAction<'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'>
+  >
   projectTemplateParametersText: string
   setProjectTemplateParametersText: React.Dispatch<React.SetStateAction<string>>
   embeddingAllowedModels: string[]
@@ -170,6 +180,11 @@ export function ProjectsCreateForm({
     if (previewConflictStatus === 'name_missing') return 'Enter a project name to validate conflicts.'
     return `Project conflict status: ${previewConflictStatus}`
   }, [previewConflictStatus, templateMode, templatePreview])
+  const chatPolicyDisabled = !projectEmbeddingEnabled
+  const effectiveProjectChatIndexMode: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR' = chatPolicyDisabled
+    ? 'OFF'
+    : projectChatIndexMode
+  const chatAttachmentDisabled = chatPolicyDisabled || effectiveProjectChatIndexMode === 'OFF'
 
   const runTemplatePreview = React.useCallback(() => {
     if (!canPreviewTemplatePlan) return
@@ -209,6 +224,8 @@ export function ProjectsCreateForm({
     projectEmbeddingEnabled,
     projectEmbeddingModel,
     projectContextPackEvidenceTopKText,
+    projectChatIndexMode,
+    projectChatAttachmentIngestionMode,
     projectTemplateParametersText,
     createProjectMemberIds,
   ])
@@ -267,6 +284,8 @@ export function ProjectsCreateForm({
             }
             if (!template.default_embedding_enabled) {
               setProjectEmbeddingModel('')
+              setProjectChatIndexMode('OFF')
+              setProjectChatAttachmentIngestionMode('METADATA_ONLY')
             }
             setProjectContextPackEvidenceTopKText(
               template.default_context_pack_evidence_top_k == null
@@ -328,6 +347,10 @@ export function ProjectsCreateForm({
                 ? 'default'
                 : templatePreview.project_blueprint.context_pack_evidence_top_k}
               .
+              {' '}
+              Chat indexing: {templatePreview.project_blueprint.chat_index_mode}.
+              {' '}
+              Chat attachment ingestion: {templatePreview.project_blueprint.chat_attachment_ingestion_mode}.
             </div>
           ) : null}
           {templatePreviewParametersJson ? (
@@ -400,6 +423,10 @@ export function ProjectsCreateForm({
                 if (next && !String(projectEmbeddingModel || '').trim() && defaultModel) {
                   setProjectEmbeddingModel(defaultModel)
                 }
+                if (!next) {
+                  setProjectChatIndexMode('OFF')
+                  setProjectChatAttachmentIngestionMode('METADATA_ONLY')
+                }
               }}
             />
             <span>Embedding enabled</span>
@@ -444,6 +471,70 @@ export function ProjectsCreateForm({
         ) : (
           <div className="meta" style={{ marginTop: 6 }}>
             Indexing starts after project creation.
+          </div>
+        )}
+      </div>
+      <div className="field-control" style={{ marginBottom: 10 }}>
+        <div className="project-chat-policy-inline">
+          <span className="field-label">Chat indexing policy</span>
+          <div className="project-chat-policy-controls">
+            <label className="field-control project-chat-policy-select">
+              <span className="field-label">Messages</span>
+              <select
+                value={effectiveProjectChatIndexMode}
+                disabled={chatPolicyDisabled}
+                onChange={(e) => {
+                  const next = e.target.value
+                  if (next === 'VECTOR_ONLY' || next === 'KG_AND_VECTOR') {
+                    setProjectChatIndexMode(next)
+                    return
+                  }
+                  setProjectChatIndexMode('OFF')
+                }}
+                aria-label="Chat message indexing mode"
+              >
+                <option value="OFF">OFF</option>
+                <option value="VECTOR_ONLY">VECTOR_ONLY</option>
+                <option value="KG_AND_VECTOR">KG_AND_VECTOR</option>
+              </select>
+            </label>
+            <label className="field-control project-chat-policy-select">
+              <span className="field-label">Attachments</span>
+              <select
+                value={projectChatAttachmentIngestionMode}
+                disabled={chatAttachmentDisabled}
+                onChange={(e) => {
+                  const next = e.target.value
+                  if (next === 'OFF' || next === 'FULL_TEXT') {
+                    setProjectChatAttachmentIngestionMode(next)
+                    return
+                  }
+                  setProjectChatAttachmentIngestionMode('METADATA_ONLY')
+                }}
+                aria-label="Chat attachment ingestion mode"
+              >
+                <option value="METADATA_ONLY">METADATA_ONLY</option>
+                <option value="OFF">OFF</option>
+                <option value="FULL_TEXT">FULL_TEXT</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        {chatPolicyDisabled ? (
+          <div className="meta" style={{ marginTop: 6 }}>
+            Enable embeddings to configure chat indexing. While embeddings are disabled, chat indexing mode is forced to OFF.
+          </div>
+        ) : effectiveProjectChatIndexMode === 'OFF' ? (
+          <div className="meta" style={{ marginTop: 6 }}>
+            Chat history stays operational-only and is excluded from Knowledge Graph and vector search.
+          </div>
+        ) : effectiveProjectChatIndexMode === 'VECTOR_ONLY' ? (
+          <div className="meta" style={{ marginTop: 6 }}>
+            Chat history is indexed for semantic vector search; graph relations are not created from chat events.
+          </div>
+        ) : (
+          <div className="meta" style={{ marginTop: 6 }}>
+            Chat history can contribute graph relations and semantic retrieval context for this project.
           </div>
         )}
       </div>

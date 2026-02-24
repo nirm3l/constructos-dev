@@ -582,6 +582,8 @@ export const createProject = (
     embedding_enabled?: boolean
     embedding_model?: string | null
     context_pack_evidence_top_k?: number | null
+    chat_index_mode?: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'
+    chat_attachment_ingestion_mode?: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
     member_user_ids?: string[]
     external_refs?: ExternalRef[]
     attachment_refs?: AttachmentRef[]
@@ -604,6 +606,8 @@ export const createProjectFromTemplate = (
     embedding_enabled?: boolean
     embedding_model?: string | null
     context_pack_evidence_top_k?: number | null
+    chat_index_mode?: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'
+    chat_attachment_ingestion_mode?: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
     parameters?: Record<string, unknown>
   }
 ) =>
@@ -624,6 +628,8 @@ export const previewProjectFromTemplate = (
     embedding_enabled?: boolean
     embedding_model?: string | null
     context_pack_evidence_top_k?: number | null
+    chat_index_mode?: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'
+    chat_attachment_ingestion_mode?: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
     parameters?: Record<string, unknown>
   }
 ) =>
@@ -635,7 +641,21 @@ export const previewProjectFromTemplate = (
 export const patchProject = (
   userId: string,
   projectId: string,
-  payload: Partial<Pick<Project, 'name' | 'description' | 'custom_statuses' | 'external_refs' | 'attachment_refs' | 'embedding_enabled' | 'embedding_model' | 'context_pack_evidence_top_k'>>
+  payload: Partial<
+    Pick<
+      Project,
+      | 'name'
+      | 'description'
+      | 'custom_statuses'
+      | 'external_refs'
+      | 'attachment_refs'
+      | 'embedding_enabled'
+      | 'embedding_model'
+      | 'context_pack_evidence_top_k'
+      | 'chat_index_mode'
+      | 'chat_attachment_ingestion_mode'
+    >
+  >
 ) => api<Project>(`/api/projects/${projectId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })
 
 export const deleteProject = (userId: string, projectId: string) =>

@@ -15,6 +15,8 @@ class ProjectFromTemplateCreate(BaseModel):
     embedding_enabled: bool | None = None
     embedding_model: str | None = None
     context_pack_evidence_top_k: int | None = Field(default=None, ge=1, le=40)
+    chat_index_mode: str | None = None
+    chat_attachment_ingestion_mode: str | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -28,4 +30,6 @@ class ProjectFromTemplatePreview(BaseModel):
     embedding_enabled: bool | None = None
     embedding_model: str | None = None
     context_pack_evidence_top_k: int | None = Field(default=None, ge=1, le=40)
+    chat_index_mode: str | None = None
+    chat_attachment_ingestion_mode: str | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)

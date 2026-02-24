@@ -24,7 +24,7 @@ from shared.settings import (
     CONTEXT_PACK_EVIDENCE_TOP_K,
     DEFAULT_EMBEDDING_MODEL,
 )
-from shared.vector_store import normalize_embedding_model, project_embedding_index_status, vector_store_enabled
+from shared.vector_store import normalize_embedding_model, project_embedding_index_snapshot, vector_store_enabled
 
 
 def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
@@ -85,6 +85,14 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
     }
     projects_payload = []
     for p in projects:
+        index_snapshot = project_embedding_index_snapshot(
+            db,
+            project_id=p.id,
+            embedding_enabled=bool(p.embedding_enabled),
+            embedding_model=p.embedding_model,
+            chat_index_mode=getattr(p, "chat_index_mode", None),
+            chat_attachment_ingestion_mode=getattr(p, "chat_attachment_ingestion_mode", None),
+        )
         projects_payload.append(
             {
                 "id": p.id,
@@ -102,12 +110,11 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
                 "chat_attachment_ingestion_mode": str(
                     p.chat_attachment_ingestion_mode or "METADATA_ONLY"
                 ),
-                "embedding_index_status": project_embedding_index_status(
-                    db,
-                    project_id=p.id,
-                    embedding_enabled=bool(p.embedding_enabled),
-                    embedding_model=p.embedding_model,
-                ),
+                "embedding_index_status": str(index_snapshot.get("status") or "not_indexed"),
+                "embedding_index_progress_pct": index_snapshot.get("progress_pct"),
+                "embedding_indexed_entities": int(index_snapshot.get("indexed_entities") or 0),
+                "embedding_index_expected_entities": int(index_snapshot.get("expected_entities") or 0),
+                "embedding_indexed_chunks": int(index_snapshot.get("indexed_chunks") or 0),
                 "created_by": project_creator_map.get(p.id, ""),
                 "created_at": to_iso_utc(p.created_at),
                 "updated_at": to_iso_utc(p.updated_at),

@@ -165,6 +165,11 @@ export function useAppActions(c: any) {
       .filter((value: string) => Boolean(value))
     const memberIds: string[] = Array.from(new Set<string>(rawMemberIds)).sort()
     const contextPackEvidenceTopK = parseProjectEvidenceTopKInput(c.editProjectContextPackEvidenceTopKText)
+    const effectiveChatIndexMode: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR' = Boolean(c.editProjectEmbeddingEnabled)
+      ? c.editProjectChatIndexMode
+      : 'OFF'
+    const effectiveChatAttachmentMode: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT' =
+      effectiveChatIndexMode === 'OFF' ? 'METADATA_ONLY' : c.editProjectChatAttachmentIngestionMode
     const patchedProject = await patchProject(c.userId, c.selectedProjectId, {
       name,
       description: c.editProjectDescription,
@@ -174,6 +179,8 @@ export function useAppActions(c: any) {
       embedding_enabled: Boolean(c.editProjectEmbeddingEnabled),
       embedding_model: String(c.editProjectEmbeddingModel || '').trim() || null,
       context_pack_evidence_top_k: contextPackEvidenceTopK,
+      chat_index_mode: effectiveChatIndexMode,
+      chat_attachment_ingestion_mode: effectiveChatAttachmentMode,
     })
     await syncProjectMembers(c.selectedProjectId, memberIds)
     c.qc.setQueryData(['bootstrap', c.userId], (prev: any) => {
@@ -194,6 +201,8 @@ export function useAppActions(c: any) {
     c.editProjectEmbeddingEnabled,
     c.editProjectEmbeddingModel,
     c.editProjectContextPackEvidenceTopKText,
+    c.editProjectChatIndexMode,
+    c.editProjectChatAttachmentIngestionMode,
     c.editProjectExternalRefsText,
     c.editProjectMemberIds,
     c.editProjectName,

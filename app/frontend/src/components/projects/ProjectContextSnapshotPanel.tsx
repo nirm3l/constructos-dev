@@ -5,7 +5,9 @@ type SnapshotSourceKey =
   | 'soul'
   | 'rules'
   | 'skills'
-  | 'knowledge_graph'
+  | 'knowledge_graph_context'
+  | 'knowledge_graph_evidence_non_chat'
+  | 'knowledge_graph_evidence_chat'
   | 'system_scaffold'
   | 'system_guidance'
   | 'chat_history'
@@ -36,6 +38,7 @@ type ChatTurnLike = {
 }
 
 const CHAT_HISTORY_WINDOW_SIZE = 12
+const CONTEXT_OCCUPANCY_TILE_COUNT = 480
 
 const PROMPT_SCAFFOLD_TEMPLATE = [
   'You are an automation agent for task management.',
@@ -129,6 +132,36 @@ function normalizeEntityTypeLabel(entityType: string | null | undefined): string
   return normalized
 }
 
+function normalizeChatIndexMode(mode: unknown): 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR' {
+  const normalized = String(mode || '').trim().toUpperCase()
+  if (normalized === 'VECTOR_ONLY' || normalized === 'KG_AND_VECTOR') return normalized
+  return 'OFF'
+}
+
+function normalizeChatAttachmentIngestionMode(mode: unknown): 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT' {
+  const normalized = String(mode || '').trim().toUpperCase()
+  if (normalized === 'OFF' || normalized === 'FULL_TEXT') return normalized
+  if (normalized === 'FULL_TEXT_OCR') return 'FULL_TEXT'
+  return 'METADATA_ONLY'
+}
+
+function isChatEntityType(entityType: unknown): boolean {
+  const normalized = String(entityType || '').trim().toLowerCase().replace(/[_\s-]+/g, '')
+  return normalized === 'chatmessage' || normalized === 'chatattachment' || normalized === 'chatsession'
+}
+
+function chatIndexModeLabel(mode: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'): string {
+  if (mode === 'KG_AND_VECTOR') return 'Knowledge Graph + Vector'
+  if (mode === 'VECTOR_ONLY') return 'Vector only'
+  return 'Off'
+}
+
+function chatAttachmentModeLabel(mode: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'): string {
+  if (mode === 'FULL_TEXT') return 'Full text'
+  if (mode === 'METADATA_ONLY') return 'Metadata only'
+  return 'Off'
+}
+
 function sourceGroupLabel(group: SnapshotSourceGroup): string {
   if (group === 'project') return 'Project-managed'
   if (group === 'knowledge_graph') return 'Knowledge graph'
@@ -186,34 +219,20 @@ function buildSnapshotCubeTiles(
     counts[slot.idx] = (counts[slot.idx] ?? 0) + 1
   }
 
-  const buckets: SnapshotCubeTile[][] = validSlices.map((slice, idx) => {
-    const bucket: SnapshotCubeTile[] = []
+  const output: SnapshotCubeTile[] = []
+  for (let idx = 0; idx < validSlices.length; idx += 1) {
+    const slice = validSlices[idx]
+    if (!slice) continue
     const tileAmount = counts[idx] ?? 0
     for (let i = 0; i < tileAmount; i += 1) {
-      bucket.push({
+      output.push({
         key: `${slice.key}-${i}`,
         label: slice.label,
         color: slice.color,
       })
     }
-    return bucket
-  })
-
-  const output: SnapshotCubeTile[] = []
-  let layer = 0
-  while (output.length < tileCount) {
-    let appended = false
-    for (const bucket of buckets) {
-      const tile = bucket[layer]
-      if (!tile) continue
-      output.push(tile)
-      appended = true
-      if (output.length >= tileCount) break
-    }
-    if (!appended) break
-    layer += 1
   }
-  return output
+  return output.slice(0, tileCount)
 }
 
 function renderRulesMarkdown(projectRules: ProjectRule[]): string {
@@ -295,6 +314,8 @@ export function ProjectContextSnapshotPanel({
   contextLimitTokens,
   activeChatProjectId,
   activeChatTurns,
+  projectChatIndexMode,
+  projectChatAttachmentIngestionMode,
 }: {
   projectId: string
   projectName: string
@@ -306,6 +327,8 @@ export function ProjectContextSnapshotPanel({
   contextLimitTokens?: number
   activeChatProjectId?: string
   activeChatTurns?: ChatTurnLike[]
+  projectChatIndexMode?: string
+  projectChatAttachmentIngestionMode?: string
 }) {
   const counts = overview?.counts ?? {
     tasks: 0,
@@ -315,11 +338,19 @@ export function ProjectContextSnapshotPanel({
     comments: 0,
   }
   const evidenceItems = contextPack?.evidence ?? []
+  const normalizedChatIndexMode = normalizeChatIndexMode(projectChatIndexMode)
+  const normalizedChatAttachmentMode = normalizeChatAttachmentIngestionMode(projectChatAttachmentIngestionMode)
   const rulesMarkdown = React.useMemo(() => renderRulesMarkdown(projectRules), [projectRules])
   const skillsMarkdown = React.useMemo(() => renderSkillsMarkdown(projectSkills), [projectSkills])
   const graphSummaryMarkdown = React.useMemo(() => renderGraphSummaryMarkdown(contextPack?.summary), [contextPack?.summary])
   const graphContextMarkdown = String(contextPack?.markdown || '')
-  const graphEvidenceJson = evidenceItems.length > 0 ? JSON.stringify(evidenceItems) : '[]'
+  const chatEvidenceItems = React.useMemo(() => evidenceItems.filter((item) => isChatEntityType(item.entity_type)), [evidenceItems])
+  const nonChatEvidenceItems = React.useMemo(
+    () => evidenceItems.filter((item) => !isChatEntityType(item.entity_type)),
+    [evidenceItems]
+  )
+  const graphEvidenceJsonChat = chatEvidenceItems.length > 0 ? JSON.stringify(chatEvidenceItems) : ''
+  const graphEvidenceJsonNonChat = nonChatEvidenceItems.length > 0 ? JSON.stringify(nonChatEvidenceItems) : ''
   const chatHistoryText = React.useMemo(
     () =>
       buildConversationHistoryText({
@@ -336,6 +367,8 @@ export function ProjectContextSnapshotPanel({
       `Retrieval mode: ${String(contextPack?.mode || '').trim()}`,
       `Focus entity type: ${String(contextPack?.focus?.entity_type || '').trim()}`,
       `Focus entity id: ${String(contextPack?.focus?.entity_id || '').trim()}`,
+      `Chat indexing mode: ${normalizedChatIndexMode}`,
+      `Chat attachment ingestion mode: ${normalizedChatAttachmentMode}`,
     ].join('\n')
 
     const sourceBase: Array<{
@@ -371,12 +404,28 @@ export function ProjectContextSnapshotPanel({
         lines: countLines(skillsMarkdown),
       },
       {
-        key: 'knowledge_graph',
+        key: 'knowledge_graph_context',
         group: 'knowledge_graph',
-        label: 'Knowledge graph pack',
+        label: 'Knowledge graph context + summary',
         color: '#2563eb',
-        chars: graphContextMarkdown.length + graphEvidenceJson.length + graphSummaryMarkdown.length,
+        chars: graphContextMarkdown.length + graphSummaryMarkdown.length,
         lines: countLines(graphContextMarkdown) + countLines(graphSummaryMarkdown),
+      },
+      {
+        key: 'knowledge_graph_evidence_non_chat',
+        group: 'knowledge_graph',
+        label: 'Indexed project corpus (non-chat evidence)',
+        color: '#0ea5e9',
+        chars: graphEvidenceJsonNonChat.length,
+        lines: countLines(graphEvidenceJsonNonChat),
+      },
+      {
+        key: 'knowledge_graph_evidence_chat',
+        group: 'knowledge_graph',
+        label: 'Indexed project chat corpus',
+        color: '#22c55e',
+        chars: graphEvidenceJsonChat.length,
+        lines: countLines(graphEvidenceJsonChat),
       },
       {
         key: 'system_scaffold',
@@ -397,7 +446,7 @@ export function ProjectContextSnapshotPanel({
       {
         key: 'chat_history',
         group: 'runtime',
-        label: 'Conversation history (active session)',
+        label: 'Conversation history (active session, optional)',
         color: '#16a34a',
         chars: chatHistoryText.length,
         lines: countLines(chatHistoryText),
@@ -418,11 +467,12 @@ export function ProjectContextSnapshotPanel({
     const contextWindowTokens = Math.max(totalTokens, normalizedContextLimitTokens)
     const usedTileCount =
       contextWindowTokens > 0 && totalTokens > 0
-        ? Math.max(1, Math.min(120, Math.round((totalTokens / contextWindowTokens) * 120)))
+        ? Math.max(1, Math.min(CONTEXT_OCCUPANCY_TILE_COUNT, Math.round((totalTokens / contextWindowTokens) * CONTEXT_OCCUPANCY_TILE_COUNT)))
         : 0
-    const emptyTileCount = Math.max(0, 120 - usedTileCount)
-    const emptyWindowPercent = contextWindowTokens > 0 ? (emptyTileCount / 120) * 100 : 0
+    const emptyTileCount = Math.max(0, CONTEXT_OCCUPANCY_TILE_COUNT - usedTileCount)
+    const emptyWindowPercent = contextWindowTokens > 0 ? (emptyTileCount / CONTEXT_OCCUPANCY_TILE_COUNT) * 100 : 0
     const emptyTokens = Math.max(0, contextWindowTokens - totalTokens)
+    const tokensPerTile = contextWindowTokens > 0 ? contextWindowTokens / CONTEXT_OCCUPANCY_TILE_COUNT : 0
 
     const sources: SnapshotSourceUsage[] = sourceBase.map((section) => {
       const sectionTokens = estimateTokenCount(section.chars)
@@ -432,7 +482,12 @@ export function ProjectContextSnapshotPanel({
         windowPercent: contextWindowTokens > 0 ? (sectionTokens / contextWindowTokens) * 100 : 0,
       }
     })
-    const visibleSources = sources.filter((section) => section.chars > 0)
+    const visibleSources = sources.filter((section) => {
+      if (section.chars > 0) return true
+      if (section.key === 'chat_history' && normalizedChatIndexMode !== 'OFF') return true
+      if (section.key === 'knowledge_graph_evidence_chat' && normalizedChatIndexMode !== 'OFF') return true
+      return false
+    })
     const sourceTiles = buildSnapshotCubeTiles(
       visibleSources.map((section) => ({
         key: section.key,
@@ -465,6 +520,11 @@ export function ProjectContextSnapshotPanel({
       evidenceItems.length > 0
         ? evidenceItems.reduce((sum, item) => sum + Number(item.final_score || 0), 0) / evidenceItems.length
         : 0
+    const chatEvidenceCount = chatEvidenceItems.length
+    const chatEvidenceEntityCount = new Set(
+      chatEvidenceItems.map((item) => `${normalizeEntityTypeLabel(item.entity_type)}:${String(item.entity_id || '').trim()}`)
+    ).size
+    const chatEvidenceSharePct = evidenceItems.length > 0 ? (chatEvidenceCount / evidenceItems.length) * 100 : 0
 
     const hardcodedChars =
       sourceBase
@@ -477,7 +537,10 @@ export function ProjectContextSnapshotPanel({
       approxTokens: estimateTokenCount(totalChars),
       hardcodedTokens: estimateTokenCount(hardcodedChars),
       chatHistoryTokens: estimateTokenCount(chatHistoryText.length),
+      indexedChatTokens: estimateTokenCount(graphEvidenceJsonChat.length),
       contextWindowTokens,
+      tileCount: CONTEXT_OCCUPANCY_TILE_COUNT,
+      tokensPerTile,
       emptyTokens,
       emptyWindowPercent,
       sources: visibleSources,
@@ -486,6 +549,9 @@ export function ProjectContextSnapshotPanel({
       distinctEvidenceEntities,
       contextCoveragePct,
       averageEvidenceScore,
+      chatEvidenceCount,
+      chatEvidenceEntityCount,
+      chatEvidenceSharePct,
     }
   }, [
     chatHistoryText,
@@ -500,9 +566,12 @@ export function ProjectContextSnapshotPanel({
     counts.tasks,
     evidenceItems,
     graphContextMarkdown,
-    graphEvidenceJson,
+    graphEvidenceJsonChat,
+    graphEvidenceJsonNonChat,
     graphSummaryMarkdown,
     projectDescription,
+    normalizedChatAttachmentMode,
+    normalizedChatIndexMode,
     projectName,
     rulesMarkdown,
     skillsMarkdown,
@@ -521,8 +590,19 @@ export function ProjectContextSnapshotPanel({
       </div>
 
       <div className="meta" style={{ marginTop: 6 }}>
-        Includes hardcoded system prompt and guidance from automation code, plus live chat history for the active project session.
+        Includes hardcoded system prompt and guidance from automation code, plus live active-session chat history when present.
       </div>
+      <div className="meta" style={{ marginTop: 4 }}>
+        Indexed project chat corpus is shown separately from active session history so you can track persisted-chat contribution.
+      </div>
+      <div className="meta" style={{ marginTop: 4 }}>
+        Chat indexing policy: {chatIndexModeLabel(normalizedChatIndexMode)} · Attachment ingestion: {chatAttachmentModeLabel(normalizedChatAttachmentMode)}
+      </div>
+      {normalizedChatIndexMode !== 'OFF' ? (
+        <div className="meta" style={{ marginTop: 4 }}>
+          Even with an empty active session, project chat corpus remains retrievable via indexing policy and appears under Chat-derived evidence.
+        </div>
+      ) : null}
 
       <div className="graph-context-metrics">
         <div className="graph-context-metric">
@@ -546,6 +626,14 @@ export function ProjectContextSnapshotPanel({
           <strong>~{snapshot.chatHistoryTokens.toLocaleString()} tokens</strong>
         </div>
         <div className="graph-context-metric">
+          <span className="meta">Indexed chat corpus</span>
+          <strong>~{snapshot.indexedChatTokens.toLocaleString()} tokens</strong>
+        </div>
+        <div className="graph-context-metric">
+          <span className="meta">Chat-derived evidence</span>
+          <strong>{snapshot.chatEvidenceCount} ({snapshot.chatEvidenceSharePct.toFixed(1)}%)</strong>
+        </div>
+        <div className="graph-context-metric">
           <span className="meta">Scope coverage</span>
           <strong>{snapshot.contextCoveragePct}%</strong>
         </div>
@@ -556,7 +644,7 @@ export function ProjectContextSnapshotPanel({
         {snapshot.sourceTiles.length === 0 ? (
           <div className="meta" style={{ marginTop: 6 }}>Context is empty for this project.</div>
         ) : (
-          <div className="graph-context-cube-grid" role="img" aria-label="Project context source occupancy map">
+          <div className="graph-context-cube-grid graph-context-cube-grid-dense" role="img" aria-label="Project context source occupancy map">
             {snapshot.sourceTiles.map((tile, idx) => (
               <span
                 key={`source-cube-${idx}-${tile.key}`}
@@ -569,6 +657,9 @@ export function ProjectContextSnapshotPanel({
         )}
         <div className="meta">
           Used window: {(100 - snapshot.emptyWindowPercent).toFixed(1)}% (~{snapshot.approxTokens.toLocaleString()} tokens)
+        </div>
+        <div className="meta">
+          Resolution: {snapshot.tileCount.toLocaleString()} cells · ~{Math.max(1, Math.round(snapshot.tokensPerTile || 0)).toLocaleString()} tokens per cell
         </div>
         <div className="graph-context-legend">
           {snapshot.sources.map((source) => (
@@ -595,7 +686,7 @@ export function ProjectContextSnapshotPanel({
         Attachment excerpts are runtime-dependent and can contribute up to ~9,000 tokens when files are included in chat.
       </div>
       <div className="meta" style={{ marginTop: 4 }}>
-        Average evidence score: {snapshot.averageEvidenceScore.toFixed(3)} · Distinct evidence entities: {snapshot.distinctEvidenceEntities}
+        Average evidence score: {snapshot.averageEvidenceScore.toFixed(3)} · Distinct evidence entities: {snapshot.distinctEvidenceEntities} · Chat evidence entities: {snapshot.chatEvidenceEntityCount}
       </div>
     </div>
   )

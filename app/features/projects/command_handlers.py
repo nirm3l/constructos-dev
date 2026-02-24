@@ -29,7 +29,6 @@ from shared.core import (
 from shared.settings import ALLOWED_EMBEDDING_MODELS, DEFAULT_EMBEDDING_MODEL
 from shared.chat_indexing import (
     CHAT_ATTACHMENT_INGESTION_FULL_TEXT,
-    CHAT_ATTACHMENT_INGESTION_FULL_TEXT_OCR,
     CHAT_ATTACHMENT_INGESTION_METADATA_ONLY,
     CHAT_ATTACHMENT_INGESTION_OFF,
     CHAT_INDEX_MODE_KG_AND_VECTOR,
@@ -164,7 +163,6 @@ _CHAT_ATTACHMENT_INGESTION_MODES = {
     CHAT_ATTACHMENT_INGESTION_OFF,
     CHAT_ATTACHMENT_INGESTION_METADATA_ONLY,
     CHAT_ATTACHMENT_INGESTION_FULL_TEXT,
-    CHAT_ATTACHMENT_INGESTION_FULL_TEXT_OCR,
 }
 
 
@@ -178,6 +176,8 @@ def _normalize_chat_index_mode(value: str | None) -> str:
 
 def _normalize_chat_attachment_ingestion_mode(value: str | None) -> str:
     mode = str(value or "").strip().upper() or CHAT_ATTACHMENT_INGESTION_METADATA_ONLY
+    if mode == "FULL_TEXT_OCR":
+        return CHAT_ATTACHMENT_INGESTION_FULL_TEXT
     if mode not in _CHAT_ATTACHMENT_INGESTION_MODES:
         allowed = ", ".join(sorted(_CHAT_ATTACHMENT_INGESTION_MODES))
         raise HTTPException(
