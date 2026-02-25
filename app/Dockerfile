@@ -6,6 +6,9 @@ RUN npm ci
 COPY frontend /frontend
 RUN npm run build
 
+FROM node:22-bookworm-slim AS codex-builder
+RUN npm install -g @openai/codex && npm cache clean --force
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -30,12 +33,15 @@ ARG APP_BUNDLE_KDF_ITERATIONS=200000
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends nodejs npm dumb-init ca-certificates openssl bash git \
+    && apt-get install -y --no-install-recommends dumb-init ca-certificates openssl bash git \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=codex-builder /usr/local/bin/node /usr/local/bin/node
+COPY --from=codex-builder /usr/local/bin/codex /usr/local/bin/codex
+COPY --from=codex-builder /usr/local/lib/node_modules /usr/local/lib/node_modules
 
 COPY requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt
-RUN npm install -g @openai/codex && npm cache clean --force
 
 COPY . /app
 COPY --from=frontend-builder /frontend/dist /app/static
