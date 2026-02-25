@@ -11,6 +11,8 @@ type AppHeaderProps = {
   bootstrapData: BootstrapPayload
   tab: Tab
   setTab: (tab: Tab) => void
+  theme: 'light' | 'dark'
+  onToggleTheme: () => void
   searchQ: string
   setSearchQ: (value: string) => void
   selectedProjectId: string
@@ -57,6 +59,8 @@ export function AppHeader({
   bootstrapData,
   tab,
   setTab,
+  theme,
+  onToggleTheme,
   searchQ,
   setSearchQ,
   selectedProjectId,
@@ -75,6 +79,8 @@ export function AppHeader({
 }: AppHeaderProps) {
   const brandSubTop = 'From spec to ship,'
   const brandSubBottom = 'with context under control...'
+  const isDarkTheme = theme === 'dark'
+  const themeToggleTooltip = isDarkTheme ? 'Switch to light mode' : 'Switch to dark mode'
   const projectSelectValue = React.useMemo(() => {
     if (!selectedProjectId) return undefined
     return bootstrapData.projects.some((project) => project.id === selectedProjectId) ? selectedProjectId : undefined
@@ -217,6 +223,23 @@ export function AppHeader({
                 aria-label="Knowledge Graph"
               >
                 <Icon path="M6 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm12 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm-6 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM7.4 6.6l3.9 10.8M16.6 6.6l-3.9 10.8" />
+              </button>
+            </HeaderTooltip>
+
+            <HeaderTooltip content={themeToggleTooltip}>
+              <button
+                className={`top-theme-btn ${isDarkTheme ? 'active' : ''}`.trim()}
+                onClick={onToggleTheme}
+                aria-label={themeToggleTooltip}
+                title={themeToggleTooltip}
+              >
+                <Icon
+                  path={
+                    isDarkTheme
+                      ? 'M12 3v2M12 19v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M3 12h2M19 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8'
+                      : 'M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z'
+                  }
+                />
               </button>
             </HeaderTooltip>
 
