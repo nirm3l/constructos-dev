@@ -121,7 +121,7 @@ Client deployment assets are maintained in a separate repository:
 
 Client one-liner installer:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh | ACTIVATION_CODE=ACT-XXXX-XXXX-XXXX-XXXX-XXXX IMAGE_TAG=main AUTO_DEPLOY=1 bash
+curl -fsSL https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh | ACTIVATION_CODE=ACT-XXXX-XXXX-XXXX-XXXX-XXXX IMAGE_TAG=main INSTALL_COS=true AUTO_DEPLOY=1 bash
 ```
 For signed entitlement enforcement, configure:
 - `LCP_SIGNING_PRIVATE_KEY_PEM` on control-plane

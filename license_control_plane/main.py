@@ -613,7 +613,7 @@ def _build_onboarding_email_template(
     subject = "ConstructOS onboarding package"
     install_command = (
         f"curl -fsSL {install_script_url} | "
-        f"ACTIVATION_CODE={activation_code} IMAGE_TAG={image_tag} AUTO_DEPLOY=1 bash"
+        f"ACTIVATION_CODE={activation_code} IMAGE_TAG={image_tag} INSTALL_COS=true AUTO_DEPLOY=1 bash"
     )
 
     text_body = (

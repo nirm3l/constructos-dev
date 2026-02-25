@@ -1243,6 +1243,7 @@ def test_admin_send_onboarding_email_succeeds_with_template(monkeypatch, tmp_pat
         assert "ConstructOS onboarding package" in payload["subject"]
         assert captured["to_email"] == "ops@example.com"
         assert "ACTIVATION_CODE=ACT-TEST-0001" in captured["text_body"]
+        assert "INSTALL_COS=true" in captured["text_body"]
         assert "AUTO_DEPLOY=1" in captured["text_body"]
         assert "LICENSE_SERVER_TOKEN=" not in captured["text_body"]
         assert "ACT-TEST-0001" in captured["text_body"]
@@ -1318,6 +1319,7 @@ def test_admin_provision_onboarding_generates_and_sends_package(monkeypatch, tmp
         assert payload["activation_code_record"]["max_installations"] == 3
         assert captured["to_email"] == "ops@example.com"
         assert f"ACTIVATION_CODE={payload['activation_code']}" in captured["text_body"]
+        assert "INSTALL_COS=true" in captured["text_body"]
         assert "AUTO_DEPLOY=1" in captured["text_body"]
         assert "LICENSE_SERVER_TOKEN=" not in captured["text_body"]
         assert payload["activation_code"] in captured["text_body"]
