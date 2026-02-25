@@ -12,6 +12,10 @@ from features.notifications.domain import EVENT_MARKED_READ as NOTIFICATION_EVEN
 from features.users.domain import EVENT_PREFERENCES_UPDATED as USER_EVENT_PREFERENCES_UPDATED
 
 from .contracts import ConcurrencyConflictError, EventEnvelope
+from .eventing_notification_triggers import (
+    emit_typed_notifications_for_event,
+    prepare_event_payload_for_notification_triggers,
+)
 from .eventing_notifications import emit_system_notifications as _emit_system_notifications
 from .eventing_projections import project_kurrent_events_once, start_projection_worker, stop_projection_worker
 from .eventing_rebuild import (
@@ -64,13 +68,20 @@ def append_event(
     cur = current_version(db, aggregate_type, aggregate_id)
     if expected_version is not None and cur != expected_version:
         raise ConcurrencyConflictError(f"Expected version {expected_version}, got {cur}")
+    normalized_payload = prepare_event_payload_for_notification_triggers(
+        db,
+        aggregate_type=aggregate_type,
+        aggregate_id=aggregate_id,
+        event_type=event_type,
+        payload=payload,
+    )
     version = cur + 1
     env = EventEnvelope(
         aggregate_type=aggregate_type,
         aggregate_id=aggregate_id,
         version=version,
         event_type=event_type,
-        payload=payload,
+        payload=normalized_payload,
         metadata={"schema_version": 2, **metadata},
     )
 
@@ -97,13 +108,14 @@ def append_event(
                 aggregate_id=aggregate_id,
                 version=version,
                 event_type=event_type,
-                payload=json.dumps(payload),
+                payload=json.dumps(normalized_payload),
                 meta=json.dumps(metadata),
             )
         )
         project_event(db, env)
 
     maybe_snapshot(db, aggregate_type, aggregate_id, version)
+    emit_typed_notifications_for_event(db, env, append_event_fn=append_event)
     _queue_realtime_signals(db, env)
 
     return env

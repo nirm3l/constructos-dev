@@ -1527,6 +1527,401 @@ def test_notifications_table_has_user_created_at_index(tmp_path):
     assert 'ix_notifications_user_created_at' in names
 
 
+def test_notifications_table_has_typed_columns_and_dedupe_index(tmp_path):
+    build_client(tmp_path)
+
+    from shared.models import SessionLocal
+
+    with SessionLocal() as db:
+        column_rows = db.execute(text("PRAGMA table_info('notifications')")).all()
+        index_rows = db.execute(text("PRAGMA index_list('notifications')")).all()
+    columns = {str(row[1]) for row in column_rows}
+    index_names = {str(row[1]) for row in index_rows}
+    assert "notification_type" in columns
+    assert "severity" in columns
+    assert "dedupe_key" in columns
+    assert "payload_json" in columns
+    assert "source_event" in columns
+    assert "ix_notifications_user_dedupe_created_at" in index_names
+
+
+def test_notifications_api_returns_typed_fields(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from shared.models import Notification, SessionLocal
+
+    with SessionLocal() as db:
+        db.add(
+            Notification(
+                user_id=user_id,
+                workspace_id=ws_id,
+                project_id=project_id,
+                task_id="task-api-typed-fields",
+                message="Typed payload test",
+                notification_type="TaskAssignedToMe",
+                severity="warning",
+                dedupe_key="typed-test-001",
+                payload_json='{"task_id":"task-api-typed-fields","status":"To do"}',
+                source_event="TaskUpdated",
+            )
+        )
+        db.commit()
+
+    listed = client.get('/api/notifications')
+    assert listed.status_code == 200
+    typed = next(item for item in listed.json() if item.get("dedupe_key") == "typed-test-001")
+    assert typed["notification_type"] == "TaskAssignedToMe"
+    assert typed["severity"] == "warning"
+    assert typed["source_event"] == "TaskUpdated"
+    assert typed["payload"]["task_id"] == "task-api-typed-fields"
+
+
+def test_task_assigned_to_me_notification_is_typed(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    actor_id = bootstrap['current_user']['id']
+
+    created_user = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'typed-assignee', 'full_name': 'Typed Assignee'},
+    )
+    assert created_user.status_code == 200
+    assignee_id = created_user.json()['user']['id']
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Typed assignee task',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'assignee_id': assignee_id,
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()['id']
+
+    from shared.models import Notification, SessionLocal
+    from shared.typed_notifications import NOTIFICATION_TYPE_TASK_ASSIGNED_TO_ME
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Notification).where(
+                Notification.user_id == assignee_id,
+                Notification.task_id == task_id,
+                Notification.notification_type == NOTIFICATION_TYPE_TASK_ASSIGNED_TO_ME,
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.severity == "info"
+    assert row.source_event == "TaskCreated"
+    assert row.dedupe_key == f"task-assigned:{task_id}:{assignee_id}:1"
+    assert actor_id != assignee_id
+
+
+def test_task_assigned_to_me_skips_self_assignment(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    actor_id = bootstrap['current_user']['id']
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Self assignment should not notify',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'assignee_id': actor_id,
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()['id']
+
+    from shared.models import Notification, SessionLocal
+    from shared.typed_notifications import NOTIFICATION_TYPE_TASK_ASSIGNED_TO_ME
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Notification).where(
+                Notification.user_id == actor_id,
+                Notification.task_id == task_id,
+                Notification.notification_type == NOTIFICATION_TYPE_TASK_ASSIGNED_TO_ME,
+            )
+        ).scalars().all()
+    assert rows == []
+
+
+def test_watched_task_status_changed_notification_is_typed(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created_user = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'typed-watcher', 'full_name': 'Typed Watcher'},
+    )
+    assert created_user.status_code == 200
+    watcher_id = created_user.json()['user']['id']
+    assigned = client.post(f'/api/projects/{project_id}/members', json={'user_id': watcher_id, 'role': 'Contributor'})
+    assert assigned.status_code == 200
+
+    task = client.post('/api/tasks', json={'title': 'Status watch target', 'workspace_id': ws_id, 'project_id': project_id})
+    assert task.status_code == 200
+    task_id = task.json()['id']
+
+    from shared.core import append_event
+    from shared.models import Notification, SessionLocal
+    from shared.typed_notifications import NOTIFICATION_TYPE_WATCHED_TASK_STATUS_CHANGED
+
+    with SessionLocal() as db:
+        append_event(
+            db,
+            aggregate_type='Task',
+            aggregate_id=task_id,
+            event_type='TaskWatchToggled',
+            payload={'task_id': task_id, 'user_id': watcher_id, 'watched': True},
+            metadata={'actor_id': watcher_id, 'workspace_id': ws_id, 'project_id': project_id, 'task_id': task_id},
+        )
+        db.commit()
+
+    patched = client.patch(f'/api/tasks/{task_id}', json={'status': 'In progress'})
+    assert patched.status_code == 200
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Notification).where(
+                Notification.user_id == watcher_id,
+                Notification.task_id == task_id,
+                Notification.notification_type == NOTIFICATION_TYPE_WATCHED_TASK_STATUS_CHANGED,
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.severity == "info"
+    assert row.dedupe_key == f"watch-status:{task_id}:{watcher_id}:In progress:3"
+    assert row.source_event == "TaskUpdated"
+
+
+def test_task_automation_failed_notification_is_typed_and_dedupes(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    assignee_user = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'typed-auto-assignee', 'full_name': 'Typed Auto Assignee'},
+    )
+    watcher_user = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'typed-auto-watcher', 'full_name': 'Typed Auto Watcher'},
+    )
+    assert assignee_user.status_code == 200
+    assert watcher_user.status_code == 200
+    assignee_id = assignee_user.json()['user']['id']
+    watcher_id = watcher_user.json()['user']['id']
+    assert client.post(f'/api/projects/{project_id}/members', json={'user_id': assignee_id, 'role': 'Contributor'}).status_code == 200
+    assert client.post(f'/api/projects/{project_id}/members', json={'user_id': watcher_id, 'role': 'Contributor'}).status_code == 200
+
+    task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Automation failure target',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'assignee_id': assignee_id,
+        },
+    )
+    assert task.status_code == 200
+    task_id = task.json()['id']
+
+    from shared.core import append_event
+    from shared.models import Notification, SessionLocal
+    from shared.settings import AGENT_SYSTEM_USER_ID
+    from shared.typed_notifications import NOTIFICATION_TYPE_TASK_AUTOMATION_FAILED
+
+    with SessionLocal() as db:
+        append_event(
+            db,
+            aggregate_type='Task',
+            aggregate_id=task_id,
+            event_type='TaskWatchToggled',
+            payload={'task_id': task_id, 'user_id': watcher_id, 'watched': True},
+            metadata={'actor_id': watcher_id, 'workspace_id': ws_id, 'project_id': project_id, 'task_id': task_id},
+        )
+        append_event(
+            db,
+            aggregate_type='Task',
+            aggregate_id=task_id,
+            event_type='TaskAutomationFailed',
+            payload={'failed_at': datetime.now(timezone.utc).isoformat(), 'error': 'Runner exploded', 'summary': 'Failed'},
+            metadata={'actor_id': AGENT_SYSTEM_USER_ID, 'workspace_id': ws_id, 'project_id': project_id, 'task_id': task_id},
+        )
+        append_event(
+            db,
+            aggregate_type='Task',
+            aggregate_id=task_id,
+            event_type='TaskAutomationFailed',
+            payload={'failed_at': datetime.now(timezone.utc).isoformat(), 'error': 'Runner exploded', 'summary': 'Failed'},
+            metadata={'actor_id': AGENT_SYSTEM_USER_ID, 'workspace_id': ws_id, 'project_id': project_id, 'task_id': task_id},
+        )
+        db.commit()
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Notification).where(
+                Notification.task_id == task_id,
+                Notification.notification_type == NOTIFICATION_TYPE_TASK_AUTOMATION_FAILED,
+            )
+        ).scalars().all()
+    user_ids = {row.user_id for row in rows}
+    assert user_ids == {assignee_id, watcher_id}
+    assert len(rows) == 2
+    assert all(row.severity == "warning" for row in rows)
+
+
+def test_task_schedule_failed_notification_is_typed_and_dedupes(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    assignee_user = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'typed-sched-assignee', 'full_name': 'Typed Schedule Assignee'},
+    )
+    assert assignee_user.status_code == 200
+    assignee_id = assignee_user.json()['user']['id']
+    assert client.post(f'/api/projects/{project_id}/members', json={'user_id': assignee_id, 'role': 'Contributor'}).status_code == 200
+
+    scheduled_at = datetime.now(timezone.utc) + timedelta(hours=2)
+    task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Schedule failure target',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'assignee_id': assignee_id,
+            'task_type': 'scheduled_instruction',
+            'scheduled_instruction': 'Run diagnostics',
+            'scheduled_at_utc': scheduled_at.isoformat(),
+        },
+    )
+    assert task.status_code == 200
+    task_id = task.json()['id']
+
+    from shared.core import append_event
+    from shared.models import Notification, SessionLocal
+    from shared.settings import AGENT_SYSTEM_USER_ID
+    from shared.typed_notifications import NOTIFICATION_TYPE_TASK_SCHEDULE_FAILED
+
+    with SessionLocal() as db:
+        append_event(
+            db,
+            aggregate_type='Task',
+            aggregate_id=task_id,
+            event_type='TaskScheduleFailed',
+            payload={'failed_at': datetime.now(timezone.utc).isoformat(), 'error': 'Schedule timeout'},
+            metadata={'actor_id': AGENT_SYSTEM_USER_ID, 'workspace_id': ws_id, 'project_id': project_id, 'task_id': task_id},
+        )
+        append_event(
+            db,
+            aggregate_type='Task',
+            aggregate_id=task_id,
+            event_type='TaskScheduleFailed',
+            payload={'failed_at': datetime.now(timezone.utc).isoformat(), 'error': 'Schedule timeout'},
+            metadata={'actor_id': AGENT_SYSTEM_USER_ID, 'workspace_id': ws_id, 'project_id': project_id, 'task_id': task_id},
+        )
+        db.commit()
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Notification).where(
+                Notification.user_id == assignee_id,
+                Notification.task_id == task_id,
+                Notification.notification_type == NOTIFICATION_TYPE_TASK_SCHEDULE_FAILED,
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.severity == "warning"
+    assert row.payload_json and "scheduled_at_utc" in row.payload_json
+
+
+def test_project_membership_changed_notification_is_typed(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created_user = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'typed-member-change', 'full_name': 'Typed Member Change'},
+    )
+    assert created_user.status_code == 200
+    member_id = created_user.json()['user']['id']
+
+    added = client.post(f'/api/projects/{project_id}/members', json={'user_id': member_id, 'role': 'Contributor'})
+    assert added.status_code == 200
+    removed = client.post(f'/api/projects/{project_id}/members/{member_id}/remove')
+    assert removed.status_code == 200
+
+    from shared.models import Notification, SessionLocal
+    from shared.typed_notifications import NOTIFICATION_TYPE_PROJECT_MEMBERSHIP_CHANGED
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Notification).where(
+                Notification.user_id == member_id,
+                Notification.project_id == project_id,
+                Notification.notification_type == NOTIFICATION_TYPE_PROJECT_MEMBERSHIP_CHANGED,
+            ).order_by(Notification.created_at.asc(), Notification.id.asc())
+        ).scalars().all()
+    assert len(rows) == 2
+    assert rows[0].source_event == "ProjectMemberUpserted"
+    assert rows[1].source_event == "ProjectMemberRemoved"
+
+
+def test_license_grace_ending_soon_notification_is_typed_and_deduped(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+
+    from shared.models import LicenseInstallation, Notification, SessionLocal
+    from shared.typed_notifications import NOTIFICATION_TYPE_LICENSE_GRACE_ENDING_SOON
+
+    with SessionLocal() as db:
+        installation = db.execute(select(LicenseInstallation).order_by(LicenseInstallation.id.asc()).limit(1)).scalar_one()
+        installation.trial_ends_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        installation.status = "grace"
+        db.commit()
+
+    emitted_first = trigger_system_notifications_for_user(user_id)
+    emitted_second = trigger_system_notifications_for_user(user_id)
+    assert emitted_first >= 1
+    assert emitted_second == 0
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Notification).where(
+                Notification.user_id == user_id,
+                Notification.notification_type == NOTIFICATION_TYPE_LICENSE_GRACE_ENDING_SOON,
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.dedupe_key and row.dedupe_key.startswith("license-grace:")
+    assert row.severity in {"warning", "critical"}
+
+
 def test_notifications_endpoint_tolerates_duplicate_messages(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()

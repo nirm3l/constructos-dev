@@ -30,9 +30,53 @@ type AppHeaderProps = {
   onOpenProject: (projectId: string) => void
 }
 
-function parseLegacyTaskId(message: string): string | null {
-  const match = message.match(/\btask\s+#([0-9a-fA-F-]{8,})\b/i)
-  return match?.[1] ?? null
+function notificationPayloadId(notification: Notification, key: string): string | null {
+  const payload = notification.payload
+  if (!payload || typeof payload !== 'object') return null
+  const value = (payload as Record<string, unknown>)[key]
+  if (typeof value !== 'string') return null
+  const normalized = value.trim()
+  return normalized || null
+}
+
+function notificationPayloadText(notification: Notification, key: string): string | null {
+  const payload = notification.payload
+  if (!payload || typeof payload !== 'object') return null
+  const value = (payload as Record<string, unknown>)[key]
+  if (typeof value !== 'string' && typeof value !== 'number') return null
+  const normalized = String(value).trim()
+  return normalized || null
+}
+
+function notificationDisplayMessage(notification: Notification): string {
+  const type = String(notification.notification_type || '').trim()
+  const fallback = String(notification.message || '').trim() || 'Notification'
+  if (!type || type === 'Legacy') return fallback
+  const title = notificationPayloadText(notification, 'title')
+  const fromStatus = notificationPayloadText(notification, 'from_status')
+  const toStatus = notificationPayloadText(notification, 'to_status')
+  const role = notificationPayloadText(notification, 'role')
+  const error = notificationPayloadText(notification, 'error')
+  const hoursRemaining = notificationPayloadText(notification, 'hours_remaining')
+  switch (type) {
+    case 'TaskAssignedToMe':
+      return title ? `Assigned to you: ${title}` : fallback
+    case 'WatchedTaskStatusChanged':
+      if (title && fromStatus && toStatus) return `${title} moved from ${fromStatus} to ${toStatus}`
+      if (title && toStatus) return `${title} moved to ${toStatus}`
+      return fallback
+    case 'TaskAutomationFailed':
+      return title && error ? `Automation failed on ${title}: ${error}` : fallback
+    case 'TaskScheduleFailed':
+      return title && error ? `Scheduled run failed on ${title}: ${error}` : fallback
+    case 'ProjectMembershipChanged':
+      if (role) return `Project membership updated. New role: ${role}`
+      return fallback
+    case 'LicenseGraceEndingSoon':
+      return hoursRemaining ? `License grace ends in about ${hoursRemaining}h.` : fallback
+    default:
+      return fallback
+  }
 }
 
 function HeaderTooltip({
@@ -144,7 +188,10 @@ export function AppHeader({
                       <div className="meta">No notifications.</div>
                     ) : (
                       notifications.map((n) => {
-                        const taskId = n.task_id || parseLegacyTaskId(n.message)
+                        const taskId = n.task_id || notificationPayloadId(n, 'task_id')
+                        const noteId = n.note_id || notificationPayloadId(n, 'note_id')
+                        const specificationId = n.specification_id || notificationPayloadId(n, 'specification_id')
+                        const projectId = n.project_id || notificationPayloadId(n, 'project_id')
                         const markNotificationRead = () => {
                           if (!n.is_read) onMarkRead(n.id)
                         }
@@ -170,7 +217,7 @@ export function AppHeader({
                             <div className="notif-dotline" aria-hidden="true" />
                             <div className="notif-main">
                               <div className="notif-copy">
-                                <div className="notif-message">{n.message}</div>
+                                <div className="notif-message">{notificationDisplayMessage(n)}</div>
                                 {!n.is_read && <div className="notif-hint">Click to mark as read</div>}
                               </div>
                               <div className="notif-actions">
@@ -179,7 +226,7 @@ export function AppHeader({
                                     className="status-chip"
                                     onClick={(event) => {
                                       event.stopPropagation()
-                                      onOpenTask(taskId, n.project_id)
+                                      onOpenTask(taskId, projectId)
                                       markNotificationRead()
                                       setShowNotificationsPanel(false)
                                     }}
@@ -187,12 +234,12 @@ export function AppHeader({
                                     Open task
                                   </button>
                                 )}
-                                {n.note_id && (
+                                {noteId && (
                                   <button
                                     className="status-chip"
                                     onClick={(event) => {
                                       event.stopPropagation()
-                                      onOpenNote(n.note_id as string, n.project_id)
+                                      onOpenNote(noteId, projectId)
                                       markNotificationRead()
                                       setShowNotificationsPanel(false)
                                     }}
@@ -200,12 +247,12 @@ export function AppHeader({
                                     Open note
                                   </button>
                                 )}
-                                {n.specification_id && (
+                                {specificationId && (
                                   <button
                                     className="status-chip"
                                     onClick={(event) => {
                                       event.stopPropagation()
-                                      onOpenSpecification(n.specification_id as string, n.project_id)
+                                      onOpenSpecification(specificationId, projectId)
                                       markNotificationRead()
                                       setShowNotificationsPanel(false)
                                     }}
@@ -213,12 +260,12 @@ export function AppHeader({
                                     Open specification
                                   </button>
                                 )}
-                                {!taskId && !n.note_id && !n.specification_id && n.project_id && (
+                                {!taskId && !noteId && !specificationId && projectId && (
                                   <button
                                     className="status-chip"
                                     onClick={(event) => {
                                       event.stopPropagation()
-                                      onOpenProject(n.project_id as string)
+                                      onOpenProject(projectId)
                                       markNotificationRead()
                                       setShowNotificationsPanel(false)
                                     }}

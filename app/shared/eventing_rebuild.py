@@ -136,6 +136,14 @@ from .models import (
     WorkspaceMember,
 )
 from .settings import DEFAULT_STATUSES, SNAPSHOT_EVERY
+from .typed_notifications import (
+    DEFAULT_NOTIFICATION_SEVERITY,
+    DEFAULT_NOTIFICATION_TYPE,
+    dumps_payload_json,
+    normalize_dedupe_key,
+    normalize_notification_type,
+    normalize_severity,
+)
 from .event_upcasters import upcast_event, upcast_snapshot
 from .eventing_store import StreamState, get_kurrent_client, kurrent_read_stream, snapshot_stream_id, stream_id, NotFoundError, serialize_snapshot_event
 
@@ -1502,6 +1510,11 @@ def project_event(db: Session, ev: EventEnvelope):
     elif ev.event_type == NOTIFICATION_EVENT_CREATED:
         # Idempotent projection: in EventStore mode we can project the same event
         # via write-through append + later catch-up, so inserts must be safe.
+        payload_json = p.get("payload_json")
+        if isinstance(payload_json, dict):
+            payload_json = dumps_payload_json(payload_json)
+        else:
+            payload_json = str(payload_json or "{}")
         n = db.get(Notification, ev.aggregate_id)
         if n is None:
             n = Notification(
@@ -1513,6 +1526,11 @@ def project_event(db: Session, ev: EventEnvelope):
                 note_id=p.get("note_id") or m.get("note_id"),
                 specification_id=p.get("specification_id") or m.get("specification_id"),
                 message=p["message"],
+                notification_type=normalize_notification_type(p.get("notification_type") or DEFAULT_NOTIFICATION_TYPE),
+                severity=normalize_severity(p.get("severity") or DEFAULT_NOTIFICATION_SEVERITY),
+                dedupe_key=normalize_dedupe_key(p.get("dedupe_key")),
+                payload_json=payload_json or "{}",
+                source_event=str(p.get("source_event") or "").strip() or None,
                 is_read=False,
             )
             db.add(n)
@@ -1524,6 +1542,11 @@ def project_event(db: Session, ev: EventEnvelope):
             n.note_id = p.get("note_id") or m.get("note_id")
             n.specification_id = p.get("specification_id") or m.get("specification_id")
             n.message = p["message"]
+            n.notification_type = normalize_notification_type(p.get("notification_type") or DEFAULT_NOTIFICATION_TYPE)
+            n.severity = normalize_severity(p.get("severity") or DEFAULT_NOTIFICATION_SEVERITY)
+            n.dedupe_key = normalize_dedupe_key(p.get("dedupe_key"))
+            n.payload_json = payload_json or "{}"
+            n.source_event = str(p.get("source_event") or "").strip() or None
             # Preserve any existing read state; newly created events are unread.
             if n.is_read is None:
                 n.is_read = False

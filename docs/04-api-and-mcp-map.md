@@ -77,6 +77,11 @@
 - `POST /api/notifications/{notification_id}/read`
 - `GET /api/notifications/stream` (SSE)
 
+Notification payload fields:
+- legacy-compatible fields: `id`, `message`, `is_read`, `created_at`, reference ids (`workspace_id`, `project_id`, `task_id`, `note_id`, `specification_id`).
+- typed fields: `notification_type`, `severity`, `dedupe_key`, `payload`, `source_event`.
+- `message` remains required fallback for legacy and mixed clients.
+
 SSE event types:
 - `notification`
 - `task_event`

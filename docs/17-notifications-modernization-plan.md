@@ -25,12 +25,16 @@ Primary driver: remove low-value notifications such as:
   - mark-read and mark-all-read emit realtime refresh signals across tabs,
   - SSE resume supports `Last-Event-ID` and tail default behavior,
   - API and runbook docs were aligned to current SSE event contract.
+- P2 is completed:
+  - typed notification schema is available in read model and API payloads,
+  - event-driven typed notifications are emitted for assignment/watch/failure/membership/license paths,
+  - typed dedupe keys are enforced per type via `user_id + dedupe_key`,
+  - frontend consumes typed fields with `message` fallback for legacy rows.
 
 ### 2.2 Remaining Gaps
-- Notification schema is still message-first and not typed.
-- Dedupe is still message-based for system notifications.
-- UI still contains legacy task-id parsing fallback from message text.
-- New high-value notifications are not implemented yet.
+- No open functional gaps for P0/P1/P2 scope.
+- Message-based system notification dedupe is intentionally retained for legacy due-soon/overdue/digest notices.
+- Next iterations should focus on channel expansion (email/push/mobile) and UX polish.
 
 ### 2.3 Changes That Affect the Remaining Plan
 - Shared operation gateway rollout is now active for overlapping UI/MCP mutations.
@@ -114,7 +118,7 @@ Primary driver: remove low-value notifications such as:
 - Mark-as-read is visible on concurrent clients without manual refresh.
 - Reconnect resumes correctly without full-history replay.
 
-## Phase P2: Typed Notification Domain + New High-Value Notifications (Open)
+## Phase P2: Typed Notification Domain + New High-Value Notifications (Completed)
 
 ### P2.1 Typed Notification Schema (Additive)
 - Add nullable notification columns:
@@ -222,6 +226,6 @@ Type trigger matrix:
   - no duplicate typed notifications under replay/catch-up tests.
 
 ## 9. Open Decisions
-- Final severity taxonomy (`info`/`warning`/`critical`) and color mapping.
-- Scope for `LicenseGraceEndingSoon` recipients (owners/admins only vs all active members).
-- Whether to keep one combined digest or split by workspace/project in a later phase.
+- Severity taxonomy resolved as `info` / `warning` / `critical`.
+- `LicenseGraceEndingSoon` recipients resolved to workspace `Owner`/`Admin` members.
+- Keep one combined digest in current phase; revisit workspace/project split in a later phase.

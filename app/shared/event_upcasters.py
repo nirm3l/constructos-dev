@@ -3,6 +3,15 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from .typed_notifications import (
+    DEFAULT_NOTIFICATION_SEVERITY,
+    DEFAULT_NOTIFICATION_TYPE,
+    dumps_payload_json,
+    normalize_dedupe_key,
+    normalize_notification_type,
+    normalize_severity,
+)
+
 
 def _normalize_optional_id(value: Any) -> str | None:
     text = str(value or "").strip()
@@ -35,6 +44,31 @@ def upcast_event(
         for key in ("task_group_id", "specification_id", "assignee_id"):
             if key in p:
                 p[key] = _normalize_optional_id(p.get(key))
+
+    if event_type == "NotificationCreated":
+        if "notification_type" not in p:
+            p["notification_type"] = DEFAULT_NOTIFICATION_TYPE
+        else:
+            p["notification_type"] = normalize_notification_type(p.get("notification_type"))
+        if "severity" not in p:
+            p["severity"] = DEFAULT_NOTIFICATION_SEVERITY
+        else:
+            p["severity"] = normalize_severity(p.get("severity"))
+        if "dedupe_key" in p:
+            p["dedupe_key"] = normalize_dedupe_key(p.get("dedupe_key"))
+        else:
+            p["dedupe_key"] = None
+        source_event = str(p.get("source_event") or "").strip()
+        p["source_event"] = source_event or None
+        if "payload_json" not in p:
+            p["payload_json"] = dumps_payload_json({})
+        else:
+            raw_payload_json = p.get("payload_json")
+            if isinstance(raw_payload_json, dict):
+                p["payload_json"] = dumps_payload_json(raw_payload_json)
+            else:
+                text = str(raw_payload_json or "").strip()
+                p["payload_json"] = text or "{}"
 
     return p, m
 

@@ -7,9 +7,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from features.notifications.domain import EVENT_CREATED as NOTIFICATION_EVENT_CREATED
+from features.licensing.read_models import license_status_read_model
 from .eventing_store import allocate_id
 from .models import Notification, Task, WorkspaceMember
 from .serializers import get_user_zoneinfo
+from .typed_notifications import (
+    NOTIFICATION_TYPE_LICENSE_GRACE_ENDING_SOON,
+    SEVERITY_CRITICAL,
+    SEVERITY_WARNING,
+    append_notification_created_event,
+)
 
 
 def _maybe_append_system_notification_event(
@@ -127,6 +134,68 @@ def _build_daily_digest_message(tasks: list[Task], *, now: datetime, user_tz: Zo
     return f"Daily digest for {local_today}: {', '.join(parts)}.{tasks_part}"
 
 
+def _license_grace_threshold_hours(hours_remaining: int) -> int | None:
+    if hours_remaining <= 6:
+        return 6
+    if hours_remaining <= 24:
+        return 24
+    if hours_remaining <= 72:
+        return 72
+    return None
+
+
+def _maybe_append_license_grace_notification(
+    db: Session,
+    *,
+    user_id: str,
+    workspace_id: str,
+    append_event_fn,
+) -> bool:
+    license_payload = license_status_read_model(db)
+    if str(license_payload.get("status") or "").strip().lower() != "grace":
+        return False
+    installation_id = str(license_payload.get("installation_id") or "").strip()
+    grace_ends_at_raw = str(license_payload.get("grace_ends_at") or "").strip()
+    if not installation_id or not grace_ends_at_raw:
+        return False
+    try:
+        grace_ends_at = datetime.fromisoformat(grace_ends_at_raw)
+    except Exception:
+        return False
+    if grace_ends_at.tzinfo is None:
+        grace_ends_at = grace_ends_at.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    total_seconds = (grace_ends_at.astimezone(timezone.utc) - now).total_seconds()
+    if total_seconds <= 0:
+        return False
+    hours_remaining = max(1, int((total_seconds + 3599) // 3600))
+    threshold_hours = _license_grace_threshold_hours(hours_remaining)
+    if threshold_hours is None:
+        return False
+
+    severity = SEVERITY_CRITICAL if threshold_hours <= 6 else SEVERITY_WARNING
+    dedupe_key = f"license-grace:{installation_id}:{threshold_hours}"
+    message = f"License grace period ends in about {hours_remaining}h."
+    return append_notification_created_event(
+        db,
+        append_event_fn=append_event_fn,
+        user_id=user_id,
+        actor_id=user_id,
+        workspace_id=workspace_id,
+        message=message,
+        notification_type=NOTIFICATION_TYPE_LICENSE_GRACE_ENDING_SOON,
+        severity=severity,
+        dedupe_key=dedupe_key,
+        payload={
+            "installation_id": installation_id,
+            "grace_ends_at": grace_ends_at.astimezone(timezone.utc).isoformat(),
+            "hours_remaining": hours_remaining,
+            "status": str(license_payload.get("status") or "").strip().lower(),
+        },
+        source_event="LicenseStatusPolled",
+    )
+
+
 def emit_system_notifications(db: Session, user, append_event_fn) -> int:
     if not bool(getattr(user, "notifications_enabled", True)):
         return 0
@@ -188,16 +257,27 @@ def emit_system_notifications(db: Session, user, append_event_fn) -> int:
             user_tz=user_tz,
             local_today=local_today,
         )
-        if digest_message is None:
-            if created:
-                db.commit()
-            return created
-        if _maybe_append_system_notification_event(
+        if digest_message is not None:
+            if _maybe_append_system_notification_event(
+                db,
+                user_id=user.id,
+                workspace_id=first_workspace_id,
+                message=digest_message,
+                lookback_hours=28,
+                append_event_fn=append_event_fn,
+            ):
+                created += 1
+
+    is_admin_member = any(str(m.role or "").strip().lower() in {"owner", "admin"} for m in memberships)
+    if is_admin_member:
+        admin_workspace_id = next(
+            (str(m.workspace_id or "").strip() for m in memberships if str(m.role or "").strip().lower() in {"owner", "admin"}),
+            first_workspace_id,
+        )
+        if admin_workspace_id and _maybe_append_license_grace_notification(
             db,
             user_id=user.id,
-            workspace_id=first_workspace_id,
-            message=digest_message,
-            lookback_hours=28,
+            workspace_id=admin_workspace_id,
             append_event_fn=append_event_fn,
         ):
             created += 1

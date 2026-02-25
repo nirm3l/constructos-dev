@@ -293,6 +293,11 @@ class NotificationDTO:
     task_id: str | None = None
     note_id: str | None = None
     specification_id: str | None = None
+    notification_type: str | None = None
+    severity: str | None = None
+    dedupe_key: str | None = None
+    payload: dict[str, Any] | None = None
+    source_event: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

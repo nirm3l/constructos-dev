@@ -281,6 +281,11 @@ export type Notification = {
   task_id?: string | null
   note_id?: string | null
   specification_id?: string | null
+  notification_type?: string | null
+  severity?: 'info' | 'warning' | 'critical' | string | null
+  dedupe_key?: string | null
+  payload?: Record<string, unknown> | null
+  source_event?: string | null
 }
 
 export type LicenseStatus = {
