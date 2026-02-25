@@ -548,7 +548,7 @@ def test_bootstrap_exposes_embedding_runtime_config(tmp_path, monkeypatch):
             'enabled': True,
             'disabled_reason': None,
             'auth_status': None,
-            'config': {'url': 'http://mcp-tools:8090/mcp'},
+            'config': {'url': 'http://mcp-tools:8091/mcp'},
         },
         {
             'name': 'jira',
@@ -3354,7 +3354,7 @@ def test_agents_chat_endpoint_normalizes_selected_mcp_servers(tmp_path, monkeypa
                 'enabled': True,
                 'disabled_reason': None,
                 'auth_status': None,
-                'config': {'url': 'http://mcp-tools:8090/mcp'},
+                'config': {'url': 'http://mcp-tools:8091/mcp'},
             },
             {
                 'name': 'jira',
@@ -3415,7 +3415,7 @@ def test_agents_chat_endpoint_skips_disabled_mcp_servers_from_defaults(tmp_path,
                 'enabled': True,
                 'disabled_reason': None,
                 'auth_status': None,
-                'config': {'url': 'http://mcp-tools:8090/mcp'},
+                'config': {'url': 'http://mcp-tools:8091/mcp'},
             },
             {
                 'name': 'jira',
