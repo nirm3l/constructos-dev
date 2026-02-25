@@ -73,13 +73,25 @@
 
 ### 1.7 Notifications and Realtime
 - `GET /api/notifications`
+- `POST /api/notifications/read-all`
 - `POST /api/notifications/{notification_id}/read`
 - `GET /api/notifications/stream` (SSE)
 
 SSE event types:
 - `notification`
 - `task_event`
+- `license_event`
 - `ping`
+
+SSE cursor and resume contract (`GET /api/notifications/stream`):
+- Notification resume cursor sources:
+  - query param `last_id`,
+  - header `Last-Event-ID` (browser/EventSource reconnect).
+- Cursor precedence: `last_id` overrides `Last-Event-ID` when both are present.
+- Workspace activity cursor source: query param `last_activity_id`.
+- Default behavior is tail mode:
+  - if notification cursor is missing or invalid, stream starts after the latest current notification for the user,
+  - if `workspace_id` is provided and `last_activity_id` is `0`, stream starts after latest current workspace activity.
 
 ### 1.8 Attachments
 - `POST /api/attachments/upload`

@@ -31,6 +31,16 @@ def list_notifications_after_cursor_read_model(db: Session, user_id: str, cursor
     return db.execute(stmt.order_by(Notification.created_at.asc(), Notification.id.asc()).limit(limit)).scalars().all()
 
 
+def latest_notification_id_read_model(db: Session, user_id: str) -> str:
+    latest_id = db.execute(
+        select(Notification.id)
+        .where(Notification.user_id == user_id)
+        .order_by(Notification.created_at.desc(), Notification.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    return str(latest_id or "")
+
+
 def list_workspace_activity_after_id_read_model(db: Session, workspace_id: str, cursor: int, limit: int = 50) -> list[dict]:
     rows = (
         db.execute(

@@ -10,7 +10,7 @@ from io import BytesIO
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 
 def build_client(tmp_path: Path):
@@ -40,6 +40,16 @@ def build_anonymous_client(tmp_path: Path):
     main = reload(main)
     main.bootstrap_data()
     return TestClient(main.app)
+
+
+def trigger_system_notifications_for_user(user_id: str) -> int:
+    from shared.core import emit_system_notifications
+    from shared.models import SessionLocal, User
+
+    with SessionLocal() as db:
+        user = db.get(User, user_id)
+        assert user is not None
+        return emit_system_notifications(db, user)
 
 
 def test_health(tmp_path):
@@ -354,6 +364,27 @@ def test_comment_mention_creates_notification(tmp_path):
     assert mentioned
     assert any(n.get('task_id') == task['id'] for n in mentioned)
     assert any(n.get('project_id') == project_id for n in mentioned)
+
+
+def test_comment_mention_respects_target_notification_preference(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    current_user = bootstrap['current_user']
+
+    disabled = client.patch('/api/me/preferences', json={'notifications_enabled': False})
+    assert disabled.status_code == 200
+    assert disabled.json()['notifications_enabled'] is False
+
+    task = client.post('/api/tasks', json={'title': 'Mention preference', 'workspace_id': ws_id, 'project_id': project_id}).json()
+    comment = client.post(f"/api/tasks/{task['id']}/comments", json={'body': f"Ping @{current_user['username']}"})
+    assert comment.status_code == 200
+
+    notes = client.get('/api/notifications')
+    assert notes.status_code == 200
+    mentioned = [n for n in notes.json() if 'mentioned you on task' in n['message'] and n.get('task_id') == task['id']]
+    assert mentioned == []
 
 
 def test_delete_comment(tmp_path):
@@ -1310,6 +1341,7 @@ def test_admin_cannot_reset_password_for_agent_user(tmp_path):
 def test_due_soon_system_notification(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
     ws_id = bootstrap['workspaces'][0]['id']
     project_id = bootstrap['projects'][0]['id']
     due_utc = datetime.now(timezone.utc) + timedelta(minutes=30)
@@ -1320,6 +1352,9 @@ def test_due_soon_system_notification(tmp_path):
     )
     assert created.status_code == 200
 
+    emitted = trigger_system_notifications_for_user(user_id)
+    assert emitted >= 1
+
     notes = client.get('/api/notifications')
     assert notes.status_code == 200
     due_soon = [n for n in notes.json() if 'due within 1 hour' in n['message']]
@@ -1328,18 +1363,168 @@ def test_due_soon_system_notification(tmp_path):
     assert any(n.get('project_id') == project_id for n in due_soon)
 
 
-def test_daily_digest_is_emitted_once_per_day(tmp_path):
+def test_notifications_get_is_read_only_and_does_not_emit_system_notifications(tmp_path):
     client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    due_utc = datetime.now(timezone.utc) + timedelta(minutes=30)
+
+    created = client.post(
+        '/api/tasks',
+        json={'title': 'Read-only notifications GET', 'workspace_id': ws_id, 'project_id': project_id, 'due_date': due_utc.isoformat()},
+    )
+    assert created.status_code == 200
+
+    from shared.models import Notification, SessionLocal
+
+    with SessionLocal() as db:
+        before = db.execute(select(Notification).where(Notification.user_id == user_id)).scalars().all()
+    assert before == []
+
+    notes = client.get('/api/notifications')
+    assert notes.status_code == 200
+    assert not any('due within 1 hour' in n['message'] for n in notes.json())
+
+    with SessionLocal() as db:
+        after = db.execute(select(Notification).where(Notification.user_id == user_id)).scalars().all()
+    assert len(after) == 0
+
+
+def test_bootstrap_get_is_read_only_and_does_not_emit_system_notifications(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    due_utc = datetime.now(timezone.utc) + timedelta(minutes=30)
+
+    created = client.post(
+        '/api/tasks',
+        json={'title': 'Read-only bootstrap GET', 'workspace_id': ws_id, 'project_id': project_id, 'due_date': due_utc.isoformat()},
+    )
+    assert created.status_code == 200
+
+    from shared.models import Notification, SessionLocal
+
+    with SessionLocal() as db:
+        before = db.execute(select(Notification).where(Notification.user_id == user_id)).scalars().all()
+    assert before == []
+
+    refreshed = client.get('/api/bootstrap')
+    assert refreshed.status_code == 200
+
+    with SessionLocal() as db:
+        after = db.execute(select(Notification).where(Notification.user_id == user_id)).scalars().all()
+    assert len(after) == 0
+
+
+def test_daily_digest_is_suppressed_when_all_counters_are_zero(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+
+    emitted = trigger_system_notifications_for_user(user_id)
+    assert emitted == 0
 
     first = client.get('/api/notifications')
     assert first.status_code == 200
     first_digests = [n for n in first.json() if n['message'].startswith('Daily digest for ')]
-    assert len(first_digests) == 1
+    assert first_digests == []
 
     second = client.get('/api/notifications')
     assert second.status_code == 200
     second_digests = [n for n in second.json() if n['message'].startswith('Daily digest for ')]
-    assert len(second_digests) == 1
+    assert second_digests == []
+
+
+def test_daily_digest_is_actionable_and_lists_top_priorities(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    overdue_utc = datetime.now(timezone.utc) - timedelta(days=1, hours=2)
+    due_today_utc = datetime.now(timezone.utc) + timedelta(hours=3)
+
+    first = client.post(
+        '/api/tasks',
+        json={'title': 'Overdue task', 'workspace_id': ws_id, 'project_id': project_id, 'due_date': overdue_utc.isoformat()},
+    )
+    second = client.post(
+        '/api/tasks',
+        json={'title': 'Due today task', 'workspace_id': ws_id, 'project_id': project_id, 'due_date': due_today_utc.isoformat()},
+    )
+    third = client.post(
+        '/api/tasks',
+        json={'title': 'High priority task', 'workspace_id': ws_id, 'project_id': project_id, 'priority': 'High'},
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert third.status_code == 200
+
+    emitted = trigger_system_notifications_for_user(user_id)
+    assert emitted >= 1
+
+    notes = client.get('/api/notifications')
+    assert notes.status_code == 200
+    digests = [n for n in notes.json() if n['message'].startswith('Daily digest for ')]
+    assert len(digests) == 1
+    message = digests[0]['message']
+    assert '1 due today' in message
+    assert '1 overdue' in message
+    assert '1 high priority' in message
+    assert '"Overdue task" (overdue)' in message
+    assert '"Due today task" (due today)' in message
+    assert '"High priority task" (high priority)' in message
+
+    overdue_pos = message.find('"Overdue task" (overdue)')
+    due_today_pos = message.find('"Due today task" (due today)')
+    high_pos = message.find('"High priority task" (high priority)')
+    assert overdue_pos >= 0
+    assert due_today_pos >= 0
+    assert high_pos >= 0
+    assert overdue_pos < due_today_pos < high_pos
+
+
+def test_system_notifications_respect_notifications_enabled_preference(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    disabled = client.patch('/api/me/preferences', json={'notifications_enabled': False})
+    assert disabled.status_code == 200
+    assert disabled.json()['notifications_enabled'] is False
+
+    due_utc = datetime.now(timezone.utc) + timedelta(minutes=30)
+    created = client.post(
+        '/api/tasks',
+        json={'title': 'Preference-gated due soon', 'workspace_id': ws_id, 'project_id': project_id, 'due_date': due_utc.isoformat()},
+    )
+    assert created.status_code == 200
+
+    emitted = trigger_system_notifications_for_user(user_id)
+    assert emitted == 0
+
+    notes = client.get('/api/notifications')
+    assert notes.status_code == 200
+    assert not any('due within 1 hour' in n['message'] for n in notes.json())
+    assert not any(n['message'].startswith('Daily digest for ') for n in notes.json())
+
+
+def test_notifications_table_has_user_created_at_index(tmp_path):
+    build_client(tmp_path)
+
+    from shared.models import SessionLocal
+
+    with SessionLocal() as db:
+        rows = db.execute(text("PRAGMA index_list('notifications')")).all()
+    names = {str(row[1]) for row in rows}
+    assert 'ix_notifications_user_created_at' in names
 
 
 def test_notifications_endpoint_tolerates_duplicate_messages(tmp_path):
@@ -1361,6 +1546,7 @@ def test_notifications_endpoint_tolerates_duplicate_messages(tmp_path):
 def test_mark_all_notifications_read(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
     ws_id = bootstrap['workspaces'][0]['id']
     project_id = bootstrap['projects'][0]['id']
 
@@ -1375,6 +1561,9 @@ def test_mark_all_notifications_read(tmp_path):
         },
     )
     assert created.status_code == 200
+
+    emitted = trigger_system_notifications_for_user(user_id)
+    assert emitted >= 1
 
     first = client.get('/api/notifications')
     assert first.status_code == 200
@@ -1886,7 +2075,6 @@ def test_notifications_stream_emits_refresh_when_user_state_changes_without_sign
     import features.notifications.api as notifications_api
     from shared.models import SessionLocal, User
 
-    monkeypatch.setattr(notifications_api, 'emit_system_notifications', lambda db, user: 0)
     class DummyRequest:
         def __init__(self):
             self.calls = 0
@@ -1951,6 +2139,268 @@ def test_notifications_stream_emits_refresh_when_user_state_changes_without_sign
 
     refreshed_theme = client.get('/api/bootstrap').json()['current_user']['theme']
     assert refreshed_theme != before_theme
+
+
+def test_notifications_stream_emits_refresh_on_mark_read_signal(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    due_utc = datetime.now(timezone.utc) + timedelta(minutes=30)
+
+    created = client.post(
+        '/api/tasks',
+        json={'title': 'Stream mark-read signal', 'workspace_id': ws_id, 'project_id': project_id, 'due_date': due_utc.isoformat()},
+    )
+    assert created.status_code == 200
+
+    emitted = trigger_system_notifications_for_user(user_id)
+    assert emitted >= 1
+
+    notes = client.get('/api/notifications')
+    assert notes.status_code == 200
+    notification_id = notes.json()[0]['id']
+
+    import features.notifications.api as notifications_api
+    from features.notifications.application import NotificationApplicationService
+    from shared.models import SessionLocal, User
+
+    original_wait_for_signal = notifications_api._wait_for_signal
+
+    async def short_wait_for_signal(subscription, timeout_seconds):  # noqa: ARG001
+        await original_wait_for_signal(subscription, timeout_seconds=1.0)
+
+    monkeypatch.setattr(notifications_api, '_wait_for_signal', short_wait_for_signal)
+
+    class DummyRequest:
+        def __init__(self):
+            self.calls = 0
+
+        async def is_disconnected(self):
+            self.calls += 1
+            return self.calls > 8
+
+    async def mark_read_later():
+        await asyncio.sleep(0.05)
+        with SessionLocal() as db:
+            local_user = db.get(User, user_id)
+            assert local_user is not None
+            result = NotificationApplicationService(
+                db,
+                local_user,
+                command_id='test-stream-mark-read-signal',
+            ).mark_read(notification_id)
+            assert result['ok'] is True
+
+    async def consume_stream_once():
+        mark_task = asyncio.create_task(mark_read_later())
+        try:
+            with SessionLocal() as db:
+                local_user = db.get(User, user_id)
+                assert local_user is not None
+                response = await notifications_api.notifications_stream(
+                    request=DummyRequest(),
+                    last_id=notification_id,
+                    workspace_id=None,
+                    last_activity_id=0,
+                    db=db,
+                    user=local_user,
+                )
+                async for raw_chunk in response.body_iterator:
+                    chunk = raw_chunk.decode() if isinstance(raw_chunk, (bytes, bytearray)) else str(raw_chunk)
+                    if 'event: task_event' in chunk and 'data: {}' in chunk:
+                        return chunk
+            return ''
+        finally:
+            await mark_task
+
+    first_chunk = asyncio.run(consume_stream_once())
+    assert 'event: task_event' in first_chunk
+    assert 'data: {}' in first_chunk
+
+    refreshed = client.get('/api/notifications')
+    assert refreshed.status_code == 200
+    marked = next(item for item in refreshed.json() if item['id'] == notification_id)
+    assert marked['is_read'] is True
+
+
+def test_notifications_stream_defaults_to_tail_and_does_not_replay_history(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    now = datetime.now(timezone.utc)
+
+    import features.notifications.api as notifications_api
+    from shared.models import Notification, SessionLocal, User
+
+    with SessionLocal() as db:
+        seeded = Notification(
+            user_id=user_id,
+            workspace_id=ws_id,
+            project_id=project_id,
+            message='Existing notification before stream connect',
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(seeded)
+        db.commit()
+        seeded_id = seeded.id
+
+    original_wait_for_signal = notifications_api._wait_for_signal
+
+    async def short_wait_for_signal(subscription, timeout_seconds):  # noqa: ARG001
+        await original_wait_for_signal(subscription, timeout_seconds=0.01)
+
+    monkeypatch.setattr(notifications_api, '_wait_for_signal', short_wait_for_signal)
+
+    class DummyRequest:
+        headers = {}
+
+        def __init__(self):
+            self.calls = 0
+
+        async def is_disconnected(self):
+            self.calls += 1
+            return self.calls > 4
+
+    async def consume_first_chunk():
+        with SessionLocal() as db:
+            local_user = db.get(User, user_id)
+            assert local_user is not None
+            response = await notifications_api.notifications_stream(
+                request=DummyRequest(),
+                last_id=None,
+                workspace_id=None,
+                last_activity_id=0,
+                db=db,
+                user=local_user,
+            )
+            async for raw_chunk in response.body_iterator:
+                chunk = raw_chunk.decode() if isinstance(raw_chunk, (bytes, bytearray)) else str(raw_chunk)
+                if chunk.strip():
+                    return chunk
+        return ''
+
+    first_chunk = asyncio.run(consume_first_chunk())
+
+    assert 'event: notification' not in first_chunk
+    assert seeded_id not in first_chunk
+
+
+def test_notifications_stream_resumes_from_last_event_id_header(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    now = datetime.now(timezone.utc)
+
+    import features.notifications.api as notifications_api
+    from shared.models import Notification, SessionLocal, User
+
+    with SessionLocal() as db:
+        first = Notification(
+            user_id=user_id,
+            workspace_id=ws_id,
+            project_id=project_id,
+            message='Resume cursor first',
+            created_at=now,
+            updated_at=now,
+        )
+        second = Notification(
+            user_id=user_id,
+            workspace_id=ws_id,
+            project_id=project_id,
+            message='Resume cursor second',
+            created_at=now + timedelta(seconds=1),
+            updated_at=now + timedelta(seconds=1),
+        )
+        db.add_all([first, second])
+        db.commit()
+        first_id = first.id
+        second_id = second.id
+
+    class DummyRequest:
+        def __init__(self, last_event_id: str):
+            self.calls = 0
+            self.headers = {'last-event-id': last_event_id}
+
+        async def is_disconnected(self):
+            self.calls += 1
+            return self.calls > 3
+
+    async def consume_first_notification():
+        with SessionLocal() as db:
+            local_user = db.get(User, user_id)
+            assert local_user is not None
+            response = await notifications_api.notifications_stream(
+                request=DummyRequest(first_id),
+                last_id=None,
+                workspace_id=None,
+                last_activity_id=0,
+                db=db,
+                user=local_user,
+            )
+            async for raw_chunk in response.body_iterator:
+                chunk = raw_chunk.decode() if isinstance(raw_chunk, (bytes, bytearray)) else str(raw_chunk)
+                if 'event: notification' in chunk:
+                    return chunk
+        return ''
+
+    first_notification_chunk = asyncio.run(consume_first_notification())
+
+    assert f'id: {second_id}' in first_notification_chunk
+    assert 'Resume cursor second' in first_notification_chunk
+    assert f'id: {first_id}' not in first_notification_chunk
+
+
+def test_notifications_stream_init_is_read_only_and_does_not_emit_system_notifications(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    due_utc = datetime.now(timezone.utc) + timedelta(minutes=30)
+
+    created = client.post(
+        '/api/tasks',
+        json={'title': 'Read-only stream init', 'workspace_id': ws_id, 'project_id': project_id, 'due_date': due_utc.isoformat()},
+    )
+    assert created.status_code == 200
+
+    from shared.models import Notification, SessionLocal, User
+    import features.notifications.api as notifications_api
+
+    class ImmediateDisconnectRequest:
+        async def is_disconnected(self):
+            return True
+
+    with SessionLocal() as db:
+        before_rows = db.execute(select(Notification).where(Notification.user_id == user_id)).scalars().all()
+    assert before_rows == []
+
+    async def connect_and_disconnect():
+        with SessionLocal() as db:
+            local_user = db.get(User, user_id)
+            response = await notifications_api.notifications_stream(
+                request=ImmediateDisconnectRequest(),
+                last_id=None,
+                workspace_id=None,
+                last_activity_id=0,
+                db=db,
+                user=local_user,
+            )
+            async for _ in response.body_iterator:
+                break
+
+    asyncio.run(connect_and_disconnect())
+
+    with SessionLocal() as db:
+        after_rows = db.execute(select(Notification).where(Notification.user_id == user_id)).scalars().all()
+    assert len(after_rows) == 0
 
 
 def test_agent_service_theme_without_user_id_targets_primary_user(tmp_path):
@@ -3433,6 +3883,52 @@ def test_task_comment_projection_is_idempotent(tmp_path):
         rows = db.query(TaskComment).filter(TaskComment.task_id == task['id']).all()
         same_rows = [r for r in rows if r.body == 'same']
         assert len(same_rows) == 1
+
+
+def test_task_comment_projection_replay_does_not_create_duplicate_mentions(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    current_user = bootstrap['current_user']
+
+    task = client.post('/api/tasks', json={'title': 'Mention replay guard', 'workspace_id': ws_id, 'project_id': project_id}).json()
+    comment = client.post(f"/api/tasks/{task['id']}/comments", json={'body': f"Ping @{current_user['username']}"})
+    assert comment.status_code == 200
+
+    before = client.get('/api/notifications')
+    assert before.status_code == 200
+    before_mentions = [
+        n for n in before.json()
+        if 'mentioned you on task' in n['message'] and n.get('task_id') == task['id']
+    ]
+    assert len(before_mentions) == 1
+
+    from shared.core import EventEnvelope
+    from shared.eventing_rebuild import project_event
+    from shared.models import SessionLocal
+
+    ev = EventEnvelope(
+        aggregate_type='Task',
+        aggregate_id=task['id'],
+        version=2,
+        event_type='TaskCommentAdded',
+        payload={'task_id': task['id'], 'user_id': current_user['id'], 'body': f"Ping @{current_user['username']}"},
+        metadata={'actor_id': current_user['id'], 'workspace_id': ws_id, 'project_id': project_id, 'task_id': task['id']},
+    )
+
+    with SessionLocal() as db:
+        project_event(db, ev)
+        project_event(db, ev)
+        db.commit()
+
+    after = client.get('/api/notifications')
+    assert after.status_code == 200
+    after_mentions = [
+        n for n in after.json()
+        if 'mentioned you on task' in n['message'] and n.get('task_id') == task['id']
+    ]
+    assert len(after_mentions) == len(before_mentions)
 
 
 def test_task_watch_projection_is_idempotent_and_dedupes(tmp_path):

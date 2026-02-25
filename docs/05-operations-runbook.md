@@ -244,8 +244,18 @@ docker compose run --rm --build task-app pytest
 | Duplicate side effects on retries | same request mutates state multiple times | verify stable `X-Command-Id` reuse | enforce command_id reuse |
 | Runner does not process queued tasks | automation stays `queued` | verify `AGENT_RUNNER_ENABLED`, runner logs | verify `AGENT_CODEX_COMMAND`, timeout |
 | SSE does not deliver updates | stale notifications/activity in UI | check `/api/notifications/stream` connectivity | verify proxy idle timeout |
+| SSE reconnect behavior is inconsistent | missing recent notification after reconnect or unexpected history replay | check `Last-Event-ID` forwarding and query cursors (`last_id`, `last_activity_id`) | ensure proxy preserves `Last-Event-ID`; use explicit query cursors for non-browser clients |
 | Projection consumer is stuck | lagging read models/graph/vector | inspect persistent subscription group info and parked count | nack policy review, fix handler error, replay parked messages |
 | Attachment download returns 404 | upload succeeded but file not found | verify `ATTACHMENTS_DIR` and scoped path | verify volume mounts and workspace path |
+
+SSE resume semantics (`/api/notifications/stream`):
+- `notification` events include SSE `id` field (notification id) and can resume from:
+  - `Last-Event-ID` header,
+  - explicit `last_id` query cursor (takes precedence over header).
+- Workspace activity resume uses `last_activity_id`.
+- Tail defaults:
+  - missing/invalid notification cursor starts from current notification tail,
+  - `workspace_id` with `last_activity_id=0` starts from current activity tail.
 
 ## 8. Pre-Production Hardening Checklist
 1. Remove default tokens and static credentials from compose/env.

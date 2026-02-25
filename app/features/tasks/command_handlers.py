@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ from shared.core import (
     TaskPatch,
     TaskWatcher,
     User,
+    allocate_id,
     coerce_originator_id,
     ensure_project_access,
     ensure_role,
@@ -36,7 +38,10 @@ from shared.core import (
     rebuild_state,
     to_iso_utc,
 )
+from features.notifications.domain import NotificationAggregate
 from .domain import TaskAggregate
+
+MENTION_PATTERN = re.compile(r"@([A-Za-z0-9_\-]+)")
 
 
 def _normalize_tags(values: list[str] | None) -> list[str]:
@@ -109,6 +114,59 @@ def _task_title_key(value: str) -> str:
 def _task_aggregate_id(project_id: str, title: str) -> str:
     key = _task_title_key(title)
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"task:{project_id}:{key}"))
+
+
+def _extract_unique_mentioned_usernames(body: str) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for username in MENTION_PATTERN.findall(body or ""):
+        normalized = username.casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(username)
+    return out
+
+
+def _emit_mention_notifications(
+    db: Session,
+    *,
+    actor: User,
+    workspace_id: str,
+    project_id: str | None,
+    task_id: str,
+    body: str,
+) -> None:
+    usernames = _extract_unique_mentioned_usernames(body)
+    if not usernames:
+        return
+
+    mentioned_users = db.execute(select(User).where(User.username.in_(usernames))).scalars().all()
+    by_username = {str(user.username or "").casefold(): user for user in mentioned_users}
+    actor_username = str(actor.username or "Someone")
+    repo = AggregateEventRepository(db)
+    for username in usernames:
+        target = by_username.get(username.casefold())
+        if target is None:
+            continue
+        if not bool(getattr(target, "notifications_enabled", True)):
+            continue
+        notification_id = allocate_id(db)
+        aggregate = NotificationAggregate(
+            id=coerce_originator_id(notification_id),
+            user_id=target.id,
+            message=f"{actor_username} mentioned you on task #{task_id}",
+        )
+        repo.persist(
+            aggregate,
+            base_metadata={
+                "actor_id": actor.id,
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "task_id": task_id,
+            },
+            expected_version=0,
+        )
 
 
 def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> Project:
@@ -666,6 +724,14 @@ class AddCommentHandler:
             workspace_id=workspace_id,
             project_id=project_id,
             task_id=self.task_id,
+        )
+        _emit_mention_notifications(
+            self.ctx.db,
+            actor=self.ctx.user,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
+            body=self.payload.body,
         )
         self.ctx.db.commit()
         last = self.ctx.db.execute(select(TaskComment).where(TaskComment.task_id == self.task_id).order_by(TaskComment.id.desc()).limit(1)).scalar_one_or_none()

@@ -12,7 +12,7 @@ from sqlalchemy import func, inspect, select, text
 from sqlalchemy.orm import Session
 
 from features.bootstrap.read_models import bootstrap_payload_read_model
-from .eventing import append_event, current_version, emit_system_notifications, get_kurrent_client
+from .eventing import append_event, current_version, get_kurrent_client
 from features.projects.domain import EVENT_CREATED as PROJECT_EVENT_CREATED
 from features.rules.domain import EVENT_CREATED as PROJECT_RULE_EVENT_CREATED
 from features.specifications.domain import EVENT_CREATED as SPECIFICATION_EVENT_CREATED
@@ -376,6 +376,7 @@ def ensure_notification_table_columns(db: Session):
     db.execute(text("CREATE INDEX IF NOT EXISTS ix_notifications_task_id ON notifications(task_id)"))
     db.execute(text("CREATE INDEX IF NOT EXISTS ix_notifications_note_id ON notifications(note_id)"))
     db.execute(text("CREATE INDEX IF NOT EXISTS ix_notifications_specification_id ON notifications(specification_id)"))
+    db.execute(text("CREATE INDEX IF NOT EXISTS ix_notifications_user_created_at ON notifications(user_id, created_at)"))
     db.commit()
 
 
@@ -616,7 +617,6 @@ def startup_bootstrap():
 
 
 def bootstrap_payload(db: Session, user: User) -> dict[str, Any]:
-    emit_system_notifications(db, user)
     return bootstrap_payload_read_model(db, user)
 
 

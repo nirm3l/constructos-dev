@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 
 from features.licensing.read_models import license_health_summary_read_model
-from shared.core import emit_system_notifications, get_current_user, get_db
+from shared.core import get_current_user, get_db
 from shared.settings import APP_BUILD, APP_DEPLOYED_AT_UTC, APP_VERSION
 from .read_models import bootstrap_payload_read_model
 
@@ -60,5 +60,4 @@ def version():
 
 @router.get("/api/bootstrap")
 def bootstrap(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    emit_system_notifications(db, user)
     return bootstrap_payload_read_model(db, user)
