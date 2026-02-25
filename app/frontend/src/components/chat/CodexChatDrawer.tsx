@@ -358,14 +358,14 @@ export function CodexChatDrawer({ state }: { state: any }) {
         ? 'Copied'
         : resumeCommandCopyState === 'error'
           ? 'Copy failed'
-          : `Continue this session from command line. Click to copy: ${codexResumeCommand}`
+          : 'Click to copy this command and continue this conversation in COS CLI.'
     )
     : null
   const hasContext = contextSummary !== null
   const metaParts: string[] = []
   if (hasMessages) metaParts.push(`${state.codexChatTurns.length} ${state.codexChatTurns.length === 1 ? 'message' : 'messages'}`)
   if (activeSessionUpdatedAt && (hasMessages || hasContext)) metaParts.push(activeSessionUpdatedAt)
-  const hasSessionMeta = metaParts.length > 0 || Boolean(contextSummary) || Boolean(codexThreadId) || codexResumeFallbackUsed
+  const hasSessionMeta = metaParts.length > 0 || Boolean(contextSummary) || codexResumeFallbackUsed
   const canDeleteSession = Array.isArray(state.codexChatSessions) && state.codexChatSessions.length > 1 && !state.runAgentChatMutation.isPending
   const canCreateSession = !state.runAgentChatMutation.isPending
   const canUseProjectCreationStarter =
@@ -630,7 +630,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
     <Tooltip.Provider delayDuration={180}>
       <div className="drawer open" onClick={() => state.setShowCodexChat(false)}>
         <div className="drawer-body codex-chat-drawer-body" onClick={(e) => e.stopPropagation()}>
-          <div className="row" style={{ justifyContent: 'space-between', marginBottom: 6 }}>
+          <div className="row codex-chat-header-row">
             <h3 style={{ margin: 0 }}>Chat</h3>
             <ChatTooltip content="Close chat">
               <button className="action-icon" onClick={() => state.setShowCodexChat(false)} aria-label="Close">
@@ -816,24 +816,9 @@ export function CodexChatDrawer({ state }: { state: any }) {
         </div>
         {hasSessionMeta && (
           <div className="meta codex-chat-session-meta">
-            {(metaParts.length > 0 || codexThreadId || codexResumeFallbackUsed) && (
+            {(metaParts.length > 0 || codexResumeFallbackUsed) && (
               <div className="codex-chat-session-meta-left">
                 {metaParts.map((part, idx) => <span key={`${idx}-${part}`}>{part}</span>)}
-                {codexThreadId && codexResumeCommand && codexResumeHint && (
-                  <ChatTooltip content={codexResumeHint}>
-                    <button
-                      type="button"
-                      className="codex-chat-session-meta-thread"
-                      aria-label={codexResumeHint}
-                      onClick={() => { void copyResumeCommandToClipboard() }}
-                    >
-                      <span className="codex-chat-session-meta-thread-text">{codexResumeCommand}</span>
-                      <span className="codex-chat-session-meta-thread-copy-icon" aria-hidden="true">
-                        <Icon path="M9 9h11v11H9zM4 4h11v2H6v9H4z" />
-                      </span>
-                    </button>
-                  </ChatTooltip>
-                )}
                 {codexResumeFallbackUsed && (
                   <ChatTooltip content="Last turn used fallback start because resume was unavailable for the saved thread.">
                     <span className="codex-chat-session-meta-resume-fallback" aria-label="Codex resume fallback used">
@@ -1122,6 +1107,23 @@ export function CodexChatDrawer({ state }: { state: any }) {
               </span>
             </ChatTooltip>
           </div>
+          {codexThreadId && codexResumeCommand && codexResumeHint && (
+            <div className="codex-chat-toolbar-footer">
+              <ChatTooltip content={codexResumeHint}>
+                <button
+                  type="button"
+                  className="codex-chat-resume-copy-btn codex-chat-resume-copy-btn-footer"
+                  aria-label={codexResumeHint}
+                  onClick={() => { void copyResumeCommandToClipboard() }}
+                >
+                  <span className="codex-chat-resume-copy-btn-text">{codexResumeCommand}</span>
+                  <span className="codex-chat-resume-copy-btn-icon" aria-hidden="true">
+                    <Icon path="M9 9h11v11H9zM4 4h11v2H6v9H4z" />
+                  </span>
+                </button>
+              </ChatTooltip>
+            </div>
+          )}
           <div className="codex-chat-task-event-row" aria-live="polite" aria-atomic="true">
             <span className={`meta codex-chat-task-event ${hasLastTaskEvent ? '' : 'is-empty'}`.trim()}>
               Last task event: <span className="codex-chat-task-event-time">{lastTaskEventTimeLabel}</span>
