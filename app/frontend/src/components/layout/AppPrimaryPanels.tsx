@@ -216,6 +216,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             selectedProjectTimeMeta: state.selectedProjectTimeMeta,
             codexChatProjectId: state.codexChatProjectId,
             codexChatTurns: state.codexChatTurns,
+            codexChatUsage: state.codexChatUsage,
+            codexChatResumeState: state.codexChatResumeState,
           }}
         />
       )}

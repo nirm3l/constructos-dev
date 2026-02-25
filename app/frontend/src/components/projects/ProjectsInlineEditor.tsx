@@ -6,6 +6,7 @@ import * as Accordion from '@radix-ui/react-accordion'
 import * as Tabs from '@radix-ui/react-tabs'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import type {
+  AgentChatUsage,
   AttachmentRef,
   GraphContextPack,
   GraphProjectOverview,
@@ -46,6 +47,12 @@ type WorkspaceUser = {
   user_type: string
 }
 
+type CodexResumeStateLike = {
+  attempted?: boolean
+  succeeded?: boolean
+  fallbackUsed?: boolean
+} | null
+
 export function ProjectsInlineEditor({
   project,
   selectedProject,
@@ -71,6 +78,8 @@ export function ProjectsInlineEditor({
   contextLimitTokensDefault,
   codexChatProjectId,
   codexChatTurns,
+  codexChatUsage,
+  codexChatResumeState,
   saveProjectMutation,
   deleteProjectMutation,
   editProjectDescriptionView,
@@ -143,6 +152,8 @@ export function ProjectsInlineEditor({
   contextLimitTokensDefault: number
   codexChatProjectId: string
   codexChatTurns: Array<{ role?: string; content?: string }>
+  codexChatUsage?: AgentChatUsage | null
+  codexChatResumeState?: CodexResumeStateLike
   saveProjectMutation: ProjectMutation
   deleteProjectMutation: ProjectMutation
   editProjectDescriptionView: 'write' | 'preview' | 'split'
@@ -1602,6 +1613,8 @@ export function ProjectsInlineEditor({
             contextLimitTokens={contextLimitTokensDefault > 0 ? contextLimitTokensDefault : undefined}
             activeChatProjectId={codexChatProjectId}
             activeChatTurns={codexChatTurns}
+            codexChatUsage={codexChatUsage ?? null}
+            codexChatResumeState={codexChatResumeState ?? null}
             projectChatIndexMode={selectedProject.chat_index_mode}
             projectChatAttachmentIngestionMode={selectedProject.chat_attachment_ingestion_mode}
           />

@@ -446,6 +446,68 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     )
 
 
+def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
+    task_id = ctx.get("task_id")
+    title = ctx.get("title", "")
+    description = ctx.get("description", "")
+    status = ctx.get("status", "")
+    instruction = ctx.get("instruction", "")
+    workspace_id = ctx.get("workspace_id") or ""
+    project_id = ctx.get("project_id") or ""
+    actor_user_id = str(ctx.get("actor_user_id") or "").strip()
+    project_name = ctx.get("project_name") or ""
+    allow_mutations = bool(ctx.get("allow_mutations", True))
+    mcp_servers = _normalize_prompt_mcp_servers(ctx.get("mcp_servers"))
+    enabled_mcp_servers_text = ", ".join(mcp_servers) if mcp_servers else "_(none selected)_"
+    has_task_context = bool(str(task_id or "").strip())
+    task_guidance = (
+        "- If task context is present, call get_task(task_id) before mutating state.\n"
+        if has_task_context
+        else "- This is a general chat request; use workspace/project context as needed.\n"
+    )
+    mutation_policy = (
+        "- Mutating tools are allowed for this request.\n"
+        if allow_mutations
+        else "- Mutating tools are NOT allowed for this request.\n"
+    )
+    response_header = (
+        "Return ONLY JSON matching the schema.\n\n"
+        if structured_response
+        else "Return plain Markdown text for the end user.\nDo not output JSON wrappers.\n\n"
+    )
+    response_tail = (
+        "- Return action=complete only if this task should be completed; otherwise return action=comment.\n"
+        "- summary must state what was actually done.\n"
+        "- comment should be concise and optional; use null when no extra runner comment is needed.\n"
+        if structured_response
+        else "- Respond directly to the user with clear, actionable text.\n"
+    )
+    return (
+        "You are an automation agent for task management.\n"
+        "This is a resumed Codex thread. Reuse prior thread context instead of re-deriving project bootstrap context.\n"
+        f"{response_header}"
+        "Current Turn Context:\n"
+        f"Task ID: {task_id}\n"
+        f"Title: {title}\n"
+        f"Status: {status}\n"
+        f"Description: {description}\n"
+        f"Workspace ID: {workspace_id}\n"
+        f"Project ID: {project_id}\n"
+        f"Current User ID: {actor_user_id}\n"
+        f"Project Name: {project_name}\n"
+        f"Instruction: {instruction}\n\n"
+        "Guidance:\n"
+        f"{task_guidance}"
+        f"- Enabled MCP servers for this run: {enabled_mcp_servers_text}.\n"
+        "- If prior thread context appears stale or missing, refresh by calling get_project_chat_context(project_ref=..., workspace_id=...).\n"
+        "- Prefer bulk tools for batch operations.\n"
+        "- For mutating MCP tool calls, always provide command_id.\n"
+        "- If retrying the same mutation, reuse the exact same command_id.\n"
+        f"{mutation_policy}"
+        f"{response_tail}"
+    )
+
+
 def _safe_non_negative_int(value: object) -> int | None:
     if value is None:
         return None
@@ -652,7 +714,8 @@ def _build_plain_text_result(message_text: str) -> dict[str, object]:
 
 def _run_codex_app_server_with_optional_stream(
     *,
-    prompt: str,
+    start_prompt: str,
+    resume_prompt: str | None,
     timeout_seconds: float,
     stream_events: bool,
     model: str | None = None,
@@ -794,9 +857,12 @@ def _run_codex_app_server_with_optional_stream(
                     raise RuntimeError("codex app-server did not return thread id")
                 if req_method == "thread/resume":
                     resume_succeeded = True
+                selected_prompt = start_prompt
+                if req_method == "thread/resume" and resume_prompt is not None:
+                    selected_prompt = resume_prompt
                 turn_params: dict[str, object] = {
                     "threadId": thread_id,
-                    "input": [{"type": "text", "text": prompt}],
+                    "input": [{"type": "text", "text": selected_prompt}],
                 }
                 if output_schema is not None:
                     turn_params["outputSchema"] = output_schema
@@ -1045,7 +1111,8 @@ def main() -> int:
     stream_events = bool(ctx.get("stream_events"))
     stream_plain_text = bool(ctx.get("stream_plain_text"))
     structured_response = not (stream_events and stream_plain_text)
-    prompt = _build_prompt(ctx, structured_response=structured_response)
+    start_prompt = _build_prompt(ctx, structured_response=structured_response)
+    resume_prompt = _build_resume_prompt(ctx, structured_response=structured_response)
     schema = {
         "type": "object",
         "properties": {
@@ -1072,7 +1139,8 @@ def main() -> int:
         ) as codex_env:
             if stream_events:
                 final_message, usage, codex_session_id, resume_attempted, resume_succeeded = _run_codex_app_server_with_optional_stream(
-                    prompt=prompt,
+                    start_prompt=start_prompt,
+                    resume_prompt=resume_prompt,
                     timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
                     stream_events=True,
                     model=AGENT_CODEX_MODEL or None,
@@ -1089,7 +1157,8 @@ def main() -> int:
                     out = _build_plain_text_result(final_message)
             else:
                 final_message, usage, codex_session_id, resume_attempted, resume_succeeded = _run_codex_app_server_with_optional_stream(
-                    prompt=prompt,
+                    start_prompt=start_prompt,
+                    resume_prompt=resume_prompt,
                     timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
                     stream_events=False,
                     model=AGENT_CODEX_MODEL or None,

@@ -238,6 +238,34 @@ def test_codex_prompt_includes_soul_md_section():
     assert "Task A IMPLEMENTS Spec B" in prompt
 
 
+def test_codex_resume_prompt_is_compact_and_turn_focused():
+    from features.agents.codex_mcp_adapter import _build_prompt, _build_resume_prompt
+
+    ctx = {
+        "task_id": "",
+        "title": "General Codex Chat",
+        "description": "chat",
+        "status": "To do",
+        "instruction": "Plan this feature",
+        "workspace_id": "ws-1",
+        "project_id": "pr-1",
+        "actor_user_id": "user-1",
+        "project_name": "Alpha",
+        "project_description": "## Soul\nUse strict acceptance criteria.",
+        "project_rules": [{"title": "Quality", "body": "Do not skip tests."}],
+        "graph_context_markdown": "## Graph\nTask A IMPLEMENTS Spec B",
+    }
+    full_prompt = _build_prompt(ctx)
+    resume_prompt = _build_resume_prompt(ctx)
+
+    assert "Context Pack:" in full_prompt
+    assert "This is a resumed Codex thread." in resume_prompt
+    assert "Context Pack:" not in resume_prompt
+    assert "File: Soul.md" not in resume_prompt
+    assert "Instruction: Plan this feature" in resume_prompt
+    assert len(resume_prompt) < len(full_prompt)
+
+
 def test_codex_prompt_includes_project_skills_section():
     from features.agents.codex_mcp_adapter import _build_prompt
 
@@ -510,7 +538,8 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
 
     def _fake_run_codex_app_server_with_optional_stream(
         *,
-        prompt: str,
+        start_prompt: str,
+        resume_prompt: str | None,
         timeout_seconds: float,
         stream_events: bool,
         model: str | None = None,
@@ -523,7 +552,10 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
         captured["timeout_seconds"] = timeout_seconds
         captured["has_output_schema"] = isinstance(output_schema, dict)
         captured["env_home"] = (env or {}).get("HOME")
-        _ = (prompt, model)
+        captured["start_prompt_contains_context_pack"] = "Context Pack:" in start_prompt
+        captured["resume_prompt_contains_context_pack"] = "Context Pack:" in str(resume_prompt or "")
+        captured["resume_prompt_text"] = str(resume_prompt or "")
+        _ = model
         return (
             '{"action":"comment","summary":"ok","comment":null}',
             {"input_tokens": 12, "output_tokens": 3},
@@ -565,6 +597,9 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
     assert captured["stream_events"] is False
     assert captured["preferred_thread_id"] == "thread-prev-1"
     assert captured["has_output_schema"] is True
+    assert captured["start_prompt_contains_context_pack"] is True
+    assert captured["resume_prompt_contains_context_pack"] is False
+    assert "This is a resumed Codex thread." in captured["resume_prompt_text"]
     assert captured["home_env_workspace_id"] == "ws-main"
     assert captured["home_env_chat_session_id"] == "chat-42"
     assert captured["env_home"] == "/tmp/fake-codex-home"

@@ -2,7 +2,7 @@ import React from 'react'
 import * as Accordion from '@radix-ui/react-accordion'
 import * as Tabs from '@radix-ui/react-tabs'
 import * as Tooltip from '@radix-ui/react-tooltip'
-import type { GraphContextPack, GraphProjectOverview, ProjectRule, ProjectSkill } from '../../types'
+import type { AgentChatUsage, GraphContextPack, GraphProjectOverview, ProjectRule, ProjectSkill } from '../../types'
 import { Icon } from '../shared/uiHelpers'
 
 type SnapshotSourceKey =
@@ -52,10 +52,18 @@ type ChatTurnLike = {
   content?: unknown
 }
 
+type CodexResumeStateLike = {
+  attempted?: boolean
+  succeeded?: boolean
+  fallbackUsed?: boolean
+} | null
+
+type PromptMode = 'start' | 'start_fallback' | 'resume'
+
 const CHAT_HISTORY_WINDOW_SIZE = 12
 const CONTEXT_OCCUPANCY_TILE_COUNT = 480
 
-const PROMPT_SCAFFOLD_TEMPLATE = [
+const START_PROMPT_SCAFFOLD_TEMPLATE = [
   'You are an automation agent for task management.',
   'Use available MCP tools to satisfy the instruction.',
   'Return plain Markdown text for the end user.',
@@ -86,7 +94,7 @@ const PROMPT_SCAFFOLD_TEMPLATE = [
   '- Respond directly to the user with clear, actionable text.',
 ].join('\n')
 
-const PROMPT_GUIDANCE_TEMPLATE = [
+const START_PROMPT_GUIDANCE_TEMPLATE = [
   '- Treat Soul.md, ProjectRules.md, ProjectSkills.md, GraphContext.md, GraphEvidence.json, and GraphSummary.md as durable project-level context.',
   '- ProjectRules.md defines how you should behave within this project.',
   '- ProjectSkills.md captures reusable skills configured for this project.',
@@ -129,6 +137,37 @@ const PROMPT_GUIDANCE_TEMPLATE = [
   '- Project: ?tab=projects&project=<project_id>',
   '- For recurring schedules, set task.recurring_rule explicitly using canonical format: every:<number><m|h|d> (example: every:1m).',
   '- After scheduling changes, verify by reading the task and confirming scheduled_at_utc + recurring_rule values.',
+].join('\n')
+
+const RESUME_PROMPT_SCAFFOLD_TEMPLATE = [
+  'You are an automation agent for task management.',
+  'This is a resumed Codex thread. Reuse prior thread context instead of re-deriving project bootstrap context.',
+  'Return plain Markdown text for the end user.',
+  'Do not output JSON wrappers.',
+  '',
+  'Current Turn Context:',
+  'Task ID: {task_id}',
+  'Title: {title}',
+  'Status: {status}',
+  'Description: {description}',
+  'Workspace ID: {workspace_id}',
+  'Project ID: {project_id}',
+  'Current User ID: {actor_user_id}',
+  'Project Name: {project_name}',
+  'Instruction: {instruction}',
+  '',
+  'Guidance:',
+  '- This is a general chat request; use workspace/project context as needed.',
+  '- Enabled MCP servers for this run: {enabled_mcp_servers}.',
+].join('\n')
+
+const RESUME_PROMPT_GUIDANCE_TEMPLATE = [
+  '- If prior thread context appears stale or missing, refresh by calling get_project_chat_context(project_ref=..., workspace_id=...).',
+  '- Prefer bulk tools for batch operations.',
+  '- For mutating MCP tool calls, always provide command_id.',
+  '- If retrying the same mutation, reuse the exact same command_id.',
+  '- Mutating tools are allowed for this request.',
+  '- Respond directly to the user with clear, actionable text.',
 ].join('\n')
 
 function estimateTokenCount(charCount: number): number {
@@ -187,6 +226,18 @@ function sourceGroupLabel(group: SnapshotSourceGroup): string {
 function formatPercent(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return '0.0%'
   return `${value.toFixed(1)}%`
+}
+
+function resolvePromptMode(resumeState: CodexResumeStateLike): PromptMode {
+  if (resumeState?.succeeded) return 'resume'
+  if (resumeState?.attempted && !resumeState?.succeeded) return 'start_fallback'
+  return 'start'
+}
+
+function promptModeLabel(mode: PromptMode): string {
+  if (mode === 'resume') return 'Resume'
+  if (mode === 'start_fallback') return 'Start (resume fallback)'
+  return 'Start'
 }
 
 function buildConversationHistoryText({
@@ -334,6 +385,8 @@ export function ProjectContextSnapshotPanel({
   contextLimitTokens,
   activeChatProjectId,
   activeChatTurns,
+  codexChatUsage,
+  codexChatResumeState,
   projectChatIndexMode,
   projectChatAttachmentIngestionMode,
 }: {
@@ -347,6 +400,8 @@ export function ProjectContextSnapshotPanel({
   contextLimitTokens?: number
   activeChatProjectId?: string
   activeChatTurns?: ChatTurnLike[]
+  codexChatUsage?: AgentChatUsage | null
+  codexChatResumeState?: CodexResumeStateLike
   projectChatIndexMode?: string
   projectChatAttachmentIngestionMode?: string
 }) {
@@ -369,6 +424,26 @@ export function ProjectContextSnapshotPanel({
     () => evidenceItems.filter((item) => !isChatEntityType(item.entity_type)),
     [evidenceItems]
   )
+  const activePromptMode = resolvePromptMode(codexChatResumeState ?? null)
+  const activePromptLabel = promptModeLabel(activePromptMode)
+  const activePromptScaffoldTemplate = activePromptMode === 'resume'
+    ? RESUME_PROMPT_SCAFFOLD_TEMPLATE
+    : START_PROMPT_SCAFFOLD_TEMPLATE
+  const activePromptGuidanceTemplate = activePromptMode === 'resume'
+    ? RESUME_PROMPT_GUIDANCE_TEMPLATE
+    : START_PROMPT_GUIDANCE_TEMPLATE
+  const observedInputTokens = typeof codexChatUsage?.input_tokens === 'number' && codexChatUsage.input_tokens >= 0
+    ? Math.floor(codexChatUsage.input_tokens)
+    : null
+  const observedOutputTokens = typeof codexChatUsage?.output_tokens === 'number' && codexChatUsage.output_tokens >= 0
+    ? Math.floor(codexChatUsage.output_tokens)
+    : null
+  const observedCachedInputTokens = typeof codexChatUsage?.cached_input_tokens === 'number' && codexChatUsage.cached_input_tokens >= 0
+    ? Math.floor(codexChatUsage.cached_input_tokens)
+    : null
+  const observedContextLimitTokens = typeof codexChatUsage?.context_limit_tokens === 'number' && codexChatUsage.context_limit_tokens > 0
+    ? Math.floor(codexChatUsage.context_limit_tokens)
+    : null
   const graphEvidenceJsonChat = chatEvidenceItems.length > 0 ? JSON.stringify(chatEvidenceItems) : ''
   const graphEvidenceJsonNonChat = nonChatEvidenceItems.length > 0 ? JSON.stringify(nonChatEvidenceItems) : ''
   const chatHistoryText = React.useMemo(
@@ -450,18 +525,18 @@ export function ProjectContextSnapshotPanel({
       {
         key: 'system_scaffold',
         group: 'hardcoded',
-        label: 'System prompt scaffold',
+        label: `System prompt scaffold (${activePromptLabel.toLowerCase()})`,
         color: '#334155',
-        chars: PROMPT_SCAFFOLD_TEMPLATE.length,
-        lines: countLines(PROMPT_SCAFFOLD_TEMPLATE),
+        chars: activePromptScaffoldTemplate.length,
+        lines: countLines(activePromptScaffoldTemplate),
       },
       {
         key: 'system_guidance',
         group: 'hardcoded',
-        label: 'Guidance and policy block',
+        label: `Guidance and policy block (${activePromptLabel.toLowerCase()})`,
         color: '#0f172a',
-        chars: PROMPT_GUIDANCE_TEMPLATE.length,
-        lines: countLines(PROMPT_GUIDANCE_TEMPLATE),
+        chars: activePromptGuidanceTemplate.length,
+        lines: countLines(activePromptGuidanceTemplate),
       },
       {
         key: 'chat_history',
@@ -483,8 +558,8 @@ export function ProjectContextSnapshotPanel({
 
     const totalChars = sourceBase.reduce((sum, section) => sum + section.chars, 0)
     const totalTokens = estimateTokenCount(totalChars)
-    const normalizedContextLimitTokens = Math.max(0, Math.floor(Number(contextLimitTokens || 0)))
-    const contextWindowTokens = Math.max(totalTokens, normalizedContextLimitTokens)
+    const normalizedContextLimitTokens = Math.max(0, Math.floor(Number(observedContextLimitTokens ?? contextLimitTokens ?? 0)))
+    const contextWindowTokens = Math.max(totalTokens, normalizedContextLimitTokens, observedInputTokens ?? 0)
     const usedTileCount =
       contextWindowTokens > 0 && totalTokens > 0
         ? Math.max(1, Math.min(CONTEXT_OCCUPANCY_TILE_COUNT, Math.round((totalTokens / contextWindowTokens) * CONTEXT_OCCUPANCY_TILE_COUNT)))
@@ -551,20 +626,34 @@ export function ProjectContextSnapshotPanel({
       sourceBase
         .filter((section) => section.group === 'hardcoded')
         .reduce((sum, section) => sum + section.chars, 0)
+    const startHardcodedChars = START_PROMPT_SCAFFOLD_TEMPLATE.length + START_PROMPT_GUIDANCE_TEMPLATE.length
+    const coldStartChars = Math.max(0, totalChars - hardcodedChars + startHardcodedChars)
+    const coldStartTokens = estimateTokenCount(coldStartChars)
+    const coldStartWindowUsedPercent = contextWindowTokens > 0 ? (coldStartTokens / contextWindowTokens) * 100 : 0
+    const observedWindowUsedPercent = contextWindowTokens > 0 && observedInputTokens !== null
+      ? (observedInputTokens / contextWindowTokens) * 100
+      : null
 
     return {
       totalChars,
       totalLines: sources.reduce((sum, section) => sum + section.lines, 0),
       approxTokens: estimateTokenCount(totalChars),
+      coldStartApproxTokens: coldStartTokens,
+      promptModeLabel: activePromptLabel,
       hardcodedTokens: estimateTokenCount(hardcodedChars),
       chatHistoryTokens: estimateTokenCount(chatHistoryText.length),
       indexedChatTokens: estimateTokenCount(graphEvidenceJsonChat.length),
       contextWindowTokens,
       windowUsedPercent: contextWindowTokens > 0 ? (totalTokens / contextWindowTokens) * 100 : 0,
+      coldStartWindowUsedPercent,
+      observedWindowUsedPercent,
       tileCount: CONTEXT_OCCUPANCY_TILE_COUNT,
       tokensPerTile,
       emptyTokens,
       emptyWindowPercent,
+      observedInputTokens,
+      observedCachedInputTokens,
+      observedOutputTokens,
       sources: visibleSources,
       sourceTiles: sourceTilesWithEmpty,
       evidenceCount: evidenceItems.length,
@@ -576,6 +665,10 @@ export function ProjectContextSnapshotPanel({
       chatEvidenceSharePct,
     }
   }, [
+    activePromptGuidanceTemplate,
+    activePromptLabel,
+    activePromptMode,
+    activePromptScaffoldTemplate,
     chatHistoryText,
     contextLimitTokens,
     contextPack?.focus?.entity_id,
@@ -594,6 +687,10 @@ export function ProjectContextSnapshotPanel({
     projectDescription,
     normalizedChatAttachmentMode,
     normalizedChatIndexMode,
+    observedCachedInputTokens,
+    observedContextLimitTokens,
+    observedInputTokens,
+    observedOutputTokens,
     projectName,
     rulesMarkdown,
     skillsMarkdown,
@@ -666,10 +763,14 @@ export function ProjectContextSnapshotPanel({
           </div>
           <div className="graph-context-snapshot-total">
             ~{snapshot.approxTokens.toLocaleString()} / {snapshot.contextWindowTokens.toLocaleString()} tokens
+            {snapshot.observedInputTokens !== null ? (
+              <div className="meta">{`Observed input: ${snapshot.observedInputTokens.toLocaleString()} tokens`}</div>
+            ) : null}
           </div>
         </div>
 
         <div className="context-snapshot-policy-row">
+          <span className="status-chip">{`Prompt mode: ${snapshot.promptModeLabel}`}</span>
           <span className="status-chip">{`Chat indexing: ${chatIndexModeLabel(normalizedChatIndexMode)}`}</span>
           <span className="status-chip">{`Attachment ingestion: ${chatAttachmentModeLabel(normalizedChatAttachmentMode)}`}</span>
           <span className="status-chip">{`Coverage: ${snapshot.contextCoveragePct}%`}</span>
@@ -682,7 +783,8 @@ export function ProjectContextSnapshotPanel({
           />
         </div>
         <div className="meta">
-          Used window: {formatPercent(snapshot.windowUsedPercent)} · Empty capacity: {formatPercent(snapshot.emptyWindowPercent)}
+          Used window: {formatPercent(snapshot.windowUsedPercent)} · Cold-start equivalent: {formatPercent(snapshot.coldStartWindowUsedPercent)} · Empty capacity: {formatPercent(snapshot.emptyWindowPercent)}
+          {snapshot.observedWindowUsedPercent !== null ? ` · Observed this turn: ${formatPercent(snapshot.observedWindowUsedPercent)}` : ''}
         </div>
 
         <Tabs.Root
@@ -725,7 +827,30 @@ export function ProjectContextSnapshotPanel({
               <div className="graph-context-metric context-snapshot-metric">
                 <div className="context-snapshot-metric-head">
                   <Icon path="M5 12h14M12 5v14" />
-                  <span className="meta">Hardcoded baseline</span>
+                  <span className="meta">Effective estimate</span>
+                </div>
+                <strong>{`~${snapshot.approxTokens.toLocaleString()}`}</strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M3 12h18M12 3v18" />
+                  <span className="meta">Cold-start estimate</span>
+                </div>
+                <strong>{`~${snapshot.coldStartApproxTokens.toLocaleString()}`}</strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M3 5h18v14H3zM7 9h10M7 13h6" />
+                  <span className="meta">Observed input</span>
+                </div>
+                <strong>
+                  {snapshot.observedInputTokens !== null ? snapshot.observedInputTokens.toLocaleString() : 'n/a'}
+                </strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M4 12h16M12 4v16" />
+                  <span className="meta">Hardcoded block</span>
                 </div>
                 <strong>{`~${snapshot.hardcodedTokens.toLocaleString()}`}</strong>
               </div>
@@ -760,7 +885,10 @@ export function ProjectContextSnapshotPanel({
             </div>
             <div className="context-snapshot-footnotes">
               <div className="meta">
-                Includes system prompt scaffold and policy block from automation code, plus active-session conversation history when available.
+                Uses the active prompt profile for this session ({snapshot.promptModeLabel}) and includes active-session conversation history when available.
+              </div>
+              <div className="meta">
+                Cold-start estimate keeps the same project/runtime payload but replaces hardcoded prompt blocks with the start profile.
               </div>
               <div className="meta">
                 Indexed chat corpus remains available when active session is empty, as long as project chat indexing policy is enabled.
@@ -842,7 +970,7 @@ export function ProjectContextSnapshotPanel({
                 </div>
               )}
               <div className="meta">
-                Used window: {formatPercent(snapshot.windowUsedPercent)} (~{snapshot.approxTokens.toLocaleString()} tokens)
+                Used window: {formatPercent(snapshot.windowUsedPercent)} (~{snapshot.approxTokens.toLocaleString()} tokens) · Cold-start equivalent: {formatPercent(snapshot.coldStartWindowUsedPercent)} (~{snapshot.coldStartApproxTokens.toLocaleString()} tokens)
               </div>
             </div>
 
