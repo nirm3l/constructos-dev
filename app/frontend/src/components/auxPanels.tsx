@@ -1,9 +1,12 @@
 import React from 'react'
+import * as Accordion from '@radix-ui/react-accordion'
 import * as Checkbox from '@radix-ui/react-checkbox'
 import * as Collapsible from '@radix-ui/react-collapsible'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Select from '@radix-ui/react-select'
+import * as Switch from '@radix-ui/react-switch'
 import * as Tabs from '@radix-ui/react-tabs'
+import * as Tooltip from '@radix-ui/react-tooltip'
 import type {
   AdminWorkspaceUser,
   LicenseStatus,
@@ -22,6 +25,16 @@ import { TaskListItem } from './tasks/taskViews'
 const VOICE_LANG_OPTIONS = [
   { value: 'bs-BA', label: 'Bosnian (bs-BA)' },
   { value: 'en-US', label: 'English (en-US)' },
+]
+
+const PROFILE_FEEDBACK_TYPE_OPTIONS: Array<{
+  value: 'general' | 'feature_request' | 'question' | 'other'
+  label: string
+}> = [
+  { value: 'general', label: 'General' },
+  { value: 'feature_request', label: 'Feature request' },
+  { value: 'question', label: 'Question' },
+  { value: 'other', label: 'Other' },
 ]
 
 const GITHUB_ISSUES_URL = 'https://github.com/nirm3l/constructos/issues'
@@ -46,6 +59,35 @@ const SEARCH_PRIORITY_OPTIONS = [
   { value: 'Med', label: 'Med' },
   { value: 'High', label: 'High' },
 ]
+
+const ADMIN_ROLE_OPTIONS = [
+  { value: 'Owner', label: 'Owner' },
+  { value: 'Admin', label: 'Admin' },
+  { value: 'Member', label: 'Member' },
+  { value: 'Guest', label: 'Guest' },
+]
+
+const SKILL_MODE_OPTIONS = [
+  { value: 'advisory', label: 'advisory' },
+  { value: 'enforced', label: 'enforced' },
+]
+
+const SKILL_TRUST_OPTIONS = [
+  { value: 'reviewed', label: 'reviewed' },
+  { value: 'verified', label: 'verified' },
+  { value: 'untrusted', label: 'untrusted' },
+]
+
+function normalizeOptionValue(
+  value: string,
+  options: Array<{ value: string; label: string }>,
+  fallback: string
+): string {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) return fallback
+  const match = options.find((option) => option.value.toLowerCase() === normalized)
+  return match?.value || fallback
+}
 
 function SearchFilterSelect({
   value,
@@ -83,6 +125,51 @@ function SearchFilterSelect({
                 <Icon path="M5 13l4 4L19 7" />
               </Select.ItemIndicator>
             </Select.Item>
+            {options.map((option) => (
+              <Select.Item key={option.value} value={option.value} className="quickadd-project-item">
+                <Select.ItemText>{option.label}</Select.ItemText>
+                <Select.ItemIndicator className="quickadd-project-item-indicator">
+                  <Icon path="M5 13l4 4L19 7" />
+                </Select.ItemIndicator>
+              </Select.Item>
+            ))}
+          </Select.Viewport>
+        </Select.Content>
+      </Select.Portal>
+    </Select.Root>
+  )
+}
+
+function AdminSelect({
+  value,
+  onValueChange,
+  options,
+  ariaLabel,
+  disabled = false,
+}: {
+  value: string
+  onValueChange: (value: string) => void
+  options: Array<{ value: string; label: string }>
+  ariaLabel: string
+  disabled?: boolean
+}) {
+  return (
+    <Select.Root value={value} onValueChange={onValueChange} disabled={disabled}>
+      <Select.Trigger
+        className="quickadd-project-trigger taskdrawer-select-trigger admin-select-trigger"
+        aria-label={ariaLabel}
+        disabled={disabled}
+      >
+        <Select.Value />
+        <Select.Icon asChild>
+          <span className="quickadd-project-trigger-icon" aria-hidden="true">
+            <Icon path="M6 9l6 6 6-6" />
+          </span>
+        </Select.Icon>
+      </Select.Trigger>
+      <Select.Portal>
+        <Select.Content className="quickadd-project-content admin-select-content" position="popper" sideOffset={6}>
+          <Select.Viewport className="quickadd-project-viewport">
             {options.map((option) => (
               <Select.Item key={option.value} value={option.value} className="quickadd-project-item">
                 <Select.ItemText>{option.label}</Select.ItemText>
@@ -346,18 +433,43 @@ export function ProfilePanel({
       ? `Subscription (${formatLabel(subscriptionStatus)})`
       : 'Trial fallback'
   const showTrialWindow = licenseStatus === 'trial' || licenseStatus === 'grace'
-  const [passwordExpanded, setPasswordExpanded] = React.useState(false)
+  const [profileTab, setProfileTab] = React.useState<'preferences' | 'security' | 'feedback' | 'runtime' | 'license'>('preferences')
   const [currentPasswordInput, setCurrentPasswordInput] = React.useState('')
   const [newPasswordInput, setNewPasswordInput] = React.useState('')
   const [confirmPasswordInput, setConfirmPasswordInput] = React.useState('')
   const [passwordFeedback, setPasswordFeedback] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
-  const [feedbackExpanded, setFeedbackExpanded] = React.useState(false)
   const [feedbackTitleInput, setFeedbackTitleInput] = React.useState('')
   const [feedbackDescriptionInput, setFeedbackDescriptionInput] = React.useState('')
   const [feedbackTypeInput, setFeedbackTypeInput] = React.useState<'general' | 'feature_request' | 'question' | 'other'>('general')
   const [feedbackResult, setFeedbackResult] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
+  const [installationCopyState, setInstallationCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
+  const [runtimeCopyState, setRuntimeCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
   const voiceFactRef = React.useRef<HTMLDivElement | null>(null)
-  const voiceSelectRef = React.useRef<HTMLSelectElement | null>(null)
+  const voiceSelectTriggerRef = React.useRef<HTMLButtonElement | null>(null)
+  const browserTimeZone = React.useMemo(() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || 'n/a'
+    } catch {
+      return 'n/a'
+    }
+  }, [])
+  const selectedVoiceLabel = React.useMemo(() => {
+    return VOICE_LANG_OPTIONS.find((item) => item.value === speechLang)?.label || speechLang
+  }, [speechLang])
+  const selectedFeedbackTypeLabel = React.useMemo(() => {
+    return PROFILE_FEEDBACK_TYPE_OPTIONS.find((item) => item.value === feedbackTypeInput)?.label || 'General'
+  }, [feedbackTypeInput])
+  const runtimeSnapshotText = React.useMemo(() => {
+    return [
+      `Frontend version: ${frontendVersion || 'n/a'}`,
+      `Backend version: ${backendVersion || 'n/a'}`,
+      `Backend build: ${backendBuild || 'n/a'}`,
+      `Deployed UTC: ${deployedAtUtc || 'unknown'}`,
+      `Theme: ${theme}`,
+      `Voice language: ${selectedVoiceLabel}`,
+      `Browser timezone: ${browserTimeZone}`,
+    ].join('\n')
+  }, [backendBuild, backendVersion, browserTimeZone, deployedAtUtc, frontendVersion, selectedVoiceLabel, theme])
 
   const scrollVoiceLanguageIntoView = React.useCallback(() => {
     if (typeof window === 'undefined') return
@@ -393,9 +505,9 @@ export function ProfilePanel({
 
     const focusVoiceSelect = () => {
       try {
-        voiceSelectRef.current?.focus({ preventScroll: true })
+        voiceSelectTriggerRef.current?.focus({ preventScroll: true })
       } catch {
-        voiceSelectRef.current?.focus()
+        voiceSelectTriggerRef.current?.focus()
       }
     }
 
@@ -408,7 +520,10 @@ export function ProfilePanel({
   React.useEffect(() => {
     if (typeof window === 'undefined') return
     const handleVoiceFocus = () => {
-      scrollVoiceLanguageIntoView()
+      setProfileTab('preferences')
+      window.setTimeout(() => {
+        scrollVoiceLanguageIntoView()
+      }, 80)
     }
 
     window.addEventListener('ui:focus-voice-language', handleVoiceFocus)
@@ -518,313 +633,635 @@ export function ProfilePanel({
     [feedbackDescriptionInput, feedbackTitleInput, feedbackTypeInput, resetFeedbackForm, submitFeedback]
   )
 
+  const handleThemeCheckedChange = React.useCallback(
+    (checked: boolean) => {
+      const nextTheme = checked ? 'dark' : 'light'
+      if (nextTheme !== theme) onToggleTheme()
+    },
+    [onToggleTheme, theme]
+  )
+
+  const copyInstallationId = React.useCallback(async () => {
+    const value = String(license?.installation_id || '').trim()
+    if (!value) return
+    if (typeof navigator === 'undefined' || !navigator.clipboard) {
+      setInstallationCopyState('error')
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(value)
+      setInstallationCopyState('copied')
+      window.setTimeout(() => setInstallationCopyState('idle'), 1400)
+    } catch {
+      setInstallationCopyState('error')
+      window.setTimeout(() => setInstallationCopyState('idle'), 1800)
+    }
+  }, [license?.installation_id])
+
+  const copyRuntimeSnapshot = React.useCallback(async () => {
+    if (typeof navigator === 'undefined' || !navigator.clipboard) {
+      setRuntimeCopyState('error')
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(runtimeSnapshotText)
+      setRuntimeCopyState('copied')
+      window.setTimeout(() => setRuntimeCopyState('idle'), 1400)
+    } catch {
+      setRuntimeCopyState('error')
+      window.setTimeout(() => setRuntimeCopyState('idle'), 1800)
+    }
+  }, [runtimeSnapshotText])
+
   return (
-    <section className="card profile-panel">
-      <div className="profile-panel-head">
-        <div className="profile-panel-identity">
-          <div className="profile-avatar" aria-hidden="true">
-            <Icon path="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8M4 20a8 8 0 0 1 16 0" />
-          </div>
-          <div className="profile-head-copy">
-            <h2>Profile</h2>
-            <p className="meta">Account settings</p>
-          </div>
-        </div>
-        <span className="status-chip profile-theme-chip">{theme} mode</span>
-      </div>
-
-      <dl className="profile-facts">
-        <div className="profile-fact">
-          <dt>User</dt>
-          <dd>
-            <div className="profile-fact-user-row">
-              <div className="profile-fact-user-name">{userName}</div>
-              <div className="row profile-fact-actions">
-                <button
-                  className="primary profile-action-button"
-                  onClick={onToggleTheme}
-                  title={`Switch to ${nextTheme} theme`}
-                >
-                  <Icon path="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79" />
-                  <span>{nextTheme === 'dark' ? 'Dark mode' : 'Light mode'}</span>
-                </button>
-                <button className="danger-ghost profile-action-button" onClick={onLogout} title="Logout">
-                  <Icon path="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" />
-                  <span>Logout</span>
-                </button>
-              </div>
+    <Tooltip.Provider delayDuration={180}>
+      <section className="card profile-panel">
+        <div className="profile-panel-head">
+          <div className="profile-panel-identity">
+            <div className="profile-avatar" aria-hidden="true">
+              <Icon path="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8M4 20a8 8 0 0 1 16 0" />
             </div>
-          </dd>
-        </div>
-        <div className="profile-fact" id="profile-voice-language" ref={voiceFactRef}>
-          <dt>Voice language</dt>
-          <dd>
-            <select
-              ref={voiceSelectRef}
-              className="profile-voice-select"
-              value={speechLang}
-              onChange={(e) => onChangeSpeechLang(e.target.value)}
-              aria-label="Voice recognition language"
-            >
-              {VOICE_LANG_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>{option.label}</option>
-              ))}
-            </select>
-          </dd>
-        </div>
-      </dl>
-
-      <section className="profile-password" aria-label="Password settings">
-        <div className="profile-license-head">
-          <button
-            type="button"
-            className="profile-section-toggle"
-            aria-expanded={passwordExpanded}
-            aria-controls="profile-password-panel"
-            onClick={() => setPasswordExpanded((current) => !current)}
-          >
-            <span>Change password</span>
-            <span className="profile-section-toggle-icon" aria-hidden="true">
-              <Icon path="M9 6l6 6-6 6" />
-            </span>
-          </button>
-          <span className="status-chip">Security</span>
-        </div>
-        {passwordExpanded ? (
-          <div id="profile-password-panel">
-            <form className="profile-bug-form" onSubmit={handleSubmitPasswordChange}>
-              <label className="field-control">
-                <span className="field-label">Current password</span>
-                <input
-                  type="password"
-                  value={currentPasswordInput}
-                  onChange={(event) => setCurrentPasswordInput(event.target.value)}
-                  autoComplete="current-password"
-                  placeholder="Current password"
-                />
-              </label>
-              <label className="field-control">
-                <span className="field-label">New password</span>
-                <input
-                  type="password"
-                  value={newPasswordInput}
-                  onChange={(event) => setNewPasswordInput(event.target.value)}
-                  autoComplete="new-password"
-                  placeholder="New password"
-                />
-              </label>
-              <label className="field-control">
-                <span className="field-label">Confirm new password</span>
-                <input
-                  type="password"
-                  value={confirmPasswordInput}
-                  onChange={(event) => setConfirmPasswordInput(event.target.value)}
-                  autoComplete="new-password"
-                  placeholder="Confirm new password"
-                />
-              </label>
-              <div className="row wrap profile-actions">
-                <button
-                  className="primary"
-                  type="submit"
-                  disabled={
-                    passwordChangePending ||
-                    !currentPasswordInput.trim() ||
-                    !newPasswordInput.trim() ||
-                    !confirmPasswordInput.trim()
-                  }
-                >
-                  {passwordChangePending ? 'Saving...' : 'Save new password'}
-                </button>
-                <button
-                  className="button-secondary"
-                  type="button"
-                  onClick={resetPasswordForm}
-                  disabled={passwordChangePending}
-                >
-                  Reset
-                </button>
-              </div>
-            </form>
-            {passwordFeedback ? (
-              <div className={`notice ${passwordFeedback.tone === 'error' ? 'notice-error' : ''}`.trim()}>
-                {passwordFeedback.message}
-              </div>
-            ) : null}
+            <div className="profile-head-copy">
+              <h2>Profile</h2>
+              <p className="meta">Personal settings and runtime details</p>
+            </div>
           </div>
-        ) : null}
+          <div className="profile-head-chips">
+            <span className="status-chip profile-theme-chip">{theme} mode</span>
+            <span className="status-chip">{licenseStatusLabel}</span>
+          </div>
+        </div>
+
+        <Tabs.Root
+          className="profile-tabs"
+          value={profileTab}
+          onValueChange={(nextValue) => {
+            if (
+              nextValue === 'preferences' ||
+              nextValue === 'security' ||
+              nextValue === 'feedback' ||
+              nextValue === 'runtime' ||
+              nextValue === 'license'
+            ) {
+              setProfileTab(nextValue)
+            }
+          }}
+        >
+          <Tabs.List className="profile-tabs-list" aria-label="Profile sections">
+            <Tabs.Trigger className="profile-tab-trigger" value="preferences">Preferences</Tabs.Trigger>
+            <Tabs.Trigger className="profile-tab-trigger" value="security">Security</Tabs.Trigger>
+            <Tabs.Trigger className="profile-tab-trigger" value="feedback">Feedback</Tabs.Trigger>
+            <Tabs.Trigger className="profile-tab-trigger" value="runtime">Runtime</Tabs.Trigger>
+            <Tabs.Trigger className="profile-tab-trigger" value="license">License</Tabs.Trigger>
+          </Tabs.List>
+
+          <Tabs.Content className="profile-tab-content" value="preferences">
+            <div className="profile-pane-grid">
+              <section className="profile-pane-card" aria-label="Appearance">
+                <div className="profile-pane-head">
+                  <h3>Appearance</h3>
+                  <span className="status-chip">Theme</span>
+                </div>
+                <div className="profile-theme-row">
+                  <label className="profile-switch-label" htmlFor="profile-theme-switch">Dark mode</label>
+                  <div className="profile-theme-controls">
+                    <Tooltip.Root>
+                      <Tooltip.Trigger asChild>
+                        <Switch.Root
+                          id="profile-theme-switch"
+                          className="profile-theme-switch"
+                          checked={theme === 'dark'}
+                          onCheckedChange={handleThemeCheckedChange}
+                          aria-label={`Switch to ${nextTheme} mode`}
+                        >
+                          <Switch.Thumb className="profile-theme-switch-thumb" />
+                        </Switch.Root>
+                      </Tooltip.Trigger>
+                      <Tooltip.Portal>
+                        <Tooltip.Content className="header-tooltip-content" sideOffset={6}>
+                          Toggle between light and dark themes
+                          <Tooltip.Arrow className="header-tooltip-arrow" />
+                        </Tooltip.Content>
+                      </Tooltip.Portal>
+                    </Tooltip.Root>
+                    <button className="button-secondary profile-action-button" type="button" onClick={onToggleTheme}>
+                      <Icon path="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79" />
+                      <span>{`Switch to ${nextTheme}`}</span>
+                    </button>
+                  </div>
+                </div>
+                <p className="meta">Current mode: {theme}.</p>
+              </section>
+
+              <section className="profile-pane-card" aria-label="Voice language" id="profile-voice-language" ref={voiceFactRef}>
+                <div className="profile-pane-head">
+                  <h3>Voice language</h3>
+                  <span className="status-chip">Speech</span>
+                </div>
+                <Select.Root value={speechLang} onValueChange={onChangeSpeechLang}>
+                  <Select.Trigger
+                    ref={voiceSelectTriggerRef}
+                    className="quickadd-project-trigger taskdrawer-select-trigger profile-select-trigger"
+                    aria-label="Voice recognition language"
+                  >
+                    <Select.Value />
+                    <Select.Icon asChild>
+                      <span className="quickadd-project-trigger-icon" aria-hidden="true">
+                        <Icon path="M6 9l6 6 6-6" />
+                      </span>
+                    </Select.Icon>
+                  </Select.Trigger>
+                  <Select.Portal>
+                    <Select.Content className="quickadd-project-content profile-select-content" position="popper" sideOffset={6}>
+                      <Select.Viewport className="quickadd-project-viewport">
+                        {VOICE_LANG_OPTIONS.map((option) => (
+                          <Select.Item key={option.value} value={option.value} className="quickadd-project-item">
+                            <Select.ItemText>{option.label}</Select.ItemText>
+                            <Select.ItemIndicator className="quickadd-project-item-indicator">
+                              <Icon path="M5 13l4 4L19 7" />
+                            </Select.ItemIndicator>
+                          </Select.Item>
+                        ))}
+                      </Select.Viewport>
+                    </Select.Content>
+                  </Select.Portal>
+                </Select.Root>
+                <p className="meta">Selected: {selectedVoiceLabel}</p>
+              </section>
+
+              <section className="profile-pane-card" aria-label="Account actions">
+                <div className="profile-pane-head">
+                  <h3>Account</h3>
+                  <span className="status-chip">Session</span>
+                </div>
+                <div className="profile-account-row">
+                  <div className="profile-fact-user-name">{userName}</div>
+                  <button className="button-secondary profile-action-button" type="button" onClick={onLogout} title="Logout">
+                    <Icon path="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" />
+                    <span>Logout</span>
+                  </button>
+                </div>
+              </section>
+            </div>
+          </Tabs.Content>
+
+          <Tabs.Content className="profile-tab-content" value="security">
+            <section className="profile-pane-card profile-password" aria-label="Password settings">
+              <Accordion.Root className="profile-accordion" type="single" collapsible defaultValue="change-password">
+                <Accordion.Item className="profile-accordion-item" value="change-password">
+                  <Accordion.Header className="profile-accordion-header">
+                    <Accordion.Trigger className="profile-accordion-trigger">
+                      <span className="profile-accordion-head">
+                        <span className="profile-accordion-title">Change password</span>
+                        <span className="profile-accordion-meta">Current password required · minimum 8 chars</span>
+                      </span>
+                      <span className="status-chip">Security</span>
+                      <span className="profile-accordion-chevron" aria-hidden="true">
+                        <Icon path="M6 9l6 6 6-6" />
+                      </span>
+                    </Accordion.Trigger>
+                  </Accordion.Header>
+                  <Accordion.Content className="profile-accordion-content">
+                    <form className="profile-bug-form" onSubmit={handleSubmitPasswordChange}>
+                      <label className="field-control">
+                        <span className="field-label">Current password</span>
+                        <input
+                          type="password"
+                          value={currentPasswordInput}
+                          onChange={(event) => setCurrentPasswordInput(event.target.value)}
+                          autoComplete="current-password"
+                          placeholder="Current password"
+                        />
+                      </label>
+                      <label className="field-control">
+                        <span className="field-label">New password</span>
+                        <input
+                          type="password"
+                          value={newPasswordInput}
+                          onChange={(event) => setNewPasswordInput(event.target.value)}
+                          autoComplete="new-password"
+                          placeholder="New password"
+                        />
+                      </label>
+                      <label className="field-control">
+                        <span className="field-label">Confirm new password</span>
+                        <input
+                          type="password"
+                          value={confirmPasswordInput}
+                          onChange={(event) => setConfirmPasswordInput(event.target.value)}
+                          autoComplete="new-password"
+                          placeholder="Confirm new password"
+                        />
+                      </label>
+                      <div className="row wrap profile-actions">
+                        <button
+                          className="primary"
+                          type="submit"
+                          disabled={
+                            passwordChangePending ||
+                            !currentPasswordInput.trim() ||
+                            !newPasswordInput.trim() ||
+                            !confirmPasswordInput.trim()
+                          }
+                        >
+                          {passwordChangePending ? 'Saving...' : 'Save new password'}
+                        </button>
+                        <button
+                          className="button-secondary"
+                          type="button"
+                          onClick={resetPasswordForm}
+                          disabled={passwordChangePending}
+                        >
+                          Reset
+                        </button>
+                      </div>
+                    </form>
+                    {passwordFeedback ? (
+                      <div className={`notice ${passwordFeedback.tone === 'error' ? 'notice-error' : ''}`.trim()}>
+                        {passwordFeedback.message}
+                      </div>
+                    ) : null}
+                  </Accordion.Content>
+                </Accordion.Item>
+              </Accordion.Root>
+            </section>
+          </Tabs.Content>
+
+          <Tabs.Content className="profile-tab-content" value="feedback">
+            <div className="profile-pane-grid">
+              <section className="profile-pane-card profile-bug-report" aria-label="Feedback">
+                <Accordion.Root className="profile-accordion" type="single" collapsible defaultValue="submit-feedback">
+                  <Accordion.Item className="profile-accordion-item" value="submit-feedback">
+                    <Accordion.Header className="profile-accordion-header">
+                      <Accordion.Trigger className="profile-accordion-trigger">
+                        <span className="profile-accordion-head">
+                          <span className="profile-accordion-title">Leave feedback</span>
+                          <span className="profile-accordion-meta">Product feedback routed to support pipeline</span>
+                        </span>
+                        <span className="status-chip">Support</span>
+                        <span className="profile-accordion-chevron" aria-hidden="true">
+                          <Icon path="M6 9l6 6 6-6" />
+                        </span>
+                      </Accordion.Trigger>
+                    </Accordion.Header>
+                    <Accordion.Content className="profile-accordion-content">
+                      <form className="profile-bug-form" onSubmit={handleSubmitFeedback}>
+                        <label className="field-control">
+                          <span className="field-label">Topic</span>
+                          <input
+                            value={feedbackTitleInput}
+                            onChange={(event) => setFeedbackTitleInput(event.target.value)}
+                            placeholder="Short feedback title"
+                          />
+                        </label>
+                        <label className="field-control">
+                          <span className="field-label">Type</span>
+                          <Select.Root
+                            value={feedbackTypeInput}
+                            onValueChange={(value: 'general' | 'feature_request' | 'question' | 'other') => setFeedbackTypeInput(value)}
+                          >
+                            <Select.Trigger
+                              className="quickadd-project-trigger taskdrawer-select-trigger profile-select-trigger"
+                              aria-label="Feedback type"
+                            >
+                              <Select.Value />
+                              <Select.Icon asChild>
+                                <span className="quickadd-project-trigger-icon" aria-hidden="true">
+                                  <Icon path="M6 9l6 6 6-6" />
+                                </span>
+                              </Select.Icon>
+                            </Select.Trigger>
+                            <Select.Portal>
+                              <Select.Content className="quickadd-project-content profile-select-content" position="popper" sideOffset={6}>
+                                <Select.Viewport className="quickadd-project-viewport">
+                                  {PROFILE_FEEDBACK_TYPE_OPTIONS.map((option) => (
+                                    <Select.Item key={option.value} value={option.value} className="quickadd-project-item">
+                                      <Select.ItemText>{option.label}</Select.ItemText>
+                                      <Select.ItemIndicator className="quickadd-project-item-indicator">
+                                        <Icon path="M5 13l4 4L19 7" />
+                                      </Select.ItemIndicator>
+                                    </Select.Item>
+                                  ))}
+                                </Select.Viewport>
+                              </Select.Content>
+                            </Select.Portal>
+                          </Select.Root>
+                          <span className="meta">{selectedFeedbackTypeLabel}</span>
+                        </label>
+                        <label className="field-control">
+                          <span className="field-label">Details</span>
+                          <textarea
+                            rows={5}
+                            value={feedbackDescriptionInput}
+                            onChange={(event) => setFeedbackDescriptionInput(event.target.value)}
+                            placeholder="Describe your feedback"
+                          />
+                        </label>
+                        <div className="row wrap profile-actions">
+                          <button
+                            className="primary"
+                            type="submit"
+                            disabled={feedbackSubmitting || !feedbackTitleInput.trim() || !feedbackDescriptionInput.trim()}
+                          >
+                            {feedbackSubmitting ? 'Sending...' : 'Send feedback'}
+                          </button>
+                          <button
+                            className="button-secondary"
+                            type="button"
+                            onClick={resetFeedbackForm}
+                            disabled={feedbackSubmitting}
+                          >
+                            Reset
+                          </button>
+                        </div>
+                      </form>
+                      {feedbackResult ? (
+                        <div className={`notice ${feedbackResult.tone === 'error' ? 'notice-error' : ''}`.trim()}>
+                          {feedbackResult.message}
+                        </div>
+                      ) : null}
+                    </Accordion.Content>
+                  </Accordion.Item>
+                </Accordion.Root>
+              </section>
+
+              <section className="profile-pane-card" aria-label="GitHub issues">
+                <div className="profile-pane-head">
+                  <h3>Bug reports</h3>
+                  <span className="status-chip">GitHub</span>
+                </div>
+                <p className="meta">For reproducible defects and stack traces, open an issue in the project repository.</p>
+                <div className="row wrap profile-actions" style={{ marginTop: 4 }}>
+                  <a
+                    className="primary"
+                    href={GITHUB_ISSUES_URL}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ textDecoration: 'none' }}
+                  >
+                    Open GitHub Issues
+                  </a>
+                </div>
+              </section>
+            </div>
+          </Tabs.Content>
+
+          <Tabs.Content className="profile-tab-content" value="runtime">
+            <section className="profile-pane-card profile-runtime" aria-label="Build details">
+              <div className="profile-pane-head">
+                <h3>Runtime</h3>
+                <span className="status-chip">Live</span>
+              </div>
+              <div className="profile-runtime-chip-row">
+                <span className="status-chip">Frontend {frontendVersion}</span>
+                <span className="status-chip">Backend {backendVersion}</span>
+                <span className="status-chip">{backendBuild ? `Build ${backendBuild}` : 'Build n/a'}</span>
+              </div>
+              <div className="row wrap profile-actions profile-runtime-actions">
+                <button className="button-secondary profile-action-button" type="button" onClick={copyRuntimeSnapshot}>
+                  <Icon path="M16 1H4a2 2 0 0 0-2 2v12h2V3h12V1zM19 5H8a2 2 0 0 0-2 2v14h13a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z" />
+                  <span>Copy runtime snapshot</span>
+                </button>
+                {runtimeCopyState === 'copied' ? <span className="status-chip">Copied</span> : null}
+                {runtimeCopyState === 'error' ? <span className="status-chip">Copy failed</span> : null}
+              </div>
+              <Accordion.Root
+                className="profile-accordion profile-runtime-accordion"
+                type="multiple"
+                defaultValue={['versions', 'deployment', 'preferences']}
+              >
+                <Accordion.Item className="profile-accordion-item" value="versions">
+                  <Accordion.Header className="profile-accordion-header">
+                    <Accordion.Trigger className="profile-accordion-trigger">
+                      <span className="profile-accordion-head">
+                        <span className="profile-accordion-title">Version matrix</span>
+                        <span className="profile-accordion-meta">Frontend, backend, and build identifiers</span>
+                      </span>
+                      <span className="profile-accordion-chevron" aria-hidden="true">
+                        <Icon path="M6 9l6 6 6-6" />
+                      </span>
+                    </Accordion.Trigger>
+                  </Accordion.Header>
+                  <Accordion.Content className="profile-accordion-content">
+                    <dl className="profile-facts profile-runtime-facts">
+                      <div className="profile-fact">
+                        <dt>Frontend version</dt>
+                        <dd>{frontendVersion || 'n/a'}</dd>
+                      </div>
+                      <div className="profile-fact">
+                        <dt>Backend version</dt>
+                        <dd>{backendVersion || 'n/a'}</dd>
+                      </div>
+                      <div className="profile-fact">
+                        <dt>Backend build</dt>
+                        <dd>{backendBuild || 'n/a'}</dd>
+                      </div>
+                    </dl>
+                  </Accordion.Content>
+                </Accordion.Item>
+                <Accordion.Item className="profile-accordion-item" value="deployment">
+                  <Accordion.Header className="profile-accordion-header">
+                    <Accordion.Trigger className="profile-accordion-trigger">
+                      <span className="profile-accordion-head">
+                        <span className="profile-accordion-title">Deployment</span>
+                        <span className="profile-accordion-meta">Timestamp and local environment details</span>
+                      </span>
+                      <span className="profile-accordion-chevron" aria-hidden="true">
+                        <Icon path="M6 9l6 6 6-6" />
+                      </span>
+                    </Accordion.Trigger>
+                  </Accordion.Header>
+                  <Accordion.Content className="profile-accordion-content">
+                    <dl className="profile-facts profile-runtime-facts">
+                      <div className="profile-fact">
+                        <dt>Deployed (UTC)</dt>
+                        <dd>{deployedAtUtc ?? 'unknown'}</dd>
+                      </div>
+                      <div className="profile-fact">
+                        <dt>Deployed (local)</dt>
+                        <dd>{formatDateTime(deployedAtUtc)}</dd>
+                      </div>
+                      <div className="profile-fact">
+                        <dt>Browser timezone</dt>
+                        <dd>{browserTimeZone}</dd>
+                      </div>
+                    </dl>
+                  </Accordion.Content>
+                </Accordion.Item>
+                <Accordion.Item className="profile-accordion-item" value="preferences">
+                  <Accordion.Header className="profile-accordion-header">
+                    <Accordion.Trigger className="profile-accordion-trigger">
+                      <span className="profile-accordion-head">
+                        <span className="profile-accordion-title">Active preferences</span>
+                        <span className="profile-accordion-meta">Theme and speech language currently in use</span>
+                      </span>
+                      <span className="profile-accordion-chevron" aria-hidden="true">
+                        <Icon path="M6 9l6 6 6-6" />
+                      </span>
+                    </Accordion.Trigger>
+                  </Accordion.Header>
+                  <Accordion.Content className="profile-accordion-content">
+                    <dl className="profile-facts profile-runtime-facts">
+                      <div className="profile-fact">
+                        <dt>Theme</dt>
+                        <dd>{theme}</dd>
+                      </div>
+                      <div className="profile-fact">
+                        <dt>Voice language</dt>
+                        <dd>{selectedVoiceLabel}</dd>
+                      </div>
+                    </dl>
+                    <div className="row wrap profile-actions profile-runtime-actions">
+                      <button
+                        className="button-secondary"
+                        type="button"
+                        onClick={() => {
+                          setProfileTab('preferences')
+                          window.setTimeout(() => {
+                            scrollVoiceLanguageIntoView()
+                          }, 60)
+                        }}
+                      >
+                        Open preference controls
+                      </button>
+                    </div>
+                  </Accordion.Content>
+                </Accordion.Item>
+              </Accordion.Root>
+            </section>
+          </Tabs.Content>
+
+          <Tabs.Content className="profile-tab-content" value="license">
+            <section className="profile-pane-card profile-license" aria-label="License details">
+              <div className="profile-pane-head">
+                <h3>License</h3>
+                <span className="status-chip">{licenseStatusLabel}</span>
+              </div>
+              {licenseLoading ? (
+                <p className="meta">Loading license status...</p>
+              ) : licenseError ? (
+                <div className="notice notice-error">{licenseError}</div>
+              ) : !license ? (
+                <p className="meta">License status is unavailable.</p>
+              ) : (
+                <Accordion.Root className="profile-accordion profile-license-accordion" type="multiple" defaultValue={['entitlement', 'lifecycle', 'installation']}>
+                  <Accordion.Item className="profile-accordion-item" value="entitlement">
+                    <Accordion.Header className="profile-accordion-header">
+                      <Accordion.Trigger className="profile-accordion-trigger">
+                        <span className="profile-accordion-head">
+                          <span className="profile-accordion-title">Entitlement</span>
+                          <span className="profile-accordion-meta">{entitlementSource}</span>
+                        </span>
+                        <span className="profile-accordion-chevron" aria-hidden="true">
+                          <Icon path="M6 9l6 6 6-6" />
+                        </span>
+                      </Accordion.Trigger>
+                    </Accordion.Header>
+                    <Accordion.Content className="profile-accordion-content">
+                      <dl className="profile-facts profile-license-facts">
+                        <div className="profile-fact">
+                          <dt>Entitlement status</dt>
+                          <dd>{formatLabel(license.status)}</dd>
+                        </div>
+                        <div className="profile-fact">
+                          <dt>Subscription status</dt>
+                          <dd>{formatLabel(subscriptionStatus)}</dd>
+                        </div>
+                        <div className="profile-fact">
+                          <dt>Entitlement source</dt>
+                          <dd>{entitlementSource}</dd>
+                        </div>
+                        <div className="profile-fact">
+                          <dt>Plan</dt>
+                          <dd>{license.plan_code || 'n/a'}</dd>
+                        </div>
+                      </dl>
+                    </Accordion.Content>
+                  </Accordion.Item>
+
+                  <Accordion.Item className="profile-accordion-item" value="lifecycle">
+                    <Accordion.Header className="profile-accordion-header">
+                      <Accordion.Trigger className="profile-accordion-trigger">
+                        <span className="profile-accordion-head">
+                          <span className="profile-accordion-title">Lifecycle dates</span>
+                          <span className="profile-accordion-meta">Subscription, trial, and grace windows</span>
+                        </span>
+                        <span className="profile-accordion-chevron" aria-hidden="true">
+                          <Icon path="M6 9l6 6 6-6" />
+                        </span>
+                      </Accordion.Trigger>
+                    </Accordion.Header>
+                    <Accordion.Content className="profile-accordion-content">
+                      <dl className="profile-facts profile-license-facts">
+                        <div className="profile-fact">
+                          <dt>Subscription valid until</dt>
+                          <dd>{formatDateTime(subscriptionValidUntil)}</dd>
+                        </div>
+                        <div className="profile-fact">
+                          <dt>Public beta free until</dt>
+                          <dd>{formatDateTime(publicBetaFreeUntil)}</dd>
+                        </div>
+                        {showTrialWindow ? (
+                          <div className="profile-fact">
+                            <dt>Trial ends</dt>
+                            <dd>{formatDateTime(license.trial_ends_at)}</dd>
+                          </div>
+                        ) : null}
+                        {showTrialWindow ? (
+                          <div className="profile-fact">
+                            <dt>Grace ends</dt>
+                            <dd>{formatDateTime(license.grace_ends_at)}</dd>
+                          </div>
+                        ) : null}
+                      </dl>
+                    </Accordion.Content>
+                  </Accordion.Item>
+
+                  <Accordion.Item className="profile-accordion-item" value="installation">
+                    <Accordion.Header className="profile-accordion-header">
+                      <Accordion.Trigger className="profile-accordion-trigger">
+                        <span className="profile-accordion-head">
+                          <span className="profile-accordion-title">Installation details</span>
+                          <span className="profile-accordion-meta">Local installation and license identity</span>
+                        </span>
+                        <span className="profile-accordion-chevron" aria-hidden="true">
+                          <Icon path="M6 9l6 6 6-6" />
+                        </span>
+                      </Accordion.Trigger>
+                    </Accordion.Header>
+                    <Accordion.Content className="profile-accordion-content">
+                      <dl className="profile-facts profile-license-facts">
+                        <div className="profile-fact">
+                          <dt>Installation ID</dt>
+                          <dd>
+                            <code>{license.installation_id || 'n/a'}</code>
+                          </dd>
+                        </div>
+                      </dl>
+                      <div className="row wrap profile-actions">
+                        <button
+                          type="button"
+                          className="button-secondary profile-action-button"
+                          onClick={() => {
+                            void copyInstallationId()
+                          }}
+                          disabled={!String(license.installation_id || '').trim()}
+                        >
+                          <Icon path="M9 9h11v11H9zM4 4h11v2H6v9H4z" />
+                          <span>Copy installation ID</span>
+                        </button>
+                        {installationCopyState === 'copied' ? <span className="status-chip">Copied</span> : null}
+                        {installationCopyState === 'error' ? <span className="status-chip">Copy failed</span> : null}
+                      </div>
+                    </Accordion.Content>
+                  </Accordion.Item>
+                </Accordion.Root>
+              )}
+            </section>
+          </Tabs.Content>
+        </Tabs.Root>
       </section>
-
-      <section className="profile-runtime" aria-label="Build details">
-        <div className="profile-license-head">
-          <h3>Build details</h3>
-          <span className="status-chip">Runtime</span>
-        </div>
-        <dl className="profile-facts">
-          <div className="profile-fact">
-            <dt>Frontend version</dt>
-            <dd>{frontendVersion}</dd>
-          </div>
-          <div className="profile-fact">
-            <dt>Backend version</dt>
-            <dd>
-              {backendVersion}
-              {backendBuild ? ` (${backendBuild})` : ''}
-            </dd>
-          </div>
-          <div className="profile-fact">
-            <dt>Deployed (UTC)</dt>
-            <dd>{deployedAtUtc ?? 'unknown'}</dd>
-          </div>
-        </dl>
-      </section>
-
-      <section className="profile-bug-report" aria-label="Feedback">
-        <div className="profile-license-head">
-          <button
-            type="button"
-            className="profile-section-toggle"
-            aria-expanded={feedbackExpanded}
-            aria-controls="profile-feedback-panel"
-            onClick={() => setFeedbackExpanded((current) => !current)}
-          >
-            <span>Leave feedback</span>
-            <span className="profile-section-toggle-icon" aria-hidden="true">
-              <Icon path="M9 6l6 6-6 6" />
-            </span>
-          </button>
-          <span className="status-chip">Support</span>
-        </div>
-        {feedbackExpanded ? (
-          <div id="profile-feedback-panel">
-            <form className="profile-bug-form" onSubmit={handleSubmitFeedback}>
-              <label className="field-control">
-                <span className="field-label">Topic</span>
-                <input
-                  value={feedbackTitleInput}
-                  onChange={(event) => setFeedbackTitleInput(event.target.value)}
-                  placeholder="Short feedback title"
-                />
-              </label>
-              <label className="field-control">
-                <span className="field-label">Type</span>
-                <select
-                  value={feedbackTypeInput}
-                  onChange={(event) =>
-                    setFeedbackTypeInput(event.target.value as 'general' | 'feature_request' | 'question' | 'other')
-                  }
-                >
-                  <option value="general">General</option>
-                  <option value="feature_request">Feature request</option>
-                  <option value="question">Question</option>
-                  <option value="other">Other</option>
-                </select>
-              </label>
-              <label className="field-control">
-                <span className="field-label">Details</span>
-                <textarea
-                  rows={5}
-                  value={feedbackDescriptionInput}
-                  onChange={(event) => setFeedbackDescriptionInput(event.target.value)}
-                  placeholder="Describe your feedback"
-                />
-              </label>
-              <div className="row wrap profile-actions">
-                <button
-                  className="primary"
-                  type="submit"
-                  disabled={feedbackSubmitting || !feedbackTitleInput.trim() || !feedbackDescriptionInput.trim()}
-                >
-                  {feedbackSubmitting ? 'Sending...' : 'Send feedback'}
-                </button>
-                <button
-                  className="button-secondary"
-                  type="button"
-                  onClick={resetFeedbackForm}
-                  disabled={feedbackSubmitting}
-                >
-                  Reset
-                </button>
-              </div>
-            </form>
-            {feedbackResult ? (
-              <div className={`notice ${feedbackResult.tone === 'error' ? 'notice-error' : ''}`.trim()}>
-                {feedbackResult.message}
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-        <p className="meta" style={{ marginTop: 10 }}>
-          For bug reports, use GitHub Issues.
-        </p>
-        <div className="row wrap profile-actions" style={{ marginTop: 10 }}>
-          <a
-            className="primary"
-            href={GITHUB_ISSUES_URL}
-            target="_blank"
-            rel="noreferrer"
-            style={{ textDecoration: 'none' }}
-          >
-            Open GitHub Issues
-          </a>
-        </div>
-      </section>
-
-      <section className="profile-license" aria-label="License details">
-        <div className="profile-license-head">
-          <h3>License</h3>
-          <span className="status-chip">{licenseStatusLabel}</span>
-        </div>
-        {licenseLoading ? (
-          <p className="meta">Loading license status...</p>
-        ) : licenseError ? (
-          <div className="notice notice-error">{licenseError}</div>
-        ) : !license ? (
-          <p className="meta">License status is unavailable.</p>
-        ) : (
-          <dl className="profile-facts profile-license-facts">
-            <div className="profile-fact">
-              <dt>Entitlement status</dt>
-              <dd>{formatLabel(license.status)}</dd>
-            </div>
-            <div className="profile-fact">
-              <dt>Subscription status</dt>
-              <dd>{formatLabel(subscriptionStatus)}</dd>
-            </div>
-            <div className="profile-fact">
-              <dt>Entitlement source</dt>
-              <dd>{entitlementSource}</dd>
-            </div>
-            <div className="profile-fact">
-              <dt>Installation ID</dt>
-              <dd>
-                <code>{license.installation_id || 'n/a'}</code>
-              </dd>
-            </div>
-            <div className="profile-fact">
-              <dt>Plan</dt>
-              <dd>{license.plan_code || 'n/a'}</dd>
-            </div>
-            <div className="profile-fact">
-              <dt>Subscription valid until</dt>
-              <dd>{formatDateTime(subscriptionValidUntil)}</dd>
-            </div>
-            {showTrialWindow && (
-              <div className="profile-fact">
-                <dt>Trial ends</dt>
-                <dd>{formatDateTime(license.trial_ends_at)}</dd>
-              </div>
-            )}
-            {showTrialWindow && (
-              <div className="profile-fact">
-                <dt>Grace ends</dt>
-                <dd>{formatDateTime(license.grace_ends_at)}</dd>
-              </div>
-            )}
-          </dl>
-        )}
-      </section>
-    </section>
+    </Tooltip.Provider>
   )
 }
 
@@ -922,10 +1359,19 @@ export function AdminPanel({
   const [workspaceSkillEditorTrustLevel, setWorkspaceSkillEditorTrustLevel] = React.useState<
     'verified' | 'reviewed' | 'untrusted'
   >('reviewed')
+  const [adminTab, setAdminTab] = React.useState<'users' | 'skills'>('users')
   const [skillsSearchQ, setSkillsSearchQ] = React.useState('')
   const [selectedWorkspaceSkillId, setSelectedWorkspaceSkillId] = React.useState<string | null>(null)
   const workspaceSkillFileInputRef = React.useRef<HTMLInputElement | null>(null)
   const workspaceSkillItems = workspaceSkills?.items ?? []
+  const totalUsers = users.length
+  const totalSkills = workspaceSkills?.total ?? workspaceSkillItems.length
+  const activeUsers = React.useMemo(() => users.filter((item) => Boolean(item.is_active)).length, [users])
+  const inactiveUsers = Math.max(0, totalUsers - activeUsers)
+  const normalizedCreateRole = React.useMemo(
+    () => normalizeOptionValue(role, ADMIN_ROLE_OPTIONS, 'Member'),
+    [role]
+  )
   const getWorkspaceSkillSourceContent = React.useCallback((manifest: Record<string, unknown> | undefined): string => {
     if (!manifest || typeof manifest !== 'object') return ''
     const raw = (manifest as Record<string, unknown>).source_content
@@ -1030,427 +1476,468 @@ export function AdminPanel({
         </div>
         <span className="status-chip admin-workspace-chip">Workspace: {workspaceId || 'n/a'}</span>
       </div>
-
-      <div className="admin-create">
-        <div className="admin-create-grid">
-          <label className="field-control">
-            <span className="field-label">Username</span>
-            <input
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder="3-64 chars"
-              autoComplete="off"
-            />
-          </label>
-          <label className="field-control">
-            <span className="field-label">Full name</span>
-            <input
-              value={fullName}
-              onChange={(e) => setFullName(e.target.value)}
-              placeholder="Optional"
-              autoComplete="off"
-            />
-          </label>
-          <label className="field-control">
-            <span className="field-label">Role</span>
-            <select
-              value={role}
-              onChange={(e) => setRole(e.target.value)}
-              aria-label="New user workspace role"
-            >
-              <option value="Member">Member</option>
-              <option value="Admin">Admin</option>
-              <option value="Guest">Guest</option>
-              <option value="Owner">Owner</option>
-            </select>
-          </label>
-          <div className="admin-create-actions">
-            <button className="primary" onClick={onCreate} disabled={createPending || !username.trim()}>
-              {createPending ? 'Creating...' : 'Create user'}
-            </button>
-          </div>
-        </div>
+      <div className="admin-panel-summary">
+        <span className="status-chip">Users: {totalUsers}</span>
+        <span className="status-chip">Active: {activeUsers}</span>
+        {inactiveUsers > 0 ? <span className="status-chip">Inactive: {inactiveUsers}</span> : null}
+        <span className="status-chip">Skills: {totalSkills}</span>
       </div>
 
-      {lastTempPassword && (
-        <div className="notice admin-temp-password">
-          Temporary password: <code>{lastTempPassword}</code>
-        </div>
-      )}
+      <Tabs.Root
+        className="admin-tabs"
+        value={adminTab}
+        onValueChange={(nextTab) => {
+          if (nextTab === 'users' || nextTab === 'skills') setAdminTab(nextTab)
+        }}
+      >
+        <Tabs.List className="admin-tabs-list" aria-label="Admin sections">
+          <Tabs.Trigger className="admin-tab-trigger" value="users">
+            <span>Users</span>
+            <span className="status-chip admin-tab-count">{totalUsers}</span>
+          </Tabs.Trigger>
+          <Tabs.Trigger className="admin-tab-trigger" value="skills">
+            <span>Skills catalog</span>
+            <span className="status-chip admin-tab-count">{totalSkills}</span>
+          </Tabs.Trigger>
+        </Tabs.List>
 
-      <div className="admin-users">
-        <div className="admin-users-head">
-          <h3>Workspace users</h3>
-          <span className="meta">{users.length} total</span>
-        </div>
-        {usersLoading ? (
-          <div className="meta">Loading users...</div>
-        ) : usersError ? (
-          <div className="notice notice-error">{usersError}</div>
-        ) : users.length === 0 ? (
-          <div className="meta">No users.</div>
-        ) : (
-          <div className="admin-user-list">
-            {users.map((item) => {
-              const canResetPassword = item.can_reset_password ?? item.user_type === 'human'
-              const canDeactivate = item.can_deactivate ?? (item.user_type === 'human' && item.is_active)
-              const roleUpdatePending = updateRolePendingUserId === item.id
-              const resetPending = resetPendingUserId === item.id
-              const deactivatePending = deactivatePendingUserId === item.id
-              return (
-                <article key={item.id} className="admin-user-row">
-                  <div className="admin-user-main">
-                    <div className="admin-user-title">
-                      <strong>{item.full_name || item.username}</strong>
-                      <span className="admin-user-username">@{item.username}</span>
-                    </div>
-                    <div className="admin-user-badges">
-                      <span className="status-chip">{item.role}</span>
-                      <span className="status-chip">{item.user_type}</span>
-                      {canResetPassword && item.must_change_password && <span className="status-chip">must change password</span>}
-                      {!canResetPassword && <span className="status-chip">service account</span>}
-                      {!item.is_active && <span className="status-chip">inactive</span>}
-                    </div>
-                  </div>
-                  <div className="admin-user-actions">
-                    <label className="field-control admin-role-field">
-                      <span className="field-label">Role</span>
-                      <select
-                        value={item.role}
-                        onChange={(e) => {
-                          const nextRole = e.target.value
-                          if (nextRole === item.role) return
-                          onUpdateRole(item.id, nextRole)
-                        }}
-                        disabled={roleUpdatePending}
-                        title="Workspace role"
-                        aria-label={`Set workspace role for ${item.username}`}
-                      >
-                        <option value="Owner">Owner</option>
-                        <option value="Admin">Admin</option>
-                        <option value="Member">Member</option>
-                        <option value="Guest">Guest</option>
-                      </select>
+        <Tabs.Content className="admin-tab-content" value="users">
+          <Accordion.Root className="profile-accordion admin-accordion" type="single" collapsible defaultValue="create-user">
+            <Accordion.Item className="profile-accordion-item" value="create-user">
+              <Accordion.Header className="profile-accordion-header">
+                <Accordion.Trigger className="profile-accordion-trigger">
+                  <span className="profile-accordion-head">
+                    <span className="profile-accordion-title">Create user</span>
+                    <span className="profile-accordion-meta">Provision a human account with initial workspace role.</span>
+                  </span>
+                  <span className="status-chip">Workspace</span>
+                  <span className="profile-accordion-chevron" aria-hidden="true">
+                    <Icon path="M6 9l6 6 6-6" />
+                  </span>
+                </Accordion.Trigger>
+              </Accordion.Header>
+              <Accordion.Content className="profile-accordion-content">
+                <div className="admin-create">
+                  <div className="admin-create-grid">
+                    <label className="field-control">
+                      <span className="field-label">Username</span>
+                      <input
+                        value={username}
+                        onChange={(event) => setUsername(event.target.value)}
+                        placeholder="3-64 chars"
+                        autoComplete="off"
+                      />
                     </label>
-                    {item.is_active && canResetPassword ? (
-                      <button
-                        className="admin-reset-btn"
-                        onClick={() => onResetPassword(item.id)}
-                        disabled={resetPending}
-                      >
-                        <Icon path="M20 11a8 8 0 1 0 2.3 5.6M20 4v7h-7" />
-                        <span>{resetPending ? 'Resetting...' : 'Reset password'}</span>
+                    <label className="field-control">
+                      <span className="field-label">Full name</span>
+                      <input
+                        value={fullName}
+                        onChange={(event) => setFullName(event.target.value)}
+                        placeholder="Optional"
+                        autoComplete="off"
+                      />
+                    </label>
+                    <label className="field-control">
+                      <span className="field-label">Role</span>
+                      <AdminSelect
+                        value={normalizedCreateRole}
+                        onValueChange={setRole}
+                        options={ADMIN_ROLE_OPTIONS}
+                        ariaLabel="New user workspace role"
+                        disabled={createPending}
+                      />
+                    </label>
+                    <div className="admin-create-actions">
+                      <button className="primary" type="button" onClick={onCreate} disabled={createPending || !username.trim()}>
+                        {createPending ? 'Creating...' : 'Create user'}
                       </button>
-                    ) : null}
-                    {item.is_active && canDeactivate ? (
-                      <button
-                        className="admin-deactivate-btn"
-                        onClick={() => {
-                          const confirmDeactivate = window.confirm(
-                            `Deactivate ${item.username}? They will be signed out and unable to log in.`
-                          )
-                          if (!confirmDeactivate) return
-                          onDeactivateUser(item.id)
-                        }}
-                        disabled={deactivatePending}
-                      >
-                        <Icon path="M6 6l12 12M18 6 6 18" />
-                        <span>{deactivatePending ? 'Deactivating...' : 'Deactivate user'}</span>
-                      </button>
-                    ) : null}
+                    </div>
                   </div>
-                </article>
-              )
-            })}
-          </div>
-        )}
-      </div>
+                </div>
+              </Accordion.Content>
+            </Accordion.Item>
+          </Accordion.Root>
 
-      <div className="admin-skills">
-        <div className="admin-users-head">
-          <h3>Skills Catalog</h3>
-          <span className="meta">{workspaceSkills?.total ?? workspaceSkillItems.length} total</span>
-        </div>
-        <div className="admin-create">
-          <div className="row wrap" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 8 }}>
-            <strong>Add New Skill</strong>
-            <span className="meta">Import from URL or upload a local file.</span>
+          {lastTempPassword ? (
+            <div className="notice admin-temp-password">
+              Temporary password: <code>{lastTempPassword}</code>
+            </div>
+          ) : null}
+
+          <div className="admin-users">
+            <div className="admin-users-head">
+              <h3>Workspace users</h3>
+              <span className="meta">{totalUsers} total</span>
+            </div>
+            {usersLoading ? (
+              <div className="meta">Loading users...</div>
+            ) : usersError ? (
+              <div className="notice notice-error">{usersError}</div>
+            ) : users.length === 0 ? (
+              <div className="meta">No users.</div>
+            ) : (
+              <div className="admin-user-list">
+                {users.map((item) => {
+                  const canResetPassword = item.can_reset_password ?? item.user_type === 'human'
+                  const canDeactivate = item.can_deactivate ?? (item.user_type === 'human' && item.is_active)
+                  const roleUpdatePending = updateRolePendingUserId === item.id
+                  const resetPending = resetPendingUserId === item.id
+                  const deactivatePending = deactivatePendingUserId === item.id
+                  const normalizedUserRole = normalizeOptionValue(String(item.role || ''), ADMIN_ROLE_OPTIONS, 'Member')
+                  return (
+                    <article key={item.id} className="admin-user-row">
+                      <div className="admin-user-main">
+                        <div className="admin-user-title">
+                          <strong>{item.full_name || item.username}</strong>
+                          <span className="admin-user-username">@{item.username}</span>
+                        </div>
+                        <div className="admin-user-badges">
+                          <span className="status-chip">{item.role}</span>
+                          <span className="status-chip">{item.user_type}</span>
+                          {canResetPassword && item.must_change_password ? <span className="status-chip">must change password</span> : null}
+                          {!canResetPassword ? <span className="status-chip">service account</span> : null}
+                          {!item.is_active ? <span className="status-chip">inactive</span> : null}
+                        </div>
+                      </div>
+                      <div className="admin-user-actions">
+                        <label className="field-control admin-role-field">
+                          <span className="field-label">Role</span>
+                          <AdminSelect
+                            value={normalizedUserRole}
+                            onValueChange={(nextRole) => {
+                              if (nextRole === normalizedUserRole) return
+                              onUpdateRole(item.id, nextRole)
+                            }}
+                            options={ADMIN_ROLE_OPTIONS}
+                            disabled={roleUpdatePending}
+                            ariaLabel={`Set workspace role for ${item.username}`}
+                          />
+                        </label>
+                        {item.is_active && canResetPassword ? (
+                          <button
+                            className="admin-reset-btn"
+                            type="button"
+                            onClick={() => onResetPassword(item.id)}
+                            disabled={resetPending}
+                          >
+                            <Icon path="M20 11a8 8 0 1 0 2.3 5.6M20 4v7h-7" />
+                            <span>{resetPending ? 'Resetting...' : 'Reset password'}</span>
+                          </button>
+                        ) : null}
+                        {item.is_active && canDeactivate ? (
+                          <button
+                            className="admin-deactivate-btn"
+                            type="button"
+                            onClick={() => {
+                              const confirmDeactivate = window.confirm(
+                                `Deactivate ${item.username}? They will be signed out and unable to log in.`
+                              )
+                              if (!confirmDeactivate) return
+                              onDeactivateUser(item.id)
+                            }}
+                            disabled={deactivatePending}
+                          >
+                            <Icon path="M6 6l12 12M18 6 6 18" />
+                            <span>{deactivatePending ? 'Deactivating...' : 'Deactivate user'}</span>
+                          </button>
+                        ) : null}
+                      </div>
+                    </article>
+                  )
+                })}
+              </div>
+            )}
           </div>
-          <div className="admin-skill-import-grid">
-            <label className="field-control">
-              <span className="field-label">Source URL</span>
+        </Tabs.Content>
+
+        <Tabs.Content className="admin-tab-content" value="skills">
+          <div className="admin-skills">
+            <Accordion.Root className="profile-accordion admin-accordion" type="single" collapsible defaultValue="import-skill">
+              <Accordion.Item className="profile-accordion-item" value="import-skill">
+                <Accordion.Header className="profile-accordion-header">
+                  <Accordion.Trigger className="profile-accordion-trigger">
+                    <span className="profile-accordion-head">
+                      <span className="profile-accordion-title">Add new skill</span>
+                      <span className="profile-accordion-meta">Import from URL or upload a local file.</span>
+                    </span>
+                    <span className="status-chip">Catalog</span>
+                    <span className="profile-accordion-chevron" aria-hidden="true">
+                      <Icon path="M6 9l6 6 6-6" />
+                    </span>
+                  </Accordion.Trigger>
+                </Accordion.Header>
+                <Accordion.Content className="profile-accordion-content">
+                  <div className="admin-create">
+                    <div className="admin-skill-import-grid">
+                      <label className="field-control">
+                        <span className="field-label">Source URL</span>
+                        <input
+                          value={skillSourceUrl}
+                          onChange={(event) => setSkillSourceUrl(event.target.value)}
+                          placeholder="https://example.com/skills/jira-execution.md"
+                          autoComplete="off"
+                        />
+                      </label>
+                      <label className="field-control">
+                        <span className="field-label">Skill key (optional)</span>
+                        <input
+                          value={skillKey}
+                          onChange={(event) => setSkillKey(event.target.value)}
+                          placeholder="github_delivery"
+                          autoComplete="off"
+                        />
+                      </label>
+                      <label className="field-control">
+                        <span className="field-label">Mode</span>
+                        <AdminSelect
+                          value={skillMode}
+                          onValueChange={(nextMode) => setSkillMode(nextMode === 'enforced' ? 'enforced' : 'advisory')}
+                          options={SKILL_MODE_OPTIONS}
+                          ariaLabel="Skill mode"
+                          disabled={importWorkspaceSkillPending || importWorkspaceSkillFilePending}
+                        />
+                      </label>
+                      <label className="field-control">
+                        <span className="field-label">Trust level</span>
+                        <AdminSelect
+                          value={skillTrustLevel}
+                          onValueChange={(nextTrustLevel) => {
+                            if (nextTrustLevel === 'verified' || nextTrustLevel === 'untrusted') {
+                              setSkillTrustLevel(nextTrustLevel)
+                            } else {
+                              setSkillTrustLevel('reviewed')
+                            }
+                          }}
+                          options={SKILL_TRUST_OPTIONS}
+                          ariaLabel="Skill trust level"
+                          disabled={importWorkspaceSkillPending || importWorkspaceSkillFilePending}
+                        />
+                      </label>
+                      <div className="admin-skill-import-actions row wrap">
+                        <button
+                          className="status-chip admin-skill-action-btn"
+                          type="button"
+                          disabled={importWorkspaceSkillPending || importWorkspaceSkillFilePending || !String(skillSourceUrl || '').trim()}
+                          title="Add skill from URL"
+                          aria-label="Add skill from URL"
+                          onClick={() => {
+                            const sourceUrl = String(skillSourceUrl || '').trim()
+                            if (!sourceUrl) return
+                            void onImportWorkspaceSkill({
+                              source_url: sourceUrl,
+                              skill_key: String(skillKey || '').trim() || undefined,
+                              mode: skillMode,
+                              trust_level: skillTrustLevel,
+                            })
+                              .then(() => {
+                                setSkillSourceUrl('')
+                                setSkillKey('')
+                                setSkillMode('advisory')
+                                setSkillTrustLevel('reviewed')
+                              })
+                              .catch(() => {
+                                // Error feedback is handled by app-level UI notice.
+                              })
+                          }}
+                        >
+                          <Icon path={importWorkspaceSkillPending ? 'M12 5v14M5 12h14' : 'M12 5v10m0 0l4-4m-4 4l-4-4M4 21h16'} />
+                          <span>{importWorkspaceSkillPending ? 'Adding...' : 'Add from URL'}</span>
+                        </button>
+                        <button
+                          className="status-chip admin-skill-action-btn"
+                          type="button"
+                          disabled={importWorkspaceSkillPending || importWorkspaceSkillFilePending}
+                          title="Upload skill file"
+                          aria-label="Upload skill file"
+                          onClick={() => workspaceSkillFileInputRef.current?.click()}
+                        >
+                          <Icon
+                            path={
+                              importWorkspaceSkillFilePending
+                                ? 'M12 5v14M5 12h14'
+                                : 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6'
+                            }
+                          />
+                          <span>{importWorkspaceSkillFilePending ? 'Uploading...' : 'Upload file'}</span>
+                        </button>
+                        <input
+                          ref={workspaceSkillFileInputRef}
+                          type="file"
+                          accept=".md,.markdown,.txt,.json,text/plain,text/markdown,application/json"
+                          style={{ display: 'none' }}
+                          onChange={(event) => {
+                            const file = event.target.files?.[0]
+                            event.currentTarget.value = ''
+                            if (!file) return
+                            void onImportWorkspaceSkillFile({
+                              file,
+                              skill_key: String(skillKey || '').trim() || undefined,
+                              mode: skillMode,
+                              trust_level: skillTrustLevel,
+                            })
+                              .then(() => {
+                                setSkillSourceUrl('')
+                                setSkillKey('')
+                                setSkillMode('advisory')
+                                setSkillTrustLevel('reviewed')
+                              })
+                              .catch(() => {
+                                // Error feedback is handled by app-level UI notice.
+                              })
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </Accordion.Content>
+              </Accordion.Item>
+            </Accordion.Root>
+
+            <div className="row wrap" style={{ marginTop: 8, marginBottom: 8 }}>
               <input
-                value={skillSourceUrl}
-                onChange={(e) => setSkillSourceUrl(e.target.value)}
-                placeholder="https://example.com/skills/jira-execution.md"
-                autoComplete="off"
-              />
-            </label>
-            <label className="field-control">
-              <span className="field-label">Skill key (optional)</span>
-              <input
-                value={skillKey}
-                onChange={(e) => setSkillKey(e.target.value)}
-                placeholder="github_delivery"
-                autoComplete="off"
-              />
-            </label>
-            <label className="field-control">
-              <span className="field-label">Mode</span>
-              <select
-                value={skillMode}
-                onChange={(e) => setSkillMode(e.target.value === 'enforced' ? 'enforced' : 'advisory')}
-              >
-                <option value="advisory">advisory</option>
-                <option value="enforced">enforced</option>
-              </select>
-            </label>
-            <label className="field-control">
-              <span className="field-label">Trust level</span>
-              <select
-                value={skillTrustLevel}
-                onChange={(e) => {
-                  const next = e.target.value
-                  if (next === 'verified' || next === 'untrusted') {
-                    setSkillTrustLevel(next)
-                  } else {
-                    setSkillTrustLevel('reviewed')
-                  }
-                }}
-              >
-                <option value="reviewed">reviewed</option>
-                <option value="verified">verified</option>
-                <option value="untrusted">untrusted</option>
-              </select>
-            </label>
-            <div className="admin-skill-import-actions row wrap">
-              <button
-                className="status-chip admin-skill-action-btn"
-                type="button"
-                disabled={importWorkspaceSkillPending || importWorkspaceSkillFilePending || !String(skillSourceUrl || '').trim()}
-                title="Add skill from URL"
-                aria-label="Add skill from URL"
-                onClick={() => {
-                  const sourceUrl = String(skillSourceUrl || '').trim()
-                  if (!sourceUrl) return
-                  void onImportWorkspaceSkill({
-                    source_url: sourceUrl,
-                    skill_key: String(skillKey || '').trim() || undefined,
-                    mode: skillMode,
-                    trust_level: skillTrustLevel,
-                  })
-                    .then(() => {
-                      setSkillSourceUrl('')
-                      setSkillKey('')
-                      setSkillMode('advisory')
-                      setSkillTrustLevel('reviewed')
-                    })
-                    .catch(() => {
-                      // Error feedback is handled by app-level UI notice.
-                    })
-                }}
-              >
-                <Icon path={importWorkspaceSkillPending ? 'M12 5v14M5 12h14' : 'M12 5v10m0 0l4-4m-4 4l-4-4M4 21h16'} />
-                <span>{importWorkspaceSkillPending ? 'Adding...' : 'Add from URL'}</span>
-              </button>
-              <button
-                className="status-chip admin-skill-action-btn"
-                type="button"
-                disabled={importWorkspaceSkillPending || importWorkspaceSkillFilePending}
-                title="Upload skill file"
-                aria-label="Upload skill file"
-                onClick={() => workspaceSkillFileInputRef.current?.click()}
-              >
-                <Icon
-                  path={
-                    importWorkspaceSkillFilePending
-                      ? 'M12 5v14M5 12h14'
-                      : 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6'
-                  }
-                />
-                <span>{importWorkspaceSkillFilePending ? 'Uploading...' : 'Upload file'}</span>
-              </button>
-              <input
-                ref={workspaceSkillFileInputRef}
-                type="file"
-                accept=".md,.markdown,.txt,.json,text/plain,text/markdown,application/json"
-                style={{ display: 'none' }}
-                onChange={(e) => {
-                  const file = e.target.files?.[0]
-                  e.currentTarget.value = ''
-                  if (!file) return
-                  void onImportWorkspaceSkillFile({
-                    file,
-                    skill_key: String(skillKey || '').trim() || undefined,
-                    mode: skillMode,
-                    trust_level: skillTrustLevel,
-                  })
-                    .then(() => {
-                      setSkillSourceUrl('')
-                      setSkillKey('')
-                      setSkillMode('advisory')
-                      setSkillTrustLevel('reviewed')
-                    })
-                    .catch(() => {
-                      // Error feedback is handled by app-level UI notice.
-                    })
-                }}
+                value={skillsSearchQ}
+                onChange={(event) => setSkillsSearchQ(event.target.value)}
+                placeholder="Filter catalog by name, key, summary, or source"
+                style={{ flex: 1, minWidth: 240 }}
               />
             </div>
-          </div>
-        </div>
-        <div className="row wrap" style={{ marginTop: 8, marginBottom: 8 }}>
-          <input
-            value={skillsSearchQ}
-            onChange={(e) => setSkillsSearchQ(e.target.value)}
-            placeholder="Filter catalog by name, key, summary, or source"
-            style={{ flex: 1, minWidth: 240 }}
-          />
-        </div>
-        <div className="rules-list">
-          {workspaceSkillsLoading ? (
-            <div className="notice">Loading workspace catalog...</div>
-          ) : filteredWorkspaceSkillItems.length === 0 ? (
-            <div className="notice">No workspace skills found.</div>
-          ) : (
-            filteredWorkspaceSkillItems.map((skill) => {
-              const isExpanded = selectedWorkspaceSkillId === skill.id
-              const selectedThisSkill = isExpanded && selectedWorkspaceSkill?.id === skill.id
-              return (
-                <div
-                  key={skill.id}
-                  className={`task-item rule-item ${isExpanded ? 'selected' : ''}`.trim()}
-                  onClick={() => setSelectedWorkspaceSkillId((current) => (current === skill.id ? null : skill.id))}
-                  role="button"
-                  aria-expanded={isExpanded}
-                >
-                  <div className="task-main">
-                    <div className="task-title">
-                      <div className="row" style={{ gap: 6, minWidth: 0 }}>
-                        {skill.is_seeded ? <span className="rule-kind-chip">[SEEDED]</span> : null}
-                        <strong>{skill.name || skill.skill_key || 'Untitled catalog skill'}</strong>
-                      </div>
-                      <button
-                        className="action-icon danger-ghost"
-                        type="button"
-                        disabled={deleteWorkspaceSkillPending}
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          const confirmed = window.confirm(`Delete catalog skill "${skill.name || skill.skill_key}"?`)
-                          if (!confirmed) return
-                          void onDeleteWorkspaceSkill(skill.id).catch(() => {
-                            // Error feedback is handled by app-level UI notice.
-                          })
-                        }}
-                        title="Delete catalog skill"
-                        aria-label="Delete catalog skill"
-                      >
-                        <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
-                      </button>
-                    </div>
-                    <div className="meta">
-                      key: {skill.skill_key || '-'} | mode: {skill.mode || '-'} | trust: {skill.trust_level || '-'}
-                    </div>
-                    <div className="meta">{(skill.summary || '').replace(/\s+/g, ' ').slice(0, 160) || '(no summary)'}</div>
-                    <div className="meta">source: {skill.source_locator || '(none)'}</div>
-                    {selectedThisSkill ? (
-                      <div className="note-accordion" onClick={(event) => event.stopPropagation()} role="region" aria-label="Catalog skill details">
-                        <div className="row rule-title-row" style={{ marginBottom: 8, justifyContent: 'space-between', gap: 8 }}>
-                          <input
-                            className="rule-title-input"
-                            value={workspaceSkillEditorName}
-                            onChange={(event) => setWorkspaceSkillEditorName(event.target.value)}
-                            placeholder="Skill name"
-                          />
+            <div className="rules-list">
+              {workspaceSkillsLoading ? (
+                <div className="notice">Loading workspace catalog...</div>
+              ) : filteredWorkspaceSkillItems.length === 0 ? (
+                <div className="notice">No workspace skills found.</div>
+              ) : (
+                filteredWorkspaceSkillItems.map((skill) => {
+                  const isExpanded = selectedWorkspaceSkillId === skill.id
+                  const selectedThisSkill = isExpanded && selectedWorkspaceSkill?.id === skill.id
+                  return (
+                    <div
+                      key={skill.id}
+                      className={`task-item rule-item ${isExpanded ? 'selected' : ''}`.trim()}
+                      onClick={() => setSelectedWorkspaceSkillId((current) => (current === skill.id ? null : skill.id))}
+                      role="button"
+                      aria-expanded={isExpanded}
+                    >
+                      <div className="task-main">
+                        <div className="task-title">
+                          <div className="row" style={{ gap: 6, minWidth: 0 }}>
+                            {skill.is_seeded ? <span className="rule-kind-chip">[SEEDED]</span> : null}
+                            <strong>{skill.name || skill.skill_key || 'Untitled catalog skill'}</strong>
+                          </div>
                           <button
-                            className="action-icon primary"
+                            className="action-icon danger-ghost"
                             type="button"
-                            disabled={!workspaceSkillEditorName.trim() || !workspaceSkillEditorDirty || patchWorkspaceSkillPending}
-                            onClick={() => {
-                              void onPatchWorkspaceSkill({
-                                skillId: skill.id,
-                                patch: {
-                                  name: workspaceSkillEditorName.trim(),
-                                  summary: workspaceSkillEditorSummary,
-                                  content: workspaceSkillEditorContent,
-                                  mode: workspaceSkillEditorMode,
-                                  trust_level: workspaceSkillEditorTrustLevel,
-                                },
-                              }).catch(() => {
+                            disabled={deleteWorkspaceSkillPending}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              const confirmed = window.confirm(`Delete catalog skill "${skill.name || skill.skill_key}"?`)
+                              if (!confirmed) return
+                              void onDeleteWorkspaceSkill(skill.id).catch(() => {
                                 // Error feedback is handled by app-level UI notice.
                               })
                             }}
-                            title="Save skill changes"
-                            aria-label="Save skill changes"
+                            title="Delete catalog skill"
+                            aria-label="Delete catalog skill"
                           >
-                            <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+                            <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
                           </button>
                         </div>
-                        <div className="row wrap" style={{ gap: 8, marginBottom: 8 }}>
-                          <label className="field-control" style={{ minWidth: 150, marginBottom: 0 }}>
-                            <span className="field-label">Mode</span>
-                            <select
-                              value={workspaceSkillEditorMode}
-                              onChange={(event) =>
-                                setWorkspaceSkillEditorMode(event.target.value === 'enforced' ? 'enforced' : 'advisory')
-                              }
-                            >
-                              <option value="advisory">advisory</option>
-                              <option value="enforced">enforced</option>
-                            </select>
-                          </label>
-                          <label className="field-control" style={{ minWidth: 170, marginBottom: 0 }}>
-                            <span className="field-label">Trust level</span>
-                            <select
-                              value={workspaceSkillEditorTrustLevel}
-                              onChange={(event) => {
-                                const next = event.target.value
-                                if (next === 'verified' || next === 'untrusted') {
-                                  setWorkspaceSkillEditorTrustLevel(next)
-                                } else {
-                                  setWorkspaceSkillEditorTrustLevel('reviewed')
-                                }
-                              }}
-                            >
-                              <option value="reviewed">reviewed</option>
-                              <option value="verified">verified</option>
-                              <option value="untrusted">untrusted</option>
-                            </select>
-                          </label>
+                        <div className="meta">
+                          key: {skill.skill_key || '-'} | mode: {skill.mode || '-'} | trust: {skill.trust_level || '-'}
                         </div>
-                        <div className="md-editor-surface">
-                          <div className="md-editor-content">
-                            <textarea
-                              className="md-textarea"
-                              value={workspaceSkillEditorSummary}
-                              onChange={(event) => setWorkspaceSkillEditorSummary(event.target.value)}
-                              placeholder="Skill summary"
-                              style={{ width: '100%', minHeight: 96 }}
-                            />
-                          </div>
-                        </div>
-                        <div className="meta" style={{ marginTop: 8 }}>
-                          Source: {skill.source_locator || '(none)'}
-                        </div>
-                        <div className="meta" style={{ marginTop: 8 }}>Skill content</div>
-                        <div className="md-editor-surface">
-                          <MarkdownModeToggle
-                            view={workspaceSkillContentView}
-                            onChange={setWorkspaceSkillContentView}
-                            ariaLabel="Catalog skill content editor view"
-                          />
-                          <div className="md-editor-content">
-                            {workspaceSkillContentView === 'write' ? (
-                              <textarea
-                                className="md-textarea"
-                                value={workspaceSkillEditorContent}
-                                onChange={(event) => setWorkspaceSkillEditorContent(event.target.value)}
-                                placeholder="Write skill content in Markdown..."
-                                style={{ width: '100%', minHeight: 180 }}
+                        <div className="meta">{(skill.summary || '').replace(/\s+/g, ' ').slice(0, 160) || '(no summary)'}</div>
+                        <div className="meta">source: {skill.source_locator || '(none)'}</div>
+                        {selectedThisSkill ? (
+                          <div
+                            className="note-accordion"
+                            onClick={(event) => event.stopPropagation()}
+                            role="region"
+                            aria-label="Catalog skill details"
+                          >
+                            <div className="row rule-title-row" style={{ marginBottom: 8, justifyContent: 'space-between', gap: 8 }}>
+                              <input
+                                className="rule-title-input"
+                                value={workspaceSkillEditorName}
+                                onChange={(event) => setWorkspaceSkillEditorName(event.target.value)}
+                                placeholder="Skill name"
                               />
-                            ) : workspaceSkillContentView === 'split' ? (
-                              <MarkdownSplitPane
-                                left={(
+                              <button
+                                className="action-icon primary"
+                                type="button"
+                                disabled={!workspaceSkillEditorName.trim() || !workspaceSkillEditorDirty || patchWorkspaceSkillPending}
+                                onClick={() => {
+                                  void onPatchWorkspaceSkill({
+                                    skillId: skill.id,
+                                    patch: {
+                                      name: workspaceSkillEditorName.trim(),
+                                      summary: workspaceSkillEditorSummary,
+                                      content: workspaceSkillEditorContent,
+                                      mode: workspaceSkillEditorMode,
+                                      trust_level: workspaceSkillEditorTrustLevel,
+                                    },
+                                  }).catch(() => {
+                                    // Error feedback is handled by app-level UI notice.
+                                  })
+                                }}
+                                title="Save skill changes"
+                                aria-label="Save skill changes"
+                              >
+                                <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+                              </button>
+                            </div>
+                            <div className="row wrap" style={{ gap: 8, marginBottom: 8 }}>
+                              <label className="field-control admin-inline-field" style={{ minWidth: 150, marginBottom: 0 }}>
+                                <span className="field-label">Mode</span>
+                                <AdminSelect
+                                  value={workspaceSkillEditorMode}
+                                  onValueChange={(nextMode) =>
+                                    setWorkspaceSkillEditorMode(nextMode === 'enforced' ? 'enforced' : 'advisory')
+                                  }
+                                  options={SKILL_MODE_OPTIONS}
+                                  ariaLabel="Catalog skill mode"
+                                  disabled={patchWorkspaceSkillPending}
+                                />
+                              </label>
+                              <label className="field-control admin-inline-field" style={{ minWidth: 170, marginBottom: 0 }}>
+                                <span className="field-label">Trust level</span>
+                                <AdminSelect
+                                  value={workspaceSkillEditorTrustLevel}
+                                  onValueChange={(nextTrustLevel) => {
+                                    if (nextTrustLevel === 'verified' || nextTrustLevel === 'untrusted') {
+                                      setWorkspaceSkillEditorTrustLevel(nextTrustLevel)
+                                    } else {
+                                      setWorkspaceSkillEditorTrustLevel('reviewed')
+                                    }
+                                  }}
+                                  options={SKILL_TRUST_OPTIONS}
+                                  ariaLabel="Catalog skill trust level"
+                                  disabled={patchWorkspaceSkillPending}
+                                />
+                              </label>
+                            </div>
+                            <div className="md-editor-surface">
+                              <div className="md-editor-content">
+                                <textarea
+                                  className="md-textarea"
+                                  value={workspaceSkillEditorSummary}
+                                  onChange={(event) => setWorkspaceSkillEditorSummary(event.target.value)}
+                                  placeholder="Skill summary"
+                                  style={{ width: '100%', minHeight: 96 }}
+                                />
+                              </div>
+                            </div>
+                            <div className="meta" style={{ marginTop: 8 }}>
+                              Source: {skill.source_locator || '(none)'}
+                            </div>
+                            <div className="meta" style={{ marginTop: 8 }}>Skill content</div>
+                            <div className="md-editor-surface">
+                              <MarkdownModeToggle
+                                view={workspaceSkillContentView}
+                                onChange={setWorkspaceSkillContentView}
+                                ariaLabel="Catalog skill content editor view"
+                              />
+                              <div className="md-editor-content">
+                                {workspaceSkillContentView === 'write' ? (
                                   <textarea
                                     className="md-textarea"
                                     value={workspaceSkillEditorContent}
@@ -1458,24 +1945,36 @@ export function AdminPanel({
                                     placeholder="Write skill content in Markdown..."
                                     style={{ width: '100%', minHeight: 180 }}
                                   />
+                                ) : workspaceSkillContentView === 'split' ? (
+                                  <MarkdownSplitPane
+                                    left={(
+                                      <textarea
+                                        className="md-textarea"
+                                        value={workspaceSkillEditorContent}
+                                        onChange={(event) => setWorkspaceSkillEditorContent(event.target.value)}
+                                        placeholder="Write skill content in Markdown..."
+                                        style={{ width: '100%', minHeight: 180 }}
+                                      />
+                                    )}
+                                    right={<MarkdownView value={workspaceSkillEditorContent} />}
+                                    ariaLabel="Resize workspace skill editor and preview panels"
+                                  />
+                                ) : (
+                                  <MarkdownView value={workspaceSkillEditorContent} />
                                 )}
-                                right={<MarkdownView value={workspaceSkillEditorContent} />}
-                                ariaLabel="Resize workspace skill editor and preview panels"
-                              />
-                            ) : (
-                              <MarkdownView value={workspaceSkillEditorContent} />
-                            )}
+                              </div>
+                            </div>
                           </div>
-                        </div>
+                        ) : null}
                       </div>
-                    ) : null}
-                  </div>
-                </div>
-              )
-            })
-          )}
-        </div>
-      </div>
+                    </div>
+                  )
+                })
+              )}
+            </div>
+          </div>
+        </Tabs.Content>
+      </Tabs.Root>
     </section>
   )
 }
