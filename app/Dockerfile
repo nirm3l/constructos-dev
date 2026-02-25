@@ -7,7 +7,8 @@ COPY frontend /frontend
 RUN npm run build
 
 FROM node:22-bookworm-slim AS codex-builder
-RUN npm install -g @openai/codex && npm cache clean --force
+RUN npm install -g --include=optional @openai/codex \
+    && npm cache clean --force
 
 FROM python:3.12-slim
 
@@ -37,8 +38,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=codex-builder /usr/local/bin/node /usr/local/bin/node
-COPY --from=codex-builder /usr/local/bin/codex /usr/local/bin/codex
 COPY --from=codex-builder /usr/local/lib/node_modules /usr/local/lib/node_modules
+# Keep the same global bin layout npm creates so Codex can resolve platform packages.
+RUN ln -sf ../lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex
 
 COPY requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt

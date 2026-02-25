@@ -110,6 +110,30 @@ function normalizeBool(value: unknown): boolean {
   return false
 }
 
+async function copyTextToClipboard(text: string): Promise<void> {
+  const canUseClipboardApi = typeof navigator !== 'undefined' && Boolean(navigator.clipboard?.writeText)
+  if (canUseClipboardApi) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  if (typeof document !== 'undefined') {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.setAttribute('readonly', 'true')
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    ta.style.pointerEvents = 'none'
+    document.body.appendChild(ta)
+    ta.focus()
+    ta.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    if (!ok) throw new Error('Clipboard copy is not supported in this browser context')
+    return
+  }
+  throw new Error('Clipboard copy is not available')
+}
+
 function ChatTooltip({
   content,
   children,
@@ -146,6 +170,9 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const [deleteSessionDialogOpen, setDeleteSessionDialogOpen] = React.useState(false)
   const [clearChatDialogOpen, setClearChatDialogOpen] = React.useState(false)
   const [deleteSessionId, setDeleteSessionId] = React.useState<string | null>(null)
+  const [resumeCommandCopyState, setResumeCommandCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
+  const codexThreadId = String(state.codexChatCodexSessionId || '').trim()
+  const codexResumeCommand = codexThreadId ? `cos resume ${codexThreadId}` : null
 
   React.useEffect(() => {
     setChatAttachmentRefs([])
@@ -187,6 +214,29 @@ export function CodexChatDrawer({ state }: { state: any }) {
     input.style.height = `${nextHeight}px`
     input.style.overflowY = input.scrollHeight > CHAT_INPUT_MAX_HEIGHT_PX ? 'auto' : 'hidden'
   }, [state.codexChatInstruction, state.showCodexChat, state.codexChatSessionId])
+
+  React.useEffect(() => {
+    setResumeCommandCopyState('idle')
+  }, [codexResumeCommand])
+
+  React.useEffect(() => {
+    if (resumeCommandCopyState === 'idle') return
+    const timeoutMs = resumeCommandCopyState === 'copied' ? 1400 : 1800
+    const timer = window.setTimeout(() => {
+      setResumeCommandCopyState('idle')
+    }, timeoutMs)
+    return () => window.clearTimeout(timer)
+  }, [resumeCommandCopyState])
+
+  const copyResumeCommandToClipboard = React.useCallback(async () => {
+    if (!codexResumeCommand) return
+    try {
+      await copyTextToClipboard(codexResumeCommand)
+      setResumeCommandCopyState('copied')
+    } catch {
+      setResumeCommandCopyState('error')
+    }
+  }, [codexResumeCommand])
 
   if (!state.showCodexChat) return null
   const usage = state.codexChatUsage
@@ -298,21 +348,24 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const contextSummary = inputTokens !== null
     ? (contextLimitTokens && usagePercent !== null ? `Context ${usagePercent}%` : `Context ${inputTokens.toLocaleString()}`)
     : null
-  const codexThreadId = String(state.codexChatCodexSessionId || '').trim()
   const codexResumeFallbackUsed = Boolean(
     normalizeBool(state.codexChatResumeState?.fallbackUsed)
     || normalizeBool(usage?.codex_resume_fallback_used)
   )
-  const codexThreadLabel = codexThreadId
-    ? (codexThreadId.length > 22
-      ? `Thread ${codexThreadId.slice(0, 8)}...${codexThreadId.slice(-6)}`
-      : `Thread ${codexThreadId}`)
+  const codexResumeHint = codexResumeCommand
+    ? (
+      resumeCommandCopyState === 'copied'
+        ? 'Copied'
+        : resumeCommandCopyState === 'error'
+          ? 'Copy failed'
+          : 'Click to copy this command and continue this conversation in COS CLI.'
+    )
     : null
   const hasContext = contextSummary !== null
   const metaParts: string[] = []
   if (hasMessages) metaParts.push(`${state.codexChatTurns.length} ${state.codexChatTurns.length === 1 ? 'message' : 'messages'}`)
   if (activeSessionUpdatedAt && (hasMessages || hasContext)) metaParts.push(activeSessionUpdatedAt)
-  const hasSessionMeta = metaParts.length > 0 || Boolean(contextSummary) || Boolean(codexThreadId) || codexResumeFallbackUsed
+  const hasSessionMeta = metaParts.length > 0 || Boolean(contextSummary) || codexResumeFallbackUsed
   const canDeleteSession = Array.isArray(state.codexChatSessions) && state.codexChatSessions.length > 1 && !state.runAgentChatMutation.isPending
   const canCreateSession = !state.runAgentChatMutation.isPending
   const canUseProjectCreationStarter =
@@ -577,7 +630,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
     <Tooltip.Provider delayDuration={180}>
       <div className="drawer open" onClick={() => state.setShowCodexChat(false)}>
         <div className="drawer-body codex-chat-drawer-body" onClick={(e) => e.stopPropagation()}>
-          <div className="row" style={{ justifyContent: 'space-between', marginBottom: 6 }}>
+          <div className="row codex-chat-header-row">
             <h3 style={{ margin: 0 }}>Chat</h3>
             <ChatTooltip content="Close chat">
               <button className="action-icon" onClick={() => state.setShowCodexChat(false)} aria-label="Close">
@@ -763,16 +816,9 @@ export function CodexChatDrawer({ state }: { state: any }) {
         </div>
         {hasSessionMeta && (
           <div className="meta codex-chat-session-meta">
-            {(metaParts.length > 0 || codexThreadId || codexResumeFallbackUsed) && (
+            {(metaParts.length > 0 || codexResumeFallbackUsed) && (
               <div className="codex-chat-session-meta-left">
                 {metaParts.map((part, idx) => <span key={`${idx}-${part}`}>{part}</span>)}
-                {codexThreadId && codexThreadLabel && (
-                  <ChatTooltip content={`Codex thread id: ${codexThreadId}`}>
-                    <span className="codex-chat-session-meta-thread" aria-label="Codex thread id">
-                      {codexThreadLabel}
-                    </span>
-                  </ChatTooltip>
-                )}
                 {codexResumeFallbackUsed && (
                   <ChatTooltip content="Last turn used fallback start because resume was unavailable for the saved thread.">
                     <span className="codex-chat-session-meta-resume-fallback" aria-label="Codex resume fallback used">
@@ -1061,6 +1107,23 @@ export function CodexChatDrawer({ state }: { state: any }) {
               </span>
             </ChatTooltip>
           </div>
+          {codexThreadId && codexResumeCommand && codexResumeHint && (
+            <div className="codex-chat-toolbar-footer">
+              <ChatTooltip content={codexResumeHint}>
+                <button
+                  type="button"
+                  className="codex-chat-resume-copy-btn codex-chat-resume-copy-btn-footer"
+                  aria-label={codexResumeHint}
+                  onClick={() => { void copyResumeCommandToClipboard() }}
+                >
+                  <span className="codex-chat-resume-copy-btn-text">{codexResumeCommand}</span>
+                  <span className="codex-chat-resume-copy-btn-icon" aria-hidden="true">
+                    <Icon path="M9 9h11v11H9zM4 4h11v2H6v9H4z" />
+                  </span>
+                </button>
+              </ChatTooltip>
+            </div>
+          )}
           <div className="codex-chat-task-event-row" aria-live="polite" aria-atomic="true">
             <span className={`meta codex-chat-task-event ${hasLastTaskEvent ? '' : 'is-empty'}`.trim()}>
               Last task event: <span className="codex-chat-task-event-time">{lastTaskEventTimeLabel}</span>

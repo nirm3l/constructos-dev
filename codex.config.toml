@@ -1,0 +1,10 @@
+[mcp_servers.task-management-tools]
+url = "http://mcp-tools:8091/mcp"
+
+[mcp_servers.github]
+url = "https://api.githubcopilot.com/mcp/"
+bearer_token_env_var = "GITHUB_PAT"
+
+[mcp_servers.jira]
+url = "http://jira-mcp:9000/mcp"
+enabled = false

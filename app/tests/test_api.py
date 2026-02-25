@@ -3457,7 +3457,7 @@ def test_mcp_registry_honors_disabled_flag_from_config_when_runtime_list_unavail
         lambda: {
             "task-management-tools": {"url": "http://localhost:8091/mcp"},
             "github": {"url": "https://api.githubcopilot.com/mcp/", "enabled": False},
-            "jira": {"url": "http://localhost:9010/mcp", "enabled": False},
+            "jira": {"url": "http://jira-mcp:9000/mcp", "enabled": False},
         },
     )
     monkeypatch.setattr(mcp_registry, "_run_codex_mcp_list_json", lambda: [])
