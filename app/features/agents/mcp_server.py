@@ -1067,7 +1067,7 @@ def _env_bool(name: str, default: bool) -> bool:
 if __name__ == "__main__":  # pragma: no cover
     transport = os.getenv("MCP_SERVER_TRANSPORT", "streamable-http").strip() or "streamable-http"
     host = os.getenv("MCP_SERVER_HOST", "0.0.0.0").strip() or "0.0.0.0"
-    port = int(os.getenv("MCP_SERVER_PORT", "8090"))
+    port = int(os.getenv("MCP_SERVER_PORT", "8091"))
     path = os.getenv("MCP_SERVER_PATH", "/mcp").strip() or "/mcp"
     stateless_http = _env_bool("MCP_SERVER_STATELESS_HTTP", True)
     create_mcp().run(

@@ -267,14 +267,14 @@ def _discover_rows_uncached() -> list[dict[str, Any]]:
         fallback_config = by_name[_FALLBACK_SERVER_NAME].get("config")
         if not isinstance(fallback_config, dict):
             by_name[_FALLBACK_SERVER_NAME]["config"] = {"url": AGENT_CODEX_MCP_URL}
-        elif not str(fallback_config.get("url") or "").strip():
-            fallback_config["url"] = AGENT_CODEX_MCP_URL
+            fallback_config = by_name[_FALLBACK_SERVER_NAME]["config"]
+        fallback_config["url"] = AGENT_CODEX_MCP_URL
     if _LEGACY_CORE_SERVER_NAME in by_name:
         legacy_config = by_name[_LEGACY_CORE_SERVER_NAME].get("config")
         if not isinstance(legacy_config, dict):
             by_name[_LEGACY_CORE_SERVER_NAME]["config"] = {"url": AGENT_CODEX_MCP_URL}
-        elif not str(legacy_config.get("url") or "").strip():
-            legacy_config["url"] = AGENT_CODEX_MCP_URL
+            legacy_config = by_name[_LEGACY_CORE_SERVER_NAME]["config"]
+        legacy_config["url"] = AGENT_CODEX_MCP_URL
     return rows
 
 
@@ -370,8 +370,7 @@ def build_selected_mcp_config_text(*, selected_servers: list[str], task_manageme
         config = copy.deepcopy(config_raw) if isinstance(config_raw, dict) else {}
         lookup_key = _normalize_lookup_key(clean_name)
         if lookup_key in {_normalize_lookup_key(_FALLBACK_SERVER_NAME), _normalize_lookup_key(_LEGACY_CORE_SERVER_NAME)}:
-            if not str(config.get("url") or "").strip():
-                config["url"] = core_url
+            config["url"] = core_url
         if not config:
             continue
         lines.append(f"[mcp_servers.{_toml_key(clean_name)}]")

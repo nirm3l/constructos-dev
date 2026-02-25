@@ -83,7 +83,7 @@ services:
       AGENT_CHAT_CONTEXT_LIMIT_TOKENS: "${AGENT_CHAT_CONTEXT_LIMIT_TOKENS:-400000}"
       AGENT_CODEX_HOME_ROOT: "${AGENT_CODEX_HOME_ROOT:-/home/app/codex-home}"
       AGENT_CODEX_COMMAND: "python -m features.agents.codex_mcp_adapter"
-      AGENT_CODEX_MCP_URL: "http://mcp-tools:8090/mcp"
+      AGENT_CODEX_MCP_URL: "http://mcp-tools:8091/mcp"
       GITHUB_PAT: "${GITHUB_PAT:-}"
       MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:-dev-mcp-token}"
       MCP_ALLOWED_WORKSPACE_IDS: "10000000-0000-0000-0000-000000000001"
@@ -137,7 +137,7 @@ services:
       APP_DEPLOYED_AT_UTC: "${APP_DEPLOYED_AT_UTC:-}"
       MCP_SERVER_TRANSPORT: streamable-http
       MCP_SERVER_HOST: 0.0.0.0
-      MCP_SERVER_PORT: "8090"
+      MCP_SERVER_PORT: "8091"
       MCP_SERVER_PATH: /mcp
       MCP_SERVER_STATELESS_HTTP: "true"
       AGENT_EXECUTOR_TIMEOUT_SECONDS: "180"
@@ -169,7 +169,7 @@ services:
       OLLAMA_EMBED_GPU_ENABLED: "${OLLAMA_EMBED_GPU_ENABLED:-true}"
       LICENSE_SERVER_TOKEN: "${LICENSE_SERVER_TOKEN:-dev-license-token}"
     ports:
-      - "8091:8090"
+      - "8091:8091"
     security_opt:
       - no-new-privileges:true
     cap_drop:
