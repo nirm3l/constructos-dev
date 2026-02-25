@@ -52,6 +52,23 @@ def _coerce_metadata(raw: str | None) -> dict[str, Any]:
     return {}
 
 
+def _sanitize_license_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(metadata)
+    subscription_status = str(cleaned.get("subscription_status") or "").strip().lower()
+    if subscription_status != "beta":
+        # Legacy control-plane payloads could leave beta markers in local metadata.
+        # Do not expose beta flags for non-beta subscriptions.
+        for key in (
+            "public_beta",
+            "public_beta_free_until",
+            "public_beta_active",
+            "beta_plan_valid_until",
+            "beta_plan_active",
+        ):
+            cleaned.pop(key, None)
+    return cleaned
+
+
 def license_status_read_model(db: Session) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     installation_id = resolve_license_installation_id(db)
@@ -112,6 +129,7 @@ def license_status_read_model(db: Session) -> dict[str, Any]:
 
     enforcement_enabled = bool(LICENSE_ENFORCEMENT_ENABLED)
     write_access = (not enforcement_enabled) or (status in WRITE_ALLOWED_STATUSES)
+    metadata = _sanitize_license_metadata(_coerce_metadata(installation.metadata_json))
 
     return {
         "installation_id": installation.installation_id,
@@ -123,7 +141,7 @@ def license_status_read_model(db: Session) -> dict[str, Any]:
         "grace_ends_at": grace_ends_at.isoformat() if grace_ends_at else None,
         "last_validated_at": _ensure_aware(installation.last_validated_at).isoformat() if installation.last_validated_at else None,
         "token_expires_at": _ensure_aware(installation.token_expires_at).isoformat() if installation.token_expires_at else None,
-        "metadata": _coerce_metadata(installation.metadata_json),
+        "metadata": metadata,
     }
 
 

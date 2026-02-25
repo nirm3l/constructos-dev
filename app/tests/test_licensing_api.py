@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from datetime import datetime, timedelta, timezone
 from importlib import reload
 from pathlib import Path
@@ -122,6 +123,46 @@ def test_license_status_prefers_expired_control_plane_entitlement_over_local_tri
     license_payload = res.json()["license"]
     assert license_payload["status"] == "expired"
     assert license_payload["write_access"] is False
+
+
+def test_license_status_hides_legacy_public_beta_metadata_for_non_beta_subscription(tmp_path: Path):
+    client = build_client(tmp_path)
+    from shared.models import LicenseEntitlement, LicenseInstallation, SessionLocal
+
+    with SessionLocal() as db:
+        installation = db.execute(
+            select(LicenseInstallation).where(LicenseInstallation.installation_id == TEST_INSTALLATION_ID)
+        ).scalar_one()
+        installation.status = "active"
+        installation.plan_code = "trial"
+        installation.metadata_json = json.dumps(
+            {
+                "subscription_status": "trialing",
+                "subscription_valid_until": "2026-02-26T08:00:00+00:00",
+                "public_beta": True,
+                "public_beta_free_until": "2026-03-31T23:59:59+00:00",
+                "entitlement_reason": "subscription_trialing",
+            }
+        )
+        db.add(
+            LicenseEntitlement(
+                installation_id=installation.id,
+                source="control-plane",
+                status="active",
+                plan_code="trial",
+                valid_from=datetime.now(timezone.utc) - timedelta(minutes=5),
+                valid_until=datetime.now(timezone.utc) + timedelta(days=1),
+                raw_payload_json="{}",
+            )
+        )
+        db.commit()
+
+    res = client.get("/api/license/status")
+    assert res.status_code == 200
+    metadata = res.json()["license"]["metadata"]
+    assert metadata.get("subscription_status") == "trialing"
+    assert "public_beta" not in metadata
+    assert "public_beta_free_until" not in metadata
 
 
 def test_expired_license_blocks_write_endpoints(tmp_path: Path):
