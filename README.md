@@ -161,6 +161,10 @@ curl -sS http://localhost:8080/api/health
 - KurrentDB UI (event browser): `http://localhost:2113/web/index.html`
 - KurrentDB all-events feed (JSON): `http://localhost:2113/streams/%24all/head/backward/50?embed=body`
 
+Optional for Codex git push from `task-app` container:
+- set `GITHUB_PAT` in `.env` to a GitHub token with repository write access.
+- runtime maps `GITHUB_PAT` to `GITHUB_TOKEN` when `GITHUB_TOKEN` is not already set.
+
 ## Optional: Jira MCP (Separate Compose)
 1. Create local env file:
 ```bash
@@ -195,6 +199,7 @@ docker compose -p constructos-app -f docker-compose.yml run --rm --build task-ap
 - auto-injects the application MCP server (`task-management-tools`)
 - prepends hidden wrapper instructions on every run
 - keeps Codex as the main implementation engine (file edits, commands, tests)
+- runs on host and, by default, executes Codex inside Docker app container `task-app`
 
 Install (recommended, isolated user install):
 ```bash
@@ -224,6 +229,9 @@ cos chat
 # interactive chat with initial request
 cos chat "Implement the notifications retry backoff fix in this repo"
 
+# resume latest interactive session
+cos resume --last
+
 # non-interactive run
 cos exec "Implement project setup improvements and run tests"
 
@@ -249,7 +257,10 @@ Build package artifacts:
 Useful options:
 - `--repo /path/to/repo` to target a specific project directory
 - `--app-mcp-url http://localhost:8091/mcp` to override MCP endpoint
+- `--codex-backend docker|local` to choose runtime backend
+- `--docker-container task-app` and `--docker-workdir /app` for Docker backend
 - `--system-prompt-file ~/.cos/system.md` for extra hidden instructions
+- `--terminal-theme green` to force green terminal styling during Codex run (best effort, default)
 - `--dangerous` for full bypass mode (same risk profile as Codex flag)
 - config precedence: `default < global (~/.cos/config.toml) < local (./.cos/config.toml) < env < CLI option`
 - see [tools/cos/README.md](/home/m4tr1x/task-management/tools/cos/README.md) for Ubuntu/macOS install/uninstall details

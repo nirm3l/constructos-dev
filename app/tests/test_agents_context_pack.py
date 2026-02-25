@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import io
 import json
+import os
+import time
 import uuid
 from importlib import reload
 from pathlib import Path
@@ -159,6 +162,51 @@ def test_execute_task_automation_includes_project_skills_in_context(tmp_path, mo
     assert captured["project_skills"][0]["trust_level"] == "verified"
 
 
+def test_execute_task_automation_includes_chat_and_codex_session_ids(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+
+    from features.agents import executor as executor_module
+
+    monkeypatch.setattr(executor_module, "AGENT_EXECUTOR_MODE", "command")
+    monkeypatch.setattr(executor_module, "AGENT_CODEX_COMMAND", "dummy-exec")
+    monkeypatch.setattr(executor_module, "build_graph_context_markdown", lambda **_: "## Graph\nTask -> Specification")
+
+    captured: dict = {}
+
+    class DummyProcess:
+        returncode = 0
+        stdout = '{"action":"comment","summary":"ok","comment":null}'
+        stderr = ""
+
+    def fake_run(command, *, input, text, capture_output, timeout, check):  # noqa: A002
+        _ = (command, text, capture_output, timeout, check)
+        captured.update(json.loads(input))
+        return DummyProcess()
+
+    monkeypatch.setattr(executor_module.subprocess, "run", fake_run)
+
+    outcome = executor_module.execute_task_automation(
+        task_id="",
+        title="General Codex Chat",
+        description="chat",
+        status="To do",
+        instruction="Use continuation context",
+        workspace_id=ws_id,
+        project_id=project_id,
+        chat_session_id="chat-session-001",
+        codex_session_id="thread-001",
+        actor_user_id=bootstrap["current_user"]["id"],
+        allow_mutations=True,
+    )
+
+    assert outcome.summary == "ok"
+    assert captured["chat_session_id"] == "chat-session-001"
+    assert captured["codex_session_id"] == "thread-001"
+
+
 def test_codex_prompt_includes_soul_md_section():
     from features.agents.codex_mcp_adapter import _build_prompt
 
@@ -291,6 +339,20 @@ def test_executor_parses_codex_session_id():
     assert outcome.codex_session_id == "thread-abc-123"
 
 
+def test_executor_parses_resume_flags():
+    from features.agents.executor import _parse_command_outcome
+
+    outcome = _parse_command_outcome(
+        (
+            '{"action":"comment","summary":"ok","comment":null,'
+            '"resume_attempted":true,"resume_succeeded":false,"resume_fallback_used":true}'
+        )
+    )
+    assert outcome.resume_attempted is True
+    assert outcome.resume_succeeded is False
+    assert outcome.resume_fallback_used is True
+
+
 def test_plain_text_result_uses_first_non_empty_line_for_summary():
     from features.agents.codex_mcp_adapter import _build_plain_text_result
 
@@ -369,3 +431,142 @@ def test_extract_error_message_supports_additional_details_snake_case():
         "additional_details": "Only details present",
     }
     assert _extract_error_message(payload) == "Only details present"
+
+
+def test_resolve_persistent_codex_home_path_sanitizes_workspace_and_session(monkeypatch, tmp_path):
+    from features.agents.codex_mcp_adapter import _resolve_persistent_codex_home_path
+
+    root = tmp_path / "codex-home-root"
+    monkeypatch.setenv("AGENT_CODEX_HOME_ROOT", str(root))
+    resolved = _resolve_persistent_codex_home_path(
+        workspace_id="WS / Main",
+        chat_session_id="Session:Alpha?1",
+    )
+    assert resolved == root.resolve() / "workspace" / "ws___main" / "chat" / "session_alpha_1"
+
+
+def test_codex_home_cleanup_removes_stale_session_dirs_and_respects_interval(monkeypatch, tmp_path):
+    from features.agents.codex_mcp_adapter import run_codex_home_cleanup_if_due
+
+    root = tmp_path / "codex-home"
+    old_session = root / "workspace" / "ws-1" / "chat" / "old-session"
+    fresh_session = root / "workspace" / "ws-1" / "chat" / "fresh-session"
+    old_session.mkdir(parents=True, exist_ok=True)
+    fresh_session.mkdir(parents=True, exist_ok=True)
+    old_file = old_session / "marker.txt"
+    fresh_file = fresh_session / "marker.txt"
+    old_file.write_text("old", encoding="utf-8")
+    fresh_file.write_text("fresh", encoding="utf-8")
+
+    now = time.time()
+    old_ts = now - (10 * 86400)
+    fresh_ts = now - (1 * 86400)
+    os.utime(old_session, (old_ts, old_ts))
+    os.utime(old_file, (old_ts, old_ts))
+    os.utime(fresh_session, (fresh_ts, fresh_ts))
+    os.utime(fresh_file, (fresh_ts, fresh_ts))
+
+    monkeypatch.setenv("AGENT_CODEX_HOME_ROOT", str(root))
+    monkeypatch.setenv("AGENT_CODEX_HOME_RETENTION_DAYS", "7")
+    monkeypatch.setenv("AGENT_CODEX_HOME_CLEANUP_INTERVAL_SECONDS", "3600")
+
+    first = run_codex_home_cleanup_if_due(now_unix_seconds=now)
+    assert first["ran"] is True
+    assert first["removed"] == 1
+    assert not old_session.exists()
+    assert fresh_session.exists()
+
+    second = run_codex_home_cleanup_if_due(now_unix_seconds=now + 120)
+    assert second["ran"] is False
+    assert second["removed"] == 0
+
+
+def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch):
+    from contextlib import contextmanager
+    from features.agents import codex_mcp_adapter as adapter_module
+
+    captured: dict[str, object] = {}
+
+    @contextmanager
+    def _fake_home_env(*, mcp_config_text: str, workspace_id: str | None = None, chat_session_id: str | None = None):
+        captured["home_env_workspace_id"] = workspace_id
+        captured["home_env_chat_session_id"] = chat_session_id
+        _ = mcp_config_text
+        yield {"HOME": "/tmp/fake-codex-home"}
+
+    @contextmanager
+    def _fake_run_lock(
+        *,
+        workspace_id: str | None = None,
+        chat_session_id: str | None = None,
+        timeout_seconds: float,
+        poll_interval_seconds: float = 0.1,
+    ):
+        captured["lock_workspace_id"] = workspace_id
+        captured["lock_chat_session_id"] = chat_session_id
+        captured["lock_timeout_seconds"] = timeout_seconds
+        captured["lock_poll_interval_seconds"] = poll_interval_seconds
+        yield
+
+    def _fake_run_codex_app_server_with_optional_stream(
+        *,
+        prompt: str,
+        timeout_seconds: float,
+        stream_events: bool,
+        model: str | None = None,
+        output_schema: dict | None = None,
+        preferred_thread_id: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> tuple[str, dict[str, int] | None, str | None, bool, bool]:
+        captured["stream_events"] = stream_events
+        captured["preferred_thread_id"] = preferred_thread_id
+        captured["timeout_seconds"] = timeout_seconds
+        captured["has_output_schema"] = isinstance(output_schema, dict)
+        captured["env_home"] = (env or {}).get("HOME")
+        _ = (prompt, model)
+        return (
+            '{"action":"comment","summary":"ok","comment":null}',
+            {"input_tokens": 12, "output_tokens": 3},
+            "thread-new-2",
+            True,
+            True,
+        )
+
+    monkeypatch.setattr(adapter_module, "_codex_home_env", _fake_home_env)
+    monkeypatch.setattr(adapter_module, "_chat_session_run_lock", _fake_run_lock)
+    monkeypatch.setattr(adapter_module, "_run_codex_app_server_with_optional_stream", _fake_run_codex_app_server_with_optional_stream)
+    monkeypatch.setattr(adapter_module, "run_codex_home_cleanup_if_due", lambda **_: {"ran": False, "removed": 0, "failures": 0})
+    monkeypatch.setattr(
+        adapter_module.sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "instruction": "Continue the same chat thread",
+                    "workspace_id": "ws-main",
+                    "chat_session_id": "chat-42",
+                    "codex_session_id": "thread-prev-1",
+                    "stream_events": False,
+                }
+            )
+        ),
+    )
+    stdout = io.StringIO()
+    monkeypatch.setattr(adapter_module.sys, "stdout", stdout)
+
+    exit_code = adapter_module.main()
+    assert exit_code == 0
+
+    payload = json.loads(stdout.getvalue().strip())
+    assert payload["codex_session_id"] == "thread-new-2"
+    assert payload["resume_attempted"] is True
+    assert payload["resume_succeeded"] is True
+    assert payload["resume_fallback_used"] is False
+    assert captured["stream_events"] is False
+    assert captured["preferred_thread_id"] == "thread-prev-1"
+    assert captured["has_output_schema"] is True
+    assert captured["home_env_workspace_id"] == "ws-main"
+    assert captured["home_env_chat_session_id"] == "chat-42"
+    assert captured["env_home"] == "/tmp/fake-codex-home"
+    assert captured["lock_workspace_id"] == "ws-main"
+    assert captured["lock_chat_session_id"] == "chat-42"

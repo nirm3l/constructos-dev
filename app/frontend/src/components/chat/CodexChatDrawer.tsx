@@ -100,6 +100,16 @@ function formatTaskEventTimestamp(value: number | string | null | undefined): st
   })
 }
 
+function normalizeBool(value: unknown): boolean {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value === 1
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on'
+  }
+  return false
+}
+
 function ChatTooltip({
   content,
   children,
@@ -250,7 +260,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const coreMcpServerName = availableMcpServers.find((server) => CORE_MCP_LOOKUP_KEYS.has(normalizeMcpLookupKey(server.name)))?.name || null
   const hasOptionalMcpServers = availableMcpServers.some((server) => !CORE_MCP_LOOKUP_KEYS.has(normalizeMcpLookupKey(server.name)))
   const showMcpSection = hasOptionalMcpServers
-  const selectedMcpServers = (() => {
+  const selectedMcpServers: string[] = (() => {
     const hasDiscoveredServers = availableMcpServers.length > 0
     const rawSelection = Array.isArray(state.codexChatMcpServers) ? state.codexChatMcpServers : []
     const normalizedSelection: string[] = []
@@ -271,12 +281,10 @@ export function CodexChatDrawer({ state }: { state: any }) {
       withCore.unshift(coreMcpServerName)
     }
     if (withCore.length > 0) return withCore
-    if (!hasDiscoveredServers) return coreMcpServerName ? [coreMcpServerName] : []
-    const defaultSelected = availableMcpServers.map((server) => server.name)
-    if (coreMcpServerName && !defaultSelected.some((name) => normalizeMcpLookupKey(name) === normalizeMcpLookupKey(coreMcpServerName))) {
-      defaultSelected.unshift(coreMcpServerName)
-    }
-    return defaultSelected
+    if (coreMcpServerName) return [coreMcpServerName]
+    if (!hasDiscoveredServers) return []
+    const firstAvailable = availableMcpServers[0]?.name
+    return firstAvailable ? [firstAvailable] : []
   })()
   const optionalMcpServers = availableMcpServers.filter(
     (server) => !CORE_MCP_LOOKUP_KEYS.has(normalizeMcpLookupKey(server.name))
@@ -290,10 +298,21 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const contextSummary = inputTokens !== null
     ? (contextLimitTokens && usagePercent !== null ? `Context ${usagePercent}%` : `Context ${inputTokens.toLocaleString()}`)
     : null
+  const codexThreadId = String(state.codexChatCodexSessionId || '').trim()
+  const codexResumeFallbackUsed = Boolean(
+    normalizeBool(state.codexChatResumeState?.fallbackUsed)
+    || normalizeBool(usage?.codex_resume_fallback_used)
+  )
+  const codexThreadLabel = codexThreadId
+    ? (codexThreadId.length > 22
+      ? `Thread ${codexThreadId.slice(0, 8)}...${codexThreadId.slice(-6)}`
+      : `Thread ${codexThreadId}`)
+    : null
   const hasContext = contextSummary !== null
   const metaParts: string[] = []
   if (hasMessages) metaParts.push(`${state.codexChatTurns.length} ${state.codexChatTurns.length === 1 ? 'message' : 'messages'}`)
   if (activeSessionUpdatedAt && (hasMessages || hasContext)) metaParts.push(activeSessionUpdatedAt)
+  const hasSessionMeta = metaParts.length > 0 || Boolean(contextSummary) || Boolean(codexThreadId) || codexResumeFallbackUsed
   const canDeleteSession = Array.isArray(state.codexChatSessions) && state.codexChatSessions.length > 1 && !state.runAgentChatMutation.isPending
   const canCreateSession = !state.runAgentChatMutation.isPending
   const canUseProjectCreationStarter =
@@ -742,11 +761,25 @@ export function CodexChatDrawer({ state }: { state: any }) {
             </DropdownMenu.Portal>
           </DropdownMenu.Root>
         </div>
-        {(metaParts.length > 0 || contextSummary) && (
+        {hasSessionMeta && (
           <div className="meta codex-chat-session-meta">
-            {metaParts.length > 0 && (
+            {(metaParts.length > 0 || codexThreadId || codexResumeFallbackUsed) && (
               <div className="codex-chat-session-meta-left">
                 {metaParts.map((part, idx) => <span key={`${idx}-${part}`}>{part}</span>)}
+                {codexThreadId && codexThreadLabel && (
+                  <ChatTooltip content={`Codex thread id: ${codexThreadId}`}>
+                    <span className="codex-chat-session-meta-thread" aria-label="Codex thread id">
+                      {codexThreadLabel}
+                    </span>
+                  </ChatTooltip>
+                )}
+                {codexResumeFallbackUsed && (
+                  <ChatTooltip content="Last turn used fallback start because resume was unavailable for the saved thread.">
+                    <span className="codex-chat-session-meta-resume-fallback" aria-label="Codex resume fallback used">
+                      Resume fallback
+                    </span>
+                  </ChatTooltip>
+                )}
               </div>
             )}
             {contextSummary && (

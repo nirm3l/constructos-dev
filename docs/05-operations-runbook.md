@@ -138,6 +138,7 @@ docker run --rm \
 - `AGENT_EXECUTOR_MODE` (`placeholder|command`)
 - `AGENT_CODEX_COMMAND`
 - `AGENT_EXECUTOR_TIMEOUT_SECONDS`
+- `GITHUB_PAT` (optional, enables non-interactive HTTPS git auth for Codex operations in container)
 
 ### 3.3 MCP Security
 - `MCP_AUTH_TOKEN`

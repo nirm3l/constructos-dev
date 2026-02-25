@@ -649,6 +649,9 @@ export type AgentChatResponse = {
   session_id?: string | null
   codex_session_id?: string | null
   usage?: AgentChatUsage | null
+  resume_attempted?: boolean
+  resume_succeeded?: boolean
+  resume_fallback_used?: boolean
 }
 
 export type ChatMcpServer = string
@@ -666,6 +669,9 @@ export type AgentChatUsage = {
   cached_input_tokens?: number
   output_tokens: number
   context_limit_tokens?: number
+  codex_resume_attempted?: boolean
+  codex_resume_succeeded?: boolean
+  codex_resume_fallback_used?: boolean
 }
 
 export type ChatSessionRecord = {

@@ -6680,6 +6680,42 @@ textarea:disabled {
   text-align: right;
 }
 
+.codex-chat-session-meta-thread {
+  display: inline-flex;
+  align-items: center;
+  max-width: min(240px, 56vw);
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 20%);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 11px;
+  line-height: 1.2;
+  color: color-mix(in srgb, var(--muted), var(--text) 18%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 26%);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.codex-chat-session-meta-resume-fallback {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, #d9a341, var(--line) 34%);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 11px;
+  line-height: 1.2;
+  color: color-mix(in srgb, #8d5b00, var(--text) 42%);
+  background: color-mix(in srgb, #ffefc2, var(--surface) 78%);
+  white-space: nowrap;
+}
+
+[data-theme="dark"] .codex-chat-session-meta-resume-fallback {
+  border-color: color-mix(in srgb, #d0a14a, var(--line) 44%);
+  color: color-mix(in srgb, #ffd27a, var(--text) 36%);
+  background: color-mix(in srgb, #5c4212, var(--surface) 72%);
+}
+
 .codex-chat-context-top-row {
   display: flex;
   align-items: center;

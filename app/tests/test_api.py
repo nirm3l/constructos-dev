@@ -2859,6 +2859,9 @@ def test_agents_chat_endpoint_returns_codex_session_id_when_available(tmp_path, 
     payload = res.json()
     assert payload['ok'] is True
     assert payload['codex_session_id'] == 'thread-123'
+    assert payload['resume_attempted'] is False
+    assert payload['resume_succeeded'] is False
+    assert payload['resume_fallback_used'] is False
 
 
 def test_agents_chat_endpoint_links_created_resources_to_assistant_message(tmp_path, monkeypatch):
@@ -3698,6 +3701,132 @@ def test_agents_chat_endpoint_auto_compacts_history_with_codex(tmp_path, monkeyp
     assert "Compact this conversation history" in calls[0]['instruction']
     assert calls[1]['allow_mutations'] is True
     assert "[Compacted conversation context]" in calls[1]['instruction']
+
+
+def test_agents_chat_endpoint_uses_stored_codex_session_id_and_skips_history_stitching(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    calls = []
+
+    def _fake_execute_task_automation(**kwargs):
+        calls.append(kwargs)
+        return AutomationOutcome(
+            action='comment',
+            summary='ok',
+            comment='done',
+            usage=None,
+            codex_session_id='thread-resume-1',
+        )
+
+    monkeypatch.setattr(agents_api, 'AGENT_CHAT_HISTORY_COMPACT_THRESHOLD', 1)
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+
+    first = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'session_id': 'resume-session-1',
+            'instruction': 'Initial request',
+            'history': [],
+        },
+    )
+    assert first.status_code == 200
+    assert first.json()['codex_session_id'] == 'thread-resume-1'
+
+    second = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'session_id': 'resume-session-1',
+            'instruction': 'Follow-up request',
+            'history': [
+                {'role': 'user', 'content': 'First request'},
+                {'role': 'assistant', 'content': 'First response'},
+                {'role': 'user', 'content': 'Second request'},
+            ],
+        },
+    )
+    assert second.status_code == 200
+    assert second.json()['codex_session_id'] == 'thread-resume-1'
+
+    # Only one execute call per request: auto-compaction should be skipped for resumed sessions.
+    assert len(calls) == 2
+    assert calls[1]['chat_session_id'] == 'resume-session-1'
+    assert calls[1]['codex_session_id'] == 'thread-resume-1'
+    assert 'Conversation history:' not in calls[1]['instruction']
+
+
+def test_agents_chat_endpoint_stitches_history_when_previous_resume_failed(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    calls = []
+
+    def _fake_execute_task_automation(**kwargs):
+        calls.append(kwargs)
+        return AutomationOutcome(
+            action='comment',
+            summary='ok',
+            comment='done',
+            usage=None,
+            codex_session_id='thread-resume-failed',
+            resume_attempted=True,
+            resume_succeeded=False,
+            resume_fallback_used=True,
+        )
+
+    monkeypatch.setattr(agents_api, 'AGENT_CHAT_HISTORY_COMPACT_THRESHOLD', 100)
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+
+    first = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'session_id': 'resume-session-failed-1',
+            'instruction': 'Initial request',
+            'history': [],
+        },
+    )
+    assert first.status_code == 200
+    assert first.json()['codex_session_id'] == 'thread-resume-failed'
+    assert first.json()['resume_attempted'] is True
+    assert first.json()['resume_succeeded'] is False
+    assert first.json()['resume_fallback_used'] is True
+
+    second = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'session_id': 'resume-session-failed-1',
+            'instruction': 'Follow-up request',
+            'history': [
+                {'role': 'user', 'content': 'First request'},
+                {'role': 'assistant', 'content': 'First response'},
+                {'role': 'user', 'content': 'Second request'},
+            ],
+        },
+    )
+    assert second.status_code == 200
+
+    assert len(calls) == 2
+    assert calls[1]['chat_session_id'] == 'resume-session-failed-1'
+    assert calls[1]['codex_session_id'] == 'thread-resume-failed'
+    assert 'Conversation history:' in calls[1]['instruction']
 
 
 def test_agents_chat_endpoint_respects_allow_mutations_flag(tmp_path, monkeypatch):

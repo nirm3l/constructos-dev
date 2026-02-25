@@ -27,7 +27,7 @@ from shared.settings import (
     AGENT_EXECUTOR_TIMEOUT_SECONDS,
 )
 
-from .executor import execute_task_automation, execute_task_automation_stream
+from .executor import AutomationOutcome, execute_task_automation, execute_task_automation_stream
 from .mcp_registry import normalize_chat_mcp_servers as normalize_chat_mcp_servers_registry
 from features.chat.application import ChatApplicationService
 from features.chat.command_handlers import (
@@ -444,6 +444,31 @@ def _assistant_text(summary: str | None, comment: str | None) -> str:
     return "\n\n".join(part for part in [str(summary or "").strip(), str(comment or "").strip()] if part).strip()
 
 
+def _coerce_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if value == 0:
+            return False
+        if value == 1:
+            return True
+        return None
+    normalized = str(value or "").strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    return None
+
+
+def _build_usage_with_resume_metadata(outcome: AutomationOutcome) -> dict[str, object]:
+    usage_payload: dict[str, object] = dict(outcome.usage or {})
+    usage_payload["codex_resume_attempted"] = bool(outcome.resume_attempted)
+    usage_payload["codex_resume_succeeded"] = bool(outcome.resume_succeeded)
+    usage_payload["codex_resume_fallback_used"] = bool(outcome.resume_fallback_used)
+    return usage_payload
+
+
 def _parse_event_key_aggregate_id(event_key: str | None) -> str | None:
     text = str(event_key or "").strip()
     if not text:
@@ -649,6 +674,62 @@ def _load_persisted_chat_history(
     return out
 
 
+def _load_chat_session_codex_state(
+    *,
+    db: Session,
+    workspace_id: str,
+    session_id: str | None,
+) -> tuple[str | None, bool | None]:
+    def _extract_resume_last_succeeded(usage_json_raw: str | None) -> bool | None:
+        text_value = str(usage_json_raw or "").strip()
+        if not text_value:
+            return None
+        try:
+            usage_payload = json.loads(text_value)
+        except Exception:
+            return None
+        if not isinstance(usage_payload, dict):
+            return None
+        resume_attempted = _coerce_bool(usage_payload.get("codex_resume_attempted"))
+        resume_succeeded = _coerce_bool(usage_payload.get("codex_resume_succeeded"))
+        if resume_attempted is True:
+            return resume_succeeded
+        return None
+
+    session_key = str(session_id or "").strip()
+    if not session_key:
+        return None, None
+    row = db.execute(
+        select(ChatSession.id, ChatSession.codex_session_id, ChatSession.usage_json).where(
+            ChatSession.workspace_id == workspace_id,
+            ChatSession.session_key == session_key,
+        )
+    ).first()
+    if row is None:
+        return None, None
+    session_db_id = str(row[0] or "").strip()
+    codex_session_id = str(row[1] or "").strip() or None
+    resume_last_succeeded = _extract_resume_last_succeeded(str(row[2] or ""))
+    if resume_last_succeeded is not None:
+        return codex_session_id, resume_last_succeeded
+    if not session_db_id:
+        return codex_session_id, None
+
+    latest_assistant_usage_row = db.execute(
+        select(ChatMessage.usage_json)
+        .where(
+            ChatMessage.session_id == session_db_id,
+            ChatMessage.role == "assistant",
+            ChatMessage.is_deleted == False,
+        )
+        .order_by(ChatMessage.order_index.desc(), ChatMessage.turn_created_at.desc(), ChatMessage.created_at.desc())
+        .limit(1)
+    ).first()
+    if latest_assistant_usage_row is None:
+        return codex_session_id, None
+    return codex_session_id, _extract_resume_last_succeeded(str(latest_assistant_usage_row[0] or ""))
+
+
 def _load_persisted_session_attachment_refs(
     *,
     db: Session,
@@ -791,6 +872,8 @@ def _prepare_chat_instruction(
     payload: AgentChatRun,
     db: Session,
     user: User,
+    resume_codex_session_id: str | None = None,
+    resume_last_succeeded: bool | None = None,
 ) -> tuple[str, list[dict[str, str]], bool, list[dict[str, object]], list[dict[str, object]]]:
     raw_instruction = (payload.instruction or "").strip()
     force_compact, instruction = _parse_compact_command(raw_instruction)
@@ -821,13 +904,18 @@ def _prepare_chat_instruction(
         payload_for_attachments = payload.model_copy(
             update={"session_attachment_refs": persisted_session_attachment_refs}
         )
-    compacted_history, compacted_applied = _maybe_compact_history(
-        history=history,
-        workspace_id=payload.workspace_id,
-        project_id=payload.project_id,
-        actor_user_id=user.id,
-        force=force_compact,
-    )
+    resume_active = bool(str(resume_codex_session_id or "").strip()) and resume_last_succeeded is not False
+    if resume_active and not force_compact:
+        compacted_history = history
+        compacted_applied = False
+    else:
+        compacted_history, compacted_applied = _maybe_compact_history(
+            history=history,
+            workspace_id=payload.workspace_id,
+            project_id=payload.project_id,
+            actor_user_id=user.id,
+            force=force_compact,
+        )
     if force_compact and not instruction:
         if not history:
             summary = "No chat history to compact."
@@ -847,7 +935,11 @@ def _prepare_chat_instruction(
     instruction_with_context = instruction
     if attachment_context:
         instruction_with_context = f"{instruction}\n\n{attachment_context}"
-    effective_instruction = _compose_chat_instruction(instruction_with_context, compacted_history)
+    if resume_active:
+        # For resumed Codex threads, avoid resending stitched history on every turn.
+        effective_instruction = instruction_with_context
+    else:
+        effective_instruction = _compose_chat_instruction(instruction_with_context, compacted_history)
     return effective_instruction, compacted_history, False, prepared_attachment_refs, prepared_session_attachment_refs
 
 
@@ -861,6 +953,11 @@ def agent_chat(
     ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     mcp_servers = _normalize_chat_mcp_servers(payload.mcp_servers)
     session_id = _resolve_chat_session_id(payload.session_id)
+    existing_codex_session_id, resume_last_succeeded = _load_chat_session_codex_state(
+        db=db,
+        workspace_id=payload.workspace_id,
+        session_id=session_id,
+    )
     payload_with_session = payload.model_copy(update={"session_id": session_id})
     (
         effective_instruction,
@@ -872,6 +969,8 @@ def agent_chat(
         payload=payload_with_session,
         db=db,
         user=user,
+        resume_codex_session_id=existing_codex_session_id,
+        resume_last_succeeded=resume_last_succeeded,
     )
 
     attachment_refs = prepared_attachment_refs or [item.model_dump() for item in payload.attachment_refs or []]
@@ -917,6 +1016,9 @@ def agent_chat(
             "session_id": session_id,
             "codex_session_id": None,
             "usage": None,
+            "resume_attempted": False,
+            "resume_succeeded": False,
+            "resume_fallback_used": False,
         }
 
     description = f"General Codex chat context. workspace_id={payload.workspace_id}; project_id={payload.project_id or ''}"
@@ -930,6 +1032,8 @@ def agent_chat(
             instruction=effective_instruction,
             workspace_id=payload.workspace_id,
             project_id=payload.project_id,
+            chat_session_id=session_id,
+            codex_session_id=existing_codex_session_id,
             actor_user_id=user.id,
             allow_mutations=bool(payload.allow_mutations),
             mcp_servers=mcp_servers,
@@ -943,7 +1047,7 @@ def agent_chat(
             session_id=session_id,
             mcp_servers=mcp_servers,
             content=_assistant_text(outcome.summary, outcome.comment),
-            usage=outcome.usage or {},
+            usage=_build_usage_with_resume_metadata(outcome),
             codex_session_id=outcome.codex_session_id,
             run_started_at=run_started_at,
         )
@@ -955,6 +1059,9 @@ def agent_chat(
             "session_id": session_id,
             "codex_session_id": outcome.codex_session_id,
             "usage": outcome.usage,
+            "resume_attempted": bool(outcome.resume_attempted),
+            "resume_succeeded": bool(outcome.resume_succeeded),
+            "resume_fallback_used": bool(outcome.resume_fallback_used),
         }
     except TimeoutError:
         timeout_summary = f"Codex timed out after {AGENT_EXECUTOR_TIMEOUT_SECONDS:.0f}s."
@@ -980,6 +1087,9 @@ def agent_chat(
             "session_id": session_id,
             "codex_session_id": None,
             "usage": None,
+            "resume_attempted": False,
+            "resume_succeeded": False,
+            "resume_fallback_used": False,
         }
     except Exception as exc:
         # Avoid bubbling internal exceptions to the client as 500 errors.
@@ -1007,6 +1117,9 @@ def agent_chat(
             "session_id": session_id,
             "codex_session_id": None,
             "usage": None,
+            "resume_attempted": False,
+            "resume_succeeded": False,
+            "resume_fallback_used": False,
         }
 
 
@@ -1020,6 +1133,11 @@ def agent_chat_stream(
     ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     mcp_servers = _normalize_chat_mcp_servers(payload.mcp_servers)
     session_id = _resolve_chat_session_id(payload.session_id)
+    existing_codex_session_id, resume_last_succeeded = _load_chat_session_codex_state(
+        db=db,
+        workspace_id=payload.workspace_id,
+        session_id=session_id,
+    )
     payload_with_session = payload.model_copy(update={"session_id": session_id})
     (
         effective_instruction,
@@ -1031,6 +1149,8 @@ def agent_chat_stream(
         payload=payload_with_session,
         db=db,
         user=user,
+        resume_codex_session_id=existing_codex_session_id,
+        resume_last_succeeded=resume_last_succeeded,
     )
 
     attachment_refs = prepared_attachment_refs or [item.model_dump() for item in payload.attachment_refs or []]
@@ -1076,6 +1196,9 @@ def agent_chat_stream(
             "session_id": session_id,
             "codex_session_id": None,
             "usage": None,
+            "resume_attempted": False,
+            "resume_succeeded": False,
+            "resume_fallback_used": False,
         }
 
         def _compact_stream():
@@ -1102,6 +1225,8 @@ def agent_chat_stream(
                     instruction=effective_instruction,
                     workspace_id=payload.workspace_id,
                     project_id=payload.project_id,
+                    chat_session_id=session_id,
+                    codex_session_id=existing_codex_session_id,
                     actor_user_id=user.id,
                     allow_mutations=bool(payload.allow_mutations),
                     mcp_servers=mcp_servers,
@@ -1115,6 +1240,9 @@ def agent_chat_stream(
                     "session_id": session_id,
                     "codex_session_id": outcome.codex_session_id,
                     "usage": outcome.usage,
+                    "resume_attempted": bool(outcome.resume_attempted),
+                    "resume_succeeded": bool(outcome.resume_succeeded),
+                    "resume_fallback_used": bool(outcome.resume_fallback_used),
                 }
                 event_queue.put({"type": "final", "response": final_payload})
             except TimeoutError:
@@ -1126,6 +1254,9 @@ def agent_chat_stream(
                     "session_id": session_id,
                     "codex_session_id": None,
                     "usage": None,
+                    "resume_attempted": False,
+                    "resume_succeeded": False,
+                    "resume_fallback_used": False,
                 }
                 event_queue.put({"type": "final", "response": timeout_payload})
             except Exception as exc:
@@ -1137,6 +1268,9 @@ def agent_chat_stream(
                     "session_id": session_id,
                     "codex_session_id": None,
                     "usage": None,
+                    "resume_attempted": False,
+                    "resume_succeeded": False,
+                    "resume_fallback_used": False,
                 }
                 event_queue.put({"type": "final", "response": error_payload})
             finally:
@@ -1171,7 +1305,14 @@ def agent_chat_stream(
                         session_id=session_id,
                         mcp_servers=mcp_servers,
                         content=assistant_content,
-                        usage=response.get("usage") if isinstance(response.get("usage"), dict) else {},
+                        usage=(
+                            {
+                                **(response.get("usage") if isinstance(response.get("usage"), dict) else {}),
+                                "codex_resume_attempted": bool(response.get("resume_attempted")),
+                                "codex_resume_succeeded": bool(response.get("resume_succeeded")),
+                                "codex_resume_fallback_used": bool(response.get("resume_fallback_used")),
+                            }
+                        ),
                         codex_session_id=str(response.get("codex_session_id") or "").strip() or None,
                         run_started_at=run_started_at,
                     )

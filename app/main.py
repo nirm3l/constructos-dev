@@ -33,6 +33,7 @@ from features.note_groups.api import router as note_groups_router
 from features.support.api import router as support_router
 from features.chat.api import router as chat_router
 from features.agents.runner import start_automation_runner, stop_automation_runner
+from features.agents.codex_mcp_adapter import run_codex_home_cleanup_if_due
 from shared.core import bootstrap_data, start_projection_worker, startup_bootstrap, stop_projection_worker
 from shared.deps import is_license_write_allowed
 from shared.eventing_graph import start_graph_projection_worker, stop_graph_projection_worker
@@ -53,6 +54,10 @@ register_realtime_session_hooks(SessionLocal)
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     startup_bootstrap()
+    try:
+        run_codex_home_cleanup_if_due()
+    except Exception as exc:
+        logger.warning("Codex home cleanup failed during startup: %s", exc)
     try:
         assert_license_startup_write_access()
     except LicenseStartupError as exc:

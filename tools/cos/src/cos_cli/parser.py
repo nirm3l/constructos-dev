@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+import errno
+import fcntl
 import json
+import os
 from pathlib import Path
+import pty
+import re
+import select
+import signal
 import subprocess
+import sys
+import termios
 from types import SimpleNamespace
+import tty
 from typing import Annotated, Literal
 
 import typer
 
 from cos_cli import __version__
-from cos_cli.codex_runner import build_codex_command, require_codex_binary
+from cos_cli.codex_runner import build_codex_command, find_docker_resume_home, require_codex_runtime
 from cos_cli.config import (
     DEFAULTS,
     ConfigError,
@@ -32,6 +42,25 @@ CHAT_EXEC_CONTEXT_SETTINGS = {
 }
 
 CONFIG_PRECEDENCE = "default < global config < local config < environment < CLI option"
+
+_SGR_PATTERN = re.compile(rb"\x1b\[([0-9;]*)m")
+_GREEN_SGR = b"\x1b[32m"
+_GREEN_THEME_SETUP = (
+    b"\x1b]10;#00ff00\007"
+    b"\x1b]4;2;#00ff00\007"
+    b"\x1b]4;10;#00ff00\007"
+    b"\x1b]4;7;#00ff00\007"
+    b"\x1b]4;15;#00ff00\007"
+    b"\x1b[0;32m"
+)
+_GREEN_THEME_RESET = (
+    b"\x1b[0m"
+    b"\x1b]110\007"
+    b"\x1b]104;2\007"
+    b"\x1b]104;10\007"
+    b"\x1b]104;7\007"
+    b"\x1b]104;15\007"
+)
 
 
 def _version_callback(value: bool) -> None:
@@ -59,15 +88,126 @@ def _resolve_runtime_config_or_exit(
         raise typer.Exit(code=2) from exc
 
 
+def _resolved_values_with_backend_defaults(resolved: ResolvedConfig) -> dict[str, str]:
+    values = {key: str(value) for key, value in resolved.values.items()}
+    backend = str(values.get("codex_backend", "")).strip().lower()
+    if backend != "docker":
+        return values
+
+    if str(resolved.sources.get("app_mcp_url", "")) == "default":
+        values["app_mcp_url"] = str(values.get("docker_app_mcp_url", "")).strip()
+
+    if str(resolved.sources.get("repo", "")) == "default":
+        if not str(values.get("repo", "")).strip():
+            values["repo"] = str(values.get("docker_workdir", "")).strip()
+
+    return values
+
+
+def _stdout_write(data: bytes) -> None:
+    try:
+        os.write(sys.stdout.fileno(), data)
+    except OSError:
+        pass
+
+
+def _copy_winsize(source_fd: int, target_fd: int) -> None:
+    try:
+        window_size = fcntl.ioctl(source_fd, termios.TIOCGWINSZ, b"\x00" * 8)
+        fcntl.ioctl(target_fd, termios.TIOCSWINSZ, window_size)
+    except OSError:
+        pass
+
+
+def _apply_green_theme_to_chunk(data: bytes) -> bytes:
+    def _replace(match: re.Match[bytes]) -> bytes:
+        params = match.group(1).decode("ascii", "ignore")
+        parts = [part for part in params.split(";") if part]
+        if not parts:
+            return match.group(0) + _GREEN_SGR
+        if any(part in {"0", "39", "37", "97"} for part in parts):
+            return match.group(0) + _GREEN_SGR
+        return match.group(0)
+
+    return _SGR_PATTERN.sub(_replace, data)
+
+
+def _run_with_green_pty(cmd: list[str], env: dict[str, str]) -> int:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        completed = subprocess.run(cmd, check=False, env=env)
+        return int(completed.returncode)
+
+    stdin_fd = sys.stdin.fileno()
+    master_fd, slave_fd = pty.openpty()
+    _copy_winsize(stdin_fd, slave_fd)
+
+    process = subprocess.Popen(
+        cmd,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        env=env,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+
+    old_tty_attrs = termios.tcgetattr(stdin_fd)
+    previous_sigwinch_handler = signal.getsignal(signal.SIGWINCH)
+
+    def _on_sigwinch(_sig: int, _frame: object) -> None:
+        _copy_winsize(stdin_fd, master_fd)
+
+    signal.signal(signal.SIGWINCH, _on_sigwinch)
+    _stdout_write(_GREEN_THEME_SETUP)
+
+    try:
+        tty.setraw(stdin_fd)
+        while True:
+            read_fds, _, _ = select.select([master_fd, stdin_fd], [], [])
+            if stdin_fd in read_fds:
+                user_input = os.read(stdin_fd, 65536)
+                if user_input:
+                    os.write(master_fd, user_input)
+            if master_fd in read_fds:
+                try:
+                    data = os.read(master_fd, 65536)
+                except OSError as exc:
+                    if exc.errno == errno.EIO:
+                        data = b""
+                    else:
+                        raise
+                if not data:
+                    break
+                _stdout_write(_apply_green_theme_to_chunk(data))
+        return int(process.wait())
+    finally:
+        termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_tty_attrs)
+        signal.signal(signal.SIGWINCH, previous_sigwinch_handler)
+        _stdout_write(_GREEN_THEME_RESET)
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+
+
 def _run_codex(
     *,
     command: str,
     prompt: str,
+    resume_session_id: str,
+    resume_last: bool,
+    resume_all: bool,
     passthrough: list[str],
     repo: str,
     model: str,
     sandbox: str,
     approval: str,
+    terminal_theme: str,
+    codex_backend: str,
+    docker_container: str,
+    docker_workdir: str,
+    docker_codex_binary: str,
+    docker_codex_home_root: str,
     dangerous: bool,
     app_mcp_name: str,
     app_mcp_url: str,
@@ -81,7 +221,6 @@ def _run_codex(
     try:
         prompt_path = Path(str(system_prompt_file or "")).expanduser()
         extra_system_prompt = load_text_file(prompt_path)
-        require_codex_binary()
     except RuntimeError as exc:
         typer.echo(str(exc), err=True)
         return 1
@@ -90,15 +229,34 @@ def _run_codex(
     if command == "exec" and not user_prompt:
         typer.echo("`cos exec` requires a prompt (argument or stdin via '-').", err=True)
         return 2
-    has_user_prompt = bool(user_prompt)
+    if command == "resume":
+        wrapped_prompt = user_prompt
+    else:
+        has_user_prompt = bool(user_prompt)
+        hidden_instruction = build_hidden_instruction(
+            app_mcp_name=app_mcp_name,
+            app_mcp_url=app_mcp_url,
+            extra_system_prompt=extra_system_prompt,
+            has_user_prompt=has_user_prompt,
+        )
+        wrapped_prompt = compose_prompt(hidden_instruction=hidden_instruction, user_prompt=user_prompt)
 
-    hidden_instruction = build_hidden_instruction(
-        app_mcp_name=app_mcp_name,
-        app_mcp_url=app_mcp_url,
-        extra_system_prompt=extra_system_prompt,
-        has_user_prompt=has_user_prompt,
-    )
-    wrapped_prompt = compose_prompt(hidden_instruction=hidden_instruction, user_prompt=user_prompt)
+    effective_skip_git_repo_check = bool(skip_git_repo_check)
+    if command == "exec" and str(codex_backend).strip().lower() == "docker":
+        effective_skip_git_repo_check = True
+
+    docker_home = ""
+    if command == "resume" and str(codex_backend).strip().lower() == "docker":
+        sid = str(resume_session_id or "").strip()
+        if sid:
+            try:
+                docker_home = find_docker_resume_home(
+                    container=str(docker_container or "").strip(),
+                    session_id=sid,
+                    search_root=str(docker_codex_home_root or "").strip(),
+                )
+            except RuntimeError:
+                docker_home = ""
 
     args = SimpleNamespace(
         command=command,
@@ -109,14 +267,46 @@ def _run_codex(
         dangerous=dangerous,
         search=search,
         json=json_output,
-        skip_git_repo_check=skip_git_repo_check,
+        skip_git_repo_check=effective_skip_git_repo_check,
+        resume_session_id=resume_session_id,
+        resume_last=resume_last,
+        resume_all=resume_all,
+        codex_backend=codex_backend,
+        docker_container=docker_container,
+        docker_workdir=docker_workdir,
+        docker_codex_binary=docker_codex_binary,
+        docker_home=docker_home,
+        interactive_tty=bool(sys.stdin.isatty() and sys.stdout.isatty()),
         no_app_mcp=no_app_mcp,
         app_mcp_name=app_mcp_name,
         app_mcp_url=app_mcp_url,
         app_mcp_bearer_env=app_mcp_bearer_env,
     )
-    cmd = build_codex_command(args=args, user_prompt=wrapped_prompt, passthrough=passthrough)
-    completed = subprocess.run(cmd, check=False)
+    try:
+        require_codex_runtime(args)
+    except RuntimeError as exc:
+        typer.echo(str(exc), err=True)
+        return 1
+
+    try:
+        cmd = build_codex_command(args=args, user_prompt=wrapped_prompt, passthrough=passthrough)
+    except RuntimeError as exc:
+        typer.echo(str(exc), err=True)
+        return 2
+
+    if terminal_theme == "green" and command == "exec":
+        has_exec_color = any(token == "--color" or token.startswith("--color=") for token in cmd)
+        if not has_exec_color:
+            cmd[-1:-1] = ["--color", "never"]
+
+    env = os.environ.copy()
+    if terminal_theme == "green":
+        env.setdefault("NO_COLOR", "1")
+        env.setdefault("CLICOLOR", "0")
+        env.setdefault("CLICOLOR_FORCE", "0")
+        return _run_with_green_pty(cmd=cmd, env=env)
+
+    completed = subprocess.run(cmd, check=False, env=env)
     return int(completed.returncode)
 
 
@@ -243,6 +433,50 @@ def chat_command(
             case_sensitive=True,
         ),
     ] = None,
+    terminal_theme: Annotated[
+        Literal["default", "green"] | None,
+        typer.Option(
+            "--terminal-theme",
+            help="Terminal color theme used while running Codex (default or green).",
+            case_sensitive=True,
+        ),
+    ] = None,
+    codex_backend: Annotated[
+        Literal["local", "docker"] | None,
+        typer.Option(
+            "--codex-backend",
+            help="Codex runtime backend used by COS (local or docker).",
+            case_sensitive=True,
+        ),
+    ] = None,
+    docker_container: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-container",
+            help="Docker container name used when --codex-backend=docker.",
+        ),
+    ] = None,
+    docker_workdir: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-workdir",
+            help="Working directory inside Docker container used for docker backend runs.",
+        ),
+    ] = None,
+    docker_codex_binary: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-codex-binary",
+            help="Codex binary path/name inside Docker container.",
+        ),
+    ] = None,
+    docker_codex_home_root: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-codex-home-root",
+            help="Root directory in Docker used to search persisted Codex sessions for resume.",
+        ),
+    ] = None,
     dangerous: Annotated[
         bool,
         typer.Option("--dangerous", help="Forward --dangerously-bypass-approvals-and-sandbox to Codex."),
@@ -288,26 +522,42 @@ def chat_command(
             "model": model,
             "sandbox": sandbox,
             "approval": approval,
+            "terminal_theme": terminal_theme,
+            "codex_backend": codex_backend,
+            "docker_container": docker_container,
+            "docker_workdir": docker_workdir,
+            "docker_codex_binary": docker_codex_binary,
+            "docker_codex_home_root": docker_codex_home_root,
             "app_mcp_name": app_mcp_name,
             "app_mcp_url": app_mcp_url,
             "app_mcp_bearer_env": app_mcp_bearer_env,
             "system_prompt_file": system_prompt_file,
         },
     )
+    values = _resolved_values_with_backend_defaults(resolved)
 
     exit_code = _run_codex(
         command="chat",
         prompt=prompt,
+        resume_session_id="",
+        resume_last=False,
+        resume_all=False,
         passthrough=_normalize_passthrough(ctx),
-        repo=str(resolved.values["repo"]),
-        model=str(resolved.values["model"]),
-        sandbox=str(resolved.values["sandbox"]),
-        approval=str(resolved.values["approval"]),
+        repo=str(values["repo"]),
+        model=str(values["model"]),
+        sandbox=str(values["sandbox"]),
+        approval=str(values["approval"]),
+        terminal_theme=str(values["terminal_theme"]),
+        codex_backend=str(values["codex_backend"]),
+        docker_container=str(values["docker_container"]),
+        docker_workdir=str(values["docker_workdir"]),
+        docker_codex_binary=str(values["docker_codex_binary"]),
+        docker_codex_home_root=str(values["docker_codex_home_root"]),
         dangerous=dangerous,
-        app_mcp_name=str(resolved.values["app_mcp_name"]),
-        app_mcp_url=str(resolved.values["app_mcp_url"]),
-        app_mcp_bearer_env=str(resolved.values["app_mcp_bearer_env"]),
-        system_prompt_file=str(resolved.values["system_prompt_file"]),
+        app_mcp_name=str(values["app_mcp_name"]),
+        app_mcp_url=str(values["app_mcp_url"]),
+        app_mcp_bearer_env=str(values["app_mcp_bearer_env"]),
+        system_prompt_file=str(values["system_prompt_file"]),
         no_app_mcp=no_app_mcp,
         search=search,
         json_output=False,
@@ -340,6 +590,50 @@ def exec_command(
             "--approval",
             help="Approval policy forwarded to Codex.",
             case_sensitive=True,
+        ),
+    ] = None,
+    terminal_theme: Annotated[
+        Literal["default", "green"] | None,
+        typer.Option(
+            "--terminal-theme",
+            help="Terminal color theme used while running Codex (default or green).",
+            case_sensitive=True,
+        ),
+    ] = None,
+    codex_backend: Annotated[
+        Literal["local", "docker"] | None,
+        typer.Option(
+            "--codex-backend",
+            help="Codex runtime backend used by COS (local or docker).",
+            case_sensitive=True,
+        ),
+    ] = None,
+    docker_container: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-container",
+            help="Docker container name used when --codex-backend=docker.",
+        ),
+    ] = None,
+    docker_workdir: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-workdir",
+            help="Working directory inside Docker container used for docker backend runs.",
+        ),
+    ] = None,
+    docker_codex_binary: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-codex-binary",
+            help="Codex binary path/name inside Docker container.",
+        ),
+    ] = None,
+    docker_codex_home_root: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-codex-home-root",
+            help="Root directory in Docker used to search persisted Codex sessions for resume.",
         ),
     ] = None,
     dangerous: Annotated[
@@ -391,30 +685,224 @@ def exec_command(
             "model": model,
             "sandbox": sandbox,
             "approval": approval,
+            "terminal_theme": terminal_theme,
+            "codex_backend": codex_backend,
+            "docker_container": docker_container,
+            "docker_workdir": docker_workdir,
+            "docker_codex_binary": docker_codex_binary,
+            "docker_codex_home_root": docker_codex_home_root,
             "app_mcp_name": app_mcp_name,
             "app_mcp_url": app_mcp_url,
             "app_mcp_bearer_env": app_mcp_bearer_env,
             "system_prompt_file": system_prompt_file,
         },
     )
+    values = _resolved_values_with_backend_defaults(resolved)
 
     exit_code = _run_codex(
         command="exec",
         prompt=prompt,
+        resume_session_id="",
+        resume_last=False,
+        resume_all=False,
         passthrough=_normalize_passthrough(ctx),
-        repo=str(resolved.values["repo"]),
-        model=str(resolved.values["model"]),
-        sandbox=str(resolved.values["sandbox"]),
-        approval=str(resolved.values["approval"]),
+        repo=str(values["repo"]),
+        model=str(values["model"]),
+        sandbox=str(values["sandbox"]),
+        approval=str(values["approval"]),
+        terminal_theme=str(values["terminal_theme"]),
+        codex_backend=str(values["codex_backend"]),
+        docker_container=str(values["docker_container"]),
+        docker_workdir=str(values["docker_workdir"]),
+        docker_codex_binary=str(values["docker_codex_binary"]),
+        docker_codex_home_root=str(values["docker_codex_home_root"]),
         dangerous=dangerous,
-        app_mcp_name=str(resolved.values["app_mcp_name"]),
-        app_mcp_url=str(resolved.values["app_mcp_url"]),
-        app_mcp_bearer_env=str(resolved.values["app_mcp_bearer_env"]),
-        system_prompt_file=str(resolved.values["system_prompt_file"]),
+        app_mcp_name=str(values["app_mcp_name"]),
+        app_mcp_url=str(values["app_mcp_url"]),
+        app_mcp_bearer_env=str(values["app_mcp_bearer_env"]),
+        system_prompt_file=str(values["system_prompt_file"]),
         no_app_mcp=no_app_mcp,
         search=False,
         json_output=json_output,
         skip_git_repo_check=skip_git_repo_check,
+    )
+    raise typer.Exit(code=exit_code)
+
+
+@app.command(
+    "resume",
+    context_settings=CHAT_EXEC_CONTEXT_SETTINGS,
+    help="Resume a previous ConstructOS Codex interactive session.",
+)
+def resume_command(
+    ctx: typer.Context,
+    session_id: Annotated[
+        str,
+        typer.Argument(help="Optional Codex session/thread id. Omit to open picker or use --last."),
+    ] = "",
+    prompt: Annotated[
+        str,
+        typer.Argument(help="Optional prompt to send after resuming. Use '-' to read from stdin."),
+    ] = "",
+    last: Annotated[
+        bool,
+        typer.Option("--last", help="Resume the most recent session without showing picker."),
+    ] = False,
+    show_all: Annotated[
+        bool,
+        typer.Option("--all", help="Show all sessions in picker (matches codex resume --all)."),
+    ] = False,
+    repo: Annotated[str | None, typer.Option("--repo", "-C", help="Repository directory passed to Codex with --cd.")] = None,
+    model: Annotated[str | None, typer.Option("--model", "-m", help="Codex model (passed as -m).")] = None,
+    sandbox: Annotated[
+        Literal["read-only", "workspace-write", "danger-full-access"] | None,
+        typer.Option(
+            "--sandbox",
+            help="Sandbox policy forwarded to Codex.",
+            case_sensitive=True,
+        ),
+    ] = None,
+    approval: Annotated[
+        Literal["untrusted", "on-request", "never"] | None,
+        typer.Option(
+            "--approval",
+            help="Approval policy forwarded to Codex.",
+            case_sensitive=True,
+        ),
+    ] = None,
+    terminal_theme: Annotated[
+        Literal["default", "green"] | None,
+        typer.Option(
+            "--terminal-theme",
+            help="Terminal color theme used while running Codex (default or green).",
+            case_sensitive=True,
+        ),
+    ] = None,
+    codex_backend: Annotated[
+        Literal["local", "docker"] | None,
+        typer.Option(
+            "--codex-backend",
+            help="Codex runtime backend used by COS (local or docker).",
+            case_sensitive=True,
+        ),
+    ] = None,
+    docker_container: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-container",
+            help="Docker container name used when --codex-backend=docker.",
+        ),
+    ] = None,
+    docker_workdir: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-workdir",
+            help="Working directory inside Docker container used for docker backend runs.",
+        ),
+    ] = None,
+    docker_codex_binary: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-codex-binary",
+            help="Codex binary path/name inside Docker container.",
+        ),
+    ] = None,
+    docker_codex_home_root: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-codex-home-root",
+            help="Root directory in Docker used to search persisted Codex sessions for resume.",
+        ),
+    ] = None,
+    dangerous: Annotated[
+        bool,
+        typer.Option("--dangerous", help="Forward --dangerously-bypass-approvals-and-sandbox to Codex."),
+    ] = False,
+    app_mcp_name: Annotated[
+        str | None,
+        typer.Option(
+            "--app-mcp-name",
+            help="ConstructOS application MCP server name to inject.",
+        ),
+    ] = None,
+    app_mcp_url: Annotated[
+        str | None,
+        typer.Option(
+            "--app-mcp-url",
+            help="ConstructOS application MCP URL to inject.",
+        ),
+    ] = None,
+    app_mcp_bearer_env: Annotated[
+        str | None,
+        typer.Option(
+            "--app-mcp-bearer-env",
+            help="Optional env var name for MCP bearer token (maps to bearer_token_env_var).",
+        ),
+    ] = None,
+    system_prompt_file: Annotated[
+        str | None,
+        typer.Option(
+            "--system-prompt-file",
+            help="Optional extra hidden instructions file.",
+        ),
+    ] = None,
+    no_app_mcp: Annotated[
+        bool,
+        typer.Option("--no-app-mcp", help="Do not inject application MCP override config."),
+    ] = False,
+    search: Annotated[bool, typer.Option("--search", help="Enable Codex web search tool.")] = False,
+) -> None:
+    if last and str(session_id or "").strip():
+        typer.echo("`--last` cannot be used together with an explicit session_id.", err=True)
+        raise typer.Exit(code=2)
+
+    resolved = _resolve_runtime_config_or_exit(
+        repo_hint=repo,
+        overrides={
+            "repo": repo,
+            "model": model,
+            "sandbox": sandbox,
+            "approval": approval,
+            "terminal_theme": terminal_theme,
+            "codex_backend": codex_backend,
+            "docker_container": docker_container,
+            "docker_workdir": docker_workdir,
+            "docker_codex_binary": docker_codex_binary,
+            "docker_codex_home_root": docker_codex_home_root,
+            "app_mcp_name": app_mcp_name,
+            "app_mcp_url": app_mcp_url,
+            "app_mcp_bearer_env": app_mcp_bearer_env,
+            "system_prompt_file": system_prompt_file,
+        },
+    )
+    values = _resolved_values_with_backend_defaults(resolved)
+
+    exit_code = _run_codex(
+        command="resume",
+        prompt=prompt,
+        resume_session_id=str(session_id or "").strip(),
+        resume_last=bool(last),
+        resume_all=bool(show_all),
+        passthrough=_normalize_passthrough(ctx),
+        repo=str(values["repo"]),
+        model=str(values["model"]),
+        sandbox=str(values["sandbox"]),
+        approval=str(values["approval"]),
+        terminal_theme=str(values["terminal_theme"]),
+        codex_backend=str(values["codex_backend"]),
+        docker_container=str(values["docker_container"]),
+        docker_workdir=str(values["docker_workdir"]),
+        docker_codex_binary=str(values["docker_codex_binary"]),
+        docker_codex_home_root=str(values["docker_codex_home_root"]),
+        dangerous=dangerous,
+        app_mcp_name=str(values["app_mcp_name"]),
+        app_mcp_url=str(values["app_mcp_url"]),
+        app_mcp_bearer_env=str(values["app_mcp_bearer_env"]),
+        system_prompt_file=str(values["system_prompt_file"]),
+        no_app_mcp=no_app_mcp,
+        search=search,
+        json_output=False,
+        skip_git_repo_check=False,
     )
     raise typer.Exit(code=exit_code)
 
@@ -425,6 +913,28 @@ def exec_command(
 )
 def doctor_command(
     repo: Annotated[str | None, typer.Option("--repo", "-C", help="Repository path used to resolve local .cos/config.toml.")] = None,
+    codex_backend: Annotated[
+        Literal["local", "docker"] | None,
+        typer.Option(
+            "--codex-backend",
+            help="Codex runtime backend used by COS (local or docker).",
+            case_sensitive=True,
+        ),
+    ] = None,
+    docker_container: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-container",
+            help="Docker container name used when --codex-backend=docker.",
+        ),
+    ] = None,
+    docker_codex_binary: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-codex-binary",
+            help="Codex binary path/name inside Docker container.",
+        ),
+    ] = None,
     app_mcp_url: Annotated[
         str | None,
         typer.Option(
@@ -447,15 +957,22 @@ def doctor_command(
         repo_hint=repo,
         overrides={
             "repo": repo,
+            "codex_backend": codex_backend,
+            "docker_container": docker_container,
+            "docker_codex_binary": docker_codex_binary,
             "app_mcp_url": app_mcp_url,
             "app_mcp_bearer_env": app_mcp_bearer_env,
             "system_prompt_file": system_prompt_file,
         },
     )
+    values = _resolved_values_with_backend_defaults(resolved)
     args = SimpleNamespace(
-        app_mcp_url=str(resolved.values["app_mcp_url"]),
-        app_mcp_bearer_env=str(resolved.values["app_mcp_bearer_env"]),
-        system_prompt_file=str(resolved.values["system_prompt_file"]),
+        codex_backend=str(values["codex_backend"]),
+        docker_container=str(values["docker_container"]),
+        docker_codex_binary=str(values["docker_codex_binary"]),
+        app_mcp_url=str(values["app_mcp_url"]),
+        app_mcp_bearer_env=str(values["app_mcp_bearer_env"]),
+        system_prompt_file=str(values["system_prompt_file"]),
         timeout_seconds=timeout_seconds,
         json=json_output,
     )

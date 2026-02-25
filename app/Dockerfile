@@ -30,7 +30,7 @@ ARG APP_BUNDLE_KDF_ITERATIONS=200000
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends nodejs npm dumb-init ca-certificates openssl bash \
+    && apt-get install -y --no-install-recommends nodejs npm dumb-init ca-certificates openssl bash git \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt
@@ -63,7 +63,7 @@ RUN chmod 0755 /usr/local/bin/constructos-entrypoint.sh \
     && mkdir -p /opt/constructos \
     && groupadd --gid "${APP_GID}" app \
     && useradd --uid "${APP_UID}" --gid app --create-home --home-dir /home/app app \
-    && mkdir -p /data/uploads /home/app/.codex \
+    && mkdir -p /data/uploads /home/app/.codex /home/app/codex-home \
     && chown -R app:app /app /data/uploads /home/app /opt/constructos
 
 USER app

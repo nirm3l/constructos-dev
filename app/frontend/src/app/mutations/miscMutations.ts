@@ -98,6 +98,33 @@ function isAbortLikeError(err: unknown): boolean {
   return false
 }
 
+function normalizeBool(value: unknown): boolean | null {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') {
+    if (value === 1) return true
+    if (value === 0) return false
+    return null
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') return true
+    if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') return false
+  }
+  return null
+}
+
+function normalizeResumeStateFromResponse(response: any): { attempted: boolean; succeeded: boolean; fallbackUsed: boolean } | null {
+  const attempted = normalizeBool(response?.resume_attempted ?? response?.usage?.codex_resume_attempted)
+  const succeeded = normalizeBool(response?.resume_succeeded ?? response?.usage?.codex_resume_succeeded)
+  const fallbackUsed = normalizeBool(response?.resume_fallback_used ?? response?.usage?.codex_resume_fallback_used)
+  if (attempted === null && succeeded === null && fallbackUsed === null) return null
+  return {
+    attempted: Boolean(attempted),
+    succeeded: Boolean(succeeded),
+    fallbackUsed: Boolean(fallbackUsed),
+  }
+}
+
 export function useMiscMutations(c: any) {
   const activeChatAbortControllerRef = React.useRef<AbortController | null>(null)
 
@@ -147,6 +174,19 @@ export function useMiscMutations(c: any) {
     }
     if (typeof c.setCodexChatCodexSessionId === 'function') {
       c.setCodexChatCodexSessionId(normalized)
+    }
+  }
+
+  const setChatResumeStateForSession = (
+    sessionId: string,
+    resumeState: { attempted: boolean; succeeded: boolean; fallbackUsed: boolean } | null
+  ) => {
+    if (sessionId && typeof c.setCodexChatResumeStateForSession === 'function') {
+      c.setCodexChatResumeStateForSession(sessionId, resumeState)
+      return
+    }
+    if (typeof c.setCodexChatResumeState === 'function') {
+      c.setCodexChatResumeState(resumeState)
     }
   }
 
@@ -364,6 +404,7 @@ export function useMiscMutations(c: any) {
       const { response, assistantTurnId, assistantCreatedAt, streamedReply, sessionId } = result
       c.setUiError(null)
       setChatCodexSessionForSession(sessionId, response.codex_session_id ?? null)
+      setChatResumeStateForSession(sessionId, normalizeResumeStateFromResponse(response))
       if (response.usage) {
         setChatUsageForSession(sessionId, response.usage)
       }

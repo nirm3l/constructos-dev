@@ -81,6 +81,7 @@ services:
       AGENT_EXECUTOR_MODE: "command"
       AGENT_EXECUTOR_TIMEOUT_SECONDS: "180"
       AGENT_CHAT_CONTEXT_LIMIT_TOKENS: "${AGENT_CHAT_CONTEXT_LIMIT_TOKENS:-400000}"
+      AGENT_CODEX_HOME_ROOT: "${AGENT_CODEX_HOME_ROOT:-/home/app/codex-home}"
       AGENT_CODEX_COMMAND: "python -m features.agents.codex_mcp_adapter"
       AGENT_CODEX_MCP_URL: "http://mcp-tools:8090/mcp"
       GITHUB_PAT: "${GITHUB_PAT:-}"
@@ -110,6 +111,7 @@ services:
     volumes:
       - ${CODEX_CONFIG_FILE:-/home/m4tr1x/.codex/config.toml}:/home/app/.codex/config.toml:ro
       - ${CODEX_AUTH_FILE:-/home/m4tr1x/.codex/auth.json}:/home/app/.codex/auth.json:ro
+      - codex-home-data:/home/app/codex-home
     ports:
       - "8080:8000"
     security_opt:
@@ -193,3 +195,5 @@ volumes:
     name: task-management_neo4j-data
   ollama-data:
     name: task-management_ollama-data
+  codex-home-data:
+    name: task-management_codex-home-data

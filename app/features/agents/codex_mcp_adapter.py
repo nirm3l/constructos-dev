@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 from features.agents.mcp_registry import build_selected_mcp_config_text, normalize_chat_mcp_servers
 from shared.settings import (
@@ -19,6 +20,9 @@ from shared.settings import (
 )
 
 EMPTY_ASSISTANT_SUMMARY = "No assistant response content was returned."
+_DEFAULT_CODEX_HOME_ROOT = "/tmp/codex-home"
+_DEFAULT_CODEX_HOME_RETENTION_DAYS = 14
+_DEFAULT_CODEX_HOME_CLEANUP_INTERVAL_SECONDS = 3600
 
 
 def _normalize_prompt_mcp_servers(value: object) -> list[str]:
@@ -38,23 +42,243 @@ def _normalize_prompt_mcp_servers(value: object) -> list[str]:
     return out
 
 
+def _normalize_path_component(value: object, *, fallback: str) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return fallback
+    out_chars: list[str] = []
+    for char in raw:
+        if char.isalnum() or char in {"-", "_", "."}:
+            out_chars.append(char)
+        else:
+            out_chars.append("_")
+    normalized = "".join(out_chars).strip("._-")
+    return normalized or fallback
+
+
+def _resolve_codex_home_root() -> Path:
+    root_raw = str(os.getenv("AGENT_CODEX_HOME_ROOT", _DEFAULT_CODEX_HOME_ROOT)).strip() or _DEFAULT_CODEX_HOME_ROOT
+    return Path(root_raw).expanduser().resolve()
+
+
+def _resolve_persistent_codex_home_path(*, workspace_id: str, chat_session_id: str) -> Path:
+    root = _resolve_codex_home_root()
+    workspace_part = _normalize_path_component(workspace_id, fallback="workspace")
+    session_part = _normalize_path_component(chat_session_id, fallback="session")
+    return root / "workspace" / workspace_part / "chat" / session_part
+
+
+def _resolve_chat_session_lock_path(*, workspace_id: str, chat_session_id: str) -> Path:
+    return _resolve_persistent_codex_home_path(
+        workspace_id=workspace_id,
+        chat_session_id=chat_session_id,
+    ) / ".run.lock"
+
+
+def _try_acquire_file_lock(lock_handle: object) -> bool:
+    try:
+        import fcntl
+    except Exception:
+        # Fallback for environments without fcntl (best-effort lock).
+        return True
+    try:
+        fileno = getattr(lock_handle, "fileno")
+        fcntl.flock(fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    except Exception:
+        return True
+    return True
+
+
+def _release_file_lock(lock_handle: object) -> None:
+    try:
+        import fcntl
+    except Exception:
+        return
+    try:
+        fileno = getattr(lock_handle, "fileno")
+        fcntl.flock(fileno(), fcntl.LOCK_UN)
+    except Exception:
+        return
+
+
 @contextmanager
-def _isolated_codex_home_env(*, mcp_config_text: str):
+def _chat_session_run_lock(
+    *,
+    workspace_id: str | None = None,
+    chat_session_id: str | None = None,
+    timeout_seconds: float,
+    poll_interval_seconds: float = 0.1,
+):
+    normalized_workspace_id = str(workspace_id or "").strip()
+    normalized_chat_session_id = str(chat_session_id or "").strip()
+    if not normalized_workspace_id or not normalized_chat_session_id:
+        yield
+        return
+
+    lock_path = _resolve_chat_session_lock_path(
+        workspace_id=normalized_workspace_id,
+        chat_session_id=normalized_chat_session_id,
+    )
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_handle = lock_path.open("a+", encoding="utf-8")
+    lock_acquired = False
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+
+    try:
+        while True:
+            if _try_acquire_file_lock(lock_handle):
+                lock_acquired = True
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Timed out waiting for active chat run lock (workspace_id={normalized_workspace_id}, "
+                    f"chat_session_id={normalized_chat_session_id})."
+                )
+            time.sleep(max(0.01, float(poll_interval_seconds)))
+        yield
+    finally:
+        if lock_acquired:
+            _release_file_lock(lock_handle)
+        lock_handle.close()
+
+
+def _parse_env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    raw = str(os.getenv(name, str(default)) or "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = int(raw)
+    except Exception:
+        return default
+    if parsed < minimum:
+        return minimum
+    return parsed
+
+
+def _iter_persistent_codex_session_dirs(root: Path) -> list[Path]:
+    workspace_root = root / "workspace"
+    if not workspace_root.exists() or not workspace_root.is_dir():
+        return []
+    out: list[Path] = []
+    for workspace_dir in workspace_root.iterdir():
+        if not workspace_dir.is_dir():
+            continue
+        chat_root = workspace_dir / "chat"
+        if not chat_root.exists() or not chat_root.is_dir():
+            continue
+        for session_dir in chat_root.iterdir():
+            if not session_dir.is_dir() or session_dir.is_symlink():
+                continue
+            out.append(session_dir)
+    return out
+
+
+def _cleanup_stale_persistent_codex_homes(*, root: Path, cutoff_unix_seconds: float) -> tuple[int, int]:
+    removed = 0
+    failures = 0
+    for session_dir in _iter_persistent_codex_session_dirs(root):
+        try:
+            stat = session_dir.stat()
+        except Exception:
+            failures += 1
+            continue
+        if float(stat.st_mtime) >= cutoff_unix_seconds:
+            continue
+        try:
+            shutil.rmtree(session_dir)
+            removed += 1
+        except Exception:
+            failures += 1
+    return removed, failures
+
+
+def run_codex_home_cleanup_if_due(*, now_unix_seconds: float | None = None) -> dict[str, int | bool]:
+    now_ts = float(now_unix_seconds if now_unix_seconds is not None else time.time())
+    root = _resolve_codex_home_root()
+    retention_days = _parse_env_int(
+        "AGENT_CODEX_HOME_RETENTION_DAYS",
+        _DEFAULT_CODEX_HOME_RETENTION_DAYS,
+        minimum=1,
+    )
+    interval_seconds = _parse_env_int(
+        "AGENT_CODEX_HOME_CLEANUP_INTERVAL_SECONDS",
+        _DEFAULT_CODEX_HOME_CLEANUP_INTERVAL_SECONDS,
+        minimum=0,
+    )
+    if retention_days <= 0:
+        return {"ran": False, "removed": 0, "failures": 0}
+    marker_path = root / ".cleanup-marker"
+    if interval_seconds > 0:
+        try:
+            marker_stat = marker_path.stat()
+            if now_ts - float(marker_stat.st_mtime) < float(interval_seconds):
+                return {"ran": False, "removed": 0, "failures": 0}
+        except Exception:
+            pass
+
+    cutoff = now_ts - (retention_days * 86400)
+    try:
+        removed, failures = _cleanup_stale_persistent_codex_homes(
+            root=root,
+            cutoff_unix_seconds=cutoff,
+        )
+    except Exception:
+        return {"ran": False, "removed": 0, "failures": 1}
+    try:
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.touch()
+    except Exception:
+        pass
+    return {"ran": True, "removed": removed, "failures": failures}
+
+
+def _prepare_codex_home(home_path: Path, *, mcp_config_text: str) -> None:
+    codex_dir = home_path / ".codex"
+    codex_dir.mkdir(parents=True, exist_ok=True)
+    config_path = codex_dir / "config.toml"
+    config_path.write_text(str(mcp_config_text or ""), encoding="utf-8")
+
+    target_auth_path = codex_dir / "auth.json"
+    if target_auth_path.exists():
+        return
+    source_auth_path = Path.home() / ".codex" / "auth.json"
+    if source_auth_path.exists() and source_auth_path.is_file():
+        try:
+            shutil.copy2(source_auth_path, target_auth_path)
+        except Exception:
+            # Authentication can still be resolved by other providers/environment in some setups.
+            pass
+
+
+@contextmanager
+def _codex_home_env(
+    *,
+    mcp_config_text: str,
+    workspace_id: str | None = None,
+    chat_session_id: str | None = None,
+):
+    normalized_workspace_id = str(workspace_id or "").strip()
+    normalized_chat_session_id = str(chat_session_id or "").strip()
+    if normalized_workspace_id and normalized_chat_session_id:
+        try:
+            persistent_home = _resolve_persistent_codex_home_path(
+                workspace_id=normalized_workspace_id,
+                chat_session_id=normalized_chat_session_id,
+            )
+            _prepare_codex_home(persistent_home, mcp_config_text=mcp_config_text)
+            env = os.environ.copy()
+            env["HOME"] = str(persistent_home)
+            yield env
+            return
+        except Exception:
+            # Fall back to a temporary home so chat remains available even if persistent storage fails.
+            pass
+
     with tempfile.TemporaryDirectory(prefix="codex-home-") as temp_home:
         temp_home_path = Path(temp_home)
-        codex_dir = temp_home_path / ".codex"
-        codex_dir.mkdir(parents=True, exist_ok=True)
-        config_path = codex_dir / "config.toml"
-        config_path.write_text(str(mcp_config_text or ""), encoding="utf-8")
-
-        source_auth_path = Path.home() / ".codex" / "auth.json"
-        if source_auth_path.exists() and source_auth_path.is_file():
-            try:
-                shutil.copy2(source_auth_path, codex_dir / "auth.json")
-            except Exception:
-                # Authentication can still be resolved by other providers/environment in some setups.
-                pass
-
+        _prepare_codex_home(temp_home_path, mcp_config_text=mcp_config_text)
         env = os.environ.copy()
         env["HOME"] = str(temp_home_path)
         yield env
@@ -433,8 +657,9 @@ def _run_codex_app_server_with_optional_stream(
     stream_events: bool,
     model: str | None = None,
     output_schema: dict | None = None,
+    preferred_thread_id: str | None = None,
     env: dict[str, str] | None = None,
-) -> tuple[str, dict[str, int] | None, str | None]:
+) -> tuple[str, dict[str, int] | None, str | None, bool, bool]:
     cmd = [
         "codex",
         "app-server",
@@ -482,6 +707,9 @@ def _run_codex_app_server_with_optional_stream(
     stream_plain_text = output_schema is None
     lines: list[str] = []
     forced_shutdown = False
+    resume_thread_id = str(preferred_thread_id or "").strip()
+    resume_attempted = bool(resume_thread_id)
+    resume_succeeded = False
 
     def _send_message(payload: dict[str, object]) -> None:
         proc.stdin.write(json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n")
@@ -494,6 +722,23 @@ def _run_codex_app_server_with_optional_stream(
         pending_requests[req_id] = method
         _send_message({"method": method, "id": req_id, "params": params})
         return req_id
+
+    def _thread_request_params() -> dict[str, object]:
+        params: dict[str, object] = {
+            "approvalPolicy": "never",
+            "sandbox": "danger-full-access",
+        }
+        if model:
+            params["model"] = model
+        return params
+
+    def _request_thread_start() -> None:
+        _send_request("thread/start", _thread_request_params())
+
+    def _request_thread_resume(thread_id_value: str) -> None:
+        params = _thread_request_params()
+        params["threadId"] = thread_id_value
+        _send_request("thread/resume", params)
 
     _send_request(
         "initialize",
@@ -522,19 +767,33 @@ def _run_codex_app_server_with_optional_stream(
             req_method = pending_requests.pop(req_id, "")
             if req_method == "initialize":
                 _send_message({"method": "initialized"})
-                thread_params: dict[str, object] = {
-                    "approvalPolicy": "never",
-                    "sandbox": "danger-full-access",
-                }
-                if model:
-                    thread_params["model"] = model
-                _send_request("thread/start", thread_params)
-            elif req_method == "thread/start":
+                if resume_thread_id:
+                    _request_thread_resume(resume_thread_id)
+                else:
+                    _request_thread_start()
+            elif req_method in {"thread/start", "thread/resume"}:
+                error_payload = message.get("error")
+                if isinstance(error_payload, dict):
+                    extracted = _extract_error_message(error_payload)
+                    if extracted:
+                        last_error_message = extracted
+                    if req_method == "thread/resume":
+                        resume_succeeded = False
+                        _request_thread_start()
+                        continue
+                    detail = extracted or "unknown error"
+                    raise RuntimeError(f"codex app-server thread/start failed: {detail[:600]}")
                 result = message.get("result")
                 thread = (result or {}).get("thread") if isinstance(result, dict) else None
                 thread_id = str((thread or {}).get("id") if isinstance(thread, dict) else "").strip()
                 if not thread_id:
+                    if req_method == "thread/resume":
+                        resume_succeeded = False
+                        _request_thread_start()
+                        continue
                     raise RuntimeError("codex app-server did not return thread id")
+                if req_method == "thread/resume":
+                    resume_succeeded = True
                 turn_params: dict[str, object] = {
                     "threadId": thread_id,
                     "input": [{"type": "text", "text": prompt}],
@@ -622,7 +881,7 @@ def _run_codex_app_server_with_optional_stream(
             _emit_stream_event({"type": "assistant_text", "delta": rendered})
     if stream_events and usage is not None:
         _emit_stream_event({"type": "usage", "usage": usage})
-    return final_message, usage, (thread_id or None)
+    return final_message, usage, (thread_id or None), resume_attempted, resume_succeeded
 
 
 def _coerce_structured_reply_payload(value: object) -> dict[str, object] | None:
@@ -771,6 +1030,9 @@ def main() -> int:
         return 0
 
     ctx = json.loads(raw)
+    workspace_id = str(ctx.get("workspace_id") or "").strip() or None
+    chat_session_id = str(ctx.get("chat_session_id") or "").strip() or None
+    preferred_codex_session_id = str(ctx.get("codex_session_id") or "").strip() or None
     mcp_url = AGENT_CODEX_MCP_URL
     selected_mcp_servers = normalize_chat_mcp_servers(
         ctx.get("mcp_servers"),
@@ -795,55 +1057,50 @@ def main() -> int:
         "additionalProperties": False,
     }
     codex_session_id: str | None = None
-    with _isolated_codex_home_env(mcp_config_text=mcp_config_text) as codex_env:
-        if stream_events:
-            final_message, usage, codex_session_id = _run_codex_app_server_with_optional_stream(
-                prompt=prompt,
-                timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
-                stream_events=True,
-                model=AGENT_CODEX_MODEL or None,
-                output_schema=schema if structured_response else None,
-                env=codex_env,
-            )
-            if structured_response:
+    resume_attempted = False
+    resume_succeeded = False
+    run_codex_home_cleanup_if_due()
+    with _chat_session_run_lock(
+        workspace_id=workspace_id,
+        chat_session_id=chat_session_id,
+        timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
+    ):
+        with _codex_home_env(
+            mcp_config_text=mcp_config_text,
+            workspace_id=workspace_id,
+            chat_session_id=chat_session_id,
+        ) as codex_env:
+            if stream_events:
+                final_message, usage, codex_session_id, resume_attempted, resume_succeeded = _run_codex_app_server_with_optional_stream(
+                    prompt=prompt,
+                    timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
+                    stream_events=True,
+                    model=AGENT_CODEX_MODEL or None,
+                    output_schema=schema if structured_response else None,
+                    preferred_thread_id=preferred_codex_session_id,
+                    env=codex_env,
+                )
+                if structured_response:
+                    parsed_payload = _try_parse_structured_reply_text(final_message)
+                    if parsed_payload is None:
+                        raise RuntimeError("codex app-server returned a non-JSON response while JSON schema was required")
+                    out = parsed_payload
+                else:
+                    out = _build_plain_text_result(final_message)
+            else:
+                final_message, usage, codex_session_id, resume_attempted, resume_succeeded = _run_codex_app_server_with_optional_stream(
+                    prompt=prompt,
+                    timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
+                    stream_events=False,
+                    model=AGENT_CODEX_MODEL or None,
+                    output_schema=schema,
+                    preferred_thread_id=preferred_codex_session_id,
+                    env=codex_env,
+                )
                 parsed_payload = _try_parse_structured_reply_text(final_message)
                 if parsed_payload is None:
                     raise RuntimeError("codex app-server returned a non-JSON response while JSON schema was required")
                 out = parsed_payload
-            else:
-                out = _build_plain_text_result(final_message)
-        else:
-            with tempfile.TemporaryDirectory() as td:
-                schema_path = os.path.join(td, "schema.json")
-                output_path = os.path.join(td, "last_message.json")
-                with open(schema_path, "w", encoding="utf-8") as f:
-                    json.dump(schema, f)
-
-                cmd = [
-                    "codex",
-                    "exec",
-                    "--skip-git-repo-check",
-                    "--dangerously-bypass-approvals-and-sandbox",
-                    "--json",
-                    "--output-schema",
-                    schema_path,
-                    "--output-last-message",
-                    output_path,
-                ]
-                if AGENT_CODEX_MODEL:
-                    cmd.extend(["-m", AGENT_CODEX_MODEL])
-                cmd.append(prompt)
-
-                stdout = _run_codex_json_with_optional_stream(
-                    command=cmd,
-                    timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
-                    stream_events=False,
-                    env=codex_env,
-                )
-                usage = _extract_turn_usage(stdout or "")
-
-                with open(output_path, "r", encoding="utf-8") as f:
-                    out = json.loads(f.read().strip() or "{}")
 
     action = str(out.get("action", "")).strip().lower()
     summary = str(out.get("summary", "")).strip()
@@ -864,6 +1121,9 @@ def main() -> int:
                 "comment": comment,
                 "usage": usage,
                 "codex_session_id": codex_session_id,
+                "resume_attempted": resume_attempted,
+                "resume_succeeded": resume_succeeded,
+                "resume_fallback_used": bool(resume_attempted and not resume_succeeded),
             }
         )
     )
