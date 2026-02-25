@@ -93,6 +93,37 @@ def test_license_status_expired_blocks_writes_when_enforced(tmp_path: Path):
     assert license_payload["write_access"] is False
 
 
+def test_license_status_prefers_expired_control_plane_entitlement_over_local_trial_window(tmp_path: Path):
+    client = build_client(tmp_path)
+    from shared.models import LicenseEntitlement, LicenseInstallation, SessionLocal
+
+    with SessionLocal() as db:
+        installation = db.execute(
+            select(LicenseInstallation).where(LicenseInstallation.installation_id == TEST_INSTALLATION_ID)
+        ).scalar_one()
+        installation.status = "expired"
+        installation.plan_code = "trial"
+        installation.trial_ends_at = datetime.now(timezone.utc) + timedelta(days=35)
+        db.add(
+            LicenseEntitlement(
+                installation_id=installation.id,
+                source="control-plane",
+                status="expired",
+                plan_code="trial",
+                valid_from=datetime.now(timezone.utc) - timedelta(minutes=5),
+                valid_until=None,
+                raw_payload_json="{}",
+            )
+        )
+        db.commit()
+
+    res = client.get("/api/license/status")
+    assert res.status_code == 200
+    license_payload = res.json()["license"]
+    assert license_payload["status"] == "expired"
+    assert license_payload["write_access"] is False
+
+
 def test_expired_license_blocks_write_endpoints(tmp_path: Path):
     client = build_client(tmp_path)
     from shared.models import LicenseInstallation, SessionLocal

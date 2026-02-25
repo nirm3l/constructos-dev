@@ -81,12 +81,25 @@ def license_status_read_model(db: Session) -> dict[str, Any]:
 
     ent_status = str(entitlement.status or "").strip().lower() if entitlement else ""
     ent_valid_until = _ensure_aware(entitlement.valid_until) if entitlement else None
-    if entitlement and ent_status in {LICENSE_STATUS_ACTIVE, LICENSE_STATUS_TRIAL} and (
-        ent_valid_until is None or ent_valid_until > now
-    ):
-        status = ent_status
-        if not plan_code:
-            plan_code = str(entitlement.plan_code or "").strip() or None
+    if entitlement:
+        if ent_status in {LICENSE_STATUS_ACTIVE, LICENSE_STATUS_TRIAL} and (ent_valid_until is None or ent_valid_until > now):
+            status = ent_status
+            if not plan_code:
+                plan_code = str(entitlement.plan_code or "").strip() or None
+        elif ent_status == LICENSE_STATUS_GRACE and (ent_valid_until is None or ent_valid_until > now):
+            status = LICENSE_STATUS_GRACE
+            if not plan_code:
+                plan_code = str(entitlement.plan_code or "").strip() or None
+        elif ent_status in {LICENSE_STATUS_EXPIRED, LICENSE_STATUS_UNLICENSED}:
+            # Control-plane explicitly returned non-writable status.
+            status = ent_status
+            if not plan_code:
+                plan_code = str(entitlement.plan_code or "").strip() or None
+        elif ent_valid_until is not None and ent_valid_until <= now:
+            # Stale entitlement with elapsed validity should not fall back to local trial window.
+            status = LICENSE_STATUS_EXPIRED
+        elif status not in {LICENSE_STATUS_ACTIVE, LICENSE_STATUS_TRIAL, LICENSE_STATUS_GRACE, LICENSE_STATUS_EXPIRED}:
+            status = LICENSE_STATUS_UNLICENSED
     elif trial_ends_at:
         if trial_ends_at > now:
             status = LICENSE_STATUS_TRIAL
