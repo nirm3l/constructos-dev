@@ -14,8 +14,8 @@ GHCR_IMAGE_PREFIX="${GHCR_IMAGE_PREFIX:-${GHCR_REPO:-constructos}}"
 IMAGE_TAG="${IMAGE_TAG:-}"
 TASK_APP_IMAGE="${TASK_APP_IMAGE:-}"
 MCP_TOOLS_IMAGE="${MCP_TOOLS_IMAGE:-}"
-CODEX_AUTH_FILE="${CODEX_AUTH_FILE:-/home/m4tr1x/.codex/auth.json}"
-CODEX_CONFIG_FILE="${CODEX_CONFIG_FILE:-/home/m4tr1x/.codex/config.toml}"
+CODEX_AUTH_FILE="${CODEX_AUTH_FILE:-${HOME}/.codex/auth.json}"
+CODEX_CONFIG_FILE="${CODEX_CONFIG_FILE:-${ROOT_DIR}/codex.config.toml}"
 
 resolve_compose_env_value() {
   local var_name="$1"
@@ -126,11 +126,21 @@ if [[ -n "$LICENSE_SERVER_TOKEN_VALUE" ]]; then
   printf 'LICENSE_SERVER_TOKEN=%s\n' "$LICENSE_SERVER_TOKEN_VALUE" >> .deploy.env
 fi
 
-if [[ -f "$CODEX_AUTH_FILE" ]]; then
-  if ! chmod a+r "$CODEX_AUTH_FILE" 2>/dev/null; then
-    echo "Warning: unable to adjust read permissions for $CODEX_AUTH_FILE"
-    echo "Codex chat in task-app may fail if the mounted auth file is not readable by container user."
-  fi
+if [[ "$CODEX_AUTH_FILE" != /* ]]; then
+  CODEX_AUTH_FILE="${ROOT_DIR}/${CODEX_AUTH_FILE#./}"
+fi
+if [[ "$CODEX_CONFIG_FILE" != /* ]]; then
+  CODEX_CONFIG_FILE="${ROOT_DIR}/${CODEX_CONFIG_FILE#./}"
+fi
+
+if [[ ! -f "$CODEX_AUTH_FILE" ]]; then
+  echo "Missing Codex auth file: $CODEX_AUTH_FILE"
+  echo "Run codex login on host or set CODEX_AUTH_FILE before deploy."
+  exit 1
+fi
+if ! chmod a+r "$CODEX_AUTH_FILE" 2>/dev/null; then
+  echo "Warning: unable to adjust read permissions for $CODEX_AUTH_FILE"
+  echo "Codex chat in task-app may fail if the mounted auth file is not readable by container user."
 fi
 
 if [[ ! -f "$CODEX_CONFIG_FILE" ]]; then

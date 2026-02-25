@@ -63,6 +63,8 @@ graph LR
 - `DEPLOY_TARGET=auto|base|ubuntu-gpu|macos-m4` (default: `auto`)
 - `DEPLOY_SOURCE=local|ghcr` (default: `local`)
 - `GHCR_IMAGE_PREFIX` (default: `constructos`)
+- `CODEX_CONFIG_FILE` (default: `./codex.config.toml`)
+- `CODEX_AUTH_FILE` (default: `${HOME}/.codex/auth.json`)
 
 Examples:
 ```bash
