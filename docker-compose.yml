@@ -1,3 +1,5 @@
+name: constructos-app
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -184,6 +186,10 @@ services:
 
 volumes:
   postgres-data:
+    name: task-management_postgres-data
   kurrent-data:
+    name: task-management_kurrent-data
   neo4j-data:
+    name: task-management_neo4j-data
   ollama-data:
+    name: task-management_ollama-data

@@ -92,7 +92,7 @@ export LCP_BACKUP_RETENTION_HOURS='168'
 
 Restore latest backup:
 ```bash
-docker compose -f docker-compose.license-control-plane.yml down
+docker compose -p constructos-cp -f docker-compose.license-control-plane.yml down
 docker run --rm \
   -v task-management_license-control-plane-backups:/backups \
   -v task-management_license-control-plane-data:/data \
@@ -170,7 +170,7 @@ cp .env.jira-mcp.example .env.jira-mcp
 `JIRA_API_TOKEN` is added in this file.
 3. Start Jira MCP:
 ```bash
-docker compose -f docker-compose.jira-mcp.yml up -d
+docker compose -p constructos-jira-mcp -f docker-compose.jira-mcp.yml up -d
 ```
 4. Register server in Codex:
 ```bash
@@ -187,7 +187,7 @@ codex mcp list
 ./scripts/recreate_from_zero.sh
 
 # Backend tests
-docker compose run --rm --build task-app pytest
+docker compose -p constructos-app -f docker-compose.yml run --rm --build task-app pytest
 ```
 
 ## COS Wrapper CLI

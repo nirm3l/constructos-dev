@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 DEPLOY_TARGET="${DEPLOY_TARGET:-auto}"
+APP_COMPOSE_PROJECT_NAME="${APP_COMPOSE_PROJECT_NAME:-constructos-app}"
 
 resolve_deploy_target() {
   if [[ "$DEPLOY_TARGET" != "auto" ]]; then
@@ -49,8 +50,10 @@ case "$TARGET_RESOLVED" in
     ;;
 esac
 
+echo "Using compose project: ${APP_COMPOSE_PROJECT_NAME}"
+
 echo "[1/5] Stopping app stack and removing app volumes..."
-docker compose "${COMPOSE_ARGS[@]}" down -v || true
+docker compose -p "${APP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" down -v || true
 
 echo "[2/5] Cleaning local projection DB and uploaded files..."
 rm -f data/*.db
@@ -71,7 +74,7 @@ for i in {1..60}; do
 done
 
 echo "[5/5] Current stack status:"
-docker compose "${COMPOSE_ARGS[@]}" ps
+docker compose -p "${APP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" ps
 echo "---"
 echo "Health:"
 curl -sS "http://localhost:8080/api/health"

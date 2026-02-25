@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+CP_COMPOSE_PROJECT_NAME="${CP_COMPOSE_PROJECT_NAME:-constructos-cp}"
 COMPOSE_ARGS=(-f docker-compose.license-control-plane.yml)
 SERVICES=(
   license-control-plane
@@ -11,22 +12,24 @@ SERVICES=(
 )
 ACTION="${1:-up}"
 
+echo "Using compose project: ${CP_COMPOSE_PROJECT_NAME}"
+
 case "$ACTION" in
   up)
-    docker compose "${COMPOSE_ARGS[@]}" up -d --build "${SERVICES[@]}"
+    docker compose -p "${CP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" up -d --build "${SERVICES[@]}"
     ;;
   down)
     # Intentionally no `-v` so control-plane data is preserved.
-    docker compose "${COMPOSE_ARGS[@]}" down
+    docker compose -p "${CP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" down
     ;;
   restart)
-    docker compose "${COMPOSE_ARGS[@]}" up -d --build "${SERVICES[@]}"
+    docker compose -p "${CP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" up -d --build "${SERVICES[@]}"
     ;;
   status)
-    docker compose "${COMPOSE_ARGS[@]}" ps
+    docker compose -p "${CP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" ps
     ;;
   logs)
-    docker compose "${COMPOSE_ARGS[@]}" logs -f "${SERVICES[@]}"
+    docker compose -p "${CP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" logs -f "${SERVICES[@]}"
     ;;
   *)
     echo "Usage: ./scripts/deploy-control-plane.sh [up|down|restart|status|logs]"

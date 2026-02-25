@@ -1,3 +1,5 @@
+name: constructos-cp
+
 services:
   license-control-plane:
     build: ./license_control_plane
@@ -54,4 +56,6 @@ services:
 
 volumes:
   license-control-plane-data:
+    name: task-management_license-control-plane-data
   license-control-plane-backups:
+    name: task-management_license-control-plane-backups

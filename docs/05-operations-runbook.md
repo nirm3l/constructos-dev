@@ -21,6 +21,7 @@ Effects:
 - generates `.deploy.env` (`APP_VERSION`, `APP_BUILD`, `APP_DEPLOYED_AT_UTC`),
 - resolves `DEPLOY_TARGET` (`auto|base|ubuntu-gpu|macos-m4`),
 - resolves `DEPLOY_SOURCE` (`local|ghcr`),
+- uses fixed app compose project name `constructos-app` (override: `APP_COMPOSE_PROJECT_NAME`),
 - runs `docker compose ... up -d --build` with target-specific override files.
 
 ### 2.2 Deploy Targets
@@ -78,6 +79,7 @@ Deploy separately from app stack:
 This starts:
 - `license-control-plane`
 - `license-control-plane-backup` (hourly SQLite snapshots)
+- fixed control-plane compose project name `constructos-cp` (override: `CP_COMPOSE_PROJECT_NAME`)
 
 Stop without deleting control-plane data:
 ```bash
@@ -86,8 +88,8 @@ Stop without deleting control-plane data:
 Compose file:
 - `docker-compose.license-control-plane.yml`
 Persisted volumes:
-- `license-control-plane-data`
-- `license-control-plane-backups`
+- `task-management_license-control-plane-data`
+- `task-management_license-control-plane-backups`
 
 Default local URL used by app services in this mode:
 - `http://license-control-plane:8092`
@@ -113,7 +115,7 @@ Backup scheduler defaults:
 
 Restore latest backup:
 ```bash
-docker compose -f docker-compose.license-control-plane.yml down
+docker compose -p constructos-cp -f docker-compose.license-control-plane.yml down
 docker run --rm \
   -v task-management_license-control-plane-backups:/backups \
   -v task-management_license-control-plane-data:/data \
@@ -234,7 +236,7 @@ Current test coverage (unit + API integration):
 
 Run tests:
 ```bash
-docker compose run --rm --build task-app pytest
+docker compose -p constructos-app -f docker-compose.yml run --rm --build task-app pytest
 ```
 
 ## 7. Troubleshooting
