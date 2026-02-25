@@ -11,24 +11,36 @@ Modernize the notification system to be:
 Primary driver: remove low-value notifications such as:
 - `Daily digest for YYYY-MM-DD: 0 due today, 0 overdue, 0 high priority.`
 
-## 2. Current Problems
+## 2. Current State Snapshot (2026-02-25)
 
-### 2.1 Product / UX
-- Daily digest is emitted even when all counters are zero.
-- Notification content is mostly plain text and not strongly typed.
-- UI still has fallback parsing from message text for task linking.
+### 2.1 Delivered Since Plan Draft
+- P0 is completed:
+  - empty daily digest is suppressed,
+  - digest is actionable with top tasks,
+  - preference gating is enforced for system and mention paths,
+  - mention notifications are emitted via event path,
+  - notification query index exists (`user_id + created_at`).
+- P1 is completed:
+  - `/api/bootstrap`, `/api/notifications`, and notification stream init are read-only,
+  - mark-read and mark-all-read emit realtime refresh signals across tabs,
+  - SSE resume supports `Last-Event-ID` and tail default behavior,
+  - API and runbook docs were aligned to current SSE event contract.
 
-### 2.2 Behavior Consistency
-- `notifications_enabled` is honored by the worker, but not consistently in all request paths that can emit system notifications.
-- Query endpoints (`GET`) can trigger notification writes, which blurs read/write boundaries.
+### 2.2 Remaining Gaps
+- Notification schema is still message-first and not typed.
+- Dedupe is still message-based for system notifications.
+- UI still contains legacy task-id parsing fallback from message text.
+- New high-value notifications are not implemented yet.
 
-### 2.3 Reliability / Realtime
-- Read-state updates do not broadcast dedicated realtime refresh for all clients/tabs.
-- SSE reconnection currently lacks robust cursor resume semantics.
-
-### 2.4 Data / Scale
-- Notification query pattern (`user_id + time order`) is not fully index-optimized.
-- Replay/idempotency risk exists for projection-time direct inserts (mention notifications).
+### 2.3 Changes That Affect the Remaining Plan
+- Shared operation gateway rollout is now active for overlapping UI/MCP mutations.
+  - New notification triggers should be event-driven (projection-time reaction to domain events), not adapter-specific.
+- SSE contract is now stable and must remain backward-compatible:
+  - `notification`, `task_event`, `license_event`, `ping`,
+  - tail-by-default stream behavior,
+  - resume by explicit cursor or `Last-Event-ID`.
+- Licensing model now includes stable `status`, `grace_ends_at`, and validation timestamps.
+  - License-related notifications should use these read-model fields and threshold dedupe.
 
 ## 3. Scope
 
@@ -36,7 +48,8 @@ Primary driver: remove low-value notifications such as:
 - System notifications (due soon, overdue, daily digest).
 - Mention notifications from task comments.
 - Notification read-state propagation and SSE behavior.
-- Data model and API-compatible evolution.
+- Typed notification evolution with backward-compatible API payloads.
+- New high-value notifications derived from existing task/project/licensing events.
 
 ### Out of Scope
 - Push/email/mobile channel delivery in this phase.
@@ -44,7 +57,7 @@ Primary driver: remove low-value notifications such as:
 
 ## 4. Phase Plan
 
-## Phase P0: Immediate Quality Fixes (Highest Priority)
+## Phase P0: Immediate Quality Fixes (Completed)
 
 ### P0.1 Suppress Empty Daily Digest
 - Do not create daily digest when:
@@ -76,7 +89,7 @@ Primary driver: remove low-value notifications such as:
 - Mention notifications are idempotent under replay.
 - Notification list query remains fast under larger history.
 
-## Phase P1: Architectural Consistency and Realtime Hardening
+## Phase P1: Architectural Consistency and Realtime Hardening (Completed)
 
 ### P1.1 Remove Write Side Effects from GET
 - Stop emitting system notifications from:
@@ -101,64 +114,101 @@ Primary driver: remove low-value notifications such as:
 - Mark-as-read is visible on concurrent clients without manual refresh.
 - Reconnect resumes correctly without full-history replay.
 
-## Phase P2: Typed Notification Domain + New High-Value Notifications
+## Phase P2: Typed Notification Domain + New High-Value Notifications (Open)
 
-### P2.1 Introduce Typed Notification Schema
-- Add structured fields:
-  - `type` (enum/string)
-  - `severity`
-  - `dedupe_key`
-  - `payload_json`
-  - `source_event`
-- Keep backward-compatible `message` for existing clients.
+### P2.1 Typed Notification Schema (Additive)
+- Add nullable notification columns:
+  - `notification_type` (string),
+  - `severity` (string),
+  - `dedupe_key` (string),
+  - `payload_json` (JSON string),
+  - `source_event` (string).
+- Add supporting index for dedupe lookup:
+  - `(user_id, dedupe_key, created_at DESC)`.
+- Keep `message` as required for backward compatibility.
+- Extend serialization and DTOs to return typed fields while preserving old fields.
+- Add event upcaster behavior for legacy `NotificationCreated` events:
+  - default `notification_type="Legacy"`,
+  - default `severity="info"`,
+  - default empty payload/dedupe metadata.
 
-### P2.2 Add New Notification Types (Existing Features)
-Recommended additions:
+### P2.2 New Notification Types and Trigger Contracts
+- Implement typed notification emission for existing domain events:
 1. `TaskAssignedToMe`
 2. `WatchedTaskStatusChanged`
 3. `TaskAutomationFailed`
 4. `TaskScheduleFailed`
 5. `ProjectMembershipChanged`
-6. `LicenseGraceEndingSoon` (threshold-based, non-spammy)
+6. `LicenseGraceEndingSoon`
+
+Type trigger matrix:
+
+| Notification type | Trigger source | Target users | Payload minimum |
+| --- | --- | --- | --- |
+| `TaskAssignedToMe` | `TaskCreated`/`TaskUpdated` where assignee changes | new assignee (excluding actor self-assignment) | `task_id`, `project_id`, `assignee_id`, `title`, `status` |
+| `WatchedTaskStatusChanged` | `TaskUpdated` where `status` changed | task watchers (excluding actor) | `task_id`, `project_id`, `from_status`, `to_status`, `title` |
+| `TaskAutomationFailed` | `TaskAutomationFailed` | assignee + watchers (deduped) | `task_id`, `project_id`, `error`, `summary`, `failed_at` |
+| `TaskScheduleFailed` | `TaskScheduleFailed` | assignee + watchers (deduped) | `task_id`, `project_id`, `error`, `failed_at`, `scheduled_at_utc` |
+| `ProjectMembershipChanged` | `ProjectMemberUpserted` / `ProjectMemberRemoved` | affected user | `project_id`, `workspace_id`, `action`, `role`, `actor_id` |
+| `LicenseGraceEndingSoon` | license status polling (`grace_ends_at`) | workspace owners/admins | `installation_id`, `grace_ends_at`, `hours_remaining`, `status` |
 
 ### P2.3 Add Dedupe Rules per Type
-- Define dedupe windows/keys per notification type instead of raw message matching.
+- Replace raw message dedupe with typed dedupe keys.
+- Baseline dedupe keys:
+  - `TaskAssignedToMe`: `task-assigned:{task_id}:{assignee_id}:{event_version}`
+  - `WatchedTaskStatusChanged`: `watch-status:{task_id}:{watcher_id}:{to_status}:{event_version}`
+  - `TaskAutomationFailed`: `automation-failed:{task_id}:{error_hash}:{hour_bucket}`
+  - `TaskScheduleFailed`: `schedule-failed:{task_id}:{error_hash}:{hour_bucket}`
+  - `ProjectMembershipChanged`: `project-member:{project_id}:{user_id}:{action}:{role}:{event_version}`
+  - `LicenseGraceEndingSoon`: `license-grace:{installation_id}:{threshold_hours}`
+- Thresholds for license grace notices:
+  - 72h, 24h, and 6h before `grace_ends_at`.
+
+### P2.4 Frontend and API Consumption
+- Extend frontend `Notification` type to include typed fields and payload.
+- Keep existing rendering path (`message`) as fallback.
+- Replace message parsing fallback (`parseLegacyTaskId`) with typed references where available.
+- Keep all current action buttons functional for legacy rows.
 
 ### P2 Acceptance Criteria
 - New notifications are typed, linked, and actionable.
-- Dedupe behavior is deterministic and test-covered per type.
+- Dedupe behavior is deterministic and test-covered per type and threshold.
+- Legacy notifications remain readable and actionable after rollout.
 
 ## 5. Data Model and Compatibility Strategy
 
 ### Migration Approach
-- Add new nullable columns first (non-breaking).
-- Backfill minimal defaults where required.
+- Add new nullable columns first.
+- Backfill minimal defaults for old rows in a background-safe way.
 - Keep existing API fields stable until frontend migration is complete.
 
 ### Backward Compatibility
-- Existing clients continue to read `message`, `is_read`, references.
-- New clients can consume structured type/payload fields.
+- Existing clients continue using `message`, `is_read`, and references.
+- New clients can consume structured type/payload fields immediately after additive release.
 
 ## 6. Testing Plan
 
 ### Unit / Integration
-- Digest suppression tests for zero counters.
-- Preference gating tests (`notifications_enabled=false`) across all emission paths.
-- Replay/idempotency tests for mention notifications.
-- SSE tests for read-state refresh and cursor resume.
-- Query performance smoke checks with larger seeded notification volumes.
+- Existing P0/P1 coverage stays as regression suite.
+- Add migration tests for new notification columns and defaulting.
+- Add upcaster tests for legacy notification events.
+- Add per-type trigger tests for all P2 notification types.
+- Add dedupe tests per type (including license thresholds and replay/catch-up scenarios).
+- Add frontend tests for typed notification rendering and legacy fallback.
 
 ### Regression Guardrails
 - Add tests proving GET endpoints do not append new events.
-- Validate dedupe behavior under retries and event replay.
+- Validate dedupe under retries, replay, and projection catch-up.
+- Validate SSE contract remains unchanged (`notification`, `task_event`, `license_event`, `ping`).
 
 ## 7. Rollout Plan
 
-1. Release P0 behind safe defaults (no feature flag needed).
-2. Ship P1 with docs update and SSE compatibility fallback.
+1. P0 delivered.
+2. P1 delivered.
 3. Ship P2 in additive mode:
-   - old fields preserved,
-   - new typed payload consumed progressively by frontend.
+   - Release 1: schema + API additive fields + no UI dependency.
+   - Release 2: typed emissions for new notification types.
+   - Release 3: frontend typed rendering, then optional legacy parser removal.
 
 ## 8. Success Metrics
 - Reduced notification noise:
@@ -169,8 +219,9 @@ Recommended additions:
   - reduced stale-read-state incidents across tabs.
 - Improved reliability:
   - no duplicate mention notifications under replay tests.
+  - no duplicate typed notifications under replay/catch-up tests.
 
 ## 9. Open Decisions
-- Preferred digest schedule time (local 08:00 vs configurable per user/workspace).
-- Whether to keep one combined digest or split by workspace/project.
-- Priority and thresholds for license-related alerts.
+- Final severity taxonomy (`info`/`warning`/`critical`) and color mapping.
+- Scope for `LicenseGraceEndingSoon` recipients (owners/admins only vs all active members).
+- Whether to keep one combined digest or split by workspace/project in a later phase.
