@@ -723,6 +723,7 @@ def apply_chat_session_event(state: dict[str, Any], event: EventEnvelope) -> dic
             "is_archived": bool(p.get("is_archived", False)),
             "codex_session_id": p.get("codex_session_id"),
             "mcp_servers": _normalize_json_list(p.get("mcp_servers")),
+            "session_attachment_refs": _normalize_json_list(p.get("session_attachment_refs")),
             "usage": _normalize_json_dict(p.get("usage")),
             "last_message_at": p.get("last_message_at"),
             "last_message_preview": p.get("last_message_preview", ""),
@@ -742,8 +743,10 @@ def apply_chat_session_event(state: dict[str, Any], event: EventEnvelope) -> dic
     if event.event_type == CHAT_SESSION_EVENT_CONTEXT_UPDATED:
         if "project_id" in p:
             s["project_id"] = p.get("project_id")
-        if "mcp_servers" in p:
+        if "mcp_servers" in p and p.get("mcp_servers") is not None:
             s["mcp_servers"] = _normalize_json_list(p.get("mcp_servers"))
+        if "session_attachment_refs" in p and p.get("session_attachment_refs") is not None:
+            s["session_attachment_refs"] = _normalize_json_list(p.get("session_attachment_refs"))
         if "codex_session_id" in p:
             s["codex_session_id"] = p.get("codex_session_id")
         if "usage" in p:
@@ -1085,9 +1088,9 @@ def project_event(db: Session, ev: EventEnvelope):
         if session:
             if "project_id" in p:
                 session.project_id = p.get("project_id")
-            if "mcp_servers" in p:
+            if "mcp_servers" in p and p.get("mcp_servers") is not None:
                 session.mcp_servers = json.dumps(_normalize_json_list(p.get("mcp_servers")), ensure_ascii=True)
-            if "session_attachment_refs" in p:
+            if "session_attachment_refs" in p and p.get("session_attachment_refs") is not None:
                 session.session_attachment_refs = json.dumps(
                     _normalize_json_list(p.get("session_attachment_refs")),
                     ensure_ascii=True,

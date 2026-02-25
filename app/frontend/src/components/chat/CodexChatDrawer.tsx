@@ -89,6 +89,17 @@ function formatSessionTimestamp(value: number): string {
   })
 }
 
+function formatTaskEventTimestamp(value: number | string | null | undefined): string {
+  const ms = Number(value)
+  if (!Number.isFinite(ms) || ms <= 0) return '—'
+  return new Date(ms).toLocaleTimeString(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  })
+}
+
 function ChatTooltip({
   content,
   children,
@@ -185,6 +196,8 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const activeSession = sessions.find((session: any) => session.id === state.codexChatActiveSessionId) ?? null
   const activeSessionUpdatedAtRaw = activeSession ? resolveSessionLastMessageAtMs(activeSession) : 0
   const activeSessionUpdatedAt = activeSessionUpdatedAtRaw > 0 ? formatSessionTimestamp(activeSessionUpdatedAtRaw) : null
+  const lastTaskEventTimeLabel = formatTaskEventTimestamp(state.codexChatLastTaskEventAt)
+  const hasLastTaskEvent = lastTaskEventTimeLabel !== '—'
   const sessionOptions = sessions.map((session: any) => {
     const lastMessageAtMs = resolveSessionLastMessageAtMs(session)
     const lastMessageLabel = formatSessionTimestamp(lastMessageAtMs)
@@ -212,13 +225,12 @@ export function CodexChatDrawer({ state }: { state: any }) {
     const out: Array<{
       name: string
       display_name: string
-      enabled: boolean
-      disabled_reason: string | null
       auth_status: string | null
     }> = []
     for (const item of state.bootstrap.data.agent_chat_available_mcp_servers) {
       const name = String(item?.name || '').trim()
       if (!name) continue
+      if (!Boolean(item?.enabled)) continue
       const key = normalizeMcpLookupKey(name)
       if (seen.has(key)) continue
       seen.add(key)
@@ -226,8 +238,6 @@ export function CodexChatDrawer({ state }: { state: any }) {
       out.push({
         name,
         display_name: displayName,
-        enabled: Boolean(item?.enabled),
-        disabled_reason: String(item?.disabled_reason || '').trim() || null,
         auth_status: String(item?.auth_status || '').trim() || null,
       })
     }
@@ -262,18 +272,11 @@ export function CodexChatDrawer({ state }: { state: any }) {
     }
     if (withCore.length > 0) return withCore
     if (!hasDiscoveredServers) return coreMcpServerName ? [coreMcpServerName] : []
-    const defaultEnabled = availableMcpServers.filter((server) => server.enabled).map((server) => server.name)
-    if (defaultEnabled.length > 0) {
-      if (coreMcpServerName && !defaultEnabled.some((name) => normalizeMcpLookupKey(name) === normalizeMcpLookupKey(coreMcpServerName))) {
-        defaultEnabled.unshift(coreMcpServerName)
-      }
-      return defaultEnabled
+    const defaultSelected = availableMcpServers.map((server) => server.name)
+    if (coreMcpServerName && !defaultSelected.some((name) => normalizeMcpLookupKey(name) === normalizeMcpLookupKey(coreMcpServerName))) {
+      defaultSelected.unshift(coreMcpServerName)
     }
-    const allServers = availableMcpServers.map((server) => server.name)
-    if (coreMcpServerName && !allServers.some((name) => normalizeMcpLookupKey(name) === normalizeMcpLookupKey(coreMcpServerName))) {
-      allServers.unshift(coreMcpServerName)
-    }
-    return allServers
+    return defaultSelected
   })()
   const optionalMcpServers = availableMcpServers.filter(
     (server) => !CORE_MCP_LOOKUP_KEYS.has(normalizeMcpLookupKey(server.name))
@@ -426,6 +429,26 @@ export function CodexChatDrawer({ state }: { state: any }) {
       deduped.push(canonical)
     }
     state.setCodexChatMcpServers(deduped)
+    if (!state.workspaceId || !state.codexChatSessionId || !state.userId) return
+    const nextSelected = [...deduped]
+    if (coreMcpServerName) {
+      const coreLookup = normalizeMcpLookupKey(coreMcpServerName)
+      if (!nextSelected.some((name) => normalizeMcpLookupKey(name) === coreLookup)) {
+        nextSelected.unshift(coreMcpServerName)
+      }
+    }
+    void updateChatSessionContext(state.userId, state.codexChatSessionId, {
+      workspace_id: state.workspaceId,
+      mcp_servers: nextSelected,
+    })
+      .then(() => {
+        state.setUiError(null)
+      })
+      .catch((err: any) => {
+        const message = String(err?.message || '').trim()
+        if (message.toLowerCase().includes('chat session not found')) return
+        state.setUiError(message || 'Failed to update MCP tool selection')
+      })
   }
 
   const confirmDeleteSession = () => {
@@ -611,14 +634,9 @@ export function CodexChatDrawer({ state }: { state: any }) {
                     const selected = selectedOptionalMcpServers.some(
                       (name) => normalizeMcpLookupKey(name) === normalizeMcpLookupKey(server.name)
                     )
-                    const chipDisabled = mcpControlsDisabled || !server.enabled
-                    const tooltipParts: string[] = [
-                      server.enabled
-                        ? `Use ${server.display_name} in this chat session`
-                        : `${server.display_name} is disabled`,
-                    ]
+                    const chipDisabled = mcpControlsDisabled
+                    const tooltipParts: string[] = [`Use ${server.display_name} in this chat session`]
                     if (server.auth_status) tooltipParts.push(`Auth: ${server.auth_status}`)
-                    if (server.disabled_reason) tooltipParts.push(server.disabled_reason)
                     return (
                       <ChatTooltip key={server.name} content={tooltipParts.join(' · ')}>
                         <span className="codex-chat-mcp-tooltip-trigger">
@@ -1010,11 +1028,11 @@ export function CodexChatDrawer({ state }: { state: any }) {
               </span>
             </ChatTooltip>
           </div>
-          {state.codexChatLastTaskEventAt && (
-            <div className="row wrap" style={{ marginTop: 8 }}>
-              <span className="meta">Last task event: {new Date(state.codexChatLastTaskEventAt).toLocaleTimeString()}</span>
-            </div>
-          )}
+          <div className="codex-chat-task-event-row" aria-live="polite" aria-atomic="true">
+            <span className={`meta codex-chat-task-event ${hasLastTaskEvent ? '' : 'is-empty'}`.trim()}>
+              Last task event: <span className="codex-chat-task-event-time">{lastTaskEventTimeLabel}</span>
+            </span>
+          </div>
           <AlertDialog.Root
             open={deleteSessionDialogOpen}
             onOpenChange={(open) => {

@@ -44,6 +44,11 @@ export type InstallationResponse = {
   entitlement: EntitlementRecord
 }
 
+export type DeleteInstallationResponse = {
+  ok: boolean
+  installation_id: string
+}
+
 export type UpdateSubscriptionRequest = {
   subscription_status: string
   plan_code: string | null

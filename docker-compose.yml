@@ -108,8 +108,8 @@ services:
       OLLAMA_EMBED_GPU_ENABLED: "${OLLAMA_EMBED_GPU_ENABLED:-true}"
       LICENSE_SERVER_TOKEN: "${LICENSE_SERVER_TOKEN:-dev-license-token}"
     volumes:
-      - ./codex.task-app.toml:/home/app/.codex/config.toml:ro
-      - /home/m4tr1x/.codex/auth.json:/home/app/.codex/auth.json:ro
+      - ${CODEX_CONFIG_FILE:-/home/m4tr1x/.codex/config.toml}:/home/app/.codex/config.toml:ro
+      - ${CODEX_AUTH_FILE:-/home/m4tr1x/.codex/auth.json}:/home/app/.codex/auth.json:ro
     ports:
       - "8080:8000"
     security_opt:

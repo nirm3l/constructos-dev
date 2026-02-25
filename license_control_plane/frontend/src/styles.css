@@ -127,8 +127,9 @@ h2 {
 .layout {
   margin-top: 0.65rem;
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-columns: minmax(380px, 460px) minmax(0, 1fr);
   gap: 0.65rem;
+  align-items: start;
 }
 
 .row {
@@ -200,6 +201,17 @@ button:disabled {
   background: #121212;
   color: var(--muted);
   border-color: var(--border);
+}
+
+.button-danger {
+  background: #1a1111;
+  color: var(--danger);
+  border-color: #5f2f2f;
+}
+
+.button-danger:hover {
+  border-color: #b64a4a;
+  color: #ffb9b9;
 }
 
 .button-icon {
@@ -325,7 +337,10 @@ code {
   margin: 0;
   padding: 0;
   max-height: 48vh;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  padding-right: 0.12rem;
 }
 
 .customer-list {

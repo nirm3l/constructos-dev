@@ -145,18 +145,42 @@ export function AppHeader({
                     ) : (
                       notifications.map((n) => {
                         const taskId = n.task_id || parseLegacyTaskId(n.message)
+                        const markNotificationRead = () => {
+                          if (!n.is_read) onMarkRead(n.id)
+                        }
                         return (
-                          <div key={n.id} className={`notif ${n.is_read ? 'read' : 'unread'}`}>
+                          <div
+                            key={n.id}
+                            className={`notif ${n.is_read ? 'read' : 'unread'}`}
+                            onClick={!n.is_read ? markNotificationRead : undefined}
+                            onKeyDown={
+                              !n.is_read
+                                ? (event) => {
+                                    if (event.key !== 'Enter' && event.key !== ' ') return
+                                    event.preventDefault()
+                                    markNotificationRead()
+                                  }
+                                : undefined
+                            }
+                            role={!n.is_read ? 'button' : undefined}
+                            tabIndex={!n.is_read ? 0 : undefined}
+                            aria-label={!n.is_read ? 'Mark notification as read' : undefined}
+                            title={!n.is_read ? 'Click to mark as read' : undefined}
+                          >
                             <div className="notif-dotline" aria-hidden="true" />
                             <div className="notif-main">
-                              <div className="notif-message">{n.message}</div>
+                              <div className="notif-copy">
+                                <div className="notif-message">{n.message}</div>
+                                {!n.is_read && <div className="notif-hint">Click to mark as read</div>}
+                              </div>
                               <div className="notif-actions">
                                 {taskId && (
                                   <button
                                     className="status-chip"
-                                    onClick={() => {
+                                    onClick={(event) => {
+                                      event.stopPropagation()
                                       onOpenTask(taskId, n.project_id)
-                                      if (!n.is_read) onMarkRead(n.id)
+                                      markNotificationRead()
                                       setShowNotificationsPanel(false)
                                     }}
                                   >
@@ -166,9 +190,10 @@ export function AppHeader({
                                 {n.note_id && (
                                   <button
                                     className="status-chip"
-                                    onClick={() => {
+                                    onClick={(event) => {
+                                      event.stopPropagation()
                                       onOpenNote(n.note_id as string, n.project_id)
-                                      if (!n.is_read) onMarkRead(n.id)
+                                      markNotificationRead()
                                       setShowNotificationsPanel(false)
                                     }}
                                   >
@@ -178,9 +203,10 @@ export function AppHeader({
                                 {n.specification_id && (
                                   <button
                                     className="status-chip"
-                                    onClick={() => {
+                                    onClick={(event) => {
+                                      event.stopPropagation()
                                       onOpenSpecification(n.specification_id as string, n.project_id)
-                                      if (!n.is_read) onMarkRead(n.id)
+                                      markNotificationRead()
                                       setShowNotificationsPanel(false)
                                     }}
                                   >
@@ -190,18 +216,14 @@ export function AppHeader({
                                 {!taskId && !n.note_id && !n.specification_id && n.project_id && (
                                   <button
                                     className="status-chip"
-                                    onClick={() => {
+                                    onClick={(event) => {
+                                      event.stopPropagation()
                                       onOpenProject(n.project_id as string)
-                                      if (!n.is_read) onMarkRead(n.id)
+                                      markNotificationRead()
                                       setShowNotificationsPanel(false)
                                     }}
                                   >
                                     Open project
-                                  </button>
-                                )}
-                                {!n.is_read && (
-                                  <button className="status-chip" onClick={() => onMarkRead(n.id)}>
-                                    Mark read
                                   </button>
                                 )}
                               </div>

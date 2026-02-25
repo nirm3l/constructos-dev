@@ -2990,6 +2990,88 @@ def test_agents_chat_endpoint_normalizes_selected_mcp_servers(tmp_path, monkeypa
     assert captured['mcp_servers'] == ['task-management-tools', 'jira', 'github']
 
 
+def test_agents_chat_endpoint_skips_disabled_mcp_servers_from_defaults(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents import mcp_registry
+    from features.agents.executor import AutomationOutcome
+
+    captured: dict[str, object] = {}
+
+    def _fake_execute_task_automation(**kwargs):
+        captured.update(kwargs)
+        return AutomationOutcome(action='comment', summary='ok', comment=None, usage=None)
+
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+    monkeypatch.setattr(
+        mcp_registry,
+        '_get_rows',
+        lambda force_refresh=False: [
+            {
+                'name': 'task-management-tools',
+                'display_name': 'Task Management Tools',
+                'enabled': True,
+                'disabled_reason': None,
+                'auth_status': None,
+                'config': {'url': 'http://mcp-tools:8090/mcp'},
+            },
+            {
+                'name': 'jira',
+                'display_name': 'Jira',
+                'enabled': False,
+                'disabled_reason': 'disabled in codex config',
+                'auth_status': None,
+                'config': {'url': 'http://jira-mcp:9000/mcp'},
+            },
+            {
+                'name': 'github',
+                'display_name': 'GitHub',
+                'enabled': True,
+                'disabled_reason': None,
+                'auth_status': None,
+                'config': {'url': 'https://api.githubcopilot.com/mcp/'},
+            },
+        ],
+    )
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Use default MCP servers',
+        },
+    )
+    assert res.status_code == 200
+    assert captured['mcp_servers'] == ['task-management-tools', 'github']
+
+
+def test_mcp_registry_honors_disabled_flag_from_config_when_runtime_list_unavailable(monkeypatch):
+    from features.agents import mcp_registry
+
+    monkeypatch.setattr(
+        mcp_registry,
+        "_load_mcp_servers_from_config",
+        lambda: {
+            "task-management-tools": {"url": "http://localhost:8091/mcp"},
+            "github": {"url": "https://api.githubcopilot.com/mcp/", "enabled": False},
+            "jira": {"url": "http://localhost:9010/mcp", "enabled": False},
+        },
+    )
+    monkeypatch.setattr(mcp_registry, "_run_codex_mcp_list_json", lambda: [])
+
+    rows = mcp_registry._discover_rows_uncached()
+    by_name = {str(row.get("name") or ""): row for row in rows}
+
+    assert by_name["task-management-tools"]["enabled"] is True
+    assert by_name["github"]["enabled"] is False
+    assert by_name["jira"]["enabled"] is False
+
+
 def test_agents_chat_endpoint_rejects_invalid_mcp_server(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -3146,6 +3228,155 @@ def test_chat_session_context_patch_persists_session_attachments(tmp_path, monke
     target = next((item for item in sessions if item.get('id') == session_id), None)
     assert target is not None
     assert target['session_attachment_refs'][0]['path'] == attachment_ref['path']
+
+
+def test_chat_session_context_patch_updates_mcp_servers_without_clearing_attachments(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    session_id = 'chat-session-context-mcp-patch-test'
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    monkeypatch.setattr(
+        agents_api,
+        'execute_task_automation',
+        lambda **_: AutomationOutcome(action='comment', summary='ok', comment=None, usage=None),
+    )
+
+    created = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Create session for MCP context patch',
+            'session_id': session_id,
+            'history': [],
+        },
+    )
+    assert created.status_code == 200
+
+    uploaded = client.post(
+        '/api/attachments/upload',
+        data={'workspace_id': ws_id, 'project_id': project_id},
+        files={'file': ('session-mcp-pin.txt', BytesIO(b'session pinned mcp file body'), 'text/plain')},
+    )
+    assert uploaded.status_code == 200
+    attachment_ref = uploaded.json()
+
+    patched_attachments = client.patch(
+        f'/api/chat/sessions/{session_id}',
+        json={
+            'workspace_id': ws_id,
+            'session_attachment_refs': [attachment_ref],
+        },
+    )
+    assert patched_attachments.status_code == 200
+    assert patched_attachments.json()['session_attachment_refs'][0]['path'] == attachment_ref['path']
+
+    patched_mcp = client.patch(
+        f'/api/chat/sessions/{session_id}',
+        json={
+            'workspace_id': ws_id,
+            'mcp_servers': ['task-management-tools'],
+        },
+    )
+    assert patched_mcp.status_code == 200
+    patched_payload = patched_mcp.json()
+    assert patched_payload['mcp_servers'] == ['task-management-tools']
+    assert patched_payload['session_attachment_refs'][0]['path'] == attachment_ref['path']
+
+    listed = client.get(
+        '/api/chat/sessions',
+        params={'workspace_id': ws_id},
+    )
+    assert listed.status_code == 200
+    sessions = listed.json()
+    target = next((item for item in sessions if item.get('id') == session_id), None)
+    assert target is not None
+    assert target['mcp_servers'] == ['task-management-tools']
+    assert target['session_attachment_refs'][0]['path'] == attachment_ref['path']
+
+
+def test_chat_sessions_and_state_are_user_scoped(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    session_id = 'chat-user-scope-session'
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    monkeypatch.setattr(
+        agents_api,
+        'execute_task_automation',
+        lambda **_: AutomationOutcome(action='comment', summary='ok', comment=None, usage=None),
+    )
+
+    owner_created = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Owner creates session',
+            'session_id': session_id,
+        },
+    )
+    assert owner_created.status_code == 200
+
+    created_user = client.post(
+        '/api/admin/users',
+        json={
+            'workspace_id': ws_id,
+            'username': 'chat-member-user',
+            'full_name': 'Chat Member User',
+        },
+    )
+    assert created_user.status_code == 200
+    member_id = created_user.json()['user']['id']
+    temp_password = created_user.json()['temporary_password']
+
+    assigned = client.post(
+        f'/api/projects/{project_id}/members',
+        json={'user_id': member_id, 'role': 'Contributor'},
+    )
+    assert assigned.status_code == 200
+
+    logout = client.post('/api/auth/logout')
+    assert logout.status_code == 200
+
+    login_member = client.post(
+        '/api/auth/login',
+        json={'username': 'chat-member-user', 'password': temp_password},
+    )
+    assert login_member.status_code == 200
+    assert login_member.json()['user']['must_change_password'] is True
+
+    changed = client.post(
+        '/api/auth/change-password',
+        json={'current_password': temp_password, 'new_password': 'memberpass1'},
+    )
+    assert changed.status_code == 200
+    assert changed.json()['user']['must_change_password'] is False
+
+    listed = client.get('/api/chat/sessions', params={'workspace_id': ws_id})
+    assert listed.status_code == 200
+    assert all(item.get('id') != session_id for item in listed.json())
+
+    reused = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Attempt to reuse owner session',
+            'session_id': session_id,
+        },
+    )
+    assert reused.status_code == 403
+    assert 'belongs to another user' in reused.text.lower()
 
 
 def test_agents_chat_endpoint_uses_persisted_session_attachment_context(tmp_path, monkeypatch):

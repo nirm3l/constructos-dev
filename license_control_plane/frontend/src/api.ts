@@ -10,6 +10,7 @@ import type {
   ClientTokenCreateRequest,
   ClientTokenCreateResponse,
   ContactRequestsListResponse,
+  DeleteInstallationResponse,
   HealthResponse,
   InstallationResponse,
   InstallationsListResponse,
@@ -76,6 +77,16 @@ export function listInstallations(
 
 export function getInstallation(token: string, installationId: string): Promise<InstallationResponse> {
   return api<InstallationResponse>(`/v1/admin/installations/${encodeURIComponent(installationId)}`, token)
+}
+
+export function deleteInstallation(token: string, installationId: string): Promise<DeleteInstallationResponse> {
+  return api<DeleteInstallationResponse>(
+    `/v1/admin/installations/${encodeURIComponent(installationId)}`,
+    token,
+    {
+      method: 'DELETE',
+    }
+  )
 }
 
 export function updateInstallationSubscription(

@@ -15,6 +15,7 @@ IMAGE_TAG="${IMAGE_TAG:-}"
 TASK_APP_IMAGE="${TASK_APP_IMAGE:-}"
 MCP_TOOLS_IMAGE="${MCP_TOOLS_IMAGE:-}"
 CODEX_AUTH_FILE="${CODEX_AUTH_FILE:-/home/m4tr1x/.codex/auth.json}"
+CODEX_CONFIG_FILE="${CODEX_CONFIG_FILE:-/home/m4tr1x/.codex/config.toml}"
 
 resolve_compose_env_value() {
   local var_name="$1"
@@ -131,6 +132,19 @@ if [[ -f "$CODEX_AUTH_FILE" ]]; then
     echo "Codex chat in task-app may fail if the mounted auth file is not readable by container user."
   fi
 fi
+
+if [[ ! -f "$CODEX_CONFIG_FILE" ]]; then
+  echo "Missing Codex config file: $CODEX_CONFIG_FILE"
+  echo "Create it first (or set CODEX_CONFIG_FILE) before deploy."
+  exit 1
+fi
+if ! chmod a+r "$CODEX_CONFIG_FILE" 2>/dev/null; then
+  echo "Warning: unable to adjust read permissions for $CODEX_CONFIG_FILE"
+  echo "Codex chat in task-app may fail if the mounted config file is not readable by container user."
+fi
+
+export CODEX_AUTH_FILE
+export CODEX_CONFIG_FILE
 
 echo "Deploy profile: internal"
 echo "Deploying version ${APP_VERSION} (${APP_BUILD}) at ${DEPLOYED_AT_UTC}"

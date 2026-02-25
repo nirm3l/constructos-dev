@@ -626,6 +626,7 @@ def _load_persisted_chat_history(
         select(ChatSession).where(
             ChatSession.workspace_id == workspace_id,
             ChatSession.session_key == session_key,
+            ChatSession.created_by == user.id,
         )
     ).scalar_one_or_none()
     if session is None:
@@ -662,6 +663,7 @@ def _load_persisted_session_attachment_refs(
         select(ChatSession).where(
             ChatSession.workspace_id == workspace_id,
             ChatSession.session_key == session_key,
+            ChatSession.created_by == user.id,
         )
     ).scalar_one_or_none()
     if session is None:

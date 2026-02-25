@@ -96,7 +96,7 @@ function resolveLocalTimezone(): string {
   }
 }
 
-function App({ logout }: { logout: () => void }) {
+function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: string }) {
   const initialUrlStateRef = React.useRef<{
     tab: Tab | null
     projectId: string | null
@@ -126,7 +126,7 @@ function App({ logout }: { logout: () => void }) {
   }
   const initialUrlState = initialUrlStateRef.current!
 
-  const [userId] = React.useState<string>('session')
+  const userId = String(sessionUserId || '').trim() || 'session'
   const [tab, setTab] = React.useState<Tab>(() => {
     if (initialUrlState.tab) return initialUrlState.tab
     if (initialUrlState.specificationId) return 'specifications'
@@ -230,7 +230,7 @@ function App({ logout }: { logout: () => void }) {
     setCodexChatUsage, setCodexChatUsageForSession, codexChatCodexSessionId, setCodexChatCodexSessionId,
     setCodexChatCodexSessionIdForSession,
     mergeCodexChatSessionsFromServer,
-  } = useCodexChatState()
+  } = useCodexChatState(userId)
   const [fabHidden, setFabHidden] = React.useState(false)
   const [showNotificationsPanel, setShowNotificationsPanel] = React.useState(false)
   const [showQuickAdd, setShowQuickAdd] = React.useState(false)
@@ -1960,6 +1960,7 @@ function AuthGate() {
   const [phase, setPhase] = React.useState<'checking' | 'login' | 'change-password' | 'ready'>('checking')
   const [authError, setAuthError] = React.useState<string | null>(null)
   const [pending, setPending] = React.useState(false)
+  const [sessionUserId, setSessionUserId] = React.useState('session')
   const [username, setUsername] = React.useState('m4tr1x')
   const [password, setPassword] = React.useState('')
   const [currentPassword, setCurrentPassword] = React.useState('')
@@ -1968,10 +1969,17 @@ function AuthGate() {
 
   const clearClientSessionState = React.useCallback(() => {
     if (typeof window === 'undefined') return
-    const keys = ['codex_chat_state_v1', 'ui_tab', 'ui_selected_project_id', 'ui_projects_mode']
-    for (const key of keys) {
-      window.localStorage.removeItem(key)
+    const codexChatPrefix = 'codex_chat_state_v1'
+    for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
+      const key = String(window.localStorage.key(index) || '')
+      if (!key) continue
+      if (key === codexChatPrefix || key.startsWith(`${codexChatPrefix}:`)) {
+        window.localStorage.removeItem(key)
+      }
     }
+    window.localStorage.removeItem('ui_tab')
+    window.localStorage.removeItem('ui_selected_project_id')
+    window.localStorage.removeItem('ui_projects_mode')
   }, [])
 
   const checkAuth = React.useCallback(async () => {
@@ -1979,12 +1987,15 @@ function AuthGate() {
     setPhase('checking')
     try {
       const payload = await authMe()
+      const nextUserId = String(payload.user?.id || '').trim() || 'session'
+      setSessionUserId(nextUserId)
       if (payload.user.must_change_password) {
         setPhase('change-password')
       } else {
         setPhase('ready')
       }
     } catch {
+      setSessionUserId('session')
       setPhase('login')
     }
   }, [])
@@ -2001,6 +2012,7 @@ function AuthGate() {
       const payload = await authLogin({ username: username.trim(), password })
       queryClient.clear()
       clearClientSessionState()
+      setSessionUserId(String(payload.user?.id || '').trim() || 'session')
       setCurrentPassword(password)
       setPassword('')
       if (payload.user.must_change_password) {
@@ -2049,6 +2061,7 @@ function AuthGate() {
     void authLogout().finally(() => {
       queryClient.clear()
       clearClientSessionState()
+      setSessionUserId('session')
       setPhase('login')
       setAuthError(null)
       setCurrentPassword('')
@@ -2136,7 +2149,7 @@ function AuthGate() {
     )
   }
 
-  return <App logout={handleLogout} />
+  return <App logout={handleLogout} sessionUserId={sessionUserId} />
 }
 
 export default function AppRoot() {

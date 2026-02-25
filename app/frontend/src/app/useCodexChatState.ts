@@ -44,10 +44,16 @@ type PersistedCodexChatState = {
   sessions: ChatSession[]
 }
 
-const STORAGE_KEY = 'codex_chat_state_v1'
+const STORAGE_KEY_PREFIX = 'codex_chat_state_v1'
 const MAX_SESSIONS = 20
 const MAX_TURNS_PER_SESSION = 240
 const DEFAULT_SESSION_TITLE_PREFIX = 'Session'
+
+function resolveStorageKey(userId: string | null | undefined): string {
+  const normalized = String(userId || '').trim()
+  if (!normalized) return STORAGE_KEY_PREFIX
+  return `${STORAGE_KEY_PREFIX}:${normalized}`
+}
 
 function makeId(prefix: string): string {
   return globalThis.crypto?.randomUUID?.() ?? `${prefix}-${Date.now()}-${Math.round(Math.random() * 1_000_000)}`
@@ -219,10 +225,19 @@ function normalizeTimestampMs(value: unknown, fallback: number): number {
   return Math.floor(numeric)
 }
 
-function loadPersistedState(): PersistedCodexChatState | null {
+function createInitialState(): PersistedCodexChatState {
+  const firstSession = createSession(`${DEFAULT_SESSION_TITLE_PREFIX} 1`)
+  return {
+    version: 1,
+    activeSessionId: firstSession.id,
+    sessions: [firstSession],
+  }
+}
+
+function loadPersistedState(storageKey: string): PersistedCodexChatState | null {
   if (typeof window === 'undefined') return null
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY)
+    const raw = window.localStorage.getItem(storageKey)
     if (!raw) return null
     const parsed = JSON.parse(raw) as unknown
     if (!parsed || typeof parsed !== 'object') return null
@@ -247,17 +262,13 @@ function loadPersistedState(): PersistedCodexChatState | null {
   }
 }
 
-export function useCodexChatState() {
+export function useCodexChatState(storageUserId?: string | null) {
+  const storageKey = React.useMemo(() => resolveStorageKey(storageUserId), [storageUserId])
   const initialState = React.useMemo<PersistedCodexChatState>(() => {
-    const restored = loadPersistedState()
+    const restored = loadPersistedState(storageKey)
     if (restored) return restored
-    const firstSession = createSession(`${DEFAULT_SESSION_TITLE_PREFIX} 1`)
-    return {
-      version: 1,
-      activeSessionId: firstSession.id,
-      sessions: [firstSession],
-    }
-  }, [])
+    return createInitialState()
+  }, [storageKey])
 
   const [showCodexChat, setShowCodexChat] = React.useState(false)
   const [codexChatInstruction, setCodexChatInstruction] = React.useState('')
@@ -266,6 +277,22 @@ export function useCodexChatState() {
   const [isCodexChatRunning, setIsCodexChatRunning] = React.useState(false)
   const [codexChatRunStartedAt, setCodexChatRunStartedAt] = React.useState<number | null>(null)
   const [codexChatElapsedSeconds, setCodexChatElapsedSeconds] = React.useState(0)
+
+  React.useEffect(() => {
+    const restored = loadPersistedState(storageKey)
+    if (restored) {
+      setCodexChatSessions(restored.sessions)
+      setCodexChatActiveSessionId(restored.activeSessionId)
+    } else {
+      const fallback = createInitialState()
+      setCodexChatSessions(fallback.sessions)
+      setCodexChatActiveSessionId(fallback.activeSessionId)
+    }
+    setCodexChatInstruction('')
+    setIsCodexChatRunning(false)
+    setCodexChatRunStartedAt(null)
+    setCodexChatElapsedSeconds(0)
+  }, [storageKey])
 
   React.useEffect(() => {
     if (codexChatSessions.length > 0) return
@@ -295,11 +322,11 @@ export function useCodexChatState() {
       sessions: codexChatSessions,
     }
     try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
+      window.localStorage.setItem(storageKey, JSON.stringify(payload))
     } catch {
       // Ignore quota/storage failures; chat continues in-memory.
     }
-  }, [codexChatActiveSessionId, codexChatSessions])
+  }, [codexChatActiveSessionId, codexChatSessions, storageKey])
 
   const patchSession = React.useCallback((sessionId: string, mutate: (session: ChatSession) => ChatSession) => {
     setCodexChatSessions((prev) => {

@@ -453,6 +453,7 @@ export const updateChatSessionContext = (
   payload: {
     workspace_id: string
     session_attachment_refs?: AttachmentRef[]
+    mcp_servers?: ChatMcpServer[]
   }
 ) =>
   api<ChatSessionRecord>(

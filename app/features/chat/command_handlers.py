@@ -188,6 +188,8 @@ def _load_or_create_session_aggregate(
     )
     if bool(getattr(aggregate, "is_archived", False)):
         raise HTTPException(status_code=409, detail="Chat session is archived")
+    if str(getattr(aggregate, "created_by", "") or "").strip() != str(created_by or "").strip():
+        raise HTTPException(status_code=403, detail="Chat session belongs to another user")
     next_session_attachment_refs = (
         _normalize_attachment_refs(session_attachment_refs)
         if session_attachment_refs is not None
@@ -475,17 +477,23 @@ class UpdateSessionContextHandler:
         if bool(getattr(aggregate, "is_archived", False)):
             raise HTTPException(status_code=409, detail="Chat session is archived")
 
-        next_session_attachment_refs = _normalize_attachment_refs(self.payload.session_attachment_refs)
+        next_session_attachment_refs = (
+            _normalize_attachment_refs(self.payload.session_attachment_refs)
+            if self.payload.session_attachment_refs is not None
+            else None
+        )
         next_mcp_servers = (
             _normalize_mcp_servers(self.payload.mcp_servers)
             if self.payload.mcp_servers is not None
             else list(getattr(aggregate, "mcp_servers", []) or [])
         )
-        aggregate.update_context(
-            project_id=project_id,
-            mcp_servers=next_mcp_servers,
-            session_attachment_refs=next_session_attachment_refs,
-        )
+        context_patch: dict[str, Any] = {
+            "project_id": project_id,
+            "mcp_servers": next_mcp_servers,
+        }
+        if next_session_attachment_refs is not None:
+            context_patch["session_attachment_refs"] = next_session_attachment_refs
+        aggregate.update_context(**context_patch)
         _persist_aggregate(
             repo=repo,
             aggregate=aggregate,

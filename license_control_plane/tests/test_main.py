@@ -234,6 +234,8 @@ def test_admin_subscription_update_canonicalizes_legacy_status_aliases(tmp_path:
         )
         assert update_none.status_code == 200
         assert update_none.json()["subscription_status"] == "none"
+        assert update_none.json()["entitlement"]["plan_code"] is None
+        assert update_none.json()["entitlement"]["valid_until"] is None
 
         get_installation = client.get(
             "/v1/admin/installations/cp-legacy-status-alias",
@@ -241,6 +243,8 @@ def test_admin_subscription_update_canonicalizes_legacy_status_aliases(tmp_path:
         )
         assert get_installation.status_code == 200
         assert get_installation.json()["installation"]["subscription_status"] == "none"
+        assert get_installation.json()["installation"]["plan_code"] is None
+        assert get_installation.json()["installation"]["subscription_valid_until"] is None
 
 
 def test_admin_list_installations_status_filter_matches_legacy_rows(tmp_path: Path):
@@ -293,6 +297,44 @@ def test_admin_list_installations_status_filter_matches_legacy_rows(tmp_path: Pa
         none_payload = filtered_none.json()
         none_ids = {item["installation"]["installation_id"] for item in none_payload["items"]}
         assert "cp-legacy-none" in none_ids
+
+
+def test_admin_delete_installation_removes_record_permanently(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-delete-installation",
+                "workspace_id": "workspace-delete",
+                "customer_ref": "customer-delete",
+                "metadata": {"source": "test"},
+            },
+        )
+        assert register.status_code == 200
+
+        deleted = client.delete(
+            "/v1/admin/installations/cp-delete-installation",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert deleted.status_code == 200
+        deleted_payload = deleted.json()
+        assert deleted_payload["ok"] is True
+        assert deleted_payload["installation_id"] == "cp-delete-installation"
+
+        get_installation = client.get(
+            "/v1/admin/installations/cp-delete-installation",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert get_installation.status_code == 404
+
+        listed = client.get(
+            "/v1/admin/installations",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert listed.status_code == 200
+        ids = {item["installation"]["installation_id"] for item in listed.json()["items"]}
+        assert "cp-delete-installation" not in ids
 
 
 def test_admin_list_installations_supports_search_and_status_filter(tmp_path: Path):
@@ -545,6 +587,60 @@ def test_activation_code_trial_plan_sets_trialing_subscription(tmp_path: Path):
         assert payload["entitlement"]["plan_code"] == "trial"
         assert payload["entitlement"]["status"] == "active"
         assert payload["entitlement"]["valid_until"] is not None
+
+
+def test_admin_subscription_update_none_clears_existing_trial_plan_state(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-none-clears-trial",
+                "workspace_id": "workspace-none-clears-trial",
+                "customer_ref": "customer-none-clears-trial",
+                "metadata": {"source": "test"},
+            },
+        )
+        assert register.status_code == 200
+
+        set_trialing = client.put(
+            "/v1/admin/installations/cp-none-clears-trial/subscription",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "subscription_status": "trialing",
+                "plan_code": "trial",
+                "customer_ref": "customer-none-clears-trial",
+                "valid_until": "2026-12-31T00:00:00Z",
+            },
+        )
+        assert set_trialing.status_code == 200
+        assert set_trialing.json()["subscription_status"] == "trialing"
+
+        set_none = client.put(
+            "/v1/admin/installations/cp-none-clears-trial/subscription",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "subscription_status": "none",
+                "customer_ref": "customer-none-clears-trial",
+            },
+        )
+        assert set_none.status_code == 200
+        payload = set_none.json()
+        assert payload["subscription_status"] == "none"
+        assert payload["entitlement"]["plan_code"] is None
+        assert payload["entitlement"]["valid_until"] is None
+        assert payload["entitlement"]["status"] == "expired"
+        assert payload["entitlement"]["metadata"]["entitlement_reason"] == "subscription_none"
+
+        get_installation = client.get(
+            "/v1/admin/installations/cp-none-clears-trial",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert get_installation.status_code == 200
+        installation_payload = get_installation.json()["installation"]
+        assert installation_payload["subscription_status"] == "none"
+        assert installation_payload["plan_code"] is None
+        assert installation_payload["subscription_valid_until"] is None
 
 
 def test_install_exchange_issues_client_token_for_activation_code(tmp_path: Path):
@@ -889,7 +985,7 @@ def test_public_contact_request_rejects_unsupported_request_type(tmp_path: Path)
         assert "Unsupported request_type" in invalid.json()["detail"]
 
 
-def test_beta_plan_cutoff_does_not_override_trial(tmp_path: Path):
+def test_beta_plan_cutoff_does_not_grant_entitlement_for_none_subscription(tmp_path: Path):
     with _build_client(tmp_path, beta_plan_valid_until="2099-12-31T23:59:59Z") as client:
         register = client.post(
             "/v1/installations/register",
@@ -903,9 +999,10 @@ def test_beta_plan_cutoff_does_not_override_trial(tmp_path: Path):
         assert register.status_code == 200
         payload = register.json()
         entitlement = payload["entitlement"]
-        assert entitlement["status"] == "trial"
-        assert entitlement["plan_code"] == "trial"
-        assert entitlement["valid_until"].startswith(payload["installation"]["trial_ends_at"])
+        assert entitlement["status"] == "expired"
+        assert entitlement["plan_code"] is None
+        assert entitlement["valid_until"] is None
+        assert entitlement["metadata"]["entitlement_reason"] == "subscription_none"
 
         health = client.get("/api/health")
         assert health.status_code == 200

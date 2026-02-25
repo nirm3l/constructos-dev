@@ -949,12 +949,8 @@ def _normalize_plan_code_for_status(
         return resolved
 
     if status_value == "none":
-        if resolved_lower in RESERVED_PLAN_CODES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"plan_code '{resolved_lower}' is not allowed when subscription_status is '{status_value}'",
-            )
-        return resolved or None
+        # "none" means no subscription attached; always clear plan code.
+        return None
 
     return resolved or None
 
@@ -987,6 +983,8 @@ def _resolve_subscription_valid_until(
         if resolved and resolved <= _now_utc():
             raise HTTPException(status_code=400, detail="valid_until must be in the future")
         return resolved
+    if status_value == "none":
+        return None
     return _parse_iso_datetime(requested_valid_until)
 
 
@@ -1282,12 +1280,10 @@ def _compute_entitlement(installation: Installation) -> dict[str, Any]:
     elif subscription_status == "grace" and valid_until and valid_until > now:
         status = "grace"
         entitlement_reason = "subscription_grace"
-    elif trial_ends_at > now:
-        status = "trial"
-        if not plan_code:
-            plan_code = "trial"
-        effective_valid_until = trial_ends_at
-        entitlement_reason = "trial_active"
+    elif subscription_status == "none":
+        status = "expired"
+        effective_valid_until = None
+        entitlement_reason = "subscription_none"
     else:
         effective_valid_until = None
 
@@ -2888,6 +2884,38 @@ def admin_get_installation(
         "installation": _serialize_installation(installation),
         "entitlement": entitlement,
         "entitlement_token": entitlement_token,
+    }
+
+
+@app.delete("/v1/admin/installations/{installation_id}")
+def admin_delete_installation(
+    installation_id: str,
+    _auth: None = Depends(_require_admin_token),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    installation = db.execute(
+        select(Installation).where(Installation.installation_id == installation_id)
+    ).scalar_one_or_none()
+    if installation is None:
+        raise HTTPException(status_code=404, detail="Installation not found")
+
+    deleted_customer_ref = installation.customer_ref
+    deleted_workspace_id = installation.workspace_id
+    db.delete(installation)
+    db.commit()
+    _publish_admin_event(
+        "installations",
+        "deleted",
+        {
+            "installation_id": installation_id,
+            "customer_ref": deleted_customer_ref,
+            "workspace_id": deleted_workspace_id,
+        },
+    )
+
+    return {
+        "ok": True,
+        "installation_id": installation_id,
     }
 
 

@@ -2,6 +2,7 @@ import React from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ApiError,
+  deleteInstallation,
   getHealth,
   getInstallation,
   listContactRequests,
@@ -159,6 +160,7 @@ const ICON_PATHS = {
   generate: 'M12 5v14M5 12h14',
   reset: 'M4 4v6h6M20 20v-6h-6M8 8l8 8',
   filter: 'M3 5h18l-7 8v6l-4-2v-4z',
+  delete: 'M6 7h12M9 7V5h6v2m-8 3 1 10h8l1-10',
 } as const
 
 function ButtonIcon({ name }: { name: keyof typeof ICON_PATHS }) {
@@ -397,6 +399,31 @@ export function App() {
     },
     onError: (error: unknown) => {
       const message = error instanceof Error ? error.message : 'Failed to move installation'
+      setFeedback(message)
+    },
+  })
+  const deleteInstallationMutation = useMutation({
+    mutationFn: async (installationId: string) => {
+      if (!token) {
+        throw new Error('Admin token is required to delete installation')
+      }
+      const normalizedInstallationId = String(installationId || '').trim()
+      if (!normalizedInstallationId) {
+        throw new Error('installation_id is required')
+      }
+      return deleteInstallation(token, normalizedInstallationId)
+    },
+    onSuccess: async (response) => {
+      setFeedback(`Installation '${response.installation_id}' permanently deleted.`)
+      if (selectedInstallationId === response.installation_id) {
+        setSelectedInstallationId(null)
+        setForm(null)
+      }
+      await queryClient.invalidateQueries({ queryKey: ['installations'] })
+      await queryClient.invalidateQueries({ queryKey: ['installation'] })
+    },
+    onError: (error: unknown) => {
+      const message = error instanceof Error ? error.message : 'Failed to delete installation'
       setFeedback(message)
     },
   })
@@ -1306,6 +1333,23 @@ export function App() {
                     >
                       <ButtonIcon name="generate" />
                       {moveInstallationMutation.isPending ? 'Moving...' : 'Move Installation'}
+                    </button>
+                    <button
+                      type="button"
+                      className="button-danger"
+                      disabled={deleteInstallationMutation.isPending || !selectedInstallationId}
+                      onClick={() => {
+                        if (!selectedInstallationId) return
+                        if (!window.confirm(`Delete installation '${selectedInstallationId}'?`)) {
+                          setFeedback('Permanent delete canceled.')
+                          return
+                        }
+                        setFeedback('')
+                        deleteInstallationMutation.mutate(selectedInstallationId)
+                      }}
+                    >
+                      <ButtonIcon name="delete" />
+                      {deleteInstallationMutation.isPending ? 'Deleting...' : 'Permanent Delete'}
                     </button>
                     <button
                       type="button"

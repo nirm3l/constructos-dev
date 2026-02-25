@@ -1141,6 +1141,27 @@ body.md-fullscreen-open {
   border-radius: 16px;
   padding: 10px;
   background: color-mix(in srgb, var(--surface), var(--surface-alt) 22%);
+  transition: border-color 140ms ease, background-color 140ms ease, box-shadow 180ms ease, transform 140ms ease;
+}
+
+.notif.unread {
+  cursor: pointer;
+}
+
+.notif.unread:hover {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 40%);
+  background: color-mix(in srgb, var(--surface), var(--brand) 7%);
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--brand), transparent 89%);
+  transform: translateY(-1px);
+}
+
+.notif.unread:active {
+  transform: translateY(0);
+}
+
+.notif.unread:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--brand), white 26%);
+  outline-offset: 2px;
 }
 
 .notif-dotline {
@@ -1162,6 +1183,12 @@ body.md-fullscreen-open {
   min-width: 0;
 }
 
+.notif-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
 .notif-message {
   font-size: 13px;
   color: var(--text);
@@ -1171,6 +1198,12 @@ body.md-fullscreen-open {
 
 .notif.read .notif-message {
   color: var(--muted);
+}
+
+.notif-hint {
+  font-size: 11px;
+  line-height: 1.2;
+  color: color-mix(in srgb, var(--muted), var(--brand-strong) 18%);
 }
 
 .notif-actions {
@@ -6485,6 +6518,32 @@ textarea:disabled {
   width: 0;
   min-height: 0;
   overflow: hidden;
+}
+
+.codex-chat-task-event-row {
+  margin-top: 8px;
+  min-height: 18px;
+  display: flex;
+  align-items: center;
+}
+
+.codex-chat-task-event {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.codex-chat-task-event-time {
+  display: inline-block;
+  min-width: 8ch;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+
+.codex-chat-task-event.is-empty {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .codex-chat-session-row {
