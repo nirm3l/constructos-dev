@@ -520,8 +520,8 @@ def test_register_auto_assigns_customer_ref_when_missing(tmp_path: Path):
         assert payload["installation"]["customer_ref"] == "cust_unassigned"
 
 
-def test_activation_code_lifetime_plan_sets_lifetime_subscription(tmp_path: Path):
-    with _build_client(tmp_path) as client:
+def test_activation_code_lifetime_plan_is_auto_mapped_to_beta_subscription(tmp_path: Path):
+    with _build_client(tmp_path, beta_plan_valid_until="2099-12-31T23:59:59Z") as client:
         create_code = client.post(
             "/v1/admin/activation-codes",
             headers={"Authorization": "Bearer control-plane-token"},
@@ -551,14 +551,14 @@ def test_activation_code_lifetime_plan_sets_lifetime_subscription(tmp_path: Path
         payload = activate.json()
         assert payload["ok"] is True
         assert payload["entitlement"]["status"] == "active"
-        assert payload["entitlement"]["plan_code"] == "lifetime"
-        assert payload["entitlement"]["valid_until"] is None
-        assert payload["installation"]["subscription_status"] == "lifetime"
-        assert payload["installation"]["subscription_valid_until"] is None
+        assert payload["entitlement"]["plan_code"] == "beta"
+        assert payload["entitlement"]["valid_until"] == "2099-12-31T23:59:59+00:00"
+        assert payload["installation"]["subscription_status"] == "beta"
+        assert payload["installation"]["subscription_valid_until"] == "2099-12-31T23:59:59+00:00"
 
 
-def test_activation_code_trial_plan_sets_trialing_subscription(tmp_path: Path):
-    with _build_client(tmp_path) as client:
+def test_activation_code_trial_plan_is_auto_mapped_to_beta_subscription(tmp_path: Path):
+    with _build_client(tmp_path, beta_plan_valid_until="2099-12-31T23:59:59Z") as client:
         create_code = client.post(
             "/v1/admin/activation-codes",
             headers={"Authorization": "Bearer control-plane-token"},
@@ -583,10 +583,10 @@ def test_activation_code_trial_plan_sets_trialing_subscription(tmp_path: Path):
         )
         assert activate.status_code == 200
         payload = activate.json()
-        assert payload["installation"]["subscription_status"] == "trialing"
-        assert payload["entitlement"]["plan_code"] == "trial"
+        assert payload["installation"]["subscription_status"] == "beta"
+        assert payload["entitlement"]["plan_code"] == "beta"
         assert payload["entitlement"]["status"] == "active"
-        assert payload["entitlement"]["valid_until"] is not None
+        assert payload["entitlement"]["valid_until"] == "2099-12-31T23:59:59+00:00"
 
 
 def test_admin_subscription_update_none_clears_existing_trial_plan_state(tmp_path: Path):
@@ -985,7 +985,7 @@ def test_public_contact_request_rejects_unsupported_request_type(tmp_path: Path)
         assert "Unsupported request_type" in invalid.json()["detail"]
 
 
-def test_beta_plan_cutoff_does_not_grant_entitlement_for_none_subscription(tmp_path: Path):
+def test_register_auto_assigns_beta_subscription(tmp_path: Path):
     with _build_client(tmp_path, beta_plan_valid_until="2099-12-31T23:59:59Z") as client:
         register = client.post(
             "/v1/installations/register",
@@ -998,11 +998,12 @@ def test_beta_plan_cutoff_does_not_grant_entitlement_for_none_subscription(tmp_p
         )
         assert register.status_code == 200
         payload = register.json()
+        assert payload["installation"]["subscription_status"] == "beta"
         entitlement = payload["entitlement"]
-        assert entitlement["status"] == "expired"
-        assert entitlement["plan_code"] is None
-        assert entitlement["valid_until"] is None
-        assert entitlement["metadata"]["entitlement_reason"] == "subscription_none"
+        assert entitlement["status"] == "active"
+        assert entitlement["plan_code"] == "beta"
+        assert entitlement["valid_until"] == "2099-12-31T23:59:59+00:00"
+        assert entitlement["metadata"]["entitlement_reason"] == "subscription_beta"
 
         health = client.get("/api/health")
         assert health.status_code == 200
@@ -1242,6 +1243,7 @@ def test_admin_send_onboarding_email_succeeds_with_template(monkeypatch, tmp_pat
         assert "ConstructOS onboarding package" in payload["subject"]
         assert captured["to_email"] == "ops@example.com"
         assert "ACTIVATION_CODE=ACT-TEST-0001" in captured["text_body"]
+        assert "INSTALL_COS=true" in captured["text_body"]
         assert "AUTO_DEPLOY=1" in captured["text_body"]
         assert "LICENSE_SERVER_TOKEN=" not in captured["text_body"]
         assert "ACT-TEST-0001" in captured["text_body"]
@@ -1317,6 +1319,7 @@ def test_admin_provision_onboarding_generates_and_sends_package(monkeypatch, tmp
         assert payload["activation_code_record"]["max_installations"] == 3
         assert captured["to_email"] == "ops@example.com"
         assert f"ACTIVATION_CODE={payload['activation_code']}" in captured["text_body"]
+        assert "INSTALL_COS=true" in captured["text_body"]
         assert "AUTO_DEPLOY=1" in captured["text_body"]
         assert "LICENSE_SERVER_TOKEN=" not in captured["text_body"]
         assert payload["activation_code"] in captured["text_body"]

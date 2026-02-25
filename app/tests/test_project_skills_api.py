@@ -479,6 +479,17 @@ def test_workspace_skill_catalog_seed_and_attach_to_project(tmp_path: Path):
     assert any(item["skill_key"] == "jira_execution" for item in items)
 
     github_skill = next(item for item in items if item["skill_key"] == "github_delivery")
+    assert github_skill["source_locator"] == "seed://workspace-skills/github-delivery"
+    assert github_skill["is_seeded"] is True
+    github_content = str(github_skill["manifest"].get("source_content", ""))
+    assert "Use GitHub MCP for repository operations and publishing" in github_content
+
+    jira_skill = next(item for item in items if item["skill_key"] == "jira_execution")
+    assert jira_skill["source_locator"] == "seed://workspace-skills/jira-execution"
+    assert jira_skill["is_seeded"] is True
+    jira_content = str(jira_skill["manifest"].get("source_content", ""))
+    assert "create one Jira snapshot issue per app task" in jira_content
+
     attached = client.post(
         f"/api/workspace-skills/{github_skill['id']}/attach",
         json={"workspace_id": workspace_id, "project_id": project_id},

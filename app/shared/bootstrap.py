@@ -4,6 +4,7 @@ import os
 import time
 import json
 import hashlib
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -53,51 +54,140 @@ from .settings import (
     logger,
 )
 
+_SEED_WORKSPACE_SKILLS_DIR = Path(__file__).resolve().parent / "workspace_skill_seeds"
+_SEED_FRONTMATTER_FIELD_RE = re.compile(r"^([A-Za-z0-9_-]+)\s*:\s*(.*)$")
+_SEED_SKILL_KEY_SANITIZER_RE = re.compile(r"[^a-z0-9]+")
+_SEED_ALLOWED_MODES = {"advisory", "enforced"}
+_SEED_ALLOWED_TRUST_LEVELS = {"reviewed", "untrusted", "verified"}
+_DEFAULT_WORKSPACE_SKILLS_CACHE: tuple[dict[str, str], ...] | None = None
 
-_DEFAULT_WORKSPACE_SKILLS: tuple[dict[str, str], ...] = (
-    {
-        "skill_key": "github_delivery",
-        "name": "GitHub Delivery Skill",
-        "summary": "Use this skill for repository workflows, pull requests, and release coordination.",
-        "source_locator": "seed://workspace-skills/github-delivery",
-        "mode": "advisory",
-        "trust_level": "verified",
-        "content": (
-            "# GitHub Delivery Skill\n\n"
-            "Use this skill when work involves GitHub repositories, pull requests, or release notes.\n\n"
-            "## Workflow\n"
-            "- Clarify target repository, default branch, and release expectations.\n"
-            "- Review open pull requests and CI status before proposing merges.\n"
-            "- Prefer small, reviewable commits with clear commit messages.\n"
-            "- Summarize risk, rollback approach, and post-merge validation.\n\n"
-            "## Guardrails\n"
-            "- Never force-push shared branches unless explicitly approved.\n"
-            "- Never merge failing checks without an explicit exception.\n"
-            "- Keep changelog and release notes aligned with merged changes.\n"
-        ),
-    },
-    {
-        "skill_key": "jira_execution",
-        "name": "Jira Execution Skill",
-        "summary": "Use this skill for Jira issue updates, workflow transitions, and sprint hygiene.",
-        "source_locator": "seed://workspace-skills/jira-execution",
-        "mode": "advisory",
-        "trust_level": "verified",
-        "content": (
-            "# Jira Execution Skill\n\n"
-            "Use this skill when work requires Jira issue planning, transitions, or reporting.\n\n"
-            "## Workflow\n"
-            "- Confirm project key, issue type, priority, and expected outcome.\n"
-            "- Keep issue summary concise and actionable.\n"
-            "- Record status transitions with a short reason.\n"
-            "- Keep worklogs and comments consistent with actual work.\n\n"
-            "## Guardrails\n"
-            "- Do not transition issues without validating required fields.\n"
-            "- Do not close issues without linking evidence (PR, commit, test result).\n"
-            "- Keep sprint scope changes explicit and documented.\n"
-        ),
-    },
-)
+
+def _normalize_seed_frontmatter_value(value: str) -> str:
+    normalized = str(value or "").strip()
+    if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {'"', "'"}:
+        normalized = normalized[1:-1].strip()
+    return normalized
+
+
+def _parse_seed_skill_file(text: str, *, source_name: str) -> tuple[dict[str, str], str]:
+    raw_text = str(text or "")
+    lines = raw_text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise ValueError(f"{source_name}: expected frontmatter block starting with '---'")
+
+    end_index = -1
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == "---":
+            end_index = idx
+            break
+    if end_index < 0:
+        raise ValueError(f"{source_name}: frontmatter block is missing closing '---'")
+
+    metadata: dict[str, str] = {}
+    for raw_line in lines[1:end_index]:
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = _SEED_FRONTMATTER_FIELD_RE.match(stripped)
+        if not match:
+            raise ValueError(f"{source_name}: invalid frontmatter line '{stripped}'")
+        key = str(match.group(1) or "").strip().lower()
+        value = _normalize_seed_frontmatter_value(match.group(2))
+        if key:
+            metadata[key] = value
+
+    content = "\n".join(lines[end_index + 1:]).strip()
+    if not content:
+        raise ValueError(f"{source_name}: content is empty")
+    return metadata, content
+
+
+def _normalize_seed_skill_key(raw: str, *, source_name: str) -> str:
+    candidate = str(raw or "").strip().lower()
+    candidate = _SEED_SKILL_KEY_SANITIZER_RE.sub("_", candidate).strip("_")
+    candidate = candidate[:128].strip("_")
+    if not candidate:
+        raise ValueError(f"{source_name}: skill_key cannot be empty")
+    return candidate
+
+
+def _extract_seed_heading(content: str) -> str:
+    for line in str(content or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            heading = stripped.lstrip("#").strip()
+            if heading:
+                return heading[:160]
+    return ""
+
+
+def _extract_seed_summary(content: str) -> str:
+    for line in str(content or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            continue
+        return stripped[:400]
+    return ""
+
+
+def _load_default_workspace_skills() -> tuple[dict[str, str], ...]:
+    if not _SEED_WORKSPACE_SKILLS_DIR.is_dir():
+        raise RuntimeError(f"Workspace skill seed directory not found: {_SEED_WORKSPACE_SKILLS_DIR}")
+
+    seed_files = sorted(_SEED_WORKSPACE_SKILLS_DIR.glob("*.md"))
+    if not seed_files:
+        raise RuntimeError(f"No workspace skill seed files found in {_SEED_WORKSPACE_SKILLS_DIR}")
+
+    loaded: list[dict[str, str]] = []
+    seen_keys: set[str] = set()
+    for seed_file in seed_files:
+        metadata, content = _parse_seed_skill_file(seed_file.read_text(encoding="utf-8"), source_name=seed_file.name)
+        skill_key = _normalize_seed_skill_key(metadata.get("skill_key", ""), source_name=seed_file.name)
+        if skill_key in seen_keys:
+            raise RuntimeError(f"Duplicate workspace skill_key '{skill_key}' in seed file {seed_file.name}")
+        seen_keys.add(skill_key)
+
+        name = str(metadata.get("name") or metadata.get("title") or "").strip() or _extract_seed_heading(content)
+        if not name:
+            raise RuntimeError(f"{seed_file.name}: name/title is required")
+
+        summary = str(metadata.get("summary") or metadata.get("description") or "").strip() or _extract_seed_summary(content)
+        if not summary:
+            raise RuntimeError(f"{seed_file.name}: summary/description is required")
+
+        mode = str(metadata.get("mode") or "advisory").strip().lower()
+        if mode not in _SEED_ALLOWED_MODES:
+            allowed = ", ".join(sorted(_SEED_ALLOWED_MODES))
+            raise RuntimeError(f"{seed_file.name}: mode must be one of: {allowed}")
+
+        trust_level = str(metadata.get("trust_level") or "verified").strip().lower()
+        if trust_level not in _SEED_ALLOWED_TRUST_LEVELS:
+            allowed = ", ".join(sorted(_SEED_ALLOWED_TRUST_LEVELS))
+            raise RuntimeError(f"{seed_file.name}: trust_level must be one of: {allowed}")
+
+        source_locator = str(metadata.get("source_locator") or f"seed://workspace-skills/{skill_key.replace('_', '-')}").strip()
+        loaded.append(
+            {
+                "skill_key": skill_key,
+                "name": name,
+                "summary": summary,
+                "source_locator": source_locator,
+                "mode": mode,
+                "trust_level": trust_level,
+                "content": content.strip(),
+            }
+        )
+
+    return tuple(loaded)
+
+
+def _get_default_workspace_skills() -> tuple[dict[str, str], ...]:
+    global _DEFAULT_WORKSPACE_SKILLS_CACHE
+    if _DEFAULT_WORKSPACE_SKILLS_CACHE is None:
+        _DEFAULT_WORKSPACE_SKILLS_CACHE = _load_default_workspace_skills()
+    return _DEFAULT_WORKSPACE_SKILLS_CACHE
 
 
 def ensure_system_users(db: Session):
@@ -160,7 +250,7 @@ def ensure_non_human_workspace_admin_roles(db: Session):
 def ensure_workspace_skill_catalog_seed(db: Session, *, workspace_id: str, actor_user_id: str):
     changed = False
     imported_at = datetime.now(timezone.utc).isoformat()
-    for default_skill in _DEFAULT_WORKSPACE_SKILLS:
+    for default_skill in _get_default_workspace_skills():
         skill_key = str(default_skill["skill_key"])
         existing = db.execute(
             select(WorkspaceSkill).where(

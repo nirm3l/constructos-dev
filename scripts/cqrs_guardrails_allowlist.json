@@ -9,6 +9,11 @@
       "path": "app/features/users/api.py",
       "regex": "\\bdb\\.execute\\(\\s*delete\\(",
       "reason": "Auth session revocation and expiration cleanup are currently infrastructure-managed in this API slice."
+    },
+    {
+      "path": "app/features/project_skills/application.py",
+      "regex": "\\bself\\.db\\.add\\(skill_entity\\)",
+      "reason": "Project/workspace skill import upsert is a transitional write path pending aggregate-based command migration."
     }
   ]
 }

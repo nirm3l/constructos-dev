@@ -613,7 +613,7 @@ def _build_onboarding_email_template(
     subject = "ConstructOS onboarding package"
     install_command = (
         f"curl -fsSL {install_script_url} | "
-        f"ACTIVATION_CODE={activation_code} IMAGE_TAG={image_tag} AUTO_DEPLOY=1 bash"
+        f"ACTIVATION_CODE={activation_code} IMAGE_TAG={image_tag} INSTALL_COS=true AUTO_DEPLOY=1 bash"
     )
 
     text_body = (
@@ -1328,13 +1328,20 @@ def _upsert_installation(db: Session, payload: InstallationRegisterRequest | Ins
     now = _now_utc()
     if installation is None:
         trial_ends_at = now + timedelta(days=LCP_TRIAL_DAYS)
+        metadata = dict(payload.metadata or {})
+        metadata.setdefault("beta_auto_assigned", True)
+        metadata.setdefault("beta_auto_assigned_reason", "install-registration")
+        metadata.setdefault("beta_auto_assigned_at", now.isoformat())
         installation = Installation(
             installation_id=payload.installation_id,
             workspace_id=payload.workspace_id,
             customer_ref=str(payload.customer_ref or "").strip() or None,
+            plan_code="beta",
+            subscription_status="beta",
+            subscription_valid_until=LCP_BETA_PLAN_VALID_UNTIL,
             trial_started_at=now,
             trial_ends_at=trial_ends_at,
-            metadata_json=_dump_metadata(payload.metadata or {}),
+            metadata_json=_dump_metadata(metadata),
         )
         db.add(installation)
         db.flush()
@@ -1392,13 +1399,18 @@ def _serialize_installation(installation: Installation) -> dict[str, Any]:
     subscription_status = _canonicalize_subscription_status(installation.subscription_status)
     if subscription_status not in SUPPORTED_SUBSCRIPTION_STATUSES:
         subscription_status = "none"
+    subscription_valid_until = installation.subscription_valid_until
+    if subscription_valid_until and subscription_valid_until.tzinfo is None:
+        subscription_valid_until = subscription_valid_until.replace(tzinfo=timezone.utc)
+    if subscription_valid_until:
+        subscription_valid_until = subscription_valid_until.astimezone(timezone.utc)
     return {
         "installation_id": installation.installation_id,
         "workspace_id": installation.workspace_id,
         "customer_ref": installation.customer_ref,
         "plan_code": installation.plan_code,
         "subscription_status": subscription_status,
-        "subscription_valid_until": installation.subscription_valid_until.isoformat() if installation.subscription_valid_until else None,
+        "subscription_valid_until": subscription_valid_until.isoformat() if subscription_valid_until else None,
         "trial_started_at": installation.trial_started_at.isoformat(),
         "trial_ends_at": installation.trial_ends_at.isoformat(),
         "activation_ip": activation_ip,
@@ -2017,20 +2029,10 @@ def activate_installation(
     )
     _enforce_installation_customer_scope(installation, auth_context)
     installation.customer_ref = activation_code.customer_ref
-    plan_code = str(activation_code.plan_code or installation.plan_code or "monthly").strip() or "monthly"
-    installation.plan_code = plan_code
-    if plan_code.lower() == "lifetime":
-        installation.subscription_status = "lifetime"
-        installation.subscription_valid_until = None
-    elif plan_code.lower() == "beta":
-        installation.subscription_status = "beta"
-        installation.subscription_valid_until = code_valid_until or LCP_BETA_PLAN_VALID_UNTIL
-    elif plan_code.lower() == "trial":
-        installation.subscription_status = "trialing"
-        installation.subscription_valid_until = code_valid_until or installation.trial_ends_at
-    else:
-        installation.subscription_status = "active"
-        installation.subscription_valid_until = code_valid_until
+    # Activation always results in beta entitlement regardless of activation-code plan.
+    installation.plan_code = "beta"
+    installation.subscription_status = "beta"
+    installation.subscription_valid_until = LCP_BETA_PLAN_VALID_UNTIL
 
     merged_metadata = _load_metadata(installation.metadata_json)
     merged_metadata.update(payload.metadata or {})
@@ -2039,6 +2041,9 @@ def activate_installation(
             "activation_code_suffix": activation_code.code_suffix,
             "activation_code_id": activation_code.id,
             "activated_at": now.isoformat(),
+            "beta_auto_assigned": True,
+            "beta_auto_assigned_reason": "activation",
+            "beta_auto_assigned_at": now.isoformat(),
         }
     )
     activation_ip = _resolve_request_ip(request)
