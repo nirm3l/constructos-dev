@@ -6683,7 +6683,11 @@ textarea:disabled {
 .codex-chat-session-meta-thread {
   display: inline-flex;
   align-items: center;
+  gap: 6px;
+  min-width: 0;
   max-width: min(460px, 82vw);
+  appearance: none;
+  -webkit-appearance: none;
   border: 1px solid color-mix(in srgb, var(--line), var(--brand) 20%);
   border-radius: 999px;
   padding: 1px 7px;
@@ -6695,6 +6699,38 @@ textarea:disabled {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  cursor: pointer;
+  text-align: left;
+  outline: none;
+}
+
+.codex-chat-session-meta-thread:hover {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 28%);
+  color: color-mix(in srgb, var(--text), var(--muted) 16%);
+}
+
+.codex-chat-session-meta-thread:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--brand), white 30%);
+  outline-offset: 1px;
+}
+
+.codex-chat-session-meta-thread-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.codex-chat-session-meta-thread-copy-icon {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  opacity: 0.78;
+}
+
+.codex-chat-session-meta-thread-copy-icon .icon {
+  width: 12px;
+  height: 12px;
+  stroke-width: 2.1;
 }
 
 .codex-chat-session-meta-resume-fallback {

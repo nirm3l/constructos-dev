@@ -110,6 +110,30 @@ function normalizeBool(value: unknown): boolean {
   return false
 }
 
+async function copyTextToClipboard(text: string): Promise<void> {
+  const canUseClipboardApi = typeof navigator !== 'undefined' && Boolean(navigator.clipboard?.writeText)
+  if (canUseClipboardApi) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  if (typeof document !== 'undefined') {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.setAttribute('readonly', 'true')
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    ta.style.pointerEvents = 'none'
+    document.body.appendChild(ta)
+    ta.focus()
+    ta.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    if (!ok) throw new Error('Clipboard copy is not supported in this browser context')
+    return
+  }
+  throw new Error('Clipboard copy is not available')
+}
+
 function ChatTooltip({
   content,
   children,
@@ -146,6 +170,9 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const [deleteSessionDialogOpen, setDeleteSessionDialogOpen] = React.useState(false)
   const [clearChatDialogOpen, setClearChatDialogOpen] = React.useState(false)
   const [deleteSessionId, setDeleteSessionId] = React.useState<string | null>(null)
+  const [resumeCommandCopyState, setResumeCommandCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
+  const codexThreadId = String(state.codexChatCodexSessionId || '').trim()
+  const codexResumeCommand = codexThreadId ? `cos resume ${codexThreadId}` : null
 
   React.useEffect(() => {
     setChatAttachmentRefs([])
@@ -187,6 +214,29 @@ export function CodexChatDrawer({ state }: { state: any }) {
     input.style.height = `${nextHeight}px`
     input.style.overflowY = input.scrollHeight > CHAT_INPUT_MAX_HEIGHT_PX ? 'auto' : 'hidden'
   }, [state.codexChatInstruction, state.showCodexChat, state.codexChatSessionId])
+
+  React.useEffect(() => {
+    setResumeCommandCopyState('idle')
+  }, [codexResumeCommand])
+
+  React.useEffect(() => {
+    if (resumeCommandCopyState === 'idle') return
+    const timeoutMs = resumeCommandCopyState === 'copied' ? 1400 : 1800
+    const timer = window.setTimeout(() => {
+      setResumeCommandCopyState('idle')
+    }, timeoutMs)
+    return () => window.clearTimeout(timer)
+  }, [resumeCommandCopyState])
+
+  const copyResumeCommandToClipboard = React.useCallback(async () => {
+    if (!codexResumeCommand) return
+    try {
+      await copyTextToClipboard(codexResumeCommand)
+      setResumeCommandCopyState('copied')
+    } catch {
+      setResumeCommandCopyState('error')
+    }
+  }, [codexResumeCommand])
 
   if (!state.showCodexChat) return null
   const usage = state.codexChatUsage
@@ -298,14 +348,18 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const contextSummary = inputTokens !== null
     ? (contextLimitTokens && usagePercent !== null ? `Context ${usagePercent}%` : `Context ${inputTokens.toLocaleString()}`)
     : null
-  const codexThreadId = String(state.codexChatCodexSessionId || '').trim()
   const codexResumeFallbackUsed = Boolean(
     normalizeBool(state.codexChatResumeState?.fallbackUsed)
     || normalizeBool(usage?.codex_resume_fallback_used)
   )
-  const codexResumeCommand = codexThreadId ? `cos resume ${codexThreadId}` : null
   const codexResumeHint = codexResumeCommand
-    ? `Continue this session from command line: ${codexResumeCommand}`
+    ? (
+      resumeCommandCopyState === 'copied'
+        ? 'Copied'
+        : resumeCommandCopyState === 'error'
+          ? 'Copy failed'
+          : `Continue this session from command line. Click to copy: ${codexResumeCommand}`
+    )
     : null
   const hasContext = contextSummary !== null
   const metaParts: string[] = []
@@ -767,9 +821,17 @@ export function CodexChatDrawer({ state }: { state: any }) {
                 {metaParts.map((part, idx) => <span key={`${idx}-${part}`}>{part}</span>)}
                 {codexThreadId && codexResumeCommand && codexResumeHint && (
                   <ChatTooltip content={codexResumeHint}>
-                    <span className="codex-chat-session-meta-thread" aria-label={codexResumeHint}>
-                      {codexResumeCommand}
-                    </span>
+                    <button
+                      type="button"
+                      className="codex-chat-session-meta-thread"
+                      aria-label={codexResumeHint}
+                      onClick={() => { void copyResumeCommandToClipboard() }}
+                    >
+                      <span className="codex-chat-session-meta-thread-text">{codexResumeCommand}</span>
+                      <span className="codex-chat-session-meta-thread-copy-icon" aria-hidden="true">
+                        <Icon path="M9 9h11v11H9zM4 4h11v2H6v9H4z" />
+                      </span>
+                    </button>
                   </ChatTooltip>
                 )}
                 {codexResumeFallbackUsed && (
