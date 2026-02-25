@@ -98,13 +98,18 @@ LCP_EMAIL_REQUEST_TIMEOUT_SECONDS = max(2.0, _env_float("LCP_EMAIL_REQUEST_TIMEO
 LCP_CUSTOMER_REF_SECRET = os.getenv("LCP_CUSTOMER_REF_SECRET", "").strip()
 LCP_CUSTOMER_REF_PREFIX = os.getenv("LCP_CUSTOMER_REF_PREFIX", "cust").strip() or "cust"
 LCP_CUSTOMER_REF_LENGTH = max(8, min(48, _env_int("LCP_CUSTOMER_REF_LENGTH", 20)))
+LCP_UNASSIGNED_CUSTOMER_REF = os.getenv("LCP_UNASSIGNED_CUSTOMER_REF", "cust_unassigned").strip() or "cust_unassigned"
 LCP_ONBOARDING_IMAGE_TAG = os.getenv("LCP_ONBOARDING_IMAGE_TAG", "main").strip() or "main"
 LCP_ONBOARDING_INSTALL_SCRIPT_URL = (
     os.getenv("LCP_ONBOARDING_INSTALL_SCRIPT_URL", "https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh").strip()
     or "https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh"
 )
 LCP_ONBOARDING_SUPPORT_EMAIL = os.getenv("LCP_ONBOARDING_SUPPORT_EMAIL", "support@constructos.dev").strip() or "support@constructos.dev"
-LCP_PUBLIC_BETA_FREE_UNTIL = _env_datetime_utc("LCP_PUBLIC_BETA_FREE_UNTIL")
+LCP_BETA_PLAN_VALID_UNTIL = (
+    _env_datetime_utc("LCP_BETA_PLAN_VALID_UNTIL")
+    or _env_datetime_utc("LCP_PUBLIC_BETA_FREE_UNTIL")
+    or datetime(2026, 3, 31, 23, 59, 59, tzinfo=timezone.utc)
+)
 LCP_ADMIN_SSE_POLL_SECONDS = max(0.5, _env_float("LCP_ADMIN_SSE_POLL_SECONDS", 1.0))
 LCP_ADMIN_SSE_HEARTBEAT_SECONDS = max(5.0, _env_float("LCP_ADMIN_SSE_HEARTBEAT_SECONDS", 15.0))
 LCP_CORS_ORIGINS = [
@@ -126,9 +131,25 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 INDEX_HTML = STATIC_DIR / "index.html"
 EMAIL_PATTERN = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
-PUBLIC_REQUEST_TYPES = {"demo", "onboarding", "plan_details"}
+PUBLIC_REQUEST_TYPES = {"demo", "onboarding", "plan_details", "feedback"}
+SUPPORT_FEEDBACK_TYPES = {"general", "feature_request", "question", "other"}
 BUG_REPORT_SEVERITIES = {"low", "medium", "high", "critical"}
 BUG_REPORT_STATUSES = {"new", "triaged", "in_progress", "resolved", "closed", "rejected"}
+SUPPORTED_SUBSCRIPTION_STATUSES = {"none", "active", "trialing", "grace", "lifetime", "beta"}
+SUBSCRIPTION_STATUS_ALIASES = {
+    "past_due": "grace",
+    "canceled": "none",
+}
+SUBSCRIPTION_STATUS_FILTER_EQUIVALENTS = {
+    "none": {"none", "canceled"},
+    "grace": {"grace", "past_due"},
+}
+RESERVED_PLAN_CODES = {"lifetime", "beta", "trial"}
+STATUS_CANONICAL_PLAN_CODE = {
+    "lifetime": "lifetime",
+    "beta": "beta",
+    "trialing": "trial",
+}
 
 Base = declarative_base()
 
@@ -266,6 +287,7 @@ SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 class InstallationRegisterRequest(BaseModel):
     installation_id: str = Field(min_length=3, max_length=128)
     workspace_id: str | None = None
+    customer_ref: str | None = Field(default=None, max_length=128)
     app_version: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -273,6 +295,7 @@ class InstallationRegisterRequest(BaseModel):
 class InstallationHeartbeatRequest(BaseModel):
     installation_id: str = Field(min_length=3, max_length=128)
     workspace_id: str | None = None
+    customer_ref: str | None = Field(default=None, max_length=128)
     app_version: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -347,6 +370,18 @@ class ContactRequestCreateRequest(BaseModel):
     request_type: str = Field(min_length=3, max_length=32)
     email: str = Field(min_length=5, max_length=320)
     source: str | None = Field(default="marketing-site", max_length=64)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SupportFeedbackCreateRequest(BaseModel):
+    installation_id: str = Field(min_length=3, max_length=128)
+    workspace_id: str | None = Field(default=None, max_length=64)
+    source: str | None = Field(default="task-app-ui", max_length=64)
+    title: str = Field(min_length=3, max_length=140)
+    description: str = Field(min_length=5, max_length=4000)
+    feedback_type: str = Field(default="general", min_length=3, max_length=32)
+    reporter_user_id: str | None = Field(default=None, max_length=64)
+    reporter_username: str | None = Field(default=None, max_length=128)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -730,6 +765,14 @@ def _normalize_public_request_type(value: str | None) -> str:
     return normalized
 
 
+def _normalize_support_feedback_type(value: str | None) -> str:
+    normalized = str(value or "").strip().lower() or "general"
+    if normalized not in SUPPORT_FEEDBACK_TYPES:
+        allowed = ", ".join(sorted(SUPPORT_FEEDBACK_TYPES))
+        raise HTTPException(status_code=400, detail=f"Unsupported feedback_type. Allowed values: {allowed}")
+    return normalized
+
+
 def _normalize_bug_report_severity(value: str | None) -> str:
     normalized = str(value or "").strip().lower() or "medium"
     if normalized not in BUG_REPORT_SEVERITIES:
@@ -852,11 +895,150 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _is_public_beta_active(now: datetime | None = None) -> bool:
-    if LCP_PUBLIC_BETA_FREE_UNTIL is None:
-        return False
+def _is_beta_plan_active(now: datetime | None = None) -> bool:
     current = now or _now_utc()
-    return current < LCP_PUBLIC_BETA_FREE_UNTIL
+    return current < LCP_BETA_PLAN_VALID_UNTIL
+
+
+def _canonicalize_subscription_status(value: str | None) -> str:
+    status_value = str(value or "").strip().lower()
+    return SUBSCRIPTION_STATUS_ALIASES.get(status_value, status_value)
+
+
+def _normalize_subscription_status(value: str | None) -> str:
+    status_value = _canonicalize_subscription_status(value)
+    if status_value not in SUPPORTED_SUBSCRIPTION_STATUSES:
+        raise HTTPException(status_code=400, detail="Unsupported subscription_status")
+    return status_value
+
+
+def _normalize_plan_code_for_status(
+    *,
+    status_value: str,
+    plan_code: str | None,
+    existing_plan_code: str | None = None,
+) -> str | None:
+    requested = str(plan_code or "").strip()
+    requested_lower = requested.lower()
+    existing = str(existing_plan_code or "").strip()
+    existing_lower = existing.lower()
+
+    if status_value in STATUS_CANONICAL_PLAN_CODE:
+        canonical = STATUS_CANONICAL_PLAN_CODE[status_value]
+        if requested and requested_lower != canonical:
+            raise HTTPException(
+                status_code=400,
+                detail=f"plan_code must be '{canonical}' when subscription_status is '{status_value}'",
+            )
+        return canonical
+
+    resolved = requested or existing
+    resolved_lower = resolved.lower() if resolved else ""
+
+    if status_value in {"active", "grace"}:
+        if not resolved:
+            raise HTTPException(
+                status_code=400,
+                detail=f"plan_code is required when subscription_status is '{status_value}'",
+            )
+        if resolved_lower in RESERVED_PLAN_CODES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"plan_code '{resolved_lower}' is not allowed when subscription_status is '{status_value}'",
+            )
+        return resolved
+
+    if status_value == "none":
+        # "none" means no subscription attached; always clear plan code.
+        return None
+
+    return resolved or None
+
+
+def _resolve_subscription_valid_until(
+    *,
+    status_value: str,
+    requested_valid_until: str | None,
+    existing_valid_until: datetime | None = None,
+) -> datetime | None:
+    normalized_existing_valid_until = existing_valid_until
+    if normalized_existing_valid_until and normalized_existing_valid_until.tzinfo is None:
+        normalized_existing_valid_until = normalized_existing_valid_until.replace(tzinfo=timezone.utc)
+    if normalized_existing_valid_until:
+        normalized_existing_valid_until = normalized_existing_valid_until.astimezone(timezone.utc)
+
+    if status_value == "lifetime":
+        return None
+    if status_value == "trialing":
+        parsed = _parse_iso_datetime(requested_valid_until)
+        resolved = parsed or normalized_existing_valid_until
+        if resolved is None:
+            raise HTTPException(status_code=400, detail="valid_until is required for trialing subscriptions")
+        if resolved <= _now_utc():
+            raise HTTPException(status_code=400, detail="valid_until must be in the future")
+        return resolved
+    if status_value == "beta":
+        parsed = _parse_iso_datetime(requested_valid_until)
+        resolved = parsed or normalized_existing_valid_until or LCP_BETA_PLAN_VALID_UNTIL
+        if resolved and resolved <= _now_utc():
+            raise HTTPException(status_code=400, detail="valid_until must be in the future")
+        return resolved
+    if status_value == "none":
+        return None
+    return _parse_iso_datetime(requested_valid_until)
+
+
+def _ensure_installation_has_customer_ref(
+    installation: Installation,
+    payload_customer_ref: str | None = None,
+) -> None:
+    requested_customer_ref = str(payload_customer_ref or "").strip()
+    if requested_customer_ref:
+        normalized = _normalize_customer_ref(requested_customer_ref)
+        current_customer_ref = str(installation.customer_ref or "").strip()
+        if current_customer_ref and current_customer_ref != normalized:
+            raise HTTPException(
+                status_code=403,
+                detail="customer_ref in request does not match existing installation customer_ref",
+            )
+        installation.customer_ref = normalized
+
+    if str(installation.customer_ref or "").strip():
+        return
+
+    # Backfill any missing customer assignment with a deterministic shared bucket.
+    installation.customer_ref = LCP_UNASSIGNED_CUSTOMER_REF
+    merged_metadata = _load_metadata(installation.metadata_json)
+    merged_metadata.setdefault("customer_ref_auto_assigned", True)
+    merged_metadata.setdefault("customer_ref_auto_assigned_at", _now_utc().isoformat())
+    installation.metadata_json = _dump_metadata(merged_metadata)
+
+
+def _apply_subscription_update_to_installation(
+    installation: Installation,
+    *,
+    status_value: str,
+    plan_code: str | None,
+    customer_ref: str | None,
+    valid_until: datetime | None,
+    metadata: dict[str, Any] | None,
+) -> None:
+    installation.subscription_status = status_value
+
+    installation.plan_code = _normalize_plan_code_for_status(
+        status_value=status_value,
+        plan_code=plan_code,
+        existing_plan_code=installation.plan_code,
+    )
+
+    requested_customer_ref = str(customer_ref or "").strip()
+    if requested_customer_ref:
+        installation.customer_ref = _normalize_customer_ref(requested_customer_ref)
+    installation.subscription_valid_until = valid_until
+
+    merged_metadata = _load_metadata(installation.metadata_json)
+    merged_metadata.update(metadata or {})
+    installation.metadata_json = _dump_metadata(merged_metadata)
 
 
 def _load_metadata(raw: str | None) -> dict[str, Any]:
@@ -1015,6 +1197,14 @@ def _bug_report_dedup_key(*, installation_id: str, title: str, description: str,
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _feedback_identity_to_pseudo_email(*, identity: str | None, fallback: str) -> str:
+    normalized_identity = str(identity or "").strip().lower()
+    local_part = re.sub(r"[^a-z0-9._-]+", "-", normalized_identity).strip(".-_")
+    if not local_part:
+        local_part = re.sub(r"[^a-z0-9._-]+", "-", str(fallback or "").strip().lower()).strip(".-_") or "feedback"
+    return f"{local_part[:64]}@feedback.local"
+
+
 def _active_customer_installations(db: Session, customer_ref: str) -> list[Installation]:
     matches = db.execute(
         select(Installation).where(Installation.customer_ref == customer_ref)
@@ -1051,26 +1241,49 @@ def _compute_entitlement(installation: Installation) -> dict[str, Any]:
     if valid_until:
         valid_until = valid_until.astimezone(timezone.utc)
 
-    subscription_status = str(installation.subscription_status or "none").strip().lower()
+    subscription_status = _canonicalize_subscription_status(installation.subscription_status or "none")
+    if subscription_status not in SUPPORTED_SUBSCRIPTION_STATUSES:
+        subscription_status = "none"
 
     status = "expired"
     plan_code = installation.plan_code or None
     effective_valid_until = valid_until
-    is_public_beta_entitlement = False
-    if subscription_status in {"active", "trialing"} and (valid_until is None or valid_until > now):
+    entitlement_reason = "expired"
+    if subscription_status == "lifetime":
         status = "active"
-    elif subscription_status in {"grace", "past_due"} and valid_until and valid_until > now:
+        plan_code = plan_code or "lifetime"
+        effective_valid_until = None
+        entitlement_reason = "subscription_lifetime"
+    elif subscription_status == "beta":
+        plan_code = plan_code or "beta"
+        if effective_valid_until is None:
+            effective_valid_until = LCP_BETA_PLAN_VALID_UNTIL
+        if effective_valid_until and effective_valid_until > now:
+            status = "active"
+            entitlement_reason = "subscription_beta"
+        else:
+            status = "expired"
+            entitlement_reason = "subscription_beta_expired"
+    elif subscription_status == "trialing":
+        plan_code = plan_code or "trial"
+        if valid_until and valid_until > now:
+            status = "active"
+            effective_valid_until = valid_until
+            entitlement_reason = "subscription_trialing"
+        else:
+            status = "expired"
+            effective_valid_until = None
+            entitlement_reason = "subscription_trialing_expired"
+    elif subscription_status == "active" and (valid_until is None or valid_until > now):
+        status = "active"
+        entitlement_reason = "subscription_active"
+    elif subscription_status == "grace" and valid_until and valid_until > now:
         status = "grace"
-    elif _is_public_beta_active(now):
-        status = "active"
-        plan_code = plan_code or "beta_free"
-        effective_valid_until = LCP_PUBLIC_BETA_FREE_UNTIL
-        is_public_beta_entitlement = True
-    elif trial_ends_at > now:
-        status = "trial"
-        if not plan_code:
-            plan_code = "trial"
-        effective_valid_until = trial_ends_at
+        entitlement_reason = "subscription_grace"
+    elif subscription_status == "none":
+        status = "expired"
+        effective_valid_until = None
+        entitlement_reason = "subscription_none"
     else:
         effective_valid_until = None
 
@@ -1078,9 +1291,8 @@ def _compute_entitlement(installation: Installation) -> dict[str, Any]:
     metadata = dict(_load_metadata(installation.metadata_json))
     metadata["subscription_status"] = subscription_status
     metadata["subscription_valid_until"] = valid_until.isoformat() if valid_until else None
-    if is_public_beta_entitlement and LCP_PUBLIC_BETA_FREE_UNTIL:
-        metadata["public_beta"] = True
-        metadata["public_beta_free_until"] = LCP_PUBLIC_BETA_FREE_UNTIL.isoformat()
+    metadata["effective_valid_until"] = effective_valid_until.isoformat() if effective_valid_until else None
+    metadata["entitlement_reason"] = entitlement_reason
 
     return {
         "installation_id": installation.installation_id,
@@ -1116,11 +1328,10 @@ def _upsert_installation(db: Session, payload: InstallationRegisterRequest | Ins
     now = _now_utc()
     if installation is None:
         trial_ends_at = now + timedelta(days=LCP_TRIAL_DAYS)
-        if LCP_PUBLIC_BETA_FREE_UNTIL and LCP_PUBLIC_BETA_FREE_UNTIL > trial_ends_at:
-            trial_ends_at = LCP_PUBLIC_BETA_FREE_UNTIL
         installation = Installation(
             installation_id=payload.installation_id,
             workspace_id=payload.workspace_id,
+            customer_ref=str(payload.customer_ref or "").strip() or None,
             trial_started_at=now,
             trial_ends_at=trial_ends_at,
             metadata_json=_dump_metadata(payload.metadata or {}),
@@ -1133,6 +1344,19 @@ def _upsert_installation(db: Session, payload: InstallationRegisterRequest | Ins
     if payload.workspace_id and installation.workspace_id != payload.workspace_id:
         installation.workspace_id = payload.workspace_id
         changed = True
+
+    requested_customer_ref = str(payload.customer_ref or "").strip()
+    if requested_customer_ref:
+        normalized_customer_ref = _normalize_customer_ref(requested_customer_ref)
+        current_customer_ref = str(installation.customer_ref or "").strip()
+        if current_customer_ref and current_customer_ref != normalized_customer_ref:
+            raise HTTPException(
+                status_code=403,
+                detail="customer_ref in request does not match existing installation customer_ref",
+            )
+        if installation.customer_ref != normalized_customer_ref:
+            installation.customer_ref = normalized_customer_ref
+            changed = True
 
     merged_metadata = _load_metadata(installation.metadata_json)
     if payload.metadata:
@@ -1165,12 +1389,15 @@ def _build_entitlement_bundle(entitlement_payload: dict[str, Any]) -> tuple[dict
 def _serialize_installation(installation: Installation) -> dict[str, Any]:
     metadata = _load_metadata(installation.metadata_json)
     activation_ip = str(metadata.get("activation_ip") or "").strip() or None
+    subscription_status = _canonicalize_subscription_status(installation.subscription_status)
+    if subscription_status not in SUPPORTED_SUBSCRIPTION_STATUSES:
+        subscription_status = "none"
     return {
         "installation_id": installation.installation_id,
         "workspace_id": installation.workspace_id,
         "customer_ref": installation.customer_ref,
         "plan_code": installation.plan_code,
-        "subscription_status": installation.subscription_status,
+        "subscription_status": subscription_status,
         "subscription_valid_until": installation.subscription_valid_until.isoformat() if installation.subscription_valid_until else None,
         "trial_started_at": installation.trial_started_at.isoformat(),
         "trial_ends_at": installation.trial_ends_at.isoformat(),
@@ -1206,6 +1433,26 @@ def _startup() -> None:
         except SigningError as exc:
             raise RuntimeError(f"Failed to initialize signing key: {exc}") from exc
 
+    # Keep data consistent for customer-first operations.
+    with SessionLocal() as db:
+        records = db.execute(
+            select(Installation).where(
+                or_(
+                    Installation.customer_ref.is_(None),
+                    Installation.customer_ref == "",
+                )
+            )
+        ).scalars().all()
+        if records:
+            now_iso = _now_utc().isoformat()
+            for installation in records:
+                installation.customer_ref = LCP_UNASSIGNED_CUSTOMER_REF
+                merged_metadata = _load_metadata(installation.metadata_json)
+                merged_metadata.setdefault("customer_ref_auto_assigned", True)
+                merged_metadata.setdefault("customer_ref_auto_assigned_at", now_iso)
+                installation.metadata_json = _dump_metadata(merged_metadata)
+            db.commit()
+
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
@@ -1214,8 +1461,11 @@ def health() -> dict[str, Any]:
         "timestamp": _now_utc().isoformat(),
         "trial_days": LCP_TRIAL_DAYS,
         "default_max_installations": LCP_DEFAULT_MAX_INSTALLATIONS,
-        "public_beta_free_until": LCP_PUBLIC_BETA_FREE_UNTIL.isoformat() if LCP_PUBLIC_BETA_FREE_UNTIL else None,
-        "public_beta_active": _is_public_beta_active(),
+        # Backward-compatible fields kept for existing UI clients.
+        "public_beta_free_until": LCP_BETA_PLAN_VALID_UNTIL.isoformat(),
+        "public_beta_active": _is_beta_plan_active(),
+        "beta_plan_valid_until": LCP_BETA_PLAN_VALID_UNTIL.isoformat(),
+        "beta_plan_active": _is_beta_plan_active(),
     }
 
 
@@ -1388,6 +1638,82 @@ def public_create_contact_request(
     }
 
 
+@app.post("/v1/support/feedback")
+def create_support_feedback(
+    payload: SupportFeedbackCreateRequest,
+    request: Request,
+    auth_context: InstallationAuthContext = Depends(_require_installation_auth),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    installation_id = str(payload.installation_id or "").strip()
+    if not installation_id:
+        raise HTTPException(status_code=400, detail="installation_id is required")
+
+    title = str(payload.title or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title is required")
+
+    description = str(payload.description or "").strip()
+    if not description:
+        raise HTTPException(status_code=400, detail="description is required")
+
+    feedback_type = _normalize_support_feedback_type(payload.feedback_type)
+    source = str(payload.source or "").strip()[:64] or "task-app-ui"
+
+    installation = db.execute(
+        select(Installation).where(Installation.installation_id == installation_id)
+    ).scalar_one_or_none()
+    token_customer_ref = str(auth_context.customer_ref or "").strip() or None
+    installation_customer_ref = str(installation.customer_ref or "").strip() if installation is not None else ""
+    if token_customer_ref and installation_customer_ref and token_customer_ref != installation_customer_ref:
+        raise HTTPException(status_code=403, detail="Token is not allowed for this installation")
+    if installation is not None and token_customer_ref and not installation_customer_ref:
+        installation.customer_ref = token_customer_ref
+
+    workspace_id = str(payload.workspace_id or "").strip()[:64] or None
+    customer_ref = token_customer_ref or installation_customer_ref or None
+    reporter_username = str(payload.reporter_username or "").strip() or None
+    reporter_user_id = str(payload.reporter_user_id or "").strip() or None
+    identity_for_email = reporter_username or reporter_user_id or installation_id
+
+    metadata = dict(payload.metadata or {})
+    request_ip = _resolve_request_ip(request)
+    user_agent = str(request.headers.get("user-agent") or "").strip()[:512]
+    if request_ip:
+        metadata["request_ip"] = request_ip
+    if user_agent:
+        metadata["user_agent"] = user_agent
+    metadata["installation_id"] = installation_id
+    metadata["workspace_id"] = workspace_id
+    metadata["customer_ref"] = customer_ref
+    metadata["feedback_type"] = feedback_type
+    metadata["title"] = title
+    metadata["description"] = description
+    metadata["reporter_user_id"] = reporter_user_id
+    metadata["reporter_username"] = reporter_username
+
+    record = ContactRequest(
+        request_type="feedback",
+        email=_feedback_identity_to_pseudo_email(identity=identity_for_email, fallback=installation_id),
+        source=source,
+        status="pending",
+        metadata_json=_dump_metadata(metadata),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    _publish_admin_event(
+        "contact_requests",
+        "created",
+        {"id": record.id, "request_type": record.request_type, "created": True},
+    )
+    return {
+        "ok": True,
+        "created": True,
+        "feedback": _serialize_contact_request(record),
+    }
+
+
 @app.post("/v1/support/bug-reports")
 def create_bug_report(
     payload: BugReportCreateRequest,
@@ -1503,6 +1829,7 @@ def register_installation(
 ) -> dict[str, Any]:
     installation = _upsert_installation(db, payload)
     _enforce_installation_customer_scope(installation, auth_context)
+    _ensure_installation_has_customer_ref(installation, payload.customer_ref)
     entitlement = _compute_entitlement(installation)
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
@@ -1619,6 +1946,7 @@ def heartbeat_installation(
 ) -> dict[str, Any]:
     installation = _upsert_installation(db, payload)
     _enforce_installation_customer_scope(installation, auth_context)
+    _ensure_installation_has_customer_ref(installation, payload.customer_ref)
     entitlement = _compute_entitlement(installation)
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
@@ -1689,9 +2017,20 @@ def activate_installation(
     )
     _enforce_installation_customer_scope(installation, auth_context)
     installation.customer_ref = activation_code.customer_ref
-    installation.plan_code = str(activation_code.plan_code or installation.plan_code or "monthly").strip() or "monthly"
-    installation.subscription_status = "active"
-    installation.subscription_valid_until = code_valid_until
+    plan_code = str(activation_code.plan_code or installation.plan_code or "monthly").strip() or "monthly"
+    installation.plan_code = plan_code
+    if plan_code.lower() == "lifetime":
+        installation.subscription_status = "lifetime"
+        installation.subscription_valid_until = None
+    elif plan_code.lower() == "beta":
+        installation.subscription_status = "beta"
+        installation.subscription_valid_until = code_valid_until or LCP_BETA_PLAN_VALID_UNTIL
+    elif plan_code.lower() == "trial":
+        installation.subscription_status = "trialing"
+        installation.subscription_valid_until = code_valid_until or installation.trial_ends_at
+    else:
+        installation.subscription_status = "active"
+        installation.subscription_valid_until = code_valid_until
 
     merged_metadata = _load_metadata(installation.metadata_json)
     merged_metadata.update(payload.metadata or {})
@@ -1745,17 +2084,26 @@ def admin_create_activation_code(
     if not customer_ref:
         raise HTTPException(status_code=400, detail="customer_ref is required")
 
-    try:
-        valid_until = _parse_iso_datetime(payload.valid_until)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid valid_until value: {exc}") from exc
-    if valid_until and valid_until <= _now_utc():
-        raise HTTPException(status_code=400, detail="valid_until must be in the future")
+    plan_code = str(payload.plan_code or "").strip() or "monthly"
+    if plan_code.lower() == "lifetime":
+        valid_until = None
+    else:
+        if plan_code.lower() == "beta" and not str(payload.valid_until or "").strip():
+            valid_until = LCP_BETA_PLAN_VALID_UNTIL
+        else:
+            try:
+                valid_until = _parse_iso_datetime(payload.valid_until)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid valid_until value: {exc}") from exc
+        if plan_code.lower() == "trial" and valid_until is None:
+            raise HTTPException(status_code=400, detail="valid_until is required for trial plan_code")
+        if valid_until and valid_until <= _now_utc():
+            raise HTTPException(status_code=400, detail="valid_until must be in the future")
 
     activation_code_raw, record = _create_activation_code_record(
         db,
         customer_ref=customer_ref,
-        plan_code=str(payload.plan_code or "").strip() or "monthly",
+        plan_code=plan_code,
         valid_until=valid_until,
         max_installations=int(payload.max_installations or LCP_DEFAULT_MAX_INSTALLATIONS),
         metadata=payload.metadata or {},
@@ -1974,14 +2322,21 @@ def admin_provision_onboarding(
     to_email = _normalize_email(payload.to_email)
     customer_ref = _customer_ref_from_email(to_email)
 
-    try:
-        valid_until = _parse_iso_datetime(payload.valid_until)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid valid_until value: {exc}") from exc
-    if valid_until and valid_until <= _now_utc():
-        raise HTTPException(status_code=400, detail="valid_until must be in the future")
-
     plan_code = str(payload.plan_code or "").strip() or "monthly"
+    if plan_code.lower() == "lifetime":
+        valid_until = None
+    else:
+        if plan_code.lower() == "beta" and not str(payload.valid_until or "").strip():
+            valid_until = LCP_BETA_PLAN_VALID_UNTIL
+        else:
+            try:
+                valid_until = _parse_iso_datetime(payload.valid_until)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid valid_until value: {exc}") from exc
+        if plan_code.lower() == "trial" and valid_until is None:
+            raise HTTPException(status_code=400, detail="valid_until is required for trial plan_code")
+        if valid_until and valid_until <= _now_utc():
+            raise HTTPException(status_code=400, detail="valid_until must be in the future")
     max_installations = int(payload.max_installations or LCP_DEFAULT_MAX_INSTALLATIONS)
     image_tag = _normalize_image_tag(payload.image_tag)
     install_script_url = _normalize_install_script_url(payload.install_script_url)
@@ -2370,7 +2725,10 @@ def admin_list_installations(
 
     status_text = str(status or "").strip().lower()
     if status_text:
-        filters.append(func.lower(Installation.subscription_status) == status_text)
+        normalized_status = _normalize_subscription_status(status_text)
+        matching_statuses = SUBSCRIPTION_STATUS_FILTER_EQUIVALENTS.get(normalized_status, {normalized_status})
+        lowered_statuses = [value.lower() for value in matching_statuses]
+        filters.append(func.lower(Installation.subscription_status).in_(lowered_statuses))
 
     total_stmt = select(func.count()).select_from(Installation)
     rows_stmt = select(Installation)
@@ -2416,18 +2774,20 @@ def admin_update_subscription(
     if installation is None:
         raise HTTPException(status_code=404, detail="Installation not found")
 
-    status_value = str(payload.subscription_status or "").strip().lower()
-    if status_value not in {"none", "active", "trialing", "grace", "past_due", "canceled"}:
-        raise HTTPException(status_code=400, detail="Unsupported subscription_status")
-
-    installation.subscription_status = status_value
-    installation.plan_code = str(payload.plan_code or "").strip() or installation.plan_code
-    installation.customer_ref = str(payload.customer_ref or "").strip() or installation.customer_ref
-    installation.subscription_valid_until = _parse_iso_datetime(payload.valid_until)
-
-    merged_metadata = _load_metadata(installation.metadata_json)
-    merged_metadata.update(payload.metadata or {})
-    installation.metadata_json = _dump_metadata(merged_metadata)
+    status_value = _normalize_subscription_status(payload.subscription_status)
+    valid_until = _resolve_subscription_valid_until(
+        status_value=status_value,
+        requested_valid_until=payload.valid_until,
+        existing_valid_until=installation.subscription_valid_until,
+    )
+    _apply_subscription_update_to_installation(
+        installation,
+        status_value=status_value,
+        plan_code=payload.plan_code,
+        customer_ref=payload.customer_ref,
+        valid_until=valid_until,
+        metadata=payload.metadata,
+    )
 
     entitlement = _compute_entitlement(installation)
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
@@ -2444,6 +2804,64 @@ def admin_update_subscription(
         "subscription_status": installation.subscription_status,
         "entitlement": entitlement,
         "entitlement_token": entitlement_token,
+    }
+
+
+@app.put("/v1/admin/customers/{customer_ref}/subscription")
+def admin_update_customer_subscription(
+    customer_ref: str,
+    payload: AdminSubscriptionUpdateRequest,
+    _auth: None = Depends(_require_admin_token),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    source_customer_ref = str(customer_ref or "").strip()
+    if not source_customer_ref:
+        raise HTTPException(status_code=400, detail="customer_ref is required")
+    target_customer_ref = str(payload.customer_ref or "").strip() or source_customer_ref
+
+    installations = db.execute(
+        select(Installation).where(Installation.customer_ref == source_customer_ref)
+    ).scalars().all()
+    if not installations:
+        raise HTTPException(status_code=404, detail="No installations found for customer_ref")
+
+    status_value = _normalize_subscription_status(payload.subscription_status)
+    updated_ids: list[str] = []
+    for installation in installations:
+        valid_until = _resolve_subscription_valid_until(
+            status_value=status_value,
+            requested_valid_until=payload.valid_until,
+            existing_valid_until=installation.subscription_valid_until,
+        )
+        _apply_subscription_update_to_installation(
+            installation,
+            status_value=status_value,
+            plan_code=payload.plan_code,
+            customer_ref=target_customer_ref,
+            valid_until=valid_until,
+            metadata=payload.metadata,
+        )
+        updated_ids.append(installation.installation_id)
+
+    db.commit()
+    _publish_admin_event(
+        "customers",
+        "subscription_updated",
+        {
+            "customer_ref": target_customer_ref,
+            "source_customer_ref": source_customer_ref,
+            "subscription_status": status_value,
+            "updated_installations": len(updated_ids),
+        },
+    )
+
+    return {
+        "ok": True,
+        "customer_ref": target_customer_ref,
+        "source_customer_ref": source_customer_ref,
+        "subscription_status": status_value,
+        "updated_installations": len(updated_ids),
+        "installation_ids": updated_ids,
     }
 
 
@@ -2466,6 +2884,38 @@ def admin_get_installation(
         "installation": _serialize_installation(installation),
         "entitlement": entitlement,
         "entitlement_token": entitlement_token,
+    }
+
+
+@app.delete("/v1/admin/installations/{installation_id}")
+def admin_delete_installation(
+    installation_id: str,
+    _auth: None = Depends(_require_admin_token),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    installation = db.execute(
+        select(Installation).where(Installation.installation_id == installation_id)
+    ).scalar_one_or_none()
+    if installation is None:
+        raise HTTPException(status_code=404, detail="Installation not found")
+
+    deleted_customer_ref = installation.customer_ref
+    deleted_workspace_id = installation.workspace_id
+    db.delete(installation)
+    db.commit()
+    _publish_admin_event(
+        "installations",
+        "deleted",
+        {
+            "installation_id": installation_id,
+            "customer_ref": deleted_customer_ref,
+            "workspace_id": deleted_workspace_id,
+        },
+    )
+
+    return {
+        "ok": True,
+        "installation_id": installation_id,
     }
 
 

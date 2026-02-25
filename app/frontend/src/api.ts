@@ -6,8 +6,8 @@ import type {
   AdminUsersPage,
   AuthMePayload,
   BootstrapPayload,
-  BugReportCreateRequest,
-  BugReportCreateResponse,
+  FeedbackCreateRequest,
+  FeedbackCreateResponse,
   LicenseActivationResponse,
   LicenseStatusResponse,
   AgentChatResponse,
@@ -133,8 +133,8 @@ export const activateLicense = (userId: string, payload: { activation_code: stri
     body: JSON.stringify(payload),
   })
 
-export const submitBugReport = (userId: string, payload: BugReportCreateRequest) =>
-  api<BugReportCreateResponse>('/api/support/bug-reports', userId, {
+export const submitFeedback = (userId: string, payload: FeedbackCreateRequest) =>
+  api<FeedbackCreateResponse>('/api/support/feedback', userId, {
     method: 'POST',
     body: JSON.stringify(payload),
   })
@@ -453,6 +453,7 @@ export const updateChatSessionContext = (
   payload: {
     workspace_id: string
     session_attachment_refs?: AttachmentRef[]
+    mcp_servers?: ChatMcpServer[]
   }
 ) =>
   api<ChatSessionRecord>(
@@ -1013,6 +1014,7 @@ export const createNote = (
     pinned?: boolean
     external_refs?: ExternalRef[]
     attachment_refs?: AttachmentRef[]
+    force_new?: boolean
   }
 ) => api<Note>('/api/notes', userId, { method: 'POST', body: JSON.stringify(payload) })
 
@@ -1113,6 +1115,7 @@ export const createSpecification = (
     tags?: string[]
     external_refs?: ExternalRef[]
     attachment_refs?: AttachmentRef[]
+    force_new?: boolean
   }
 ) => api<Specification>('/api/specifications', userId, { method: 'POST', body: JSON.stringify(payload) })
 

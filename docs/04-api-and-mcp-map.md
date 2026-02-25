@@ -73,13 +73,30 @@
 
 ### 1.7 Notifications and Realtime
 - `GET /api/notifications`
+- `POST /api/notifications/read-all`
 - `POST /api/notifications/{notification_id}/read`
 - `GET /api/notifications/stream` (SSE)
+
+Notification payload fields:
+- legacy-compatible fields: `id`, `message`, `is_read`, `created_at`, reference ids (`workspace_id`, `project_id`, `task_id`, `note_id`, `specification_id`).
+- typed fields: `notification_type`, `severity`, `dedupe_key`, `payload`, `source_event`.
+- `message` remains required fallback for legacy and mixed clients.
 
 SSE event types:
 - `notification`
 - `task_event`
+- `license_event`
 - `ping`
+
+SSE cursor and resume contract (`GET /api/notifications/stream`):
+- Notification resume cursor sources:
+  - query param `last_id`,
+  - header `Last-Event-ID` (browser/EventSource reconnect).
+- Cursor precedence: `last_id` overrides `Last-Event-ID` when both are present.
+- Workspace activity cursor source: query param `last_activity_id`.
+- Default behavior is tail mode:
+  - if notification cursor is missing or invalid, stream starts after the latest current notification for the user,
+  - if `workspace_id` is provided and `last_activity_id` is `0`, stream starts after latest current workspace activity.
 
 ### 1.8 Attachments
 - `POST /api/attachments/upload`
@@ -124,7 +141,6 @@ Tool categories:
 - Mutations: `create_*`, `update_*`, `archive_*`, `restore_*`, `delete_*`, `bulk_task_action`.
 - Specification linking: `link_*_to_spec`, `unlink_*_from_spec`, `create_tasks_from_spec`.
 - Automation: `run_task_with_codex`, `get_task_automation_status`.
-- Utility: `send_email` (SMTP).
 - Templates:
   - `list_project_templates`
   - `get_project_template`
@@ -156,7 +172,6 @@ sequenceDiagram
 - Workspace/project allowlists (`MCP_ALLOWED_*`).
 - Automatic fallback command_id generation for create mutations.
 - Workspace inference from project/task scope for safer create flows.
-- SMTP allowlist controls for email sending.
 
 ## 6. Frontend API Consumption
 Frontend (`app/frontend/src/api.ts`) uses:

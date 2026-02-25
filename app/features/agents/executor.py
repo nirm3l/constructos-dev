@@ -21,6 +21,26 @@ class AutomationOutcome:
     comment: str | None = None
     usage: dict[str, int] | None = None
     codex_session_id: str | None = None
+    resume_attempted: bool = False
+    resume_succeeded: bool = False
+    resume_fallback_used: bool = False
+
+
+def _coerce_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if value == 0:
+            return False
+        if value == 1:
+            return True
+        return None
+    normalized = str(value or "").strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    return None
 
 
 def _graph_summary_to_markdown(summary: dict[str, object] | None) -> str:
@@ -140,6 +160,9 @@ def _parse_command_outcome(stdout: str) -> AutomationOutcome:
     usage_raw = payload.get("usage")
     codex_session_id_raw = str(payload.get("codex_session_id") or "").strip()
     codex_session_id = codex_session_id_raw or None
+    resume_attempted = _coerce_bool(payload.get("resume_attempted"))
+    resume_succeeded = _coerce_bool(payload.get("resume_succeeded"))
+    resume_fallback_used = _coerce_bool(payload.get("resume_fallback_used"))
     usage: dict[str, int] | None = None
     if isinstance(usage_raw, dict):
         usage = {}
@@ -165,6 +188,9 @@ def _parse_command_outcome(stdout: str) -> AutomationOutcome:
         comment=comment,
         usage=usage,
         codex_session_id=codex_session_id,
+        resume_attempted=bool(resume_attempted),
+        resume_succeeded=bool(resume_succeeded),
+        resume_fallback_used=bool(resume_fallback_used),
     )
 
 
@@ -242,6 +268,8 @@ def execute_task_automation(
     instruction: str,
     workspace_id: str | None = None,
     project_id: str | None = None,
+    chat_session_id: str | None = None,
+    codex_session_id: str | None = None,
     actor_user_id: str | None = None,
     allow_mutations: bool = True,
     mcp_servers: list[str] | None = None,
@@ -282,6 +310,8 @@ def execute_task_automation(
         "instruction": instruction,
         "workspace_id": workspace_id,
         "project_id": project_id,
+        "chat_session_id": chat_session_id,
+        "codex_session_id": codex_session_id,
         "actor_user_id": actor_user_id,
         "project_name": project_name,
         "project_description": project_description,
@@ -320,6 +350,8 @@ def execute_task_automation_stream(
     instruction: str,
     workspace_id: str | None = None,
     project_id: str | None = None,
+    chat_session_id: str | None = None,
+    codex_session_id: str | None = None,
     actor_user_id: str | None = None,
     allow_mutations: bool = True,
     mcp_servers: list[str] | None = None,
@@ -360,6 +392,8 @@ def execute_task_automation_stream(
         "instruction": instruction,
         "workspace_id": workspace_id,
         "project_id": project_id,
+        "chat_session_id": chat_session_id,
+        "codex_session_id": codex_session_id,
         "actor_user_id": actor_user_id,
         "project_name": project_name,
         "project_description": project_description,

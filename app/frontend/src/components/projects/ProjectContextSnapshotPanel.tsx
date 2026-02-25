@@ -1,5 +1,9 @@
 import React from 'react'
-import type { GraphContextPack, GraphProjectOverview, ProjectRule, ProjectSkill } from '../../types'
+import * as Accordion from '@radix-ui/react-accordion'
+import * as Tabs from '@radix-ui/react-tabs'
+import * as Tooltip from '@radix-ui/react-tooltip'
+import type { AgentChatUsage, GraphContextPack, GraphProjectOverview, ProjectRule, ProjectSkill } from '../../types'
+import { Icon } from '../shared/uiHelpers'
 
 type SnapshotSourceKey =
   | 'soul'
@@ -21,6 +25,7 @@ type SnapshotSourceUsage = {
   group: SnapshotSourceGroup
   color: string
   chars: number
+  tokens: number
   lines: number
   percent: number
   windowPercent: number
@@ -32,15 +37,33 @@ type SnapshotCubeTile = {
   color: string
 }
 
+type SnapshotCompositionSegment = {
+  key: string
+  label: string
+  color: string
+  tokens: number
+  windowPercent: number
+  usedPercent: number
+  groupLabel: string
+}
+
 type ChatTurnLike = {
   role?: unknown
   content?: unknown
 }
 
+type CodexResumeStateLike = {
+  attempted?: boolean
+  succeeded?: boolean
+  fallbackUsed?: boolean
+} | null
+
+type PromptMode = 'start' | 'start_fallback' | 'resume'
+
 const CHAT_HISTORY_WINDOW_SIZE = 12
 const CONTEXT_OCCUPANCY_TILE_COUNT = 480
 
-const PROMPT_SCAFFOLD_TEMPLATE = [
+const START_PROMPT_SCAFFOLD_TEMPLATE = [
   'You are an automation agent for task management.',
   'Use available MCP tools to satisfy the instruction.',
   'Return plain Markdown text for the end user.',
@@ -71,7 +94,7 @@ const PROMPT_SCAFFOLD_TEMPLATE = [
   '- Respond directly to the user with clear, actionable text.',
 ].join('\n')
 
-const PROMPT_GUIDANCE_TEMPLATE = [
+const START_PROMPT_GUIDANCE_TEMPLATE = [
   '- Treat Soul.md, ProjectRules.md, ProjectSkills.md, GraphContext.md, GraphEvidence.json, and GraphSummary.md as durable project-level context.',
   '- ProjectRules.md defines how you should behave within this project.',
   '- ProjectSkills.md captures reusable skills configured for this project.',
@@ -114,6 +137,37 @@ const PROMPT_GUIDANCE_TEMPLATE = [
   '- Project: ?tab=projects&project=<project_id>',
   '- For recurring schedules, set task.recurring_rule explicitly using canonical format: every:<number><m|h|d> (example: every:1m).',
   '- After scheduling changes, verify by reading the task and confirming scheduled_at_utc + recurring_rule values.',
+].join('\n')
+
+const RESUME_PROMPT_SCAFFOLD_TEMPLATE = [
+  'You are an automation agent for task management.',
+  'This is a resumed Codex thread. Reuse prior thread context instead of re-deriving project bootstrap context.',
+  'Return plain Markdown text for the end user.',
+  'Do not output JSON wrappers.',
+  '',
+  'Current Turn Context:',
+  'Task ID: {task_id}',
+  'Title: {title}',
+  'Status: {status}',
+  'Description: {description}',
+  'Workspace ID: {workspace_id}',
+  'Project ID: {project_id}',
+  'Current User ID: {actor_user_id}',
+  'Project Name: {project_name}',
+  'Instruction: {instruction}',
+  '',
+  'Guidance:',
+  '- This is a general chat request; use workspace/project context as needed.',
+  '- Enabled MCP servers for this run: {enabled_mcp_servers}.',
+].join('\n')
+
+const RESUME_PROMPT_GUIDANCE_TEMPLATE = [
+  '- If prior thread context appears stale or missing, refresh by calling get_project_chat_context(project_ref=..., workspace_id=...).',
+  '- Prefer bulk tools for batch operations.',
+  '- For mutating MCP tool calls, always provide command_id.',
+  '- If retrying the same mutation, reuse the exact same command_id.',
+  '- Mutating tools are allowed for this request.',
+  '- Respond directly to the user with clear, actionable text.',
 ].join('\n')
 
 function estimateTokenCount(charCount: number): number {
@@ -167,6 +221,23 @@ function sourceGroupLabel(group: SnapshotSourceGroup): string {
   if (group === 'knowledge_graph') return 'Knowledge graph'
   if (group === 'hardcoded') return 'Prompt code'
   return 'Runtime session'
+}
+
+function formatPercent(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0.0%'
+  return `${value.toFixed(1)}%`
+}
+
+function resolvePromptMode(resumeState: CodexResumeStateLike): PromptMode {
+  if (resumeState?.succeeded) return 'resume'
+  if (resumeState?.attempted && !resumeState?.succeeded) return 'start_fallback'
+  return 'start'
+}
+
+function promptModeLabel(mode: PromptMode): string {
+  if (mode === 'resume') return 'Resume'
+  if (mode === 'start_fallback') return 'Start (resume fallback)'
+  return 'Start'
 }
 
 function buildConversationHistoryText({
@@ -314,6 +385,8 @@ export function ProjectContextSnapshotPanel({
   contextLimitTokens,
   activeChatProjectId,
   activeChatTurns,
+  codexChatUsage,
+  codexChatResumeState,
   projectChatIndexMode,
   projectChatAttachmentIngestionMode,
 }: {
@@ -327,6 +400,8 @@ export function ProjectContextSnapshotPanel({
   contextLimitTokens?: number
   activeChatProjectId?: string
   activeChatTurns?: ChatTurnLike[]
+  codexChatUsage?: AgentChatUsage | null
+  codexChatResumeState?: CodexResumeStateLike
   projectChatIndexMode?: string
   projectChatAttachmentIngestionMode?: string
 }) {
@@ -349,6 +424,26 @@ export function ProjectContextSnapshotPanel({
     () => evidenceItems.filter((item) => !isChatEntityType(item.entity_type)),
     [evidenceItems]
   )
+  const activePromptMode = resolvePromptMode(codexChatResumeState ?? null)
+  const activePromptLabel = promptModeLabel(activePromptMode)
+  const activePromptScaffoldTemplate = activePromptMode === 'resume'
+    ? RESUME_PROMPT_SCAFFOLD_TEMPLATE
+    : START_PROMPT_SCAFFOLD_TEMPLATE
+  const activePromptGuidanceTemplate = activePromptMode === 'resume'
+    ? RESUME_PROMPT_GUIDANCE_TEMPLATE
+    : START_PROMPT_GUIDANCE_TEMPLATE
+  const observedInputTokens = typeof codexChatUsage?.input_tokens === 'number' && codexChatUsage.input_tokens >= 0
+    ? Math.floor(codexChatUsage.input_tokens)
+    : null
+  const observedOutputTokens = typeof codexChatUsage?.output_tokens === 'number' && codexChatUsage.output_tokens >= 0
+    ? Math.floor(codexChatUsage.output_tokens)
+    : null
+  const observedCachedInputTokens = typeof codexChatUsage?.cached_input_tokens === 'number' && codexChatUsage.cached_input_tokens >= 0
+    ? Math.floor(codexChatUsage.cached_input_tokens)
+    : null
+  const observedContextLimitTokens = typeof codexChatUsage?.context_limit_tokens === 'number' && codexChatUsage.context_limit_tokens > 0
+    ? Math.floor(codexChatUsage.context_limit_tokens)
+    : null
   const graphEvidenceJsonChat = chatEvidenceItems.length > 0 ? JSON.stringify(chatEvidenceItems) : ''
   const graphEvidenceJsonNonChat = nonChatEvidenceItems.length > 0 ? JSON.stringify(nonChatEvidenceItems) : ''
   const chatHistoryText = React.useMemo(
@@ -430,18 +525,18 @@ export function ProjectContextSnapshotPanel({
       {
         key: 'system_scaffold',
         group: 'hardcoded',
-        label: 'System prompt scaffold',
+        label: `System prompt scaffold (${activePromptLabel.toLowerCase()})`,
         color: '#334155',
-        chars: PROMPT_SCAFFOLD_TEMPLATE.length,
-        lines: countLines(PROMPT_SCAFFOLD_TEMPLATE),
+        chars: activePromptScaffoldTemplate.length,
+        lines: countLines(activePromptScaffoldTemplate),
       },
       {
         key: 'system_guidance',
         group: 'hardcoded',
-        label: 'Guidance and policy block',
+        label: `Guidance and policy block (${activePromptLabel.toLowerCase()})`,
         color: '#0f172a',
-        chars: PROMPT_GUIDANCE_TEMPLATE.length,
-        lines: countLines(PROMPT_GUIDANCE_TEMPLATE),
+        chars: activePromptGuidanceTemplate.length,
+        lines: countLines(activePromptGuidanceTemplate),
       },
       {
         key: 'chat_history',
@@ -463,8 +558,8 @@ export function ProjectContextSnapshotPanel({
 
     const totalChars = sourceBase.reduce((sum, section) => sum + section.chars, 0)
     const totalTokens = estimateTokenCount(totalChars)
-    const normalizedContextLimitTokens = Math.max(0, Math.floor(Number(contextLimitTokens || 0)))
-    const contextWindowTokens = Math.max(totalTokens, normalizedContextLimitTokens)
+    const normalizedContextLimitTokens = Math.max(0, Math.floor(Number(observedContextLimitTokens ?? contextLimitTokens ?? 0)))
+    const contextWindowTokens = Math.max(totalTokens, normalizedContextLimitTokens, observedInputTokens ?? 0)
     const usedTileCount =
       contextWindowTokens > 0 && totalTokens > 0
         ? Math.max(1, Math.min(CONTEXT_OCCUPANCY_TILE_COUNT, Math.round((totalTokens / contextWindowTokens) * CONTEXT_OCCUPANCY_TILE_COUNT)))
@@ -478,6 +573,7 @@ export function ProjectContextSnapshotPanel({
       const sectionTokens = estimateTokenCount(section.chars)
       return {
         ...section,
+        tokens: sectionTokens,
         percent: totalChars > 0 ? (section.chars / totalChars) * 100 : 0,
         windowPercent: contextWindowTokens > 0 ? (sectionTokens / contextWindowTokens) * 100 : 0,
       }
@@ -530,19 +626,34 @@ export function ProjectContextSnapshotPanel({
       sourceBase
         .filter((section) => section.group === 'hardcoded')
         .reduce((sum, section) => sum + section.chars, 0)
+    const startHardcodedChars = START_PROMPT_SCAFFOLD_TEMPLATE.length + START_PROMPT_GUIDANCE_TEMPLATE.length
+    const coldStartChars = Math.max(0, totalChars - hardcodedChars + startHardcodedChars)
+    const coldStartTokens = estimateTokenCount(coldStartChars)
+    const coldStartWindowUsedPercent = contextWindowTokens > 0 ? (coldStartTokens / contextWindowTokens) * 100 : 0
+    const observedWindowUsedPercent = contextWindowTokens > 0 && observedInputTokens !== null
+      ? (observedInputTokens / contextWindowTokens) * 100
+      : null
 
     return {
       totalChars,
       totalLines: sources.reduce((sum, section) => sum + section.lines, 0),
       approxTokens: estimateTokenCount(totalChars),
+      coldStartApproxTokens: coldStartTokens,
+      promptModeLabel: activePromptLabel,
       hardcodedTokens: estimateTokenCount(hardcodedChars),
       chatHistoryTokens: estimateTokenCount(chatHistoryText.length),
       indexedChatTokens: estimateTokenCount(graphEvidenceJsonChat.length),
       contextWindowTokens,
+      windowUsedPercent: contextWindowTokens > 0 ? (totalTokens / contextWindowTokens) * 100 : 0,
+      coldStartWindowUsedPercent,
+      observedWindowUsedPercent,
       tileCount: CONTEXT_OCCUPANCY_TILE_COUNT,
       tokensPerTile,
       emptyTokens,
       emptyWindowPercent,
+      observedInputTokens,
+      observedCachedInputTokens,
+      observedOutputTokens,
       sources: visibleSources,
       sourceTiles: sourceTilesWithEmpty,
       evidenceCount: evidenceItems.length,
@@ -554,6 +665,10 @@ export function ProjectContextSnapshotPanel({
       chatEvidenceSharePct,
     }
   }, [
+    activePromptGuidanceTemplate,
+    activePromptLabel,
+    activePromptMode,
+    activePromptScaffoldTemplate,
     chatHistoryText,
     contextLimitTokens,
     contextPack?.focus?.entity_id,
@@ -572,122 +687,406 @@ export function ProjectContextSnapshotPanel({
     projectDescription,
     normalizedChatAttachmentMode,
     normalizedChatIndexMode,
+    observedCachedInputTokens,
+    observedContextLimitTokens,
+    observedInputTokens,
+    observedOutputTokens,
     projectName,
     rulesMarkdown,
     skillsMarkdown,
   ])
 
+  const [snapshotTab, setSnapshotTab] = React.useState<'overview' | 'composition'>('overview')
+  const [selectedSourceKey, setSelectedSourceKey] = React.useState<string | null>(null)
+
+  const sourceGroups = React.useMemo(() => {
+    const groups: SnapshotSourceGroup[] = ['project', 'knowledge_graph', 'hardcoded', 'runtime']
+    return groups
+      .map((group) => {
+        const items = snapshot.sources.filter((source) => source.group === group)
+        const chars = items.reduce((sum, item) => sum + item.chars, 0)
+        const tokens = items.reduce((sum, item) => sum + item.tokens, 0)
+        const windowPercent = items.reduce((sum, item) => sum + item.windowPercent, 0)
+        const usedPercent = items.reduce((sum, item) => sum + item.percent, 0)
+        return {
+          group,
+          label: sourceGroupLabel(group),
+          items,
+          chars,
+          tokens,
+          windowPercent,
+          usedPercent,
+        }
+      })
+      .filter((group) => group.items.length > 0)
+  }, [snapshot.sources])
+
+  const compositionSegments = React.useMemo<SnapshotCompositionSegment[]>(() => {
+    const activeSegments: SnapshotCompositionSegment[] = snapshot.sources.map((source) => ({
+      key: source.key,
+      label: source.label,
+      color: source.color,
+      tokens: source.tokens,
+      windowPercent: source.windowPercent,
+      usedPercent: source.percent,
+      groupLabel: sourceGroupLabel(source.group),
+    }))
+    if (snapshot.emptyTokens > 0) {
+      activeSegments.push({
+        key: 'empty-window',
+        label: 'Empty context window',
+        color: 'var(--surface-alt)',
+        tokens: snapshot.emptyTokens,
+        windowPercent: snapshot.emptyWindowPercent,
+        usedPercent: 0,
+        groupLabel: 'Unused capacity',
+      })
+    }
+    return activeSegments.filter((segment) => segment.windowPercent > 0)
+  }, [snapshot.emptyTokens, snapshot.emptyWindowPercent, snapshot.sources])
+
+  React.useEffect(() => {
+    if (!selectedSourceKey) return
+    const exists = compositionSegments.some((segment) => segment.key === selectedSourceKey)
+    if (!exists) setSelectedSourceKey(null)
+  }, [compositionSegments, selectedSourceKey])
+
   return (
-    <div className="graph-context-snapshot" style={{ marginTop: 10, marginBottom: 12 }}>
-      <div className="row wrap graph-context-snapshot-head">
-        <div>
-          <div className="meta">Project context snapshot</div>
-          <div className="graph-context-snapshot-title">Full context footprint across project data, hardcoded prompt logic, and runtime inputs</div>
-        </div>
-        <div className="graph-context-snapshot-total">
-          Used ~{snapshot.approxTokens.toLocaleString()} / {snapshot.contextWindowTokens.toLocaleString()} tokens
-        </div>
-      </div>
-
-      <div className="meta" style={{ marginTop: 6 }}>
-        Includes hardcoded system prompt and guidance from automation code, plus live active-session chat history when present.
-      </div>
-      <div className="meta" style={{ marginTop: 4 }}>
-        Indexed project chat corpus is shown separately from active session history so you can track persisted-chat contribution.
-      </div>
-      <div className="meta" style={{ marginTop: 4 }}>
-        Chat indexing policy: {chatIndexModeLabel(normalizedChatIndexMode)} · Attachment ingestion: {chatAttachmentModeLabel(normalizedChatAttachmentMode)}
-      </div>
-      {normalizedChatIndexMode !== 'OFF' ? (
-        <div className="meta" style={{ marginTop: 4 }}>
-          Even with an empty active session, project chat corpus remains retrievable via indexing policy and appears under Chat-derived evidence.
-        </div>
-      ) : null}
-
-      <div className="graph-context-metrics">
-        <div className="graph-context-metric">
-          <span className="meta">Rules</span>
-          <strong>{projectRules.length}</strong>
-        </div>
-        <div className="graph-context-metric">
-          <span className="meta">Skills</span>
-          <strong>{projectSkills.length}</strong>
-        </div>
-        <div className="graph-context-metric">
-          <span className="meta">Evidence items</span>
-          <strong>{snapshot.evidenceCount}</strong>
-        </div>
-        <div className="graph-context-metric">
-          <span className="meta">Hardcoded baseline</span>
-          <strong>~{snapshot.hardcodedTokens.toLocaleString()} tokens</strong>
-        </div>
-        <div className="graph-context-metric">
-          <span className="meta">Live chat history</span>
-          <strong>~{snapshot.chatHistoryTokens.toLocaleString()} tokens</strong>
-        </div>
-        <div className="graph-context-metric">
-          <span className="meta">Indexed chat corpus</span>
-          <strong>~{snapshot.indexedChatTokens.toLocaleString()} tokens</strong>
-        </div>
-        <div className="graph-context-metric">
-          <span className="meta">Chat-derived evidence</span>
-          <strong>{snapshot.chatEvidenceCount} ({snapshot.chatEvidenceSharePct.toFixed(1)}%)</strong>
-        </div>
-        <div className="graph-context-metric">
-          <span className="meta">Scope coverage</span>
-          <strong>{snapshot.contextCoveragePct}%</strong>
-        </div>
-      </div>
-
-      <div className="graph-context-cube-block">
-        <div className="meta">Context source occupancy map</div>
-        {snapshot.sourceTiles.length === 0 ? (
-          <div className="meta" style={{ marginTop: 6 }}>Context is empty for this project.</div>
-        ) : (
-          <div className="graph-context-cube-grid graph-context-cube-grid-dense" role="img" aria-label="Project context source occupancy map">
-            {snapshot.sourceTiles.map((tile, idx) => (
-              <span
-                key={`source-cube-${idx}-${tile.key}`}
-                className="graph-context-cube"
-                style={{ backgroundColor: tile.color }}
-                title={tile.label}
-              />
-            ))}
+    <Tooltip.Provider delayDuration={120}>
+      <div className="graph-context-snapshot context-snapshot-surface" style={{ marginTop: 10, marginBottom: 12 }}>
+        <div className="row wrap graph-context-snapshot-head">
+          <div>
+            <div className="meta">Project context snapshot</div>
+            <div className="graph-context-snapshot-title">
+              Context budget across project resources, indexed graph evidence, hardcoded guidance, and runtime session input.
+            </div>
           </div>
-        )}
-        <div className="meta">
-          Used window: {(100 - snapshot.emptyWindowPercent).toFixed(1)}% (~{snapshot.approxTokens.toLocaleString()} tokens)
+          <div className="graph-context-snapshot-total">
+            ~{snapshot.approxTokens.toLocaleString()} / {snapshot.contextWindowTokens.toLocaleString()} tokens
+            {snapshot.observedInputTokens !== null ? (
+              <div className="meta">{`Observed input: ${snapshot.observedInputTokens.toLocaleString()} tokens`}</div>
+            ) : null}
+          </div>
         </div>
-        <div className="meta">
-          Resolution: {snapshot.tileCount.toLocaleString()} cells · ~{Math.max(1, Math.round(snapshot.tokensPerTile || 0)).toLocaleString()} tokens per cell
-        </div>
-        <div className="graph-context-legend">
-          {snapshot.sources.map((source) => (
-            <div key={`source-legend-${source.key}`} className="graph-context-legend-row">
-              <span className="graph-context-legend-swatch" style={{ backgroundColor: source.color }} />
-              <span className="graph-context-legend-label">{source.label}</span>
-              <span className="meta">
-                {sourceGroupLabel(source.group)} · {source.windowPercent.toFixed(1)}% window · {source.percent.toFixed(1)}% used · {source.chars.toLocaleString()} chars
-                {source.lines > 0 ? ` · ${source.lines} lines` : ''}
-              </span>
-            </div>
-          ))}
-          {snapshot.emptyTokens > 0 ? (
-            <div className="graph-context-legend-row">
-              <span className="graph-context-legend-swatch graph-context-legend-swatch-empty" />
-              <span className="graph-context-legend-label">Empty context window</span>
-              <span className="meta">{snapshot.emptyWindowPercent.toFixed(1)}% window · {snapshot.emptyTokens.toLocaleString()} tokens</span>
-            </div>
-          ) : null}
-        </div>
-      </div>
 
-      <div className="meta" style={{ marginTop: 8 }}>
-        Attachment excerpts are runtime-dependent and can contribute up to ~9,000 tokens when files are included in chat.
+        <div className="context-snapshot-policy-row">
+          <span className="status-chip">{`Prompt mode: ${snapshot.promptModeLabel}`}</span>
+          <span className="status-chip">{`Chat indexing: ${chatIndexModeLabel(normalizedChatIndexMode)}`}</span>
+          <span className="status-chip">{`Attachment ingestion: ${chatAttachmentModeLabel(normalizedChatAttachmentMode)}`}</span>
+          <span className="status-chip">{`Coverage: ${snapshot.contextCoveragePct}%`}</span>
+        </div>
+
+        <div className="context-snapshot-capacity-track" role="img" aria-label="Context capacity usage">
+          <div
+            className="context-snapshot-capacity-fill"
+            style={{ width: `${Math.max(0, Math.min(100, snapshot.windowUsedPercent))}%` }}
+          />
+        </div>
+        <div className="meta">
+          Used window: {formatPercent(snapshot.windowUsedPercent)} · Cold-start equivalent: {formatPercent(snapshot.coldStartWindowUsedPercent)} · Empty capacity: {formatPercent(snapshot.emptyWindowPercent)}
+          {snapshot.observedWindowUsedPercent !== null ? ` · Observed this turn: ${formatPercent(snapshot.observedWindowUsedPercent)}` : ''}
+        </div>
+
+        <Tabs.Root
+          className="context-snapshot-tabs"
+          value={snapshotTab}
+          onValueChange={(next) => {
+            if (next === 'overview' || next === 'composition') {
+              setSnapshotTab(next)
+            }
+          }}
+        >
+          <Tabs.List className="context-snapshot-tabs-list" aria-label="Context snapshot views">
+            <Tabs.Trigger className="context-snapshot-tab-trigger" value="overview">Overview</Tabs.Trigger>
+            <Tabs.Trigger className="context-snapshot-tab-trigger" value="composition">Composition + Sources</Tabs.Trigger>
+          </Tabs.List>
+
+          <Tabs.Content value="overview" className="context-snapshot-tab-content">
+            <div className="graph-context-metrics context-snapshot-metrics">
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M6 2h9l3 3v17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm8 1v3h3" />
+                  <span className="meta">Rules</span>
+                </div>
+                <strong>{projectRules.length}</strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M4 6h16M4 12h16M4 18h16" />
+                  <span className="meta">Skills</span>
+                </div>
+                <strong>{projectSkills.length}</strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6zm9 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
+                  <span className="meta">Evidence items</span>
+                </div>
+                <strong>{snapshot.evidenceCount}</strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M5 12h14M12 5v14" />
+                  <span className="meta">Effective estimate</span>
+                </div>
+                <strong>{`~${snapshot.approxTokens.toLocaleString()}`}</strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M3 12h18M12 3v18" />
+                  <span className="meta">Cold-start estimate</span>
+                </div>
+                <strong>{`~${snapshot.coldStartApproxTokens.toLocaleString()}`}</strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M3 5h18v14H3zM7 9h10M7 13h6" />
+                  <span className="meta">Observed input</span>
+                </div>
+                <strong>
+                  {snapshot.observedInputTokens !== null ? snapshot.observedInputTokens.toLocaleString() : 'n/a'}
+                </strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M4 12h16M12 4v16" />
+                  <span className="meta">Hardcoded block</span>
+                </div>
+                <strong>{`~${snapshot.hardcodedTokens.toLocaleString()}`}</strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M4 6h16v10H7l-3 3V6z" />
+                  <span className="meta">Live chat history</span>
+                </div>
+                <strong>{`~${snapshot.chatHistoryTokens.toLocaleString()}`}</strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M12 2v20M2 12h20" />
+                  <span className="meta">Indexed chat corpus</span>
+                </div>
+                <strong>{`~${snapshot.indexedChatTokens.toLocaleString()}`}</strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M7 7h10v10H7zM4 4h16v16H4z" />
+                  <span className="meta">Chat-derived evidence</span>
+                </div>
+                <strong>{`${snapshot.chatEvidenceCount} (${snapshot.chatEvidenceSharePct.toFixed(1)}%)`}</strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M3 17l6-6 4 4 8-8" />
+                  <span className="meta">Avg evidence score</span>
+                </div>
+                <strong>{snapshot.averageEvidenceScore.toFixed(3)}</strong>
+              </div>
+            </div>
+            <div className="context-snapshot-footnotes">
+              <div className="meta">
+                Uses the active prompt profile for this session ({snapshot.promptModeLabel}) and includes active-session conversation history when available.
+              </div>
+              <div className="meta">
+                Cold-start estimate keeps the same project/runtime payload but replaces hardcoded prompt blocks with the start profile.
+              </div>
+              <div className="meta">
+                Indexed chat corpus remains available when active session is empty, as long as project chat indexing policy is enabled.
+              </div>
+              <div className="meta">
+                Distinct evidence entities: {snapshot.distinctEvidenceEntities} · Chat evidence entities: {snapshot.chatEvidenceEntityCount} · Map resolution: {snapshot.tileCount.toLocaleString()} cells (~{Math.max(1, Math.round(snapshot.tokensPerTile || 0)).toLocaleString()} tokens/cell)
+              </div>
+            </div>
+          </Tabs.Content>
+
+          <Tabs.Content value="composition" className="context-snapshot-tab-content">
+            <div className="context-snapshot-band-card">
+              <div className="meta">Context source occupancy band</div>
+              {compositionSegments.length === 0 ? (
+                <div className="meta" style={{ marginTop: 8 }}>No context payload available yet.</div>
+              ) : (
+                <div className="context-snapshot-band" role="img" aria-label="Context occupancy by source">
+                  {compositionSegments.map((segment) => {
+                    const isSelected = selectedSourceKey === segment.key
+                    return (
+                      <Tooltip.Root key={`segment-${segment.key}`}>
+                        <Tooltip.Trigger asChild>
+                          <button
+                            type="button"
+                            className={`context-snapshot-band-segment ${isSelected ? 'active' : ''}`.trim()}
+                            style={{
+                              flexGrow: Math.max(segment.windowPercent, 0.45),
+                              backgroundColor: segment.color,
+                            }}
+                            aria-label={`${segment.label}: ${formatPercent(segment.windowPercent)} of context window`}
+                            onClick={() => {
+                              setSelectedSourceKey((current) => (current === segment.key ? null : segment.key))
+                            }}
+                          />
+                        </Tooltip.Trigger>
+                        <Tooltip.Portal>
+                          <Tooltip.Content className="header-tooltip-content" side="top" sideOffset={6}>
+                            <strong>{segment.label}</strong>
+                            <div className="meta">{segment.groupLabel}</div>
+                            <div className="meta">
+                              {formatPercent(segment.windowPercent)} window · {segment.tokens.toLocaleString()} tokens
+                            </div>
+                            {segment.key !== 'empty-window' ? (
+                              <div className="meta">{formatPercent(segment.usedPercent)} of used payload</div>
+                            ) : null}
+                            <Tooltip.Arrow className="header-tooltip-arrow" />
+                          </Tooltip.Content>
+                        </Tooltip.Portal>
+                      </Tooltip.Root>
+                    )
+                  })}
+                </div>
+              )}
+              <div className="meta">
+                Click a segment to focus matching cells and source rows below.
+              </div>
+            </div>
+
+            <div className="graph-context-cube-block context-snapshot-cube-block">
+              <div className="meta">Context source occupancy map</div>
+              {snapshot.sourceTiles.length === 0 ? (
+                <div className="meta" style={{ marginTop: 6 }}>Context is empty for this project.</div>
+              ) : (
+                <div className="graph-context-cube-grid graph-context-cube-grid-dense" role="img" aria-label="Project context source occupancy map">
+                  {snapshot.sourceTiles.map((tile, idx) => {
+                    const tileSourceKey = tile.key.startsWith('empty-')
+                      ? 'empty-window'
+                      : snapshot.sources.find((source) => tile.key.startsWith(`${source.key}-`))?.key ?? null
+                    const isSelected = selectedSourceKey ? selectedSourceKey === tileSourceKey : false
+                    return (
+                      <span
+                        key={`source-cube-${idx}-${tile.key}`}
+                        className={`graph-context-cube context-snapshot-cube ${isSelected ? 'selected' : ''}`.trim()}
+                        style={{ backgroundColor: tile.color }}
+                        title={tile.label}
+                      />
+                    )
+                  })}
+                </div>
+              )}
+              <div className="meta">
+                Used window: {formatPercent(snapshot.windowUsedPercent)} (~{snapshot.approxTokens.toLocaleString()} tokens) · Cold-start equivalent: {formatPercent(snapshot.coldStartWindowUsedPercent)} (~{snapshot.coldStartApproxTokens.toLocaleString()} tokens)
+              </div>
+            </div>
+
+            <div className="context-snapshot-segment-grid">
+              {compositionSegments.map((segment) => (
+                <Tooltip.Root key={`segment-chip-${segment.key}`}>
+                  <Tooltip.Trigger asChild>
+                    <button
+                      type="button"
+                      className={`context-snapshot-segment-chip ${selectedSourceKey === segment.key ? 'active' : ''}`.trim()}
+                      onClick={() => setSelectedSourceKey((current) => (current === segment.key ? null : segment.key))}
+                    >
+                      <span className="context-snapshot-segment-swatch" style={{ backgroundColor: segment.color }} />
+                      <span className="context-snapshot-segment-label">{segment.label}</span>
+                      <span className="meta">{formatPercent(segment.windowPercent)}</span>
+                    </button>
+                  </Tooltip.Trigger>
+                  <Tooltip.Portal>
+                    <Tooltip.Content className="header-tooltip-content" side="top" sideOffset={6}>
+                      <strong>{segment.label}</strong>
+                      <div className="meta">{segment.groupLabel}</div>
+                      <div className="meta">
+                        {formatPercent(segment.windowPercent)} window · {segment.tokens.toLocaleString()} tokens
+                      </div>
+                      {segment.key !== 'empty-window' ? (
+                        <div className="meta">{formatPercent(segment.usedPercent)} of used payload</div>
+                      ) : null}
+                      <Tooltip.Arrow className="header-tooltip-arrow" />
+                    </Tooltip.Content>
+                  </Tooltip.Portal>
+                </Tooltip.Root>
+              ))}
+            </div>
+            <div className="meta">Source breakdown</div>
+            <Accordion.Root
+              className="context-snapshot-source-groups"
+              type="multiple"
+              defaultValue={sourceGroups.map((group) => group.group)}
+            >
+              {sourceGroups.map((group) => (
+                <Accordion.Item
+                  key={`source-group-${group.group}`}
+                  value={group.group}
+                  className="context-snapshot-source-group"
+                >
+                  <Accordion.Header>
+                    <Accordion.Trigger className="context-snapshot-source-group-trigger">
+                      <span className="context-snapshot-source-group-head">
+                        <span className="context-snapshot-source-group-title">{group.label}</span>
+                        <span className="meta">
+                          {formatPercent(group.windowPercent)} window · {formatPercent(group.usedPercent)} used · {group.tokens.toLocaleString()} tokens
+                        </span>
+                      </span>
+                      <span className="context-snapshot-source-group-chevron" aria-hidden="true">
+                        <Icon path="M6 9l6 6 6-6" />
+                      </span>
+                    </Accordion.Trigger>
+                  </Accordion.Header>
+                  <Accordion.Content className="context-snapshot-source-group-content">
+                    <div className="context-snapshot-source-list">
+                      {group.items.map((source) => (
+                        <Tooltip.Root key={`source-row-${source.key}`}>
+                          <Tooltip.Trigger asChild>
+                            <button
+                              type="button"
+                              className={`context-snapshot-source-row ${selectedSourceKey === source.key ? 'active' : ''}`.trim()}
+                              onClick={() => setSelectedSourceKey((current) => (current === source.key ? null : source.key))}
+                            >
+                              <span className="graph-context-legend-swatch" style={{ backgroundColor: source.color }} />
+                              <span className="context-snapshot-source-row-main">
+                                <span className="graph-context-legend-label">{source.label}</span>
+                                <span className="meta">
+                                  {source.tokens.toLocaleString()} tokens · {source.chars.toLocaleString()} chars
+                                  {source.lines > 0 ? ` · ${source.lines} lines` : ''}
+                                </span>
+                                <span className="context-snapshot-source-row-track">
+                                  <span
+                                    className="context-snapshot-source-row-fill"
+                                    style={{ width: `${Math.max(0, Math.min(100, source.windowPercent))}%`, backgroundColor: source.color }}
+                                  />
+                                </span>
+                              </span>
+                              <span className="meta context-snapshot-source-row-pct">
+                                {formatPercent(source.windowPercent)}
+                              </span>
+                            </button>
+                          </Tooltip.Trigger>
+                          <Tooltip.Portal>
+                            <Tooltip.Content className="header-tooltip-content" side="top" sideOffset={6}>
+                              <strong>{source.label}</strong>
+                              <div className="meta">{sourceGroupLabel(source.group)}</div>
+                              <div className="meta">
+                                {formatPercent(source.windowPercent)} window · {formatPercent(source.percent)} used
+                              </div>
+                              <div className="meta">
+                                {source.tokens.toLocaleString()} tokens · {source.chars.toLocaleString()} chars
+                                {source.lines > 0 ? ` · ${source.lines} lines` : ''}
+                              </div>
+                              <Tooltip.Arrow className="header-tooltip-arrow" />
+                            </Tooltip.Content>
+                          </Tooltip.Portal>
+                        </Tooltip.Root>
+                      ))}
+                    </div>
+                  </Accordion.Content>
+                </Accordion.Item>
+              ))}
+            </Accordion.Root>
+            {snapshot.emptyTokens > 0 ? (
+              <div className="meta" style={{ marginTop: 8 }}>
+                Empty context window: {formatPercent(snapshot.emptyWindowPercent)} · {snapshot.emptyTokens.toLocaleString()} tokens
+              </div>
+            ) : null}
+          </Tabs.Content>
+        </Tabs.Root>
       </div>
-      <div className="meta" style={{ marginTop: 4 }}>
-        Average evidence score: {snapshot.averageEvidenceScore.toFixed(3)} · Distinct evidence entities: {snapshot.distinctEvidenceEntities} · Chat evidence entities: {snapshot.chatEvidenceEntityCount}
-      </div>
-    </div>
+    </Tooltip.Provider>
   )
 }

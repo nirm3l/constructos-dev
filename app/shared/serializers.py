@@ -29,6 +29,14 @@ from .contracts import (
 )
 from .models import Note, NoteGroup, Notification, Project, ProjectRule, SavedView, Specification, StoredEvent, Task, TaskGroup
 from .settings import DEFAULT_STATUSES
+from .typed_notifications import (
+    DEFAULT_NOTIFICATION_SEVERITY,
+    DEFAULT_NOTIFICATION_TYPE,
+    loads_payload_json,
+    normalize_dedupe_key,
+    normalize_notification_type,
+    normalize_severity,
+)
 from .vector_store import project_embedding_index_snapshot
 
 
@@ -93,7 +101,7 @@ def load_created_by_map(db: Session, aggregate_type: str, aggregate_ids: list[st
     return out
 
 
-def serialize_task(task: Task, created_by: str = "") -> dict[str, Any]:
+def serialize_task(task: Task, created_by: str = "", linked_note_count: int = 0) -> dict[str, Any]:
     dto = TaskDTO(
         id=task.id,
         workspace_id=task.workspace_id,
@@ -125,6 +133,7 @@ def serialize_task(task: Task, created_by: str = "") -> dict[str, Any]:
         updated_at=to_iso_utc(task.updated_at),
         created_by=created_by,
         order_index=task.order_index,
+        linked_note_count=max(0, int(linked_note_count or 0)),
     )
     return asdict(dto)
 
@@ -163,6 +172,11 @@ def serialize_notification(notification: Notification) -> dict[str, Any]:
         task_id=notification.task_id,
         note_id=notification.note_id,
         specification_id=notification.specification_id,
+        notification_type=normalize_notification_type(notification.notification_type or DEFAULT_NOTIFICATION_TYPE),
+        severity=normalize_severity(notification.severity or DEFAULT_NOTIFICATION_SEVERITY),
+        dedupe_key=normalize_dedupe_key(notification.dedupe_key),
+        payload=loads_payload_json(notification.payload_json),
+        source_event=str(notification.source_event or "").strip() or None,
     )
     return asdict(dto)
 

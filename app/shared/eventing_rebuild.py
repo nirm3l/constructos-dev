@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -137,6 +136,14 @@ from .models import (
     WorkspaceMember,
 )
 from .settings import DEFAULT_STATUSES, SNAPSHOT_EVERY
+from .typed_notifications import (
+    DEFAULT_NOTIFICATION_SEVERITY,
+    DEFAULT_NOTIFICATION_TYPE,
+    dumps_payload_json,
+    normalize_dedupe_key,
+    normalize_notification_type,
+    normalize_severity,
+)
 from .event_upcasters import upcast_event, upcast_snapshot
 from .eventing_store import StreamState, get_kurrent_client, kurrent_read_stream, snapshot_stream_id, stream_id, NotFoundError, serialize_snapshot_event
 
@@ -724,6 +731,7 @@ def apply_chat_session_event(state: dict[str, Any], event: EventEnvelope) -> dic
             "is_archived": bool(p.get("is_archived", False)),
             "codex_session_id": p.get("codex_session_id"),
             "mcp_servers": _normalize_json_list(p.get("mcp_servers")),
+            "session_attachment_refs": _normalize_json_list(p.get("session_attachment_refs")),
             "usage": _normalize_json_dict(p.get("usage")),
             "last_message_at": p.get("last_message_at"),
             "last_message_preview": p.get("last_message_preview", ""),
@@ -743,8 +751,10 @@ def apply_chat_session_event(state: dict[str, Any], event: EventEnvelope) -> dic
     if event.event_type == CHAT_SESSION_EVENT_CONTEXT_UPDATED:
         if "project_id" in p:
             s["project_id"] = p.get("project_id")
-        if "mcp_servers" in p:
+        if "mcp_servers" in p and p.get("mcp_servers") is not None:
             s["mcp_servers"] = _normalize_json_list(p.get("mcp_servers"))
+        if "session_attachment_refs" in p and p.get("session_attachment_refs") is not None:
+            s["session_attachment_refs"] = _normalize_json_list(p.get("session_attachment_refs"))
         if "codex_session_id" in p:
             s["codex_session_id"] = p.get("codex_session_id")
         if "usage" in p:
@@ -1086,9 +1096,9 @@ def project_event(db: Session, ev: EventEnvelope):
         if session:
             if "project_id" in p:
                 session.project_id = p.get("project_id")
-            if "mcp_servers" in p:
+            if "mcp_servers" in p and p.get("mcp_servers") is not None:
                 session.mcp_servers = json.dumps(_normalize_json_list(p.get("mcp_servers")), ensure_ascii=True)
-            if "session_attachment_refs" in p:
+            if "session_attachment_refs" in p and p.get("session_attachment_refs") is not None:
                 session.session_attachment_refs = json.dumps(
                     _normalize_json_list(p.get("session_attachment_refs")),
                     ensure_ascii=True,
@@ -1463,22 +1473,6 @@ def project_event(db: Session, ev: EventEnvelope):
         ).scalar_one_or_none()
         if existing_comment is None and not pending_exists:
             db.add(TaskComment(task_id=p["task_id"], user_id=p["user_id"], body=p["body"], event_version=ev.version))
-        task = db.get(Task, p["task_id"])
-        mentions = re.findall(r"@([A-Za-z0-9_\-]+)", p["body"])
-        if mentions:
-            users = db.execute(select(User).where(User.username.in_(mentions))).scalars().all()
-            actor = db.get(User, p["user_id"])
-            actor_username = actor.username if actor else "Someone"
-            for mentioned in users:
-                db.add(
-                    Notification(
-                        user_id=mentioned.id,
-                        workspace_id=task.workspace_id if task else m.get("workspace_id"),
-                        project_id=task.project_id if task else m.get("project_id"),
-                        task_id=p["task_id"],
-                        message=f"{actor_username} mentioned you on task #{p['task_id']}",
-                    )
-                )
     elif ev.event_type == TASK_EVENT_COMMENT_DELETED:
         comment = db.get(TaskComment, p["comment_id"])
         if comment and comment.task_id == p["task_id"]:
@@ -1516,6 +1510,11 @@ def project_event(db: Session, ev: EventEnvelope):
     elif ev.event_type == NOTIFICATION_EVENT_CREATED:
         # Idempotent projection: in EventStore mode we can project the same event
         # via write-through append + later catch-up, so inserts must be safe.
+        payload_json = p.get("payload_json")
+        if isinstance(payload_json, dict):
+            payload_json = dumps_payload_json(payload_json)
+        else:
+            payload_json = str(payload_json or "{}")
         n = db.get(Notification, ev.aggregate_id)
         if n is None:
             n = Notification(
@@ -1527,6 +1526,11 @@ def project_event(db: Session, ev: EventEnvelope):
                 note_id=p.get("note_id") or m.get("note_id"),
                 specification_id=p.get("specification_id") or m.get("specification_id"),
                 message=p["message"],
+                notification_type=normalize_notification_type(p.get("notification_type") or DEFAULT_NOTIFICATION_TYPE),
+                severity=normalize_severity(p.get("severity") or DEFAULT_NOTIFICATION_SEVERITY),
+                dedupe_key=normalize_dedupe_key(p.get("dedupe_key")),
+                payload_json=payload_json or "{}",
+                source_event=str(p.get("source_event") or "").strip() or None,
                 is_read=False,
             )
             db.add(n)
@@ -1538,6 +1542,11 @@ def project_event(db: Session, ev: EventEnvelope):
             n.note_id = p.get("note_id") or m.get("note_id")
             n.specification_id = p.get("specification_id") or m.get("specification_id")
             n.message = p["message"]
+            n.notification_type = normalize_notification_type(p.get("notification_type") or DEFAULT_NOTIFICATION_TYPE)
+            n.severity = normalize_severity(p.get("severity") or DEFAULT_NOTIFICATION_SEVERITY)
+            n.dedupe_key = normalize_dedupe_key(p.get("dedupe_key"))
+            n.payload_json = payload_json or "{}"
+            n.source_event = str(p.get("source_event") or "").strip() or None
             # Preserve any existing read state; newly created events are unread.
             if n.is_read is None:
                 n.is_read = False

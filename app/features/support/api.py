@@ -3,17 +3,16 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from shared.core import User, get_current_user, get_db
 from shared.licensing import resolve_license_installation_id
 from shared.settings import LICENSE_SERVER_TOKEN, LICENSE_SERVER_URL
-from .outbox import enqueue_bug_report, is_retryable_status_code
 
 router = APIRouter()
-BUG_REPORT_SEVERITIES = {"low", "medium", "high", "critical"}
+FEEDBACK_TYPES = {"general", "feature_request", "question", "other"}
 
 
 class WaitlistJoinProxyRequest(BaseModel):
@@ -29,13 +28,10 @@ class ContactRequestProxyRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class BugReportSubmitRequest(BaseModel):
+class FeedbackSubmitRequest(BaseModel):
     title: str = Field(min_length=3, max_length=140)
     description: str = Field(min_length=5, max_length=4000)
-    steps_to_reproduce: str | None = Field(default=None, max_length=4000)
-    expected_behavior: str | None = Field(default=None, max_length=2000)
-    actual_behavior: str | None = Field(default=None, max_length=2000)
-    severity: str = Field(default="medium", min_length=3, max_length=16)
+    feedback_type: str = Field(default="general", min_length=3, max_length=32)
     context: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -98,12 +94,20 @@ def _post_to_control_plane(path: str, payload: dict[str, Any], request: Request)
     return body
 
 
-def _normalize_bug_report_severity(value: str | None) -> str:
-    normalized = str(value or "").strip().lower() or "medium"
-    if normalized not in BUG_REPORT_SEVERITIES:
-        allowed = ", ".join(sorted(BUG_REPORT_SEVERITIES))
-        raise HTTPException(status_code=400, detail=f"Unsupported severity. Allowed values: {allowed}")
+def _normalize_feedback_type(value: str | None) -> str:
+    normalized = str(value or "").strip().lower() or "general"
+    if normalized not in FEEDBACK_TYPES:
+        allowed = ", ".join(sorted(FEEDBACK_TYPES))
+        raise HTTPException(status_code=400, detail=f"Unsupported feedback type. Allowed values: {allowed}")
     return normalized
+
+
+def _feedback_identity_email(*, username: str | None, user_id: str | None, installation_id: str) -> str:
+    raw = str(username or "").strip() or str(user_id or "").strip() or str(installation_id or "").strip() or "feedback"
+    safe = "".join(ch if ch.isalnum() or ch in {".", "-", "_"} else "-" for ch in raw.lower()).strip(".-_")
+    if not safe:
+        safe = "feedback"
+    return f"{safe[:64]}@feedback.local"
 
 
 @router.post("/api/public/waitlist")
@@ -119,80 +123,6 @@ def proxy_waitlist_join(payload: WaitlistJoinProxyRequest, request: Request) -> 
     )
 
 
-@router.post("/api/support/bug-reports")
-def submit_bug_report(
-    payload: BugReportSubmitRequest,
-    request: Request,
-    response: Response,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-) -> dict[str, Any]:
-    installation_id = resolve_license_installation_id(db)
-    severity = _normalize_bug_report_severity(payload.severity)
-    context = dict(payload.context or {})
-
-    metadata = dict(payload.metadata or {})
-    metadata["context"] = context
-
-    control_plane_payload = {
-        "installation_id": installation_id,
-        "workspace_id": str(context.get("workspace_id") or "").strip() or None,
-        "source": "task-app-ui",
-        "title": str(payload.title or "").strip(),
-        "description": str(payload.description or "").strip(),
-        "steps_to_reproduce": str(payload.steps_to_reproduce or "").strip() or None,
-        "expected_behavior": str(payload.expected_behavior or "").strip() or None,
-        "actual_behavior": str(payload.actual_behavior or "").strip() or None,
-        "severity": severity,
-        "reporter_user_id": str(user.id or "").strip() or None,
-        "reporter_username": str(user.username or "").strip() or None,
-        "metadata": metadata,
-    }
-
-    try:
-        control_plane_response = _post_to_control_plane(
-            "/v1/support/bug-reports",
-            control_plane_payload,
-            request,
-        )
-    except HTTPException as exc:
-        if not is_retryable_status_code(exc.status_code):
-            raise
-        try:
-            record, _created = enqueue_bug_report(
-                db,
-                control_plane_payload,
-                last_error=str(exc.detail or "Control-plane request failed"),
-            )
-            db.commit()
-        except Exception as queue_exc:
-            db.rollback()
-            raise HTTPException(
-                status_code=503,
-                detail=f"Control-plane request failed and outbox enqueue failed: {queue_exc}",
-            ) from queue_exc
-        response.status_code = 202
-        return {
-            "ok": True,
-            "created": False,
-            "queued": True,
-            "queue_id": record.id,
-            "report_id": None,
-            "bug_report": {},
-        }
-
-    bug_report = control_plane_response.get("bug_report") if isinstance(control_plane_response.get("bug_report"), dict) else {}
-    report_id = str(bug_report.get("report_id") or "").strip() or None
-    return {
-        "ok": bool(control_plane_response.get("ok")),
-        "created": bool(control_plane_response.get("created")),
-        "queued": False,
-        "queue_id": None,
-        "report_id": report_id,
-        "bug_report": bug_report,
-    }
-
-
 @router.post("/api/public/contact-requests")
 def proxy_contact_request(payload: ContactRequestProxyRequest, request: Request) -> dict[str, Any]:
     return _post_to_control_plane(
@@ -205,3 +135,85 @@ def proxy_contact_request(payload: ContactRequestProxyRequest, request: Request)
         },
         request,
     )
+
+
+@router.post("/api/support/feedback")
+def submit_feedback(
+    payload: FeedbackSubmitRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    installation_id = resolve_license_installation_id(db)
+    feedback_type = _normalize_feedback_type(payload.feedback_type)
+    context = dict(payload.context or {})
+    metadata = dict(payload.metadata or {})
+    metadata["context"] = context
+    reporter_user_id = str(user.id or "").strip() or None
+    reporter_username = str(user.username or "").strip() or None
+    normalized_title = str(payload.title or "").strip()
+    normalized_description = str(payload.description or "").strip()
+
+    primary_payload = {
+        "installation_id": installation_id,
+        "workspace_id": str(context.get("workspace_id") or "").strip() or None,
+        "source": "task-app-ui",
+        "title": normalized_title,
+        "description": normalized_description,
+        "feedback_type": feedback_type,
+        "reporter_user_id": reporter_user_id,
+        "reporter_username": reporter_username,
+        "metadata": metadata,
+    }
+    try:
+        control_plane_response = _post_to_control_plane("/v1/support/feedback", primary_payload, request)
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        fallback_metadata = dict(metadata)
+        fallback_metadata["submission_kind"] = "feedback"
+        fallback_metadata["feedback_type"] = feedback_type
+        fallback_metadata["installation_id"] = installation_id
+        fallback_metadata["workspace_id"] = primary_payload["workspace_id"]
+        fallback_metadata["reporter_user_id"] = reporter_user_id
+        fallback_metadata["reporter_username"] = reporter_username
+        fallback_metadata["title"] = normalized_title
+        fallback_metadata["description"] = normalized_description
+        fallback_payload = {
+            "request_type": "feedback",
+            "email": _feedback_identity_email(
+                username=reporter_username,
+                user_id=reporter_user_id,
+                installation_id=installation_id,
+            ),
+            "source": "task-app-ui",
+            "metadata": fallback_metadata,
+        }
+        try:
+            control_plane_response = _post_to_control_plane("/v1/public/contact-requests", fallback_payload, request)
+        except HTTPException as fallback_exc:
+            # Compatibility fallback for control-plane versions that don't allow request_type=feedback yet.
+            if fallback_exc.status_code != 400:
+                raise
+            fallback_payload["request_type"] = "onboarding"
+            control_plane_response = _post_to_control_plane("/v1/public/contact-requests", fallback_payload, request)
+        contact_request = (
+            control_plane_response.get("contact_request")
+            if isinstance(control_plane_response.get("contact_request"), dict)
+            else {}
+        )
+        return {
+            "ok": bool(control_plane_response.get("ok")),
+            "created": bool(control_plane_response.get("created")),
+            "feedback": contact_request,
+        }
+    feedback_record = (
+        control_plane_response.get("feedback")
+        if isinstance(control_plane_response.get("feedback"), dict)
+        else {}
+    )
+    return {
+        "ok": bool(control_plane_response.get("ok")),
+        "created": bool(control_plane_response.get("created")),
+        "feedback": feedback_record,
+    }

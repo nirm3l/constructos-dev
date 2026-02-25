@@ -8,6 +8,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from shared.core import (
+    Note,
     Task,
     ensure_project_access,
     ensure_role,
@@ -74,7 +75,21 @@ def list_tasks_read_model(db: Session, user, query: TaskListQuery) -> dict:
     if query.priority:
         stmt = stmt.where(Task.priority == query.priority)
 
-    if query.view == "today":
+    if query.view == "inbox":
+        # Inbox focuses on actionable items for the current user:
+        # - open tasks only
+        # - assigned to current user or unassigned
+        # - no due date or due within today/tomorrow (local timezone)
+        local_now = now.astimezone(user_tz)
+        local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        local_day_after_tomorrow_start = local_start + timedelta(days=2)
+        inbox_due_cutoff_utc = local_day_after_tomorrow_start.astimezone(timezone.utc)
+        stmt = stmt.where(
+            Task.completed_at.is_(None),
+            or_(Task.assignee_id.is_(None), Task.assignee_id == user.id),
+            or_(Task.due_date.is_(None), Task.due_date < inbox_due_cutoff_utc),
+        )
+    elif query.view == "today":
         local_now = now.astimezone(user_tz)
         local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
         local_end = local_start + timedelta(days=1)
@@ -88,9 +103,36 @@ def list_tasks_read_model(db: Session, user, query: TaskListQuery) -> dict:
 
     total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one()
     tasks = db.execute(stmt.order_by(Task.order_index.asc(), Task.created_at.desc()).limit(query.limit).offset(query.offset)).scalars().all()
+    task_ids = [t.id for t in tasks]
+    linked_note_count_by_task_id: dict[str, int] = {}
+    if task_ids:
+        note_counts = db.execute(
+            select(Note.task_id, func.count())
+            .where(
+                Note.workspace_id == query.workspace_id,
+                Note.project_id == query.project_id,
+                Note.is_deleted == False,
+                Note.archived == False,
+                Note.task_id.is_not(None),
+                Note.task_id.in_(task_ids),
+            )
+            .group_by(Note.task_id)
+        ).all()
+        linked_note_count_by_task_id = {
+            str(task_id): int(count or 0)
+            for task_id, count in note_counts
+            if task_id
+        }
     created_by_map = load_created_by_map(db, "Task", [t.id for t in tasks])
     return {
-        "items": [serialize_task(t, created_by=created_by_map.get(t.id, "")) for t in tasks],
+        "items": [
+            serialize_task(
+                t,
+                created_by=created_by_map.get(t.id, ""),
+                linked_note_count=linked_note_count_by_task_id.get(t.id, 0),
+            )
+            for t in tasks
+        ],
         "total": total,
         "limit": query.limit,
         "offset": query.offset,

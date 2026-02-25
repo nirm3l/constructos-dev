@@ -57,6 +57,12 @@ export function AppContent({ state }: { state: any }) {
         bootstrapData={state.bootstrap.data}
         tab={state.tab}
         setTab={state.setTab}
+        theme={state.theme}
+        onToggleTheme={() => {
+          const nextTheme = state.theme === 'light' ? 'dark' : 'light'
+          state.setTheme(nextTheme)
+          state.themeMutation.mutate(nextTheme)
+        }}
         searchQ={state.searchQ}
         setSearchQ={state.setSearchQ}
         selectedProjectId={state.selectedProjectId}

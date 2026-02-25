@@ -21,6 +21,7 @@ Effects:
 - generates `.deploy.env` (`APP_VERSION`, `APP_BUILD`, `APP_DEPLOYED_AT_UTC`),
 - resolves `DEPLOY_TARGET` (`auto|base|ubuntu-gpu|macos-m4`),
 - resolves `DEPLOY_SOURCE` (`local|ghcr`),
+- uses fixed app compose project name `constructos-app` (override: `APP_COMPOSE_PROJECT_NAME`),
 - runs `docker compose ... up -d --build` with target-specific override files.
 
 ### 2.2 Deploy Targets
@@ -75,12 +76,20 @@ Deploy separately from app stack:
 ```bash
 ./scripts/deploy-control-plane.sh up
 ```
+This starts:
+- `license-control-plane`
+- `license-control-plane-backup` (hourly SQLite snapshots)
+- fixed control-plane compose project name `constructos-cp` (override: `CP_COMPOSE_PROJECT_NAME`)
+
 Stop without deleting control-plane data:
 ```bash
 ./scripts/deploy-control-plane.sh down
 ```
 Compose file:
 - `docker-compose.license-control-plane.yml`
+Persisted volumes:
+- `task-management_license-control-plane-data`
+- `task-management_license-control-plane-backups`
 
 Default local URL used by app services in this mode:
 - `http://license-control-plane:8092`
@@ -98,6 +107,23 @@ Activation code flow (multi-device seat control):
 - Customer enters activation code in app (`POST /api/license/activate` -> control-plane `POST /v1/installations/activate`).
 - Control-plane binds installation to `customer_ref` and enforces seat limit (default `3`).
 
+### 2.9 Control-Plane Backup and Restore
+Backup scheduler defaults:
+- interval: `LCP_BACKUP_INTERVAL_SECONDS=3600` (1 hour)
+- retention: `LCP_BACKUP_RETENTION_HOURS=168` (7 days)
+- backup files: `/backups/license-control-plane-YYYYMMDDTHHMMSSZ.sqlite3`
+
+Restore latest backup:
+```bash
+docker compose -p constructos-cp -f docker-compose.license-control-plane.yml down
+docker run --rm \
+  -v task-management_license-control-plane-backups:/backups \
+  -v task-management_license-control-plane-data:/data \
+  alpine:3.20 \
+  sh -lc 'cp "$(ls -1t /backups/license-control-plane-*.sqlite3 | head -n 1)" /data/license-control-plane.db'
+./scripts/deploy-control-plane.sh up
+```
+
 ## 3. Critical Environment Variables
 
 ### 3.1 Core
@@ -112,6 +138,7 @@ Activation code flow (multi-device seat control):
 - `AGENT_EXECUTOR_MODE` (`placeholder|command`)
 - `AGENT_CODEX_COMMAND`
 - `AGENT_EXECUTOR_TIMEOUT_SECONDS`
+- `GITHUB_PAT` (optional, enables non-interactive HTTPS git auth for Codex operations in container)
 
 ### 3.3 MCP Security
 - `MCP_AUTH_TOKEN`
@@ -137,13 +164,7 @@ Activation code flow (multi-device seat control):
 - `PERSISTENT_SUBSCRIPTION_STOPPING_GRACE_SECONDS`
 - `PERSISTENT_SUBSCRIPTION_RETRY_BACKOFF_SECONDS`
 
-### 3.6 Email Tool
-- `MCP_EMAIL_SMTP_*`
-- `MCP_EMAIL_FROM`
-- `MCP_EMAIL_ALLOWED_RECIPIENTS`
-- `MCP_EMAIL_ALLOWED_DOMAINS`
-
-### 3.7 Licensing
+### 3.6 Licensing
 - License server endpoint is fixed in application runtime and is not customer-configurable.
 - Required client-side variables:
   - `LICENSE_SERVER_TOKEN`
@@ -157,7 +178,7 @@ Activation code flow (multi-device seat control):
 - If `LICENSE_PUBLIC_KEY` is configured, app accepts only valid signed `entitlement_token` payloads from control-plane.
 - `POST /api/license/activate` is write-exempt from license lock so expired installations can re-activate.
 
-### 3.8 Control-Plane Licensing
+### 3.7 Control-Plane Licensing
 - `LCP_API_TOKEN`
 - `LCP_TRIAL_DAYS`
 - `LCP_TOKEN_TTL_SECONDS`
@@ -169,6 +190,11 @@ Activation code flow (multi-device seat control):
 - Installation endpoints (`/v1/installations/*`) accept either:
   - admin token, or
   - active customer-specific client token issued from `/v1/admin/client-tokens`.
+- Backup scheduler:
+  - `LCP_BACKUP_INTERVAL_SECONDS`
+  - `LCP_BACKUP_RETENTION_HOURS`
+  - `LCP_BACKUP_SOURCE_DB_PATH`
+  - `LCP_BACKUP_DIR`
 
 ## 4. Bootstrap and Migration Behavior
 `startup_bootstrap()` performs:
@@ -211,7 +237,7 @@ Current test coverage (unit + API integration):
 
 Run tests:
 ```bash
-docker compose run --rm --build task-app pytest
+docker compose -p constructos-app -f docker-compose.yml run --rm --build task-app pytest
 ```
 
 ## 7. Troubleshooting
@@ -221,8 +247,18 @@ docker compose run --rm --build task-app pytest
 | Duplicate side effects on retries | same request mutates state multiple times | verify stable `X-Command-Id` reuse | enforce command_id reuse |
 | Runner does not process queued tasks | automation stays `queued` | verify `AGENT_RUNNER_ENABLED`, runner logs | verify `AGENT_CODEX_COMMAND`, timeout |
 | SSE does not deliver updates | stale notifications/activity in UI | check `/api/notifications/stream` connectivity | verify proxy idle timeout |
+| SSE reconnect behavior is inconsistent | missing recent notification after reconnect or unexpected history replay | check `Last-Event-ID` forwarding and query cursors (`last_id`, `last_activity_id`) | ensure proxy preserves `Last-Event-ID`; use explicit query cursors for non-browser clients |
 | Projection consumer is stuck | lagging read models/graph/vector | inspect persistent subscription group info and parked count | nack policy review, fix handler error, replay parked messages |
 | Attachment download returns 404 | upload succeeded but file not found | verify `ATTACHMENTS_DIR` and scoped path | verify volume mounts and workspace path |
+
+SSE resume semantics (`/api/notifications/stream`):
+- `notification` events include SSE `id` field (notification id) and can resume from:
+  - `Last-Event-ID` header,
+  - explicit `last_id` query cursor (takes precedence over header).
+- Workspace activity resume uses `last_activity_id`.
+- Tail defaults:
+  - missing/invalid notification cursor starts from current notification tail,
+  - `workspace_id` with `last_activity_id=0` starts from current activity tail.
 
 ## 8. Pre-Production Hardening Checklist
 1. Remove default tokens and static credentials from compose/env.

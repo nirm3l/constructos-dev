@@ -7,8 +7,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from shared.core import (
+    Notification,
     User,
-    emit_system_notifications,
     ensure_role,
     get_command_id,
     get_current_user,
@@ -21,6 +21,7 @@ from features.licensing.read_models import license_status_read_model
 
 from .application import NotificationApplicationService
 from .read_models import (
+    latest_notification_id_read_model,
     latest_workspace_activity_id_read_model,
     list_notifications_after_cursor_read_model,
     list_notifications_read_model,
@@ -55,11 +56,25 @@ async def _wait_for_signal(subscription, timeout_seconds: float) -> None:
     await asyncio.wait_for(subscription.get(), timeout=timeout_seconds)
 
 
+def _extract_last_event_id(request: Request) -> str:
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return ""
+    value = headers.get("last-event-id", "")
+    return str(value or "").strip()
+
+
+def _resolve_notification_cursor(db: Session, user_id: str, explicit_cursor: str | None, last_event_id: str) -> str:
+    requested = str(explicit_cursor or "").strip() or str(last_event_id or "").strip()
+    if requested:
+        row = db.get(Notification, requested)
+        if row is not None and row.user_id == user_id:
+            return requested
+    return latest_notification_id_read_model(db, user_id)
+
+
 @router.get("/api/notifications")
 def list_notifications(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    created = emit_system_notifications(db, user)
-    if created:
-        incr("notifications_emitted", created)
     return list_notifications_read_model(db, user.id, limit=100)
 
 
@@ -98,18 +113,16 @@ async def notifications_stream(
     if workspace_id:
         channels.add(f"workspace:{workspace_id}")
     subscription = realtime_hub.subscribe(channels=channels)
+    last_event_id = _extract_last_event_id(request)
 
     async def event_generator():
-        notification_cursor = last_id or ""
+        notification_cursor = _resolve_notification_cursor(db, user.id, last_id, last_event_id)
         activity_cursor = max(last_activity_id, 0)
         user_state_cursor = _load_user_state_cursor(db, user.id)
         license_state_cursor = _load_license_state_cursor(db)
         if workspace_id and activity_cursor == 0:
             # Tail mode by default: only stream new activity generated after this connection starts.
             activity_cursor = latest_workspace_activity_id_read_model(db, workspace_id)
-        created = emit_system_notifications(db, user)
-        if created:
-            incr("notifications_emitted", created)
         flush_now = True
         try:
             while True:

@@ -54,10 +54,12 @@ export function AppPrimaryPanels({ state }: { state: any }) {
         }}
       />
 
-      {state.tab === 'tasks' && (
+      {(state.tab === 'tasks' || state.tab === 'inbox') && (
         <TasksPanel
-          projectsMode={state.projectsMode}
-          setProjectsMode={state.setProjectsMode}
+          panelTitle={state.tab === 'inbox' ? 'Inbox' : 'Tasks'}
+          allowBoardView={state.tab !== 'inbox'}
+          projectsMode={state.tab === 'inbox' ? 'list' : state.projectsMode}
+          setProjectsMode={state.tab === 'inbox' ? (() => undefined) : state.setProjectsMode}
           taskGroups={state.taskGroups.data?.items ?? []}
           taskGroupFilterId={state.taskGroupFilterId}
           setTaskGroupFilterId={state.setTaskGroupFilterId}
@@ -70,7 +72,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           toggleSearchTag={state.toggleSearchTag}
           clearSearchTags={state.clearSearchTags}
           getTagUsage={state.getTagUsage}
-          boardData={state.board.data}
+          boardData={state.tab === 'inbox' ? undefined : state.board.data}
           onOpenTaskEditor={state.openTaskEditor}
           onOpenSpecification={state.openSpecification}
           specificationNames={state.specificationNameMap}
@@ -79,6 +81,15 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           onRestoreTask={(taskId) => state.restoreTaskMutation.mutate(taskId)}
           onReopenTask={(taskId) => state.reopenTaskMutation.mutate(taskId)}
           onCompleteTask={(taskId) => state.completeTaskMutation.mutate(taskId)}
+          onNewTask={(taskType) => {
+            state.setQuickProjectId(state.selectedProjectId || state.bootstrap.data?.projects?.[0]?.id || '')
+            state.setQuickTaskGroupId('')
+            state.setQuickTaskAssigneeId('')
+            state.setQuickTaskExternalRefsText('')
+            state.setQuickTaskAttachmentRefsText('')
+            state.setQuickTaskType(taskType === 'scheduled_instruction' ? 'scheduled_instruction' : 'manual')
+            state.setShowQuickAdd(true)
+          }}
         />
       )}
 
@@ -205,6 +216,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             selectedProjectTimeMeta: state.selectedProjectTimeMeta,
             codexChatProjectId: state.codexChatProjectId,
             codexChatTurns: state.codexChatTurns,
+            codexChatUsage: state.codexChatUsage,
+            codexChatResumeState: state.codexChatResumeState,
           }}
         />
       )}
@@ -238,8 +251,6 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             toggleSpecificationFilterTag: state.toggleSpecificationFilterTag,
             clearSpecificationFilterTags: state.clearSpecificationFilterTags,
             getTagUsage: state.getTagUsage,
-            specificationArchived: state.specificationArchived,
-            setSpecificationArchived: state.setSpecificationArchived,
             createSpecificationMutation: state.createSpecificationMutation,
             selectedSpecificationId: state.selectedSpecificationId,
             toggleSpecificationEditor: state.toggleSpecificationEditor,
@@ -413,8 +424,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             }}
             changePassword={state.changeMyPassword}
             passwordChangePending={state.changeMyPasswordPending}
-            submitBugReport={state.submitBugReport}
-            bugReportSubmitting={state.submitBugReportPending}
+            submitFeedback={state.submitFeedback}
+            feedbackSubmitting={state.submitFeedbackPending}
           />
           {state.canManageUsers && (
             <AdminPanel
@@ -459,6 +470,15 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           notesTotal={state.searchNotesCombined?.length ?? 0}
           specifications={state.searchSpecificationsCombined ?? []}
           specificationsTotal={state.searchSpecificationsCombined?.length ?? 0}
+          searchQuery={state.searchQ}
+          semanticMode={String(state.searchKnowledge?.data?.mode || 'empty')}
+          semanticSearching={Boolean(state.searchKnowledge?.isFetching)}
+          semanticTaskIds={state.semanticTaskIds ?? []}
+          semanticNoteIds={state.semanticNoteIds ?? []}
+          semanticSpecificationIds={state.semanticSpecificationIds ?? []}
+          lexicalTaskIds={(state.tasks.data?.items ?? []).map((task: any) => String(task?.id || '')).filter(Boolean)}
+          lexicalNoteIds={(state.searchNotes.data?.items ?? []).map((note: any) => String(note?.id || '')).filter(Boolean)}
+          lexicalSpecificationIds={(state.searchSpecifications.data?.items ?? []).map((spec: any) => String(spec?.id || '')).filter(Boolean)}
           projectNames={state.projectNames}
           specificationNames={state.specificationNameMap}
           onOpenSpecification={state.openSpecification}

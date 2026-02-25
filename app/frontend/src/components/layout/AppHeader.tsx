@@ -11,6 +11,8 @@ type AppHeaderProps = {
   bootstrapData: BootstrapPayload
   tab: Tab
   setTab: (tab: Tab) => void
+  theme: 'light' | 'dark'
+  onToggleTheme: () => void
   searchQ: string
   setSearchQ: (value: string) => void
   selectedProjectId: string
@@ -28,9 +30,53 @@ type AppHeaderProps = {
   onOpenProject: (projectId: string) => void
 }
 
-function parseLegacyTaskId(message: string): string | null {
-  const match = message.match(/\btask\s+#([0-9a-fA-F-]{8,})\b/i)
-  return match?.[1] ?? null
+function notificationPayloadId(notification: Notification, key: string): string | null {
+  const payload = notification.payload
+  if (!payload || typeof payload !== 'object') return null
+  const value = (payload as Record<string, unknown>)[key]
+  if (typeof value !== 'string') return null
+  const normalized = value.trim()
+  return normalized || null
+}
+
+function notificationPayloadText(notification: Notification, key: string): string | null {
+  const payload = notification.payload
+  if (!payload || typeof payload !== 'object') return null
+  const value = (payload as Record<string, unknown>)[key]
+  if (typeof value !== 'string' && typeof value !== 'number') return null
+  const normalized = String(value).trim()
+  return normalized || null
+}
+
+function notificationDisplayMessage(notification: Notification): string {
+  const type = String(notification.notification_type || '').trim()
+  const fallback = String(notification.message || '').trim() || 'Notification'
+  if (!type || type === 'Legacy') return fallback
+  const title = notificationPayloadText(notification, 'title')
+  const fromStatus = notificationPayloadText(notification, 'from_status')
+  const toStatus = notificationPayloadText(notification, 'to_status')
+  const role = notificationPayloadText(notification, 'role')
+  const error = notificationPayloadText(notification, 'error')
+  const hoursRemaining = notificationPayloadText(notification, 'hours_remaining')
+  switch (type) {
+    case 'TaskAssignedToMe':
+      return title ? `Assigned to you: ${title}` : fallback
+    case 'WatchedTaskStatusChanged':
+      if (title && fromStatus && toStatus) return `${title} moved from ${fromStatus} to ${toStatus}`
+      if (title && toStatus) return `${title} moved to ${toStatus}`
+      return fallback
+    case 'TaskAutomationFailed':
+      return title && error ? `Automation failed on ${title}: ${error}` : fallback
+    case 'TaskScheduleFailed':
+      return title && error ? `Scheduled run failed on ${title}: ${error}` : fallback
+    case 'ProjectMembershipChanged':
+      if (role) return `Project membership updated. New role: ${role}`
+      return fallback
+    case 'LicenseGraceEndingSoon':
+      return hoursRemaining ? `License grace ends in about ${hoursRemaining}h.` : fallback
+    default:
+      return fallback
+  }
 }
 
 function HeaderTooltip({
@@ -57,6 +103,8 @@ export function AppHeader({
   bootstrapData,
   tab,
   setTab,
+  theme,
+  onToggleTheme,
   searchQ,
   setSearchQ,
   selectedProjectId,
@@ -75,6 +123,8 @@ export function AppHeader({
 }: AppHeaderProps) {
   const brandSubTop = 'From spec to ship,'
   const brandSubBottom = 'with context under control...'
+  const isDarkTheme = theme === 'dark'
+  const themeToggleTooltip = isDarkTheme ? 'Switch to light mode' : 'Switch to dark mode'
   const projectSelectValue = React.useMemo(() => {
     if (!selectedProjectId) return undefined
     return bootstrapData.projects.some((project) => project.id === selectedProjectId) ? selectedProjectId : undefined
@@ -138,64 +188,89 @@ export function AppHeader({
                       <div className="meta">No notifications.</div>
                     ) : (
                       notifications.map((n) => {
-                        const taskId = n.task_id || parseLegacyTaskId(n.message)
+                        const taskId = n.task_id || notificationPayloadId(n, 'task_id')
+                        const noteId = n.note_id || notificationPayloadId(n, 'note_id')
+                        const specificationId = n.specification_id || notificationPayloadId(n, 'specification_id')
+                        const projectId = n.project_id || notificationPayloadId(n, 'project_id')
+                        const markNotificationRead = () => {
+                          if (!n.is_read) onMarkRead(n.id)
+                        }
                         return (
-                          <div key={n.id} className={`notif ${n.is_read ? 'read' : 'unread'}`}>
+                          <div
+                            key={n.id}
+                            className={`notif ${n.is_read ? 'read' : 'unread'}`}
+                            onClick={!n.is_read ? markNotificationRead : undefined}
+                            onKeyDown={
+                              !n.is_read
+                                ? (event) => {
+                                    if (event.key !== 'Enter' && event.key !== ' ') return
+                                    event.preventDefault()
+                                    markNotificationRead()
+                                  }
+                                : undefined
+                            }
+                            role={!n.is_read ? 'button' : undefined}
+                            tabIndex={!n.is_read ? 0 : undefined}
+                            aria-label={!n.is_read ? 'Mark notification as read' : undefined}
+                            title={!n.is_read ? 'Click to mark as read' : undefined}
+                          >
                             <div className="notif-dotline" aria-hidden="true" />
                             <div className="notif-main">
-                              <div className="notif-message">{n.message}</div>
+                              <div className="notif-copy">
+                                <div className="notif-message">{notificationDisplayMessage(n)}</div>
+                                {!n.is_read && <div className="notif-hint">Click to mark as read</div>}
+                              </div>
                               <div className="notif-actions">
                                 {taskId && (
                                   <button
                                     className="status-chip"
-                                    onClick={() => {
-                                      onOpenTask(taskId, n.project_id)
-                                      if (!n.is_read) onMarkRead(n.id)
+                                    onClick={(event) => {
+                                      event.stopPropagation()
+                                      onOpenTask(taskId, projectId)
+                                      markNotificationRead()
                                       setShowNotificationsPanel(false)
                                     }}
                                   >
                                     Open task
                                   </button>
                                 )}
-                                {n.note_id && (
+                                {noteId && (
                                   <button
                                     className="status-chip"
-                                    onClick={() => {
-                                      onOpenNote(n.note_id as string, n.project_id)
-                                      if (!n.is_read) onMarkRead(n.id)
+                                    onClick={(event) => {
+                                      event.stopPropagation()
+                                      onOpenNote(noteId, projectId)
+                                      markNotificationRead()
                                       setShowNotificationsPanel(false)
                                     }}
                                   >
                                     Open note
                                   </button>
                                 )}
-                                {n.specification_id && (
+                                {specificationId && (
                                   <button
                                     className="status-chip"
-                                    onClick={() => {
-                                      onOpenSpecification(n.specification_id as string, n.project_id)
-                                      if (!n.is_read) onMarkRead(n.id)
+                                    onClick={(event) => {
+                                      event.stopPropagation()
+                                      onOpenSpecification(specificationId, projectId)
+                                      markNotificationRead()
                                       setShowNotificationsPanel(false)
                                     }}
                                   >
                                     Open specification
                                   </button>
                                 )}
-                                {!taskId && !n.note_id && !n.specification_id && n.project_id && (
+                                {!taskId && !noteId && !specificationId && projectId && (
                                   <button
                                     className="status-chip"
-                                    onClick={() => {
-                                      onOpenProject(n.project_id as string)
-                                      if (!n.is_read) onMarkRead(n.id)
+                                    onClick={(event) => {
+                                      event.stopPropagation()
+                                      onOpenProject(projectId)
+                                      markNotificationRead()
                                       setShowNotificationsPanel(false)
                                     }}
                                   >
                                     Open project
-                                  </button>
-                                )}
-                                {!n.is_read && (
-                                  <button className="status-chip" onClick={() => onMarkRead(n.id)}>
-                                    Mark read
                                   </button>
                                 )}
                               </div>
@@ -217,6 +292,23 @@ export function AppHeader({
                 aria-label="Knowledge Graph"
               >
                 <Icon path="M6 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm12 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm-6 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM7.4 6.6l3.9 10.8M16.6 6.6l-3.9 10.8" />
+              </button>
+            </HeaderTooltip>
+
+            <HeaderTooltip content={themeToggleTooltip}>
+              <button
+                className={`top-theme-btn ${isDarkTheme ? 'active' : ''}`.trim()}
+                onClick={onToggleTheme}
+                aria-label={themeToggleTooltip}
+                title={themeToggleTooltip}
+              >
+                <Icon
+                  path={
+                    isDarkTheme
+                      ? 'M12 3v2M12 19v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M3 12h2M19 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8'
+                      : 'M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z'
+                  }
+                />
               </button>
             </HeaderTooltip>
 

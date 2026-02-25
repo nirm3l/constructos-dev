@@ -1,3 +1,5 @@
+name: constructos-cp
+
 services:
   license-control-plane:
     build: ./license_control_plane
@@ -14,6 +16,16 @@ services:
       LCP_CLIENT_TOKEN_BUNDLE_PASSWORD: "${LCP_CLIENT_TOKEN_BUNDLE_PASSWORD:-${APP_BUNDLE_PASSWORD:-}}"
       LCP_CLIENT_TOKEN_DELIMITER: "${LCP_CLIENT_TOKEN_DELIMITER:-.}"
       LCP_CLIENT_TOKEN_BUNDLE_SEGMENT_INDEX: "${LCP_CLIENT_TOKEN_BUNDLE_SEGMENT_INDEX:-2}"
+      LCP_EMAIL_RESEND_API_KEY: "${LCP_EMAIL_RESEND_API_KEY:-}"
+      LCP_EMAIL_FROM: "${LCP_EMAIL_FROM:-}"
+      LCP_EMAIL_REPLY_TO: "${LCP_EMAIL_REPLY_TO:-}"
+      LCP_EMAIL_REQUEST_TIMEOUT_SECONDS: "${LCP_EMAIL_REQUEST_TIMEOUT_SECONDS:-10}"
+      LCP_CUSTOMER_REF_SECRET: "${LCP_CUSTOMER_REF_SECRET:-}"
+      LCP_CUSTOMER_REF_PREFIX: "${LCP_CUSTOMER_REF_PREFIX:-cust}"
+      LCP_CUSTOMER_REF_LENGTH: "${LCP_CUSTOMER_REF_LENGTH:-20}"
+      LCP_ONBOARDING_IMAGE_TAG: "${LCP_ONBOARDING_IMAGE_TAG:-main}"
+      LCP_ONBOARDING_INSTALL_SCRIPT_URL: "${LCP_ONBOARDING_INSTALL_SCRIPT_URL:-https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh}"
+      LCP_ONBOARDING_SUPPORT_EMAIL: "${LCP_ONBOARDING_SUPPORT_EMAIL:-support@constructos.dev}"
       LCP_PUBLIC_BETA_FREE_UNTIL: "${LCP_PUBLIC_BETA_FREE_UNTIL:-2026-03-31T23:59:59Z}"
       LCP_CORS_ORIGINS: "${LCP_CORS_ORIGINS:-http://localhost:8082,http://127.0.0.1:8082,https://constructos.dev,https://www.constructos.dev}"
     ports:
@@ -22,5 +34,28 @@ services:
       - license-control-plane-data:/data
     restart: unless-stopped
 
+  license-control-plane-backup:
+    build: ./license_control_plane
+    container_name: license-control-plane-backup
+    command: ["python", "-m", "backup_scheduler"]
+    depends_on:
+      - license-control-plane
+    environment:
+      LCP_BACKUP_SOURCE_DB_PATH: "${LCP_BACKUP_SOURCE_DB_PATH:-/data/license-control-plane.db}"
+      LCP_BACKUP_DIR: "${LCP_BACKUP_DIR:-/backups}"
+      LCP_BACKUP_FILE_PREFIX: "${LCP_BACKUP_FILE_PREFIX:-license-control-plane}"
+      LCP_BACKUP_INTERVAL_SECONDS: "${LCP_BACKUP_INTERVAL_SECONDS:-3600}"
+      LCP_BACKUP_RETENTION_HOURS: "${LCP_BACKUP_RETENTION_HOURS:-168}"
+      LCP_BACKUP_STARTUP_DELAY_SECONDS: "${LCP_BACKUP_STARTUP_DELAY_SECONDS:-15}"
+      LCP_BACKUP_BUSY_TIMEOUT_MS: "${LCP_BACKUP_BUSY_TIMEOUT_MS:-5000}"
+      LCP_BACKUP_LOG_LEVEL: "${LCP_BACKUP_LOG_LEVEL:-INFO}"
+    volumes:
+      - license-control-plane-data:/data:ro
+      - license-control-plane-backups:/backups
+    restart: unless-stopped
+
 volumes:
   license-control-plane-data:
+    name: task-management_license-control-plane-data
+  license-control-plane-backups:
+    name: task-management_license-control-plane-backups

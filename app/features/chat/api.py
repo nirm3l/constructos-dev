@@ -27,6 +27,7 @@ class ChatResourceLinkCreate(BaseModel):
 class ChatSessionContextPatch(BaseModel):
     workspace_id: str = Field(min_length=1)
     session_attachment_refs: list[AttachmentRef] | None = None
+    mcp_servers: list[str] | None = None
 
 
 def _serialize_session(row: ChatSession) -> dict:
@@ -61,6 +62,7 @@ def _load_session_with_access(
         select(ChatSession).where(
             ChatSession.workspace_id == workspace_id,
             ChatSession.session_key == session_key,
+            ChatSession.created_by == user.id,
         )
     ).scalar_one_or_none()
     if session is None:
@@ -84,7 +86,10 @@ def list_chat_sessions(
     if normalized_project_id:
         ensure_project_access(db, workspace_id, normalized_project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
 
-    query = select(ChatSession).where(ChatSession.workspace_id == workspace_id)
+    query = select(ChatSession).where(
+        ChatSession.workspace_id == workspace_id,
+        ChatSession.created_by == user.id,
+    )
     if normalized_project_id is not None:
         query = query.where(ChatSession.project_id == normalized_project_id)
     if not include_archived:
@@ -121,7 +126,12 @@ def update_chat_session_context(
             workspace_id=payload.workspace_id,
             project_id=session.project_id,
             session_id=session_id,
-            session_attachment_refs=[item.model_dump() for item in payload.session_attachment_refs or []],
+            session_attachment_refs=(
+                [item.model_dump() for item in payload.session_attachment_refs]
+                if payload.session_attachment_refs is not None
+                else None
+            ),
+            mcp_servers=payload.mcp_servers,
         )
     )
     db.refresh(session)

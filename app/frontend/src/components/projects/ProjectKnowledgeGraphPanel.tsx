@@ -1,5 +1,7 @@
 import React from 'react'
 import ForceGraph2D from 'react-force-graph-2d'
+import * as Accordion from '@radix-ui/react-accordion'
+import * as Tabs from '@radix-ui/react-tabs'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import type { GraphContextPack, GraphProjectOverview, GraphProjectSubgraph, ProjectKnowledgeSearchResult } from '../../types'
 import { Icon } from '../shared/uiHelpers'
@@ -12,6 +14,8 @@ type QueryLike<T> = {
   error?: unknown
   refetch?: () => void
 }
+
+type KnowledgeGraphTab = 'overview' | 'explore' | 'pack'
 
 function toErrorMessage(err: unknown): string {
   if (err instanceof Error && err.message.trim()) return err.message.trim()
@@ -52,6 +56,7 @@ function formatEvidenceUpdated(value: string | null | undefined): string {
 
 type GraphCubeTile = {
   key: string
+  sourceKey: string
   label: string
   color: string
 }
@@ -75,6 +80,16 @@ function estimateTokenCount(charCount: number): number {
 function countLines(value: string): number {
   if (!value.trim()) return 0
   return value.split(/\r?\n/).length
+}
+
+function formatPercent(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0.0%'
+  return `${value.toFixed(1)}%`
+}
+
+function normalizeScorePercent(value: number | null | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0
+  return Math.max(0, Math.min(100, value * 100))
 }
 
 function normalizeChatIndexMode(mode: unknown): 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR' {
@@ -105,6 +120,12 @@ function chatAttachmentModeLabel(mode: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'): s
   if (mode === 'FULL_TEXT') return 'Full text'
   if (mode === 'METADATA_ONLY') return 'Metadata only'
   return 'Off'
+}
+
+function graphPackSourceGroupLabel(sourceKey: string): string {
+  if (sourceKey.includes('evidence')) return 'Evidence payload'
+  if (sourceKey.includes('summary') || sourceKey.includes('context')) return 'Graph narrative'
+  return 'Metadata envelope'
 }
 
 function buildGraphCubeTiles(
@@ -142,6 +163,7 @@ function buildGraphCubeTiles(
     for (let i = 0; i < tileAmount; i += 1) {
       output.push({
         key: `${slice.key}-${i}`,
+        sourceKey: slice.key,
         label: slice.label,
         color: slice.color,
       })
@@ -214,6 +236,11 @@ export function ProjectKnowledgeGraphPanel({
   const [hoveredNodeId, setHoveredNodeId] = React.useState<string | null>(null)
   const [isGraphFullscreen, setIsGraphFullscreen] = React.useState(false)
   const [selectedEvidenceId, setSelectedEvidenceId] = React.useState<string | null>(null)
+  const [activeTab, setActiveTab] = React.useState<KnowledgeGraphTab>('explore')
+  const [overviewTab, setOverviewTab] = React.useState<'summary' | 'composition'>('summary')
+  const [packTab, setPackTab] = React.useState<'composition' | 'markdown'>('composition')
+  const [selectedOverviewSourceKey, setSelectedOverviewSourceKey] = React.useState<string | null>(null)
+  const [selectedPackSourceKey, setSelectedPackSourceKey] = React.useState<string | null>(null)
   const [actionBusy, setActionBusy] = React.useState<string | null>(null)
   const [actionError, setActionError] = React.useState<string | null>(null)
 
@@ -491,6 +518,77 @@ export function ProjectKnowledgeGraphPanel({
   const knowledgeSearchActive = normalizedKnowledgeSearchQuery.length >= 2
   const knowledgeSearchItems = knowledgeSearchResultsQuery.data?.items ?? []
   const knowledgeSearchMode = knowledgeSearchResultsQuery.data?.mode ?? 'empty'
+  const overviewEntityCount = counts.tasks + counts.notes + counts.specifications + counts.project_rules + counts.comments
+  const overviewSources = React.useMemo(() => {
+    const base = [
+      { key: 'tasks', label: 'Tasks', color: '#0284c7', count: Number(counts.tasks || 0) },
+      { key: 'notes', label: 'Notes', color: '#9333ea', count: Number(counts.notes || 0) },
+      { key: 'specifications', label: 'Specifications', color: '#0d9488', count: Number(counts.specifications || 0) },
+      { key: 'rules', label: 'Rules', color: '#ea580c', count: Number(counts.project_rules || 0) },
+      { key: 'comments', label: 'Comments', color: '#16a34a', count: Number(counts.comments || 0) },
+    ]
+    const total = base.reduce((sum, item) => sum + item.count, 0)
+    return base
+      .filter((item) => item.count > 0)
+      .map((item) => ({
+        ...item,
+        percent: total > 0 ? (item.count / total) * 100 : 0,
+      }))
+  }, [counts.comments, counts.notes, counts.project_rules, counts.specifications, counts.tasks])
+  const overviewTiles = React.useMemo(
+    () =>
+      buildGraphCubeTiles(
+        overviewSources.map((item) => ({
+          key: item.key,
+          label: item.label,
+          color: item.color,
+          value: item.count,
+        })),
+        300
+      ),
+    [overviewSources]
+  )
+  const packSourceGroups = React.useMemo(() => {
+    const order = ['Graph narrative', 'Evidence payload', 'Metadata envelope']
+    const bucket = new Map<string, GraphPackSourceUsage[]>()
+    for (const source of graphPackSnapshot.sources) {
+      const group = graphPackSourceGroupLabel(source.key)
+      const current = bucket.get(group) ?? []
+      current.push(source)
+      bucket.set(group, current)
+    }
+    return order
+      .map((group) => {
+        const items = bucket.get(group) ?? []
+        const percent = items.reduce((sum, item) => sum + item.percent, 0)
+        const chars = items.reduce((sum, item) => sum + item.chars, 0)
+        return { group, items, percent, chars }
+      })
+      .filter((item) => item.items.length > 0)
+  }, [graphPackSnapshot.sources])
+
+  React.useEffect(() => {
+    if (!overviewSources.length) {
+      setSelectedOverviewSourceKey(null)
+      return
+    }
+    if (selectedOverviewSourceKey && overviewSources.some((item) => item.key === selectedOverviewSourceKey)) return
+    setSelectedOverviewSourceKey(overviewSources[0]?.key ?? null)
+  }, [overviewSources, selectedOverviewSourceKey])
+
+  React.useEffect(() => {
+    const sources = graphPackSnapshot.sources
+    if (!sources.length) {
+      setSelectedPackSourceKey(null)
+      return
+    }
+    if (selectedPackSourceKey && sources.some((source) => source.key === selectedPackSourceKey)) return
+    setSelectedPackSourceKey(sources[0]?.key ?? null)
+  }, [graphPackSnapshot.sources, selectedPackSourceKey])
+
+  React.useEffect(() => {
+    if (knowledgeSearchActive) setActiveTab('explore')
+  }, [knowledgeSearchActive])
 
   const focusNodeOnCanvas = React.useCallback((nodeId: string, zoomTarget = 2.2) => {
     setSelectedNodeId(nodeId)
@@ -630,530 +728,979 @@ export function ProjectKnowledgeGraphPanel({
             Project scope: {String(overview?.project_name || projectName || 'Unknown project')}
           </div>
 
-          <div className="meta" style={{ marginBottom: 8 }}>
-            Retrieval mode: {contextPack?.mode ?? 'graph-only'}
+          <div className="graph-insights-meta-row">
+            <span className="badge">Retrieval: {contextPack?.mode ?? 'graph-only'}</span>
+            <span className="badge">
+              Chat policy: {chatIndexModeLabel(normalizedChatIndexMode)} / {chatAttachmentModeLabel(normalizedChatAttachmentMode)}
+            </span>
+            <span className="badge">Nodes: {graphData.nodes.length}</span>
+            <span className="badge">Edges: {graphData.links.length}</span>
+            <span className="badge">Evidence: {evidenceItems.length}</span>
           </div>
 
-          <div className="field-control" style={{ marginBottom: 10 }}>
-            <span className="field-label">Knowledge search</span>
-            <div className="row wrap" style={{ gap: 8, alignItems: 'center' }}>
-              <input
-                value={knowledgeSearchQuery}
-                onChange={(e) => setKnowledgeSearchQuery(e.target.value)}
-                placeholder="Search entities, events, commands, readiness, metrics..."
-              />
-              {knowledgeSearchResultsQuery.isFetching ? <span className="badge">Searching</span> : null}
-              {knowledgeSearchActive ? <span className="badge">Mode: {knowledgeSearchMode}</span> : null}
-            </div>
-            <div className="meta" style={{ marginTop: 6 }}>
-              Type at least 2 characters. Click a result to focus its node in the graph.
-            </div>
-          </div>
+          <Tabs.Root className="kg-insights-tabs" value={activeTab} onValueChange={(value) => setActiveTab(value as KnowledgeGraphTab)}>
+            <Tabs.List className="kg-insights-tabs-list" aria-label="Knowledge graph sections">
+              <Tabs.Trigger className="kg-insights-tab-trigger" value="overview">
+                <span>Overview</span>
+                <span className="kg-insights-tab-count">{overviewEntityCount}</span>
+              </Tabs.Trigger>
+              <Tabs.Trigger className="kg-insights-tab-trigger" value="explore">
+                <span>Explore</span>
+                <span className="kg-insights-tab-count">{graphData.nodes.length}</span>
+              </Tabs.Trigger>
+              <Tabs.Trigger className="kg-insights-tab-trigger" value="pack">
+                <span>Pack</span>
+                <span className="kg-insights-tab-count">{graphPackSnapshot.sources.length}</span>
+              </Tabs.Trigger>
+            </Tabs.List>
 
-          {knowledgeSearchActive ? (
-            <div className="graph-connected-block">
-              <div className="meta">Knowledge search results</div>
-              {knowledgeSearchResultsQuery.isError ? (
-                <div className="notice notice-error" style={{ marginTop: 8 }}>
-                  {toErrorMessage(knowledgeSearchResultsQuery.error)}
-                </div>
-              ) : knowledgeSearchItems.length === 0 ? (
-                <div className="meta" style={{ marginTop: 8 }}>No matches for this query.</div>
-              ) : (
-                <div className="graph-evidence-list">
-                  {knowledgeSearchItems.slice(0, 10).map((item) => {
-                    const graphPath = (item.graph_path ?? []).filter(Boolean).join(' -> ')
-                    return (
-                      <button
-                        key={`kg-search-${item.rank}-${item.entity_type}-${item.entity_id}`}
-                        type="button"
-                        className="graph-evidence-item"
-                        onClick={() => focusNodeOnCanvas(item.entity_id, 2.2)}
-                      >
-                        <div className="graph-evidence-head">
-                          <div className="graph-evidence-badges">
-                            <span className="graph-evidence-id">#{item.rank}</span>
-                            <span className="status-chip">{item.entity_type}</span>
-                            <span className="status-chip">{item.source_type}</span>
-                          </div>
-                          <span className="graph-evidence-score">Score {item.final_score.toFixed(3)}</span>
-                        </div>
-                        <div className="graph-evidence-snippet">{item.snippet}</div>
-                        <div className="graph-evidence-meta">
-                          <span className="meta">Entity {item.entity_id}</span>
-                          <span className="meta">Graph {item.graph_score.toFixed(3)}</span>
-                          <span className="meta">
-                            Vector {item.vector_similarity === null ? 'n/a' : item.vector_similarity.toFixed(3)}
-                          </span>
-                          {typeof item.template_alignment === 'number' ? (
-                            <span className="meta">Template {item.template_alignment.toFixed(3)}</span>
-                          ) : null}
-                        </div>
-                        {graphPath ? <div className="graph-evidence-path">Path {graphPath}</div> : null}
-                        {item.why_selected ? <div className="graph-evidence-why">{item.why_selected}</div> : null}
-                      </button>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
-          ) : null}
-
-          <div className="graph-count-grid">
-            <div className="graph-stat">
-              <span className="meta">Tasks</span>
-              <strong>{counts.tasks}</strong>
-            </div>
-            <div className="graph-stat">
-              <span className="meta">Notes</span>
-              <strong>{counts.notes}</strong>
-            </div>
-            <div className="graph-stat">
-              <span className="meta">Specifications</span>
-              <strong>{counts.specifications}</strong>
-            </div>
-            <div className="graph-stat">
-              <span className="meta">Rules</span>
-              <strong>{counts.project_rules}</strong>
-            </div>
-            <div className="graph-stat">
-              <span className="meta">Comments</span>
-              <strong>{counts.comments}</strong>
-            </div>
-          </div>
-
-          <div className="graph-chip-block">
-            <div className="meta">Top tags</div>
-            <div className="graph-chip-row">
-              {(overview?.top_tags ?? []).length === 0 ? (
-                <span className="meta">No tags yet.</span>
-              ) : (
-                (overview?.top_tags ?? []).map((item) => (
-                  <span key={`kg-tag-${item.tag}`} className="status-chip">
-                    {item.tag || '(empty)'} · {item.usage}
-                  </span>
-                ))
-              )}
-            </div>
-          </div>
-
-          <div className="graph-chip-block">
-            <div className="meta">Top relationships</div>
-            <div className="graph-chip-row">
-              {(overview?.top_relationships ?? []).length === 0 ? (
-                <span className="meta">No relationships yet.</span>
-              ) : (
-                (overview?.top_relationships ?? []).map((item) => (
-                  <span key={`kg-rel-${item.relationship}`} className="status-chip">
-                    {item.relationship || 'RELATED'} · {item.count}
-                  </span>
-                ))
-              )}
-            </div>
-          </div>
-
-          <div className="graph-connected-block">
-            <div className="meta">Focus neighbors</div>
-            {focusNeighbors.length === 0 ? (
-              <div className="meta">No focus neighbors for current selection.</div>
-            ) : (
-              <div className="graph-connected-list">
-                {focusNeighbors.slice(0, 8).map((item) => (
-                  <div key={`kg-focus-${item.entity_type}-${item.entity_id}`} className="graph-connected-row">
-                    <span>
-                      <strong>{item.entity_type}</strong> {item.title || item.entity_id}
-                    </span>
-                    <span className="meta">{(item.path_types ?? []).join(' -> ') || 'RELATED'}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div className="graph-connected-block">
-            <div className="meta">Dependency paths</div>
-            {dependencyPaths.length === 0 ? (
-              <div className="meta">No dependency paths available.</div>
-            ) : (
-              <div className="graph-connected-list">
-                {dependencyPaths.slice(0, 8).map((item) => (
-                  <div key={`kg-path-${item.to_entity_type}-${item.to_entity_id}`} className="graph-connected-row">
-                    <span>
-                      <strong>{item.to_entity_type}</strong> {item.to_entity_id}
-                    </span>
-                    <span className="meta">{(item.path ?? []).join(' -> ') || 'RELATED'}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div className="graph-connected-block">
-            <div className="meta">Evidence (sorted by score)</div>
-            <div className="meta" style={{ marginTop: 4 }}>
-              Click an evidence item to focus its node in the visual graph.
-            </div>
-            {evidenceItems.length === 0 ? (
-              <div className="meta">No evidence available for this context pack.</div>
-            ) : (
-              <div className="graph-evidence-list">
-                {evidenceItems.map((item) => {
-                  const isSelected = selectedEvidenceId === item.evidence_id
-                  const graphPath = (item.graph_path ?? []).filter(Boolean).join(' -> ')
-                  return (
-                    <button
-                      key={item.evidence_id}
-                      type="button"
-                      className={`graph-evidence-item ${isSelected ? 'selected' : ''}`.trim()}
-                      onClick={() => {
-                        setSelectedEvidenceId(item.evidence_id)
-                        focusNodeOnCanvas(item.entity_id, 2.4)
-                      }}
-                    >
-                      <div className="graph-evidence-head">
-                        <div className="graph-evidence-badges">
-                          <span className="graph-evidence-id">{item.evidence_id}</span>
-                          <span className="status-chip">{item.entity_type}</span>
-                          <span className="status-chip">{item.source_type}</span>
-                        </div>
-                        <span className="graph-evidence-score">Score {item.final_score.toFixed(3)}</span>
-                      </div>
-                      <div className="graph-evidence-snippet">{item.snippet}</div>
-                      <div className="graph-evidence-meta">
-                        <span className="meta">Entity {item.entity_id}</span>
-                        <span className="meta">Graph {item.graph_score.toFixed(3)}</span>
-                        <span className="meta">
-                          Vector {item.vector_similarity === null ? 'n/a' : item.vector_similarity.toFixed(3)}
-                        </span>
-                        <span className="meta">Updated {formatEvidenceUpdated(item.updated_at)}</span>
-                      </div>
-                      {graphPath ? <div className="graph-evidence-path">Path {graphPath}</div> : null}
-                      <div className="graph-evidence-why">Why selected: {item.why_selected}</div>
-                    </button>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-
-          <div className="graph-viz-block">
-            <div className="row wrap graph-viz-head">
-              <div className="meta">
-                Visual graph ({graphData.nodes.length}/{subgraph?.node_count ?? graphNodes.length} nodes, {graphData.links.length}/{subgraph?.edge_count ?? graphEdges.length} edges)
-              </div>
-              <button
-                className="action-icon"
-                type="button"
-                title={isGraphFullscreen ? 'Exit full screen' : 'Open full screen graph'}
-                aria-label={isGraphFullscreen ? 'Exit full screen' : 'Open full screen graph'}
-                onClick={() => void toggleGraphFullscreen()}
+            <Tabs.Content className="kg-insights-tab-content" value="overview">
+              <Tabs.Root
+                className="context-snapshot-tabs"
+                value={overviewTab}
+                onValueChange={(next) => {
+                  if (next === 'summary' || next === 'composition') setOverviewTab(next)
+                }}
               >
-                <Icon path={isGraphFullscreen ? 'M9 9H3V3h6v2H5v4h4v2zm12 0h-6V7h4V3h2v6zM9 21H3v-6h2v4h4v2zm12 0h-6v-2h4v-4h2v6z' : 'M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6'} />
-              </button>
-            </div>
+                <Tabs.List className="context-snapshot-tabs-list" aria-label="Knowledge graph overview views">
+                  <Tabs.Trigger className="context-snapshot-tab-trigger" value="summary">Overview</Tabs.Trigger>
+                  <Tabs.Trigger className="context-snapshot-tab-trigger" value="composition">Composition + Sources</Tabs.Trigger>
+                </Tabs.List>
 
-            {!subgraph ? (
-              <div className="meta">Loading graph visualization...</div>
-            ) : graphNodes.length <= 1 || graphEdges.length === 0 ? (
-              <div className="meta">Not enough connected entities yet for a visual graph.</div>
-            ) : (
-              <>
-                {noVisibleNodes ? (
-                  <div className="meta">No nodes available for visualization.</div>
-                ) : (
-                  <div className="graph-viz-shell" ref={graphShellRef}>
-                    {isGraphFullscreen ? (
-                      <button
-                        className="action-icon graph-viz-exit-button"
-                        type="button"
-                        title="Exit full screen"
-                        aria-label="Exit full screen"
-                        onClick={() => void exitGraphFullscreen()}
-                      >
-                        <Icon path="M9 9H3V3h6v2H5v4h4v2zm12 0h-6V7h4V3h2v6zM9 21H3v-6h2v4h4v2zm12 0h-6v-2h4v-4h2v6z" />
-                      </button>
-                    ) : null}
-                    <div className="graph-viz-canvas" ref={graphCanvasRef}>
-                      <ForceGraph2D
-                        ref={graphRef}
-                        width={canvasSize.width}
-                        height={canvasSize.height}
-                        graphData={graphData}
-                        backgroundColor="rgba(0,0,0,0)"
-                        cooldownTicks={120}
-                        d3VelocityDecay={0.28}
-                        linkColor={(link) => {
-                          const source = getLinkNodeId((link as { source?: unknown }).source)
-                          const target = getLinkNodeId((link as { target?: unknown }).target)
-                          if (!selectedNodeId || source === selectedNodeId || target === selectedNodeId) {
-                            return 'rgba(59,130,246,0.72)'
-                          }
-                          return 'rgba(100,116,139,0.30)'
-                        }}
-                        linkWidth={(link) => {
-                          const source = getLinkNodeId((link as { source?: unknown }).source)
-                          const target = getLinkNodeId((link as { target?: unknown }).target)
-                          return !selectedNodeId || source === selectedNodeId || target === selectedNodeId ? 1.9 : 1.0
-                        }}
-                        nodeLabel={(node) => {
-                          const n = node as VizNode
-                          return `${n.entity_type}: ${n.name} (degree ${n.degree})`
-                        }}
-                        onNodeClick={(node) => {
-                          const n = node as { id?: unknown }
-                          if (!n.id) return
-                          focusNodeOnCanvas(String(n.id), 2.3)
-                        }}
-                        onNodeHover={(node) => {
-                          const n = node as { id?: unknown } | null
-                          if (!n?.id) {
-                            setHoveredNodeId(null)
-                            return
-                          }
-                          setHoveredNodeId(String(n.id))
-                        }}
-                        nodeCanvasObject={(node, ctx, globalScale) => {
-                          const n = node as VizNode & { x?: number; y?: number }
-                          const x = Number(n.x || 0)
-                          const y = Number(n.y || 0)
-                          const selected = String(n.id) === String(selectedNodeId || '')
-                          const hovered = String(n.id) === String(hoveredNodeId || '')
-                          const radius = selected ? 10.4 : hovered ? 7.2 : Number(n.val || 5.2)
-                          const isDark = typeof document !== 'undefined' && document.documentElement?.dataset?.theme === 'dark'
-                          ctx.beginPath()
-                          ctx.arc(x, y, radius, 0, 2 * Math.PI, false)
-                          ctx.fillStyle = n.color || '#334155'
-                          ctx.fill()
-                          ctx.lineWidth = selected ? 3.2 : hovered ? 2.0 : 1.2
-                          ctx.strokeStyle = selected ? '#22c55e' : isDark ? 'rgba(203,213,225,0.72)' : 'rgba(241,245,249,0.9)'
-                          ctx.stroke()
-
-                          const label = String(n.name || n.id || '').slice(0, 34)
-                          if (!label) return
-                          const baseFontSize = Math.max(1.5, 1.9 / globalScale)
-                          const hoverFontSize = Math.max(1.8, 2.2 / globalScale)
-                          const selectedFontSize = Math.max(2.5, 3.1 / globalScale)
-                          const fontSize = selected ? selectedFontSize : hovered ? hoverFontSize : baseFontSize
-                          ctx.font = `${selected ? 700 : hovered ? 600 : 400} ${fontSize}px ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial`
-                          ctx.fillStyle = selected
-                            ? isDark
-                              ? 'rgba(248,250,252,0.98)'
-                              : 'rgba(2,6,23,0.96)'
-                            : hovered
-                              ? isDark
-                                ? 'rgba(226,232,240,0.90)'
-                                : 'rgba(15,23,42,0.80)'
-                              : isDark
-                                ? 'rgba(203,213,225,0.54)'
-                                : 'rgba(15,23,42,0.44)'
-                          ctx.fillText(label, x + radius + 2, y + fontSize / 3)
-                        }}
-                      />
+                <Tabs.Content value="summary" className="context-snapshot-tab-content">
+                  <div className="graph-context-snapshot kg-snapshot-surface">
+                    <div className="row wrap graph-context-snapshot-head">
+                      <div>
+                        <div className="meta">Project graph overview</div>
+                        <div className="graph-context-snapshot-title">
+                          Entity counts, connected structure, and dominant relationship signals for this project.
+                        </div>
+                      </div>
+                      <div className="graph-context-snapshot-total">{overviewEntityCount.toLocaleString()} entities</div>
                     </div>
-                    <aside className="graph-viz-side">
-                      <div className="meta">Legend</div>
-                      <div className="graph-viz-legend">
-                        {Array.from(new Set(graphData.nodes.map((n) => String(n.entity_type || 'Entity')))).map((type) => (
-                          <div key={`legend-${type}`} className="graph-viz-legend-item">
-                            <span className="graph-viz-dot" style={{ backgroundColor: nodeColor(type) }} />
-                            <span>{type}</span>
+                    <div className="graph-context-metrics context-snapshot-metrics">
+                      <div className="graph-context-metric context-snapshot-metric">
+                        <span className="meta">Tasks</span>
+                        <strong>{counts.tasks.toLocaleString()}</strong>
+                      </div>
+                      <div className="graph-context-metric context-snapshot-metric">
+                        <span className="meta">Notes</span>
+                        <strong>{counts.notes.toLocaleString()}</strong>
+                      </div>
+                      <div className="graph-context-metric context-snapshot-metric">
+                        <span className="meta">Specifications</span>
+                        <strong>{counts.specifications.toLocaleString()}</strong>
+                      </div>
+                      <div className="graph-context-metric context-snapshot-metric">
+                        <span className="meta">Rules</span>
+                        <strong>{counts.project_rules.toLocaleString()}</strong>
+                      </div>
+                      <div className="graph-context-metric context-snapshot-metric">
+                        <span className="meta">Comments</span>
+                        <strong>{counts.comments.toLocaleString()}</strong>
+                      </div>
+                      <div className="graph-context-metric context-snapshot-metric">
+                        <span className="meta">Focus neighbors</span>
+                        <strong>{focusNeighbors.length.toLocaleString()}</strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="context-snapshot-band-card">
+                    <div className="meta">Top tags</div>
+                    {(overview?.top_tags ?? []).length === 0 ? (
+                      <div className="meta">No tags yet.</div>
+                    ) : (
+                      <div className="context-snapshot-segment-grid">
+                        {(overview?.top_tags ?? []).map((item, idx) => (
+                          <div key={`kg-tag-${item.tag}`} className="context-snapshot-segment-chip">
+                            <span
+                              className="context-snapshot-segment-swatch"
+                              style={{ backgroundColor: `hsl(${(idx * 37) % 360}deg 65% 48%)` }}
+                            />
+                            <span className="context-snapshot-segment-label">{item.tag || '(empty)'}</span>
+                            <span className="meta">{item.usage.toLocaleString()}</span>
                           </div>
                         ))}
                       </div>
-                      {selectedNode ? (
-                        <div className="graph-viz-selected">
-                          <div className="meta">Selected</div>
-                          <div><strong>{selectedNode.entity_type}</strong></div>
-                          <div>{selectedNode.name}</div>
-                          <div className="meta">degree {selectedNode.degree}</div>
-                          <div className="meta" style={{ marginTop: 6 }}>
-                            Connected edges: {connectedSelectedEdges.length}
+                    )}
+                  </div>
+
+                  <div className="context-snapshot-band-card">
+                    <div className="meta">Top relationships</div>
+                    {(overview?.top_relationships ?? []).length === 0 ? (
+                      <div className="meta">No relationships yet.</div>
+                    ) : (
+                      <div className="context-snapshot-segment-grid">
+                        {(overview?.top_relationships ?? []).map((item, idx) => (
+                          <div key={`kg-rel-${item.relationship}`} className="context-snapshot-segment-chip">
+                            <span
+                              className="context-snapshot-segment-swatch"
+                              style={{ backgroundColor: `hsl(${(idx * 29 + 13) % 360}deg 62% 44%)` }}
+                            />
+                            <span className="context-snapshot-segment-label">{item.relationship || 'RELATED'}</span>
+                            <span className="meta">{item.count.toLocaleString()}</span>
                           </div>
-                        </div>
-                      ) : null}
-                    </aside>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                )}
-              </>
-            )}
-          </div>
 
-          <div className="graph-markdown-block">
-            <div className="meta">Summary with citations</div>
-            <div className="row wrap" style={{ gap: 8, marginTop: 6, marginBottom: 8 }}>
-              {onCreateTaskFromSummary ? (
-                <button
-                  type="button"
-                  className="status-chip"
-                  disabled={Boolean(actionBusy)}
-                  onClick={() =>
-                    runAction('summary-create-task', () =>
-                      onCreateTaskFromSummary({
-                        title: summaryTaskTitle,
-                        description: summaryTaskDescription,
-                      })
-                    )
-                  }
-                >
-                  Create task
-                </button>
-              ) : null}
-              {onCreateNoteFromSummary ? (
-                <button
-                  type="button"
-                  className="status-chip"
-                  disabled={Boolean(actionBusy)}
-                  onClick={() =>
-                    runAction('summary-create-note', () =>
-                      onCreateNoteFromSummary({
-                        title: summaryNoteTitle,
-                        body: summaryNoteBody,
-                      })
-                    )
-                  }
-                >
-                  Create note
-                </button>
-              ) : null}
-              {canLinkTaskToSpecification ? (
-                <button
-                  type="button"
-                  className="status-chip"
-                  disabled={Boolean(actionBusy)}
-                  onClick={() =>
-                    runAction('summary-link-task-spec', () =>
-                      onLinkFocusTaskToSpecification?.(taskToLinkId, specificationToLinkId)
-                    )
-                  }
-                >
-                  Link task/spec
-                </button>
-              ) : null}
-              {actionBusy ? <span className="meta">Running action...</span> : null}
-            </div>
-            {actionError ? <div className="notice notice-error">{actionError}</div> : null}
-            {!summary ? (
-              <div className="meta">
-                Summary is unavailable for this response.
-                {(contextPack?.gaps ?? []).length > 0 ? ` ${contextPack?.gaps?.join(' | ')}` : ''}
-              </div>
-            ) : (
-              <div className="graph-summary-layout">
-                <div className="graph-summary-card">
-                  <div className="meta">Executive</div>
-                  <div className="graph-summary-executive">
-                    {summary.executive || 'No executive summary available.'}
+                  <Accordion.Root className="context-snapshot-source-groups" type="multiple" defaultValue={['kg-focus-neighbors']}>
+                    <Accordion.Item value="kg-focus-neighbors" className="context-snapshot-source-group">
+                      <Accordion.Header>
+                        <Accordion.Trigger className="context-snapshot-source-group-trigger">
+                          <span className="context-snapshot-source-group-head">
+                            <span className="context-snapshot-source-group-title">Focus neighbors</span>
+                            <span className="meta">{focusNeighbors.length} connected entities</span>
+                          </span>
+                          <span className="context-snapshot-source-group-chevron" aria-hidden="true">
+                            <Icon path="M6 9l6 6 6-6" />
+                          </span>
+                        </Accordion.Trigger>
+                      </Accordion.Header>
+                      <Accordion.Content className="context-snapshot-source-group-content">
+                        {focusNeighbors.length === 0 ? (
+                          <div className="meta">No focus neighbors for current selection.</div>
+                        ) : (
+                          <div className="context-snapshot-source-list">
+                            {focusNeighbors.slice(0, 12).map((item) => (
+                              <div key={`kg-focus-${item.entity_type}-${item.entity_id}`} className="context-snapshot-source-row">
+                                <span className="graph-context-legend-swatch" style={{ backgroundColor: '#2563eb' }} />
+                                <span className="context-snapshot-source-row-main">
+                                  <span className="graph-context-legend-label">
+                                    {item.entity_type}: {item.title || item.entity_id}
+                                  </span>
+                                  <span className="meta">{(item.path_types ?? []).join(' -> ') || 'RELATED'}</span>
+                                </span>
+                                <span className="meta context-snapshot-source-row-pct">
+                                  {(item.path_types ?? []).length || 1} hops
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </Accordion.Content>
+                    </Accordion.Item>
+
+                    <Accordion.Item value="kg-dependency-paths" className="context-snapshot-source-group">
+                      <Accordion.Header>
+                        <Accordion.Trigger className="context-snapshot-source-group-trigger">
+                          <span className="context-snapshot-source-group-head">
+                            <span className="context-snapshot-source-group-title">Dependency paths</span>
+                            <span className="meta">{dependencyPaths.length} discovered routes</span>
+                          </span>
+                          <span className="context-snapshot-source-group-chevron" aria-hidden="true">
+                            <Icon path="M6 9l6 6 6-6" />
+                          </span>
+                        </Accordion.Trigger>
+                      </Accordion.Header>
+                      <Accordion.Content className="context-snapshot-source-group-content">
+                        {dependencyPaths.length === 0 ? (
+                          <div className="meta">No dependency paths available.</div>
+                        ) : (
+                          <div className="context-snapshot-source-list">
+                            {dependencyPaths.slice(0, 12).map((item) => (
+                              <div key={`kg-path-${item.to_entity_type}-${item.to_entity_id}`} className="context-snapshot-source-row">
+                                <span className="graph-context-legend-swatch" style={{ backgroundColor: '#14b8a6' }} />
+                                <span className="context-snapshot-source-row-main">
+                                  <span className="graph-context-legend-label">
+                                    {item.to_entity_type}: {item.to_entity_id}
+                                  </span>
+                                  <span className="meta">{(item.path ?? []).join(' -> ') || 'RELATED'}</span>
+                                </span>
+                                <span className="meta context-snapshot-source-row-pct">
+                                  {item.hops || (item.path ?? []).length || 1} hops
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </Accordion.Content>
+                    </Accordion.Item>
+                  </Accordion.Root>
+                </Tabs.Content>
+
+                <Tabs.Content value="composition" className="context-snapshot-tab-content kg-overview-composition">
+                  <div className="context-snapshot-band-card">
+                    <div className="meta">Entity composition band</div>
+                    {overviewSources.length === 0 ? (
+                      <div className="meta" style={{ marginTop: 8 }}>No project entities are indexed yet.</div>
+                    ) : (
+                      <div className="context-snapshot-band" role="img" aria-label="Entity composition by type">
+                        {overviewSources.map((source) => {
+                          const isSelected = selectedOverviewSourceKey === source.key
+                          return (
+                            <button
+                              key={`overview-band-${source.key}`}
+                              type="button"
+                              className={`context-snapshot-band-segment ${isSelected ? 'active' : ''}`.trim()}
+                              style={{ flexGrow: Math.max(source.percent, 0.5), backgroundColor: source.color }}
+                              aria-label={`${source.label}: ${formatPercent(source.percent)}`}
+                              onClick={() => setSelectedOverviewSourceKey((current) => (current === source.key ? null : source.key))}
+                            />
+                          )
+                        })}
+                      </div>
+                    )}
+                    <div className="meta">Click a segment to focus matching cells and source rows below.</div>
                   </div>
-                </div>
 
-                <div className="graph-summary-card">
-                  <div className="meta">Key points</div>
-                  {(summary.key_points ?? []).length === 0 ? (
-                    <div className="meta">No grounded key points available.</div>
+                  <div className="graph-context-cube-block context-snapshot-cube-block">
+                    <div className="meta">Entity occupancy map</div>
+                    {overviewTiles.length === 0 ? (
+                      <div className="meta" style={{ marginTop: 6 }}>No entity composition data available.</div>
+                    ) : (
+                      <div className="graph-context-cube-grid graph-context-cube-grid-dense" role="img" aria-label="Knowledge graph entity composition map">
+                        {overviewTiles.map((tile, idx) => {
+                          const isSelected = selectedOverviewSourceKey ? tile.sourceKey === selectedOverviewSourceKey : false
+                          return (
+                            <span
+                              key={`overview-cube-${idx}-${tile.key}`}
+                              className={`graph-context-cube context-snapshot-cube ${isSelected ? 'selected' : ''}`.trim()}
+                              style={{ backgroundColor: tile.color }}
+                              title={tile.label}
+                            />
+                          )
+                        })}
+                      </div>
+                    )}
+                    <div className="meta">
+                      Resolution: {overviewTiles.length.toLocaleString()} cells · Total entities: {overviewEntityCount.toLocaleString()}
+                    </div>
+                  </div>
+
+                  <div className="meta">Source breakdown</div>
+                  {overviewSources.length === 0 ? (
+                    <div className="meta">No source rows to display.</div>
                   ) : (
-                    <div className="graph-summary-points">
-                      {(summary.key_points ?? []).map((point, idx) => (
-                        <div key={`summary-point-${idx}`} className="graph-summary-point">
-                          <div className="graph-summary-point-head">
-                            <span className="graph-summary-point-index">{idx + 1}</span>
-                            <span className="graph-summary-point-claim">{point.claim}</span>
-                          </div>
-                          <div className="graph-summary-point-evidence">
-                            <span className="meta">Evidence</span>
-                            <div className="graph-summary-evidence-links">
-                              {(point.evidence_ids ?? []).length === 0
-                                ? <span className="meta">none</span>
-                                : (point.evidence_ids ?? []).map((evidenceId) => {
-                                    const evidence = evidenceById.get(evidenceId)
-                                    return (
-                                      <button
-                                        key={evidenceId}
-                                        type="button"
-                                        className="graph-summary-evidence-link"
-                                        onClick={() => {
-                                          setSelectedEvidenceId(evidenceId)
-                                          if (evidence?.entity_id) {
-                                            focusNodeOnCanvas(evidence.entity_id, 2.4)
-                                          }
-                                        }}
-                                        title={evidence?.snippet || `Open ${evidenceId}`}
-                                      >
-                                        {evidenceId}
-                                      </button>
-                                    )
-                                  })}
-                            </div>
-                          </div>
-                        </div>
+                    <div className="context-snapshot-source-list">
+                      {overviewSources.map((source) => (
+                        <button
+                          key={`overview-source-${source.key}`}
+                          type="button"
+                          className={`context-snapshot-source-row ${selectedOverviewSourceKey === source.key ? 'active' : ''}`.trim()}
+                          onClick={() => setSelectedOverviewSourceKey((current) => (current === source.key ? null : source.key))}
+                        >
+                          <span className="graph-context-legend-swatch" style={{ backgroundColor: source.color }} />
+                          <span className="context-snapshot-source-row-main">
+                            <span className="graph-context-legend-label">{source.label}</span>
+                            <span className="meta">{source.count.toLocaleString()} entities</span>
+                            <span className="context-snapshot-source-row-track">
+                              <span
+                                className="context-snapshot-source-row-fill"
+                                style={{ width: `${Math.max(0, Math.min(100, source.percent))}%`, backgroundColor: source.color }}
+                              />
+                            </span>
+                          </span>
+                          <span className="meta context-snapshot-source-row-pct">{formatPercent(source.percent)}</span>
+                        </button>
                       ))}
                     </div>
                   )}
-                </div>
+                </Tabs.Content>
+              </Tabs.Root>
+            </Tabs.Content>
 
-                {(summary.gaps ?? []).length > 0 ? (
-                  <div className="graph-summary-card">
-                    <div className="meta">Gaps</div>
-                    <div className="graph-summary-gaps">
-                      {(summary.gaps ?? []).map((gap, idx) => (
-                        <div key={`summary-gap-${idx}`} className="graph-summary-gap-item">
-                          {gap}
-                        </div>
-                      ))}
+            <Tabs.Content className="kg-insights-tab-content" value="explore">
+              <div className="kg-explore-layout">
+                <div className="kg-explore-main">
+                  <div className="field-control" style={{ marginBottom: 10 }}>
+                    <span className="field-label">Knowledge search</span>
+                    <div className="row wrap" style={{ gap: 8, alignItems: 'center' }}>
+                      <input
+                        value={knowledgeSearchQuery}
+                        onChange={(e) => setKnowledgeSearchQuery(e.target.value)}
+                        placeholder="Search entities, events, commands, readiness, metrics..."
+                      />
+                      {knowledgeSearchResultsQuery.isFetching ? <span className="badge">Searching</span> : null}
+                      {knowledgeSearchActive ? <span className="badge">Mode: {knowledgeSearchMode}</span> : null}
+                    </div>
+                    <div className="meta" style={{ marginTop: 6 }}>
+                      Type at least 2 characters. Click a result to focus its node in the graph.
                     </div>
                   </div>
-                ) : null}
-              </div>
-            )}
-          </div>
 
-          <div className="graph-markdown-block">
-            <div className="meta">Context pack preview</div>
-            <div className="graph-markdown-preview">
-              <MarkdownView value={contextPack?.markdown || ''} />
-            </div>
-          </div>
+                  {knowledgeSearchActive ? (
+                    <div className="graph-connected-block">
+                      <div className="meta">Knowledge search results</div>
+                      {knowledgeSearchResultsQuery.isError ? (
+                        <div className="notice notice-error" style={{ marginTop: 8 }}>
+                          {toErrorMessage(knowledgeSearchResultsQuery.error)}
+                        </div>
+                      ) : knowledgeSearchItems.length === 0 ? (
+                        <div className="meta" style={{ marginTop: 8 }}>No matches for this query.</div>
+                      ) : (
+                        <div className="graph-evidence-list">
+                          {knowledgeSearchItems.slice(0, 10).map((item) => {
+                            const graphPath = (item.graph_path ?? []).filter(Boolean).join(' -> ')
+                            return (
+                              <button
+                                key={`kg-search-${item.rank}-${item.entity_type}-${item.entity_id}`}
+                                type="button"
+                                className="graph-evidence-item"
+                                onClick={() => focusNodeOnCanvas(item.entity_id, 2.2)}
+                              >
+                                <div className="graph-evidence-head">
+                                  <div className="graph-evidence-badges">
+                                    <span className="graph-evidence-id">#{item.rank}</span>
+                                    <span className="status-chip">{item.entity_type}</span>
+                                    <span className="status-chip">{item.source_type}</span>
+                                  </div>
+                                  <span className="graph-evidence-score graph-evidence-score-pill">Final {item.final_score.toFixed(3)}</span>
+                                </div>
+                                <div className="graph-evidence-entity">{item.entity_id}</div>
+                                <div className="graph-evidence-snippet">{item.snippet}</div>
+                                <div className="graph-evidence-score-grid">
+                                  <div className="graph-evidence-score-row">
+                                    <span className="meta">Final</span>
+                                    <span className="graph-evidence-score-value">{item.final_score.toFixed(3)}</span>
+                                    <span className="graph-evidence-score-track">
+                                      <span
+                                        className="graph-evidence-score-fill graph-evidence-score-fill-final"
+                                        style={{ width: `${normalizeScorePercent(item.final_score)}%` }}
+                                      />
+                                    </span>
+                                  </div>
+                                  <div className="graph-evidence-score-row">
+                                    <span className="meta">Graph</span>
+                                    <span className="graph-evidence-score-value">{item.graph_score.toFixed(3)}</span>
+                                    <span className="graph-evidence-score-track">
+                                      <span
+                                        className="graph-evidence-score-fill graph-evidence-score-fill-graph"
+                                        style={{ width: `${normalizeScorePercent(item.graph_score)}%` }}
+                                      />
+                                    </span>
+                                  </div>
+                                  <div className="graph-evidence-score-row">
+                                    <span className="meta">Vector</span>
+                                    <span className="graph-evidence-score-value">
+                                      {item.vector_similarity === null ? 'n/a' : item.vector_similarity.toFixed(3)}
+                                    </span>
+                                    <span className="graph-evidence-score-track">
+                                      <span
+                                        className="graph-evidence-score-fill graph-evidence-score-fill-vector"
+                                        style={{ width: `${normalizeScorePercent(item.vector_similarity)}%` }}
+                                      />
+                                    </span>
+                                  </div>
+                                  {typeof item.template_alignment === 'number' ? (
+                                    <div className="graph-evidence-score-row">
+                                      <span className="meta">Template</span>
+                                      <span className="graph-evidence-score-value">{item.template_alignment.toFixed(3)}</span>
+                                      <span className="graph-evidence-score-track">
+                                        <span
+                                          className="graph-evidence-score-fill graph-evidence-score-fill-template"
+                                          style={{ width: `${normalizeScorePercent(item.template_alignment)}%` }}
+                                        />
+                                      </span>
+                                    </div>
+                                  ) : null}
+                                </div>
+                                <div className="graph-evidence-meta">
+                                  <span className="meta">Mode {knowledgeSearchMode}</span>
+                                  <span className="meta">Updated {formatEvidenceUpdated(item.updated_at)}</span>
+                                </div>
+                                {graphPath ? <div className="graph-evidence-path">Path {graphPath}</div> : null}
+                                {item.why_selected ? <div className="graph-evidence-why">{item.why_selected}</div> : null}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
 
-          <div className="graph-context-cube-block" style={{ marginTop: 12 }}>
-            <div className="meta">Knowledge graph pack composition</div>
-            {graphPackSnapshot.tiles.length === 0 ? (
-              <div className="meta" style={{ marginTop: 6 }}>No knowledge graph context has been produced yet.</div>
-            ) : (
-              <div className="graph-context-cube-grid graph-context-cube-grid-dense graph-context-cube-grid-entities" role="img" aria-label="Knowledge graph context composition map">
-                {graphPackSnapshot.tiles.map((tile, idx) => (
-                  <span
-                    key={`kg-pack-cube-${idx}-${tile.key}`}
-                    className="graph-context-cube"
-                    style={{ backgroundColor: tile.color }}
-                    title={tile.label}
-                  />
-                ))}
-              </div>
-            )}
-            <div className="meta">
-              ~{graphPackSnapshot.approxTokens.toLocaleString()} tokens · {graphPackSnapshot.totalChars.toLocaleString()} chars · {graphPackSnapshot.totalLines.toLocaleString()} lines
-            </div>
-            <div className="meta">
-              Resolution: {graphPackSnapshot.tileCount.toLocaleString()} cells · ~{Math.max(1, Math.round(graphPackSnapshot.charsPerTile || 0)).toLocaleString()} chars per cell
-            </div>
-            <div className="meta">
-              Chat indexing policy: {chatIndexModeLabel(normalizedChatIndexMode)} · Attachment ingestion: {chatAttachmentModeLabel(normalizedChatAttachmentMode)}
-            </div>
-            <div className="meta">
-              Chat-derived evidence: {graphPackSnapshot.chatEvidenceCount} / {graphPackSnapshot.chatEvidenceCount + graphPackSnapshot.nonChatEvidenceCount} ({graphPackSnapshot.chatEvidenceSharePct.toFixed(1)}%) · Distinct chat entities: {graphPackSnapshot.chatEvidenceEntityCount}
-            </div>
-            <div className="graph-context-legend">
-              {graphPackSnapshot.sources.map((source) => (
-                <div key={`kg-pack-source-${source.key}`} className="graph-context-legend-row">
-                  <span className="graph-context-legend-swatch" style={{ backgroundColor: source.color }} />
-                  <span className="graph-context-legend-label">{source.label}</span>
-                  <span className="meta">
-                    {source.percent.toFixed(1)}% pack · {source.chars.toLocaleString()} chars
-                    {source.lines > 0 ? ` · ${source.lines} lines` : ''}
-                  </span>
+                  <div className="graph-viz-block">
+                    <div className="row wrap graph-viz-head">
+                      <div className="meta">
+                        Visual graph ({graphData.nodes.length}/{subgraph?.node_count ?? graphNodes.length} nodes, {graphData.links.length}/{subgraph?.edge_count ?? graphEdges.length} edges)
+                      </div>
+                      <button
+                        className="action-icon"
+                        type="button"
+                        title={isGraphFullscreen ? 'Exit full screen' : 'Open full screen graph'}
+                        aria-label={isGraphFullscreen ? 'Exit full screen' : 'Open full screen graph'}
+                        onClick={() => void toggleGraphFullscreen()}
+                      >
+                        <Icon path={isGraphFullscreen ? 'M9 9H3V3h6v2H5v4h4v2zm12 0h-6V7h4V3h2v6zM9 21H3v-6h2v4h4v2zm12 0h-6v-2h4v-4h2v6z' : 'M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6'} />
+                      </button>
+                    </div>
+
+                    {!subgraph ? (
+                      <div className="meta">Loading graph visualization...</div>
+                    ) : graphNodes.length <= 1 || graphEdges.length === 0 ? (
+                      <div className="meta">Not enough connected entities yet for a visual graph.</div>
+                    ) : (
+                      <>
+                        {noVisibleNodes ? (
+                          <div className="meta">No nodes available for visualization.</div>
+                        ) : (
+                          <div className="graph-viz-shell" ref={graphShellRef}>
+                            {isGraphFullscreen ? (
+                              <button
+                                className="action-icon graph-viz-exit-button"
+                                type="button"
+                                title="Exit full screen"
+                                aria-label="Exit full screen"
+                                onClick={() => void exitGraphFullscreen()}
+                              >
+                                <Icon path="M9 9H3V3h6v2H5v4h4v2zm12 0h-6V7h4V3h2v6zM9 21H3v-6h2v4h4v2zm12 0h-6v-2h4v-4h2v6z" />
+                              </button>
+                            ) : null}
+                            <div className="graph-viz-canvas" ref={graphCanvasRef}>
+                              <ForceGraph2D
+                                ref={graphRef}
+                                width={canvasSize.width}
+                                height={canvasSize.height}
+                                graphData={graphData}
+                                backgroundColor="rgba(0,0,0,0)"
+                                cooldownTicks={120}
+                                d3VelocityDecay={0.28}
+                                linkColor={(link) => {
+                                  const source = getLinkNodeId((link as { source?: unknown }).source)
+                                  const target = getLinkNodeId((link as { target?: unknown }).target)
+                                  if (!selectedNodeId || source === selectedNodeId || target === selectedNodeId) {
+                                    return 'rgba(59,130,246,0.72)'
+                                  }
+                                  return 'rgba(100,116,139,0.30)'
+                                }}
+                                linkWidth={(link) => {
+                                  const source = getLinkNodeId((link as { source?: unknown }).source)
+                                  const target = getLinkNodeId((link as { target?: unknown }).target)
+                                  return !selectedNodeId || source === selectedNodeId || target === selectedNodeId ? 1.9 : 1.0
+                                }}
+                                nodeLabel={(node) => {
+                                  const n = node as VizNode
+                                  return `${n.entity_type}: ${n.name} (degree ${n.degree})`
+                                }}
+                                onNodeClick={(node) => {
+                                  const n = node as { id?: unknown }
+                                  if (!n.id) return
+                                  focusNodeOnCanvas(String(n.id), 2.3)
+                                }}
+                                onNodeHover={(node) => {
+                                  const n = node as { id?: unknown } | null
+                                  if (!n?.id) {
+                                    setHoveredNodeId(null)
+                                    return
+                                  }
+                                  setHoveredNodeId(String(n.id))
+                                }}
+                                nodeCanvasObject={(node, ctx, globalScale) => {
+                                  const n = node as VizNode & { x?: number; y?: number }
+                                  const x = Number(n.x || 0)
+                                  const y = Number(n.y || 0)
+                                  const selected = String(n.id) === String(selectedNodeId || '')
+                                  const hovered = String(n.id) === String(hoveredNodeId || '')
+                                  const radius = selected ? 10.4 : hovered ? 7.2 : Number(n.val || 5.2)
+                                  const isDark = typeof document !== 'undefined' && document.documentElement?.dataset?.theme === 'dark'
+                                  ctx.beginPath()
+                                  ctx.arc(x, y, radius, 0, 2 * Math.PI, false)
+                                  ctx.fillStyle = n.color || '#334155'
+                                  ctx.fill()
+                                  ctx.lineWidth = selected ? 3.2 : hovered ? 2.0 : 1.2
+                                  ctx.strokeStyle = selected ? '#22c55e' : isDark ? 'rgba(203,213,225,0.72)' : 'rgba(241,245,249,0.9)'
+                                  ctx.stroke()
+
+                                  const label = String(n.name || n.id || '').slice(0, 34)
+                                  if (!label) return
+                                  const baseFontSize = Math.max(1.5, 1.9 / globalScale)
+                                  const hoverFontSize = Math.max(1.8, 2.2 / globalScale)
+                                  const selectedFontSize = Math.max(2.5, 3.1 / globalScale)
+                                  const fontSize = selected ? selectedFontSize : hovered ? hoverFontSize : baseFontSize
+                                  ctx.font = `${selected ? 700 : hovered ? 600 : 400} ${fontSize}px ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial`
+                                  ctx.fillStyle = selected
+                                    ? isDark
+                                      ? 'rgba(248,250,252,0.98)'
+                                      : 'rgba(2,6,23,0.96)'
+                                    : hovered
+                                      ? isDark
+                                        ? 'rgba(226,232,240,0.90)'
+                                        : 'rgba(15,23,42,0.80)'
+                                      : isDark
+                                        ? 'rgba(203,213,225,0.54)'
+                                        : 'rgba(15,23,42,0.44)'
+                                  ctx.fillText(label, x + radius + 2, y + fontSize / 3)
+                                }}
+                              />
+                            </div>
+                            <aside className="graph-viz-side">
+                              <div className="meta">Legend</div>
+                              <div className="graph-viz-legend">
+                                {Array.from(new Set(graphData.nodes.map((n) => String(n.entity_type || 'Entity')))).map((type) => (
+                                  <div key={`legend-${type}`} className="graph-viz-legend-item">
+                                    <span className="graph-viz-dot" style={{ backgroundColor: nodeColor(type) }} />
+                                    <span>{type}</span>
+                                  </div>
+                                ))}
+                              </div>
+                              {selectedNode ? (
+                                <div className="graph-viz-selected">
+                                  <div className="graph-viz-selected-head">
+                                    <span className="meta">Selected</span>
+                                    <span className="status-chip">{selectedNode.entity_type}</span>
+                                  </div>
+                                  <div className="graph-viz-selected-title">{selectedNode.name}</div>
+                                  <div className="graph-viz-selected-id" title={selectedNode.id}>
+                                    {selectedNode.id}
+                                  </div>
+                                  <div className="graph-viz-selected-stats">
+                                    <span className="graph-viz-selected-stat">
+                                      <span className="meta">Degree</span>
+                                      <strong>{selectedNode.degree}</strong>
+                                    </span>
+                                    <span className="graph-viz-selected-stat">
+                                      <span className="meta">Connected edges</span>
+                                      <strong>{connectedSelectedEdges.length}</strong>
+                                    </span>
+                                  </div>
+                                </div>
+                              ) : null}
+                            </aside>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
                 </div>
-              ))}
-            </div>
-          </div>
+
+                <div className="kg-explore-side">
+                  <Accordion.Root
+                    type="multiple"
+                    className="kg-explore-accordion"
+                    defaultValue={['kg-explore-evidence', 'kg-explore-summary']}
+                  >
+                    <Accordion.Item value="kg-explore-evidence" className="taskdrawer-section-item kg-explore-section">
+                      <Accordion.Header className="taskdrawer-section-header">
+                        <Accordion.Trigger className="taskdrawer-section-trigger">
+                          <span className="taskdrawer-section-icon" aria-hidden="true">
+                            <Icon path="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6zm9 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
+                          </span>
+                          <span className="taskdrawer-section-head">
+                            <span className="taskdrawer-section-title">Evidence</span>
+                            <span className="taskdrawer-section-meta">{`${evidenceItems.length} scored entries`}</span>
+                          </span>
+                          <span className="taskdrawer-section-badge">{evidenceItems.length}</span>
+                          <span className="taskdrawer-section-chevron" aria-hidden="true">
+                            <Icon path="M6 9l6 6 6-6" />
+                          </span>
+                        </Accordion.Trigger>
+                      </Accordion.Header>
+                      <Accordion.Content className="taskdrawer-section-content">
+                        <div className="kg-explore-content-stack">
+                          <div className="meta">
+                            Click an evidence item to focus and highlight its node in the visual graph.
+                          </div>
+                          {evidenceItems.length === 0 ? (
+                            <div className="meta">No evidence available for this context pack.</div>
+                          ) : (
+                            <div className="graph-evidence-list">
+                              {evidenceItems.map((item) => {
+                                const isSelected = selectedEvidenceId === item.evidence_id
+                                const graphPath = (item.graph_path ?? []).filter(Boolean).join(' -> ')
+                                return (
+                                  <button
+                                    key={item.evidence_id}
+                                    type="button"
+                                    className={`graph-evidence-item ${isSelected ? 'selected' : ''}`.trim()}
+                                    onClick={() => {
+                                      setSelectedEvidenceId(item.evidence_id)
+                                      focusNodeOnCanvas(item.entity_id, 2.4)
+                                    }}
+                                  >
+                                    <div className="graph-evidence-head">
+                                      <div className="graph-evidence-badges">
+                                        <span className="graph-evidence-id">{item.evidence_id}</span>
+                                        <span className="status-chip">{item.entity_type}</span>
+                                        <span className="status-chip">{item.source_type}</span>
+                                      </div>
+                                      <span className="graph-evidence-score graph-evidence-score-pill">Final {item.final_score.toFixed(3)}</span>
+                                    </div>
+                                    <div className="graph-evidence-entity">{item.entity_id}</div>
+                                    <div className="graph-evidence-snippet">{item.snippet}</div>
+                                    <div className="graph-evidence-score-grid">
+                                      <div className="graph-evidence-score-row">
+                                        <span className="meta">Final</span>
+                                        <span className="graph-evidence-score-value">{item.final_score.toFixed(3)}</span>
+                                        <span className="graph-evidence-score-track">
+                                          <span
+                                            className="graph-evidence-score-fill graph-evidence-score-fill-final"
+                                            style={{ width: `${normalizeScorePercent(item.final_score)}%` }}
+                                          />
+                                        </span>
+                                      </div>
+                                      <div className="graph-evidence-score-row">
+                                        <span className="meta">Graph</span>
+                                        <span className="graph-evidence-score-value">{item.graph_score.toFixed(3)}</span>
+                                        <span className="graph-evidence-score-track">
+                                          <span
+                                            className="graph-evidence-score-fill graph-evidence-score-fill-graph"
+                                            style={{ width: `${normalizeScorePercent(item.graph_score)}%` }}
+                                          />
+                                        </span>
+                                      </div>
+                                      <div className="graph-evidence-score-row">
+                                        <span className="meta">Vector</span>
+                                        <span className="graph-evidence-score-value">
+                                          {item.vector_similarity === null ? 'n/a' : item.vector_similarity.toFixed(3)}
+                                        </span>
+                                        <span className="graph-evidence-score-track">
+                                          <span
+                                            className="graph-evidence-score-fill graph-evidence-score-fill-vector"
+                                            style={{ width: `${normalizeScorePercent(item.vector_similarity)}%` }}
+                                          />
+                                        </span>
+                                      </div>
+                                      {typeof item.template_alignment === 'number' ? (
+                                        <div className="graph-evidence-score-row">
+                                          <span className="meta">Template</span>
+                                          <span className="graph-evidence-score-value">{item.template_alignment.toFixed(3)}</span>
+                                          <span className="graph-evidence-score-track">
+                                            <span
+                                              className="graph-evidence-score-fill graph-evidence-score-fill-template"
+                                              style={{ width: `${normalizeScorePercent(item.template_alignment)}%` }}
+                                            />
+                                          </span>
+                                        </div>
+                                      ) : null}
+                                    </div>
+                                    <div className="graph-evidence-meta">
+                                      <span className="meta">Updated {formatEvidenceUpdated(item.updated_at)}</span>
+                                    </div>
+                                    {graphPath ? <div className="graph-evidence-path">Path {graphPath}</div> : null}
+                                    <div className="graph-evidence-why">Why selected: {item.why_selected}</div>
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      </Accordion.Content>
+                    </Accordion.Item>
+
+                    <Accordion.Item value="kg-explore-summary" className="taskdrawer-section-item kg-explore-section">
+                      <Accordion.Header className="taskdrawer-section-header">
+                        <Accordion.Trigger className="taskdrawer-section-trigger">
+                          <span className="taskdrawer-section-icon" aria-hidden="true">
+                            <Icon path="M6 2h12a2 2 0 0 1 2 2v16l-4 2-4-2-4 2-4-2V4a2 2 0 0 1 2-2zm3 5h6m-6 4h6m-6 4h4" />
+                          </span>
+                          <span className="taskdrawer-section-head">
+                            <span className="taskdrawer-section-title">Summary with citations</span>
+                            <span className="taskdrawer-section-meta">
+                              {`${(summary?.key_points ?? []).length} key points · ${(summary?.gaps ?? []).length} gaps`}
+                            </span>
+                          </span>
+                          <span className="taskdrawer-section-badge">{(summary?.key_points ?? []).length}</span>
+                          <span className="taskdrawer-section-chevron" aria-hidden="true">
+                            <Icon path="M6 9l6 6 6-6" />
+                          </span>
+                        </Accordion.Trigger>
+                      </Accordion.Header>
+                      <Accordion.Content className="taskdrawer-section-content">
+                        <div className="kg-explore-content-stack">
+                          <div className="row wrap" style={{ gap: 8 }}>
+                            {onCreateTaskFromSummary ? (
+                              <button
+                                type="button"
+                                className="status-chip"
+                                disabled={Boolean(actionBusy)}
+                                onClick={() =>
+                                  runAction('summary-create-task', () =>
+                                    onCreateTaskFromSummary({
+                                      title: summaryTaskTitle,
+                                      description: summaryTaskDescription,
+                                    })
+                                  )
+                                }
+                              >
+                                Create task
+                              </button>
+                            ) : null}
+                            {onCreateNoteFromSummary ? (
+                              <button
+                                type="button"
+                                className="status-chip"
+                                disabled={Boolean(actionBusy)}
+                                onClick={() =>
+                                  runAction('summary-create-note', () =>
+                                    onCreateNoteFromSummary({
+                                      title: summaryNoteTitle,
+                                      body: summaryNoteBody,
+                                    })
+                                  )
+                                }
+                              >
+                                Create note
+                              </button>
+                            ) : null}
+                            {canLinkTaskToSpecification ? (
+                              <button
+                                type="button"
+                                className="status-chip"
+                                disabled={Boolean(actionBusy)}
+                                onClick={() =>
+                                  runAction('summary-link-task-spec', () =>
+                                    onLinkFocusTaskToSpecification?.(taskToLinkId, specificationToLinkId)
+                                  )
+                                }
+                              >
+                                Link task/spec
+                              </button>
+                            ) : null}
+                            {actionBusy ? <span className="meta">Running action...</span> : null}
+                          </div>
+                          {actionError ? <div className="notice notice-error">{actionError}</div> : null}
+                          {!summary ? (
+                            <div className="meta">
+                              Summary is unavailable for this response.
+                              {(contextPack?.gaps ?? []).length > 0 ? ` ${contextPack?.gaps?.join(' | ')}` : ''}
+                            </div>
+                          ) : (
+                            <div className="graph-summary-layout">
+                              <div className="graph-summary-card">
+                                <div className="meta">Executive</div>
+                                <div className="graph-summary-executive">
+                                  {summary.executive || 'No executive summary available.'}
+                                </div>
+                              </div>
+
+                              <div className="graph-summary-card">
+                                <div className="meta">Key points</div>
+                                {(summary.key_points ?? []).length === 0 ? (
+                                  <div className="meta">No grounded key points available.</div>
+                                ) : (
+                                  <div className="graph-summary-points">
+                                    {(summary.key_points ?? []).map((point, idx) => (
+                                      <div key={`summary-point-${idx}`} className="graph-summary-point">
+                                        <div className="graph-summary-point-head">
+                                          <span className="graph-summary-point-index">{idx + 1}</span>
+                                          <span className="graph-summary-point-claim">{point.claim}</span>
+                                          <span className="graph-summary-point-count">
+                                            {(point.evidence_ids ?? []).length} evidence
+                                          </span>
+                                        </div>
+                                        <div className="graph-summary-point-evidence">
+                                          <span className="meta">Evidence</span>
+                                          <div className="graph-summary-evidence-links">
+                                            {(point.evidence_ids ?? []).length === 0
+                                              ? <span className="meta">none</span>
+                                              : (point.evidence_ids ?? []).map((evidenceId) => {
+                                                  const evidence = evidenceById.get(evidenceId)
+                                                  return (
+                                                    <button
+                                                      key={evidenceId}
+                                                      type="button"
+                                                      className="graph-summary-evidence-link"
+                                                      onClick={() => {
+                                                        setSelectedEvidenceId(evidenceId)
+                                                        if (evidence?.entity_id) {
+                                                          focusNodeOnCanvas(evidence.entity_id, 2.4)
+                                                        }
+                                                      }}
+                                                      title={evidence?.snippet || `Open ${evidenceId}`}
+                                                    >
+                                                      {evidenceId}
+                                                    </button>
+                                                  )
+                                                })}
+                                          </div>
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+
+                              {(summary.gaps ?? []).length > 0 ? (
+                                <div className="graph-summary-card">
+                                  <div className="meta">Gaps</div>
+                                  <div className="graph-summary-gaps">
+                                    {(summary.gaps ?? []).map((gap, idx) => (
+                                      <div key={`summary-gap-${idx}`} className="graph-summary-gap-item">
+                                        {gap}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              ) : null}
+                            </div>
+                          )}
+                        </div>
+                      </Accordion.Content>
+                    </Accordion.Item>
+                  </Accordion.Root>
+                </div>
+              </div>
+            </Tabs.Content>
+
+            <Tabs.Content className="kg-insights-tab-content" value="pack">
+              <Tabs.Root
+                className="context-snapshot-tabs"
+                value={packTab}
+                onValueChange={(next) => {
+                  if (next === 'composition' || next === 'markdown') setPackTab(next)
+                }}
+              >
+                <Tabs.List className="context-snapshot-tabs-list" aria-label="Knowledge graph pack views">
+                  <Tabs.Trigger className="context-snapshot-tab-trigger" value="composition">Composition + Sources</Tabs.Trigger>
+                  <Tabs.Trigger className="context-snapshot-tab-trigger" value="markdown">Pack markdown</Tabs.Trigger>
+                </Tabs.List>
+
+                <Tabs.Content value="composition" className="context-snapshot-tab-content kg-pack-composition">
+                  <div className="graph-context-snapshot kg-snapshot-surface">
+                    <div className="row wrap graph-context-snapshot-head">
+                      <div>
+                        <div className="meta">Knowledge graph pack</div>
+                        <div className="graph-context-snapshot-title">
+                          Token budget distribution across context markdown, evidence payload, summary, and metadata.
+                        </div>
+                      </div>
+                      <div className="graph-context-snapshot-total">~{graphPackSnapshot.approxTokens.toLocaleString()} tokens</div>
+                    </div>
+                    <div className="context-snapshot-policy-row">
+                      <span className="status-chip">{`Chat indexing: ${chatIndexModeLabel(normalizedChatIndexMode)}`}</span>
+                      <span className="status-chip">{`Attachment ingestion: ${chatAttachmentModeLabel(normalizedChatAttachmentMode)}`}</span>
+                    </div>
+                    <div className="graph-context-metrics context-snapshot-metrics">
+                      <div className="graph-context-metric context-snapshot-metric">
+                        <span className="meta">Sources</span>
+                        <strong>{graphPackSnapshot.sources.length.toLocaleString()}</strong>
+                      </div>
+                      <div className="graph-context-metric context-snapshot-metric">
+                        <span className="meta">Characters</span>
+                        <strong>{graphPackSnapshot.totalChars.toLocaleString()}</strong>
+                      </div>
+                      <div className="graph-context-metric context-snapshot-metric">
+                        <span className="meta">Lines</span>
+                        <strong>{graphPackSnapshot.totalLines.toLocaleString()}</strong>
+                      </div>
+                      <div className="graph-context-metric context-snapshot-metric">
+                        <span className="meta">Chat-derived evidence</span>
+                        <strong>{`${graphPackSnapshot.chatEvidenceCount} (${graphPackSnapshot.chatEvidenceSharePct.toFixed(1)}%)`}</strong>
+                      </div>
+                      <div className="graph-context-metric context-snapshot-metric">
+                        <span className="meta">Distinct chat entities</span>
+                        <strong>{graphPackSnapshot.chatEvidenceEntityCount.toLocaleString()}</strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="context-snapshot-band-card">
+                    <div className="meta">Context source occupancy band</div>
+                    {graphPackSnapshot.sources.length === 0 ? (
+                      <div className="meta" style={{ marginTop: 8 }}>No knowledge graph context has been produced yet.</div>
+                    ) : (
+                      <div className="context-snapshot-band" role="img" aria-label="Knowledge graph source occupancy by section">
+                        {graphPackSnapshot.sources.map((source) => {
+                          const isSelected = selectedPackSourceKey === source.key
+                          return (
+                            <button
+                              key={`pack-band-${source.key}`}
+                              type="button"
+                              className={`context-snapshot-band-segment ${isSelected ? 'active' : ''}`.trim()}
+                              style={{ flexGrow: Math.max(source.percent, 0.5), backgroundColor: source.color }}
+                              aria-label={`${source.label}: ${formatPercent(source.percent)}`}
+                              onClick={() => setSelectedPackSourceKey((current) => (current === source.key ? null : source.key))}
+                            />
+                          )
+                        })}
+                      </div>
+                    )}
+                    <div className="meta">
+                      Resolution: {graphPackSnapshot.tileCount.toLocaleString()} cells · ~{Math.max(1, Math.round(graphPackSnapshot.charsPerTile || 0)).toLocaleString()} chars per cell
+                    </div>
+                  </div>
+
+                  <div className="graph-context-cube-block context-snapshot-cube-block">
+                    <div className="meta">Knowledge graph pack composition</div>
+                    {graphPackSnapshot.tiles.length === 0 ? (
+                      <div className="meta" style={{ marginTop: 6 }}>No knowledge graph context has been produced yet.</div>
+                    ) : (
+                      <div className="graph-context-cube-grid graph-context-cube-grid-dense graph-context-cube-grid-entities" role="img" aria-label="Knowledge graph context composition map">
+                        {graphPackSnapshot.tiles.map((tile, idx) => {
+                          const isSelected = selectedPackSourceKey ? tile.sourceKey === selectedPackSourceKey : false
+                          return (
+                            <span
+                              key={`kg-pack-cube-${idx}-${tile.key}`}
+                              className={`graph-context-cube context-snapshot-cube ${isSelected ? 'selected' : ''}`.trim()}
+                              style={{ backgroundColor: tile.color }}
+                              title={tile.label}
+                            />
+                          )
+                        })}
+                      </div>
+                    )}
+                    <div className="meta">
+                      ~{graphPackSnapshot.approxTokens.toLocaleString()} tokens · {graphPackSnapshot.totalChars.toLocaleString()} chars · {graphPackSnapshot.totalLines.toLocaleString()} lines
+                    </div>
+                  </div>
+
+                  <div className="meta">Source breakdown</div>
+                  <Accordion.Root
+                    className="context-snapshot-source-groups"
+                    type="multiple"
+                    defaultValue={packSourceGroups.map((group) => group.group)}
+                  >
+                    {packSourceGroups.map((group) => (
+                      <Accordion.Item key={`pack-source-group-${group.group}`} value={group.group} className="context-snapshot-source-group">
+                        <Accordion.Header>
+                          <Accordion.Trigger className="context-snapshot-source-group-trigger">
+                            <span className="context-snapshot-source-group-head">
+                              <span className="context-snapshot-source-group-title">{group.group}</span>
+                              <span className="meta">
+                                {formatPercent(group.percent)} · {group.chars.toLocaleString()} chars
+                              </span>
+                            </span>
+                            <span className="context-snapshot-source-group-chevron" aria-hidden="true">
+                              <Icon path="M6 9l6 6 6-6" />
+                            </span>
+                          </Accordion.Trigger>
+                        </Accordion.Header>
+                        <Accordion.Content className="context-snapshot-source-group-content">
+                          <div className="context-snapshot-source-list">
+                            {group.items.map((source) => (
+                              <button
+                                key={`kg-pack-source-${source.key}`}
+                                type="button"
+                                className={`context-snapshot-source-row ${selectedPackSourceKey === source.key ? 'active' : ''}`.trim()}
+                                onClick={() => setSelectedPackSourceKey((current) => (current === source.key ? null : source.key))}
+                              >
+                                <span className="graph-context-legend-swatch" style={{ backgroundColor: source.color }} />
+                                <span className="context-snapshot-source-row-main">
+                                  <span className="graph-context-legend-label">{source.label}</span>
+                                  <span className="meta">
+                                    {source.chars.toLocaleString()} chars
+                                    {source.lines > 0 ? ` · ${source.lines.toLocaleString()} lines` : ''}
+                                  </span>
+                                  <span className="context-snapshot-source-row-track">
+                                    <span
+                                      className="context-snapshot-source-row-fill"
+                                      style={{ width: `${Math.max(0, Math.min(100, source.percent))}%`, backgroundColor: source.color }}
+                                    />
+                                  </span>
+                                </span>
+                                <span className="meta context-snapshot-source-row-pct">{formatPercent(source.percent)}</span>
+                              </button>
+                            ))}
+                          </div>
+                        </Accordion.Content>
+                      </Accordion.Item>
+                    ))}
+                  </Accordion.Root>
+                </Tabs.Content>
+
+                <Tabs.Content value="markdown" className="context-snapshot-tab-content">
+                  <div className="graph-markdown-block">
+                    <div className="meta">Context pack preview</div>
+                    <div className="graph-markdown-preview">
+                      <MarkdownView value={contextPack?.markdown || ''} />
+                    </div>
+                  </div>
+                </Tabs.Content>
+              </Tabs.Root>
+            </Tabs.Content>
+          </Tabs.Root>
         </>
       )}
     </section>

@@ -1,5 +1,6 @@
 import React from 'react'
 import * as Accordion from '@radix-ui/react-accordion'
+import * as AlertDialog from '@radix-ui/react-alert-dialog'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Popover from '@radix-ui/react-popover'
 import * as Select from '@radix-ui/react-select'
@@ -248,6 +249,37 @@ function TaskDueInputWithPresets({
 
 export function TaskDrawer({ state }: { state: any }) {
   const [openSections, setOpenSections] = React.useState<string[]>([])
+  const [confirmDiscardOpen, setConfirmDiscardOpen] = React.useState(false)
+  const pendingPostDiscardActionRef = React.useRef<(() => void) | null>(null)
+
+  const forceCloseTaskEditor = React.useCallback(() => {
+    state.setSelectedTaskId(null)
+    state.setTaskEditorError(null)
+  }, [state])
+
+  const requestTaskClose = React.useCallback((postDiscardAction?: () => void) => {
+    if (state.taskIsDirty) {
+      pendingPostDiscardActionRef.current = postDiscardAction ?? null
+      setConfirmDiscardOpen(true)
+      return
+    }
+    forceCloseTaskEditor()
+    if (postDiscardAction) postDiscardAction()
+  }, [forceCloseTaskEditor, state.taskIsDirty])
+
+  const cancelDiscardTaskChanges = React.useCallback(() => {
+    pendingPostDiscardActionRef.current = null
+    setConfirmDiscardOpen(false)
+  }, [])
+
+  const confirmDiscardTaskChanges = React.useCallback(() => {
+    const postDiscardAction = pendingPostDiscardActionRef.current
+    pendingPostDiscardActionRef.current = null
+    setConfirmDiscardOpen(false)
+    forceCloseTaskEditor()
+    if (postDiscardAction) postDiscardAction()
+  }, [forceCloseTaskEditor])
+
   const ensureSectionOpen = React.useCallback((section: string) => {
     setOpenSections((prev) => (prev.includes(section) ? prev : [...prev, section]))
   }, [])
@@ -346,7 +378,7 @@ export function TaskDrawer({ state }: { state: any }) {
     for (const file of files) {
       try {
         const ref = await state.uploadAttachmentRef(file, {
-          project_id: state.editProjectId || state.selectedTask.project_id,
+          project_id: state.selectedTask.project_id,
           task_id: state.selectedTask.id,
         })
         uploadedRefs.push(ref)
@@ -370,7 +402,7 @@ export function TaskDrawer({ state }: { state: any }) {
 
   return (
     <Tooltip.Provider delayDuration={180}>
-      <div className="drawer open" onClick={() => state.closeTaskEditor()}>
+      <div className="drawer open" onClick={() => requestTaskClose()}>
         <div className="drawer-body task-drawer-body" onClick={(e) => e.stopPropagation()}>
         <div className="drawer-header">
           <div className="task-header-main">
@@ -433,7 +465,7 @@ export function TaskDrawer({ state }: { state: any }) {
               </DropdownMenu.Portal>
             </DropdownMenu.Root>
             <TaskDrawerTooltip content="Close task">
-              <button className="action-icon" onClick={() => state.closeTaskEditor()} title="Close" aria-label="Close">
+              <button className="action-icon" onClick={() => requestTaskClose()} title="Close" aria-label="Close">
                 <Icon path="M6 6l12 12M18 6 6 18" />
               </button>
             </TaskDrawerTooltip>
@@ -453,9 +485,10 @@ export function TaskDrawer({ state }: { state: any }) {
           <button
             className="pill subtle task-project-pill"
             onClick={() => {
-              if (!state.closeTaskEditor()) return
-              state.setSelectedProjectId(state.selectedTask.project_id)
-              state.setTab('projects')
+              requestTaskClose(() => {
+                state.setSelectedProjectId(state.selectedTask.project_id)
+                state.setTab('projects')
+              })
             }}
             title="Open project"
             aria-label="Open project"
@@ -837,12 +870,14 @@ export function TaskDrawer({ state }: { state: any }) {
                 className="status-chip taskdrawer-section-quick-action"
                 type="button"
                 onClick={() => {
-                  if (!state.closeTaskEditor()) return
-                  state.createNoteMutation.mutate({
-                    title: 'Untitled note',
-                    body: '',
-                    project_id: state.selectedTask.project_id,
-                    task_id: state.selectedTask.id,
+                  requestTaskClose(() => {
+                    state.createNoteMutation.mutate({
+                      title: 'Untitled note',
+                      body: '',
+                      project_id: state.selectedTask.project_id,
+                      task_id: state.selectedTask.id,
+                      force_new: true,
+                    })
                   })
                 }}
                 disabled={state.createNoteMutation.isPending}
@@ -870,8 +905,9 @@ export function TaskDrawer({ state }: { state: any }) {
                         className="status-chip"
                         type="button"
                         onClick={() => {
-                          if (!state.closeTaskEditor()) return
-                          state.openNote(note.id, note.project_id)
+                          requestTaskClose(() => {
+                            state.openNote(note.id, note.project_id)
+                          })
                         }}
                       >
                         Open
@@ -898,8 +934,36 @@ export function TaskDrawer({ state }: { state: any }) {
           </div>
         </div>
         <TaskDrawerInsights state={state} />
+        </div>
       </div>
-      </div>
+      <AlertDialog.Root
+        open={confirmDiscardOpen}
+        onOpenChange={(open) => {
+          if (!open) cancelDiscardTaskChanges()
+        }}
+      >
+        <AlertDialog.Portal>
+          <AlertDialog.Overlay className="codex-chat-alert-overlay" />
+          <AlertDialog.Content className="codex-chat-alert-content">
+            <AlertDialog.Title className="codex-chat-alert-title">Discard task changes?</AlertDialog.Title>
+            <AlertDialog.Description className="codex-chat-alert-description">
+              You have unsaved task changes. Discard and continue?
+            </AlertDialog.Description>
+            <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
+              <AlertDialog.Cancel asChild>
+                <button className="status-chip" type="button" onClick={cancelDiscardTaskChanges}>
+                  Keep editing
+                </button>
+              </AlertDialog.Cancel>
+              <AlertDialog.Action asChild>
+                <button className="action-icon primary" type="button" onClick={confirmDiscardTaskChanges} aria-label="Discard task changes">
+                  <Icon path="M6 6l12 12M18 6 6 18" />
+                </button>
+              </AlertDialog.Action>
+            </div>
+          </AlertDialog.Content>
+        </AlertDialog.Portal>
+      </AlertDialog.Root>
     </Tooltip.Provider>
   )
 }

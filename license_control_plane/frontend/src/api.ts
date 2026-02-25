@@ -1,16 +1,23 @@
 import type {
+  AdminProvisionOnboardingRequest,
+  AdminProvisionOnboardingResponse,
+  AdminSendOnboardingEmailRequest,
+  AdminSendOnboardingEmailResponse,
+  AdminSendEmailRequest,
+  AdminSendEmailResponse,
   ActivationCodeCreateRequest,
   ActivationCodeCreateResponse,
-  BugReportsListResponse,
   ClientTokenCreateRequest,
   ClientTokenCreateResponse,
   ContactRequestsListResponse,
+  DeleteInstallationResponse,
   HealthResponse,
   InstallationResponse,
   InstallationsListResponse,
   WaitlistListResponse,
   UpdateSubscriptionRequest,
   UpdateSubscriptionResponse,
+  UpdateCustomerSubscriptionResponse,
 } from './types'
 
 export class ApiError extends Error {
@@ -72,6 +79,16 @@ export function getInstallation(token: string, installationId: string): Promise<
   return api<InstallationResponse>(`/v1/admin/installations/${encodeURIComponent(installationId)}`, token)
 }
 
+export function deleteInstallation(token: string, installationId: string): Promise<DeleteInstallationResponse> {
+  return api<DeleteInstallationResponse>(
+    `/v1/admin/installations/${encodeURIComponent(installationId)}`,
+    token,
+    {
+      method: 'DELETE',
+    }
+  )
+}
+
 export function updateInstallationSubscription(
   token: string,
   installationId: string,
@@ -79,6 +96,21 @@ export function updateInstallationSubscription(
 ): Promise<UpdateSubscriptionResponse> {
   return api<UpdateSubscriptionResponse>(
     `/v1/admin/installations/${encodeURIComponent(installationId)}/subscription`,
+    token,
+    {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }
+  )
+}
+
+export function updateCustomerSubscription(
+  token: string,
+  customerRef: string,
+  payload: UpdateSubscriptionRequest
+): Promise<UpdateCustomerSubscriptionResponse> {
+  return api<UpdateCustomerSubscriptionResponse>(
+    `/v1/admin/customers/${encodeURIComponent(customerRef)}/subscription`,
     token,
     {
       method: 'PUT',
@@ -102,6 +134,36 @@ export function createClientToken(
   payload: ClientTokenCreateRequest
 ): Promise<ClientTokenCreateResponse> {
   return api<ClientTokenCreateResponse>('/v1/admin/client-tokens', token, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function sendAdminEmail(
+  token: string,
+  payload: AdminSendEmailRequest
+): Promise<AdminSendEmailResponse> {
+  return api<AdminSendEmailResponse>('/v1/admin/email/send', token, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function sendAdminOnboardingEmail(
+  token: string,
+  payload: AdminSendOnboardingEmailRequest
+): Promise<AdminSendOnboardingEmailResponse> {
+  return api<AdminSendOnboardingEmailResponse>('/v1/admin/email/send-onboarding', token, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function provisionOnboardingPackage(
+  token: string,
+  payload: AdminProvisionOnboardingRequest
+): Promise<AdminProvisionOnboardingResponse> {
+  return api<AdminProvisionOnboardingResponse>('/v1/admin/onboarding/provision', token, {
     method: 'POST',
     body: JSON.stringify(payload),
   })
@@ -132,33 +194,6 @@ export function listContactRequests(
   if (params.limit != null) search.set('limit', String(params.limit))
   if (params.offset != null) search.set('offset', String(params.offset))
   return api<ContactRequestsListResponse>(`/v1/admin/contact-requests?${search.toString()}`, token)
-}
-
-export function listBugReports(
-  token: string,
-  params: {
-    q?: string
-    status?: string
-    severity?: string
-    source?: string
-    workspace_id?: string
-    customer_ref?: string
-    installation_id?: string
-    limit?: number
-    offset?: number
-  }
-): Promise<BugReportsListResponse> {
-  const search = new URLSearchParams()
-  if (params.q) search.set('q', params.q)
-  if (params.status) search.set('status', params.status)
-  if (params.severity) search.set('severity', params.severity)
-  if (params.source) search.set('source', params.source)
-  if (params.workspace_id) search.set('workspace_id', params.workspace_id)
-  if (params.customer_ref) search.set('customer_ref', params.customer_ref)
-  if (params.installation_id) search.set('installation_id', params.installation_id)
-  if (params.limit != null) search.set('limit', String(params.limit))
-  if (params.offset != null) search.set('offset', String(params.offset))
-  return api<BugReportsListResponse>(`/v1/admin/bug-reports?${search.toString()}`, token)
 }
 
 export function openAdminEvents(token: string | null): EventSource {

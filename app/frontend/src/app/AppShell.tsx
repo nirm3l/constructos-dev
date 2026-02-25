@@ -13,7 +13,7 @@ import {
   linkTaskToSpecification,
   listAdminUsers,
   resetAdminUserPassword,
-  submitBugReport,
+  submitFeedback,
   updateAdminUserRole,
 } from '../api'
 import { useCoreQueries } from './useCoreQueries'
@@ -96,7 +96,7 @@ function resolveLocalTimezone(): string {
   }
 }
 
-function App({ logout }: { logout: () => void }) {
+function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: string }) {
   const initialUrlStateRef = React.useRef<{
     tab: Tab | null
     projectId: string | null
@@ -126,7 +126,7 @@ function App({ logout }: { logout: () => void }) {
   }
   const initialUrlState = initialUrlStateRef.current!
 
-  const [userId] = React.useState<string>('session')
+  const userId = String(sessionUserId || '').trim() || 'session'
   const [tab, setTab] = React.useState<Tab>(() => {
     if (initialUrlState.tab) return initialUrlState.tab
     if (initialUrlState.specificationId) return 'specifications'
@@ -190,7 +190,6 @@ function App({ logout }: { logout: () => void }) {
   const [noteGroupFilterId, setNoteGroupFilterId] = React.useState('')
   const [specificationStatus, setSpecificationStatus] = React.useState('')
   const [specificationTags, setSpecificationTags] = React.useState<string[]>([])
-  const [specificationArchived, setSpecificationArchived] = React.useState(false)
   const [selectedSpecificationId, setSelectedSpecificationId] = React.useState<string | null>(() => initialUrlState.specificationId)
   const [editSpecificationTitle, setEditSpecificationTitle] = React.useState('')
   const [editSpecificationBody, setEditSpecificationBody] = React.useState('')
@@ -198,7 +197,7 @@ function App({ logout }: { logout: () => void }) {
   const [editSpecificationTags, setEditSpecificationTags] = React.useState('')
   const [editSpecificationExternalRefsText, setEditSpecificationExternalRefsText] = React.useState('')
   const [editSpecificationAttachmentRefsText, setEditSpecificationAttachmentRefsText] = React.useState('')
-  const [specificationEditorView, setSpecificationEditorView] = React.useState<'write' | 'preview'>('preview')
+  const [specificationEditorView, setSpecificationEditorView] = React.useState<'write' | 'preview' | 'split'>('preview')
   const [editNoteTitle, setEditNoteTitle] = React.useState('')
   const [editNoteBody, setEditNoteBody] = React.useState('')
   const [editNoteGroupId, setEditNoteGroupId] = React.useState('')
@@ -207,7 +206,7 @@ function App({ logout }: { logout: () => void }) {
   const [editNoteAttachmentRefsText, setEditNoteAttachmentRefsText] = React.useState('')
   const [showTagPicker, setShowTagPicker] = React.useState(false)
   const [tagPickerQuery, setTagPickerQuery] = React.useState('')
-  const [noteEditorView, setNoteEditorView] = React.useState<'write' | 'preview'>('preview')
+  const [noteEditorView, setNoteEditorView] = React.useState<'write' | 'preview' | 'split'>('preview')
   const {
     editStatus, setEditStatus, editTitle, setEditTitle, editDescription, setEditDescription, editPriority, setEditPriority,
     editDueDate, setEditDueDate, editProjectId, setEditProjectId, editTaskGroupId, setEditTaskGroupId, editTaskTags, setEditTaskTags, editTaskExternalRefsText,
@@ -229,9 +228,10 @@ function App({ logout }: { logout: () => void }) {
     setIsCodexChatRunning, codexChatRunStartedAt, setCodexChatRunStartedAt, codexChatElapsedSeconds,
     setCodexChatElapsedSeconds, codexChatLastTaskEventAt, setCodexChatLastTaskEventAt, codexChatUsage,
     setCodexChatUsage, setCodexChatUsageForSession, codexChatCodexSessionId, setCodexChatCodexSessionId,
+    codexChatResumeState, setCodexChatResumeState, setCodexChatResumeStateForSession,
     setCodexChatCodexSessionIdForSession,
     mergeCodexChatSessionsFromServer,
-  } = useCodexChatState()
+  } = useCodexChatState(userId)
   const [fabHidden, setFabHidden] = React.useState(false)
   const [showNotificationsPanel, setShowNotificationsPanel] = React.useState(false)
   const [showQuickAdd, setShowQuickAdd] = React.useState(false)
@@ -312,28 +312,21 @@ function App({ logout }: { logout: () => void }) {
       setUiError(toErrorMessage(error, 'License activation failed'))
     },
   })
-  const submitBugReportMutation = useMutation({
+  const submitFeedbackMutation = useMutation({
     mutationFn: (payload: {
       title: string
       description: string
-      steps_to_reproduce?: string | null
-      expected_behavior?: string | null
-      actual_behavior?: string | null
-      severity: 'low' | 'medium' | 'high' | 'critical'
+      feedback_type: 'general' | 'feature_request' | 'question' | 'other'
       context?: Record<string, unknown>
       metadata?: Record<string, unknown>
-    }) => submitBugReport(userId, payload),
-    onSuccess: (result) => {
+    }) => submitFeedback(userId, payload),
+    onSuccess: () => {
       setUiError(null)
-      if (result.queued) {
-        setUiInfo('Control plane unavailable. Bug report queued and will retry automatically.')
-      } else {
-        setUiInfo('Bug report sent to the control plane.')
-      }
+      setUiInfo('Feedback submitted successfully.')
       setTimeout(() => setUiInfo(null), 2500)
     },
     onError: (error: unknown) => {
-      setUiError(toErrorMessage(error, 'Bug report submission failed'))
+      setUiError(toErrorMessage(error, 'Feedback submission failed'))
     },
   })
   const changeMyPasswordMutation = useMutation({
@@ -544,7 +537,6 @@ function App({ logout }: { logout: () => void }) {
     noteTags,
     specificationStatus,
     specificationTags,
-    specificationArchived,
     projects: bootstrap.data?.projects ?? [],
     projectsMode,
   })
@@ -905,10 +897,9 @@ function App({ logout }: { logout: () => void }) {
   const openSpecification = React.useCallback((specificationId: string, projectId?: string | null) => {
     if (projectId) setSelectedProjectId(projectId)
     setSpecificationStatus('')
-    setSpecificationArchived(false)
     setSelectedSpecificationId(specificationId)
     setTab('specifications')
-  }, [setSelectedProjectId, setSpecificationStatus, setSpecificationArchived, setSelectedSpecificationId, setTab])
+  }, [setSelectedProjectId, setSpecificationStatus, setSelectedSpecificationId, setTab])
 
   const {
     taskTagSuggestions,
@@ -1329,6 +1320,8 @@ function App({ logout }: { logout: () => void }) {
     setCodexChatUsage,
     setCodexChatUsageForSession,
     setCodexChatCodexSessionId,
+    setCodexChatResumeState,
+    setCodexChatResumeStateForSession,
     setCodexChatCodexSessionIdForSession,
     setIsCodexChatRunning,
     setCodexChatRunStartedAt,
@@ -1336,6 +1329,8 @@ function App({ logout }: { logout: () => void }) {
     setCodexChatInstruction,
     selectedSpecificationId,
     setSelectedSpecificationId,
+    setSpecificationStatus,
+    clearSpecificationFilterTags,
     editSpecificationTitle,
     editSpecificationBody,
     editSpecificationStatus,
@@ -1716,6 +1711,9 @@ function App({ logout }: { logout: () => void }) {
       notes,
       searchNotes,
       searchKnowledge,
+      semanticTaskIds,
+      semanticNoteIds,
+      semanticSpecificationIds,
       searchTasksCombined,
       searchNotesCombined,
       searchSpecificationsCombined,
@@ -1787,8 +1785,6 @@ function App({ logout }: { logout: () => void }) {
       specificationTags,
       toggleSpecificationFilterTag,
       clearSpecificationFilterTags,
-      specificationArchived,
-      setSpecificationArchived,
       selectedSpecificationId,
       setSelectedSpecificationId,
       toggleSpecificationEditor,
@@ -1834,8 +1830,8 @@ function App({ logout }: { logout: () => void }) {
       themeMutation,
       changeMyPassword: changeMyPasswordMutation.mutateAsync,
       changeMyPasswordPending: changeMyPasswordMutation.isPending,
-      submitBugReport: submitBugReportMutation.mutateAsync,
-      submitBugReportPending: submitBugReportMutation.isPending,
+      submitFeedback: submitFeedbackMutation.mutateAsync,
+      submitFeedbackPending: submitFeedbackMutation.isPending,
       projectNames,
       taskNameMap,
       specificationNameMap,
@@ -1888,6 +1884,7 @@ function App({ logout }: { logout: () => void }) {
       editProjectId,
       setTaskEditorError,
       editTaskAttachmentRefsText,
+      setEditTaskAttachmentRefsText,
       selectedTaskCreator,
       selectedTaskTimeMeta,
       showTaskTagPicker,
@@ -1912,6 +1909,7 @@ function App({ logout }: { logout: () => void }) {
       setAutomationInstruction,
       runAutomationMutation,
       selectedTaskId,
+      setSelectedTaskId,
       activityShowRawDetails,
       setActivityShowRawDetails,
       activity,
@@ -1941,6 +1939,7 @@ function App({ logout }: { logout: () => void }) {
       codexChatSessionAttachmentRefs,
       setCodexChatSessionAttachmentRefs,
       codexChatCodexSessionId,
+      codexChatResumeState,
       runAgentChatMutation,
       cancelAgentChat,
       codexChatHistoryRef,
@@ -1965,6 +1964,7 @@ function AuthGate() {
   const [phase, setPhase] = React.useState<'checking' | 'login' | 'change-password' | 'ready'>('checking')
   const [authError, setAuthError] = React.useState<string | null>(null)
   const [pending, setPending] = React.useState(false)
+  const [sessionUserId, setSessionUserId] = React.useState('session')
   const [username, setUsername] = React.useState('m4tr1x')
   const [password, setPassword] = React.useState('')
   const [currentPassword, setCurrentPassword] = React.useState('')
@@ -1973,10 +1973,17 @@ function AuthGate() {
 
   const clearClientSessionState = React.useCallback(() => {
     if (typeof window === 'undefined') return
-    const keys = ['codex_chat_state_v1', 'ui_tab', 'ui_selected_project_id', 'ui_projects_mode']
-    for (const key of keys) {
-      window.localStorage.removeItem(key)
+    const codexChatPrefix = 'codex_chat_state_v1'
+    for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
+      const key = String(window.localStorage.key(index) || '')
+      if (!key) continue
+      if (key === codexChatPrefix || key.startsWith(`${codexChatPrefix}:`)) {
+        window.localStorage.removeItem(key)
+      }
     }
+    window.localStorage.removeItem('ui_tab')
+    window.localStorage.removeItem('ui_selected_project_id')
+    window.localStorage.removeItem('ui_projects_mode')
   }, [])
 
   const checkAuth = React.useCallback(async () => {
@@ -1984,12 +1991,15 @@ function AuthGate() {
     setPhase('checking')
     try {
       const payload = await authMe()
+      const nextUserId = String(payload.user?.id || '').trim() || 'session'
+      setSessionUserId(nextUserId)
       if (payload.user.must_change_password) {
         setPhase('change-password')
       } else {
         setPhase('ready')
       }
     } catch {
+      setSessionUserId('session')
       setPhase('login')
     }
   }, [])
@@ -2006,6 +2016,7 @@ function AuthGate() {
       const payload = await authLogin({ username: username.trim(), password })
       queryClient.clear()
       clearClientSessionState()
+      setSessionUserId(String(payload.user?.id || '').trim() || 'session')
       setCurrentPassword(password)
       setPassword('')
       if (payload.user.must_change_password) {
@@ -2054,6 +2065,7 @@ function AuthGate() {
     void authLogout().finally(() => {
       queryClient.clear()
       clearClientSessionState()
+      setSessionUserId('session')
       setPhase('login')
       setAuthError(null)
       setCurrentPassword('')
@@ -2141,7 +2153,7 @@ function AuthGate() {
     )
   }
 
-  return <App logout={handleLogout} />
+  return <App logout={handleLogout} sessionUserId={sessionUserId} />
 }
 
 export default function AppRoot() {

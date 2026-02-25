@@ -172,7 +172,7 @@ class CreateSpecificationHandler:
             raise HTTPException(status_code=422, detail="title cannot be empty")
 
         status = _normalize_status(self.payload.status)
-        sid = _specification_aggregate_id(self.payload.project_id, title)
+        sid = str(uuid.uuid4()) if bool(self.payload.force_new) else _specification_aggregate_id(self.payload.project_id, title)
         existing_specification = self.ctx.db.get(Specification, sid)
         if existing_specification and not existing_specification.is_deleted:
             view = load_specification_view(self.ctx.db, sid)

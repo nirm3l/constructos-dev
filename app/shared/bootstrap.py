@@ -12,7 +12,7 @@ from sqlalchemy import func, inspect, select, text
 from sqlalchemy.orm import Session
 
 from features.bootstrap.read_models import bootstrap_payload_read_model
-from .eventing import append_event, current_version, emit_system_notifications, get_kurrent_client
+from .eventing import append_event, current_version, get_kurrent_client
 from features.projects.domain import EVENT_CREATED as PROJECT_EVENT_CREATED
 from features.rules.domain import EVENT_CREATED as PROJECT_RULE_EVENT_CREATED
 from features.specifications.domain import EVENT_CREATED as SPECIFICATION_EVENT_CREATED
@@ -50,6 +50,7 @@ from .settings import (
     DEFAULT_USER_ID,
     DEFAULT_STATUSES,
     LICENSE_TRIAL_DAYS,
+    logger,
 )
 
 
@@ -370,11 +371,26 @@ def ensure_notification_table_columns(db: Session):
         db.execute(text("ALTER TABLE notifications ADD COLUMN note_id VARCHAR(36)"))
     if "specification_id" not in existing:
         db.execute(text("ALTER TABLE notifications ADD COLUMN specification_id VARCHAR(36)"))
+    if "notification_type" not in existing:
+        db.execute(text("ALTER TABLE notifications ADD COLUMN notification_type VARCHAR(64)"))
+    if "severity" not in existing:
+        db.execute(text("ALTER TABLE notifications ADD COLUMN severity VARCHAR(16)"))
+    if "dedupe_key" not in existing:
+        db.execute(text("ALTER TABLE notifications ADD COLUMN dedupe_key VARCHAR(255)"))
+    if "payload_json" not in existing:
+        db.execute(text("ALTER TABLE notifications ADD COLUMN payload_json TEXT"))
+    if "source_event" not in existing:
+        db.execute(text("ALTER TABLE notifications ADD COLUMN source_event VARCHAR(128)"))
+    db.execute(text("UPDATE notifications SET notification_type='Legacy' WHERE notification_type IS NULL OR notification_type = ''"))
+    db.execute(text("UPDATE notifications SET severity='info' WHERE severity IS NULL OR severity = ''"))
+    db.execute(text("UPDATE notifications SET payload_json='{}' WHERE payload_json IS NULL OR payload_json = ''"))
     db.execute(text("CREATE INDEX IF NOT EXISTS ix_notifications_workspace_id ON notifications(workspace_id)"))
     db.execute(text("CREATE INDEX IF NOT EXISTS ix_notifications_project_id ON notifications(project_id)"))
     db.execute(text("CREATE INDEX IF NOT EXISTS ix_notifications_task_id ON notifications(task_id)"))
     db.execute(text("CREATE INDEX IF NOT EXISTS ix_notifications_note_id ON notifications(note_id)"))
     db.execute(text("CREATE INDEX IF NOT EXISTS ix_notifications_specification_id ON notifications(specification_id)"))
+    db.execute(text("CREATE INDEX IF NOT EXISTS ix_notifications_user_created_at ON notifications(user_id, created_at)"))
+    db.execute(text("CREATE INDEX IF NOT EXISTS ix_notifications_user_dedupe_created_at ON notifications(user_id, dedupe_key, created_at)"))
     db.commit()
 
 
@@ -591,6 +607,7 @@ def bootstrap_data():
         _backfill_task_streams_from_read_model(db)
         _rebuild_project_tag_index(db)
         _backfill_project_members_for_existing_projects(db)
+        _repair_vector_index_drift(db)
         db.commit()
 
 
@@ -614,7 +631,6 @@ def startup_bootstrap():
 
 
 def bootstrap_payload(db: Session, user: User) -> dict[str, Any]:
-    emit_system_notifications(db, user)
     return bootstrap_payload_read_model(db, user)
 
 
@@ -643,26 +659,27 @@ def _backfill_project_streams_from_read_model(db: Session) -> None:
             attachment_refs = json.loads(p.attachment_refs or "[]")
         except Exception:
             attachment_refs = []
-            append_event(
-                db,
-                aggregate_type="Project",
-                aggregate_id=p.id,
-                event_type=PROJECT_EVENT_CREATED,
+
+        append_event(
+            db,
+            aggregate_type="Project",
+            aggregate_id=p.id,
+            event_type=PROJECT_EVENT_CREATED,
             payload={
                 "workspace_id": p.workspace_id,
                 "name": p.name,
-                    "description": p.description or "",
-                    "custom_statuses": custom_statuses or DEFAULT_STATUSES,
-                    "external_refs": external_refs,
-                    "attachment_refs": attachment_refs,
-                    "chat_index_mode": str(getattr(p, "chat_index_mode", "") or "OFF"),
-                    "chat_attachment_ingestion_mode": str(
-                        getattr(p, "chat_attachment_ingestion_mode", "") or "METADATA_ONLY"
-                    ),
-                },
-                metadata={"actor_id": DEFAULT_USER_ID, "workspace_id": p.workspace_id, "project_id": p.id},
-                expected_version=0,
-            )
+                "description": p.description or "",
+                "custom_statuses": custom_statuses or DEFAULT_STATUSES,
+                "external_refs": external_refs,
+                "attachment_refs": attachment_refs,
+                "chat_index_mode": str(getattr(p, "chat_index_mode", "") or "OFF"),
+                "chat_attachment_ingestion_mode": str(
+                    getattr(p, "chat_attachment_ingestion_mode", "") or "METADATA_ONLY"
+                ),
+            },
+            metadata={"actor_id": DEFAULT_USER_ID, "workspace_id": p.workspace_id, "project_id": p.id},
+            expected_version=0,
+        )
 
 
 def _backfill_task_streams_from_read_model(db: Session) -> None:
@@ -841,6 +858,61 @@ def _backfill_project_members_for_existing_projects(db: Session) -> None:
                     role="Owner",
                 )
             )
+
+
+def _repair_vector_index_drift(db: Session) -> None:
+    try:
+        from .vector_store import maybe_reindex_project, project_embedding_index_snapshot, vector_store_enabled
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Vector drift repair unavailable: %s", exc)
+        return
+
+    if not vector_store_enabled():
+        return
+
+    projects = db.execute(
+        select(Project).where(
+            Project.is_deleted == False,
+            Project.embedding_enabled == True,
+        )
+    ).scalars().all()
+    for project in projects:
+        snapshot = project_embedding_index_snapshot(
+            db,
+            project_id=project.id,
+            embedding_enabled=bool(project.embedding_enabled),
+            embedding_model=project.embedding_model,
+            chat_index_mode=str(getattr(project, "chat_index_mode", "") or "OFF"),
+            chat_attachment_ingestion_mode=str(
+                getattr(project, "chat_attachment_ingestion_mode", "") or "METADATA_ONLY"
+            ),
+        )
+        status = str(snapshot.get("status") or "").strip().lower()
+        expected_entities = int(snapshot.get("expected_entities") or 0)
+        indexed_entities = int(snapshot.get("indexed_entities") or 0)
+        gap = max(0, expected_entities - indexed_entities)
+        if status != "indexing" or gap <= 0:
+            continue
+        logger.info(
+            "Vector drift repair: project_id=%s indexed=%s expected=%s gap=%s",
+            project.id,
+            indexed_entities,
+            expected_entities,
+            gap,
+        )
+        try:
+            maybe_reindex_project(
+                db,
+                project_id=project.id,
+                embedding_enabled=bool(project.embedding_enabled),
+                embedding_model=project.embedding_model,
+                chat_index_mode=str(getattr(project, "chat_index_mode", "") or "OFF"),
+                chat_attachment_ingestion_mode=str(
+                    getattr(project, "chat_attachment_ingestion_mode", "") or "METADATA_ONLY"
+                ),
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Vector drift repair failed for project_id=%s: %s", project.id, exc)
 
 
 def _parse_tag_list(raw: str | None) -> list[str]:

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 from features.agents.mcp_registry import build_selected_mcp_config_text, normalize_chat_mcp_servers
 from shared.settings import (
@@ -19,6 +20,9 @@ from shared.settings import (
 )
 
 EMPTY_ASSISTANT_SUMMARY = "No assistant response content was returned."
+_DEFAULT_CODEX_HOME_ROOT = "/tmp/codex-home"
+_DEFAULT_CODEX_HOME_RETENTION_DAYS = 14
+_DEFAULT_CODEX_HOME_CLEANUP_INTERVAL_SECONDS = 3600
 
 
 def _normalize_prompt_mcp_servers(value: object) -> list[str]:
@@ -38,23 +42,243 @@ def _normalize_prompt_mcp_servers(value: object) -> list[str]:
     return out
 
 
+def _normalize_path_component(value: object, *, fallback: str) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return fallback
+    out_chars: list[str] = []
+    for char in raw:
+        if char.isalnum() or char in {"-", "_", "."}:
+            out_chars.append(char)
+        else:
+            out_chars.append("_")
+    normalized = "".join(out_chars).strip("._-")
+    return normalized or fallback
+
+
+def _resolve_codex_home_root() -> Path:
+    root_raw = str(os.getenv("AGENT_CODEX_HOME_ROOT", _DEFAULT_CODEX_HOME_ROOT)).strip() or _DEFAULT_CODEX_HOME_ROOT
+    return Path(root_raw).expanduser().resolve()
+
+
+def _resolve_persistent_codex_home_path(*, workspace_id: str, chat_session_id: str) -> Path:
+    root = _resolve_codex_home_root()
+    workspace_part = _normalize_path_component(workspace_id, fallback="workspace")
+    session_part = _normalize_path_component(chat_session_id, fallback="session")
+    return root / "workspace" / workspace_part / "chat" / session_part
+
+
+def _resolve_chat_session_lock_path(*, workspace_id: str, chat_session_id: str) -> Path:
+    return _resolve_persistent_codex_home_path(
+        workspace_id=workspace_id,
+        chat_session_id=chat_session_id,
+    ) / ".run.lock"
+
+
+def _try_acquire_file_lock(lock_handle: object) -> bool:
+    try:
+        import fcntl
+    except Exception:
+        # Fallback for environments without fcntl (best-effort lock).
+        return True
+    try:
+        fileno = getattr(lock_handle, "fileno")
+        fcntl.flock(fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    except Exception:
+        return True
+    return True
+
+
+def _release_file_lock(lock_handle: object) -> None:
+    try:
+        import fcntl
+    except Exception:
+        return
+    try:
+        fileno = getattr(lock_handle, "fileno")
+        fcntl.flock(fileno(), fcntl.LOCK_UN)
+    except Exception:
+        return
+
+
 @contextmanager
-def _isolated_codex_home_env(*, mcp_config_text: str):
+def _chat_session_run_lock(
+    *,
+    workspace_id: str | None = None,
+    chat_session_id: str | None = None,
+    timeout_seconds: float,
+    poll_interval_seconds: float = 0.1,
+):
+    normalized_workspace_id = str(workspace_id or "").strip()
+    normalized_chat_session_id = str(chat_session_id or "").strip()
+    if not normalized_workspace_id or not normalized_chat_session_id:
+        yield
+        return
+
+    lock_path = _resolve_chat_session_lock_path(
+        workspace_id=normalized_workspace_id,
+        chat_session_id=normalized_chat_session_id,
+    )
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_handle = lock_path.open("a+", encoding="utf-8")
+    lock_acquired = False
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+
+    try:
+        while True:
+            if _try_acquire_file_lock(lock_handle):
+                lock_acquired = True
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Timed out waiting for active chat run lock (workspace_id={normalized_workspace_id}, "
+                    f"chat_session_id={normalized_chat_session_id})."
+                )
+            time.sleep(max(0.01, float(poll_interval_seconds)))
+        yield
+    finally:
+        if lock_acquired:
+            _release_file_lock(lock_handle)
+        lock_handle.close()
+
+
+def _parse_env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    raw = str(os.getenv(name, str(default)) or "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = int(raw)
+    except Exception:
+        return default
+    if parsed < minimum:
+        return minimum
+    return parsed
+
+
+def _iter_persistent_codex_session_dirs(root: Path) -> list[Path]:
+    workspace_root = root / "workspace"
+    if not workspace_root.exists() or not workspace_root.is_dir():
+        return []
+    out: list[Path] = []
+    for workspace_dir in workspace_root.iterdir():
+        if not workspace_dir.is_dir():
+            continue
+        chat_root = workspace_dir / "chat"
+        if not chat_root.exists() or not chat_root.is_dir():
+            continue
+        for session_dir in chat_root.iterdir():
+            if not session_dir.is_dir() or session_dir.is_symlink():
+                continue
+            out.append(session_dir)
+    return out
+
+
+def _cleanup_stale_persistent_codex_homes(*, root: Path, cutoff_unix_seconds: float) -> tuple[int, int]:
+    removed = 0
+    failures = 0
+    for session_dir in _iter_persistent_codex_session_dirs(root):
+        try:
+            stat = session_dir.stat()
+        except Exception:
+            failures += 1
+            continue
+        if float(stat.st_mtime) >= cutoff_unix_seconds:
+            continue
+        try:
+            shutil.rmtree(session_dir)
+            removed += 1
+        except Exception:
+            failures += 1
+    return removed, failures
+
+
+def run_codex_home_cleanup_if_due(*, now_unix_seconds: float | None = None) -> dict[str, int | bool]:
+    now_ts = float(now_unix_seconds if now_unix_seconds is not None else time.time())
+    root = _resolve_codex_home_root()
+    retention_days = _parse_env_int(
+        "AGENT_CODEX_HOME_RETENTION_DAYS",
+        _DEFAULT_CODEX_HOME_RETENTION_DAYS,
+        minimum=1,
+    )
+    interval_seconds = _parse_env_int(
+        "AGENT_CODEX_HOME_CLEANUP_INTERVAL_SECONDS",
+        _DEFAULT_CODEX_HOME_CLEANUP_INTERVAL_SECONDS,
+        minimum=0,
+    )
+    if retention_days <= 0:
+        return {"ran": False, "removed": 0, "failures": 0}
+    marker_path = root / ".cleanup-marker"
+    if interval_seconds > 0:
+        try:
+            marker_stat = marker_path.stat()
+            if now_ts - float(marker_stat.st_mtime) < float(interval_seconds):
+                return {"ran": False, "removed": 0, "failures": 0}
+        except Exception:
+            pass
+
+    cutoff = now_ts - (retention_days * 86400)
+    try:
+        removed, failures = _cleanup_stale_persistent_codex_homes(
+            root=root,
+            cutoff_unix_seconds=cutoff,
+        )
+    except Exception:
+        return {"ran": False, "removed": 0, "failures": 1}
+    try:
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.touch()
+    except Exception:
+        pass
+    return {"ran": True, "removed": removed, "failures": failures}
+
+
+def _prepare_codex_home(home_path: Path, *, mcp_config_text: str) -> None:
+    codex_dir = home_path / ".codex"
+    codex_dir.mkdir(parents=True, exist_ok=True)
+    config_path = codex_dir / "config.toml"
+    config_path.write_text(str(mcp_config_text or ""), encoding="utf-8")
+
+    target_auth_path = codex_dir / "auth.json"
+    if target_auth_path.exists():
+        return
+    source_auth_path = Path.home() / ".codex" / "auth.json"
+    if source_auth_path.exists() and source_auth_path.is_file():
+        try:
+            shutil.copy2(source_auth_path, target_auth_path)
+        except Exception:
+            # Authentication can still be resolved by other providers/environment in some setups.
+            pass
+
+
+@contextmanager
+def _codex_home_env(
+    *,
+    mcp_config_text: str,
+    workspace_id: str | None = None,
+    chat_session_id: str | None = None,
+):
+    normalized_workspace_id = str(workspace_id or "").strip()
+    normalized_chat_session_id = str(chat_session_id or "").strip()
+    if normalized_workspace_id and normalized_chat_session_id:
+        try:
+            persistent_home = _resolve_persistent_codex_home_path(
+                workspace_id=normalized_workspace_id,
+                chat_session_id=normalized_chat_session_id,
+            )
+            _prepare_codex_home(persistent_home, mcp_config_text=mcp_config_text)
+            env = os.environ.copy()
+            env["HOME"] = str(persistent_home)
+            yield env
+            return
+        except Exception:
+            # Fall back to a temporary home so chat remains available even if persistent storage fails.
+            pass
+
     with tempfile.TemporaryDirectory(prefix="codex-home-") as temp_home:
         temp_home_path = Path(temp_home)
-        codex_dir = temp_home_path / ".codex"
-        codex_dir.mkdir(parents=True, exist_ok=True)
-        config_path = codex_dir / "config.toml"
-        config_path.write_text(str(mcp_config_text or ""), encoding="utf-8")
-
-        source_auth_path = Path.home() / ".codex" / "auth.json"
-        if source_auth_path.exists() and source_auth_path.is_file():
-            try:
-                shutil.copy2(source_auth_path, codex_dir / "auth.json")
-            except Exception:
-                # Authentication can still be resolved by other providers/environment in some setups.
-                pass
-
+        _prepare_codex_home(temp_home_path, mcp_config_text=mcp_config_text)
         env = os.environ.copy()
         env["HOME"] = str(temp_home_path)
         yield env
@@ -218,6 +442,136 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         f"{mutation_policy}"
         "- For recurring schedules, set task.recurring_rule explicitly using canonical format: every:<number><m|h|d> (example: every:1m).\n"
         "- After scheduling changes, verify by reading the task and confirming scheduled_at_utc + recurring_rule values.\n"
+        f"{response_tail}"
+    )
+
+
+def _normalize_snapshot_text(value: object, *, max_chars: int) -> str:
+    normalized = " ".join(str(value or "").split())
+    if len(normalized) <= max_chars:
+        return normalized
+    return f"{normalized[: max(0, max_chars - 3)]}..."
+
+
+def _build_resume_fresh_memory_snapshot(
+    ctx: dict,
+    *,
+    max_summary_chars: int = 1100,
+    max_evidence_items: int = 6,
+    max_evidence_snippet_chars: int = 180,
+    max_block_chars: int = 2400,
+) -> str:
+    blocks: list[str] = []
+
+    summary_markdown = str(ctx.get("graph_summary_markdown") or "").strip()
+    if summary_markdown:
+        summary_text = _normalize_snapshot_text(summary_markdown, max_chars=max_summary_chars)
+        if summary_text:
+            blocks.append("Fresh Summary:\n" + summary_text)
+
+    evidence_json = str(ctx.get("graph_evidence_json") or "").strip()
+    evidence_lines: list[str] = []
+    if evidence_json:
+        try:
+            parsed = json.loads(evidence_json)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, list):
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                evidence_id = str(item.get("evidence_id") or "").strip()
+                entity_type = str(item.get("entity_type") or "").strip() or "Entity"
+                source_type = str(item.get("source_type") or "").strip() or "source"
+                snippet = _normalize_snapshot_text(item.get("snippet"), max_chars=max_evidence_snippet_chars)
+                if not snippet:
+                    continue
+                score_raw = item.get("final_score")
+                score_text = ""
+                try:
+                    score_text = f"{float(score_raw):.3f}"
+                except Exception:
+                    score_text = ""
+                evidence_prefix = f"[{evidence_id}] " if evidence_id else ""
+                score_suffix = f" score={score_text}" if score_text else ""
+                evidence_lines.append(
+                    f"- {evidence_prefix}{entity_type} ({source_type}){score_suffix}: {snippet}"
+                )
+                if len(evidence_lines) >= max(1, int(max_evidence_items)):
+                    break
+    if evidence_lines:
+        blocks.append("Fresh Evidence:\n" + "\n".join(evidence_lines))
+
+    snapshot = "\n\n".join(blocks).strip()
+    if not snapshot:
+        return "_(fresh project snapshot unavailable)_"
+    if len(snapshot) <= max_block_chars:
+        return snapshot
+    return _normalize_snapshot_text(snapshot, max_chars=max_block_chars)
+
+
+def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
+    task_id = ctx.get("task_id")
+    title = ctx.get("title", "")
+    description = ctx.get("description", "")
+    status = ctx.get("status", "")
+    instruction = ctx.get("instruction", "")
+    workspace_id = ctx.get("workspace_id") or ""
+    project_id = ctx.get("project_id") or ""
+    actor_user_id = str(ctx.get("actor_user_id") or "").strip()
+    project_name = ctx.get("project_name") or ""
+    fresh_memory_snapshot = _build_resume_fresh_memory_snapshot(ctx)
+    allow_mutations = bool(ctx.get("allow_mutations", True))
+    mcp_servers = _normalize_prompt_mcp_servers(ctx.get("mcp_servers"))
+    enabled_mcp_servers_text = ", ".join(mcp_servers) if mcp_servers else "_(none selected)_"
+    has_task_context = bool(str(task_id or "").strip())
+    task_guidance = (
+        "- If task context is present, call get_task(task_id) before mutating state.\n"
+        if has_task_context
+        else "- This is a general chat request; use workspace/project context as needed.\n"
+    )
+    mutation_policy = (
+        "- Mutating tools are allowed for this request.\n"
+        if allow_mutations
+        else "- Mutating tools are NOT allowed for this request.\n"
+    )
+    response_header = (
+        "Return ONLY JSON matching the schema.\n\n"
+        if structured_response
+        else "Return plain Markdown text for the end user.\nDo not output JSON wrappers.\n\n"
+    )
+    response_tail = (
+        "- Return action=complete only if this task should be completed; otherwise return action=comment.\n"
+        "- summary must state what was actually done.\n"
+        "- comment should be concise and optional; use null when no extra runner comment is needed.\n"
+        if structured_response
+        else "- Respond directly to the user with clear, actionable text.\n"
+    )
+    return (
+        "You are an automation agent for task management.\n"
+        "This is a resumed Codex thread. Reuse prior thread context instead of re-deriving project bootstrap context.\n"
+        f"{response_header}"
+        "Current Turn Context:\n"
+        f"Task ID: {task_id}\n"
+        f"Title: {title}\n"
+        f"Status: {status}\n"
+        f"Description: {description}\n"
+        f"Workspace ID: {workspace_id}\n"
+        f"Project ID: {project_id}\n"
+        f"Current User ID: {actor_user_id}\n"
+        f"Project Name: {project_name}\n"
+        f"Instruction: {instruction}\n\n"
+        "Fresh Cross-Session Memory Snapshot (generated for this turn):\n"
+        f"{fresh_memory_snapshot}\n\n"
+        "Guidance:\n"
+        f"{task_guidance}"
+        f"- Enabled MCP servers for this run: {enabled_mcp_servers_text}.\n"
+        "- For factual questions that may depend on other sessions, prefer Fresh Cross-Session Memory Snapshot over stale thread memory.\n"
+        "- If prior thread context appears stale or missing, refresh by calling get_project_chat_context(project_ref=..., workspace_id=...).\n"
+        "- Prefer bulk tools for batch operations.\n"
+        "- For mutating MCP tool calls, always provide command_id.\n"
+        "- If retrying the same mutation, reuse the exact same command_id.\n"
+        f"{mutation_policy}"
         f"{response_tail}"
     )
 
@@ -428,13 +782,15 @@ def _build_plain_text_result(message_text: str) -> dict[str, object]:
 
 def _run_codex_app_server_with_optional_stream(
     *,
-    prompt: str,
+    start_prompt: str,
+    resume_prompt: str | None,
     timeout_seconds: float,
     stream_events: bool,
     model: str | None = None,
     output_schema: dict | None = None,
+    preferred_thread_id: str | None = None,
     env: dict[str, str] | None = None,
-) -> tuple[str, dict[str, int] | None, str | None]:
+) -> tuple[str, dict[str, int] | None, str | None, bool, bool]:
     cmd = [
         "codex",
         "app-server",
@@ -482,6 +838,9 @@ def _run_codex_app_server_with_optional_stream(
     stream_plain_text = output_schema is None
     lines: list[str] = []
     forced_shutdown = False
+    resume_thread_id = str(preferred_thread_id or "").strip()
+    resume_attempted = bool(resume_thread_id)
+    resume_succeeded = False
 
     def _send_message(payload: dict[str, object]) -> None:
         proc.stdin.write(json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n")
@@ -494,6 +853,23 @@ def _run_codex_app_server_with_optional_stream(
         pending_requests[req_id] = method
         _send_message({"method": method, "id": req_id, "params": params})
         return req_id
+
+    def _thread_request_params() -> dict[str, object]:
+        params: dict[str, object] = {
+            "approvalPolicy": "never",
+            "sandbox": "danger-full-access",
+        }
+        if model:
+            params["model"] = model
+        return params
+
+    def _request_thread_start() -> None:
+        _send_request("thread/start", _thread_request_params())
+
+    def _request_thread_resume(thread_id_value: str) -> None:
+        params = _thread_request_params()
+        params["threadId"] = thread_id_value
+        _send_request("thread/resume", params)
 
     _send_request(
         "initialize",
@@ -522,22 +898,39 @@ def _run_codex_app_server_with_optional_stream(
             req_method = pending_requests.pop(req_id, "")
             if req_method == "initialize":
                 _send_message({"method": "initialized"})
-                thread_params: dict[str, object] = {
-                    "approvalPolicy": "never",
-                    "sandbox": "danger-full-access",
-                }
-                if model:
-                    thread_params["model"] = model
-                _send_request("thread/start", thread_params)
-            elif req_method == "thread/start":
+                if resume_thread_id:
+                    _request_thread_resume(resume_thread_id)
+                else:
+                    _request_thread_start()
+            elif req_method in {"thread/start", "thread/resume"}:
+                error_payload = message.get("error")
+                if isinstance(error_payload, dict):
+                    extracted = _extract_error_message(error_payload)
+                    if extracted:
+                        last_error_message = extracted
+                    if req_method == "thread/resume":
+                        resume_succeeded = False
+                        _request_thread_start()
+                        continue
+                    detail = extracted or "unknown error"
+                    raise RuntimeError(f"codex app-server thread/start failed: {detail[:600]}")
                 result = message.get("result")
                 thread = (result or {}).get("thread") if isinstance(result, dict) else None
                 thread_id = str((thread or {}).get("id") if isinstance(thread, dict) else "").strip()
                 if not thread_id:
+                    if req_method == "thread/resume":
+                        resume_succeeded = False
+                        _request_thread_start()
+                        continue
                     raise RuntimeError("codex app-server did not return thread id")
+                if req_method == "thread/resume":
+                    resume_succeeded = True
+                selected_prompt = start_prompt
+                if req_method == "thread/resume" and resume_prompt is not None:
+                    selected_prompt = resume_prompt
                 turn_params: dict[str, object] = {
                     "threadId": thread_id,
-                    "input": [{"type": "text", "text": prompt}],
+                    "input": [{"type": "text", "text": selected_prompt}],
                 }
                 if output_schema is not None:
                     turn_params["outputSchema"] = output_schema
@@ -622,7 +1015,7 @@ def _run_codex_app_server_with_optional_stream(
             _emit_stream_event({"type": "assistant_text", "delta": rendered})
     if stream_events and usage is not None:
         _emit_stream_event({"type": "usage", "usage": usage})
-    return final_message, usage, (thread_id or None)
+    return final_message, usage, (thread_id or None), resume_attempted, resume_succeeded
 
 
 def _coerce_structured_reply_payload(value: object) -> dict[str, object] | None:
@@ -771,6 +1164,9 @@ def main() -> int:
         return 0
 
     ctx = json.loads(raw)
+    workspace_id = str(ctx.get("workspace_id") or "").strip() or None
+    chat_session_id = str(ctx.get("chat_session_id") or "").strip() or None
+    preferred_codex_session_id = str(ctx.get("codex_session_id") or "").strip() or None
     mcp_url = AGENT_CODEX_MCP_URL
     selected_mcp_servers = normalize_chat_mcp_servers(
         ctx.get("mcp_servers"),
@@ -783,7 +1179,8 @@ def main() -> int:
     stream_events = bool(ctx.get("stream_events"))
     stream_plain_text = bool(ctx.get("stream_plain_text"))
     structured_response = not (stream_events and stream_plain_text)
-    prompt = _build_prompt(ctx, structured_response=structured_response)
+    start_prompt = _build_prompt(ctx, structured_response=structured_response)
+    resume_prompt = _build_resume_prompt(ctx, structured_response=structured_response)
     schema = {
         "type": "object",
         "properties": {
@@ -795,55 +1192,52 @@ def main() -> int:
         "additionalProperties": False,
     }
     codex_session_id: str | None = None
-    with _isolated_codex_home_env(mcp_config_text=mcp_config_text) as codex_env:
-        if stream_events:
-            final_message, usage, codex_session_id = _run_codex_app_server_with_optional_stream(
-                prompt=prompt,
-                timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
-                stream_events=True,
-                model=AGENT_CODEX_MODEL or None,
-                output_schema=schema if structured_response else None,
-                env=codex_env,
-            )
-            if structured_response:
+    resume_attempted = False
+    resume_succeeded = False
+    run_codex_home_cleanup_if_due()
+    with _chat_session_run_lock(
+        workspace_id=workspace_id,
+        chat_session_id=chat_session_id,
+        timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
+    ):
+        with _codex_home_env(
+            mcp_config_text=mcp_config_text,
+            workspace_id=workspace_id,
+            chat_session_id=chat_session_id,
+        ) as codex_env:
+            if stream_events:
+                final_message, usage, codex_session_id, resume_attempted, resume_succeeded = _run_codex_app_server_with_optional_stream(
+                    start_prompt=start_prompt,
+                    resume_prompt=resume_prompt,
+                    timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
+                    stream_events=True,
+                    model=AGENT_CODEX_MODEL or None,
+                    output_schema=schema if structured_response else None,
+                    preferred_thread_id=preferred_codex_session_id,
+                    env=codex_env,
+                )
+                if structured_response:
+                    parsed_payload = _try_parse_structured_reply_text(final_message)
+                    if parsed_payload is None:
+                        raise RuntimeError("codex app-server returned a non-JSON response while JSON schema was required")
+                    out = parsed_payload
+                else:
+                    out = _build_plain_text_result(final_message)
+            else:
+                final_message, usage, codex_session_id, resume_attempted, resume_succeeded = _run_codex_app_server_with_optional_stream(
+                    start_prompt=start_prompt,
+                    resume_prompt=resume_prompt,
+                    timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
+                    stream_events=False,
+                    model=AGENT_CODEX_MODEL or None,
+                    output_schema=schema,
+                    preferred_thread_id=preferred_codex_session_id,
+                    env=codex_env,
+                )
                 parsed_payload = _try_parse_structured_reply_text(final_message)
                 if parsed_payload is None:
                     raise RuntimeError("codex app-server returned a non-JSON response while JSON schema was required")
                 out = parsed_payload
-            else:
-                out = _build_plain_text_result(final_message)
-        else:
-            with tempfile.TemporaryDirectory() as td:
-                schema_path = os.path.join(td, "schema.json")
-                output_path = os.path.join(td, "last_message.json")
-                with open(schema_path, "w", encoding="utf-8") as f:
-                    json.dump(schema, f)
-
-                cmd = [
-                    "codex",
-                    "exec",
-                    "--skip-git-repo-check",
-                    "--dangerously-bypass-approvals-and-sandbox",
-                    "--json",
-                    "--output-schema",
-                    schema_path,
-                    "--output-last-message",
-                    output_path,
-                ]
-                if AGENT_CODEX_MODEL:
-                    cmd.extend(["-m", AGENT_CODEX_MODEL])
-                cmd.append(prompt)
-
-                stdout = _run_codex_json_with_optional_stream(
-                    command=cmd,
-                    timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
-                    stream_events=False,
-                    env=codex_env,
-                )
-                usage = _extract_turn_usage(stdout or "")
-
-                with open(output_path, "r", encoding="utf-8") as f:
-                    out = json.loads(f.read().strip() or "{}")
 
     action = str(out.get("action", "")).strip().lower()
     summary = str(out.get("summary", "")).strip()
@@ -864,6 +1258,9 @@ def main() -> int:
                 "comment": comment,
                 "usage": usage,
                 "codex_session_id": codex_session_id,
+                "resume_attempted": resume_attempted,
+                "resume_succeeded": resume_succeeded,
+                "resume_fallback_used": bool(resume_attempted and not resume_succeeded),
             }
         )
     )

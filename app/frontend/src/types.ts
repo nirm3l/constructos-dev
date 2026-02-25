@@ -254,6 +254,7 @@ export type Task = {
   attachments: Array<Record<string, unknown>>
   external_refs: ExternalRef[]
   attachment_refs: AttachmentRef[]
+  linked_note_count?: number
   recurring_rule: string | null
   task_type: 'manual' | 'scheduled_instruction'
   scheduled_instruction: string | null
@@ -280,6 +281,11 @@ export type Notification = {
   task_id?: string | null
   note_id?: string | null
   specification_id?: string | null
+  notification_type?: string | null
+  severity?: 'info' | 'warning' | 'critical' | string | null
+  dedupe_key?: string | null
+  payload?: Record<string, unknown> | null
+  source_event?: string | null
 }
 
 export type LicenseStatus = {
@@ -312,26 +318,20 @@ export type LicenseActivationResponse = {
   seat_usage: LicenseActivationSeatUsage | null
 }
 
-export type BugReportSeverity = 'low' | 'medium' | 'high' | 'critical'
+export type FeedbackKind = 'general' | 'feature_request' | 'question' | 'other'
 
-export type BugReportCreateRequest = {
+export type FeedbackCreateRequest = {
   title: string
   description: string
-  steps_to_reproduce?: string | null
-  expected_behavior?: string | null
-  actual_behavior?: string | null
-  severity: BugReportSeverity
+  feedback_type: FeedbackKind
   context?: Record<string, unknown>
   metadata?: Record<string, unknown>
 }
 
-export type BugReportCreateResponse = {
+export type FeedbackCreateResponse = {
   ok: boolean
   created: boolean
-  queued: boolean
-  queue_id: number | null
-  report_id: string | null
-  bug_report: Record<string, unknown>
+  feedback: Record<string, unknown>
 }
 
 export type AppVersionPayload = {
@@ -654,6 +654,9 @@ export type AgentChatResponse = {
   session_id?: string | null
   codex_session_id?: string | null
   usage?: AgentChatUsage | null
+  resume_attempted?: boolean
+  resume_succeeded?: boolean
+  resume_fallback_used?: boolean
 }
 
 export type ChatMcpServer = string
@@ -671,6 +674,9 @@ export type AgentChatUsage = {
   cached_input_tokens?: number
   output_tokens: number
   context_limit_tokens?: number
+  codex_resume_attempted?: boolean
+  codex_resume_succeeded?: boolean
+  codex_resume_fallback_used?: boolean
 }
 
 export type ChatSessionRecord = {

@@ -28,6 +28,7 @@ def _build_client(
     *,
     private_key_pem: str = "",
     public_beta_free_until: str = "",
+    beta_plan_valid_until: str = "",
     client_token_bundle_password: str = "",
     client_token_delimiter: str = ".",
     client_token_bundle_segment_index: int = 2,
@@ -42,6 +43,7 @@ def _build_client(
     os.environ["LCP_SIGNING_KEY_ID"] = "test-key"
     os.environ["LCP_REQUIRE_SIGNED_TOKENS"] = "false"
     os.environ["LCP_PUBLIC_BETA_FREE_UNTIL"] = public_beta_free_until
+    os.environ["LCP_BETA_PLAN_VALID_UNTIL"] = beta_plan_valid_until
     os.environ["APP_BUNDLE_PASSWORD"] = ""
     os.environ["LCP_CLIENT_TOKEN_BUNDLE_PASSWORD"] = client_token_bundle_password
     os.environ["LCP_CLIENT_TOKEN_DELIMITER"] = client_token_delimiter
@@ -122,6 +124,219 @@ def test_admin_subscription_update_changes_installation_status(tmp_path: Path):
         assert installation_payload["metadata"].get("billing_sync_source") == "external-billing-app"
 
 
+def test_admin_subscription_update_lifetime_clears_valid_until(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-lifetime-installation",
+                "workspace_id": "workspace-lifetime",
+                "metadata": {"source": "test"},
+            },
+        )
+        assert register.status_code == 200
+
+        update = client.put(
+            "/v1/admin/installations/cp-lifetime-installation/subscription",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "subscription_status": "lifetime",
+                "customer_ref": "customer-lifetime",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "plan_code": "lifetime",
+            },
+        )
+        assert update.status_code == 200
+        payload = update.json()
+        assert payload["ok"] is True
+        assert payload["subscription_status"] == "lifetime"
+        assert payload["entitlement"]["status"] == "active"
+        assert payload["entitlement"]["plan_code"] == "lifetime"
+        assert payload["entitlement"]["valid_until"] is None
+
+        get_installation = client.get(
+            "/v1/admin/installations/cp-lifetime-installation",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert get_installation.status_code == 200
+        installation_payload = get_installation.json()["installation"]
+        assert installation_payload["subscription_status"] == "lifetime"
+        assert installation_payload["plan_code"] == "lifetime"
+        assert installation_payload["subscription_valid_until"] is None
+
+
+def test_admin_subscription_update_rejects_invalid_status_plan_mapping(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-invalid-plan-mapping",
+                "workspace_id": "workspace-invalid",
+                "customer_ref": "customer-invalid",
+                "metadata": {"source": "test"},
+            },
+        )
+        assert register.status_code == 200
+
+        update = client.put(
+            "/v1/admin/installations/cp-invalid-plan-mapping/subscription",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "subscription_status": "active",
+                "plan_code": "beta",
+                "customer_ref": "customer-invalid",
+                "valid_until": "2026-12-31T00:00:00Z",
+            },
+        )
+        assert update.status_code == 400
+        assert "is not allowed when subscription_status is 'active'" in update.json()["detail"]
+
+
+def test_admin_subscription_update_canonicalizes_legacy_status_aliases(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-legacy-status-alias",
+                "workspace_id": "workspace-legacy",
+                "customer_ref": "customer-legacy",
+                "metadata": {"source": "test"},
+            },
+        )
+        assert register.status_code == 200
+
+        update_grace = client.put(
+            "/v1/admin/installations/cp-legacy-status-alias/subscription",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "subscription_status": "past_due",
+                "plan_code": "monthly",
+                "customer_ref": "customer-legacy",
+                "valid_until": "2026-12-31T00:00:00Z",
+            },
+        )
+        assert update_grace.status_code == 200
+        assert update_grace.json()["subscription_status"] == "grace"
+        assert update_grace.json()["entitlement"]["status"] == "grace"
+
+        update_none = client.put(
+            "/v1/admin/installations/cp-legacy-status-alias/subscription",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "subscription_status": "canceled",
+                "plan_code": None,
+                "customer_ref": "customer-legacy",
+                "valid_until": None,
+            },
+        )
+        assert update_none.status_code == 200
+        assert update_none.json()["subscription_status"] == "none"
+        assert update_none.json()["entitlement"]["plan_code"] is None
+        assert update_none.json()["entitlement"]["valid_until"] is None
+
+        get_installation = client.get(
+            "/v1/admin/installations/cp-legacy-status-alias",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert get_installation.status_code == 200
+        assert get_installation.json()["installation"]["subscription_status"] == "none"
+        assert get_installation.json()["installation"]["plan_code"] is None
+        assert get_installation.json()["installation"]["subscription_valid_until"] is None
+
+
+def test_admin_list_installations_status_filter_matches_legacy_rows(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        for installation_id in ["cp-legacy-grace", "cp-legacy-none"]:
+            register = client.post(
+                "/v1/installations/register",
+                headers={"Authorization": "Bearer control-plane-token"},
+                json={
+                    "installation_id": installation_id,
+                    "workspace_id": "workspace-legacy-filter",
+                    "customer_ref": "customer-legacy-filter",
+                    "metadata": {"source": "test"},
+                },
+            )
+            assert register.status_code == 200
+
+        import license_control_plane.main as lcp_main
+
+        with lcp_main.SessionLocal() as db:
+            grace_installation = db.execute(
+                lcp_main.select(lcp_main.Installation).where(
+                    lcp_main.Installation.installation_id == "cp-legacy-grace"
+                )
+            ).scalar_one()
+            grace_installation.subscription_status = "past_due"
+
+            none_installation = db.execute(
+                lcp_main.select(lcp_main.Installation).where(
+                    lcp_main.Installation.installation_id == "cp-legacy-none"
+                )
+            ).scalar_one()
+            none_installation.subscription_status = "canceled"
+            db.commit()
+
+        filtered_grace = client.get(
+            "/v1/admin/installations?status=grace&limit=50&offset=0",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert filtered_grace.status_code == 200
+        grace_payload = filtered_grace.json()
+        grace_ids = {item["installation"]["installation_id"] for item in grace_payload["items"]}
+        assert "cp-legacy-grace" in grace_ids
+
+        filtered_none = client.get(
+            "/v1/admin/installations?status=none&limit=50&offset=0",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert filtered_none.status_code == 200
+        none_payload = filtered_none.json()
+        none_ids = {item["installation"]["installation_id"] for item in none_payload["items"]}
+        assert "cp-legacy-none" in none_ids
+
+
+def test_admin_delete_installation_removes_record_permanently(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-delete-installation",
+                "workspace_id": "workspace-delete",
+                "customer_ref": "customer-delete",
+                "metadata": {"source": "test"},
+            },
+        )
+        assert register.status_code == 200
+
+        deleted = client.delete(
+            "/v1/admin/installations/cp-delete-installation",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert deleted.status_code == 200
+        deleted_payload = deleted.json()
+        assert deleted_payload["ok"] is True
+        assert deleted_payload["installation_id"] == "cp-delete-installation"
+
+        get_installation = client.get(
+            "/v1/admin/installations/cp-delete-installation",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert get_installation.status_code == 404
+
+        listed = client.get(
+            "/v1/admin/installations",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert listed.status_code == 200
+        ids = {item["installation"]["installation_id"] for item in listed.json()["items"]}
+        assert "cp-delete-installation" not in ids
+
+
 def test_admin_list_installations_supports_search_and_status_filter(tmp_path: Path):
     with _build_client(tmp_path) as client:
         first = client.post(
@@ -169,6 +384,59 @@ def test_admin_list_installations_supports_search_and_status_filter(tmp_path: Pa
         assert payload["total"] == 1
         assert len(payload["items"]) == 1
         assert payload["items"][0]["installation"]["installation_id"] == "cp-tenant-beta"
+
+
+def test_admin_customer_subscription_update_applies_to_all_installations(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        for installation_id in ["cp-customer-a1", "cp-customer-a2"]:
+            register = client.post(
+                "/v1/installations/register",
+                headers={"Authorization": "Bearer control-plane-token"},
+                json={
+                    "installation_id": installation_id,
+                    "workspace_id": "workspace-customer-a",
+                    "metadata": {"source": "test"},
+                },
+            )
+            assert register.status_code == 200
+            assign_customer = client.put(
+                f"/v1/admin/installations/{installation_id}/subscription",
+                headers={"Authorization": "Bearer control-plane-token"},
+                json={
+                    "subscription_status": "active",
+                    "plan_code": "monthly",
+                    "customer_ref": "customer-a",
+                    "valid_until": "2026-12-31T00:00:00Z",
+                },
+            )
+            assert assign_customer.status_code == 200
+
+        bulk_update = client.put(
+            "/v1/admin/customers/customer-a/subscription",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "subscription_status": "lifetime",
+                "plan_code": "lifetime",
+                "valid_until": None,
+            },
+        )
+        assert bulk_update.status_code == 200
+        bulk_payload = bulk_update.json()
+        assert bulk_payload["ok"] is True
+        assert bulk_payload["customer_ref"] == "customer-a"
+        assert bulk_payload["updated_installations"] == 2
+
+        for installation_id in ["cp-customer-a1", "cp-customer-a2"]:
+            get_installation = client.get(
+                f"/v1/admin/installations/{installation_id}",
+                headers={"Authorization": "Bearer control-plane-token"},
+            )
+            assert get_installation.status_code == 200
+            payload = get_installation.json()
+            assert payload["installation"]["subscription_status"] == "lifetime"
+            assert payload["installation"]["subscription_valid_until"] is None
+            assert payload["entitlement"]["status"] == "active"
+            assert payload["entitlement"]["plan_code"] == "lifetime"
 
 
 def test_activation_code_flow_enforces_three_device_limit(tmp_path: Path):
@@ -234,6 +502,145 @@ def test_activation_code_flow_enforces_three_device_limit(tmp_path: Path):
         assert list_payload["ok"] is True
         assert list_payload["total"] == 1
         assert list_payload["items"][0]["usage_count"] == 3
+
+
+def test_register_auto_assigns_customer_ref_when_missing(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-auto-customer-installation",
+                "workspace_id": "workspace-auto-customer",
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert register.status_code == 200
+        payload = register.json()
+        assert payload["installation"]["customer_ref"] == "cust_unassigned"
+
+
+def test_activation_code_lifetime_plan_sets_lifetime_subscription(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-lifetime-activation",
+                "plan_code": "lifetime",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+            },
+        )
+        assert create_code.status_code == 200
+        create_payload = create_code.json()
+        activation_code = create_payload["activation_code"]
+        assert create_payload["activation_code_record"]["plan_code"] == "lifetime"
+        assert create_payload["activation_code_record"]["valid_until"] is None
+
+        activate = client.post(
+            "/v1/installations/activate",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-lifetime-seat-1",
+                "workspace_id": "workspace-lifetime",
+                "activation_code": activation_code,
+            },
+        )
+        assert activate.status_code == 200
+        payload = activate.json()
+        assert payload["ok"] is True
+        assert payload["entitlement"]["status"] == "active"
+        assert payload["entitlement"]["plan_code"] == "lifetime"
+        assert payload["entitlement"]["valid_until"] is None
+        assert payload["installation"]["subscription_status"] == "lifetime"
+        assert payload["installation"]["subscription_valid_until"] is None
+
+
+def test_activation_code_trial_plan_sets_trialing_subscription(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-trial-activation",
+                "plan_code": "trial",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+            },
+        )
+        assert create_code.status_code == 200
+        activation_code = create_code.json()["activation_code"]
+
+        activate = client.post(
+            "/v1/installations/activate",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-trial-seat-1",
+                "workspace_id": "workspace-trial",
+                "activation_code": activation_code,
+            },
+        )
+        assert activate.status_code == 200
+        payload = activate.json()
+        assert payload["installation"]["subscription_status"] == "trialing"
+        assert payload["entitlement"]["plan_code"] == "trial"
+        assert payload["entitlement"]["status"] == "active"
+        assert payload["entitlement"]["valid_until"] is not None
+
+
+def test_admin_subscription_update_none_clears_existing_trial_plan_state(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-none-clears-trial",
+                "workspace_id": "workspace-none-clears-trial",
+                "customer_ref": "customer-none-clears-trial",
+                "metadata": {"source": "test"},
+            },
+        )
+        assert register.status_code == 200
+
+        set_trialing = client.put(
+            "/v1/admin/installations/cp-none-clears-trial/subscription",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "subscription_status": "trialing",
+                "plan_code": "trial",
+                "customer_ref": "customer-none-clears-trial",
+                "valid_until": "2026-12-31T00:00:00Z",
+            },
+        )
+        assert set_trialing.status_code == 200
+        assert set_trialing.json()["subscription_status"] == "trialing"
+
+        set_none = client.put(
+            "/v1/admin/installations/cp-none-clears-trial/subscription",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "subscription_status": "none",
+                "customer_ref": "customer-none-clears-trial",
+            },
+        )
+        assert set_none.status_code == 200
+        payload = set_none.json()
+        assert payload["subscription_status"] == "none"
+        assert payload["entitlement"]["plan_code"] is None
+        assert payload["entitlement"]["valid_until"] is None
+        assert payload["entitlement"]["status"] == "expired"
+        assert payload["entitlement"]["metadata"]["entitlement_reason"] == "subscription_none"
+
+        get_installation = client.get(
+            "/v1/admin/installations/cp-none-clears-trial",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert get_installation.status_code == 200
+        installation_payload = get_installation.json()["installation"]
+        assert installation_payload["subscription_status"] == "none"
+        assert installation_payload["plan_code"] is None
+        assert installation_payload["subscription_valid_until"] is None
 
 
 def test_install_exchange_issues_client_token_for_activation_code(tmp_path: Path):
@@ -328,6 +735,21 @@ def test_install_exchange_rejects_invalid_and_inactive_codes(tmp_path: Path):
         )
         assert inactive.status_code == 400
         assert inactive.json()["detail"] == "Activation code is inactive"
+
+
+def test_activation_code_trial_plan_requires_valid_until(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-trial-invalid",
+                "plan_code": "trial",
+                "max_installations": 3,
+            },
+        )
+        assert create_code.status_code == 400
+        assert "valid_until is required for trial plan_code" in create_code.json()["detail"]
 
 
 def test_client_token_allows_installation_endpoints_and_blocks_admin_endpoints(tmp_path: Path):
@@ -563,13 +985,13 @@ def test_public_contact_request_rejects_unsupported_request_type(tmp_path: Path)
         assert "Unsupported request_type" in invalid.json()["detail"]
 
 
-def test_public_beta_grants_active_entitlement_without_subscription(tmp_path: Path):
-    with _build_client(tmp_path, public_beta_free_until="2099-12-31T23:59:59Z") as client:
+def test_beta_plan_cutoff_does_not_grant_entitlement_for_none_subscription(tmp_path: Path):
+    with _build_client(tmp_path, beta_plan_valid_until="2099-12-31T23:59:59Z") as client:
         register = client.post(
             "/v1/installations/register",
             headers={"Authorization": "Bearer control-plane-token"},
             json={
-                "installation_id": "cp-public-beta-installation",
+                "installation_id": "cp-beta-cutoff-only-installation",
                 "workspace_id": "workspace-beta",
                 "metadata": {"source": "tests"},
             },
@@ -577,42 +999,51 @@ def test_public_beta_grants_active_entitlement_without_subscription(tmp_path: Pa
         assert register.status_code == 200
         payload = register.json()
         entitlement = payload["entitlement"]
-        assert entitlement["status"] == "active"
-        assert entitlement["plan_code"] == "beta_free"
-        assert entitlement["valid_until"] == "2099-12-31T23:59:59+00:00"
-        assert entitlement["metadata"]["public_beta"] is True
-        assert entitlement["metadata"]["public_beta_free_until"] == "2099-12-31T23:59:59+00:00"
+        assert entitlement["status"] == "expired"
+        assert entitlement["plan_code"] is None
+        assert entitlement["valid_until"] is None
+        assert entitlement["metadata"]["entitlement_reason"] == "subscription_none"
 
         health = client.get("/api/health")
         assert health.status_code == 200
         health_payload = health.json()
+        assert health_payload["beta_plan_active"] is True
+        assert health_payload["beta_plan_valid_until"] == "2099-12-31T23:59:59+00:00"
         assert health_payload["public_beta_active"] is True
         assert health_payload["public_beta_free_until"] == "2099-12-31T23:59:59+00:00"
 
 
-def test_public_beta_expired_falls_back_to_trial(tmp_path: Path):
-    with _build_client(tmp_path, public_beta_free_until="2000-01-01T00:00:00Z") as client:
+def test_beta_subscription_status_grants_active_entitlement(tmp_path: Path):
+    with _build_client(tmp_path, beta_plan_valid_until="2099-12-31T23:59:59Z") as client:
         register = client.post(
             "/v1/installations/register",
             headers={"Authorization": "Bearer control-plane-token"},
             json={
-                "installation_id": "cp-post-beta-installation",
-                "workspace_id": "workspace-post-beta",
+                "installation_id": "cp-beta-subscription-installation",
+                "workspace_id": "workspace-beta",
                 "metadata": {"source": "tests"},
             },
         )
         assert register.status_code == 200
-        payload = register.json()
-        entitlement = payload["entitlement"]
-        assert entitlement["status"] == "trial"
-        assert entitlement["plan_code"] == "trial"
-        assert entitlement["valid_until"].startswith(payload["installation"]["trial_ends_at"])
 
-        health = client.get("/api/health")
-        assert health.status_code == 200
-        health_payload = health.json()
-        assert health_payload["public_beta_active"] is False
-        assert health_payload["public_beta_free_until"] == "2000-01-01T00:00:00+00:00"
+        update = client.put(
+            "/v1/admin/installations/cp-beta-subscription-installation/subscription",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "subscription_status": "beta",
+                "plan_code": "beta",
+                "customer_ref": "customer-beta",
+                "valid_until": None,
+            },
+        )
+        assert update.status_code == 200
+        update_payload = update.json()
+        assert update_payload["ok"] is True
+        assert update_payload["subscription_status"] == "beta"
+        assert update_payload["entitlement"]["status"] == "active"
+        assert update_payload["entitlement"]["plan_code"] == "beta"
+        assert update_payload["entitlement"]["valid_until"] == "2099-12-31T23:59:59+00:00"
+        assert update_payload["entitlement"]["metadata"]["entitlement_reason"] == "subscription_beta"
 
 
 def test_support_bug_report_create_deduplicate_and_admin_triage(tmp_path: Path):
@@ -890,6 +1321,35 @@ def test_admin_provision_onboarding_generates_and_sends_package(monkeypatch, tmp
         assert "LICENSE_SERVER_TOKEN=" not in captured["text_body"]
         assert payload["activation_code"] in captured["text_body"]
         assert payload["customer_ref"] in captured["html_body"]
+
+
+def test_admin_provision_onboarding_lifetime_plan_ignores_valid_until(monkeypatch, tmp_path: Path):
+    with _build_client(tmp_path, customer_ref_secret="test-customer-ref-secret") as client:
+        import license_control_plane.main as lcp_main
+
+        def _fake_send(*, to_email: str, subject: str, text_body: str, html_body: str | None = None) -> str:
+            return "re_onboarding_lifetime_message_id"
+
+        monkeypatch.setattr(lcp_main, "_send_email_via_resend", _fake_send)
+
+        response = client.post(
+            "/v1/admin/onboarding/provision",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "to_email": "lifetime@example.com",
+                "plan_code": "lifetime",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+                "image_tag": "main",
+                "install_script_url": "https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh",
+                "support_email": "support@constructos.dev",
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["activation_code_record"]["plan_code"] == "lifetime"
+        assert payload["activation_code_record"]["valid_until"] is None
 
 
 def test_admin_events_stream_requires_admin_token(tmp_path: Path):

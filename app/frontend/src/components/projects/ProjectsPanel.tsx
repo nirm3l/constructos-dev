@@ -83,6 +83,9 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
         userId={state.userId}
         toggleProjectEditor={state.toggleProjectEditor}
         onCopyShareLink={(projectId) => state.copyShareLink({ tab: 'projects', projectId })}
+        onRemoveProject={(projectId) => {
+          state.deleteProjectMutation.mutate(projectId)
+        }}
         renderInlineEditor={(project) => (
           <ProjectsInlineEditor
             project={project}
@@ -147,6 +150,8 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
             contextLimitTokensDefault={state.contextLimitTokensDefault}
             codexChatProjectId={state.codexChatProjectId}
             codexChatTurns={state.codexChatTurns}
+            codexChatUsage={state.codexChatUsage}
+            codexChatResumeState={state.codexChatResumeState}
             workspaceId={state.workspaceId}
             userId={state.userId}
             workspaceUsers={state.workspaceUsers}

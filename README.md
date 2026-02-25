@@ -80,6 +80,27 @@ Deploy local control-plane separately:
 ```bash
 ./scripts/deploy-control-plane.sh up
 ```
+This also starts `license-control-plane-backup`, which creates SQLite backups every hour.
+Default backup retention is 7 days in Docker volume `license-control-plane-backups`.
+
+Optional backup tuning:
+```bash
+export LCP_BACKUP_INTERVAL_SECONDS='3600'
+export LCP_BACKUP_RETENTION_HOURS='168'
+./scripts/deploy-control-plane.sh restart
+```
+
+Restore latest backup:
+```bash
+docker compose -p constructos-cp -f docker-compose.license-control-plane.yml down
+docker run --rm \
+  -v task-management_license-control-plane-backups:/backups \
+  -v task-management_license-control-plane-data:/data \
+  alpine:3.20 \
+  sh -lc 'cp "$(ls -1t /backups/license-control-plane-*.sqlite3 | head -n 1)" /data/license-control-plane.db'
+./scripts/deploy-control-plane.sh up
+```
+
 Optional control-plane email test setup (Resend):
 ```bash
 export LCP_EMAIL_RESEND_API_KEY='re_xxx'
@@ -140,6 +161,10 @@ curl -sS http://localhost:8080/api/health
 - KurrentDB UI (event browser): `http://localhost:2113/web/index.html`
 - KurrentDB all-events feed (JSON): `http://localhost:2113/streams/%24all/head/backward/50?embed=body`
 
+Optional for Codex git push from `task-app` container:
+- set `GITHUB_PAT` in `.env` to a GitHub token with repository write access.
+- runtime maps `GITHUB_PAT` to `GITHUB_TOKEN` when `GITHUB_TOKEN` is not already set.
+
 ## Optional: Jira MCP (Separate Compose)
 1. Create local env file:
 ```bash
@@ -149,7 +174,7 @@ cp .env.jira-mcp.example .env.jira-mcp
 `JIRA_API_TOKEN` is added in this file.
 3. Start Jira MCP:
 ```bash
-docker compose -f docker-compose.jira-mcp.yml up -d
+docker compose -p constructos-jira-mcp -f docker-compose.jira-mcp.yml up -d
 ```
 4. Register server in Codex:
 ```bash
@@ -166,8 +191,20 @@ codex mcp list
 ./scripts/recreate_from_zero.sh
 
 # Backend tests
-docker compose run --rm --build task-app pytest
+docker compose -p constructos-app -f docker-compose.yml run --rm --build task-app pytest
 ```
+
+## COS Wrapper CLI
+`cos` moved to the public `constructos` repository and is maintained there.
+
+Install directly from GitHub:
+```bash
+pipx install --force "git+https://github.com/nirm3l/constructos.git@main#subdirectory=tools/cos"
+```
+
+Repository and docs:
+- `https://github.com/nirm3l/constructos`
+- `https://github.com/nirm3l/constructos/tree/main/tools/cos`
 
 ## Technology Stack
 - Backend: FastAPI, SQLAlchemy, Pydantic.

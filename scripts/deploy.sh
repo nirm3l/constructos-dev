@@ -8,12 +8,14 @@ DEPLOYED_AT_UTC="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo "nogit")"
 DEPLOY_TARGET="${DEPLOY_TARGET:-auto}"
 DEPLOY_SOURCE="${DEPLOY_SOURCE:-local}"
+APP_COMPOSE_PROJECT_NAME="${APP_COMPOSE_PROJECT_NAME:-constructos-app}"
 GHCR_OWNER="${GHCR_OWNER:-nirm3l}"
 GHCR_IMAGE_PREFIX="${GHCR_IMAGE_PREFIX:-${GHCR_REPO:-constructos}}"
 IMAGE_TAG="${IMAGE_TAG:-}"
 TASK_APP_IMAGE="${TASK_APP_IMAGE:-}"
 MCP_TOOLS_IMAGE="${MCP_TOOLS_IMAGE:-}"
 CODEX_AUTH_FILE="${CODEX_AUTH_FILE:-/home/m4tr1x/.codex/auth.json}"
+CODEX_CONFIG_FILE="${CODEX_CONFIG_FILE:-/home/m4tr1x/.codex/config.toml}"
 
 resolve_compose_env_value() {
   local var_name="$1"
@@ -131,19 +133,33 @@ if [[ -f "$CODEX_AUTH_FILE" ]]; then
   fi
 fi
 
+if [[ ! -f "$CODEX_CONFIG_FILE" ]]; then
+  echo "Missing Codex config file: $CODEX_CONFIG_FILE"
+  echo "Create it first (or set CODEX_CONFIG_FILE) before deploy."
+  exit 1
+fi
+if ! chmod a+r "$CODEX_CONFIG_FILE" 2>/dev/null; then
+  echo "Warning: unable to adjust read permissions for $CODEX_CONFIG_FILE"
+  echo "Codex chat in task-app may fail if the mounted config file is not readable by container user."
+fi
+
+export CODEX_AUTH_FILE
+export CODEX_CONFIG_FILE
+
 echo "Deploy profile: internal"
 echo "Deploying version ${APP_VERSION} (${APP_BUILD}) at ${DEPLOYED_AT_UTC}"
 echo "Resolved deploy target: ${TARGET_RESOLVED}"
 echo "Deploy source: ${DEPLOY_SOURCE}"
 echo "task-app image: ${TASK_APP_IMAGE}"
 echo "mcp-tools image: ${MCP_TOOLS_IMAGE}"
+echo "Compose project: ${APP_COMPOSE_PROJECT_NAME}"
 echo "Compose files: ${COMPOSE_ARGS[*]}"
 echo "Deploy services: ${DEPLOY_SERVICES[*]}"
 
 if [[ "$DEPLOY_SOURCE" == "ghcr" ]]; then
   echo "Pulling images..."
-  docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env pull "${DEPLOY_SERVICES[@]}"
-  docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d --no-build "${DEPLOY_SERVICES[@]}"
+  docker compose -p "${APP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" --env-file .deploy.env pull "${DEPLOY_SERVICES[@]}"
+  docker compose -p "${APP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d --no-build "${DEPLOY_SERVICES[@]}"
 else
-  docker compose "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d --build "${DEPLOY_SERVICES[@]}"
+  docker compose -p "${APP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d --build "${DEPLOY_SERVICES[@]}"
 fi

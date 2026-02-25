@@ -10,7 +10,7 @@ from io import BytesIO
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 
 def build_client(tmp_path: Path):
@@ -40,6 +40,16 @@ def build_anonymous_client(tmp_path: Path):
     main = reload(main)
     main.bootstrap_data()
     return TestClient(main.app)
+
+
+def trigger_system_notifications_for_user(user_id: str) -> int:
+    from shared.core import emit_system_notifications
+    from shared.models import SessionLocal, User
+
+    with SessionLocal() as db:
+        user = db.get(User, user_id)
+        assert user is not None
+        return emit_system_notifications(db, user)
 
 
 def test_health(tmp_path):
@@ -136,6 +146,134 @@ def test_create_note_is_case_insensitive_idempotent_by_title(tmp_path):
     assert len([item for item in listed.json()['items'] if item['title'].strip().lower() == 'fk sarajevo note']) == 1
 
 
+def test_create_note_after_deleted_title_allocates_new_identity(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    first = client.post(
+        '/api/notes?command_id=test-note-recreate-first',
+        json={'title': 'Untitled note', 'workspace_id': ws_id, 'project_id': project_id, 'body': ''},
+    )
+    assert first.status_code == 200
+    first_note = first.json()
+
+    deleted = client.post(f"/api/notes/{first_note['id']}/delete?command_id=test-note-recreate-delete")
+    assert deleted.status_code == 200
+
+    recreated = client.post(
+        '/api/notes?command_id=test-note-recreate-second',
+        json={'title': 'Untitled note', 'workspace_id': ws_id, 'project_id': project_id, 'body': ''},
+    )
+    assert recreated.status_code == 200
+    recreated_note = recreated.json()
+    assert recreated_note['id'] != first_note['id']
+    assert recreated_note['title'] == 'Untitled note'
+
+    recreated_again = client.post(
+        '/api/notes?command_id=test-note-recreate-third',
+        json={'title': 'Untitled note', 'workspace_id': ws_id, 'project_id': project_id, 'body': ''},
+    )
+    assert recreated_again.status_code == 200
+    assert recreated_again.json()['id'] == recreated_note['id']
+
+    listed = client.get(f"/api/notes?workspace_id={ws_id}&project_id={project_id}&q=untitled note")
+    assert listed.status_code == 200
+    active_ids = [item['id'] for item in listed.json()['items'] if item['title'].strip().lower() == 'untitled note']
+    assert active_ids == [recreated_note['id']]
+
+
+def test_create_note_force_new_bypasses_title_idempotency(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    first = client.post(
+        '/api/notes?command_id=test-note-force-new-first',
+        json={
+            'title': 'Untitled note',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'body': '',
+        },
+    )
+    assert first.status_code == 200
+    first_note = first.json()
+
+    second = client.post(
+        '/api/notes?command_id=test-note-force-new-second',
+        json={
+            'title': 'Untitled note',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'body': '',
+            'force_new': True,
+        },
+    )
+    assert second.status_code == 200
+    second_note = second.json()
+    assert second_note['id'] != first_note['id']
+
+    listed = client.get(f"/api/notes?workspace_id={ws_id}&project_id={project_id}&q=untitled note")
+    assert listed.status_code == 200
+    matching = [item for item in listed.json()['items'] if item['title'].strip().lower() == 'untitled note']
+    assert len(matching) == 2
+
+
+def test_task_list_reports_linked_note_count(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created_task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Task with linked notes',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert created_task.status_code == 200
+    task = created_task.json()
+
+    active_note = client.post(
+        '/api/notes',
+        json={
+            'title': 'Active linked note',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'task_id': task['id'],
+            'body': 'hello',
+        },
+    )
+    assert active_note.status_code == 200
+
+    archived_note = client.post(
+        '/api/notes',
+        json={
+            'title': 'Archived linked note',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'task_id': task['id'],
+            'body': 'archive me',
+            'force_new': True,
+        },
+    )
+    assert archived_note.status_code == 200
+    archived_note_id = archived_note.json()['id']
+
+    archived_res = client.post(f'/api/notes/{archived_note_id}/archive')
+    assert archived_res.status_code == 200
+
+    listed = client.get(f'/api/tasks?workspace_id={ws_id}&project_id={project_id}')
+    assert listed.status_code == 200
+    listed_task = next(item for item in listed.json()['items'] if item['id'] == task['id'])
+    assert listed_task['linked_note_count'] == 1
+
+
 def test_project_and_task_refs_roundtrip(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -228,6 +366,27 @@ def test_comment_mention_creates_notification(tmp_path):
     assert any(n.get('project_id') == project_id for n in mentioned)
 
 
+def test_comment_mention_respects_target_notification_preference(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    current_user = bootstrap['current_user']
+
+    disabled = client.patch('/api/me/preferences', json={'notifications_enabled': False})
+    assert disabled.status_code == 200
+    assert disabled.json()['notifications_enabled'] is False
+
+    task = client.post('/api/tasks', json={'title': 'Mention preference', 'workspace_id': ws_id, 'project_id': project_id}).json()
+    comment = client.post(f"/api/tasks/{task['id']}/comments", json={'body': f"Ping @{current_user['username']}"})
+    assert comment.status_code == 200
+
+    notes = client.get('/api/notifications')
+    assert notes.status_code == 200
+    mentioned = [n for n in notes.json() if 'mentioned you on task' in n['message'] and n.get('task_id') == task['id']]
+    assert mentioned == []
+
+
 def test_delete_comment(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -268,6 +427,103 @@ def test_today_view_respects_user_timezone(tmp_path):
     today = client.get(f'/api/tasks?workspace_id={ws_id}&project_id={project_id}&view=today')
     assert today.status_code == 200
     assert any(t['title'] == 'TZ today task' for t in today.json()['items'])
+
+
+def test_inbox_view_shows_actionable_tasks_for_current_user(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    current_user = bootstrap['current_user']
+    current_user_id = current_user['id']
+    user_tz = ZoneInfo(current_user['timezone'])
+    other_user_id = next(
+        item['id']
+        for item in bootstrap['users']
+        if item['id'] != current_user_id
+    )
+
+    now_utc = datetime.now(timezone.utc)
+    local_today_start = now_utc.astimezone(user_tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    due_today_utc = (local_today_start + timedelta(hours=10)).astimezone(timezone.utc)
+    due_tomorrow_utc = (local_today_start + timedelta(days=1, hours=11)).astimezone(timezone.utc)
+    due_later_utc = (local_today_start + timedelta(days=3, hours=9)).astimezone(timezone.utc)
+
+    no_due = client.post(
+        '/api/tasks',
+        json={'title': 'Inbox no due', 'workspace_id': ws_id, 'project_id': project_id},
+    )
+    assert no_due.status_code == 200
+
+    due_today = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Inbox due today',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'assignee_id': current_user_id,
+            'due_date': due_today_utc.isoformat(),
+        },
+    )
+    assert due_today.status_code == 200
+
+    due_tomorrow = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Inbox due tomorrow',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'due_date': due_tomorrow_utc.isoformat(),
+        },
+    )
+    assert due_tomorrow.status_code == 200
+
+    due_later = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Inbox due later',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'due_date': due_later_utc.isoformat(),
+        },
+    )
+    assert due_later.status_code == 200
+
+    assigned_other = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Inbox assigned other',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'assignee_id': other_user_id,
+            'due_date': due_today_utc.isoformat(),
+        },
+    )
+    assert assigned_other.status_code == 200
+
+    done_task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Inbox done task',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'due_date': due_today_utc.isoformat(),
+        },
+    )
+    assert done_task.status_code == 200
+    done_complete = client.post(f"/api/tasks/{done_task.json()['id']}/complete")
+    assert done_complete.status_code == 200
+
+    inbox = client.get(f'/api/tasks?workspace_id={ws_id}&project_id={project_id}&view=inbox')
+    assert inbox.status_code == 200
+    titles = {item['title'] for item in inbox.json()['items']}
+
+    assert 'Inbox no due' in titles
+    assert 'Inbox due today' in titles
+    assert 'Inbox due tomorrow' in titles
+    assert 'Inbox due later' not in titles
+    assert 'Inbox assigned other' not in titles
+    assert 'Inbox done task' not in titles
 
 
 def test_create_project(tmp_path):
@@ -1085,6 +1341,7 @@ def test_admin_cannot_reset_password_for_agent_user(tmp_path):
 def test_due_soon_system_notification(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
     ws_id = bootstrap['workspaces'][0]['id']
     project_id = bootstrap['projects'][0]['id']
     due_utc = datetime.now(timezone.utc) + timedelta(minutes=30)
@@ -1095,6 +1352,9 @@ def test_due_soon_system_notification(tmp_path):
     )
     assert created.status_code == 200
 
+    emitted = trigger_system_notifications_for_user(user_id)
+    assert emitted >= 1
+
     notes = client.get('/api/notifications')
     assert notes.status_code == 200
     due_soon = [n for n in notes.json() if 'due within 1 hour' in n['message']]
@@ -1103,18 +1363,563 @@ def test_due_soon_system_notification(tmp_path):
     assert any(n.get('project_id') == project_id for n in due_soon)
 
 
-def test_daily_digest_is_emitted_once_per_day(tmp_path):
+def test_notifications_get_is_read_only_and_does_not_emit_system_notifications(tmp_path):
     client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    due_utc = datetime.now(timezone.utc) + timedelta(minutes=30)
+
+    created = client.post(
+        '/api/tasks',
+        json={'title': 'Read-only notifications GET', 'workspace_id': ws_id, 'project_id': project_id, 'due_date': due_utc.isoformat()},
+    )
+    assert created.status_code == 200
+
+    from shared.models import Notification, SessionLocal
+
+    with SessionLocal() as db:
+        before = db.execute(select(Notification).where(Notification.user_id == user_id)).scalars().all()
+    assert before == []
+
+    notes = client.get('/api/notifications')
+    assert notes.status_code == 200
+    assert not any('due within 1 hour' in n['message'] for n in notes.json())
+
+    with SessionLocal() as db:
+        after = db.execute(select(Notification).where(Notification.user_id == user_id)).scalars().all()
+    assert len(after) == 0
+
+
+def test_bootstrap_get_is_read_only_and_does_not_emit_system_notifications(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    due_utc = datetime.now(timezone.utc) + timedelta(minutes=30)
+
+    created = client.post(
+        '/api/tasks',
+        json={'title': 'Read-only bootstrap GET', 'workspace_id': ws_id, 'project_id': project_id, 'due_date': due_utc.isoformat()},
+    )
+    assert created.status_code == 200
+
+    from shared.models import Notification, SessionLocal
+
+    with SessionLocal() as db:
+        before = db.execute(select(Notification).where(Notification.user_id == user_id)).scalars().all()
+    assert before == []
+
+    refreshed = client.get('/api/bootstrap')
+    assert refreshed.status_code == 200
+
+    with SessionLocal() as db:
+        after = db.execute(select(Notification).where(Notification.user_id == user_id)).scalars().all()
+    assert len(after) == 0
+
+
+def test_daily_digest_is_suppressed_when_all_counters_are_zero(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+
+    emitted = trigger_system_notifications_for_user(user_id)
+    assert emitted == 0
 
     first = client.get('/api/notifications')
     assert first.status_code == 200
     first_digests = [n for n in first.json() if n['message'].startswith('Daily digest for ')]
-    assert len(first_digests) == 1
+    assert first_digests == []
 
     second = client.get('/api/notifications')
     assert second.status_code == 200
     second_digests = [n for n in second.json() if n['message'].startswith('Daily digest for ')]
-    assert len(second_digests) == 1
+    assert second_digests == []
+
+
+def test_daily_digest_is_actionable_and_lists_top_priorities(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    overdue_utc = datetime.now(timezone.utc) - timedelta(days=1, hours=2)
+    due_today_utc = datetime.now(timezone.utc) + timedelta(hours=3)
+
+    first = client.post(
+        '/api/tasks',
+        json={'title': 'Overdue task', 'workspace_id': ws_id, 'project_id': project_id, 'due_date': overdue_utc.isoformat()},
+    )
+    second = client.post(
+        '/api/tasks',
+        json={'title': 'Due today task', 'workspace_id': ws_id, 'project_id': project_id, 'due_date': due_today_utc.isoformat()},
+    )
+    third = client.post(
+        '/api/tasks',
+        json={'title': 'High priority task', 'workspace_id': ws_id, 'project_id': project_id, 'priority': 'High'},
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert third.status_code == 200
+
+    emitted = trigger_system_notifications_for_user(user_id)
+    assert emitted >= 1
+
+    notes = client.get('/api/notifications')
+    assert notes.status_code == 200
+    digests = [n for n in notes.json() if n['message'].startswith('Daily digest for ')]
+    assert len(digests) == 1
+    message = digests[0]['message']
+    assert '1 due today' in message
+    assert '1 overdue' in message
+    assert '1 high priority' in message
+    assert '"Overdue task" (overdue)' in message
+    assert '"Due today task" (due today)' in message
+    assert '"High priority task" (high priority)' in message
+
+    overdue_pos = message.find('"Overdue task" (overdue)')
+    due_today_pos = message.find('"Due today task" (due today)')
+    high_pos = message.find('"High priority task" (high priority)')
+    assert overdue_pos >= 0
+    assert due_today_pos >= 0
+    assert high_pos >= 0
+    assert overdue_pos < due_today_pos < high_pos
+
+
+def test_system_notifications_respect_notifications_enabled_preference(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    disabled = client.patch('/api/me/preferences', json={'notifications_enabled': False})
+    assert disabled.status_code == 200
+    assert disabled.json()['notifications_enabled'] is False
+
+    due_utc = datetime.now(timezone.utc) + timedelta(minutes=30)
+    created = client.post(
+        '/api/tasks',
+        json={'title': 'Preference-gated due soon', 'workspace_id': ws_id, 'project_id': project_id, 'due_date': due_utc.isoformat()},
+    )
+    assert created.status_code == 200
+
+    emitted = trigger_system_notifications_for_user(user_id)
+    assert emitted == 0
+
+    notes = client.get('/api/notifications')
+    assert notes.status_code == 200
+    assert not any('due within 1 hour' in n['message'] for n in notes.json())
+    assert not any(n['message'].startswith('Daily digest for ') for n in notes.json())
+
+
+def test_notifications_table_has_user_created_at_index(tmp_path):
+    build_client(tmp_path)
+
+    from shared.models import SessionLocal
+
+    with SessionLocal() as db:
+        rows = db.execute(text("PRAGMA index_list('notifications')")).all()
+    names = {str(row[1]) for row in rows}
+    assert 'ix_notifications_user_created_at' in names
+
+
+def test_notifications_table_has_typed_columns_and_dedupe_index(tmp_path):
+    build_client(tmp_path)
+
+    from shared.models import SessionLocal
+
+    with SessionLocal() as db:
+        column_rows = db.execute(text("PRAGMA table_info('notifications')")).all()
+        index_rows = db.execute(text("PRAGMA index_list('notifications')")).all()
+    columns = {str(row[1]) for row in column_rows}
+    index_names = {str(row[1]) for row in index_rows}
+    assert "notification_type" in columns
+    assert "severity" in columns
+    assert "dedupe_key" in columns
+    assert "payload_json" in columns
+    assert "source_event" in columns
+    assert "ix_notifications_user_dedupe_created_at" in index_names
+
+
+def test_notifications_api_returns_typed_fields(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from shared.models import Notification, SessionLocal
+
+    with SessionLocal() as db:
+        db.add(
+            Notification(
+                user_id=user_id,
+                workspace_id=ws_id,
+                project_id=project_id,
+                task_id="task-api-typed-fields",
+                message="Typed payload test",
+                notification_type="TaskAssignedToMe",
+                severity="warning",
+                dedupe_key="typed-test-001",
+                payload_json='{"task_id":"task-api-typed-fields","status":"To do"}',
+                source_event="TaskUpdated",
+            )
+        )
+        db.commit()
+
+    listed = client.get('/api/notifications')
+    assert listed.status_code == 200
+    typed = next(item for item in listed.json() if item.get("dedupe_key") == "typed-test-001")
+    assert typed["notification_type"] == "TaskAssignedToMe"
+    assert typed["severity"] == "warning"
+    assert typed["source_event"] == "TaskUpdated"
+    assert typed["payload"]["task_id"] == "task-api-typed-fields"
+
+
+def test_task_assigned_to_me_notification_is_typed(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    actor_id = bootstrap['current_user']['id']
+
+    created_user = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'typed-assignee', 'full_name': 'Typed Assignee'},
+    )
+    assert created_user.status_code == 200
+    assignee_id = created_user.json()['user']['id']
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Typed assignee task',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'assignee_id': assignee_id,
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()['id']
+
+    from shared.models import Notification, SessionLocal
+    from shared.typed_notifications import NOTIFICATION_TYPE_TASK_ASSIGNED_TO_ME
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Notification).where(
+                Notification.user_id == assignee_id,
+                Notification.task_id == task_id,
+                Notification.notification_type == NOTIFICATION_TYPE_TASK_ASSIGNED_TO_ME,
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.severity == "info"
+    assert row.source_event == "TaskCreated"
+    assert row.dedupe_key == f"task-assigned:{task_id}:{assignee_id}:1"
+    assert actor_id != assignee_id
+
+
+def test_task_assigned_to_me_skips_self_assignment(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    actor_id = bootstrap['current_user']['id']
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Self assignment should not notify',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'assignee_id': actor_id,
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()['id']
+
+    from shared.models import Notification, SessionLocal
+    from shared.typed_notifications import NOTIFICATION_TYPE_TASK_ASSIGNED_TO_ME
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Notification).where(
+                Notification.user_id == actor_id,
+                Notification.task_id == task_id,
+                Notification.notification_type == NOTIFICATION_TYPE_TASK_ASSIGNED_TO_ME,
+            )
+        ).scalars().all()
+    assert rows == []
+
+
+def test_watched_task_status_changed_notification_is_typed(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created_user = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'typed-watcher', 'full_name': 'Typed Watcher'},
+    )
+    assert created_user.status_code == 200
+    watcher_id = created_user.json()['user']['id']
+    assigned = client.post(f'/api/projects/{project_id}/members', json={'user_id': watcher_id, 'role': 'Contributor'})
+    assert assigned.status_code == 200
+
+    task = client.post('/api/tasks', json={'title': 'Status watch target', 'workspace_id': ws_id, 'project_id': project_id})
+    assert task.status_code == 200
+    task_id = task.json()['id']
+
+    from shared.core import append_event
+    from shared.models import Notification, SessionLocal
+    from shared.typed_notifications import NOTIFICATION_TYPE_WATCHED_TASK_STATUS_CHANGED
+
+    with SessionLocal() as db:
+        append_event(
+            db,
+            aggregate_type='Task',
+            aggregate_id=task_id,
+            event_type='TaskWatchToggled',
+            payload={'task_id': task_id, 'user_id': watcher_id, 'watched': True},
+            metadata={'actor_id': watcher_id, 'workspace_id': ws_id, 'project_id': project_id, 'task_id': task_id},
+        )
+        db.commit()
+
+    patched = client.patch(f'/api/tasks/{task_id}', json={'status': 'In progress'})
+    assert patched.status_code == 200
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Notification).where(
+                Notification.user_id == watcher_id,
+                Notification.task_id == task_id,
+                Notification.notification_type == NOTIFICATION_TYPE_WATCHED_TASK_STATUS_CHANGED,
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.severity == "info"
+    assert row.dedupe_key == f"watch-status:{task_id}:{watcher_id}:In progress:3"
+    assert row.source_event == "TaskUpdated"
+
+
+def test_task_automation_failed_notification_is_typed_and_dedupes(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    assignee_user = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'typed-auto-assignee', 'full_name': 'Typed Auto Assignee'},
+    )
+    watcher_user = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'typed-auto-watcher', 'full_name': 'Typed Auto Watcher'},
+    )
+    assert assignee_user.status_code == 200
+    assert watcher_user.status_code == 200
+    assignee_id = assignee_user.json()['user']['id']
+    watcher_id = watcher_user.json()['user']['id']
+    assert client.post(f'/api/projects/{project_id}/members', json={'user_id': assignee_id, 'role': 'Contributor'}).status_code == 200
+    assert client.post(f'/api/projects/{project_id}/members', json={'user_id': watcher_id, 'role': 'Contributor'}).status_code == 200
+
+    task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Automation failure target',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'assignee_id': assignee_id,
+        },
+    )
+    assert task.status_code == 200
+    task_id = task.json()['id']
+
+    from shared.core import append_event
+    from shared.models import Notification, SessionLocal
+    from shared.settings import AGENT_SYSTEM_USER_ID
+    from shared.typed_notifications import NOTIFICATION_TYPE_TASK_AUTOMATION_FAILED
+
+    with SessionLocal() as db:
+        append_event(
+            db,
+            aggregate_type='Task',
+            aggregate_id=task_id,
+            event_type='TaskWatchToggled',
+            payload={'task_id': task_id, 'user_id': watcher_id, 'watched': True},
+            metadata={'actor_id': watcher_id, 'workspace_id': ws_id, 'project_id': project_id, 'task_id': task_id},
+        )
+        append_event(
+            db,
+            aggregate_type='Task',
+            aggregate_id=task_id,
+            event_type='TaskAutomationFailed',
+            payload={'failed_at': datetime.now(timezone.utc).isoformat(), 'error': 'Runner exploded', 'summary': 'Failed'},
+            metadata={'actor_id': AGENT_SYSTEM_USER_ID, 'workspace_id': ws_id, 'project_id': project_id, 'task_id': task_id},
+        )
+        append_event(
+            db,
+            aggregate_type='Task',
+            aggregate_id=task_id,
+            event_type='TaskAutomationFailed',
+            payload={'failed_at': datetime.now(timezone.utc).isoformat(), 'error': 'Runner exploded', 'summary': 'Failed'},
+            metadata={'actor_id': AGENT_SYSTEM_USER_ID, 'workspace_id': ws_id, 'project_id': project_id, 'task_id': task_id},
+        )
+        db.commit()
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Notification).where(
+                Notification.task_id == task_id,
+                Notification.notification_type == NOTIFICATION_TYPE_TASK_AUTOMATION_FAILED,
+            )
+        ).scalars().all()
+    user_ids = {row.user_id for row in rows}
+    assert user_ids == {assignee_id, watcher_id}
+    assert len(rows) == 2
+    assert all(row.severity == "warning" for row in rows)
+
+
+def test_task_schedule_failed_notification_is_typed_and_dedupes(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    assignee_user = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'typed-sched-assignee', 'full_name': 'Typed Schedule Assignee'},
+    )
+    assert assignee_user.status_code == 200
+    assignee_id = assignee_user.json()['user']['id']
+    assert client.post(f'/api/projects/{project_id}/members', json={'user_id': assignee_id, 'role': 'Contributor'}).status_code == 200
+
+    scheduled_at = datetime.now(timezone.utc) + timedelta(hours=2)
+    task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Schedule failure target',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'assignee_id': assignee_id,
+            'task_type': 'scheduled_instruction',
+            'scheduled_instruction': 'Run diagnostics',
+            'scheduled_at_utc': scheduled_at.isoformat(),
+        },
+    )
+    assert task.status_code == 200
+    task_id = task.json()['id']
+
+    from shared.core import append_event
+    from shared.models import Notification, SessionLocal
+    from shared.settings import AGENT_SYSTEM_USER_ID
+    from shared.typed_notifications import NOTIFICATION_TYPE_TASK_SCHEDULE_FAILED
+
+    with SessionLocal() as db:
+        append_event(
+            db,
+            aggregate_type='Task',
+            aggregate_id=task_id,
+            event_type='TaskScheduleFailed',
+            payload={'failed_at': datetime.now(timezone.utc).isoformat(), 'error': 'Schedule timeout'},
+            metadata={'actor_id': AGENT_SYSTEM_USER_ID, 'workspace_id': ws_id, 'project_id': project_id, 'task_id': task_id},
+        )
+        append_event(
+            db,
+            aggregate_type='Task',
+            aggregate_id=task_id,
+            event_type='TaskScheduleFailed',
+            payload={'failed_at': datetime.now(timezone.utc).isoformat(), 'error': 'Schedule timeout'},
+            metadata={'actor_id': AGENT_SYSTEM_USER_ID, 'workspace_id': ws_id, 'project_id': project_id, 'task_id': task_id},
+        )
+        db.commit()
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Notification).where(
+                Notification.user_id == assignee_id,
+                Notification.task_id == task_id,
+                Notification.notification_type == NOTIFICATION_TYPE_TASK_SCHEDULE_FAILED,
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.severity == "warning"
+    assert row.payload_json and "scheduled_at_utc" in row.payload_json
+
+
+def test_project_membership_changed_notification_is_typed(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created_user = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'typed-member-change', 'full_name': 'Typed Member Change'},
+    )
+    assert created_user.status_code == 200
+    member_id = created_user.json()['user']['id']
+
+    added = client.post(f'/api/projects/{project_id}/members', json={'user_id': member_id, 'role': 'Contributor'})
+    assert added.status_code == 200
+    removed = client.post(f'/api/projects/{project_id}/members/{member_id}/remove')
+    assert removed.status_code == 200
+
+    from shared.models import Notification, SessionLocal
+    from shared.typed_notifications import NOTIFICATION_TYPE_PROJECT_MEMBERSHIP_CHANGED
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Notification).where(
+                Notification.user_id == member_id,
+                Notification.project_id == project_id,
+                Notification.notification_type == NOTIFICATION_TYPE_PROJECT_MEMBERSHIP_CHANGED,
+            ).order_by(Notification.created_at.asc(), Notification.id.asc())
+        ).scalars().all()
+    assert len(rows) == 2
+    assert rows[0].source_event == "ProjectMemberUpserted"
+    assert rows[1].source_event == "ProjectMemberRemoved"
+
+
+def test_license_grace_ending_soon_notification_is_typed_and_deduped(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+
+    from shared.models import LicenseInstallation, Notification, SessionLocal
+    from shared.typed_notifications import NOTIFICATION_TYPE_LICENSE_GRACE_ENDING_SOON
+
+    with SessionLocal() as db:
+        installation = db.execute(select(LicenseInstallation).order_by(LicenseInstallation.id.asc()).limit(1)).scalar_one()
+        installation.trial_ends_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        installation.status = "grace"
+        db.commit()
+
+    emitted_first = trigger_system_notifications_for_user(user_id)
+    emitted_second = trigger_system_notifications_for_user(user_id)
+    assert emitted_first >= 1
+    assert emitted_second == 0
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Notification).where(
+                Notification.user_id == user_id,
+                Notification.notification_type == NOTIFICATION_TYPE_LICENSE_GRACE_ENDING_SOON,
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.dedupe_key and row.dedupe_key.startswith("license-grace:")
+    assert row.severity in {"warning", "critical"}
 
 
 def test_notifications_endpoint_tolerates_duplicate_messages(tmp_path):
@@ -1136,6 +1941,7 @@ def test_notifications_endpoint_tolerates_duplicate_messages(tmp_path):
 def test_mark_all_notifications_read(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
     ws_id = bootstrap['workspaces'][0]['id']
     project_id = bootstrap['projects'][0]['id']
 
@@ -1150,6 +1956,9 @@ def test_mark_all_notifications_read(tmp_path):
         },
     )
     assert created.status_code == 200
+
+    emitted = trigger_system_notifications_for_user(user_id)
+    assert emitted >= 1
 
     first = client.get('/api/notifications')
     assert first.status_code == 200
@@ -1661,7 +2470,6 @@ def test_notifications_stream_emits_refresh_when_user_state_changes_without_sign
     import features.notifications.api as notifications_api
     from shared.models import SessionLocal, User
 
-    monkeypatch.setattr(notifications_api, 'emit_system_notifications', lambda db, user: 0)
     class DummyRequest:
         def __init__(self):
             self.calls = 0
@@ -1726,6 +2534,268 @@ def test_notifications_stream_emits_refresh_when_user_state_changes_without_sign
 
     refreshed_theme = client.get('/api/bootstrap').json()['current_user']['theme']
     assert refreshed_theme != before_theme
+
+
+def test_notifications_stream_emits_refresh_on_mark_read_signal(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    due_utc = datetime.now(timezone.utc) + timedelta(minutes=30)
+
+    created = client.post(
+        '/api/tasks',
+        json={'title': 'Stream mark-read signal', 'workspace_id': ws_id, 'project_id': project_id, 'due_date': due_utc.isoformat()},
+    )
+    assert created.status_code == 200
+
+    emitted = trigger_system_notifications_for_user(user_id)
+    assert emitted >= 1
+
+    notes = client.get('/api/notifications')
+    assert notes.status_code == 200
+    notification_id = notes.json()[0]['id']
+
+    import features.notifications.api as notifications_api
+    from features.notifications.application import NotificationApplicationService
+    from shared.models import SessionLocal, User
+
+    original_wait_for_signal = notifications_api._wait_for_signal
+
+    async def short_wait_for_signal(subscription, timeout_seconds):  # noqa: ARG001
+        await original_wait_for_signal(subscription, timeout_seconds=1.0)
+
+    monkeypatch.setattr(notifications_api, '_wait_for_signal', short_wait_for_signal)
+
+    class DummyRequest:
+        def __init__(self):
+            self.calls = 0
+
+        async def is_disconnected(self):
+            self.calls += 1
+            return self.calls > 8
+
+    async def mark_read_later():
+        await asyncio.sleep(0.05)
+        with SessionLocal() as db:
+            local_user = db.get(User, user_id)
+            assert local_user is not None
+            result = NotificationApplicationService(
+                db,
+                local_user,
+                command_id='test-stream-mark-read-signal',
+            ).mark_read(notification_id)
+            assert result['ok'] is True
+
+    async def consume_stream_once():
+        mark_task = asyncio.create_task(mark_read_later())
+        try:
+            with SessionLocal() as db:
+                local_user = db.get(User, user_id)
+                assert local_user is not None
+                response = await notifications_api.notifications_stream(
+                    request=DummyRequest(),
+                    last_id=notification_id,
+                    workspace_id=None,
+                    last_activity_id=0,
+                    db=db,
+                    user=local_user,
+                )
+                async for raw_chunk in response.body_iterator:
+                    chunk = raw_chunk.decode() if isinstance(raw_chunk, (bytes, bytearray)) else str(raw_chunk)
+                    if 'event: task_event' in chunk and 'data: {}' in chunk:
+                        return chunk
+            return ''
+        finally:
+            await mark_task
+
+    first_chunk = asyncio.run(consume_stream_once())
+    assert 'event: task_event' in first_chunk
+    assert 'data: {}' in first_chunk
+
+    refreshed = client.get('/api/notifications')
+    assert refreshed.status_code == 200
+    marked = next(item for item in refreshed.json() if item['id'] == notification_id)
+    assert marked['is_read'] is True
+
+
+def test_notifications_stream_defaults_to_tail_and_does_not_replay_history(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    now = datetime.now(timezone.utc)
+
+    import features.notifications.api as notifications_api
+    from shared.models import Notification, SessionLocal, User
+
+    with SessionLocal() as db:
+        seeded = Notification(
+            user_id=user_id,
+            workspace_id=ws_id,
+            project_id=project_id,
+            message='Existing notification before stream connect',
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(seeded)
+        db.commit()
+        seeded_id = seeded.id
+
+    original_wait_for_signal = notifications_api._wait_for_signal
+
+    async def short_wait_for_signal(subscription, timeout_seconds):  # noqa: ARG001
+        await original_wait_for_signal(subscription, timeout_seconds=0.01)
+
+    monkeypatch.setattr(notifications_api, '_wait_for_signal', short_wait_for_signal)
+
+    class DummyRequest:
+        headers = {}
+
+        def __init__(self):
+            self.calls = 0
+
+        async def is_disconnected(self):
+            self.calls += 1
+            return self.calls > 4
+
+    async def consume_first_chunk():
+        with SessionLocal() as db:
+            local_user = db.get(User, user_id)
+            assert local_user is not None
+            response = await notifications_api.notifications_stream(
+                request=DummyRequest(),
+                last_id=None,
+                workspace_id=None,
+                last_activity_id=0,
+                db=db,
+                user=local_user,
+            )
+            async for raw_chunk in response.body_iterator:
+                chunk = raw_chunk.decode() if isinstance(raw_chunk, (bytes, bytearray)) else str(raw_chunk)
+                if chunk.strip():
+                    return chunk
+        return ''
+
+    first_chunk = asyncio.run(consume_first_chunk())
+
+    assert 'event: notification' not in first_chunk
+    assert seeded_id not in first_chunk
+
+
+def test_notifications_stream_resumes_from_last_event_id_header(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    now = datetime.now(timezone.utc)
+
+    import features.notifications.api as notifications_api
+    from shared.models import Notification, SessionLocal, User
+
+    with SessionLocal() as db:
+        first = Notification(
+            user_id=user_id,
+            workspace_id=ws_id,
+            project_id=project_id,
+            message='Resume cursor first',
+            created_at=now,
+            updated_at=now,
+        )
+        second = Notification(
+            user_id=user_id,
+            workspace_id=ws_id,
+            project_id=project_id,
+            message='Resume cursor second',
+            created_at=now + timedelta(seconds=1),
+            updated_at=now + timedelta(seconds=1),
+        )
+        db.add_all([first, second])
+        db.commit()
+        first_id = first.id
+        second_id = second.id
+
+    class DummyRequest:
+        def __init__(self, last_event_id: str):
+            self.calls = 0
+            self.headers = {'last-event-id': last_event_id}
+
+        async def is_disconnected(self):
+            self.calls += 1
+            return self.calls > 3
+
+    async def consume_first_notification():
+        with SessionLocal() as db:
+            local_user = db.get(User, user_id)
+            assert local_user is not None
+            response = await notifications_api.notifications_stream(
+                request=DummyRequest(first_id),
+                last_id=None,
+                workspace_id=None,
+                last_activity_id=0,
+                db=db,
+                user=local_user,
+            )
+            async for raw_chunk in response.body_iterator:
+                chunk = raw_chunk.decode() if isinstance(raw_chunk, (bytes, bytearray)) else str(raw_chunk)
+                if 'event: notification' in chunk:
+                    return chunk
+        return ''
+
+    first_notification_chunk = asyncio.run(consume_first_notification())
+
+    assert f'id: {second_id}' in first_notification_chunk
+    assert 'Resume cursor second' in first_notification_chunk
+    assert f'id: {first_id}' not in first_notification_chunk
+
+
+def test_notifications_stream_init_is_read_only_and_does_not_emit_system_notifications(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    due_utc = datetime.now(timezone.utc) + timedelta(minutes=30)
+
+    created = client.post(
+        '/api/tasks',
+        json={'title': 'Read-only stream init', 'workspace_id': ws_id, 'project_id': project_id, 'due_date': due_utc.isoformat()},
+    )
+    assert created.status_code == 200
+
+    from shared.models import Notification, SessionLocal, User
+    import features.notifications.api as notifications_api
+
+    class ImmediateDisconnectRequest:
+        async def is_disconnected(self):
+            return True
+
+    with SessionLocal() as db:
+        before_rows = db.execute(select(Notification).where(Notification.user_id == user_id)).scalars().all()
+    assert before_rows == []
+
+    async def connect_and_disconnect():
+        with SessionLocal() as db:
+            local_user = db.get(User, user_id)
+            response = await notifications_api.notifications_stream(
+                request=ImmediateDisconnectRequest(),
+                last_id=None,
+                workspace_id=None,
+                last_activity_id=0,
+                db=db,
+                user=local_user,
+            )
+            async for _ in response.body_iterator:
+                break
+
+    asyncio.run(connect_and_disconnect())
+
+    with SessionLocal() as db:
+        after_rows = db.execute(select(Notification).where(Notification.user_id == user_id)).scalars().all()
+    assert len(after_rows) == 0
 
 
 def test_agent_service_theme_without_user_id_targets_primary_user(tmp_path):
@@ -2184,6 +3254,9 @@ def test_agents_chat_endpoint_returns_codex_session_id_when_available(tmp_path, 
     payload = res.json()
     assert payload['ok'] is True
     assert payload['codex_session_id'] == 'thread-123'
+    assert payload['resume_attempted'] is False
+    assert payload['resume_succeeded'] is False
+    assert payload['resume_fallback_used'] is False
 
 
 def test_agents_chat_endpoint_links_created_resources_to_assistant_message(tmp_path, monkeypatch):
@@ -2313,6 +3386,88 @@ def test_agents_chat_endpoint_normalizes_selected_mcp_servers(tmp_path, monkeypa
     )
     assert res.status_code == 200
     assert captured['mcp_servers'] == ['task-management-tools', 'jira', 'github']
+
+
+def test_agents_chat_endpoint_skips_disabled_mcp_servers_from_defaults(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents import mcp_registry
+    from features.agents.executor import AutomationOutcome
+
+    captured: dict[str, object] = {}
+
+    def _fake_execute_task_automation(**kwargs):
+        captured.update(kwargs)
+        return AutomationOutcome(action='comment', summary='ok', comment=None, usage=None)
+
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+    monkeypatch.setattr(
+        mcp_registry,
+        '_get_rows',
+        lambda force_refresh=False: [
+            {
+                'name': 'task-management-tools',
+                'display_name': 'Task Management Tools',
+                'enabled': True,
+                'disabled_reason': None,
+                'auth_status': None,
+                'config': {'url': 'http://mcp-tools:8090/mcp'},
+            },
+            {
+                'name': 'jira',
+                'display_name': 'Jira',
+                'enabled': False,
+                'disabled_reason': 'disabled in codex config',
+                'auth_status': None,
+                'config': {'url': 'http://jira-mcp:9000/mcp'},
+            },
+            {
+                'name': 'github',
+                'display_name': 'GitHub',
+                'enabled': True,
+                'disabled_reason': None,
+                'auth_status': None,
+                'config': {'url': 'https://api.githubcopilot.com/mcp/'},
+            },
+        ],
+    )
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Use default MCP servers',
+        },
+    )
+    assert res.status_code == 200
+    assert captured['mcp_servers'] == ['task-management-tools', 'github']
+
+
+def test_mcp_registry_honors_disabled_flag_from_config_when_runtime_list_unavailable(monkeypatch):
+    from features.agents import mcp_registry
+
+    monkeypatch.setattr(
+        mcp_registry,
+        "_load_mcp_servers_from_config",
+        lambda: {
+            "task-management-tools": {"url": "http://localhost:8091/mcp"},
+            "github": {"url": "https://api.githubcopilot.com/mcp/", "enabled": False},
+            "jira": {"url": "http://localhost:9010/mcp", "enabled": False},
+        },
+    )
+    monkeypatch.setattr(mcp_registry, "_run_codex_mcp_list_json", lambda: [])
+
+    rows = mcp_registry._discover_rows_uncached()
+    by_name = {str(row.get("name") or ""): row for row in rows}
+
+    assert by_name["task-management-tools"]["enabled"] is True
+    assert by_name["github"]["enabled"] is False
+    assert by_name["jira"]["enabled"] is False
 
 
 def test_agents_chat_endpoint_rejects_invalid_mcp_server(tmp_path, monkeypatch):
@@ -2471,6 +3626,155 @@ def test_chat_session_context_patch_persists_session_attachments(tmp_path, monke
     target = next((item for item in sessions if item.get('id') == session_id), None)
     assert target is not None
     assert target['session_attachment_refs'][0]['path'] == attachment_ref['path']
+
+
+def test_chat_session_context_patch_updates_mcp_servers_without_clearing_attachments(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    session_id = 'chat-session-context-mcp-patch-test'
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    monkeypatch.setattr(
+        agents_api,
+        'execute_task_automation',
+        lambda **_: AutomationOutcome(action='comment', summary='ok', comment=None, usage=None),
+    )
+
+    created = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Create session for MCP context patch',
+            'session_id': session_id,
+            'history': [],
+        },
+    )
+    assert created.status_code == 200
+
+    uploaded = client.post(
+        '/api/attachments/upload',
+        data={'workspace_id': ws_id, 'project_id': project_id},
+        files={'file': ('session-mcp-pin.txt', BytesIO(b'session pinned mcp file body'), 'text/plain')},
+    )
+    assert uploaded.status_code == 200
+    attachment_ref = uploaded.json()
+
+    patched_attachments = client.patch(
+        f'/api/chat/sessions/{session_id}',
+        json={
+            'workspace_id': ws_id,
+            'session_attachment_refs': [attachment_ref],
+        },
+    )
+    assert patched_attachments.status_code == 200
+    assert patched_attachments.json()['session_attachment_refs'][0]['path'] == attachment_ref['path']
+
+    patched_mcp = client.patch(
+        f'/api/chat/sessions/{session_id}',
+        json={
+            'workspace_id': ws_id,
+            'mcp_servers': ['task-management-tools'],
+        },
+    )
+    assert patched_mcp.status_code == 200
+    patched_payload = patched_mcp.json()
+    assert patched_payload['mcp_servers'] == ['task-management-tools']
+    assert patched_payload['session_attachment_refs'][0]['path'] == attachment_ref['path']
+
+    listed = client.get(
+        '/api/chat/sessions',
+        params={'workspace_id': ws_id},
+    )
+    assert listed.status_code == 200
+    sessions = listed.json()
+    target = next((item for item in sessions if item.get('id') == session_id), None)
+    assert target is not None
+    assert target['mcp_servers'] == ['task-management-tools']
+    assert target['session_attachment_refs'][0]['path'] == attachment_ref['path']
+
+
+def test_chat_sessions_and_state_are_user_scoped(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    session_id = 'chat-user-scope-session'
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    monkeypatch.setattr(
+        agents_api,
+        'execute_task_automation',
+        lambda **_: AutomationOutcome(action='comment', summary='ok', comment=None, usage=None),
+    )
+
+    owner_created = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Owner creates session',
+            'session_id': session_id,
+        },
+    )
+    assert owner_created.status_code == 200
+
+    created_user = client.post(
+        '/api/admin/users',
+        json={
+            'workspace_id': ws_id,
+            'username': 'chat-member-user',
+            'full_name': 'Chat Member User',
+        },
+    )
+    assert created_user.status_code == 200
+    member_id = created_user.json()['user']['id']
+    temp_password = created_user.json()['temporary_password']
+
+    assigned = client.post(
+        f'/api/projects/{project_id}/members',
+        json={'user_id': member_id, 'role': 'Contributor'},
+    )
+    assert assigned.status_code == 200
+
+    logout = client.post('/api/auth/logout')
+    assert logout.status_code == 200
+
+    login_member = client.post(
+        '/api/auth/login',
+        json={'username': 'chat-member-user', 'password': temp_password},
+    )
+    assert login_member.status_code == 200
+    assert login_member.json()['user']['must_change_password'] is True
+
+    changed = client.post(
+        '/api/auth/change-password',
+        json={'current_password': temp_password, 'new_password': 'memberpass1'},
+    )
+    assert changed.status_code == 200
+    assert changed.json()['user']['must_change_password'] is False
+
+    listed = client.get('/api/chat/sessions', params={'workspace_id': ws_id})
+    assert listed.status_code == 200
+    assert all(item.get('id') != session_id for item in listed.json())
+
+    reused = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Attempt to reuse owner session',
+            'session_id': session_id,
+        },
+    )
+    assert reused.status_code == 403
+    assert 'belongs to another user' in reused.text.lower()
 
 
 def test_agents_chat_endpoint_uses_persisted_session_attachment_context(tmp_path, monkeypatch):
@@ -2792,6 +4096,200 @@ def test_agents_chat_endpoint_auto_compacts_history_with_codex(tmp_path, monkeyp
     assert "Compact this conversation history" in calls[0]['instruction']
     assert calls[1]['allow_mutations'] is True
     assert "[Compacted conversation context]" in calls[1]['instruction']
+
+
+def test_agents_chat_endpoint_uses_stored_codex_session_id_and_skips_history_stitching(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    calls = []
+
+    def _fake_execute_task_automation(**kwargs):
+        calls.append(kwargs)
+        return AutomationOutcome(
+            action='comment',
+            summary='ok',
+            comment='done',
+            usage=None,
+            codex_session_id='thread-resume-1',
+        )
+
+    monkeypatch.setattr(agents_api, 'AGENT_CHAT_HISTORY_COMPACT_THRESHOLD', 1)
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+
+    first = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'session_id': 'resume-session-1',
+            'instruction': 'Initial request',
+            'history': [],
+        },
+    )
+    assert first.status_code == 200
+    assert first.json()['codex_session_id'] == 'thread-resume-1'
+
+    second = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'session_id': 'resume-session-1',
+            'instruction': 'Follow-up request',
+            'history': [
+                {'role': 'user', 'content': 'First request'},
+                {'role': 'assistant', 'content': 'First response'},
+                {'role': 'user', 'content': 'Second request'},
+            ],
+        },
+    )
+    assert second.status_code == 200
+    assert second.json()['codex_session_id'] == 'thread-resume-1'
+
+    # Only one execute call per request: auto-compaction should be skipped for resumed sessions.
+    assert len(calls) == 2
+    assert calls[1]['chat_session_id'] == 'resume-session-1'
+    assert calls[1]['codex_session_id'] == 'thread-resume-1'
+    assert 'Conversation history:' not in calls[1]['instruction']
+
+
+def test_agents_chat_endpoint_stitches_history_when_previous_resume_failed(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    calls = []
+
+    def _fake_execute_task_automation(**kwargs):
+        calls.append(kwargs)
+        return AutomationOutcome(
+            action='comment',
+            summary='ok',
+            comment='done',
+            usage=None,
+            codex_session_id='thread-resume-failed',
+            resume_attempted=True,
+            resume_succeeded=False,
+            resume_fallback_used=True,
+        )
+
+    monkeypatch.setattr(agents_api, 'AGENT_CHAT_HISTORY_COMPACT_THRESHOLD', 100)
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+
+    first = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'session_id': 'resume-session-failed-1',
+            'instruction': 'Initial request',
+            'history': [],
+        },
+    )
+    assert first.status_code == 200
+    assert first.json()['codex_session_id'] == 'thread-resume-failed'
+    assert first.json()['resume_attempted'] is True
+    assert first.json()['resume_succeeded'] is False
+    assert first.json()['resume_fallback_used'] is True
+
+    second = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'session_id': 'resume-session-failed-1',
+            'instruction': 'Follow-up request',
+            'history': [
+                {'role': 'user', 'content': 'First request'},
+                {'role': 'assistant', 'content': 'First response'},
+                {'role': 'user', 'content': 'Second request'},
+            ],
+        },
+    )
+    assert second.status_code == 200
+
+    assert len(calls) == 2
+    assert calls[1]['chat_session_id'] == 'resume-session-failed-1'
+    assert calls[1]['codex_session_id'] == 'thread-resume-failed'
+    assert 'Conversation history:' in calls[1]['instruction']
+
+
+def test_agents_chat_endpoint_includes_cross_session_updates_for_resumed_threads(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    calls = []
+
+    def _fake_execute_task_automation(**kwargs):
+        calls.append(kwargs)
+        return AutomationOutcome(
+            action='comment',
+            summary='ok',
+            comment='done',
+            usage=None,
+            codex_session_id='thread-resume-cross-session-1',
+        )
+
+    monkeypatch.setattr(agents_api, 'AGENT_CHAT_HISTORY_COMPACT_THRESHOLD', 999)
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+
+    old_session_first = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'session_id': 'old-session-1',
+            'instruction': 'Initial old-session request',
+            'history': [],
+        },
+    )
+    assert old_session_first.status_code == 200
+
+    new_session_secret = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'session_id': 'new-session-1',
+            'instruction': 'Tajni broj je 44',
+            'history': [],
+        },
+    )
+    assert new_session_secret.status_code == 200
+
+    old_session_followup = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'session_id': 'old-session-1',
+            'instruction': 'Koji je tajni broj?',
+            'history': [],
+        },
+    )
+    assert old_session_followup.status_code == 200
+
+    assert len(calls) == 3
+    assert calls[2]['chat_session_id'] == 'old-session-1'
+    assert calls[2]['codex_session_id'] == 'thread-resume-cross-session-1'
+    assert 'Recent updates from other project chat sessions' in calls[2]['instruction']
+    assert 'Tajni broj je 44' in calls[2]['instruction']
+    assert 'Conversation history:' not in calls[2]['instruction']
 
 
 def test_agents_chat_endpoint_respects_allow_mutations_flag(tmp_path, monkeypatch):
@@ -3208,6 +4706,52 @@ def test_task_comment_projection_is_idempotent(tmp_path):
         rows = db.query(TaskComment).filter(TaskComment.task_id == task['id']).all()
         same_rows = [r for r in rows if r.body == 'same']
         assert len(same_rows) == 1
+
+
+def test_task_comment_projection_replay_does_not_create_duplicate_mentions(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    current_user = bootstrap['current_user']
+
+    task = client.post('/api/tasks', json={'title': 'Mention replay guard', 'workspace_id': ws_id, 'project_id': project_id}).json()
+    comment = client.post(f"/api/tasks/{task['id']}/comments", json={'body': f"Ping @{current_user['username']}"})
+    assert comment.status_code == 200
+
+    before = client.get('/api/notifications')
+    assert before.status_code == 200
+    before_mentions = [
+        n for n in before.json()
+        if 'mentioned you on task' in n['message'] and n.get('task_id') == task['id']
+    ]
+    assert len(before_mentions) == 1
+
+    from shared.core import EventEnvelope
+    from shared.eventing_rebuild import project_event
+    from shared.models import SessionLocal
+
+    ev = EventEnvelope(
+        aggregate_type='Task',
+        aggregate_id=task['id'],
+        version=2,
+        event_type='TaskCommentAdded',
+        payload={'task_id': task['id'], 'user_id': current_user['id'], 'body': f"Ping @{current_user['username']}"},
+        metadata={'actor_id': current_user['id'], 'workspace_id': ws_id, 'project_id': project_id, 'task_id': task['id']},
+    )
+
+    with SessionLocal() as db:
+        project_event(db, ev)
+        project_event(db, ev)
+        db.commit()
+
+    after = client.get('/api/notifications')
+    assert after.status_code == 200
+    after_mentions = [
+        n for n in after.json()
+        if 'mentioned you on task' in n['message'] and n.get('task_id') == task['id']
+    ]
+    assert len(after_mentions) == len(before_mentions)
 
 
 def test_task_watch_projection_is_idempotent_and_dedupes(tmp_path):

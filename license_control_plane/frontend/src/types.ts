@@ -1,4 +1,4 @@
-export type SubscriptionStatus = 'none' | 'active' | 'trialing' | 'grace' | 'past_due' | 'canceled'
+export type SubscriptionStatus = 'none' | 'active' | 'trialing' | 'lifetime' | 'beta'
 
 export type InstallationRecord = {
   installation_id: string
@@ -44,8 +44,13 @@ export type InstallationResponse = {
   entitlement: EntitlementRecord
 }
 
+export type DeleteInstallationResponse = {
+  ok: boolean
+  installation_id: string
+}
+
 export type UpdateSubscriptionRequest = {
-  subscription_status: SubscriptionStatus
+  subscription_status: string
   plan_code: string | null
   customer_ref: string | null
   valid_until: string | null
@@ -59,6 +64,15 @@ export type UpdateSubscriptionResponse = {
   entitlement: EntitlementRecord
 }
 
+export type UpdateCustomerSubscriptionResponse = {
+  ok: boolean
+  customer_ref: string
+  source_customer_ref?: string
+  subscription_status: string
+  updated_installations: number
+  installation_ids: string[]
+}
+
 export type HealthResponse = {
   ok: boolean
   timestamp: string
@@ -66,6 +80,8 @@ export type HealthResponse = {
   default_max_installations?: number
   public_beta_free_until?: string | null
   public_beta_active?: boolean
+  beta_plan_valid_until?: string | null
+  beta_plan_active?: boolean
 }
 
 export type ActivationCodeRecord = {
@@ -118,6 +134,62 @@ export type ClientTokenCreateResponse = {
   client_token_record: ClientTokenRecord
 }
 
+export type AdminSendEmailRequest = {
+  to_email: string
+  subject: string
+  text_body: string
+}
+
+export type AdminSendEmailResponse = {
+  ok: boolean
+  provider: string
+  to_email: string
+  message_id: string | null
+}
+
+export type AdminSendOnboardingEmailRequest = {
+  to_email: string
+  customer_ref: string
+  client_token: string
+  activation_code: string
+  image_tag: string
+  install_script_url: string
+  support_email: string
+}
+
+export type AdminSendOnboardingEmailResponse = {
+  ok: boolean
+  provider: string
+  to_email: string
+  customer_ref: string
+  subject: string
+  message_id: string | null
+}
+
+export type AdminProvisionOnboardingRequest = {
+  to_email: string
+  plan_code: string | null
+  valid_until: string | null
+  max_installations: number
+  image_tag: string
+  install_script_url: string
+  support_email: string
+  metadata: Record<string, unknown>
+}
+
+export type AdminProvisionOnboardingResponse = {
+  ok: boolean
+  provider: string
+  to_email: string
+  customer_ref: string
+  subject: string
+  message_id: string | null
+  client_token: string
+  client_token_record: ClientTokenRecord
+  activation_code: string
+  activation_code_record: ActivationCodeRecord
+}
+
 export type WaitlistEntryRecord = {
   id: number
   email: string
@@ -150,38 +222,6 @@ export type ContactRequestRecord = {
 export type ContactRequestsListResponse = {
   ok: boolean
   items: ContactRequestRecord[]
-  total: number
-  limit: number
-  offset: number
-}
-
-export type BugReportRecord = {
-  id: number
-  report_id: string
-  installation_id: string
-  workspace_id: string | null
-  customer_ref: string | null
-  source: string
-  status: string
-  severity: string
-  title: string
-  description: string
-  steps_to_reproduce: string | null
-  expected_behavior: string | null
-  actual_behavior: string | null
-  reporter_user_id: string | null
-  reporter_username: string | null
-  triage_note: string | null
-  assignee: string | null
-  dedup_key: string
-  metadata: Record<string, unknown>
-  updated_at: string
-  created_at: string
-}
-
-export type BugReportsListResponse = {
-  ok: boolean
-  items: BugReportRecord[]
   total: number
   limit: number
   offset: number

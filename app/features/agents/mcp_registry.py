@@ -19,10 +19,25 @@ logger = logging.getLogger(__name__)
 _CACHE_LOCK = threading.Lock()
 _CACHE_EXPIRES_AT = 0.0
 _CACHE_ROWS: list[dict[str, Any]] = []
-_CACHE_TTL_SECONDS = 5.0
 _FALLBACK_SERVER_NAME = "task-management-tools"
 _LEGACY_CORE_SERVER_NAME = "task_management_tools"
-_MCP_LIST_TIMEOUT_SECONDS = 4.0
+
+
+def _load_positive_float_env(name: str, default: float) -> float:
+    raw = str(os.getenv(name, "")).strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except Exception:
+        return default
+    if value <= 0:
+        return default
+    return value
+
+
+_CACHE_TTL_SECONDS = _load_positive_float_env("MCP_REGISTRY_CACHE_TTL_SECONDS", 60.0)
+_MCP_LIST_TIMEOUT_SECONDS = _load_positive_float_env("MCP_REGISTRY_LIST_TIMEOUT_SECONDS", 0.8)
 
 
 def _toml_quote(value: str) -> str:
@@ -92,6 +107,22 @@ def _display_name(name: str) -> str:
     if not words:
         return clean
     return " ".join(word[:1].upper() + word[1:] for word in words)
+
+
+def _coerce_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if not normalized:
+            return None
+        if normalized in {"true", "1", "yes", "y", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "off"}:
+            return False
+    return None
 
 
 def _load_mcp_servers_from_config() -> dict[str, dict[str, Any]]:
@@ -198,9 +229,14 @@ def _discover_rows_uncached() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for name in ordered_names:
         list_row = list_by_name.get(name) or {}
-        config = copy.deepcopy(config_rows.get(name) or _derive_config_from_list_entry(list_row))
-        enabled = bool(list_row.get("enabled")) if list_row else True
+        config_row = config_rows.get(name) or {}
+        config = copy.deepcopy(config_row or _derive_config_from_list_entry(list_row))
+        list_enabled = _coerce_optional_bool(list_row.get("enabled")) if list_row else None
+        config_enabled = _coerce_optional_bool(config_row.get("enabled"))
+        enabled = list_enabled if list_enabled is not None else (config_enabled if config_enabled is not None else True)
         disabled_reason = str(list_row.get("disabled_reason") or "").strip() or None
+        if not disabled_reason and enabled is False:
+            disabled_reason = str(config_row.get("disabled_reason") or "").strip() or "Disabled in Codex config."
         auth_status = str(list_row.get("auth_status") or "").strip() or None
         rows.append(
             {
@@ -274,23 +310,24 @@ def list_available_mcp_servers(*, force_refresh: bool = False) -> list[dict[str,
 
 def normalize_chat_mcp_servers(raw_servers: list[str] | None, *, strict: bool = True) -> list[str]:
     available_rows = _get_rows()
-    available_names = [str(row.get("name") or "").strip() for row in available_rows if str(row.get("name") or "").strip()]
+    enabled_names = [
+        str(row.get("name") or "").strip()
+        for row in available_rows
+        if str(row.get("name") or "").strip() and bool(row.get("enabled"))
+    ]
     alias_map: dict[str, str] = {}
-    for name in available_names:
+    for name in enabled_names:
         alias_map[_normalize_lookup_key(name)] = name
     core_aliases = {_normalize_lookup_key(_FALLBACK_SERVER_NAME), _normalize_lookup_key(_LEGACY_CORE_SERVER_NAME)}
-    core_server_name = next((name for name in available_names if _normalize_lookup_key(name) in core_aliases), None)
+    core_server_name = next((name for name in enabled_names if _normalize_lookup_key(name) in core_aliases), None)
 
     if raw_servers is None:
-        defaults = [str(row.get("name") or "").strip() for row in available_rows if bool(row.get("enabled"))]
-        defaults = [name for name in defaults if name]
+        defaults = list(enabled_names)
         if core_server_name and core_server_name not in defaults:
             defaults.insert(0, core_server_name)
         if defaults:
             return defaults
-        if core_server_name:
-            return [core_server_name]
-        return available_names[:1]
+        return []
 
     requested_aliases: list[str] = []
     for raw in raw_servers:
@@ -309,14 +346,14 @@ def normalize_chat_mcp_servers(raw_servers: list[str] | None, *, strict: bool = 
         unknown.append(alias)
 
     if unknown and strict:
-        allowed = ", ".join(available_names) if available_names else "(none)"
+        allowed = ", ".join(enabled_names) if enabled_names else "(none)"
         unknown_text = ", ".join(sorted(set(unknown)))
         raise ValueError(f"Unsupported MCP server '{unknown_text}'. Allowed: {allowed}")
     if core_server_name:
         selected_set.add(core_server_name)
     if not selected_set:
         return []
-    return [name for name in available_names if name in selected_set]
+    return [name for name in enabled_names if name in selected_set]
 
 
 def build_selected_mcp_config_text(*, selected_servers: list[str], task_management_mcp_url: str | None = None) -> str:

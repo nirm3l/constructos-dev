@@ -1,0 +1,43 @@
+name: COS CLI Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "cos-v*"
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install packaging tooling
+        run: python -m pip install --upgrade pip pytest build twine typer
+
+      - name: Run COS unit tests
+        run: pytest -q tools/cos/tests/test_main.py
+
+      - name: Build COS package artifacts
+        run: ./tools/cos/scripts/build.sh
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cos-cli-dist
+          path: tools/cos/dist/*
+
+      - name: Publish GitHub release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: tools/cos/dist/*
+          generate_release_notes: true

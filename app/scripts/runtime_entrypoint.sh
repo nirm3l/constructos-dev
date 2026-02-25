@@ -64,6 +64,43 @@ resolve_bundle_passphrase() {
   printf '%s' "${passphrase}"
 }
 
+setup_git_runtime() {
+  local workspace_dir="${1:-}"
+  if ! command -v git >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [ -n "${workspace_dir}" ]; then
+    git config --global --add safe.directory "${workspace_dir}" >/dev/null 2>&1 || true
+  fi
+
+  if [ -z "${GITHUB_PAT:-}" ]; then
+    return 0
+  fi
+
+  local askpass_path="${HOME:-/home/app}/.codex/git-askpass.sh"
+  mkdir -p "$(dirname "${askpass_path}")"
+  cat > "${askpass_path}" <<'EOF'
+#!/usr/bin/env sh
+case "$1" in
+  *Username*) printf '%s\n' "x-access-token" ;;
+  *Password*) printf '%s\n' "${GITHUB_PAT:-}" ;;
+  *) printf '\n' ;;
+esac
+EOF
+  chmod 0700 "${askpass_path}"
+
+  export GIT_ASKPASS="${askpass_path}"
+  export GIT_ASKPASS_REQUIRE=force
+  export GIT_TERMINAL_PROMPT=0
+  if [ -z "${GITHUB_TOKEN:-}" ]; then
+    export GITHUB_TOKEN="${GITHUB_PAT}"
+  fi
+
+  git config --global credential.helper "" >/dev/null 2>&1 || true
+  git config --global credential.useHttpPath true >/dev/null 2>&1 || true
+}
+
 main() {
   local app_dir="${APP_RUNTIME_APP_DIR:-/app}"
   local encrypted_enabled="${APP_ENCRYPTED_BUNDLE_ENABLED:-false}"
@@ -77,6 +114,7 @@ main() {
   fi
 
   if ! is_truthy "${encrypted_enabled}"; then
+    setup_git_runtime "${app_dir}"
     cd "${app_dir}"
     exec "$@"
   fi
@@ -105,6 +143,7 @@ main() {
   rm -f "${decrypted_archive_path}"
 
   export PYTHONPATH="${decrypted_app_dir}${PYTHONPATH:+:${PYTHONPATH}}"
+  setup_git_runtime "${decrypted_app_dir}"
   cd "${decrypted_app_dir}"
   exec "$@"
 }

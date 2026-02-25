@@ -1,6 +1,12 @@
 import React from 'react'
 import type { AgentChatUsage, AttachmentRef, ChatMcpServer } from '../types'
 
+export type CodexResumeState = {
+  attempted: boolean
+  succeeded: boolean
+  fallbackUsed: boolean
+}
+
 export type ChatRole = 'user' | 'assistant'
 export type ChatTurn = {
   id: string
@@ -19,6 +25,7 @@ export type ChatSession = {
   mcpServers: ChatMcpServer[]
   sessionAttachmentRefs: AttachmentRef[]
   codexSessionId: string | null
+  codexResumeState: CodexResumeState | null
   createdAt: number
   updatedAt: number
   lastTaskEventAt: number | null
@@ -33,6 +40,7 @@ export type ChatSessionServerSnapshot = {
   mcpServers?: ChatMcpServer[]
   sessionAttachmentRefs?: AttachmentRef[]
   codexSessionId?: string | null
+  codexResumeState?: CodexResumeState | null
   createdAt?: number
   updatedAt?: number
   lastTaskEventAt?: number | null
@@ -44,13 +52,61 @@ type PersistedCodexChatState = {
   sessions: ChatSession[]
 }
 
-const STORAGE_KEY = 'codex_chat_state_v1'
+const STORAGE_KEY_PREFIX = 'codex_chat_state_v1'
 const MAX_SESSIONS = 20
 const MAX_TURNS_PER_SESSION = 240
 const DEFAULT_SESSION_TITLE_PREFIX = 'Session'
 
+function resolveStorageKey(userId: string | null | undefined): string {
+  const normalized = String(userId || '').trim()
+  if (!normalized) return STORAGE_KEY_PREFIX
+  return `${STORAGE_KEY_PREFIX}:${normalized}`
+}
+
 function makeId(prefix: string): string {
   return globalThis.crypto?.randomUUID?.() ?? `${prefix}-${Date.now()}-${Math.round(Math.random() * 1_000_000)}`
+}
+
+function normalizeBool(value: unknown): boolean | null {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') {
+    if (value === 1) return true
+    if (value === 0) return false
+    return null
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') return true
+    if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') return false
+  }
+  return null
+}
+
+function normalizeResumeState(value: unknown): CodexResumeState | null {
+  if (!value || typeof value !== 'object') return null
+  const payload = value as Record<string, unknown>
+  const attempted = normalizeBool(
+    payload.attempted
+    ?? payload.resume_attempted
+    ?? payload.codex_resume_attempted
+  )
+  const succeeded = normalizeBool(
+    payload.succeeded
+    ?? payload.resume_succeeded
+    ?? payload.codex_resume_succeeded
+  )
+  const fallbackUsed = normalizeBool(
+    payload.fallbackUsed
+    ?? payload.fallback_used
+    ?? payload.resume_fallback_used
+    ?? payload.codex_resume_fallback_used
+  )
+  if (attempted === null && succeeded === null && fallbackUsed === null) return null
+  return {
+    attempted: Boolean(attempted),
+    succeeded: Boolean(succeeded),
+    fallbackUsed: Boolean(fallbackUsed),
+  }
 }
 
 function normalizeUsage(value: unknown): AgentChatUsage | null {
@@ -166,6 +222,7 @@ function createSession(title: string, projectId = ''): ChatSession {
     mcpServers: [],
     sessionAttachmentRefs: [],
     codexSessionId: null,
+    codexResumeState: null,
     createdAt: now,
     updatedAt: now,
     lastTaskEventAt: null,
@@ -195,6 +252,7 @@ function normalizeSession(value: unknown): ChatSession | null {
     typeof session.codexSessionId === 'string' && session.codexSessionId.trim()
       ? session.codexSessionId.trim()
       : null
+  const codexResumeState = normalizeResumeState(session.codexResumeState ?? session.codex_resume_state ?? session.usage)
   return {
     id,
     title: typeof session.title === 'string' && session.title.trim()
@@ -206,6 +264,7 @@ function normalizeSession(value: unknown): ChatSession | null {
     mcpServers: normalizeMcpServers(session.mcpServers),
     sessionAttachmentRefs: normalizeAttachmentRefs(session.sessionAttachmentRefs ?? session.session_attachment_refs),
     codexSessionId,
+    codexResumeState,
     createdAt,
     updatedAt,
     lastTaskEventAt:
@@ -219,10 +278,19 @@ function normalizeTimestampMs(value: unknown, fallback: number): number {
   return Math.floor(numeric)
 }
 
-function loadPersistedState(): PersistedCodexChatState | null {
+function createInitialState(): PersistedCodexChatState {
+  const firstSession = createSession(`${DEFAULT_SESSION_TITLE_PREFIX} 1`)
+  return {
+    version: 1,
+    activeSessionId: firstSession.id,
+    sessions: [firstSession],
+  }
+}
+
+function loadPersistedState(storageKey: string): PersistedCodexChatState | null {
   if (typeof window === 'undefined') return null
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY)
+    const raw = window.localStorage.getItem(storageKey)
     if (!raw) return null
     const parsed = JSON.parse(raw) as unknown
     if (!parsed || typeof parsed !== 'object') return null
@@ -247,17 +315,13 @@ function loadPersistedState(): PersistedCodexChatState | null {
   }
 }
 
-export function useCodexChatState() {
+export function useCodexChatState(storageUserId?: string | null) {
+  const storageKey = React.useMemo(() => resolveStorageKey(storageUserId), [storageUserId])
   const initialState = React.useMemo<PersistedCodexChatState>(() => {
-    const restored = loadPersistedState()
+    const restored = loadPersistedState(storageKey)
     if (restored) return restored
-    const firstSession = createSession(`${DEFAULT_SESSION_TITLE_PREFIX} 1`)
-    return {
-      version: 1,
-      activeSessionId: firstSession.id,
-      sessions: [firstSession],
-    }
-  }, [])
+    return createInitialState()
+  }, [storageKey])
 
   const [showCodexChat, setShowCodexChat] = React.useState(false)
   const [codexChatInstruction, setCodexChatInstruction] = React.useState('')
@@ -266,6 +330,22 @@ export function useCodexChatState() {
   const [isCodexChatRunning, setIsCodexChatRunning] = React.useState(false)
   const [codexChatRunStartedAt, setCodexChatRunStartedAt] = React.useState<number | null>(null)
   const [codexChatElapsedSeconds, setCodexChatElapsedSeconds] = React.useState(0)
+
+  React.useEffect(() => {
+    const restored = loadPersistedState(storageKey)
+    if (restored) {
+      setCodexChatSessions(restored.sessions)
+      setCodexChatActiveSessionId(restored.activeSessionId)
+    } else {
+      const fallback = createInitialState()
+      setCodexChatSessions(fallback.sessions)
+      setCodexChatActiveSessionId(fallback.activeSessionId)
+    }
+    setCodexChatInstruction('')
+    setIsCodexChatRunning(false)
+    setCodexChatRunStartedAt(null)
+    setCodexChatElapsedSeconds(0)
+  }, [storageKey])
 
   React.useEffect(() => {
     if (codexChatSessions.length > 0) return
@@ -295,11 +375,11 @@ export function useCodexChatState() {
       sessions: codexChatSessions,
     }
     try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
+      window.localStorage.setItem(storageKey, JSON.stringify(payload))
     } catch {
       // Ignore quota/storage failures; chat continues in-memory.
     }
-  }, [codexChatActiveSessionId, codexChatSessions])
+  }, [codexChatActiveSessionId, codexChatSessions, storageKey])
 
   const patchSession = React.useCallback((sessionId: string, mutate: (session: ChatSession) => ChatSession) => {
     setCodexChatSessions((prev) => {
@@ -334,11 +414,16 @@ export function useCodexChatState() {
   }, [patchSession])
 
   const setCodexChatUsageForSession = React.useCallback((sessionId: string, usage: AgentChatUsage | null) => {
-    patchSession(sessionId, (session) => ({
-      ...session,
-      usage: normalizeUsage(usage),
-      updatedAt: Date.now(),
-    }))
+    patchSession(sessionId, (session) => {
+      const normalizedUsage = normalizeUsage(usage)
+      const inferredResumeState = normalizeResumeState(usage)
+      return {
+        ...session,
+        usage: normalizedUsage,
+        codexResumeState: inferredResumeState ?? session.codexResumeState,
+        updatedAt: Date.now(),
+      }
+    })
   }, [patchSession])
 
   const setCodexChatMcpServersForSession = React.useCallback((sessionId: string, servers: ChatMcpServer[]) => {
@@ -364,6 +449,14 @@ export function useCodexChatState() {
     patchSession(sessionId, (session) => ({
       ...session,
       codexSessionId: codexSessionId && codexSessionId.trim() ? codexSessionId.trim() : null,
+      updatedAt: Date.now(),
+    }))
+  }, [patchSession])
+
+  const setCodexChatResumeStateForSession = React.useCallback((sessionId: string, resumeState: CodexResumeState | null) => {
+    patchSession(sessionId, (session) => ({
+      ...session,
+      codexResumeState: normalizeResumeState(resumeState) ?? null,
       updatedAt: Date.now(),
     }))
   }, [patchSession])
@@ -397,6 +490,11 @@ export function useCodexChatState() {
           : snapshot.lastTaskEventAt === undefined
             ? (existing?.lastTaskEventAt ?? null)
             : normalizeTimestampMs(snapshot.lastTaskEventAt, existing?.lastTaskEventAt ?? now)
+        const resumeState = normalizeResumeState(
+          snapshot.codexResumeState
+          ?? snapshot.usage
+          ?? existing?.codexResumeState
+        )
         byId.set(id, {
           id,
           title: String(snapshot.title || existing?.title || `${DEFAULT_SESSION_TITLE_PREFIX} 1`).trim()
@@ -416,6 +514,7 @@ export function useCodexChatState() {
                 ? String(snapshot.codexSessionId).trim()
                 : null)
               : (existing?.codexSessionId ?? null),
+          codexResumeState: resumeState,
           createdAt,
           updatedAt,
           lastTaskEventAt,
@@ -511,6 +610,7 @@ export function useCodexChatState() {
   const codexChatMcpServers = normalizeMcpServers(activeSession?.mcpServers)
   const codexChatSessionAttachmentRefs = normalizeAttachmentRefs(activeSession?.sessionAttachmentRefs)
   const codexChatCodexSessionId = activeSession?.codexSessionId ?? null
+  const codexChatResumeState = activeSession?.codexResumeState ?? null
   const codexChatLastTaskEventAt = activeSession?.lastTaskEventAt ?? null
   const codexChatActiveSessionTitle = activeSession?.title ?? ''
   const codexChatProjectSessions = React.useMemo(() => {
@@ -552,6 +652,11 @@ export function useCodexChatState() {
     if (!codexChatSessionId) return
     setCodexChatCodexSessionIdForSession(codexChatSessionId, codexSessionId)
   }, [codexChatSessionId, setCodexChatCodexSessionIdForSession])
+
+  const setCodexChatResumeState = React.useCallback((resumeState: CodexResumeState | null) => {
+    if (!codexChatSessionId) return
+    setCodexChatResumeStateForSession(codexChatSessionId, resumeState)
+  }, [codexChatSessionId, setCodexChatResumeStateForSession])
 
   const setCodexChatLastTaskEventAt = React.useCallback((at: number | null) => {
     if (!codexChatSessionId) return
@@ -597,6 +702,9 @@ export function useCodexChatState() {
     codexChatCodexSessionId,
     setCodexChatCodexSessionId,
     setCodexChatCodexSessionIdForSession,
+    codexChatResumeState,
+    setCodexChatResumeState,
+    setCodexChatResumeStateForSession,
     setCodexChatMcpServersForSession,
     mergeCodexChatSessionsFromServer,
   }

@@ -1,4 +1,8 @@
 import React from 'react'
+import * as AlertDialog from '@radix-ui/react-alert-dialog'
+import * as Accordion from '@radix-ui/react-accordion'
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
+import * as ToggleGroup from '@radix-ui/react-toggle-group'
 import type { ProjectBoard, Task, TaskGroup } from '../../types'
 import { priorityTone, tagHue } from '../../utils/ui'
 import { Icon } from '../shared/uiHelpers'
@@ -20,6 +24,61 @@ type BoardGroupSection = {
   name: string
   color: string | null
   managed: boolean
+}
+
+type TaskGroupDialogTarget = {
+  id: string
+  name: string
+}
+
+type TaskGroupActionsMenuProps = {
+  groupName: string
+  busy: boolean
+  onRename: () => void
+  onDelete: () => void
+}
+
+function TaskGroupActionsMenu({
+  groupName,
+  busy,
+  onRename,
+  onDelete,
+}: TaskGroupActionsMenuProps) {
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button
+          className="action-icon group-action-icon group-action-menu-trigger"
+          type="button"
+          title={`Manage group ${groupName}`}
+          aria-label={`Manage group ${groupName}`}
+          disabled={busy}
+        >
+          <Icon path="M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0" />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content className="task-group-menu-content" sideOffset={8} align="end">
+          <DropdownMenu.Item
+            className="task-group-menu-item"
+            onSelect={onRename}
+            disabled={busy}
+          >
+            <Icon path="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+            <span>Rename group</span>
+          </DropdownMenu.Item>
+          <DropdownMenu.Item
+            className="task-group-menu-item task-group-menu-item-danger"
+            onSelect={onDelete}
+            disabled={busy}
+          >
+            <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+            <span>Delete group</span>
+          </DropdownMenu.Item>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  )
 }
 
 function formatBoardScheduleTrigger(iso: string | null | undefined): string {
@@ -69,6 +128,11 @@ function BoardTaskCard({
   onDragEnd,
 }: BoardTaskCardProps) {
   const descriptionPreviewText = taskDescriptionPreview(task.description)
+  const availableStatuses = statuses.filter((candidateStatus) => candidateStatus !== status)
+  const currentStatusIndex = statuses.indexOf(status)
+  const nextStatus = currentStatusIndex >= 0 && currentStatusIndex < statuses.length - 1
+    ? statuses[currentStatusIndex + 1]
+    : null
 
   return (
     <div
@@ -121,25 +185,82 @@ function BoardTaskCard({
           ))}
         </div>
       )}
-      <div className="kanban-actions">
-        {statuses.filter((s) => s !== status).slice(0, 3).map((nextStatus) => (
+      <div
+        className="kanban-actions"
+        onClick={(event) => event.stopPropagation()}
+      >
+        {availableStatuses.length > 0 ? (
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger asChild>
+              <button
+                className="status-chip kanban-move-trigger"
+                type="button"
+                onClick={(event) => event.stopPropagation()}
+                aria-label="Move task to another status"
+                title="Move task to another status"
+              >
+                <span>Move to</span>
+                <Icon path="M6 9l6 6 6-6" />
+              </button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content className="task-group-menu-content kanban-move-menu-content" sideOffset={6} align="start">
+                {nextStatus && (
+                  <>
+                    <DropdownMenu.Item
+                      className="task-group-menu-item"
+                      onSelect={() => onMoveTaskStatus(task.id, nextStatus, targetGroupId)}
+                    >
+                      <Icon path="M13 5l7 7-7 7M5 12h14" />
+                      <span>{`Move to next (${nextStatus})`}</span>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator className="task-group-menu-separator" />
+                  </>
+                )}
+                <DropdownMenu.RadioGroup
+                  value={status}
+                  onValueChange={(value) => {
+                    if (value !== status) onMoveTaskStatus(task.id, value, targetGroupId)
+                  }}
+                >
+                  {statuses.map((candidateStatus) => (
+                    <DropdownMenu.RadioItem
+                      key={candidateStatus}
+                      value={candidateStatus}
+                      className="task-group-menu-item kanban-move-menu-item"
+                      disabled={candidateStatus === status}
+                    >
+                      <span className="kanban-move-menu-label">{candidateStatus}</span>
+                      {candidateStatus === status && <span className="meta kanban-move-menu-meta">Current</span>}
+                      <DropdownMenu.ItemIndicator className="kanban-move-menu-indicator">
+                        <Icon path="M5 13l4 4L19 7" />
+                      </DropdownMenu.ItemIndicator>
+                    </DropdownMenu.RadioItem>
+                  ))}
+                </DropdownMenu.RadioGroup>
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
+        ) : (
           <button
-            key={nextStatus}
-            className="status-chip"
-            onClick={(e) => {
-              e.stopPropagation()
-              onMoveTaskStatus(task.id, nextStatus, targetGroupId)
-            }}
+            className="status-chip kanban-move-trigger"
+            type="button"
+            disabled
+            aria-label="No available status transitions"
+            title="No available status transitions"
           >
-            {nextStatus}
+            <span>Move to</span>
+            <Icon path="M6 9l6 6 6-6" />
           </button>
-        ))}
+        )}
       </div>
     </div>
   )
 }
 
 type TasksPanelProps = {
+  panelTitle?: string
+  allowBoardView?: boolean
   projectsMode: 'board' | 'list'
   setProjectsMode: React.Dispatch<React.SetStateAction<'board' | 'list'>>
   taskGroups: TaskGroup[]
@@ -163,9 +284,12 @@ type TasksPanelProps = {
   onRestoreTask: (taskId: string) => void
   onReopenTask: (taskId: string) => void
   onCompleteTask: (taskId: string) => void
+  onNewTask: (taskType?: 'manual' | 'scheduled_instruction') => void
 }
 
 export function TasksPanel({
+  panelTitle = 'Tasks',
+  allowBoardView = true,
   projectsMode,
   setProjectsMode,
   taskGroups,
@@ -189,8 +313,15 @@ export function TasksPanel({
   onRestoreTask,
   onReopenTask,
   onCompleteTask,
+  onNewTask,
 }: TasksPanelProps) {
-  const selectedGroupFilter = String(taskGroupFilterId || '')
+  const selectedGroupFilter = ''
+
+  React.useEffect(() => {
+    if (String(taskGroupFilterId || '').trim().length > 0) {
+      setTaskGroupFilterId('')
+    }
+  }, [setTaskGroupFilterId, taskGroupFilterId])
 
   const filteredTasks = React.useMemo(() => {
     if (!selectedGroupFilter) return tasks
@@ -291,59 +422,89 @@ export function TasksPanel({
       managed: true,
     }))
   }, [filteredTasks, selectedGroupFilter, taskGroups])
-
-  const [collapsedSectionMap, setCollapsedSectionMap] = React.useState<Record<string, boolean>>({})
+  const [openSectionKeys, setOpenSectionKeys] = React.useState<string[]>([])
 
   React.useEffect(() => {
-    setCollapsedSectionMap((prev) => {
-      const allowed = new Set(taskSections.map((section) => section.key))
-      let changed = false
-      const next: Record<string, boolean> = {}
-      for (const [key, value] of Object.entries(prev)) {
-        if (!allowed.has(key)) {
-          changed = true
-          continue
-        }
-        next[key] = value
-      }
-      return changed ? next : prev
+    const allKeys = taskSections.map((section) => section.key)
+    setOpenSectionKeys((previousOpenKeys) => {
+      const allowed = new Set(allKeys)
+      const filteredOpenKeys = previousOpenKeys.filter((key) => allowed.has(key))
+      const existing = new Set(filteredOpenKeys)
+      const missing = allKeys.filter((key) => !existing.has(key))
+      return [...filteredOpenKeys, ...missing]
     })
   }, [taskSections])
-
-  const toggleSection = React.useCallback((sectionKey: string) => {
-    setCollapsedSectionMap((prev) => ({ ...prev, [sectionKey]: !prev[sectionKey] }))
-  }, [])
 
   const createGroupBusy = Boolean(createTaskGroupMutation?.isPending)
   const updateGroupBusy = Boolean(patchTaskGroupMutation?.isPending)
   const deleteGroupBusy = Boolean(deleteTaskGroupMutation?.isPending)
   const reorderGroupBusy = Boolean(reorderTaskGroupsMutation?.isPending)
   const groupActionBusy = createGroupBusy || updateGroupBusy || deleteGroupBusy || reorderGroupBusy
+  const [taskGroupDialogMode, setTaskGroupDialogMode] = React.useState<'create' | 'rename' | null>(null)
+  const [taskGroupDialogName, setTaskGroupDialogName] = React.useState('')
+  const [taskGroupDialogTarget, setTaskGroupDialogTarget] = React.useState<TaskGroupDialogTarget | null>(null)
+  const [deleteTaskGroupPrompt, setDeleteTaskGroupPrompt] = React.useState<TaskGroupDialogTarget | null>(null)
 
-  const createTaskGroup = React.useCallback(() => {
-    if (typeof window === 'undefined') return
-    const rawName = window.prompt('New task group name')
-    if (rawName == null) return
-    const name = rawName.trim()
+  const closeTaskGroupDialog = React.useCallback(() => {
+    setTaskGroupDialogMode(null)
+    setTaskGroupDialogName('')
+    setTaskGroupDialogTarget(null)
+  }, [])
+
+  const openCreateTaskGroupDialog = React.useCallback(() => {
+    setTaskGroupDialogMode('create')
+    setTaskGroupDialogName('')
+    setTaskGroupDialogTarget(null)
+  }, [])
+
+  const openRenameTaskGroupDialog = React.useCallback((groupId: string, currentName: string) => {
+    setTaskGroupDialogMode('rename')
+    setTaskGroupDialogName(currentName)
+    setTaskGroupDialogTarget({ id: groupId, name: currentName })
+  }, [])
+
+  const submitTaskGroupDialog = React.useCallback(() => {
+    const name = taskGroupDialogName.trim()
     if (!name) return
-    createTaskGroupMutation.mutate({ name })
-  }, [createTaskGroupMutation])
 
-  const renameTaskGroup = React.useCallback((groupId: string, currentName: string) => {
-    if (typeof window === 'undefined') return
-    const rawName = window.prompt('Rename task group', currentName)
-    if (rawName == null) return
-    const name = rawName.trim()
-    if (!name || name === currentName) return
-    patchTaskGroupMutation.mutate({ taskGroupId: groupId, name })
-  }, [patchTaskGroupMutation])
+    if (taskGroupDialogMode === 'create') {
+      createTaskGroupMutation.mutate(
+        { name },
+        { onSuccess: () => closeTaskGroupDialog() }
+      )
+      return
+    }
 
-  const deleteTaskGroupById = React.useCallback((groupId: string, groupName: string) => {
-    if (typeof window === 'undefined') return
-    const ok = window.confirm(`Delete task group "${groupName}"? Linked tasks will become ungrouped.`)
-    if (!ok) return
-    deleteTaskGroupMutation.mutate(groupId)
-  }, [deleteTaskGroupMutation])
+    if (taskGroupDialogMode === 'rename' && taskGroupDialogTarget) {
+      if (name === taskGroupDialogTarget.name) {
+        closeTaskGroupDialog()
+        return
+      }
+      patchTaskGroupMutation.mutate(
+        { taskGroupId: taskGroupDialogTarget.id, name },
+        { onSuccess: () => closeTaskGroupDialog() }
+      )
+    }
+  }, [
+    closeTaskGroupDialog,
+    createTaskGroupMutation,
+    patchTaskGroupMutation,
+    taskGroupDialogMode,
+    taskGroupDialogName,
+    taskGroupDialogTarget,
+  ])
+
+  const requestDeleteTaskGroup = React.useCallback((groupId: string, groupName: string) => {
+    setDeleteTaskGroupPrompt({ id: groupId, name: groupName })
+  }, [])
+
+  const confirmDeleteTaskGroup = React.useCallback(() => {
+    if (!deleteTaskGroupPrompt) return
+    deleteTaskGroupMutation.mutate(
+      deleteTaskGroupPrompt.id,
+      { onSuccess: () => setDeleteTaskGroupPrompt(null) }
+    )
+  }, [deleteTaskGroupMutation, deleteTaskGroupPrompt])
 
   const moveTaskGroup = React.useCallback((groupId: string, direction: -1 | 1) => {
     const orderedIds = taskGroups.map((group) => group.id)
@@ -381,58 +542,95 @@ export function TasksPanel({
     return boardData.statuses.filter((status) => (boardLanes[status] ?? []).length > 0)
   }, [boardData, boardLanes, hasGroups])
 
+  const onProjectsModeChange = React.useCallback((value: string) => {
+    if (!allowBoardView) return
+    if (value === 'board' || value === 'list') setProjectsMode(value)
+  }, [allowBoardView, setProjectsMode])
+
+  const taskGroupDialogOpen = taskGroupDialogMode !== null
+  const taskGroupDialogSubmitDisabled =
+    groupActionBusy ||
+    !taskGroupDialogName.trim() ||
+    (taskGroupDialogMode === 'rename' &&
+      taskGroupDialogTarget !== null &&
+      taskGroupDialogName.trim() === taskGroupDialogTarget.name)
+  const taskGroupDialogTitle = taskGroupDialogMode === 'rename' ? 'Rename task group' : 'Create task group'
+  const taskGroupDialogDescription = taskGroupDialogMode === 'rename'
+    ? 'Set a new name for this task group.'
+    : 'Create a new group to organize tasks in list and board views.'
+  const taskGroupDialogSubmitLabel = taskGroupDialogMode === 'rename' ? 'Save' : 'Create'
+
   return (
     <section className="card">
       <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-        <h2 style={{ margin: 0 }}>Tasks</h2>
-        <div className="seg" role="tablist" aria-label="Task view mode">
-          <button
-            className={`seg-btn ${projectsMode === 'board' ? 'active' : ''}`}
-            onClick={() => setProjectsMode('board')}
-            role="tab"
-            aria-selected={projectsMode === 'board'}
+        <h2 style={{ margin: 0 }}>{panelTitle}</h2>
+        {allowBoardView && (
+          <ToggleGroup.Root
+            className="seg"
+            type="single"
+            value={projectsMode}
+            onValueChange={onProjectsModeChange}
+            aria-label="Task view mode"
           >
-            <Icon path="M4 4h7v7H4V4zm9 0h7v7h-7V4zM4 13h7v7H4v-7zm9 0h7v7h-7v-7z" />
-            Board
-          </button>
-          <button
-            className={`seg-btn ${projectsMode === 'list' ? 'active' : ''}`}
-            onClick={() => setProjectsMode('list')}
-            role="tab"
-            aria-selected={projectsMode === 'list'}
-          >
-            <Icon path="M4 6h16M4 12h16M4 18h16" />
-            List
-          </button>
-        </div>
+            <ToggleGroup.Item className="seg-btn" value="board" aria-label="Board view">
+              <Icon path="M4 4h7v7H4V4zm9 0h7v7h-7V4zM4 13h7v7H4v-7zm9 0h7v7h-7v-7z" />
+              Board
+            </ToggleGroup.Item>
+            <ToggleGroup.Item className="seg-btn" value="list" aria-label="List view">
+              <Icon path="M4 6h16M4 12h16M4 18h16" />
+              List
+            </ToggleGroup.Item>
+          </ToggleGroup.Root>
+        )}
       </div>
 
-      <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8, gap: 8 }}>
-        <label className="row wrap" style={{ gap: 6, alignItems: 'center' }}>
-          <span className="meta">Group filter</span>
-          <select
-            value={taskGroupFilterId}
-            onChange={(e) => setTaskGroupFilterId(e.target.value)}
-            disabled={taskGroups.length === 0}
-          >
-            <option value="">All groups</option>
-            {taskGroups.map((group) => (
-              <option key={group.id} value={group.id}>
-                {group.name}
-              </option>
-            ))}
-          </select>
-        </label>
+      <div className="row wrap tasks-create-actions" style={{ justifyContent: 'flex-end', marginBottom: 8, gap: 8 }}>
         <button
           className="status-chip"
           type="button"
-          onClick={createTaskGroup}
+          onClick={openCreateTaskGroupDialog}
           disabled={groupActionBusy}
           title="Create task group"
           aria-label="Create task group"
         >
           + Group
         </button>
+        <div className="row" style={{ gap: 6 }}>
+          <button
+            className="status-chip task-new-task-btn"
+            type="button"
+            onClick={() => onNewTask('manual')}
+            title="Create task"
+            aria-label="Create task"
+          >
+            <Icon path="M12 5v14M5 12h14" />
+            <span>Task</span>
+          </button>
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger asChild>
+              <button
+                className="action-icon"
+                type="button"
+                title="More task create options"
+                aria-label="More task create options"
+              >
+                <Icon path="M6 9l6 6 6-6" />
+              </button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content className="task-group-menu-content" sideOffset={8} align="end">
+                <DropdownMenu.Item className="task-group-menu-item" onSelect={() => onNewTask('manual')}>
+                  <Icon path="M12 5v14M5 12h14" />
+                  <span>Manual task</span>
+                </DropdownMenu.Item>
+                <DropdownMenu.Item className="task-group-menu-item" onSelect={() => onNewTask('scheduled_instruction')}>
+                  <Icon path="M12 8v5l3 2m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0" />
+                  <span>Scheduled task</span>
+                </DropdownMenu.Item>
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
+        </div>
       </div>
 
       <div className="row wrap notes-tag-filters task-tag-filters">
@@ -538,26 +736,14 @@ export function TasksPanel({
                         >
                           <Icon path="M12 5v14M5 12l7 7 7-7" />
                         </button>
-                        <button
-                          className="action-icon group-action-icon"
-                          type="button"
-                          onClick={() => group.groupId && renameTaskGroup(group.groupId, group.name)}
-                          disabled={!group.managed || groupActionBusy}
-                          title="Rename group"
-                          aria-label="Rename group"
-                        >
-                          <Icon path="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
-                        </button>
-                        <button
-                          className="action-icon group-action-icon"
-                          type="button"
-                          onClick={() => group.groupId && deleteTaskGroupById(group.groupId, group.name)}
-                          disabled={!group.managed || groupActionBusy}
-                          title="Delete group"
-                          aria-label="Delete group"
-                        >
-                          <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
-                        </button>
+                        {group.groupId && group.managed && (
+                          <TaskGroupActionsMenu
+                            groupName={group.name}
+                            busy={groupActionBusy}
+                            onRename={() => openRenameTaskGroupDialog(group.groupId as string, group.name)}
+                            onDelete={() => requestDeleteTaskGroup(group.groupId as string, group.name)}
+                          />
+                        )}
                       </div>
                     </div>
                     <div className="kanban">
@@ -719,134 +905,208 @@ export function TasksPanel({
               </div>
             )
           )}
-          {taskSections.map((section) => {
-            const collapsed = Boolean(collapsedSectionMap[section.key])
-            const sectionGroup = section.groupId
-              ? taskGroups.find((group) => group.id === section.groupId) ?? null
-              : null
-            const listDropKey = `list:${section.key}`
-            const isListDropTarget = dropTargetKey === listDropKey
-            const sectionIndex = sectionGroup ? taskGroups.findIndex((group) => group.id === sectionGroup.id) : -1
-            const canMoveUp = sectionGroup ? sectionIndex > 0 : false
-            const canMoveDown = sectionGroup ? sectionIndex >= 0 && sectionIndex < taskGroups.length - 1 : false
+          <Accordion.Root
+            type="multiple"
+            value={openSectionKeys}
+            onValueChange={setOpenSectionKeys}
+            className="tasks-sections-accordion"
+          >
+            {taskSections.map((section) => {
+              const sectionGroup = section.groupId
+                ? taskGroups.find((group) => group.id === section.groupId) ?? null
+                : null
+              const listDropKey = `list:${section.key}`
+              const isListDropTarget = dropTargetKey === listDropKey
+              const sectionIndex = sectionGroup ? taskGroups.findIndex((group) => group.id === sectionGroup.id) : -1
+              const canMoveUp = sectionGroup ? sectionIndex > 0 : false
+              const canMoveDown = sectionGroup ? sectionIndex >= 0 && sectionIndex < taskGroups.length - 1 : false
 
-            return (
-              <div
-                key={section.key}
-                style={{
-                  borderLeft: section.color ? `3px solid ${section.color}` : '3px solid transparent',
-                  paddingLeft: 8,
-                  marginBottom: 10,
-                }}
-              >
-                <div className="row wrap group-section-head">
-                  <button
-                    className="pill subtle group-toggle-pill"
-                    type="button"
-                    onClick={() => toggleSection(section.key)}
-                    aria-expanded={!collapsed}
-                    aria-label={collapsed ? `Expand ${section.name}` : `Collapse ${section.name}`}
-                  >
-                    <span>{collapsed ? '▸' : '▾'}</span>
-                    <span>{section.name}</span>
-                    <span className="meta">({section.tasks.length})</span>
-                  </button>
+              return (
+                <Accordion.Item
+                  key={section.key}
+                  value={section.key}
+                  className="tasks-section-accordion-item"
+                  style={{
+                    borderLeft: section.color ? `3px solid ${section.color}` : '3px solid transparent',
+                    paddingLeft: 8,
+                    marginBottom: 10,
+                  }}
+                >
+                  <div className="row wrap group-section-head">
+                    <Accordion.Header className="group-section-accordion-header">
+                      <Accordion.Trigger className="pill subtle group-toggle-pill group-toggle-pill-trigger">
+                        <span className="group-toggle-pill-chevron">
+                          <Icon path="M6 9l6 6 6-6" />
+                        </span>
+                        <span className="group-toggle-pill-label">{section.name}</span>
+                        <span className="meta group-toggle-pill-count">({section.tasks.length})</span>
+                      </Accordion.Trigger>
+                    </Accordion.Header>
 
-                  {sectionGroup && section.managed && (
-                    <div className="group-actions">
-                      <button
-                        className="action-icon group-action-icon"
-                        type="button"
-                        onClick={() => moveTaskGroup(sectionGroup.id, -1)}
-                        disabled={!canMoveUp || groupActionBusy}
-                        title="Move group up"
-                        aria-label="Move group up"
-                      >
-                        <Icon path="M12 19V5M5 12l7-7 7 7" />
-                      </button>
-                      <button
-                        className="action-icon group-action-icon"
-                        type="button"
-                        onClick={() => moveTaskGroup(sectionGroup.id, 1)}
-                        disabled={!canMoveDown || groupActionBusy}
-                        title="Move group down"
-                        aria-label="Move group down"
-                      >
-                        <Icon path="M12 5v14M5 12l7 7 7-7" />
-                      </button>
-                      <button
-                        className="action-icon group-action-icon"
-                        type="button"
-                        onClick={() => renameTaskGroup(sectionGroup.id, sectionGroup.name)}
-                        disabled={groupActionBusy}
-                        title="Rename group"
-                        aria-label="Rename group"
-                      >
-                        <Icon path="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
-                      </button>
-                      <button
-                        className="action-icon group-action-icon"
-                        type="button"
-                        onClick={() => deleteTaskGroupById(sectionGroup.id, sectionGroup.name)}
-                        disabled={groupActionBusy}
-                        title="Delete group"
-                        aria-label="Delete group"
-                      >
-                        <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-                {!collapsed && (
-                  <div
-                    className="task-list-dropzone"
-                    style={isListDropTarget ? { outline: '2px dashed rgba(59, 130, 246, 0.55)', borderRadius: 10, padding: 6 } : undefined}
-                    onDragOver={(event) => {
-                      event.preventDefault()
-                      maybeAutoScrollWhileDragging(event)
-                      setDropTargetKey(listDropKey)
-                    }}
-                    onDragLeave={() => {
-                      setDropTargetKey((prev) => (prev === listDropKey ? null : prev))
-                    }}
-                    onDrop={(event) => onListSectionDrop(event, section.groupId)}
-                  >
-                    {section.tasks.map((task) => (
-                      <div
-                        key={task.id}
-                        draggable
-                        onDragStart={(event) => onBoardCardDragStart(event, task.id)}
-                        onDragEnd={onBoardCardDragEnd}
-                      >
-                        <TaskListItem
-                          task={task}
-                          onOpen={onOpenTaskEditor}
-                          onOpenSpecification={onOpenSpecification}
-                          onTagClick={toggleSearchTag}
-                          onRestore={onRestoreTask}
-                          onReopen={onReopenTask}
-                          onComplete={onCompleteTask}
-                          specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
+                    {sectionGroup && section.managed && (
+                      <div className="group-actions">
+                        <button
+                          className="action-icon group-action-icon"
+                          type="button"
+                          onClick={() => moveTaskGroup(sectionGroup.id, -1)}
+                          disabled={!canMoveUp || groupActionBusy}
+                          title="Move group up"
+                          aria-label="Move group up"
+                        >
+                          <Icon path="M12 19V5M5 12l7-7 7 7" />
+                        </button>
+                        <button
+                          className="action-icon group-action-icon"
+                          type="button"
+                          onClick={() => moveTaskGroup(sectionGroup.id, 1)}
+                          disabled={!canMoveDown || groupActionBusy}
+                          title="Move group down"
+                          aria-label="Move group down"
+                        >
+                          <Icon path="M12 5v14M5 12l7 7 7-7" />
+                        </button>
+                        <TaskGroupActionsMenu
+                          groupName={sectionGroup.name}
+                          busy={groupActionBusy}
+                          onRename={() => openRenameTaskGroupDialog(sectionGroup.id, sectionGroup.name)}
+                          onDelete={() => requestDeleteTaskGroup(sectionGroup.id, sectionGroup.name)}
                         />
-                      </div>
-                    ))}
-                    {section.tasks.length === 0 && (
-                      <div className="meta" style={{ minHeight: 64, display: 'grid', alignItems: 'center' }}>
-                        Drop task here to move it to this section.
                       </div>
                     )}
                   </div>
-                )}
-              </div>
-            )
-          })}
+
+                  <Accordion.Content className="tasks-section-accordion-content">
+                    <div
+                      className="task-list-dropzone"
+                      style={isListDropTarget ? { outline: '2px dashed rgba(59, 130, 246, 0.55)', borderRadius: 10, padding: 6 } : undefined}
+                      onDragOver={(event) => {
+                        event.preventDefault()
+                        maybeAutoScrollWhileDragging(event)
+                        setDropTargetKey(listDropKey)
+                      }}
+                      onDragLeave={() => {
+                        setDropTargetKey((prev) => (prev === listDropKey ? null : prev))
+                      }}
+                      onDrop={(event) => onListSectionDrop(event, section.groupId)}
+                    >
+                      {section.tasks.map((task) => (
+                        <div
+                          key={task.id}
+                          draggable
+                          onDragStart={(event) => onBoardCardDragStart(event, task.id)}
+                          onDragEnd={onBoardCardDragEnd}
+                        >
+                          <TaskListItem
+                            task={task}
+                            onOpen={onOpenTaskEditor}
+                            onOpenSpecification={onOpenSpecification}
+                            onTagClick={toggleSearchTag}
+                            onRestore={onRestoreTask}
+                            onReopen={onReopenTask}
+                            onComplete={onCompleteTask}
+                            specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
+                          />
+                        </div>
+                      ))}
+                      {section.tasks.length === 0 && (
+                        <div className="meta" style={{ minHeight: 64, display: 'grid', alignItems: 'center' }}>
+                          Drop task here to move it to this section.
+                        </div>
+                      )}
+                    </div>
+                  </Accordion.Content>
+                </Accordion.Item>
+              )
+            })}
+          </Accordion.Root>
 
           {filteredTasks.length === 0 && (
             <div className="notice" style={{ marginTop: 10 }}>No tasks in this project.</div>
           )}
         </div>
       )}
+
+      <AlertDialog.Root
+        open={taskGroupDialogOpen}
+        onOpenChange={(open) => {
+          if (!open) closeTaskGroupDialog()
+        }}
+      >
+        <AlertDialog.Portal>
+          <AlertDialog.Overlay className="codex-chat-alert-overlay" />
+          <AlertDialog.Content className="codex-chat-alert-content">
+            <AlertDialog.Title className="codex-chat-alert-title">{taskGroupDialogTitle}</AlertDialog.Title>
+            <AlertDialog.Description className="codex-chat-alert-description">{taskGroupDialogDescription}</AlertDialog.Description>
+            <div className="field-control">
+              <span className="field-label">Group name</span>
+              <input
+                type="text"
+                value={taskGroupDialogName}
+                onChange={(event) => setTaskGroupDialogName(event.target.value)}
+                placeholder="Enter group name"
+                autoFocus
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    if (!taskGroupDialogSubmitDisabled) submitTaskGroupDialog()
+                  }
+                }}
+              />
+            </div>
+            <div className="codex-chat-alert-actions">
+              <AlertDialog.Cancel asChild>
+                <button className="pill subtle" type="button">
+                  Cancel
+                </button>
+              </AlertDialog.Cancel>
+              <button
+                className="primary"
+                type="button"
+                onClick={submitTaskGroupDialog}
+                disabled={taskGroupDialogSubmitDisabled}
+              >
+                {taskGroupDialogSubmitLabel}
+              </button>
+            </div>
+          </AlertDialog.Content>
+        </AlertDialog.Portal>
+      </AlertDialog.Root>
+
+      <AlertDialog.Root
+        open={deleteTaskGroupPrompt !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTaskGroupPrompt(null)
+        }}
+      >
+        <AlertDialog.Portal>
+          <AlertDialog.Overlay className="codex-chat-alert-overlay" />
+          <AlertDialog.Content className="codex-chat-alert-content">
+            <AlertDialog.Title className="codex-chat-alert-title">Delete task group?</AlertDialog.Title>
+            <AlertDialog.Description className="codex-chat-alert-description">
+              {deleteTaskGroupPrompt
+                ? `Delete "${deleteTaskGroupPrompt.name}"? Linked tasks will become ungrouped.`
+                : 'Delete selected task group?'}
+            </AlertDialog.Description>
+            <div className="codex-chat-alert-actions">
+              <AlertDialog.Cancel asChild>
+                <button className="pill subtle" type="button">
+                  Cancel
+                </button>
+              </AlertDialog.Cancel>
+              <AlertDialog.Action asChild>
+                <button
+                  className="danger"
+                  type="button"
+                  onClick={confirmDeleteTaskGroup}
+                  disabled={groupActionBusy}
+                >
+                  Delete
+                </button>
+              </AlertDialog.Action>
+            </div>
+          </AlertDialog.Content>
+        </AlertDialog.Portal>
+      </AlertDialog.Root>
     </section>
   )
 }

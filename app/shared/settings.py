@@ -96,17 +96,6 @@ MCP_DEFAULT_WORKSPACE_ID = os.getenv("MCP_DEFAULT_WORKSPACE_ID", "").strip()
 MCP_ALLOWED_WORKSPACE_IDS = _parse_csv_env("MCP_ALLOWED_WORKSPACE_IDS")
 MCP_ALLOWED_PROJECT_IDS = _parse_csv_env("MCP_ALLOWED_PROJECT_IDS")
 
-# MCP email tool configuration (optional).
-MCP_EMAIL_SMTP_HOST = os.getenv("MCP_EMAIL_SMTP_HOST", "").strip()
-MCP_EMAIL_SMTP_PORT = _env_int("MCP_EMAIL_SMTP_PORT", 587)
-MCP_EMAIL_SMTP_USERNAME = os.getenv("MCP_EMAIL_SMTP_USERNAME", "").strip()
-MCP_EMAIL_SMTP_PASSWORD = os.getenv("MCP_EMAIL_SMTP_PASSWORD", "").strip()
-MCP_EMAIL_SMTP_STARTTLS = _env_bool("MCP_EMAIL_SMTP_STARTTLS", True)
-MCP_EMAIL_SMTP_SSL = _env_bool("MCP_EMAIL_SMTP_SSL", False)
-MCP_EMAIL_FROM = os.getenv("MCP_EMAIL_FROM", "").strip()
-MCP_EMAIL_ALLOWED_RECIPIENTS = {s.strip().lower() for s in _parse_csv_env("MCP_EMAIL_ALLOWED_RECIPIENTS")}
-MCP_EMAIL_ALLOWED_DOMAINS = {s.strip().lower() for s in _parse_csv_env("MCP_EMAIL_ALLOWED_DOMAINS")}
-
 KNOWLEDGE_GRAPH_ENABLED = _env_bool("KNOWLEDGE_GRAPH_ENABLED", False)
 NEO4J_URI = os.getenv("NEO4J_URI", "").strip()
 NEO4J_USERNAME = os.getenv("NEO4J_USERNAME", "").strip()

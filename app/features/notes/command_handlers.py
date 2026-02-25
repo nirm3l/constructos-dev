@@ -111,9 +111,36 @@ def _note_title_key(value: str) -> str:
     return _normalize_note_title(value).casefold()
 
 
-def _note_aggregate_id(project_id: str, title: str) -> str:
+def _note_aggregate_id(project_id: str, title: str, *, salt: int = 0) -> str:
     key = _note_title_key(title)
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"note:{project_id}:{key}"))
+    seed = f"note:{project_id}:{key}" if salt <= 0 else f"note:{project_id}:{key}:{salt}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
+
+
+def _resolve_note_create_id(
+    db: Session,
+    *,
+    project_id: str,
+    title: str,
+    force_new: bool = False,
+    max_salt: int = 1024,
+) -> tuple[str, bool]:
+    if force_new:
+        return str(uuid.uuid4()), False
+    for salt in range(0, max_salt + 1):
+        candidate_id = _note_aggregate_id(project_id, title, salt=salt)
+        existing_note = db.get(Note, candidate_id)
+        if existing_note and existing_note.is_deleted:
+            continue
+        if existing_note and not existing_note.is_deleted:
+            return candidate_id, True
+        existing_state = load_note_command_state(db, candidate_id)
+        if existing_state and existing_state.is_deleted:
+            continue
+        if existing_state and not existing_state.is_deleted:
+            return candidate_id, True
+        return candidate_id, False
+    raise HTTPException(status_code=409, detail="Unable to allocate note id for this title")
 
 
 def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> Project:
@@ -184,18 +211,17 @@ class CreateNoteHandler:
         title = _normalize_note_title(self.payload.title)
         if not title:
             raise HTTPException(status_code=422, detail="title cannot be empty")
-        nid = _note_aggregate_id(self.payload.project_id, title)
-        existing_note = self.ctx.db.get(Note, nid)
-        if existing_note and not existing_note.is_deleted:
+        nid, exists_active = _resolve_note_create_id(
+            self.ctx.db,
+            project_id=self.payload.project_id,
+            title=title,
+            force_new=bool(self.payload.force_new),
+        )
+        if exists_active:
             view = load_note_view(self.ctx.db, nid)
             if view is None:
-                raise HTTPException(status_code=404, detail="Note not found")
+                raise HTTPException(status_code=409, detail="Note already exists; retry")
             return view
-        if existing_note and existing_note.is_deleted:
-            raise HTTPException(
-                status_code=409,
-                detail="Note with this title already exists in deleted state; restore is not supported",
-            )
 
         if self.payload.specification_id:
             _require_specification_scope(
