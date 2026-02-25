@@ -1180,8 +1180,8 @@ body.md-fullscreen-open {
 [data-theme="dark"] input,
 [data-theme="dark"] select,
 [data-theme="dark"] textarea {
-  background: #0f1930;
-  border-color: #2d4472;
+  background: #102115;
+  border-color: #2f734d;
   color: var(--text);
 }
 
@@ -1192,8 +1192,8 @@ body.md-fullscreen-open {
 }
 
 [data-theme="dark"] button {
-  background: #1a2a49;
-  border-color: #325084;
+  background: #173726;
+  border-color: #3a7f56;
   color: var(--text);
 }
 
@@ -2878,7 +2878,7 @@ button:disabled {
 
 [data-theme="dark"] .markdown :not(pre) > code {
   background: #0f1930;
-  border-color: #2d4472;
+  border-color: #2f734d;
 }
 
 .markdown pre {
@@ -3069,10 +3069,10 @@ button:disabled {
 
 /* Minimal highlight.js token colors (works without importing a theme CSS). */
 .markdown .hljs-comment,
-.markdown .hljs-quote { color: #93a4c7; }
+.markdown .hljs-quote { color: #8dc7a3; }
 .markdown .hljs-keyword,
 .markdown .hljs-selector-tag,
-.markdown .hljs-literal { color: #7dd3fc; }
+.markdown .hljs-literal { color: #79dca8; }
 .markdown .hljs-string,
 .markdown .hljs-title,
 .markdown .hljs-section,
@@ -3449,8 +3449,8 @@ button:disabled {
 }
 
 .search-semantic-mode-badge.mode-graph-vector {
-  border-color: color-mix(in srgb, #2d86f1, var(--line) 45%);
-  background: color-mix(in srgb, #2d86f1, var(--surface) 88%);
+  border-color: color-mix(in srgb, #3cad75, var(--line) 45%);
+  background: color-mix(in srgb, #3cad75, var(--surface) 88%);
 }
 
 .search-semantic-mode-badge.mode-vector-only {
@@ -3638,9 +3638,9 @@ button:disabled {
 }
 
 .task-kind-pill.task-kind-pill-semantic {
-  border-color: color-mix(in srgb, #2d86f1, var(--line) 28%);
-  background: color-mix(in srgb, #2d86f1, var(--surface) 88%);
-  color: color-mix(in srgb, #205ca0, var(--text) 22%);
+  border-color: color-mix(in srgb, #3cad75, var(--line) 28%);
+  background: color-mix(in srgb, #3cad75, var(--surface) 88%);
+  color: color-mix(in srgb, #1f6b39, var(--text) 22%);
 }
 
 .task-schedule-compact {
@@ -4238,41 +4238,41 @@ button:disabled {
 }
 
 [data-theme="dark"] .profile-tabs-list {
-  border-color: #35517e;
-  background: #10203a;
+  border-color: #2f6f46;
+  background: #0f1f16;
 }
 
 [data-theme="dark"] .profile-tab-trigger[data-state="active"] {
-  border-color: #4f73ad;
-  background: #17345d;
-  color: #e6efff;
+  border-color: #4db975;
+  background: #173824;
+  color: #e8ffef;
 }
 
 [data-theme="dark"] .profile-tab-trigger-icon,
 [data-theme="dark"] .profile-pane-head-icon,
 [data-theme="dark"] .profile-accordion-title-icon,
 [data-theme="dark"] .admin-tab-trigger-icon {
-  color: #9fc1f5;
+  color: #8feab2;
 }
 
 [data-theme="dark"] .profile-pane-card,
 [data-theme="dark"] .profile-accordion-item {
-  border-color: #2f4772;
-  background: #0f1d36;
+  border-color: #2a5b3e;
+  background: #0f1f16;
 }
 
 [data-theme="dark"] .profile-theme-switch {
-  border-color: #35517e;
-  background: #132643;
+  border-color: #2f6f46;
+  background: #12291d;
 }
 
 [data-theme="dark"] .profile-theme-switch[data-state="checked"] {
-  border-color: #4f73ad;
-  background: #17345d;
+  border-color: #4db975;
+  background: #173824;
 }
 
 [data-theme="dark"] .profile-theme-switch-thumb {
-  background: #e6efff;
+  background: #e8ffef;
 }
 
 .admin-panel {
@@ -4638,14 +4638,14 @@ button:disabled {
 }
 
 [data-theme="dark"] .admin-tabs-list {
-  border-color: #2f4772;
-  background: #10203a;
+  border-color: #2a5b3e;
+  background: #0f1f16;
 }
 
 [data-theme="dark"] .admin-tab-trigger[data-state="active"] {
-  border-color: #4f73ad;
-  background: #17345d;
-  color: #e6efff;
+  border-color: #4db975;
+  background: #173824;
+  color: #e8ffef;
 }
 
 .project-item-actions {
@@ -5567,7 +5567,7 @@ button:disabled {
 }
 
 .graph-evidence-score-fill-final {
-  background: linear-gradient(90deg, #2563eb, #1d4ed8);
+  background: linear-gradient(90deg, #4db975, #2f8a53);
 }
 
 .graph-evidence-score-fill-graph {
@@ -7795,36 +7795,36 @@ button:disabled {
 }
 
 [data-theme="dark"] .fab-speed-menu {
-  border-color: #2f4772;
+  border-color: #2a5b3e;
   background:
-    linear-gradient(180deg, #152746, #10213b);
+    linear-gradient(180deg, #143124, #122a1e);
   box-shadow:
     0 18px 38px rgba(2, 8, 20, 0.62),
-    inset 0 1px 0 rgba(210, 226, 255, 0.12);
+    inset 0 1px 0 rgba(187, 255, 209, 0.12);
 }
 
 [data-theme="dark"] .fab-speed-menu-arrow {
-  fill: #112341;
+  fill: #153224;
 }
 
 [data-theme="dark"] .fab-speed-item {
-  border-color: #2f4772;
-  background: #132746;
+  border-color: #2a5b3e;
+  background: #143224;
 }
 
 [data-theme="dark"] .fab-speed-item:hover,
 [data-theme="dark"] .fab-speed-item:focus-visible {
-  background: #17305a;
-  border-color: #5578ba;
+  background: #1a3b2a;
+  border-color: #56ad7b;
 }
 
 [data-theme="dark"] .fab-speed-item-icon {
-  border-color: #3c5d92;
-  background: #10213f;
+  border-color: #3f8c60;
+  background: #12281d;
 }
 
 [data-theme="dark"] .fab-speed-item-copy small {
-  color: #a9bfdf;
+  color: #b6e5c8;
 }
 
 .fab .icon {
@@ -7959,16 +7959,16 @@ button:disabled {
 
 [data-theme="dark"] .bottom-tabs {
   background:
-    linear-gradient(180deg, color-mix(in srgb, #0f1a2f, transparent 100%) 0%, color-mix(in srgb, #0f1a2f, transparent 20%) 100%);
+    linear-gradient(180deg, color-mix(in srgb, #0f1d15, transparent 100%) 0%, color-mix(in srgb, #0f1d15, transparent 20%) 100%);
 }
 
 [data-theme="dark"] .bottom-tabs-list {
-  border-color: #2f4772;
+  border-color: #2a5b3e;
   background:
-    linear-gradient(180deg, #152746, #10213b);
+    linear-gradient(180deg, #143124, #122a1e);
   box-shadow:
     0 16px 28px rgba(2, 8, 20, 0.62),
-    inset 0 1px 0 rgba(210, 226, 255, 0.12);
+    inset 0 1px 0 rgba(187, 255, 209, 0.12);
 }
 
 [data-theme="dark"] .task-item,
@@ -7976,31 +7976,31 @@ button:disabled {
 [data-theme="dark"] .kanban-card,
 [data-theme="dark"] .note,
 [data-theme="dark"] .drawer-body {
-  border-color: #2c426d;
+  border-color: #28543b;
 }
 
 [data-theme="dark"] .task-item,
 [data-theme="dark"] .kanban-col,
 [data-theme="dark"] .note {
-  background: #13213b;
+  background: #12271c;
 }
 
 [data-theme="dark"] .graph-insights {
-  border-color: #2c426d;
-  background: #12213b;
+  border-color: #28543b;
+  background: #11251b;
 }
 
 [data-theme="dark"] .graph-context-snapshot {
-  border-color: #2c426d;
+  border-color: #28543b;
   background:
-    radial-gradient(circle at 86% 8%, rgba(45, 92, 176, 0.2), transparent 36%),
-    #0f1d36;
+    radial-gradient(circle at 86% 8%, rgba(77, 185, 117, 0.2), transparent 36%),
+    #0f1f16;
 }
 
 [data-theme="dark"] .graph-context-snapshot-total {
-  border-color: #3f5f95;
-  background: #132747;
-  color: #d6e5ff;
+  border-color: #3f9163;
+  background: #143124;
+  color: #d8ffdf;
 }
 
 [data-theme="dark"] .graph-stat,
@@ -8014,113 +8014,113 @@ button:disabled {
 [data-theme="dark"] .graph-viz-shell,
 [data-theme="dark"] .graph-viz-side,
 [data-theme="dark"] .graph-markdown-preview {
-  border-color: #2c426d;
-  background: #0f1d36;
+  border-color: #28543b;
+  background: #0f1f16;
 }
 
 [data-theme="dark"] .graph-context-cube {
-  border-color: #35527f;
+  border-color: #33764f;
   box-shadow:
-    inset 0 1px 0 rgba(226, 232, 240, 0.2),
+    inset 0 1px 0 rgba(187, 255, 209, 0.2),
     inset 0 -1px 0 rgba(2, 8, 20, 0.55);
 }
 
 [data-theme="dark"] .graph-context-cube-grid-dense .graph-context-cube {
-  border-color: #31507f;
-  box-shadow: inset 0 1px 0 rgba(226, 232, 240, 0.12);
+  border-color: #2f6f49;
+  box-shadow: inset 0 1px 0 rgba(187, 255, 209, 0.12);
 }
 
 [data-theme="dark"] .graph-context-legend-swatch-empty {
-  background: color-mix(in srgb, #1d3359, #12213b 42%);
-  border-color: #486796;
+  background: color-mix(in srgb, #173623, #11251b 42%);
+  border-color: #4da16f;
 }
 
 [data-theme="dark"] .context-snapshot-capacity-track {
-  border-color: #365585;
-  background: #12233f;
+  border-color: #3a875a;
+  background: #132a1e;
 }
 
 [data-theme="dark"] .context-snapshot-capacity-fill {
-  box-shadow: inset 0 0 0 1px rgba(207, 230, 255, 0.18);
+  box-shadow: inset 0 0 0 1px rgba(187, 255, 209, 0.18);
 }
 
 [data-theme="dark"] .context-snapshot-tabs-list {
-  border-color: #35517e;
-  background: #10203a;
+  border-color: #2f6f46;
+  background: #0f1f16;
 }
 
 [data-theme="dark"] .context-snapshot-tab-trigger[data-state="active"] {
-  border-color: #4f73ad;
-  background: #17345d;
-  color: #e6efff;
+  border-color: #4db975;
+  background: #173824;
+  color: #e8ffef;
 }
 
 [data-theme="dark"] .context-snapshot-band-card,
 [data-theme="dark"] .context-snapshot-source-group,
 [data-theme="dark"] .context-snapshot-source-row,
 [data-theme="dark"] .context-snapshot-segment-chip {
-  border-color: #2f4772;
-  background: #0f1d36;
+  border-color: #2a5b3e;
+  background: #0f1f16;
 }
 
 [data-theme="dark"] .context-snapshot-band {
-  border-color: #2f4772;
-  background: #132645;
+  border-color: #2a5b3e;
+  background: #143022;
 }
 
 [data-theme="dark"] .context-snapshot-band-segment {
-  box-shadow: inset 0 0 0 1px rgba(220, 235, 255, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(187, 255, 209, 0.16);
 }
 
 [data-theme="dark"] .context-snapshot-source-row-track {
-  border-color: #34517f;
-  background: #132643;
+  border-color: #357d53;
+  background: #12291d;
 }
 
 [data-theme="dark"] .graph-summary-point-count {
-  border-color: #3c5d90;
-  background: #142a4b;
-  color: #dce9ff;
+  border-color: #3f8f61;
+  background: #173627;
+  color: #dbffe5;
 }
 
 [data-theme="dark"] .graph-viz-selected-id,
 [data-theme="dark"] .graph-viz-selected-stat {
-  border-color: #34527f;
-  background: #132745;
+  border-color: #367e54;
+  background: #143124;
 }
 
 [data-theme="dark"] .graph-viz-selected-stat strong {
-  color: #e7efff;
+  color: #e8ffef;
 }
 
 [data-theme="dark"] .graph-viz-canvas {
-  border-color: #2c426d;
+  border-color: #28543b;
   background:
-    radial-gradient(circle at 20% 12%, rgba(30, 55, 92, 0.55), transparent 40%),
-    #0f1c34;
+    radial-gradient(circle at 20% 12%, rgba(36, 79, 52, 0.55), transparent 40%),
+    #0f1d15;
 }
 
 [data-theme="dark"] .task-item.scheduled {
-  border-color: #5a7fc3;
-  background: #122745;
+  border-color: #53a374;
+  background: #143124;
 }
 
 [data-theme="dark"] .task-kind-pill {
-  border-color: #4f74b6;
-  background: #18345c;
-  color: #dbe9ff;
+  border-color: #4fa76f;
+  background: #193a28;
+  color: #ddffe7;
 }
 
 [data-theme="dark"] .task-schedule-chip {
-  border-color: #3e5f95;
-  background: #152d4f;
-  color: #bdd2f0;
+  border-color: #428e63;
+  background: #173726;
+  color: #cdeed9;
 }
 
 [data-theme="dark"] .task-schedule-chip-primary {
-  border-color: #6a8fcb;
-  background: #1a3a66;
-  color: #e7f0ff;
+  border-color: #63b684;
+  background: #1b402d;
+  color: #ebfff1;
 }
 
 [data-theme="dark"] .task-schedule-state-queued,
@@ -8153,17 +8153,17 @@ button:disabled {
 }
 
 [data-theme="dark"] .kanban-card {
-  background: #0f1c34;
+  background: #0f1d15;
 }
 
 [data-theme="dark"] .status-chip {
-  background: #1b2f54;
-  border-color: #35558d;
+  background: #183a29;
+  border-color: #3f8f61;
 }
 
 [data-theme="dark"] .project-member-chip {
   border-color: color-mix(in srgb, var(--line), var(--brand) 35%);
-  color: color-mix(in srgb, var(--text), #c8d9f5 16%);
+  color: color-mix(in srgb, var(--text), #cdeed9 16%);
 }
 
 [data-theme="dark"] .project-member-chip.active {
@@ -8179,7 +8179,7 @@ button:disabled {
 
 [data-theme="dark"] .tag-filter-chip {
   border-color: color-mix(in srgb, var(--line), var(--brand) 35%);
-  color: color-mix(in srgb, var(--text), #c8d9f5 16%);
+  color: color-mix(in srgb, var(--text), #cdeed9 16%);
 }
 
 [data-theme="dark"] .tag-filter-chip[data-state="on"] {
@@ -8194,8 +8194,8 @@ button:disabled {
 }
 
 [data-theme="dark"] .tag-filter-count {
-  background: color-mix(in srgb, #1d3558, var(--surface) 42%);
-  color: color-mix(in srgb, #d4e7ff, var(--text) 25%);
+  background: color-mix(in srgb, #173623, var(--surface) 42%);
+  color: color-mix(in srgb, #d7ffe3, var(--text) 25%);
 }
 
 [data-theme="dark"] .tag-filter-chip[data-state="on"] .tag-filter-count {
@@ -8205,14 +8205,14 @@ button:disabled {
 
 [data-theme="dark"] .tag-filter-more {
   border-color: color-mix(in srgb, var(--brand), var(--line) 36%);
-  background: color-mix(in srgb, #1a2d4f, var(--surface) 36%);
-  color: color-mix(in srgb, #d4e7ff, var(--text) 30%);
+  background: color-mix(in srgb, #1a3a28, var(--surface) 36%);
+  color: color-mix(in srgb, #d7ffe3, var(--text) 30%);
 }
 
 [data-theme="dark"] .tag-filter-clear {
   border-color: color-mix(in srgb, var(--brand), var(--line) 44%);
-  background: color-mix(in srgb, #1a2d4f, var(--surface) 34%);
-  color: color-mix(in srgb, #d4e7ff, var(--text) 28%);
+  background: color-mix(in srgb, #1a3a28, var(--surface) 34%);
+  color: color-mix(in srgb, #d7ffe3, var(--text) 28%);
 }
 
 [data-theme="dark"] .tag-filter-menu-item[data-state="checked"] {
@@ -8266,7 +8266,7 @@ button:disabled {
 }
 
 [data-theme="dark"] .action-icon {
-  background: #1a2d4f;
+  background: #1a3a28;
 }
 
 .bottom-tab-trigger {
