@@ -190,7 +190,6 @@ function App({ logout }: { logout: () => void }) {
   const [noteGroupFilterId, setNoteGroupFilterId] = React.useState('')
   const [specificationStatus, setSpecificationStatus] = React.useState('')
   const [specificationTags, setSpecificationTags] = React.useState<string[]>([])
-  const [specificationArchived, setSpecificationArchived] = React.useState(false)
   const [selectedSpecificationId, setSelectedSpecificationId] = React.useState<string | null>(() => initialUrlState.specificationId)
   const [editSpecificationTitle, setEditSpecificationTitle] = React.useState('')
   const [editSpecificationBody, setEditSpecificationBody] = React.useState('')
@@ -537,7 +536,6 @@ function App({ logout }: { logout: () => void }) {
     noteTags,
     specificationStatus,
     specificationTags,
-    specificationArchived,
     projects: bootstrap.data?.projects ?? [],
     projectsMode,
   })
@@ -898,10 +896,9 @@ function App({ logout }: { logout: () => void }) {
   const openSpecification = React.useCallback((specificationId: string, projectId?: string | null) => {
     if (projectId) setSelectedProjectId(projectId)
     setSpecificationStatus('')
-    setSpecificationArchived(false)
     setSelectedSpecificationId(specificationId)
     setTab('specifications')
-  }, [setSelectedProjectId, setSpecificationStatus, setSpecificationArchived, setSelectedSpecificationId, setTab])
+  }, [setSelectedProjectId, setSpecificationStatus, setSelectedSpecificationId, setTab])
 
   const {
     taskTagSuggestions,
@@ -1330,7 +1327,6 @@ function App({ logout }: { logout: () => void }) {
     selectedSpecificationId,
     setSelectedSpecificationId,
     setSpecificationStatus,
-    setSpecificationArchived,
     clearSpecificationFilterTags,
     editSpecificationTitle,
     editSpecificationBody,
@@ -1786,8 +1782,6 @@ function App({ logout }: { logout: () => void }) {
       specificationTags,
       toggleSpecificationFilterTag,
       clearSpecificationFilterTags,
-      specificationArchived,
-      setSpecificationArchived,
       selectedSpecificationId,
       setSelectedSpecificationId,
       toggleSpecificationEditor,

@@ -248,14 +248,6 @@ export function SpecificationsPanel({ state }: { state: any }) {
               </Select.Content>
             </Select.Portal>
           </Select.Root>
-          <label className="row archived-toggle notes-archived-filter">
-            <input
-              type="checkbox"
-              checked={state.specificationArchived}
-              onChange={(e) => state.setSpecificationArchived(e.target.checked)}
-            />
-            Archived
-          </label>
           <PopularTagFilters
             tags={state.taskTagSuggestions ?? []}
             selectedTags={state.specificationTags}

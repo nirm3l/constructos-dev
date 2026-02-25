@@ -167,6 +167,7 @@ export function useCoreQueries(c: any) {
     queryFn: () => getProjectGraphSubgraph(c.userId, c.selectedProjectId, { limit_nodes: 48, limit_edges: 160 }),
     enabled: Boolean(c.selectedProjectId) && (c.tab === 'projects' || c.tab === 'knowledge-graph'),
   })
+  const specificationArchivedFilter = c.specificationStatus === 'Archived'
 
   const specifications = useQuery({
     queryKey: [
@@ -175,7 +176,7 @@ export function useCoreQueries(c: any) {
       c.workspaceId,
       c.selectedProjectId,
       c.specificationStatus,
-      c.specificationArchived,
+      specificationArchivedFilter,
       c.specificationTags.join(','),
     ],
     queryFn: () =>
@@ -183,7 +184,7 @@ export function useCoreQueries(c: any) {
         project_id: c.selectedProjectId,
         status: c.specificationStatus || undefined,
         tags: c.specificationTags,
-        archived: c.specificationArchived,
+        archived: specificationArchivedFilter,
       }),
     enabled: Boolean(c.workspaceId && c.selectedProjectId) && c.tab === 'specifications',
   })

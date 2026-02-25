@@ -249,8 +249,6 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             toggleSpecificationFilterTag: state.toggleSpecificationFilterTag,
             clearSpecificationFilterTags: state.clearSpecificationFilterTags,
             getTagUsage: state.getTagUsage,
-            specificationArchived: state.specificationArchived,
-            setSpecificationArchived: state.setSpecificationArchived,
             createSpecificationMutation: state.createSpecificationMutation,
             selectedSpecificationId: state.selectedSpecificationId,
             toggleSpecificationEditor: state.toggleSpecificationEditor,

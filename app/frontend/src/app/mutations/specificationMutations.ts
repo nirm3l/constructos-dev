@@ -56,7 +56,6 @@ export function useSpecificationMutations(c: any) {
       c.setTab('specifications')
       if (typeof c.clearSpecificationFilterTags === 'function') c.clearSpecificationFilterTags()
       if (typeof c.setSpecificationStatus === 'function') c.setSpecificationStatus('')
-      if (typeof c.setSpecificationArchived === 'function') c.setSpecificationArchived(false)
       await c.invalidateAll()
       c.setSelectedSpecificationId(specification.id)
     },
