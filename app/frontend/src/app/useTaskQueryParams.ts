@@ -13,7 +13,7 @@ export function useTaskQueryParams(args: {
 
   return React.useMemo(() => {
     if (!selectedProjectId) return null
-    if (tab === 'today') return { project_id: selectedProjectId, view: 'today' as const }
+    if (tab === 'inbox') return { project_id: selectedProjectId, view: 'inbox' as const, tags: searchTags }
     if (tab === 'tasks') {
       return {
         project_id: selectedProjectId,

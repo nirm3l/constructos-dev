@@ -32,5 +32,26 @@ services:
       - license-control-plane-data:/data
     restart: unless-stopped
 
+  license-control-plane-backup:
+    build: ./license_control_plane
+    container_name: license-control-plane-backup
+    command: ["python", "-m", "backup_scheduler"]
+    depends_on:
+      - license-control-plane
+    environment:
+      LCP_BACKUP_SOURCE_DB_PATH: "${LCP_BACKUP_SOURCE_DB_PATH:-/data/license-control-plane.db}"
+      LCP_BACKUP_DIR: "${LCP_BACKUP_DIR:-/backups}"
+      LCP_BACKUP_FILE_PREFIX: "${LCP_BACKUP_FILE_PREFIX:-license-control-plane}"
+      LCP_BACKUP_INTERVAL_SECONDS: "${LCP_BACKUP_INTERVAL_SECONDS:-3600}"
+      LCP_BACKUP_RETENTION_HOURS: "${LCP_BACKUP_RETENTION_HOURS:-168}"
+      LCP_BACKUP_STARTUP_DELAY_SECONDS: "${LCP_BACKUP_STARTUP_DELAY_SECONDS:-15}"
+      LCP_BACKUP_BUSY_TIMEOUT_MS: "${LCP_BACKUP_BUSY_TIMEOUT_MS:-5000}"
+      LCP_BACKUP_LOG_LEVEL: "${LCP_BACKUP_LOG_LEVEL:-INFO}"
+    volumes:
+      - license-control-plane-data:/data:ro
+      - license-control-plane-backups:/backups
+    restart: unless-stopped
+
 volumes:
   license-control-plane-data:
+  license-control-plane-backups:

@@ -25,8 +25,8 @@ COPY . /app
 COPY --from=frontend-builder /frontend/dist /app/static
 
 RUN useradd --uid 10002 --create-home --home-dir /home/license license \
-    && mkdir -p /data \
-    && chown -R license:license /app /data /home/license
+    && mkdir -p /data /backups \
+    && chown -R license:license /app /data /backups /home/license
 
 USER license
 

@@ -1,20 +1,9 @@
 from __future__ import annotations
 
-import hmac
 import os
 from typing import Any
 
-from shared.settings import MCP_AUTH_TOKEN
-
 from .gateway import build_mcp_gateway
-
-
-def _require_token(auth_token: str | None):
-    """Mirror gateway token enforcement for tools that bypass the app service layer."""
-    if not MCP_AUTH_TOKEN:
-        return
-    if not auth_token or not hmac.compare_digest(auth_token, MCP_AUTH_TOKEN):
-        raise RuntimeError("Invalid MCP token")
 
 
 def create_mcp():
@@ -664,31 +653,6 @@ def create_mcp():
     def delete_note(note_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
         return service.delete_note(note_id=note_id, auth_token=auth_token, command_id=command_id)
-
-    @mcp.tool(description="Send an email via SMTP (requires MCP email env configuration).")
-    def send_email(
-        to: list[str],
-        subject: str,
-        body: str,
-        auth_token: str | None = None,
-        cc: list[str] | None = None,
-        bcc: list[str] | None = None,
-        html: bool = False,
-        dry_run: bool = False,
-    ) -> dict[str, Any]:
-        from .email import send_email_smtp
-
-        auth_token = auth_token or default_tool_token
-        _require_token(auth_token)
-        return send_email_smtp(
-            to=to,
-            subject=subject,
-            body=body,
-            cc=cc or [],
-            bcc=bcc or [],
-            html=html,
-            dry_run=dry_run,
-        )
 
     @mcp.tool(description="Create a project in a workspace.")
     def create_project(

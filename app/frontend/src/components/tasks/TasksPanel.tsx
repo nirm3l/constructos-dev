@@ -284,6 +284,7 @@ type TasksPanelProps = {
   onRestoreTask: (taskId: string) => void
   onReopenTask: (taskId: string) => void
   onCompleteTask: (taskId: string) => void
+  onNewTask: (taskType?: 'manual' | 'scheduled_instruction') => void
 }
 
 export function TasksPanel({
@@ -312,6 +313,7 @@ export function TasksPanel({
   onRestoreTask,
   onReopenTask,
   onCompleteTask,
+  onNewTask,
 }: TasksPanelProps) {
   const selectedGroupFilter = ''
 
@@ -582,7 +584,7 @@ export function TasksPanel({
         )}
       </div>
 
-      <div className="row wrap" style={{ justifyContent: 'flex-end', marginBottom: 8, gap: 8 }}>
+      <div className="row wrap tasks-create-actions" style={{ justifyContent: 'flex-end', marginBottom: 8, gap: 8 }}>
         <button
           className="status-chip"
           type="button"
@@ -593,6 +595,42 @@ export function TasksPanel({
         >
           + Group
         </button>
+        <div className="row" style={{ gap: 6 }}>
+          <button
+            className="status-chip task-new-task-btn"
+            type="button"
+            onClick={() => onNewTask('manual')}
+            title="Create task"
+            aria-label="Create task"
+          >
+            <Icon path="M12 5v14M5 12h14" />
+            <span>Task</span>
+          </button>
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger asChild>
+              <button
+                className="action-icon"
+                type="button"
+                title="More task create options"
+                aria-label="More task create options"
+              >
+                <Icon path="M6 9l6 6 6-6" />
+              </button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content className="task-group-menu-content" sideOffset={8} align="end">
+                <DropdownMenu.Item className="task-group-menu-item" onSelect={() => onNewTask('manual')}>
+                  <Icon path="M12 5v14M5 12h14" />
+                  <span>Manual task</span>
+                </DropdownMenu.Item>
+                <DropdownMenu.Item className="task-group-menu-item" onSelect={() => onNewTask('scheduled_instruction')}>
+                  <Icon path="M12 8v5l3 2m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0" />
+                  <span>Scheduled task</span>
+                </DropdownMenu.Item>
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
+        </div>
       </div>
 
       <div className="row wrap notes-tag-filters task-tag-filters">

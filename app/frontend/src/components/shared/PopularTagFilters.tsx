@@ -24,9 +24,15 @@ export function PopularTagFilters({
   idPrefix,
   visibleCount = DEFAULT_VISIBLE_TAGS,
 }: PopularTagFiltersProps) {
+  const [overflowQuery, setOverflowQuery] = React.useState('')
   const maxVisible = Math.max(1, visibleCount)
   const visibleTags = tags.slice(0, maxVisible)
   const overflowTags = tags.slice(maxVisible)
+  const filteredOverflowTags = React.useMemo(() => {
+    const query = overflowQuery.trim().toLowerCase()
+    if (!query) return overflowTags
+    return overflowTags.filter((tag) => tag.toLowerCase().includes(query))
+  }, [overflowQuery, overflowTags])
   const selectedSet = React.useMemo(() => new Set(selectedTags.map((tag) => tag.toLowerCase())), [selectedTags])
   const visibleValues = React.useMemo(
     () => visibleTags.filter((tag) => selectedSet.has(tag.toLowerCase())).map((tag) => tag.toLowerCase()),
@@ -67,7 +73,7 @@ export function PopularTagFilters({
       </ToggleGroup.Root>
 
       {overflowTags.length > 0 && (
-        <DropdownMenu.Root>
+        <DropdownMenu.Root onOpenChange={(open) => { if (!open) setOverflowQuery('') }}>
           <DropdownMenu.Trigger asChild>
             <button
               className="status-chip tag-filter-more"
@@ -80,7 +86,17 @@ export function PopularTagFilters({
           </DropdownMenu.Trigger>
           <DropdownMenu.Portal>
             <DropdownMenu.Content className="task-group-menu-content tag-filter-menu-content" sideOffset={8} align="start">
-              {overflowTags.map((tag) => (
+              <div className="tag-filter-menu-search">
+                <input
+                  value={overflowQuery}
+                  onChange={(event) => setOverflowQuery(event.target.value)}
+                  onKeyDown={(event) => event.stopPropagation()}
+                  placeholder="Filter tags"
+                  aria-label="Filter additional tags"
+                />
+              </div>
+              <DropdownMenu.Separator className="task-group-menu-separator" />
+              {filteredOverflowTags.map((tag) => (
                 <DropdownMenu.CheckboxItem
                   key={`${idPrefix}-overflow-${tag}`}
                   className="task-group-menu-item tag-filter-menu-item"
@@ -94,6 +110,9 @@ export function PopularTagFilters({
                   </DropdownMenu.ItemIndicator>
                 </DropdownMenu.CheckboxItem>
               ))}
+              {filteredOverflowTags.length === 0 && (
+                <div className="tag-filter-menu-empty">No matching tags.</div>
+              )}
             </DropdownMenu.Content>
           </DropdownMenu.Portal>
         </DropdownMenu.Root>

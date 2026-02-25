@@ -1532,6 +1532,7 @@ class AgentTaskService:
         pinned: bool = False,
         external_refs: list[dict[str, Any]] | None = None,
         attachment_refs: list[dict[str, Any]] | None = None,
+        force_new: bool = False,
         command_id: str | None = None,
     ) -> dict:
         self._require_token(auth_token)
@@ -1564,6 +1565,7 @@ class AgentTaskService:
                     "pinned": bool(pinned),
                     "external_refs": external_refs or [],
                     "attachment_refs": attachment_refs or [],
+                    "force_new": bool(force_new),
                 },
             )
             payload = NoteCreate(
@@ -1578,6 +1580,7 @@ class AgentTaskService:
                 pinned=bool(pinned),
                 external_refs=external_refs or [],
                 attachment_refs=attachment_refs or [],
+                force_new=bool(force_new),
             )
             return NoteApplicationService(db, user, command_id=effective_command_id).create_note(payload)
 
@@ -2144,6 +2147,7 @@ class AgentTaskService:
         tags: list[str] | None = None,
         external_refs: list[dict[str, Any]] | None = None,
         attachment_refs: list[dict[str, Any]] | None = None,
+        force_new: bool = False,
         auth_token: str | None = None,
         command_id: str | None = None,
     ) -> dict:
@@ -2166,6 +2170,7 @@ class AgentTaskService:
                     "tags": tags or [],
                     "external_refs": external_refs or [],
                     "attachment_refs": attachment_refs or [],
+                    "force_new": bool(force_new),
                 },
             )
             payload = SpecificationCreate(
@@ -2177,6 +2182,7 @@ class AgentTaskService:
                 tags=tags or [],
                 external_refs=external_refs or [],
                 attachment_refs=attachment_refs or [],
+                force_new=bool(force_new),
             )
             return SpecificationApplicationService(
                 db, user, command_id=effective_command_id

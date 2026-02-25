@@ -106,6 +106,7 @@ class NoteCreate(BaseModel):
     external_refs: list[ExternalRef] = Field(default_factory=list)
     attachment_refs: list[AttachmentRef] = Field(default_factory=list)
     pinned: bool = False
+    force_new: bool = False
 
 
 class NotePatch(BaseModel):
@@ -212,6 +213,7 @@ class SpecificationCreate(BaseModel):
     tags: list[str] = Field(default_factory=list)
     external_refs: list[ExternalRef] = Field(default_factory=list)
     attachment_refs: list[AttachmentRef] = Field(default_factory=list)
+    force_new: bool = False
 
 
 class SpecificationPatch(BaseModel):
@@ -277,6 +279,7 @@ class TaskDTO:
     updated_at: str | None
     created_by: str
     order_index: int
+    linked_note_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)

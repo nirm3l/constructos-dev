@@ -103,6 +103,7 @@ def create_specification(
         tags=payload.tags,
         external_refs=[item.model_dump() for item in payload.external_refs],
         attachment_refs=[item.model_dump() for item in payload.attachment_refs],
+        force_new=bool(payload.force_new),
         command_id=command_id,
     )
 

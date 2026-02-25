@@ -1,8 +1,11 @@
 import React from 'react'
+import * as Checkbox from '@radix-ui/react-checkbox'
+import * as Collapsible from '@radix-ui/react-collapsible'
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
+import * as Select from '@radix-ui/react-select'
+import * as Tabs from '@radix-ui/react-tabs'
 import type {
   AdminWorkspaceUser,
-  BugReportCreateRequest,
-  BugReportCreateResponse,
   LicenseStatus,
   Note,
   Specification,
@@ -13,13 +16,87 @@ import type {
 import { tagHue } from '../utils/ui'
 import { MarkdownView } from '../markdown/MarkdownView'
 import { PopularTagFilters } from './shared/PopularTagFilters'
-import { Icon, MarkdownModeToggle } from './shared/uiHelpers'
+import { Icon, MarkdownModeToggle, MarkdownSplitPane } from './shared/uiHelpers'
 import { TaskListItem } from './tasks/taskViews'
 
 const VOICE_LANG_OPTIONS = [
   { value: 'bs-BA', label: 'Bosnian (bs-BA)' },
   { value: 'en-US', label: 'English (en-US)' },
 ]
+
+const GITHUB_ISSUES_URL = 'https://github.com/nirm3l/constructos/issues'
+const SEARCH_ANY_VALUE = '__any__'
+
+const SEARCH_TASK_STATUS_OPTIONS = [
+  { value: 'To do', label: 'To do' },
+  { value: 'In progress', label: 'In progress' },
+  { value: 'Done', label: 'Done' },
+]
+
+const SEARCH_SPEC_STATUS_OPTIONS = [
+  { value: 'Draft', label: 'Draft' },
+  { value: 'Ready', label: 'Ready' },
+  { value: 'In progress', label: 'In progress' },
+  { value: 'Implemented', label: 'Implemented' },
+  { value: 'Archived', label: 'Archived' },
+]
+
+const SEARCH_PRIORITY_OPTIONS = [
+  { value: 'Low', label: 'Low' },
+  { value: 'Med', label: 'Med' },
+  { value: 'High', label: 'High' },
+]
+
+function SearchFilterSelect({
+  value,
+  onValueChange,
+  anyLabel,
+  options,
+  ariaLabel,
+}: {
+  value: string
+  onValueChange: (value: string) => void
+  anyLabel: string
+  options: Array<{ value: string; label: string }>
+  ariaLabel: string
+}) {
+  const normalizedValue = String(value || '').trim() || SEARCH_ANY_VALUE
+  return (
+    <Select.Root
+      value={normalizedValue}
+      onValueChange={(nextValue) => onValueChange(nextValue === SEARCH_ANY_VALUE ? '' : nextValue)}
+    >
+      <Select.Trigger className="quickadd-project-trigger search-panel-select-trigger" aria-label={ariaLabel}>
+        <Select.Value />
+        <Select.Icon asChild>
+          <span className="quickadd-project-trigger-icon" aria-hidden="true">
+            <Icon path="M6 9l6 6 6-6" />
+          </span>
+        </Select.Icon>
+      </Select.Trigger>
+      <Select.Portal>
+        <Select.Content className="quickadd-project-content search-panel-select-content" position="popper" sideOffset={6}>
+          <Select.Viewport className="quickadd-project-viewport">
+            <Select.Item value={SEARCH_ANY_VALUE} className="quickadd-project-item">
+              <Select.ItemText>{anyLabel}</Select.ItemText>
+              <Select.ItemIndicator className="quickadd-project-item-indicator">
+                <Icon path="M5 13l4 4L19 7" />
+              </Select.ItemIndicator>
+            </Select.Item>
+            {options.map((option) => (
+              <Select.Item key={option.value} value={option.value} className="quickadd-project-item">
+                <Select.ItemText>{option.label}</Select.ItemText>
+                <Select.ItemIndicator className="quickadd-project-item-indicator">
+                  <Icon path="M5 13l4 4L19 7" />
+                </Select.ItemIndicator>
+              </Select.Item>
+            ))}
+          </Select.Viewport>
+        </Select.Content>
+      </Select.Portal>
+    </Select.Root>
+  )
+}
 
 export function SearchPanel({
   searchQ,
@@ -56,49 +133,140 @@ export function SearchPanel({
   getTagUsage: (tag: string) => number
   onClose: () => void
 }) {
+  const activeAdvancedFilterCount = React.useMemo(() => {
+    let count = 0
+    if (String(searchStatus || '').trim()) count += 1
+    if (String(searchSpecificationStatus || '').trim()) count += 1
+    if (String(searchPriority || '').trim()) count += 1
+    if (searchArchived) count += 1
+    return count
+  }, [searchArchived, searchPriority, searchSpecificationStatus, searchStatus])
+  const [advancedOpen, setAdvancedOpen] = React.useState<boolean>(activeAdvancedFilterCount > 0)
+
+  React.useEffect(() => {
+    if (activeAdvancedFilterCount > 0) setAdvancedOpen(true)
+  }, [activeAdvancedFilterCount])
+
+  const resetAllFilters = React.useCallback(() => {
+    setSearchQ('')
+    setSearchStatus('')
+    setSearchSpecificationStatus('')
+    setSearchPriority('')
+    setSearchArchived(false)
+    clearSearchTags()
+    setAdvancedOpen(false)
+  }, [
+    clearSearchTags,
+    setSearchArchived,
+    setSearchPriority,
+    setSearchQ,
+    setSearchSpecificationStatus,
+    setSearchStatus,
+  ])
+
   return (
-    <section className="card">
-      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+    <section className="card search-panel-card">
+      <div className="row search-panel-header">
         <h2 style={{ margin: 0 }}>Search</h2>
-        <button className="action-icon" onClick={onClose} title="Close search" aria-label="Close search">
-          <Icon path="M6 6l12 12M18 6 6 18" />
-        </button>
+        <div className="search-panel-header-actions">
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger asChild>
+              <button className="action-icon" type="button" title="Search actions" aria-label="Search actions">
+                <Icon path="M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0" />
+              </button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content className="task-group-menu-content search-panel-menu-content" sideOffset={8} align="end">
+                <DropdownMenu.Item className="task-group-menu-item" onSelect={resetAllFilters}>
+                  <Icon path="M3 12a9 9 0 1 0 3-6.7M3 4v5h5" />
+                  <span>Reset all filters</span>
+                </DropdownMenu.Item>
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
+          <button className="action-icon" onClick={onClose} title="Close search" aria-label="Close search">
+            <Icon path="M6 6l12 12M18 6 6 18" />
+          </button>
+        </div>
       </div>
-      <div className="row wrap" style={{ marginTop: 10 }}>
-        <input value={searchQ} onChange={(e) => setSearchQ(e.target.value)} placeholder="Search text" />
-        <select value={searchStatus} onChange={(e) => setSearchStatus(e.target.value)}>
-          <option value="">Any status</option>
-          <option value="To do">To do</option>
-          <option value="In progress">In progress</option>
-          <option value="Done">Done</option>
-        </select>
-        <select value={searchSpecificationStatus} onChange={(e) => setSearchSpecificationStatus(e.target.value)}>
-          <option value="">Any spec status</option>
-          <option value="Draft">Draft</option>
-          <option value="Ready">Ready</option>
-          <option value="In progress">In progress</option>
-          <option value="Implemented">Implemented</option>
-          <option value="Archived">Archived</option>
-        </select>
-        <select value={searchPriority} onChange={(e) => setSearchPriority(e.target.value)}>
-          <option value="">Any priority</option>
-          <option value="Low">Low</option>
-          <option value="Med">Med</option>
-          <option value="High">High</option>
-        </select>
-        <label className="row archived-toggle">
-          <input type="checkbox" checked={searchArchived} onChange={(e) => setSearchArchived(e.target.checked)} />
-          Archived only
-        </label>
-        <div className="row wrap">
-          <PopularTagFilters
-            tags={taskTagSuggestions}
-            selectedTags={searchTags}
-            onToggleTag={toggleSearchTag}
-            onClear={clearSearchTags}
-            getTagUsage={getTagUsage}
-            idPrefix="search-tag"
+
+      <Collapsible.Root open={advancedOpen} onOpenChange={setAdvancedOpen} className="search-panel-collapsible">
+        <div className="search-panel-primary-row">
+          <input
+            className="search-panel-input"
+            value={searchQ}
+            onChange={(e) => setSearchQ(e.target.value)}
+            placeholder="Search tasks, notes, and specifications"
+            aria-label="Search query"
           />
+          <Collapsible.Trigger asChild>
+            <button
+              className={`status-chip search-panel-advanced-trigger ${advancedOpen ? 'active' : ''}`}
+              type="button"
+              aria-expanded={advancedOpen}
+            >
+              <Icon path={advancedOpen ? 'M6 15l6-6 6 6' : 'M6 9l6 6 6-6'} />
+              <span>Advanced</span>
+              {activeAdvancedFilterCount > 0 ? (
+                <span className="search-panel-filter-count">{activeAdvancedFilterCount}</span>
+              ) : null}
+            </button>
+          </Collapsible.Trigger>
+        </div>
+        <Collapsible.Content className="search-panel-advanced-grid">
+          <SearchFilterSelect
+            value={searchStatus}
+            onValueChange={setSearchStatus}
+            anyLabel="Any task status"
+            options={SEARCH_TASK_STATUS_OPTIONS}
+            ariaLabel="Filter by task status"
+          />
+          <SearchFilterSelect
+            value={searchSpecificationStatus}
+            onValueChange={setSearchSpecificationStatus}
+            anyLabel="Any specification status"
+            options={SEARCH_SPEC_STATUS_OPTIONS}
+            ariaLabel="Filter by specification status"
+          />
+          <SearchFilterSelect
+            value={searchPriority}
+            onValueChange={setSearchPriority}
+            anyLabel="Any priority"
+            options={SEARCH_PRIORITY_OPTIONS}
+            ariaLabel="Filter by task priority"
+          />
+          <label className="search-panel-checkbox-row" htmlFor="search-archived-only">
+            <Checkbox.Root
+              className="search-panel-checkbox-root"
+              id="search-archived-only"
+              checked={searchArchived}
+              onCheckedChange={(checked: boolean | 'indeterminate') => setSearchArchived(checked === true)}
+            >
+              <Checkbox.Indicator className="search-panel-checkbox-indicator">
+                <Icon path="M5 13l4 4L19 7" />
+              </Checkbox.Indicator>
+            </Checkbox.Root>
+            <span>Archived only</span>
+          </label>
+        </Collapsible.Content>
+      </Collapsible.Root>
+
+      <div className="search-panel-tags-row">
+        <div className="search-panel-tags-title-row">
+          <span className="meta">Tag filters</span>
+          {searchTags.length > 0 ? <span className="badge">{searchTags.length} selected</span> : null}
+        </div>
+        <div className="search-panel-tags-scroll">
+          <div className="row wrap search-panel-tags-wrap">
+            <PopularTagFilters
+              tags={taskTagSuggestions}
+              selectedTags={searchTags}
+              onToggleTag={toggleSearchTag}
+              onClear={clearSearchTags}
+              getTagUsage={getTagUsage}
+              idPrefix="search-tag"
+            />
+          </div>
         </div>
       </div>
     </section>
@@ -121,8 +289,8 @@ export function ProfilePanel({
   onChangeSpeechLang,
   changePassword,
   passwordChangePending,
-  submitBugReport,
-  bugReportSubmitting,
+  submitFeedback,
+  feedbackSubmitting,
 }: {
   userName: string
   theme: 'light' | 'dark'
@@ -139,8 +307,14 @@ export function ProfilePanel({
   onChangeSpeechLang: (value: string) => void
   changePassword: (payload: { current_password: string; new_password: string }) => Promise<unknown>
   passwordChangePending: boolean
-  submitBugReport: (payload: BugReportCreateRequest) => Promise<BugReportCreateResponse>
-  bugReportSubmitting: boolean
+  submitFeedback: (payload: {
+    title: string
+    description: string
+    feedback_type: 'general' | 'feature_request' | 'question' | 'other'
+    context?: Record<string, unknown>
+    metadata?: Record<string, unknown>
+  }) => Promise<unknown>
+  feedbackSubmitting: boolean
 }) {
   const nextTheme = theme === 'light' ? 'dark' : 'light'
   const licenseStatus = String(license?.status || '').trim().toLowerCase() || 'unknown'
@@ -172,19 +346,16 @@ export function ProfilePanel({
       ? `Subscription (${formatLabel(subscriptionStatus)})`
       : 'Trial fallback'
   const showTrialWindow = licenseStatus === 'trial' || licenseStatus === 'grace'
-  const [bugTitle, setBugTitle] = React.useState('')
-  const [bugDescription, setBugDescription] = React.useState('')
-  const [bugSeverity, setBugSeverity] = React.useState<'low' | 'medium' | 'high' | 'critical'>('medium')
-  const [bugSteps, setBugSteps] = React.useState('')
-  const [bugExpected, setBugExpected] = React.useState('')
-  const [bugActual, setBugActual] = React.useState('')
-  const [bugReportExpanded, setBugReportExpanded] = React.useState(false)
-  const [bugFeedback, setBugFeedback] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
   const [passwordExpanded, setPasswordExpanded] = React.useState(false)
   const [currentPasswordInput, setCurrentPasswordInput] = React.useState('')
   const [newPasswordInput, setNewPasswordInput] = React.useState('')
   const [confirmPasswordInput, setConfirmPasswordInput] = React.useState('')
   const [passwordFeedback, setPasswordFeedback] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
+  const [feedbackExpanded, setFeedbackExpanded] = React.useState(false)
+  const [feedbackTitleInput, setFeedbackTitleInput] = React.useState('')
+  const [feedbackDescriptionInput, setFeedbackDescriptionInput] = React.useState('')
+  const [feedbackTypeInput, setFeedbackTypeInput] = React.useState<'general' | 'feature_request' | 'question' | 'other'>('general')
+  const [feedbackResult, setFeedbackResult] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
   const voiceFactRef = React.useRef<HTMLDivElement | null>(null)
   const voiceSelectRef = React.useRef<HTMLSelectElement | null>(null)
 
@@ -266,19 +437,16 @@ export function ProfilePanel({
     }
   }, [scrollVoiceLanguageIntoView])
 
-  const resetBugForm = React.useCallback(() => {
-    setBugTitle('')
-    setBugDescription('')
-    setBugSeverity('medium')
-    setBugSteps('')
-    setBugExpected('')
-    setBugActual('')
-  }, [])
-
   const resetPasswordForm = React.useCallback(() => {
     setCurrentPasswordInput('')
     setNewPasswordInput('')
     setConfirmPasswordInput('')
+  }, [])
+
+  const resetFeedbackForm = React.useCallback(() => {
+    setFeedbackTitleInput('')
+    setFeedbackDescriptionInput('')
+    setFeedbackTypeInput('general')
   }, [])
 
   const handleSubmitPasswordChange = React.useCallback(
@@ -318,54 +486,36 @@ export function ProfilePanel({
     [changePassword, confirmPasswordInput, currentPasswordInput, newPasswordInput, resetPasswordForm]
   )
 
-  const handleSubmitBugReport = React.useCallback(
+  const handleSubmitFeedback = React.useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
       event.preventDefault()
-      const title = String(bugTitle || '').trim()
-      const description = String(bugDescription || '').trim()
-      if (!title) {
-        setBugFeedback({ tone: 'error', message: 'Bug title is required.' })
+      const title = String(feedbackTitleInput || '').trim()
+      const description = String(feedbackDescriptionInput || '').trim()
+      if (title.length < 3) {
+        setFeedbackResult({ tone: 'error', message: 'Feedback title must be at least 3 characters.' })
         return
       }
-      if (!description) {
-        setBugFeedback({ tone: 'error', message: 'Bug description is required.' })
+      if (description.length < 5) {
+        setFeedbackResult({ tone: 'error', message: 'Feedback description must be at least 5 characters.' })
         return
       }
       try {
-        const result = await submitBugReport({
+        await submitFeedback({
           title,
           description,
-          steps_to_reproduce: String(bugSteps || '').trim() || null,
-          expected_behavior: String(bugExpected || '').trim() || null,
-          actual_behavior: String(bugActual || '').trim() || null,
-          severity: bugSeverity,
-          context: {},
-          metadata: {},
+          feedback_type: feedbackTypeInput,
+          context: {
+            tab: 'profile',
+          },
         })
-        resetBugForm()
-        if (result.queued) {
-          setBugFeedback({
-            tone: 'success',
-            message: 'Control plane unavailable. Bug report was queued and will retry automatically.',
-          })
-        } else {
-          setBugFeedback({ tone: 'success', message: 'Bug report was sent successfully.' })
-        }
+        resetFeedbackForm()
+        setFeedbackResult({ tone: 'success', message: 'Feedback sent successfully.' })
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed to submit bug report.'
-        setBugFeedback({ tone: 'error', message })
+        const message = error instanceof Error ? error.message : 'Failed to send feedback.'
+        setFeedbackResult({ tone: 'error', message })
       }
     },
-    [
-      bugActual,
-      bugDescription,
-      bugExpected,
-      bugSeverity,
-      bugSteps,
-      bugTitle,
-      resetBugForm,
-      submitBugReport,
-    ]
+    [feedbackDescriptionInput, feedbackTitleInput, feedbackTypeInput, resetFeedbackForm, submitFeedback]
   )
 
   return (
@@ -529,96 +679,95 @@ export function ProfilePanel({
         </dl>
       </section>
 
-      <section className="profile-bug-report" aria-label="Bug reporting">
+      <section className="profile-bug-report" aria-label="Feedback">
         <div className="profile-license-head">
           <button
             type="button"
             className="profile-section-toggle"
-            aria-expanded={bugReportExpanded}
-            aria-controls="profile-bug-report-panel"
-            onClick={() => setBugReportExpanded((current) => !current)}
+            aria-expanded={feedbackExpanded}
+            aria-controls="profile-feedback-panel"
+            onClick={() => setFeedbackExpanded((current) => !current)}
           >
-            <span>Report a bug</span>
+            <span>Leave feedback</span>
             <span className="profile-section-toggle-icon" aria-hidden="true">
               <Icon path="M9 6l6 6-6 6" />
             </span>
           </button>
-          <span className="status-chip">Control Plane</span>
+          <span className="status-chip">Support</span>
         </div>
-        {bugReportExpanded && (
-          <div id="profile-bug-report-panel">
-            <form className="profile-bug-form" onSubmit={handleSubmitBugReport}>
+        {feedbackExpanded ? (
+          <div id="profile-feedback-panel">
+            <form className="profile-bug-form" onSubmit={handleSubmitFeedback}>
               <label className="field-control">
-                <span className="field-label">Title</span>
+                <span className="field-label">Topic</span>
                 <input
-                  value={bugTitle}
-                  onChange={(event) => setBugTitle(event.target.value)}
-                  placeholder="Short summary"
-                  maxLength={140}
-                  autoComplete="off"
+                  value={feedbackTitleInput}
+                  onChange={(event) => setFeedbackTitleInput(event.target.value)}
+                  placeholder="Short feedback title"
                 />
               </label>
               <label className="field-control">
-                <span className="field-label">Severity</span>
-                <select value={bugSeverity} onChange={(event) => setBugSeverity(event.target.value as 'low' | 'medium' | 'high' | 'critical')}>
-                  <option value="low">low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
-                  <option value="critical">critical</option>
+                <span className="field-label">Type</span>
+                <select
+                  value={feedbackTypeInput}
+                  onChange={(event) =>
+                    setFeedbackTypeInput(event.target.value as 'general' | 'feature_request' | 'question' | 'other')
+                  }
+                >
+                  <option value="general">General</option>
+                  <option value="feature_request">Feature request</option>
+                  <option value="question">Question</option>
+                  <option value="other">Other</option>
                 </select>
               </label>
               <label className="field-control">
-                <span className="field-label">Description</span>
+                <span className="field-label">Details</span>
                 <textarea
-                  value={bugDescription}
-                  onChange={(event) => setBugDescription(event.target.value)}
-                  rows={4}
-                  placeholder="What is happening?"
-                />
-              </label>
-              <label className="field-control">
-                <span className="field-label">Steps to reproduce (optional)</span>
-                <textarea
-                  value={bugSteps}
-                  onChange={(event) => setBugSteps(event.target.value)}
-                  rows={3}
-                  placeholder="Exact steps"
-                />
-              </label>
-              <label className="field-control">
-                <span className="field-label">Expected behavior (optional)</span>
-                <textarea
-                  value={bugExpected}
-                  onChange={(event) => setBugExpected(event.target.value)}
-                  rows={2}
-                  placeholder="What should happen?"
-                />
-              </label>
-              <label className="field-control">
-                <span className="field-label">Actual behavior (optional)</span>
-                <textarea
-                  value={bugActual}
-                  onChange={(event) => setBugActual(event.target.value)}
-                  rows={2}
-                  placeholder="What actually happens?"
+                  rows={5}
+                  value={feedbackDescriptionInput}
+                  onChange={(event) => setFeedbackDescriptionInput(event.target.value)}
+                  placeholder="Describe your feedback"
                 />
               </label>
               <div className="row wrap profile-actions">
-                <button className="primary" type="submit" disabled={bugReportSubmitting || !bugTitle.trim() || !bugDescription.trim()}>
-                  {bugReportSubmitting ? 'Submitting...' : 'Submit Bug Report'}
+                <button
+                  className="primary"
+                  type="submit"
+                  disabled={feedbackSubmitting || !feedbackTitleInput.trim() || !feedbackDescriptionInput.trim()}
+                >
+                  {feedbackSubmitting ? 'Sending...' : 'Send feedback'}
                 </button>
-                <button className="button-secondary" type="button" onClick={resetBugForm} disabled={bugReportSubmitting}>
+                <button
+                  className="button-secondary"
+                  type="button"
+                  onClick={resetFeedbackForm}
+                  disabled={feedbackSubmitting}
+                >
                   Reset
                 </button>
               </div>
             </form>
-            {bugFeedback && (
-              <div className={`notice ${bugFeedback.tone === 'error' ? 'notice-error' : ''}`.trim()}>
-                {bugFeedback.message}
+            {feedbackResult ? (
+              <div className={`notice ${feedbackResult.tone === 'error' ? 'notice-error' : ''}`.trim()}>
+                {feedbackResult.message}
               </div>
-            )}
+            ) : null}
           </div>
-        )}
+        ) : null}
+        <p className="meta" style={{ marginTop: 10 }}>
+          For bug reports, use GitHub Issues.
+        </p>
+        <div className="row wrap profile-actions" style={{ marginTop: 10 }}>
+          <a
+            className="primary"
+            href={GITHUB_ISSUES_URL}
+            target="_blank"
+            rel="noreferrer"
+            style={{ textDecoration: 'none' }}
+          >
+            Open GitHub Issues
+          </a>
+        </div>
       </section>
 
       <section className="profile-license" aria-label="License details">
@@ -765,7 +914,7 @@ export function AdminPanel({
   const [skillKey, setSkillKey] = React.useState('')
   const [skillMode, setSkillMode] = React.useState<'advisory' | 'enforced'>('advisory')
   const [skillTrustLevel, setSkillTrustLevel] = React.useState<'verified' | 'reviewed' | 'untrusted'>('reviewed')
-  const [workspaceSkillContentView, setWorkspaceSkillContentView] = React.useState<'write' | 'preview'>('write')
+  const [workspaceSkillContentView, setWorkspaceSkillContentView] = React.useState<'write' | 'preview' | 'split'>('write')
   const [workspaceSkillEditorName, setWorkspaceSkillEditorName] = React.useState('')
   const [workspaceSkillEditorSummary, setWorkspaceSkillEditorSummary] = React.useState('')
   const [workspaceSkillEditorContent, setWorkspaceSkillEditorContent] = React.useState('')
@@ -1299,6 +1448,20 @@ export function AdminPanel({
                                 placeholder="Write skill content in Markdown..."
                                 style={{ width: '100%', minHeight: 180 }}
                               />
+                            ) : workspaceSkillContentView === 'split' ? (
+                              <MarkdownSplitPane
+                                left={(
+                                  <textarea
+                                    className="md-textarea"
+                                    value={workspaceSkillEditorContent}
+                                    onChange={(event) => setWorkspaceSkillEditorContent(event.target.value)}
+                                    placeholder="Write skill content in Markdown..."
+                                    style={{ width: '100%', minHeight: 180 }}
+                                  />
+                                )}
+                                right={<MarkdownView value={workspaceSkillEditorContent} />}
+                                ariaLabel="Resize workspace skill editor and preview panels"
+                              />
                             ) : (
                               <MarkdownView value={workspaceSkillEditorContent} />
                             )}
@@ -1373,6 +1536,15 @@ export function GlobalSearchResultsPanel({
   notesTotal,
   specifications,
   specificationsTotal,
+  searchQuery,
+  semanticMode,
+  semanticSearching,
+  semanticTaskIds,
+  semanticNoteIds,
+  semanticSpecificationIds,
+  lexicalTaskIds,
+  lexicalNoteIds,
+  lexicalSpecificationIds,
   projectNames,
   specificationNames,
   onOpenSpecification,
@@ -1391,6 +1563,15 @@ export function GlobalSearchResultsPanel({
   notesTotal: number
   specifications: Specification[]
   specificationsTotal: number
+  searchQuery: string
+  semanticMode: string
+  semanticSearching: boolean
+  semanticTaskIds: string[]
+  semanticNoteIds: string[]
+  semanticSpecificationIds: string[]
+  lexicalTaskIds: string[]
+  lexicalNoteIds: string[]
+  lexicalSpecificationIds: string[]
   projectNames: Record<string, string>
   specificationNames: Record<string, string>
   onOpenSpecification: (specificationId: string, projectId: string) => void
@@ -1403,45 +1584,152 @@ export function GlobalSearchResultsPanel({
   onCompleteTask: (taskId: string) => void
   onOpenNote: (noteId: string, projectId?: string | null) => boolean
 }) {
-  return (
-    <>
-      <section className="card">
-        <h2>Tasks ({tasksTotal})</h2>
-        <div className="task-list">
-          {tasks.length === 0 ? (
-            <div className="notice">No matching tasks.</div>
-          ) : (
-            tasks.map((task) => (
-              <TaskListItem
-                key={task.id}
-                task={task}
-                onOpen={onOpenTask}
-                onOpenSpecification={onOpenSpecification}
-                onTagClick={onTaskTagClick}
-                onRestore={onRestoreTask}
-                onReopen={onReopenTask}
-                onComplete={onCompleteTask}
-                showProject
-                projectName={projectNames[task.project_id]}
-                specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
-              />
-            ))
-          )}
-        </div>
-      </section>
+  const normalizedQuery = String(searchQuery || '').trim()
+  const normalizedSemanticMode = String(semanticMode || 'empty').trim().toLowerCase()
+  const semanticTaskSet = React.useMemo(() => new Set((semanticTaskIds ?? []).map((id) => String(id || '').trim()).filter(Boolean)), [semanticTaskIds])
+  const semanticNoteSet = React.useMemo(() => new Set((semanticNoteIds ?? []).map((id) => String(id || '').trim()).filter(Boolean)), [semanticNoteIds])
+  const semanticSpecificationSet = React.useMemo(
+    () => new Set((semanticSpecificationIds ?? []).map((id) => String(id || '').trim()).filter(Boolean)),
+    [semanticSpecificationIds]
+  )
+  const lexicalTaskSet = React.useMemo(() => new Set((lexicalTaskIds ?? []).map((id) => String(id || '').trim()).filter(Boolean)), [lexicalTaskIds])
+  const lexicalNoteSet = React.useMemo(() => new Set((lexicalNoteIds ?? []).map((id) => String(id || '').trim()).filter(Boolean)), [lexicalNoteIds])
+  const lexicalSpecificationSet = React.useMemo(
+    () => new Set((lexicalSpecificationIds ?? []).map((id) => String(id || '').trim()).filter(Boolean)),
+    [lexicalSpecificationIds]
+  )
+  const semanticAddedTaskSet = React.useMemo(() => {
+    const out = new Set<string>()
+    for (const id of semanticTaskSet) {
+      if (!lexicalTaskSet.has(id)) out.add(id)
+    }
+    return out
+  }, [lexicalTaskSet, semanticTaskSet])
+  const semanticAddedNoteSet = React.useMemo(() => {
+    const out = new Set<string>()
+    for (const id of semanticNoteSet) {
+      if (!lexicalNoteSet.has(id)) out.add(id)
+    }
+    return out
+  }, [lexicalNoteSet, semanticNoteSet])
+  const semanticAddedSpecificationSet = React.useMemo(() => {
+    const out = new Set<string>()
+    for (const id of semanticSpecificationSet) {
+      if (!lexicalSpecificationSet.has(id)) out.add(id)
+    }
+    return out
+  }, [lexicalSpecificationSet, semanticSpecificationSet])
+  const semanticAddedCount = semanticAddedTaskSet.size + semanticAddedNoteSet.size + semanticAddedSpecificationSet.size
+  const totalResults = tasksTotal + notesTotal + specificationsTotal
 
-      <section className="card">
-        <h2>Notes ({notesTotal})</h2>
-        <div className="task-list">
-          {notes.length === 0 ? (
-            <div className="notice">No matching notes.</div>
-          ) : (
-            notes.map((note) => (
-              <div key={note.id} className="note-row">
+  const semanticModeLabel = (() => {
+    if (normalizedSemanticMode === 'graph+vector') return 'Graph + vector'
+    if (normalizedSemanticMode === 'vector-only') return 'Vector only'
+    if (normalizedSemanticMode === 'graph-only') return 'Graph only'
+    if (normalizedSemanticMode === 'empty') return 'No semantic context'
+    return normalizedSemanticMode || 'Unknown'
+  })()
+  const semanticModeClassSuffix = (() => {
+    if (normalizedSemanticMode === 'graph+vector') return 'graph-vector'
+    if (normalizedSemanticMode === 'vector-only') return 'vector-only'
+    if (normalizedSemanticMode === 'graph-only') return 'graph-only'
+    return 'empty'
+  })()
+
+  const renderTasksSection = () => (
+    <section className="card">
+      <h2>Tasks ({tasksTotal})</h2>
+      <div className="task-list">
+        {tasks.length === 0 ? (
+          <div className="notice">No matching tasks.</div>
+        ) : (
+          tasks.map((task) => (
+            <TaskListItem
+              key={task.id}
+              task={task}
+              onOpen={onOpenTask}
+              onOpenSpecification={onOpenSpecification}
+              onTagClick={onTaskTagClick}
+              onRestore={onRestoreTask}
+              onReopen={onReopenTask}
+              onComplete={onCompleteTask}
+              semanticHit={semanticAddedTaskSet.has(String(task.id))}
+              showProject
+              projectName={projectNames[task.project_id]}
+              specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
+            />
+          ))
+        )}
+      </div>
+    </section>
+  )
+
+  const renderNotesSection = () => (
+    <section className="card">
+      <h2>Notes ({notesTotal})</h2>
+      <div className="task-list">
+        {notes.length === 0 ? (
+          <div className="notice">No matching notes.</div>
+        ) : (
+          notes.map((note) => {
+            const semanticHit = semanticAddedNoteSet.has(String(note.id))
+            return (
+              <div key={note.id} className="note-row search-result-row">
                 <div className="note-title">
-                  {note.archived && <span className="badge">Archived</span>}
-                  {note.pinned && <span className="badge">Pinned</span>}
-                  <strong>{note.title || 'Untitled'}</strong>
+                  <div className="note-title-main">
+                    {note.archived && <span className="badge">Archived</span>}
+                    {note.pinned && <span className="badge">Pinned</span>}
+                    <strong>{note.title || 'Untitled'}</strong>
+                  </div>
+                  <div className="task-title-badges">
+                    {semanticHit ? <span className="task-kind-pill task-kind-pill-semantic">SEMANTIC</span> : null}
+                  </div>
+                  <div className="note-row-actions">
+                    <DropdownMenu.Root>
+                      <DropdownMenu.Trigger asChild>
+                        <button
+                          className="action-icon note-row-actions-trigger"
+                          type="button"
+                          title="Note result actions"
+                          aria-label="Note result actions"
+                        >
+                          <Icon path="M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0" />
+                        </button>
+                      </DropdownMenu.Trigger>
+                      <DropdownMenu.Portal>
+                        <DropdownMenu.Content className="task-group-menu-content note-row-menu-content" sideOffset={8} align="end">
+                          <DropdownMenu.Item className="task-group-menu-item" onSelect={() => onOpenNote(note.id, note.project_id)}>
+                            <Icon path="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6zm9 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
+                            <span>Open note</span>
+                          </DropdownMenu.Item>
+                          {note.specification_id ? (
+                            <DropdownMenu.Item
+                              className="task-group-menu-item"
+                              onSelect={() => onOpenSpecification(note.specification_id as string, note.project_id)}
+                            >
+                              <Icon path="M6 2h12a2 2 0 0 1 2 2v16l-4 2-4-2-4 2-4-2V4a2 2 0 0 1 2-2zm3 5h6m-6 4h6m-6 4h4" />
+                              <span>Open specification</span>
+                            </DropdownMenu.Item>
+                          ) : null}
+                          {(note.tags ?? []).length > 0 ? (
+                            <>
+                              <DropdownMenu.Separator className="task-group-menu-separator" />
+                              {(note.tags ?? []).map((tag) => (
+                                <DropdownMenu.Item
+                                  key={`note-result-tag-${note.id}-${tag}`}
+                                  className="task-group-menu-item"
+                                  onSelect={() => onNoteTagClick(tag)}
+                                >
+                                  <Icon path="M20 10V4a1 1 0 0 0-1-1h-6l-9 9 8 8 9-9zM14.5 7.5h.01" />
+                                  <span>Filter by #{tag}</span>
+                                </DropdownMenu.Item>
+                              ))}
+                            </>
+                          ) : null}
+                        </DropdownMenu.Content>
+                      </DropdownMenu.Portal>
+                    </DropdownMenu.Root>
+                  </div>
                 </div>
                 <div className="meta" style={{ marginTop: 6 }}>{projectNames[note.project_id] || 'Unknown project'}</div>
                 <div className="note-snippet">{(note.body || '').replace(/\s+/g, ' ').slice(0, 180) || '(empty)'}</div>
@@ -1479,22 +1767,72 @@ export function GlobalSearchResultsPanel({
                   )}
                 </div>
               </div>
-            ))
-          )}
-        </div>
-      </section>
+            )
+          })
+        )}
+      </div>
+    </section>
+  )
 
-      <section className="card">
-        <h2>Specifications ({specificationsTotal})</h2>
-        <div className="task-list">
-          {specifications.length === 0 ? (
-            <div className="notice">No matching specifications.</div>
-          ) : (
-            specifications.map((specification) => (
-              <div key={specification.id} className="note-row">
+  const renderSpecificationsSection = () => (
+    <section className="card">
+      <h2>Specifications ({specificationsTotal})</h2>
+      <div className="task-list">
+        {specifications.length === 0 ? (
+          <div className="notice">No matching specifications.</div>
+        ) : (
+          specifications.map((specification) => {
+            const semanticHit = semanticAddedSpecificationSet.has(String(specification.id))
+            return (
+              <div key={specification.id} className="note-row search-result-row">
                 <div className="note-title">
-                  {specification.archived && <span className="badge">Archived</span>}
-                  <strong>{specification.title || 'Untitled spec'}</strong>
+                  <div className="note-title-main">
+                    {specification.archived && <span className="badge">Archived</span>}
+                    <strong>{specification.title || 'Untitled spec'}</strong>
+                  </div>
+                  <div className="task-title-badges">
+                    {semanticHit ? <span className="task-kind-pill task-kind-pill-semantic">SEMANTIC</span> : null}
+                  </div>
+                  <div className="note-row-actions">
+                    <DropdownMenu.Root>
+                      <DropdownMenu.Trigger asChild>
+                        <button
+                          className="action-icon note-row-actions-trigger"
+                          type="button"
+                          title="Specification result actions"
+                          aria-label="Specification result actions"
+                        >
+                          <Icon path="M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0" />
+                        </button>
+                      </DropdownMenu.Trigger>
+                      <DropdownMenu.Portal>
+                        <DropdownMenu.Content className="task-group-menu-content note-row-menu-content" sideOffset={8} align="end">
+                          <DropdownMenu.Item
+                            className="task-group-menu-item"
+                            onSelect={() => onOpenSpecification(specification.id, specification.project_id)}
+                          >
+                            <Icon path="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6zm9 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
+                            <span>Open specification</span>
+                          </DropdownMenu.Item>
+                          {(specification.tags ?? []).length > 0 ? (
+                            <>
+                              <DropdownMenu.Separator className="task-group-menu-separator" />
+                              {(specification.tags ?? []).map((tag) => (
+                                <DropdownMenu.Item
+                                  key={`spec-result-tag-${specification.id}-${tag}`}
+                                  className="task-group-menu-item"
+                                  onSelect={() => onSpecificationTagClick(tag)}
+                                >
+                                  <Icon path="M20 10V4a1 1 0 0 0-1-1h-6l-9 9 8 8 9-9zM14.5 7.5h.01" />
+                                  <span>Filter by #{tag}</span>
+                                </DropdownMenu.Item>
+                              ))}
+                            </>
+                          ) : null}
+                        </DropdownMenu.Content>
+                      </DropdownMenu.Portal>
+                    </DropdownMenu.Root>
+                  </div>
                 </div>
                 <div className="row wrap" style={{ marginTop: 6, gap: 6 }}>
                   <span className="status-chip">{specification.status}</span>
@@ -1530,10 +1868,81 @@ export function GlobalSearchResultsPanel({
                   </button>
                 </div>
               </div>
-            ))
-          )}
+            )
+          })
+        )}
+      </div>
+    </section>
+  )
+
+  return (
+    <>
+      <section className="card search-results-summary-card">
+        <div className="search-results-summary-row">
+          <div className="search-results-summary-title">
+            <h2 style={{ margin: 0 }}>Results ({totalResults})</h2>
+            {normalizedQuery ? (
+              <span className="meta">Query: "{normalizedQuery}"</span>
+            ) : (
+              <span className="meta">Enter a query to narrow results.</span>
+            )}
+          </div>
+          <div className="search-results-summary-badges">
+            {semanticSearching ? (
+              <span className="badge">Semantic: Searching...</span>
+            ) : (
+              <span className={`badge search-semantic-mode-badge mode-${semanticModeClassSuffix}`}>
+                Semantic: {semanticModeLabel}
+              </span>
+            )}
+            {semanticAddedCount > 0 ? <span className="badge">Semantic additions: {semanticAddedCount}</span> : null}
+          </div>
         </div>
       </section>
+
+      <Tabs.Root className="search-results-tabs" defaultValue="all">
+        <Tabs.List className="search-results-tabs-list" aria-label="Search result sections">
+          <Tabs.Trigger className="search-results-tab-trigger" value="all">
+            All
+            <span className="search-results-tab-count">{totalResults}</span>
+          </Tabs.Trigger>
+          <Tabs.Trigger className="search-results-tab-trigger" value="tasks">
+            Tasks
+            <span className="search-results-tab-count">{tasksTotal}</span>
+          </Tabs.Trigger>
+          <Tabs.Trigger className="search-results-tab-trigger" value="notes">
+            Notes
+            <span className="search-results-tab-count">{notesTotal}</span>
+          </Tabs.Trigger>
+          <Tabs.Trigger className="search-results-tab-trigger" value="specifications">
+            Specs
+            <span className="search-results-tab-count">{specificationsTotal}</span>
+          </Tabs.Trigger>
+        </Tabs.List>
+
+        <Tabs.Content className="search-results-tab-content" value="all">
+          {renderTasksSection()}
+          {renderNotesSection()}
+          {renderSpecificationsSection()}
+        </Tabs.Content>
+        <Tabs.Content className="search-results-tab-content" value="tasks">
+          {renderTasksSection()}
+        </Tabs.Content>
+        <Tabs.Content className="search-results-tab-content" value="notes">
+          {renderNotesSection()}
+        </Tabs.Content>
+        <Tabs.Content className="search-results-tab-content" value="specifications">
+          {renderSpecificationsSection()}
+        </Tabs.Content>
+      </Tabs.Root>
+
+      {normalizedQuery.length >= 3 && !semanticSearching && semanticAddedCount === 0 ? (
+        <section className="card">
+          <div className="notice">
+            Semantic search is active, but this query currently has no additional semantic matches.
+          </div>
+        </section>
+      ) : null}
     </>
   )
 }

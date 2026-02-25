@@ -7,7 +7,6 @@ import type {
   AdminSendEmailResponse,
   ActivationCodeCreateRequest,
   ActivationCodeCreateResponse,
-  BugReportsListResponse,
   ClientTokenCreateRequest,
   ClientTokenCreateResponse,
   ContactRequestsListResponse,
@@ -17,6 +16,7 @@ import type {
   WaitlistListResponse,
   UpdateSubscriptionRequest,
   UpdateSubscriptionResponse,
+  UpdateCustomerSubscriptionResponse,
 } from './types'
 
 export class ApiError extends Error {
@@ -85,6 +85,21 @@ export function updateInstallationSubscription(
 ): Promise<UpdateSubscriptionResponse> {
   return api<UpdateSubscriptionResponse>(
     `/v1/admin/installations/${encodeURIComponent(installationId)}/subscription`,
+    token,
+    {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }
+  )
+}
+
+export function updateCustomerSubscription(
+  token: string,
+  customerRef: string,
+  payload: UpdateSubscriptionRequest
+): Promise<UpdateCustomerSubscriptionResponse> {
+  return api<UpdateCustomerSubscriptionResponse>(
+    `/v1/admin/customers/${encodeURIComponent(customerRef)}/subscription`,
     token,
     {
       method: 'PUT',
@@ -168,33 +183,6 @@ export function listContactRequests(
   if (params.limit != null) search.set('limit', String(params.limit))
   if (params.offset != null) search.set('offset', String(params.offset))
   return api<ContactRequestsListResponse>(`/v1/admin/contact-requests?${search.toString()}`, token)
-}
-
-export function listBugReports(
-  token: string,
-  params: {
-    q?: string
-    status?: string
-    severity?: string
-    source?: string
-    workspace_id?: string
-    customer_ref?: string
-    installation_id?: string
-    limit?: number
-    offset?: number
-  }
-): Promise<BugReportsListResponse> {
-  const search = new URLSearchParams()
-  if (params.q) search.set('q', params.q)
-  if (params.status) search.set('status', params.status)
-  if (params.severity) search.set('severity', params.severity)
-  if (params.source) search.set('source', params.source)
-  if (params.workspace_id) search.set('workspace_id', params.workspace_id)
-  if (params.customer_ref) search.set('customer_ref', params.customer_ref)
-  if (params.installation_id) search.set('installation_id', params.installation_id)
-  if (params.limit != null) search.set('limit', String(params.limit))
-  if (params.offset != null) search.set('offset', String(params.offset))
-  return api<BugReportsListResponse>(`/v1/admin/bug-reports?${search.toString()}`, token)
 }
 
 export function openAdminEvents(token: string | null): EventSource {

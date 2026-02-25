@@ -124,7 +124,6 @@ Tool categories:
 - Mutations: `create_*`, `update_*`, `archive_*`, `restore_*`, `delete_*`, `bulk_task_action`.
 - Specification linking: `link_*_to_spec`, `unlink_*_from_spec`, `create_tasks_from_spec`.
 - Automation: `run_task_with_codex`, `get_task_automation_status`.
-- Utility: `send_email` (SMTP).
 - Templates:
   - `list_project_templates`
   - `get_project_template`
@@ -156,7 +155,6 @@ sequenceDiagram
 - Workspace/project allowlists (`MCP_ALLOWED_*`).
 - Automatic fallback command_id generation for create mutations.
 - Workspace inference from project/task scope for safer create flows.
-- SMTP allowlist controls for email sending.
 
 ## 6. Frontend API Consumption
 Frontend (`app/frontend/src/api.ts`) uses:

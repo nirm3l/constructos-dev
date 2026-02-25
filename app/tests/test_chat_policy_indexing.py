@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from importlib import reload
 from pathlib import Path
+from types import SimpleNamespace
 
 from sqlalchemy import select
 
@@ -285,6 +286,96 @@ def test_project_vector_event_passes_chat_policy_overrides_to_reindex(monkeypatc
     assert captured.get("project_id") == "project-chat-policy"
     assert captured.get("chat_index_mode") == "VECTOR_ONLY"
     assert captured.get("chat_attachment_ingestion_mode") == "METADATA_ONLY"
+
+
+def test_index_chat_message_state_uses_fallback_payload_when_message_row_missing(monkeypatch) -> None:
+    from shared import eventing_vector
+
+    class _FakeDb:
+        def get(self, *_args, **_kwargs):
+            return None
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        eventing_vector,
+        "_load_project_chat_policy",
+        lambda *_args, **_kwargs: (object(), SimpleNamespace(vector_enabled=True, attachment_ingestion_mode="OFF")),
+    )
+
+    def _fake_index_entity_state(*_args, **kwargs):
+        captured.update(kwargs)
+        return 1
+
+    monkeypatch.setattr(eventing_vector, "index_entity_state", _fake_index_entity_state)
+
+    eventing_vector._index_chat_message_state(
+        _FakeDb(),
+        message_id="missing-chat-message",
+        fallback_state={
+            "workspace_id": "workspace-1",
+            "project_id": "project-1",
+            "role": "user",
+            "content": "fallback payload content",
+            "is_deleted": False,
+        },
+    )
+
+    assert captured.get("entity_type") == "ChatMessage"
+    assert captured.get("entity_id") == "missing-chat-message"
+    state = dict(captured.get("state") or {})
+    assert state.get("workspace_id") == "workspace-1"
+    assert state.get("project_id") == "project-1"
+    assert state.get("content") == "fallback payload content"
+
+
+def test_index_chat_attachment_state_uses_fallback_payload_when_attachment_row_missing(monkeypatch) -> None:
+    from shared import eventing_vector
+
+    class _FakeDb:
+        def get(self, *_args, **_kwargs):
+            return None
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        eventing_vector,
+        "_load_project_chat_policy",
+        lambda *_args, **_kwargs: (
+            object(),
+            SimpleNamespace(vector_enabled=True, attachment_ingestion_mode="METADATA_ONLY"),
+        ),
+    )
+
+    def _fake_index_entity_state(*_args, **kwargs):
+        captured.update(kwargs)
+        return 1
+
+    monkeypatch.setattr(eventing_vector, "index_entity_state", _fake_index_entity_state)
+
+    eventing_vector._index_chat_attachment_state(
+        _FakeDb(),
+        attachment_id="missing-chat-attachment",
+        fallback_state={
+            "workspace_id": "workspace-1",
+            "project_id": "project-1",
+            "path": "workspace/x/project/y/file.txt",
+            "name": "file.txt",
+            "mime_type": "text/plain",
+            "size_bytes": 42,
+            "extraction_status": "pending",
+            "extracted_text": "",
+            "is_deleted": False,
+        },
+    )
+
+    assert captured.get("entity_type") == "ChatAttachment"
+    assert captured.get("entity_id") == "missing-chat-attachment"
+    state = dict(captured.get("state") or {})
+    assert state.get("workspace_id") == "workspace-1"
+    assert state.get("project_id") == "project-1"
+    assert state.get("name") == "file.txt"
+    assert state.get("chat_attachment_ingestion_mode") == "METADATA_ONLY"
 
 
 def test_project_graph_event_routes_policy_changes_to_chat_sync(monkeypatch) -> None:

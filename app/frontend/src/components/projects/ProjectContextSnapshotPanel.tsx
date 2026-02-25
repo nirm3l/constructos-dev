@@ -1,5 +1,9 @@
 import React from 'react'
+import * as Accordion from '@radix-ui/react-accordion'
+import * as Tabs from '@radix-ui/react-tabs'
+import * as Tooltip from '@radix-ui/react-tooltip'
 import type { GraphContextPack, GraphProjectOverview, ProjectRule, ProjectSkill } from '../../types'
+import { Icon } from '../shared/uiHelpers'
 
 type SnapshotSourceKey =
   | 'soul'
@@ -21,6 +25,7 @@ type SnapshotSourceUsage = {
   group: SnapshotSourceGroup
   color: string
   chars: number
+  tokens: number
   lines: number
   percent: number
   windowPercent: number
@@ -30,6 +35,16 @@ type SnapshotCubeTile = {
   key: string
   label: string
   color: string
+}
+
+type SnapshotCompositionSegment = {
+  key: string
+  label: string
+  color: string
+  tokens: number
+  windowPercent: number
+  usedPercent: number
+  groupLabel: string
 }
 
 type ChatTurnLike = {
@@ -167,6 +182,11 @@ function sourceGroupLabel(group: SnapshotSourceGroup): string {
   if (group === 'knowledge_graph') return 'Knowledge graph'
   if (group === 'hardcoded') return 'Prompt code'
   return 'Runtime session'
+}
+
+function formatPercent(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0.0%'
+  return `${value.toFixed(1)}%`
 }
 
 function buildConversationHistoryText({
@@ -478,6 +498,7 @@ export function ProjectContextSnapshotPanel({
       const sectionTokens = estimateTokenCount(section.chars)
       return {
         ...section,
+        tokens: sectionTokens,
         percent: totalChars > 0 ? (section.chars / totalChars) * 100 : 0,
         windowPercent: contextWindowTokens > 0 ? (sectionTokens / contextWindowTokens) * 100 : 0,
       }
@@ -539,6 +560,7 @@ export function ProjectContextSnapshotPanel({
       chatHistoryTokens: estimateTokenCount(chatHistoryText.length),
       indexedChatTokens: estimateTokenCount(graphEvidenceJsonChat.length),
       contextWindowTokens,
+      windowUsedPercent: contextWindowTokens > 0 ? (totalTokens / contextWindowTokens) * 100 : 0,
       tileCount: CONTEXT_OCCUPANCY_TILE_COUNT,
       tokensPerTile,
       emptyTokens,
@@ -577,117 +599,366 @@ export function ProjectContextSnapshotPanel({
     skillsMarkdown,
   ])
 
+  const [snapshotTab, setSnapshotTab] = React.useState<'overview' | 'composition'>('overview')
+  const [selectedSourceKey, setSelectedSourceKey] = React.useState<string | null>(null)
+
+  const sourceGroups = React.useMemo(() => {
+    const groups: SnapshotSourceGroup[] = ['project', 'knowledge_graph', 'hardcoded', 'runtime']
+    return groups
+      .map((group) => {
+        const items = snapshot.sources.filter((source) => source.group === group)
+        const chars = items.reduce((sum, item) => sum + item.chars, 0)
+        const tokens = items.reduce((sum, item) => sum + item.tokens, 0)
+        const windowPercent = items.reduce((sum, item) => sum + item.windowPercent, 0)
+        const usedPercent = items.reduce((sum, item) => sum + item.percent, 0)
+        return {
+          group,
+          label: sourceGroupLabel(group),
+          items,
+          chars,
+          tokens,
+          windowPercent,
+          usedPercent,
+        }
+      })
+      .filter((group) => group.items.length > 0)
+  }, [snapshot.sources])
+
+  const compositionSegments = React.useMemo<SnapshotCompositionSegment[]>(() => {
+    const activeSegments: SnapshotCompositionSegment[] = snapshot.sources.map((source) => ({
+      key: source.key,
+      label: source.label,
+      color: source.color,
+      tokens: source.tokens,
+      windowPercent: source.windowPercent,
+      usedPercent: source.percent,
+      groupLabel: sourceGroupLabel(source.group),
+    }))
+    if (snapshot.emptyTokens > 0) {
+      activeSegments.push({
+        key: 'empty-window',
+        label: 'Empty context window',
+        color: 'var(--surface-alt)',
+        tokens: snapshot.emptyTokens,
+        windowPercent: snapshot.emptyWindowPercent,
+        usedPercent: 0,
+        groupLabel: 'Unused capacity',
+      })
+    }
+    return activeSegments.filter((segment) => segment.windowPercent > 0)
+  }, [snapshot.emptyTokens, snapshot.emptyWindowPercent, snapshot.sources])
+
+  React.useEffect(() => {
+    if (!selectedSourceKey) return
+    const exists = compositionSegments.some((segment) => segment.key === selectedSourceKey)
+    if (!exists) setSelectedSourceKey(null)
+  }, [compositionSegments, selectedSourceKey])
+
   return (
-    <div className="graph-context-snapshot" style={{ marginTop: 10, marginBottom: 12 }}>
-      <div className="row wrap graph-context-snapshot-head">
-        <div>
-          <div className="meta">Project context snapshot</div>
-          <div className="graph-context-snapshot-title">Full context footprint across project data, hardcoded prompt logic, and runtime inputs</div>
-        </div>
-        <div className="graph-context-snapshot-total">
-          Used ~{snapshot.approxTokens.toLocaleString()} / {snapshot.contextWindowTokens.toLocaleString()} tokens
-        </div>
-      </div>
-
-      <div className="meta" style={{ marginTop: 6 }}>
-        Includes hardcoded system prompt and guidance from automation code, plus live active-session chat history when present.
-      </div>
-      <div className="meta" style={{ marginTop: 4 }}>
-        Indexed project chat corpus is shown separately from active session history so you can track persisted-chat contribution.
-      </div>
-      <div className="meta" style={{ marginTop: 4 }}>
-        Chat indexing policy: {chatIndexModeLabel(normalizedChatIndexMode)} · Attachment ingestion: {chatAttachmentModeLabel(normalizedChatAttachmentMode)}
-      </div>
-      {normalizedChatIndexMode !== 'OFF' ? (
-        <div className="meta" style={{ marginTop: 4 }}>
-          Even with an empty active session, project chat corpus remains retrievable via indexing policy and appears under Chat-derived evidence.
-        </div>
-      ) : null}
-
-      <div className="graph-context-metrics">
-        <div className="graph-context-metric">
-          <span className="meta">Rules</span>
-          <strong>{projectRules.length}</strong>
-        </div>
-        <div className="graph-context-metric">
-          <span className="meta">Skills</span>
-          <strong>{projectSkills.length}</strong>
-        </div>
-        <div className="graph-context-metric">
-          <span className="meta">Evidence items</span>
-          <strong>{snapshot.evidenceCount}</strong>
-        </div>
-        <div className="graph-context-metric">
-          <span className="meta">Hardcoded baseline</span>
-          <strong>~{snapshot.hardcodedTokens.toLocaleString()} tokens</strong>
-        </div>
-        <div className="graph-context-metric">
-          <span className="meta">Live chat history</span>
-          <strong>~{snapshot.chatHistoryTokens.toLocaleString()} tokens</strong>
-        </div>
-        <div className="graph-context-metric">
-          <span className="meta">Indexed chat corpus</span>
-          <strong>~{snapshot.indexedChatTokens.toLocaleString()} tokens</strong>
-        </div>
-        <div className="graph-context-metric">
-          <span className="meta">Chat-derived evidence</span>
-          <strong>{snapshot.chatEvidenceCount} ({snapshot.chatEvidenceSharePct.toFixed(1)}%)</strong>
-        </div>
-        <div className="graph-context-metric">
-          <span className="meta">Scope coverage</span>
-          <strong>{snapshot.contextCoveragePct}%</strong>
-        </div>
-      </div>
-
-      <div className="graph-context-cube-block">
-        <div className="meta">Context source occupancy map</div>
-        {snapshot.sourceTiles.length === 0 ? (
-          <div className="meta" style={{ marginTop: 6 }}>Context is empty for this project.</div>
-        ) : (
-          <div className="graph-context-cube-grid graph-context-cube-grid-dense" role="img" aria-label="Project context source occupancy map">
-            {snapshot.sourceTiles.map((tile, idx) => (
-              <span
-                key={`source-cube-${idx}-${tile.key}`}
-                className="graph-context-cube"
-                style={{ backgroundColor: tile.color }}
-                title={tile.label}
-              />
-            ))}
+    <Tooltip.Provider delayDuration={120}>
+      <div className="graph-context-snapshot context-snapshot-surface" style={{ marginTop: 10, marginBottom: 12 }}>
+        <div className="row wrap graph-context-snapshot-head">
+          <div>
+            <div className="meta">Project context snapshot</div>
+            <div className="graph-context-snapshot-title">
+              Context budget across project resources, indexed graph evidence, hardcoded guidance, and runtime session input.
+            </div>
           </div>
-        )}
-        <div className="meta">
-          Used window: {(100 - snapshot.emptyWindowPercent).toFixed(1)}% (~{snapshot.approxTokens.toLocaleString()} tokens)
+          <div className="graph-context-snapshot-total">
+            ~{snapshot.approxTokens.toLocaleString()} / {snapshot.contextWindowTokens.toLocaleString()} tokens
+          </div>
         </div>
-        <div className="meta">
-          Resolution: {snapshot.tileCount.toLocaleString()} cells · ~{Math.max(1, Math.round(snapshot.tokensPerTile || 0)).toLocaleString()} tokens per cell
-        </div>
-        <div className="graph-context-legend">
-          {snapshot.sources.map((source) => (
-            <div key={`source-legend-${source.key}`} className="graph-context-legend-row">
-              <span className="graph-context-legend-swatch" style={{ backgroundColor: source.color }} />
-              <span className="graph-context-legend-label">{source.label}</span>
-              <span className="meta">
-                {sourceGroupLabel(source.group)} · {source.windowPercent.toFixed(1)}% window · {source.percent.toFixed(1)}% used · {source.chars.toLocaleString()} chars
-                {source.lines > 0 ? ` · ${source.lines} lines` : ''}
-              </span>
-            </div>
-          ))}
-          {snapshot.emptyTokens > 0 ? (
-            <div className="graph-context-legend-row">
-              <span className="graph-context-legend-swatch graph-context-legend-swatch-empty" />
-              <span className="graph-context-legend-label">Empty context window</span>
-              <span className="meta">{snapshot.emptyWindowPercent.toFixed(1)}% window · {snapshot.emptyTokens.toLocaleString()} tokens</span>
-            </div>
-          ) : null}
-        </div>
-      </div>
 
-      <div className="meta" style={{ marginTop: 8 }}>
-        Attachment excerpts are runtime-dependent and can contribute up to ~9,000 tokens when files are included in chat.
+        <div className="context-snapshot-policy-row">
+          <span className="status-chip">{`Chat indexing: ${chatIndexModeLabel(normalizedChatIndexMode)}`}</span>
+          <span className="status-chip">{`Attachment ingestion: ${chatAttachmentModeLabel(normalizedChatAttachmentMode)}`}</span>
+          <span className="status-chip">{`Coverage: ${snapshot.contextCoveragePct}%`}</span>
+        </div>
+
+        <div className="context-snapshot-capacity-track" role="img" aria-label="Context capacity usage">
+          <div
+            className="context-snapshot-capacity-fill"
+            style={{ width: `${Math.max(0, Math.min(100, snapshot.windowUsedPercent))}%` }}
+          />
+        </div>
+        <div className="meta">
+          Used window: {formatPercent(snapshot.windowUsedPercent)} · Empty capacity: {formatPercent(snapshot.emptyWindowPercent)}
+        </div>
+
+        <Tabs.Root
+          className="context-snapshot-tabs"
+          value={snapshotTab}
+          onValueChange={(next) => {
+            if (next === 'overview' || next === 'composition') {
+              setSnapshotTab(next)
+            }
+          }}
+        >
+          <Tabs.List className="context-snapshot-tabs-list" aria-label="Context snapshot views">
+            <Tabs.Trigger className="context-snapshot-tab-trigger" value="overview">Overview</Tabs.Trigger>
+            <Tabs.Trigger className="context-snapshot-tab-trigger" value="composition">Composition + Sources</Tabs.Trigger>
+          </Tabs.List>
+
+          <Tabs.Content value="overview" className="context-snapshot-tab-content">
+            <div className="graph-context-metrics context-snapshot-metrics">
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M6 2h9l3 3v17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm8 1v3h3" />
+                  <span className="meta">Rules</span>
+                </div>
+                <strong>{projectRules.length}</strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M4 6h16M4 12h16M4 18h16" />
+                  <span className="meta">Skills</span>
+                </div>
+                <strong>{projectSkills.length}</strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6zm9 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
+                  <span className="meta">Evidence items</span>
+                </div>
+                <strong>{snapshot.evidenceCount}</strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M5 12h14M12 5v14" />
+                  <span className="meta">Hardcoded baseline</span>
+                </div>
+                <strong>{`~${snapshot.hardcodedTokens.toLocaleString()}`}</strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M4 6h16v10H7l-3 3V6z" />
+                  <span className="meta">Live chat history</span>
+                </div>
+                <strong>{`~${snapshot.chatHistoryTokens.toLocaleString()}`}</strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M12 2v20M2 12h20" />
+                  <span className="meta">Indexed chat corpus</span>
+                </div>
+                <strong>{`~${snapshot.indexedChatTokens.toLocaleString()}`}</strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M7 7h10v10H7zM4 4h16v16H4z" />
+                  <span className="meta">Chat-derived evidence</span>
+                </div>
+                <strong>{`${snapshot.chatEvidenceCount} (${snapshot.chatEvidenceSharePct.toFixed(1)}%)`}</strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M3 17l6-6 4 4 8-8" />
+                  <span className="meta">Avg evidence score</span>
+                </div>
+                <strong>{snapshot.averageEvidenceScore.toFixed(3)}</strong>
+              </div>
+            </div>
+            <div className="context-snapshot-footnotes">
+              <div className="meta">
+                Includes system prompt scaffold and policy block from automation code, plus active-session conversation history when available.
+              </div>
+              <div className="meta">
+                Indexed chat corpus remains available when active session is empty, as long as project chat indexing policy is enabled.
+              </div>
+              <div className="meta">
+                Distinct evidence entities: {snapshot.distinctEvidenceEntities} · Chat evidence entities: {snapshot.chatEvidenceEntityCount} · Map resolution: {snapshot.tileCount.toLocaleString()} cells (~{Math.max(1, Math.round(snapshot.tokensPerTile || 0)).toLocaleString()} tokens/cell)
+              </div>
+            </div>
+          </Tabs.Content>
+
+          <Tabs.Content value="composition" className="context-snapshot-tab-content">
+            <div className="context-snapshot-band-card">
+              <div className="meta">Context source occupancy band</div>
+              {compositionSegments.length === 0 ? (
+                <div className="meta" style={{ marginTop: 8 }}>No context payload available yet.</div>
+              ) : (
+                <div className="context-snapshot-band" role="img" aria-label="Context occupancy by source">
+                  {compositionSegments.map((segment) => {
+                    const isSelected = selectedSourceKey === segment.key
+                    return (
+                      <Tooltip.Root key={`segment-${segment.key}`}>
+                        <Tooltip.Trigger asChild>
+                          <button
+                            type="button"
+                            className={`context-snapshot-band-segment ${isSelected ? 'active' : ''}`.trim()}
+                            style={{
+                              flexGrow: Math.max(segment.windowPercent, 0.45),
+                              backgroundColor: segment.color,
+                            }}
+                            aria-label={`${segment.label}: ${formatPercent(segment.windowPercent)} of context window`}
+                            onClick={() => {
+                              setSelectedSourceKey((current) => (current === segment.key ? null : segment.key))
+                            }}
+                          />
+                        </Tooltip.Trigger>
+                        <Tooltip.Portal>
+                          <Tooltip.Content className="header-tooltip-content" side="top" sideOffset={6}>
+                            <strong>{segment.label}</strong>
+                            <div className="meta">{segment.groupLabel}</div>
+                            <div className="meta">
+                              {formatPercent(segment.windowPercent)} window · {segment.tokens.toLocaleString()} tokens
+                            </div>
+                            {segment.key !== 'empty-window' ? (
+                              <div className="meta">{formatPercent(segment.usedPercent)} of used payload</div>
+                            ) : null}
+                            <Tooltip.Arrow className="header-tooltip-arrow" />
+                          </Tooltip.Content>
+                        </Tooltip.Portal>
+                      </Tooltip.Root>
+                    )
+                  })}
+                </div>
+              )}
+              <div className="meta">
+                Click a segment to focus matching cells and source rows below.
+              </div>
+            </div>
+
+            <div className="graph-context-cube-block context-snapshot-cube-block">
+              <div className="meta">Context source occupancy map</div>
+              {snapshot.sourceTiles.length === 0 ? (
+                <div className="meta" style={{ marginTop: 6 }}>Context is empty for this project.</div>
+              ) : (
+                <div className="graph-context-cube-grid graph-context-cube-grid-dense" role="img" aria-label="Project context source occupancy map">
+                  {snapshot.sourceTiles.map((tile, idx) => {
+                    const tileSourceKey = tile.key.startsWith('empty-')
+                      ? 'empty-window'
+                      : snapshot.sources.find((source) => tile.key.startsWith(`${source.key}-`))?.key ?? null
+                    const isSelected = selectedSourceKey ? selectedSourceKey === tileSourceKey : false
+                    return (
+                      <span
+                        key={`source-cube-${idx}-${tile.key}`}
+                        className={`graph-context-cube context-snapshot-cube ${isSelected ? 'selected' : ''}`.trim()}
+                        style={{ backgroundColor: tile.color }}
+                        title={tile.label}
+                      />
+                    )
+                  })}
+                </div>
+              )}
+              <div className="meta">
+                Used window: {formatPercent(snapshot.windowUsedPercent)} (~{snapshot.approxTokens.toLocaleString()} tokens)
+              </div>
+            </div>
+
+            <div className="context-snapshot-segment-grid">
+              {compositionSegments.map((segment) => (
+                <Tooltip.Root key={`segment-chip-${segment.key}`}>
+                  <Tooltip.Trigger asChild>
+                    <button
+                      type="button"
+                      className={`context-snapshot-segment-chip ${selectedSourceKey === segment.key ? 'active' : ''}`.trim()}
+                      onClick={() => setSelectedSourceKey((current) => (current === segment.key ? null : segment.key))}
+                    >
+                      <span className="context-snapshot-segment-swatch" style={{ backgroundColor: segment.color }} />
+                      <span className="context-snapshot-segment-label">{segment.label}</span>
+                      <span className="meta">{formatPercent(segment.windowPercent)}</span>
+                    </button>
+                  </Tooltip.Trigger>
+                  <Tooltip.Portal>
+                    <Tooltip.Content className="header-tooltip-content" side="top" sideOffset={6}>
+                      <strong>{segment.label}</strong>
+                      <div className="meta">{segment.groupLabel}</div>
+                      <div className="meta">
+                        {formatPercent(segment.windowPercent)} window · {segment.tokens.toLocaleString()} tokens
+                      </div>
+                      {segment.key !== 'empty-window' ? (
+                        <div className="meta">{formatPercent(segment.usedPercent)} of used payload</div>
+                      ) : null}
+                      <Tooltip.Arrow className="header-tooltip-arrow" />
+                    </Tooltip.Content>
+                  </Tooltip.Portal>
+                </Tooltip.Root>
+              ))}
+            </div>
+            <div className="meta">Source breakdown</div>
+            <Accordion.Root
+              className="context-snapshot-source-groups"
+              type="multiple"
+              defaultValue={sourceGroups.map((group) => group.group)}
+            >
+              {sourceGroups.map((group) => (
+                <Accordion.Item
+                  key={`source-group-${group.group}`}
+                  value={group.group}
+                  className="context-snapshot-source-group"
+                >
+                  <Accordion.Header>
+                    <Accordion.Trigger className="context-snapshot-source-group-trigger">
+                      <span className="context-snapshot-source-group-head">
+                        <span className="context-snapshot-source-group-title">{group.label}</span>
+                        <span className="meta">
+                          {formatPercent(group.windowPercent)} window · {formatPercent(group.usedPercent)} used · {group.tokens.toLocaleString()} tokens
+                        </span>
+                      </span>
+                      <span className="context-snapshot-source-group-chevron" aria-hidden="true">
+                        <Icon path="M6 9l6 6 6-6" />
+                      </span>
+                    </Accordion.Trigger>
+                  </Accordion.Header>
+                  <Accordion.Content className="context-snapshot-source-group-content">
+                    <div className="context-snapshot-source-list">
+                      {group.items.map((source) => (
+                        <Tooltip.Root key={`source-row-${source.key}`}>
+                          <Tooltip.Trigger asChild>
+                            <button
+                              type="button"
+                              className={`context-snapshot-source-row ${selectedSourceKey === source.key ? 'active' : ''}`.trim()}
+                              onClick={() => setSelectedSourceKey((current) => (current === source.key ? null : source.key))}
+                            >
+                              <span className="graph-context-legend-swatch" style={{ backgroundColor: source.color }} />
+                              <span className="context-snapshot-source-row-main">
+                                <span className="graph-context-legend-label">{source.label}</span>
+                                <span className="meta">
+                                  {source.tokens.toLocaleString()} tokens · {source.chars.toLocaleString()} chars
+                                  {source.lines > 0 ? ` · ${source.lines} lines` : ''}
+                                </span>
+                                <span className="context-snapshot-source-row-track">
+                                  <span
+                                    className="context-snapshot-source-row-fill"
+                                    style={{ width: `${Math.max(0, Math.min(100, source.windowPercent))}%`, backgroundColor: source.color }}
+                                  />
+                                </span>
+                              </span>
+                              <span className="meta context-snapshot-source-row-pct">
+                                {formatPercent(source.windowPercent)}
+                              </span>
+                            </button>
+                          </Tooltip.Trigger>
+                          <Tooltip.Portal>
+                            <Tooltip.Content className="header-tooltip-content" side="top" sideOffset={6}>
+                              <strong>{source.label}</strong>
+                              <div className="meta">{sourceGroupLabel(source.group)}</div>
+                              <div className="meta">
+                                {formatPercent(source.windowPercent)} window · {formatPercent(source.percent)} used
+                              </div>
+                              <div className="meta">
+                                {source.tokens.toLocaleString()} tokens · {source.chars.toLocaleString()} chars
+                                {source.lines > 0 ? ` · ${source.lines} lines` : ''}
+                              </div>
+                              <Tooltip.Arrow className="header-tooltip-arrow" />
+                            </Tooltip.Content>
+                          </Tooltip.Portal>
+                        </Tooltip.Root>
+                      ))}
+                    </div>
+                  </Accordion.Content>
+                </Accordion.Item>
+              ))}
+            </Accordion.Root>
+            {snapshot.emptyTokens > 0 ? (
+              <div className="meta" style={{ marginTop: 8 }}>
+                Empty context window: {formatPercent(snapshot.emptyWindowPercent)} · {snapshot.emptyTokens.toLocaleString()} tokens
+              </div>
+            ) : null}
+          </Tabs.Content>
+        </Tabs.Root>
       </div>
-      <div className="meta" style={{ marginTop: 4 }}>
-        Average evidence score: {snapshot.averageEvidenceScore.toFixed(3)} · Distinct evidence entities: {snapshot.distinctEvidenceEntities} · Chat evidence entities: {snapshot.chatEvidenceEntityCount}
-      </div>
-    </div>
+    </Tooltip.Provider>
   )
 }

@@ -123,6 +123,7 @@ export function AppOverlays({ state }: { state: any }) {
           setAutomationInstruction: state.setAutomationInstruction,
           runAutomationMutation: state.runAutomationMutation,
           selectedTaskId: state.selectedTaskId,
+          setSelectedTaskId: state.setSelectedTaskId,
           activityShowRawDetails: state.activityShowRawDetails,
           setActivityShowRawDetails: state.setActivityShowRawDetails,
           activity: state.activity,

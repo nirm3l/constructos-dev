@@ -103,6 +103,53 @@ def test_create_specification_is_case_insensitive_idempotent_by_title(tmp_path: 
     assert len([item for item in listed.json()["items"] if item["title"].strip().lower() == "fk sarajevo spec"]) == 1
 
 
+def test_create_specification_force_new_creates_new_instance(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+
+    first = client.post(
+        "/api/specifications",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Untitled spec",
+            "status": "Draft",
+        },
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        "/api/specifications?command_id=spec-force-new-1",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Untitled spec",
+            "status": "Draft",
+            "force_new": True,
+        },
+    )
+    assert second.status_code == 200
+    assert first.json()["id"] != second.json()["id"]
+
+    deleted = client.post(f"/api/specifications/{first.json()['id']}/delete")
+    assert deleted.status_code == 200
+
+    after_delete_force_new = client.post(
+        "/api/specifications?command_id=spec-force-new-2",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Untitled spec",
+            "status": "Draft",
+            "force_new": True,
+        },
+    )
+    assert after_delete_force_new.status_code == 200
+    assert after_delete_force_new.json()["id"] not in {first.json()["id"], second.json()["id"]}
+
+
 def test_specification_status_aliases_are_normalized(tmp_path: Path):
     client = build_client(tmp_path)
     bootstrap = client.get("/api/bootstrap").json()

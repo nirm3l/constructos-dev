@@ -75,12 +75,19 @@ Deploy separately from app stack:
 ```bash
 ./scripts/deploy-control-plane.sh up
 ```
+This starts:
+- `license-control-plane`
+- `license-control-plane-backup` (hourly SQLite snapshots)
+
 Stop without deleting control-plane data:
 ```bash
 ./scripts/deploy-control-plane.sh down
 ```
 Compose file:
 - `docker-compose.license-control-plane.yml`
+Persisted volumes:
+- `license-control-plane-data`
+- `license-control-plane-backups`
 
 Default local URL used by app services in this mode:
 - `http://license-control-plane:8092`
@@ -97,6 +104,23 @@ Activation code flow (multi-device seat control):
 - Issue activation code via `POST /v1/admin/activation-codes` (`customer_ref`, `max_installations`, `valid_until`).
 - Customer enters activation code in app (`POST /api/license/activate` -> control-plane `POST /v1/installations/activate`).
 - Control-plane binds installation to `customer_ref` and enforces seat limit (default `3`).
+
+### 2.9 Control-Plane Backup and Restore
+Backup scheduler defaults:
+- interval: `LCP_BACKUP_INTERVAL_SECONDS=3600` (1 hour)
+- retention: `LCP_BACKUP_RETENTION_HOURS=168` (7 days)
+- backup files: `/backups/license-control-plane-YYYYMMDDTHHMMSSZ.sqlite3`
+
+Restore latest backup:
+```bash
+docker compose -f docker-compose.license-control-plane.yml down
+docker run --rm \
+  -v task-management_license-control-plane-backups:/backups \
+  -v task-management_license-control-plane-data:/data \
+  alpine:3.20 \
+  sh -lc 'cp "$(ls -1t /backups/license-control-plane-*.sqlite3 | head -n 1)" /data/license-control-plane.db'
+./scripts/deploy-control-plane.sh up
+```
 
 ## 3. Critical Environment Variables
 
@@ -137,13 +161,7 @@ Activation code flow (multi-device seat control):
 - `PERSISTENT_SUBSCRIPTION_STOPPING_GRACE_SECONDS`
 - `PERSISTENT_SUBSCRIPTION_RETRY_BACKOFF_SECONDS`
 
-### 3.6 Email Tool
-- `MCP_EMAIL_SMTP_*`
-- `MCP_EMAIL_FROM`
-- `MCP_EMAIL_ALLOWED_RECIPIENTS`
-- `MCP_EMAIL_ALLOWED_DOMAINS`
-
-### 3.7 Licensing
+### 3.6 Licensing
 - License server endpoint is fixed in application runtime and is not customer-configurable.
 - Required client-side variables:
   - `LICENSE_SERVER_TOKEN`
@@ -157,7 +175,7 @@ Activation code flow (multi-device seat control):
 - If `LICENSE_PUBLIC_KEY` is configured, app accepts only valid signed `entitlement_token` payloads from control-plane.
 - `POST /api/license/activate` is write-exempt from license lock so expired installations can re-activate.
 
-### 3.8 Control-Plane Licensing
+### 3.7 Control-Plane Licensing
 - `LCP_API_TOKEN`
 - `LCP_TRIAL_DAYS`
 - `LCP_TOKEN_TTL_SECONDS`
@@ -169,6 +187,11 @@ Activation code flow (multi-device seat control):
 - Installation endpoints (`/v1/installations/*`) accept either:
   - admin token, or
   - active customer-specific client token issued from `/v1/admin/client-tokens`.
+- Backup scheduler:
+  - `LCP_BACKUP_INTERVAL_SECONDS`
+  - `LCP_BACKUP_RETENTION_HOURS`
+  - `LCP_BACKUP_SOURCE_DB_PATH`
+  - `LCP_BACKUP_DIR`
 
 ## 4. Bootstrap and Migration Behavior
 `startup_bootstrap()` performs:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -188,12 +189,34 @@ def _resolve_project_chat_policy_override(db, *, project_id: str, payload: dict[
     )
 
 
-def _index_chat_message_state(db, *, message_id: str) -> None:
+def _index_chat_message_state(db, *, message_id: str, fallback_state: dict[str, Any] | None = None) -> None:
     from .models import ChatMessage
 
     message = db.get(ChatMessage, message_id)
     if message is None:
+        state = dict(fallback_state or {})
+        project_id = str(state.get("project_id") or "").strip()
+        workspace_id = str(state.get("workspace_id") or "").strip()
+        if not project_id or not workspace_id:
+            return
+        _, policy = _load_project_chat_policy(db, project_id=project_id)
+        if policy is None or not policy.vector_enabled:
+            return
+        index_entity_state(
+            db,
+            entity_type="ChatMessage",
+            entity_id=message_id,
+            state={
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "role": str(state.get("role") or ""),
+                "content": str(state.get("content") or ""),
+                "is_deleted": bool(state.get("is_deleted", False)),
+                "updated_at": state.get("updated_at") or datetime.now(timezone.utc),
+            },
+        )
         return
+
     project_id = str(message.project_id or "").strip()
     if not project_id:
         return
@@ -215,12 +238,39 @@ def _index_chat_message_state(db, *, message_id: str) -> None:
     )
 
 
-def _index_chat_attachment_state(db, *, attachment_id: str) -> None:
+def _index_chat_attachment_state(db, *, attachment_id: str, fallback_state: dict[str, Any] | None = None) -> None:
     from .models import ChatAttachment
 
     attachment = db.get(ChatAttachment, attachment_id)
     if attachment is None:
+        state = dict(fallback_state or {})
+        project_id = str(state.get("project_id") or "").strip()
+        workspace_id = str(state.get("workspace_id") or "").strip()
+        if not project_id or not workspace_id:
+            return
+        _, policy = _load_project_chat_policy(db, project_id=project_id)
+        if policy is None or not policy.vector_enabled:
+            return
+        index_entity_state(
+            db,
+            entity_type="ChatAttachment",
+            entity_id=attachment_id,
+            state={
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "path": str(state.get("path") or ""),
+                "name": str(state.get("name") or ""),
+                "mime_type": str(state.get("mime_type") or ""),
+                "size_bytes": state.get("size_bytes"),
+                "extraction_status": str(state.get("extraction_status") or "pending"),
+                "extracted_text": str(state.get("extracted_text") or ""),
+                "chat_attachment_ingestion_mode": policy.attachment_ingestion_mode,
+                "is_deleted": bool(state.get("is_deleted", False)),
+                "updated_at": state.get("updated_at") or datetime.now(timezone.utc),
+            },
+        )
         return
+
     project_id = str(attachment.project_id or "").strip()
     if not project_id:
         return
@@ -305,6 +355,9 @@ def _project_vector_event(db, ev: EventEnvelope) -> None:
 
     if ev.aggregate_type == "ChatSession":
         payload = ev.payload or {}
+        metadata = ev.metadata or {}
+        fallback_workspace_id = str(payload.get("workspace_id") or metadata.get("workspace_id") or "").strip()
+        fallback_project_id = str(payload.get("project_id") or metadata.get("project_id") or "").strip()
         if ev.event_type in {
             CHAT_SESSION_EVENT_USER_MESSAGE_APPENDED,
             CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_APPENDED,
@@ -313,12 +366,45 @@ def _project_vector_event(db, ev: EventEnvelope) -> None:
         }:
             message_id = str(payload.get("message_id") or "").strip()
             if message_id:
-                _index_chat_message_state(db, message_id=message_id)
+                fallback_role = str(payload.get("role") or "").strip().lower()
+                if not fallback_role:
+                    if ev.event_type == CHAT_SESSION_EVENT_USER_MESSAGE_APPENDED:
+                        fallback_role = "user"
+                    elif ev.event_type in {
+                        CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_APPENDED,
+                        CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_UPDATED,
+                    }:
+                        fallback_role = "assistant"
+                _index_chat_message_state(
+                    db,
+                    message_id=message_id,
+                    fallback_state={
+                        "workspace_id": fallback_workspace_id,
+                        "project_id": fallback_project_id,
+                        "role": fallback_role,
+                        "content": str(payload.get("content") or ""),
+                        "is_deleted": ev.event_type == CHAT_SESSION_EVENT_MESSAGE_DELETED,
+                    },
+                )
             return
         if ev.event_type == CHAT_SESSION_EVENT_ATTACHMENT_LINKED:
             attachment_id = str(payload.get("attachment_id") or "").strip()
             if attachment_id:
-                _index_chat_attachment_state(db, attachment_id=attachment_id)
+                _index_chat_attachment_state(
+                    db,
+                    attachment_id=attachment_id,
+                    fallback_state={
+                        "workspace_id": fallback_workspace_id,
+                        "project_id": fallback_project_id,
+                        "path": str(payload.get("path") or ""),
+                        "name": str(payload.get("name") or ""),
+                        "mime_type": str(payload.get("mime_type") or ""),
+                        "size_bytes": payload.get("size_bytes"),
+                        "extraction_status": str(payload.get("extraction_status") or "pending"),
+                        "extracted_text": str(payload.get("extracted_text") or ""),
+                        "is_deleted": bool(payload.get("is_deleted", False)),
+                    },
+                )
             return
 
     if ev.aggregate_type not in {"Task", "Note", "Specification", "ProjectRule"}:

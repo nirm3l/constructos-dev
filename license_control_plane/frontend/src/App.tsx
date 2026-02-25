@@ -4,13 +4,13 @@ import {
   ApiError,
   getHealth,
   getInstallation,
-  listBugReports,
   listContactRequests,
   listInstallations,
   listWaitlist,
   openAdminEvents,
   provisionOnboardingPackage,
   sendAdminEmail,
+  updateCustomerSubscription,
   updateInstallationSubscription
 } from './api'
 import type {
@@ -22,7 +22,13 @@ import type {
 } from './types'
 
 const TOKEN_STORAGE_KEY = 'lcp_admin_token'
-const STATUS_OPTIONS: SubscriptionStatus[] = ['none', 'active', 'trialing', 'grace', 'past_due', 'canceled']
+const STATUS_OPTIONS: SubscriptionStatus[] = ['none', 'active', 'trialing', 'lifetime', 'beta']
+const LEGACY_STATUS_ALIASES: Record<string, SubscriptionStatus> = {
+  canceled: 'none',
+  past_due: 'active',
+  grace: 'active',
+}
+const PLAN_CODE_SUGGESTIONS = ['monthly', 'yearly', 'beta', 'lifetime', 'trial']
 
 type FormState = {
   subscription_status: SubscriptionStatus
@@ -49,6 +55,11 @@ type OnboardingProvisionFormState = {
   metadata_text: string
 }
 
+type CustomerGroup = {
+  customer_ref: string
+  items: InstallationListItem[]
+}
+
 function toDatetimeLocal(value: string | null): string {
   if (!value) return ''
   const date = new Date(value)
@@ -68,8 +79,10 @@ function parseMetadata(metadataText: string): Record<string, unknown> {
 }
 
 function buildFormState(item: InstallationListItem): FormState {
+  const rawStatus = String(item.installation.subscription_status || '').trim().toLowerCase()
+  const normalizedStatus = LEGACY_STATUS_ALIASES[rawStatus] ?? (rawStatus as SubscriptionStatus)
   return {
-    subscription_status: (item.installation.subscription_status as SubscriptionStatus) || 'none',
+    subscription_status: STATUS_OPTIONS.includes(normalizedStatus) ? normalizedStatus : 'none',
     plan_code: item.installation.plan_code ?? '',
     customer_ref: item.installation.customer_ref ?? '',
     valid_until: toDatetimeLocal(item.installation.subscription_valid_until),
@@ -88,6 +101,55 @@ function datetimeLocalFromNow(days: number): string {
   const date = new Date(Date.now() + Math.max(0, days) * 24 * 60 * 60 * 1000)
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+function isLifetimePlanCode(value: string | null | undefined): boolean {
+  return String(value || '').trim().toLowerCase() === 'lifetime'
+}
+
+function isBetaPlanCode(value: string | null | undefined): boolean {
+  return String(value || '').trim().toLowerCase() === 'beta'
+}
+
+function normalizePlanCodeForStatus(status: SubscriptionStatus, planCodeValue: string): string | null {
+  const raw = String(planCodeValue || '').trim()
+  const normalized = raw.toLowerCase()
+  const reserved = new Set(['lifetime', 'beta', 'trial'])
+
+  if (status === 'lifetime') {
+    if (raw && normalized !== 'lifetime') {
+      throw new Error("plan_code must be 'lifetime' when subscription_status is 'lifetime'")
+    }
+    return 'lifetime'
+  }
+  if (status === 'beta') {
+    if (raw && normalized !== 'beta') {
+      throw new Error("plan_code must be 'beta' when subscription_status is 'beta'")
+    }
+    return 'beta'
+  }
+  if (status === 'trialing') {
+    if (raw && normalized !== 'trial') {
+      throw new Error("plan_code must be 'trial' when subscription_status is 'trialing'")
+    }
+    return 'trial'
+  }
+  if (status === 'active') {
+    if (!raw) {
+      throw new Error(`plan_code is required when subscription_status is '${status}'`)
+    }
+    if (reserved.has(normalized)) {
+      throw new Error(`plan_code '${normalized}' is not allowed when subscription_status is '${status}'`)
+    }
+    return raw
+  }
+  if (status === 'none') {
+    if (reserved.has(normalized)) {
+      throw new Error(`plan_code '${normalized}' is not allowed when subscription_status is '${status}'`)
+    }
+    return raw || null
+  }
+  return raw || null
 }
 
 const ICON_PATHS = {
@@ -122,10 +184,7 @@ export function App() {
   const [contactRequestsTypeFilter, setContactRequestsTypeFilter] = React.useState('')
   const [contactRequestsStatusFilter, setContactRequestsStatusFilter] = React.useState('')
   const [contactRequestsSourceFilter, setContactRequestsSourceFilter] = React.useState('')
-  const [bugReportsSearch, setBugReportsSearch] = React.useState('')
-  const [bugReportsStatusFilter, setBugReportsStatusFilter] = React.useState('')
-  const [bugReportsSeverityFilter, setBugReportsSeverityFilter] = React.useState('')
-  const [bugReportsSourceFilter, setBugReportsSourceFilter] = React.useState('')
+  const [selectedCustomerRef, setSelectedCustomerRef] = React.useState<string | null>(null)
   const [selectedInstallationId, setSelectedInstallationId] = React.useState<string | null>(null)
   const [form, setForm] = React.useState<FormState | null>(null)
   const [feedback, setFeedback] = React.useState<string>('')
@@ -185,19 +244,6 @@ export function App() {
       }),
     enabled: Boolean(token),
   })
-  const bugReports = useQuery({
-    queryKey: ['bug-reports', token, bugReportsSearch, bugReportsStatusFilter, bugReportsSeverityFilter, bugReportsSourceFilter],
-    queryFn: () =>
-      listBugReports(token, {
-        q: bugReportsSearch,
-        status: bugReportsStatusFilter,
-        severity: bugReportsSeverityFilter,
-        source: bugReportsSourceFilter,
-        limit: 100,
-        offset: 0,
-      }),
-    enabled: Boolean(token),
-  })
 
   React.useEffect(() => {
     if (!selectedInstallationId) return
@@ -213,27 +259,144 @@ export function App() {
     enabled: Boolean(selectedInstallationId),
   })
 
-  const updateMutation = useMutation({
+  const customerGroups = React.useMemo<CustomerGroup[]>(() => {
+    const groups = new Map<string, InstallationListItem[]>()
+    for (const item of installations.data?.items ?? []) {
+      const customerRef = String(item.installation.customer_ref || '').trim() || 'cust_unassigned'
+      const list = groups.get(customerRef)
+      if (list) {
+        list.push(item)
+      } else {
+        groups.set(customerRef, [item])
+      }
+    }
+    return Array.from(groups.entries())
+      .map(([customer_ref, items]) => ({
+        customer_ref,
+        items: [...items].sort((a, b) =>
+          a.installation.installation_id.localeCompare(b.installation.installation_id)
+        ),
+      }))
+      .sort((a, b) => a.customer_ref.localeCompare(b.customer_ref))
+  }, [installations.data?.items])
+
+  const selectedCustomer = customerGroups.find((group) => group.customer_ref === selectedCustomerRef) ?? null
+  const selectedCustomerInstallations = selectedCustomer?.items ?? []
+
+  React.useEffect(() => {
+    if (customerGroups.length === 0) {
+      setSelectedCustomerRef(null)
+      setSelectedInstallationId(null)
+      setForm(null)
+      return
+    }
+    if (!selectedCustomerRef || !customerGroups.some((group) => group.customer_ref === selectedCustomerRef)) {
+      const firstGroup = customerGroups[0]
+      if (!firstGroup) return
+      setSelectedCustomerRef(firstGroup.customer_ref)
+    }
+  }, [customerGroups, selectedCustomerRef])
+
+  React.useEffect(() => {
+    if (!selectedCustomerRef) return
+    if (selectedCustomerInstallations.length === 0) {
+      setSelectedInstallationId(null)
+      setForm(null)
+      return
+    }
+    if (
+      !selectedInstallationId ||
+      !selectedCustomerInstallations.some(
+        (item) => item.installation.installation_id === selectedInstallationId
+      )
+    ) {
+      const first = selectedCustomerInstallations[0]
+      if (!first) return
+      setSelectedInstallationId(first.installation.installation_id)
+      setForm(buildFormState(first))
+    }
+  }, [selectedCustomerInstallations, selectedCustomerRef, selectedInstallationId])
+
+  const defaultBetaValidUntilIso = health.data?.beta_plan_valid_until ?? health.data?.public_beta_free_until ?? null
+  const defaultBetaValidUntilLocal = toDatetimeLocal(defaultBetaValidUntilIso)
+
+  const buildSubscriptionPayload = React.useCallback((currentForm: FormState): UpdateSubscriptionRequest => {
+    const status = currentForm.subscription_status
+    const normalizedPlanCode = normalizePlanCodeForStatus(status, currentForm.plan_code)
+    const normalizedValidUntil = currentForm.valid_until
+      ? new Date(currentForm.valid_until).toISOString()
+      : null
+    if (status === 'trialing' && !normalizedValidUntil) {
+      throw new Error("valid_until is required when subscription_status is 'trialing'")
+    }
+    const validUntil =
+      status === 'lifetime'
+        ? null
+        : status === 'beta' && !normalizedValidUntil
+          ? defaultBetaValidUntilIso
+          : normalizedValidUntil
+    return {
+      subscription_status: status,
+      plan_code: normalizedPlanCode,
+      customer_ref: currentForm.customer_ref.trim() || null,
+      valid_until: validUntil,
+      metadata: parseMetadata(currentForm.metadata_text),
+    }
+  }, [defaultBetaValidUntilIso])
+
+  const saveSubscriptionMutation = useMutation({
     mutationFn: async () => {
-      if (!token || !selectedInstallationId || !form) {
-        throw new Error('Missing token, installation, or form state')
+      if (!token || !form || !selectedCustomerRef) {
+        throw new Error('Missing token, selected customer, or form state')
       }
-      const payload: UpdateSubscriptionRequest = {
-        subscription_status: form.subscription_status,
-        plan_code: form.plan_code.trim() || null,
-        customer_ref: form.customer_ref.trim() || null,
-        valid_until: form.valid_until ? new Date(form.valid_until).toISOString() : null,
-        metadata: parseMetadata(form.metadata_text),
+      if (!form.customer_ref.trim()) {
+        throw new Error('Customer reference is required')
       }
-      return updateInstallationSubscription(token, selectedInstallationId, payload)
+      const payload = buildSubscriptionPayload(form)
+      return updateCustomerSubscription(token, selectedCustomerRef, payload)
     },
-    onSuccess: async () => {
-      setFeedback('Subscription updated successfully.')
+    onSuccess: async (response) => {
+      setFeedback(
+        `Updated ${response.updated_installations} installation(s): ${response.source_customer_ref ?? response.customer_ref} -> ${response.customer_ref}.`
+      )
       await queryClient.invalidateQueries({ queryKey: ['installations'] })
       await queryClient.invalidateQueries({ queryKey: ['installation'] })
     },
     onError: (error: unknown) => {
-      const message = error instanceof Error ? error.message : 'Failed to update subscription'
+      const message = error instanceof Error ? error.message : 'Failed to update customer subscription'
+      setFeedback(message)
+    },
+  })
+  const moveInstallationMutation = useMutation({
+    mutationFn: async () => {
+      if (!token || !selectedInstallationId || !form) {
+        throw new Error('Missing token, installation, or form state')
+      }
+      const targetCustomerRef = String(form.customer_ref || '').trim()
+      if (!targetCustomerRef) {
+        throw new Error('Customer reference is required')
+      }
+      const sourceInstallation = details.data?.installation ?? selectedFromList?.installation
+      if (!sourceInstallation) {
+        throw new Error('Installation details are not available')
+      }
+      const payload: UpdateSubscriptionRequest = {
+        subscription_status: (sourceInstallation.subscription_status as SubscriptionStatus) || 'none',
+        plan_code: sourceInstallation.plan_code ?? null,
+        customer_ref: targetCustomerRef,
+        valid_until: sourceInstallation.subscription_valid_until,
+        metadata: (sourceInstallation.metadata ?? {}) as Record<string, unknown>,
+      }
+      return updateInstallationSubscription(token, selectedInstallationId, payload)
+    },
+    onSuccess: async () => {
+      const targetCustomerRef = String(form?.customer_ref || '').trim()
+      setFeedback(`Installation moved to customer '${targetCustomerRef}'.`)
+      await queryClient.invalidateQueries({ queryKey: ['installations'] })
+      await queryClient.invalidateQueries({ queryKey: ['installation'] })
+    },
+    onError: (error: unknown) => {
+      const message = error instanceof Error ? error.message : 'Failed to move installation'
       setFeedback(message)
     },
   })
@@ -253,9 +416,14 @@ export function App() {
       const payload: AdminProvisionOnboardingRequest = {
         to_email: toEmail,
         plan_code: String(onboardingProvisionForm.plan_code || '').trim() || null,
-        valid_until: onboardingProvisionForm.valid_until
-          ? new Date(onboardingProvisionForm.valid_until).toISOString()
-          : null,
+        valid_until:
+          isLifetimePlanCode(onboardingProvisionForm.plan_code)
+            ? null
+            : isBetaPlanCode(onboardingProvisionForm.plan_code) && !String(onboardingProvisionForm.valid_until || '').trim()
+              ? defaultBetaValidUntilIso
+            : onboardingProvisionForm.valid_until
+              ? new Date(onboardingProvisionForm.valid_until).toISOString()
+              : null,
         max_installations: maxInstallations,
         image_tag: String(onboardingProvisionForm.image_tag || '').trim() || 'main',
         install_script_url: String(onboardingProvisionForm.install_script_url || '').trim(),
@@ -327,7 +495,6 @@ export function App() {
       void queryClient.invalidateQueries({ queryKey: ['installation'] })
       void queryClient.invalidateQueries({ queryKey: ['waitlist'] })
       void queryClient.invalidateQueries({ queryKey: ['contact-requests'] })
-      void queryClient.invalidateQueries({ queryKey: ['bug-reports'] })
     }
 
     const handleSseMessage = (event: MessageEvent<string>, shouldRefresh: boolean) => {
@@ -366,18 +533,23 @@ export function App() {
     }
   }, [queryClient, token])
 
-  const selectedFromList = installations.data?.items.find(
+  const selectedFromList = (installations.data?.items ?? []).find(
     (item) => item.installation.installation_id === selectedInstallationId
   )
+  const currentInstallationCustomerRef = String(
+    details.data?.installation.customer_ref ?? selectedFromList?.installation.customer_ref ?? ''
+  ).trim()
+  const targetFormCustomerRef = String(form?.customer_ref || '').trim()
+  const onboardingPlanIsLifetime = isLifetimePlanCode(onboardingProvisionForm.plan_code)
+  const customerCount = customerGroups.length
   const installationCount = installations.data?.items.length ?? 0
+  const selectedCustomerInstallationCount = selectedCustomerInstallations.length
   const waitlistCount = waitlist.data?.items.length ?? 0
   const contactRequestsCount = contactRequests.data?.items.length ?? 0
-  const bugReportsCount = bugReports.data?.items.length ?? 0
-  const publicBetaLabel = health.data?.public_beta_active
-    ? `active until ${formatDateTime(health.data?.public_beta_free_until ?? null)}`
-    : health.data?.public_beta_free_until
-      ? `ended (${formatDateTime(health.data?.public_beta_free_until ?? null)})`
-      : 'not configured'
+  const betaPlanCutoff = health.data?.beta_plan_valid_until ?? health.data?.public_beta_free_until ?? null
+  const betaPlanLabel = betaPlanCutoff
+    ? `${formatDateTime(betaPlanCutoff)}`
+    : 'not configured'
   const liveFeedLabel = liveFeedState === 'online' ? 'online' : liveFeedState === 'connecting' ? 'connecting' : 'offline'
   const liveFeedLastSeenLabel = formatDateTime(liveFeedLastEventAt)
 
@@ -392,6 +564,7 @@ export function App() {
     setToken('')
     setTokenInput('')
     localStorage.removeItem(TOKEN_STORAGE_KEY)
+    setSelectedCustomerRef(null)
     setSelectedInstallationId(null)
     setForm(null)
     setFeedback('Token cleared.')
@@ -402,7 +575,7 @@ export function App() {
       <header className="header">
         <div className="header-main">
           <h1>License Control Plane</h1>
-          <p className="muted">Realtime operations dashboard for licensing, waitlist, requests, and bug triage.</p>
+          <p className="muted">Realtime operations dashboard for licensing, waitlist, contact requests, and onboarding.</p>
         </div>
         <div className="status-strip">
           <span className={`status-chip ${health.data?.ok ? 'status-chip-ok' : 'status-chip-warn'}`}>
@@ -412,7 +585,7 @@ export function App() {
             SSE {liveFeedLabel}
           </span>
           <span className="status-chip">
-            Beta {publicBetaLabel}
+            Beta cutoff {betaPlanLabel}
           </span>
           <span className="status-chip">
             Trial {health.data?.trial_days ?? '-'}d
@@ -425,6 +598,12 @@ export function App() {
           </span>
         </div>
       </header>
+
+      <datalist id="plan-code-options">
+        {PLAN_CODE_SUGGESTIONS.map((planCode) => (
+          <option key={planCode} value={planCode} />
+        ))}
+      </datalist>
 
       <section className="panel">
         <h2>Admin API Token</h2>
@@ -476,8 +655,18 @@ export function App() {
               Plan code
               <input
                 value={onboardingProvisionForm.plan_code}
+                list="plan-code-options"
                 onChange={(event) =>
-                  setOnboardingProvisionForm((prev) => ({ ...prev, plan_code: event.target.value }))
+                  setOnboardingProvisionForm((prev) => ({
+                    ...prev,
+                    plan_code: event.target.value,
+                    valid_until:
+                      isLifetimePlanCode(event.target.value)
+                        ? ''
+                        : isBetaPlanCode(event.target.value) && !prev.valid_until
+                          ? defaultBetaValidUntilLocal
+                          : prev.valid_until,
+                  }))
                 }
                 placeholder="monthly"
               />
@@ -487,11 +676,15 @@ export function App() {
               <input
                 type="datetime-local"
                 value={onboardingProvisionForm.valid_until}
+                disabled={onboardingPlanIsLifetime}
                 onChange={(event) =>
                   setOnboardingProvisionForm((prev) => ({ ...prev, valid_until: event.target.value }))
                 }
               />
             </label>
+            <p className="muted">
+              Plan code suggestions: <code>{PLAN_CODE_SUGGESTIONS.join(', ')}</code>
+            </p>
             <label>
               Max installations
               <input
@@ -736,7 +929,7 @@ export function App() {
       <section className="panel">
         <h2>Contact Requests</h2>
         <p className="muted">
-          Requests submitted from marketing-site forms (demo, onboarding, plan details).
+          Requests submitted from marketing-site forms and in-app feedback.
         </p>
         <div className="row compact">
           <input
@@ -752,6 +945,7 @@ export function App() {
             <option value="demo">demo</option>
             <option value="onboarding">onboarding</option>
             <option value="plan_details">plan_details</option>
+            <option value="feedback">feedback</option>
           </select>
           <select
             value={contactRequestsStatusFilter}
@@ -807,118 +1001,41 @@ export function App() {
             </p>
             <div className="feed-list">
               {(contactRequests.data?.items ?? []).map((entry) => (
-                <article key={entry.id} className="feed-item">
-                  <div className="feed-item-head">
-                    <div className="feed-item-title"><code>{entry.email}</code></div>
-                    <div className="feed-item-chips">
-                      <span className="status-chip">{entry.request_type || '-'}</span>
-                      <span className="status-chip">{entry.status || '-'}</span>
-                    </div>
-                  </div>
-                  <p className="feed-item-line">Source: {entry.source || '-'}</p>
-                  <p className="feed-item-line">Created: {formatDateTime(entry.created_at)}</p>
-                </article>
-              ))}
-            </div>
-          </>
-        )}
-      </section>
-
-      <section className="panel">
-        <h2>Bug Reports</h2>
-        <p className="muted">
-          Reports submitted from authenticated app users through the application server.
-        </p>
-        <div className="row compact">
-          <input
-            value={bugReportsSearch}
-            onChange={(event) => setBugReportsSearch(event.target.value)}
-            placeholder="Search by report ID, title, reporter, installation, workspace, or customer"
-          />
-          <select
-            value={bugReportsStatusFilter}
-            onChange={(event) => setBugReportsStatusFilter(event.target.value)}
-          >
-            <option value="">All statuses</option>
-            <option value="new">new</option>
-            <option value="triaged">triaged</option>
-            <option value="in_progress">in_progress</option>
-            <option value="resolved">resolved</option>
-            <option value="closed">closed</option>
-            <option value="rejected">rejected</option>
-          </select>
-          <select
-            value={bugReportsSeverityFilter}
-            onChange={(event) => setBugReportsSeverityFilter(event.target.value)}
-          >
-            <option value="">All severities</option>
-            <option value="low">low</option>
-            <option value="medium">medium</option>
-            <option value="high">high</option>
-            <option value="critical">critical</option>
-          </select>
-          <input
-            value={bugReportsSourceFilter}
-            onChange={(event) => setBugReportsSourceFilter(event.target.value)}
-            placeholder="Source (for example task-app-ui)"
-          />
-        </div>
-        <div className="row compact">
-          <button
-            type="button"
-            className="button-secondary"
-            onClick={() => {
-              setBugReportsSearch('')
-              setBugReportsStatusFilter('')
-              setBugReportsSeverityFilter('')
-              setBugReportsSourceFilter('')
-            }}
-          >
-            <ButtonIcon name="filter" />Clear Filters
-          </button>
-          <button
-            type="button"
-            className="button-secondary"
-            onClick={() => void bugReports.refetch()}
-            disabled={!token}
-          >
-            <ButtonIcon name="refresh" />Reload
-          </button>
-        </div>
-        {!token && <p className="muted">Save admin token to load bug reports.</p>}
-        {bugReports.isLoading && token && <p className="muted">Loading bug reports...</p>}
-        {bugReports.isError && token && (
-          <p className="error">{bugReports.error instanceof Error ? bugReports.error.message : 'Failed to load bug reports.'}</p>
-        )}
-        {!bugReports.isLoading && !bugReports.isError && token && bugReportsCount === 0 && (
-          <p className="muted">No bug reports found for current filters.</p>
-        )}
-        {!bugReports.isLoading && !bugReports.isError && token && bugReportsCount > 0 && (
-          <>
-            <p className="muted">
-              Loaded items: {bugReportsCount} | Total: {bugReports.data?.total ?? 0}
-            </p>
-            <div className="feed-list">
-              {(bugReports.data?.items ?? []).map((entry) => (
-                <article key={entry.report_id} className="feed-item">
-                  <div className="feed-item-head">
-                    <div>
-                      <div className="feed-item-title">{entry.title || '-'}</div>
-                      <div className="feed-item-subtitle"><code>{entry.report_id}</code></div>
-                    </div>
-                    <div className="feed-item-chips">
-                      <span className="status-chip">{entry.severity || '-'}</span>
-                      <span className="status-chip">{entry.status || '-'}</span>
-                    </div>
-                  </div>
-                  <p className="feed-item-line">
-                    Installation: <code>{entry.installation_id}</code>
-                    {entry.workspace_id ? <> | ws: <code>{entry.workspace_id}</code></> : null}
-                  </p>
-                  <p className="feed-item-line">Reporter: {entry.reporter_username || entry.reporter_user_id || '-'}</p>
-                  <p className="feed-item-line">Created: {formatDateTime(entry.created_at)}</p>
-                  <p className="feed-item-desc">{entry.description || '-'}</p>
-                </article>
+                (() => {
+                  const metadata =
+                    entry.metadata && typeof entry.metadata === 'object'
+                      ? (entry.metadata as Record<string, unknown>)
+                      : {}
+                  const feedbackTitle = String(metadata.title || '').trim()
+                  const feedbackDescription = String(metadata.description || '').trim()
+                  const feedbackInstallationId = String(metadata.installation_id || '').trim()
+                  const feedbackReporter =
+                    String(metadata.reporter_username || '').trim() || String(metadata.reporter_user_id || '').trim()
+                  return (
+                    <article key={entry.id} className="feed-item">
+                      <div className="feed-item-head">
+                        <div>
+                          <div className="feed-item-title">
+                            {feedbackTitle || <code>{entry.email}</code>}
+                          </div>
+                          {feedbackReporter ? (
+                            <div className="feed-item-subtitle">Reporter: {feedbackReporter}</div>
+                          ) : null}
+                        </div>
+                        <div className="feed-item-chips">
+                          <span className="status-chip">{entry.request_type || '-'}</span>
+                          <span className="status-chip">{entry.status || '-'}</span>
+                        </div>
+                      </div>
+                      {feedbackInstallationId ? (
+                        <p className="feed-item-line">Installation: <code>{feedbackInstallationId}</code></p>
+                      ) : null}
+                      <p className="feed-item-line">Source: {entry.source || '-'}</p>
+                      <p className="feed-item-line">Created: {formatDateTime(entry.created_at)}</p>
+                      {feedbackDescription ? <p className="feed-item-desc">{feedbackDescription}</p> : null}
+                    </article>
+                  )
+                })()
               ))}
             </div>
           </>
@@ -927,12 +1044,15 @@ export function App() {
 
       <section className="layout">
         <aside className="panel">
-          <h2>Installations</h2>
+          <h2>Customers</h2>
+          <p className="muted">
+            Customer-first view. Select a customer, then pick one of that customer's installations.
+          </p>
           <div className="row compact">
             <input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search by installation ID, customer reference, or workspace ID"
+              placeholder="Search by customer reference, installation ID, or workspace ID"
             />
             <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
               <option value="">All statuses</option>
@@ -955,7 +1075,7 @@ export function App() {
               <ButtonIcon name="filter" />Clear Filters
             </button>
           </div>
-          <p className="muted">Loaded items: {installationCount}</p>
+          <p className="muted">Loaded customers: {customerCount} | Loaded installations: {installationCount}</p>
 
           {installations.isLoading && <p className="muted">Loading installations...</p>}
           {installations.isError && !authError && (
@@ -968,26 +1088,58 @@ export function App() {
             <p className="muted">No installations found for current filters. Clear filters or search by exact installation ID.</p>
           )}
 
-          <ul className="installation-list">
-            {(installations.data?.items ?? []).map((item) => {
-              const installationId = item.installation.installation_id
-              const active = installationId === selectedInstallationId
+          <ul className="installation-list customer-list">
+            {customerGroups.map((group) => {
+              const active = group.customer_ref === selectedCustomerRef
+              const customerActiveCount = group.items.filter((item) => item.entitlement.status === 'active').length
               return (
-                <li key={installationId} className={active ? 'active' : ''}>
+                <li key={group.customer_ref} className={active ? 'active' : ''}>
                   <button
                     onClick={() => {
-                      setSelectedInstallationId(installationId)
-                      setForm(buildFormState(item))
+                      setSelectedCustomerRef(group.customer_ref)
                       setFeedback('')
                     }}
                   >
-                    <strong>{installationId}</strong>
-                    <span>{item.entitlement.status} | {item.installation.plan_code ?? '-'}</span>
+                    <strong>{group.customer_ref}</strong>
+                    <span>Installations: {group.items.length}</span>
+                    <span>Active entitlements: {customerActiveCount}</span>
                   </button>
                 </li>
               )
             })}
           </ul>
+
+          <h2>Customer Installations</h2>
+          {!selectedCustomerRef && <p className="muted">Select a customer.</p>}
+          {selectedCustomerRef && (
+            <>
+              <p className="muted">
+                Customer: <code>{selectedCustomerRef}</code> | Installations: {selectedCustomerInstallationCount}
+              </p>
+              <ul className="installation-list">
+                {selectedCustomerInstallations.map((item) => {
+                  const installationId = item.installation.installation_id
+                  const active = installationId === selectedInstallationId
+                  return (
+                    <li key={installationId} className={active ? 'active' : ''}>
+                      <button
+                        onClick={() => {
+                          setSelectedCustomerRef(item.installation.customer_ref || selectedCustomerRef)
+                          setSelectedInstallationId(installationId)
+                          setForm(buildFormState(item))
+                          setFeedback('')
+                        }}
+                      >
+                        <strong>{installationId}</strong>
+                        <span>sub: {item.installation.subscription_status || '-'} | ent: {item.entitlement.status}</span>
+                        <span>plan: {item.installation.plan_code ?? '-'}</span>
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            </>
+          )}
         </aside>
 
         <main className="panel">
@@ -997,14 +1149,32 @@ export function App() {
           {selectedInstallationId && (
             <>
               <p className="muted">Installation: <code>{selectedInstallationId}</code></p>
+              <p className="muted">Customer: <code>{selectedCustomerRef ?? '-'}</code></p>
+              <p className="muted">
+                Subscription changes are applied at customer level for all installations sharing the selected <code>customer_ref</code>.
+              </p>
+              <p className="muted">
+                Use <code>Move Installation</code> only when a single installation must be reassigned to another customer.
+              </p>
               <p className="muted">
                 Subscription status: <strong>{details.data?.installation.subscription_status ?? selectedFromList?.installation.subscription_status ?? '-'}</strong>
+              </p>
+              <p className="muted">
+                Plan code: <strong>{details.data?.installation.plan_code ?? selectedFromList?.installation.plan_code ?? '-'}</strong>
               </p>
               <p className="muted">
                 Entitlement status: <strong>{details.data?.entitlement.status ?? selectedFromList?.entitlement.status ?? '-'}</strong>
               </p>
               <p className="muted">
-                Valid until: {formatDateTime(details.data?.entitlement.valid_until ?? selectedFromList?.entitlement.valid_until ?? null)}
+                Entitlement reason:{' '}
+                <strong>{String(details.data?.entitlement.metadata?.entitlement_reason ?? selectedFromList?.entitlement.metadata?.entitlement_reason ?? '-')}</strong>
+              </p>
+              <p className="muted">
+                Subscription valid until (configured):{' '}
+                {formatDateTime(details.data?.installation.subscription_valid_until ?? selectedFromList?.installation.subscription_valid_until ?? null)}
+              </p>
+              <p className="muted">
+                Entitlement valid until (effective): {formatDateTime(details.data?.entitlement.valid_until ?? selectedFromList?.entitlement.valid_until ?? null)}
               </p>
               <p className="muted">
                 Trial ends at: {formatDateTime(details.data?.installation.trial_ends_at ?? selectedFromList?.installation.trial_ends_at ?? null)}
@@ -1018,7 +1188,7 @@ export function App() {
                   onSubmit={(event) => {
                     event.preventDefault()
                     setFeedback('')
-                    updateMutation.mutate()
+                    saveSubscriptionMutation.mutate()
                   }}
                 >
                   <div className="form-grid">
@@ -1032,6 +1202,25 @@ export function App() {
                               ? {
                                   ...prev,
                                   subscription_status: event.target.value as SubscriptionStatus,
+                                  plan_code: (() => {
+                                    const nextStatus = event.target.value as SubscriptionStatus
+                                    if (nextStatus === 'lifetime') return 'lifetime'
+                                    if (nextStatus === 'beta') return 'beta'
+                                    if (nextStatus === 'trialing') return 'trial'
+                                    const currentPlan = String(prev.plan_code || '').trim().toLowerCase()
+                                    if (currentPlan === 'lifetime' || currentPlan === 'beta' || currentPlan === 'trial') {
+                                      return ''
+                                    }
+                                    return prev.plan_code
+                                  })(),
+                                  valid_until:
+                                    (event.target.value as SubscriptionStatus) === 'lifetime'
+                                      ? ''
+                                      : (event.target.value as SubscriptionStatus) === 'beta' && !prev.valid_until
+                                        ? defaultBetaValidUntilLocal
+                                        : (event.target.value as SubscriptionStatus) === 'trialing' && !prev.valid_until
+                                          ? datetimeLocalFromNow(14)
+                                        : prev.valid_until,
                                 }
                               : prev
                           )
@@ -1049,6 +1238,8 @@ export function App() {
                       Plan code
                       <input
                         value={form.plan_code}
+                        list="plan-code-options"
+                        disabled={form.subscription_status === 'lifetime' || form.subscription_status === 'beta' || form.subscription_status === 'trialing'}
                         onChange={(event) =>
                           setForm((prev) => (prev ? { ...prev, plan_code: event.target.value } : prev))
                         }
@@ -1070,12 +1261,20 @@ export function App() {
                       <input
                         type="datetime-local"
                         value={form.valid_until}
+                        disabled={form.subscription_status === 'lifetime'}
                         onChange={(event) =>
                           setForm((prev) => (prev ? { ...prev, valid_until: event.target.value } : prev))
                         }
                       />
                     </label>
                   </div>
+                  <p className="muted">
+                    Subscriptions are managed by <code>customer_ref</code>.
+                  </p>
+                  <p className="muted">
+                    Status/Plan mapping: <code>lifetime → lifetime</code>, <code>beta → beta</code>, <code>trialing → trial</code>, and
+                    <code> active</code> requires a commercial plan code such as <code>monthly</code> or <code>yearly</code>.
+                  </p>
 
                   <label>
                     Metadata (JSON object)
@@ -1089,9 +1288,24 @@ export function App() {
                   </label>
 
                   <div className="row">
-                    <button type="submit" disabled={updateMutation.isPending}>
+                    <button type="submit" disabled={saveSubscriptionMutation.isPending}>
                       <ButtonIcon name="save" />
-                      {updateMutation.isPending ? 'Saving...' : 'Save Subscription'}
+                      {saveSubscriptionMutation.isPending ? 'Saving...' : 'Save Subscription'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={
+                        moveInstallationMutation.isPending ||
+                        !targetFormCustomerRef ||
+                        targetFormCustomerRef === currentInstallationCustomerRef
+                      }
+                      onClick={() => {
+                        setFeedback('')
+                        moveInstallationMutation.mutate()
+                      }}
+                    >
+                      <ButtonIcon name="generate" />
+                      {moveInstallationMutation.isPending ? 'Moving...' : 'Move Installation'}
                     </button>
                     <button
                       type="button"

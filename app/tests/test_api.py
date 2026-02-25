@@ -136,6 +136,134 @@ def test_create_note_is_case_insensitive_idempotent_by_title(tmp_path):
     assert len([item for item in listed.json()['items'] if item['title'].strip().lower() == 'fk sarajevo note']) == 1
 
 
+def test_create_note_after_deleted_title_allocates_new_identity(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    first = client.post(
+        '/api/notes?command_id=test-note-recreate-first',
+        json={'title': 'Untitled note', 'workspace_id': ws_id, 'project_id': project_id, 'body': ''},
+    )
+    assert first.status_code == 200
+    first_note = first.json()
+
+    deleted = client.post(f"/api/notes/{first_note['id']}/delete?command_id=test-note-recreate-delete")
+    assert deleted.status_code == 200
+
+    recreated = client.post(
+        '/api/notes?command_id=test-note-recreate-second',
+        json={'title': 'Untitled note', 'workspace_id': ws_id, 'project_id': project_id, 'body': ''},
+    )
+    assert recreated.status_code == 200
+    recreated_note = recreated.json()
+    assert recreated_note['id'] != first_note['id']
+    assert recreated_note['title'] == 'Untitled note'
+
+    recreated_again = client.post(
+        '/api/notes?command_id=test-note-recreate-third',
+        json={'title': 'Untitled note', 'workspace_id': ws_id, 'project_id': project_id, 'body': ''},
+    )
+    assert recreated_again.status_code == 200
+    assert recreated_again.json()['id'] == recreated_note['id']
+
+    listed = client.get(f"/api/notes?workspace_id={ws_id}&project_id={project_id}&q=untitled note")
+    assert listed.status_code == 200
+    active_ids = [item['id'] for item in listed.json()['items'] if item['title'].strip().lower() == 'untitled note']
+    assert active_ids == [recreated_note['id']]
+
+
+def test_create_note_force_new_bypasses_title_idempotency(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    first = client.post(
+        '/api/notes?command_id=test-note-force-new-first',
+        json={
+            'title': 'Untitled note',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'body': '',
+        },
+    )
+    assert first.status_code == 200
+    first_note = first.json()
+
+    second = client.post(
+        '/api/notes?command_id=test-note-force-new-second',
+        json={
+            'title': 'Untitled note',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'body': '',
+            'force_new': True,
+        },
+    )
+    assert second.status_code == 200
+    second_note = second.json()
+    assert second_note['id'] != first_note['id']
+
+    listed = client.get(f"/api/notes?workspace_id={ws_id}&project_id={project_id}&q=untitled note")
+    assert listed.status_code == 200
+    matching = [item for item in listed.json()['items'] if item['title'].strip().lower() == 'untitled note']
+    assert len(matching) == 2
+
+
+def test_task_list_reports_linked_note_count(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created_task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Task with linked notes',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert created_task.status_code == 200
+    task = created_task.json()
+
+    active_note = client.post(
+        '/api/notes',
+        json={
+            'title': 'Active linked note',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'task_id': task['id'],
+            'body': 'hello',
+        },
+    )
+    assert active_note.status_code == 200
+
+    archived_note = client.post(
+        '/api/notes',
+        json={
+            'title': 'Archived linked note',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'task_id': task['id'],
+            'body': 'archive me',
+            'force_new': True,
+        },
+    )
+    assert archived_note.status_code == 200
+    archived_note_id = archived_note.json()['id']
+
+    archived_res = client.post(f'/api/notes/{archived_note_id}/archive')
+    assert archived_res.status_code == 200
+
+    listed = client.get(f'/api/tasks?workspace_id={ws_id}&project_id={project_id}')
+    assert listed.status_code == 200
+    listed_task = next(item for item in listed.json()['items'] if item['id'] == task['id'])
+    assert listed_task['linked_note_count'] == 1
+
+
 def test_project_and_task_refs_roundtrip(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -268,6 +396,103 @@ def test_today_view_respects_user_timezone(tmp_path):
     today = client.get(f'/api/tasks?workspace_id={ws_id}&project_id={project_id}&view=today')
     assert today.status_code == 200
     assert any(t['title'] == 'TZ today task' for t in today.json()['items'])
+
+
+def test_inbox_view_shows_actionable_tasks_for_current_user(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    current_user = bootstrap['current_user']
+    current_user_id = current_user['id']
+    user_tz = ZoneInfo(current_user['timezone'])
+    other_user_id = next(
+        item['id']
+        for item in bootstrap['users']
+        if item['id'] != current_user_id
+    )
+
+    now_utc = datetime.now(timezone.utc)
+    local_today_start = now_utc.astimezone(user_tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    due_today_utc = (local_today_start + timedelta(hours=10)).astimezone(timezone.utc)
+    due_tomorrow_utc = (local_today_start + timedelta(days=1, hours=11)).astimezone(timezone.utc)
+    due_later_utc = (local_today_start + timedelta(days=3, hours=9)).astimezone(timezone.utc)
+
+    no_due = client.post(
+        '/api/tasks',
+        json={'title': 'Inbox no due', 'workspace_id': ws_id, 'project_id': project_id},
+    )
+    assert no_due.status_code == 200
+
+    due_today = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Inbox due today',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'assignee_id': current_user_id,
+            'due_date': due_today_utc.isoformat(),
+        },
+    )
+    assert due_today.status_code == 200
+
+    due_tomorrow = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Inbox due tomorrow',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'due_date': due_tomorrow_utc.isoformat(),
+        },
+    )
+    assert due_tomorrow.status_code == 200
+
+    due_later = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Inbox due later',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'due_date': due_later_utc.isoformat(),
+        },
+    )
+    assert due_later.status_code == 200
+
+    assigned_other = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Inbox assigned other',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'assignee_id': other_user_id,
+            'due_date': due_today_utc.isoformat(),
+        },
+    )
+    assert assigned_other.status_code == 200
+
+    done_task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Inbox done task',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'due_date': due_today_utc.isoformat(),
+        },
+    )
+    assert done_task.status_code == 200
+    done_complete = client.post(f"/api/tasks/{done_task.json()['id']}/complete")
+    assert done_complete.status_code == 200
+
+    inbox = client.get(f'/api/tasks?workspace_id={ws_id}&project_id={project_id}&view=inbox')
+    assert inbox.status_code == 200
+    titles = {item['title'] for item in inbox.json()['items']}
+
+    assert 'Inbox no due' in titles
+    assert 'Inbox due today' in titles
+    assert 'Inbox due tomorrow' in titles
+    assert 'Inbox due later' not in titles
+    assert 'Inbox assigned other' not in titles
+    assert 'Inbox done task' not in titles
 
 
 def test_create_project(tmp_path):

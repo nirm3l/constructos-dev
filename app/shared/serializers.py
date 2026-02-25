@@ -93,7 +93,7 @@ def load_created_by_map(db: Session, aggregate_type: str, aggregate_ids: list[st
     return out
 
 
-def serialize_task(task: Task, created_by: str = "") -> dict[str, Any]:
+def serialize_task(task: Task, created_by: str = "", linked_note_count: int = 0) -> dict[str, Any]:
     dto = TaskDTO(
         id=task.id,
         workspace_id=task.workspace_id,
@@ -125,6 +125,7 @@ def serialize_task(task: Task, created_by: str = "") -> dict[str, Any]:
         updated_at=to_iso_utc(task.updated_at),
         created_by=created_by,
         order_index=task.order_index,
+        linked_note_count=max(0, int(linked_note_count or 0)),
     )
     return asdict(dto)
 

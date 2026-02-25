@@ -13,7 +13,7 @@ import {
   linkTaskToSpecification,
   listAdminUsers,
   resetAdminUserPassword,
-  submitBugReport,
+  submitFeedback,
   updateAdminUserRole,
 } from '../api'
 import { useCoreQueries } from './useCoreQueries'
@@ -198,7 +198,7 @@ function App({ logout }: { logout: () => void }) {
   const [editSpecificationTags, setEditSpecificationTags] = React.useState('')
   const [editSpecificationExternalRefsText, setEditSpecificationExternalRefsText] = React.useState('')
   const [editSpecificationAttachmentRefsText, setEditSpecificationAttachmentRefsText] = React.useState('')
-  const [specificationEditorView, setSpecificationEditorView] = React.useState<'write' | 'preview'>('preview')
+  const [specificationEditorView, setSpecificationEditorView] = React.useState<'write' | 'preview' | 'split'>('preview')
   const [editNoteTitle, setEditNoteTitle] = React.useState('')
   const [editNoteBody, setEditNoteBody] = React.useState('')
   const [editNoteGroupId, setEditNoteGroupId] = React.useState('')
@@ -207,7 +207,7 @@ function App({ logout }: { logout: () => void }) {
   const [editNoteAttachmentRefsText, setEditNoteAttachmentRefsText] = React.useState('')
   const [showTagPicker, setShowTagPicker] = React.useState(false)
   const [tagPickerQuery, setTagPickerQuery] = React.useState('')
-  const [noteEditorView, setNoteEditorView] = React.useState<'write' | 'preview'>('preview')
+  const [noteEditorView, setNoteEditorView] = React.useState<'write' | 'preview' | 'split'>('preview')
   const {
     editStatus, setEditStatus, editTitle, setEditTitle, editDescription, setEditDescription, editPriority, setEditPriority,
     editDueDate, setEditDueDate, editProjectId, setEditProjectId, editTaskGroupId, setEditTaskGroupId, editTaskTags, setEditTaskTags, editTaskExternalRefsText,
@@ -312,28 +312,21 @@ function App({ logout }: { logout: () => void }) {
       setUiError(toErrorMessage(error, 'License activation failed'))
     },
   })
-  const submitBugReportMutation = useMutation({
+  const submitFeedbackMutation = useMutation({
     mutationFn: (payload: {
       title: string
       description: string
-      steps_to_reproduce?: string | null
-      expected_behavior?: string | null
-      actual_behavior?: string | null
-      severity: 'low' | 'medium' | 'high' | 'critical'
+      feedback_type: 'general' | 'feature_request' | 'question' | 'other'
       context?: Record<string, unknown>
       metadata?: Record<string, unknown>
-    }) => submitBugReport(userId, payload),
-    onSuccess: (result) => {
+    }) => submitFeedback(userId, payload),
+    onSuccess: () => {
       setUiError(null)
-      if (result.queued) {
-        setUiInfo('Control plane unavailable. Bug report queued and will retry automatically.')
-      } else {
-        setUiInfo('Bug report sent to the control plane.')
-      }
+      setUiInfo('Feedback submitted successfully.')
       setTimeout(() => setUiInfo(null), 2500)
     },
     onError: (error: unknown) => {
-      setUiError(toErrorMessage(error, 'Bug report submission failed'))
+      setUiError(toErrorMessage(error, 'Feedback submission failed'))
     },
   })
   const changeMyPasswordMutation = useMutation({
@@ -1336,6 +1329,9 @@ function App({ logout }: { logout: () => void }) {
     setCodexChatInstruction,
     selectedSpecificationId,
     setSelectedSpecificationId,
+    setSpecificationStatus,
+    setSpecificationArchived,
+    clearSpecificationFilterTags,
     editSpecificationTitle,
     editSpecificationBody,
     editSpecificationStatus,
@@ -1716,6 +1712,9 @@ function App({ logout }: { logout: () => void }) {
       notes,
       searchNotes,
       searchKnowledge,
+      semanticTaskIds,
+      semanticNoteIds,
+      semanticSpecificationIds,
       searchTasksCombined,
       searchNotesCombined,
       searchSpecificationsCombined,
@@ -1834,8 +1833,8 @@ function App({ logout }: { logout: () => void }) {
       themeMutation,
       changeMyPassword: changeMyPasswordMutation.mutateAsync,
       changeMyPasswordPending: changeMyPasswordMutation.isPending,
-      submitBugReport: submitBugReportMutation.mutateAsync,
-      submitBugReportPending: submitBugReportMutation.isPending,
+      submitFeedback: submitFeedbackMutation.mutateAsync,
+      submitFeedbackPending: submitFeedbackMutation.isPending,
       projectNames,
       taskNameMap,
       specificationNameMap,
@@ -1888,6 +1887,7 @@ function App({ logout }: { logout: () => void }) {
       editProjectId,
       setTaskEditorError,
       editTaskAttachmentRefsText,
+      setEditTaskAttachmentRefsText,
       selectedTaskCreator,
       selectedTaskTimeMeta,
       showTaskTagPicker,
@@ -1912,6 +1912,7 @@ function App({ logout }: { logout: () => void }) {
       setAutomationInstruction,
       runAutomationMutation,
       selectedTaskId,
+      setSelectedTaskId,
       activityShowRawDetails,
       setActivityShowRawDetails,
       activity,

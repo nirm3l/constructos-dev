@@ -328,6 +328,11 @@ code {
   overflow: auto;
 }
 
+.customer-list {
+  max-height: 24vh;
+  margin-bottom: 0.65rem;
+}
+
 .installation-list li {
   margin-bottom: 0.36rem;
 }
@@ -375,6 +380,10 @@ code {
 
   .installation-list {
     max-height: 34vh;
+  }
+
+  .customer-list {
+    max-height: 24vh;
   }
 }
 

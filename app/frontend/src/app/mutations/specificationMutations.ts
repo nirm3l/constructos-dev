@@ -54,9 +54,9 @@ export function useSpecificationMutations(c: any) {
     onSuccess: async (specification) => {
       c.setUiError(null)
       c.setTab('specifications')
-      c.clearSpecificationFilterTags()
-      c.setSpecificationStatus('')
-      c.setSpecificationArchived(false)
+      if (typeof c.clearSpecificationFilterTags === 'function') c.clearSpecificationFilterTags()
+      if (typeof c.setSpecificationStatus === 'function') c.setSpecificationStatus('')
+      if (typeof c.setSpecificationArchived === 'function') c.setSpecificationArchived(false)
       await c.invalidateAll()
       c.setSelectedSpecificationId(specification.id)
     },

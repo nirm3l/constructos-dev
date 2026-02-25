@@ -31,6 +31,7 @@ export function useNoteMutations(c: any) {
       note_group_id?: string | null
       task_id?: string | null
       specification_id?: string | null
+      force_new?: boolean
     }) =>
       createNote(c.userId, {
         title: payload?.title?.trim() || 'Untitled',
@@ -42,13 +43,14 @@ export function useNoteMutations(c: any) {
         body: payload?.body ?? '',
         external_refs: [],
         attachment_refs: [],
+        force_new: Boolean(payload?.force_new),
       }),
     onSuccess: async (note) => {
       c.setUiError(null)
       c.setTab('notes')
       c.openNextSelectedNoteInWriteRef.current = true
       c.setSelectedNoteId(note.id)
-      c.setShowTagPicker(true)
+      c.setShowTagPicker(false)
       c.setTagPickerQuery('')
       await c.invalidateAll()
     },

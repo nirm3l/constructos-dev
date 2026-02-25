@@ -83,6 +83,9 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
         userId={state.userId}
         toggleProjectEditor={state.toggleProjectEditor}
         onCopyShareLink={(projectId) => state.copyShareLink({ tab: 'projects', projectId })}
+        onRemoveProject={(projectId) => {
+          state.deleteProjectMutation.mutate(projectId)
+        }}
         renderInlineEditor={(project) => (
           <ProjectsInlineEditor
             project={project}

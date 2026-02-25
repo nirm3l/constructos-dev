@@ -1,6 +1,7 @@
 import React from 'react'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Tabs from '@radix-ui/react-tabs'
+import * as Tooltip from '@radix-ui/react-tooltip'
 import { createPortal } from 'react-dom'
 import type { Task } from '../../types'
 import type { Tab } from '../../utils/ui'
@@ -44,9 +45,9 @@ function formatScheduleState(state: Task['schedule_state'] | null | undefined): 
 
 const BOTTOM_TAB_ITEMS: Array<{ value: Tab; label: string; shortLabel: string; iconPath: string }> = [
   {
-    value: 'today',
-    label: 'Today',
-    shortLabel: 'Today',
+    value: 'inbox',
+    label: 'Inbox',
+    shortLabel: 'Inbox',
     iconPath: 'M8 3v4M16 3v4M4 10h16M4 5h16v15H4z',
   },
   {
@@ -75,6 +76,26 @@ const BOTTOM_TAB_ITEMS: Array<{ value: Tab; label: string; shortLabel: string; i
   },
 ]
 
+function ChipTooltip({
+  label,
+  children,
+}: {
+  label: string
+  children: React.ReactElement
+}) {
+  return (
+    <Tooltip.Root>
+      <Tooltip.Trigger asChild>{children}</Tooltip.Trigger>
+      <Tooltip.Portal>
+        <Tooltip.Content className="header-tooltip-content" side="top" sideOffset={6}>
+          <span>{label}</span>
+          <Tooltip.Arrow className="header-tooltip-arrow" />
+        </Tooltip.Content>
+      </Tooltip.Portal>
+    </Tooltip.Root>
+  )
+}
+
 export function TaskListItem({
   task,
   onOpen,
@@ -83,6 +104,7 @@ export function TaskListItem({
   onRestore,
   onReopen,
   onComplete,
+  semanticHit = false,
   showProject = false,
   projectName,
   specificationName,
@@ -94,12 +116,16 @@ export function TaskListItem({
   onRestore: (taskId: string) => void
   onReopen: (taskId: string) => void
   onComplete: (taskId: string) => void
+  semanticHit?: boolean
   showProject?: boolean
   projectName?: string
   specificationName?: string
 }) {
   const descriptionPreviewText = taskDescriptionPreview(task.description)
   const isScheduled = task.task_type === 'scheduled_instruction'
+  const externalRefCount = Array.isArray(task.external_refs) ? task.external_refs.length : 0
+  const attachmentCount = Array.isArray(task.attachment_refs) ? task.attachment_refs.length : 0
+  const linkedNoteCount = Number.isFinite(task.linked_note_count as number) ? Number(task.linked_note_count) : 0
   const scheduleTrigger = formatScheduleTrigger(task.scheduled_at_utc)
   const scheduleRepeat = formatRecurringRuleCompact(task.recurring_rule)
   const scheduleState = formatScheduleState(task.schedule_state)
@@ -122,11 +148,25 @@ export function TaskListItem({
         }
 
   return (
-    <div key={task.id} className={`task-item ${isScheduled ? 'scheduled' : ''}`}>
+    <Tooltip.Provider delayDuration={120}>
+      <div key={task.id} className={`task-item ${isScheduled ? 'scheduled' : ''}`}>
       <div className="task-main" role="button" onClick={() => onOpen(task.id)}>
         <div className="task-title">
           <strong>{task.title}</strong>
-          {isScheduled && <span className="task-kind-pill">Scheduled</span>}
+          {semanticHit || isScheduled ? (
+            <div className="task-title-badges">
+              {semanticHit ? (
+                <ChipTooltip label="Ranked as a semantic search hit">
+                  <span className="task-kind-pill task-kind-pill-semantic">SEMANTIC</span>
+                </ChipTooltip>
+              ) : null}
+              {isScheduled ? (
+                <ChipTooltip label="Scheduled task">
+                  <span className="task-kind-pill">Scheduled</span>
+                </ChipTooltip>
+              ) : null}
+            </div>
+          ) : null}
         </div>
         {descriptionPreviewText && (
           <p className="task-desc-preview" title={descriptionPreviewText}>
@@ -135,17 +175,23 @@ export function TaskListItem({
         )}
         {isScheduled && (
           <div className="task-schedule-compact">
-            <span className="task-schedule-chip task-schedule-chip-primary" title={scheduleTrigger}>
-              <Icon path="M12 8v5l3 2m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0" />
-              <span>{scheduleTrigger}</span>
-            </span>
-            <span className="task-schedule-chip" title={scheduleRepeat}>
-              <Icon path="M21 12a9 9 0 0 1-9 9m0 0-4-4m4 4v-4m-9-5a9 9 0 0 1 9-9m0 0 4 4m-4-4v4" />
-              <span>{scheduleRepeat}</span>
-            </span>
-            <span className={`task-schedule-chip task-schedule-state task-schedule-state-${task.schedule_state}`} title={scheduleState}>
-              {scheduleState}
-            </span>
+            <ChipTooltip label={scheduleTrigger}>
+              <span className="task-schedule-chip task-schedule-chip-primary">
+                <Icon path="M12 8v5l3 2m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0" />
+                <span>{scheduleTrigger}</span>
+              </span>
+            </ChipTooltip>
+            <ChipTooltip label={scheduleRepeat}>
+              <span className="task-schedule-chip">
+                <Icon path="M21 12a9 9 0 0 1-9 9m0 0-4-4m4 4v-4m-9-5a9 9 0 0 1 9-9m0 0 4 4m-4-4v4" />
+                <span>{scheduleRepeat}</span>
+              </span>
+            </ChipTooltip>
+            <ChipTooltip label={scheduleState}>
+              <span className={`task-schedule-chip task-schedule-state task-schedule-state-${task.schedule_state}`}>
+                {scheduleState}
+              </span>
+            </ChipTooltip>
           </div>
         )}
         <span className="meta">
@@ -192,37 +238,66 @@ export function TaskListItem({
           </div>
         )}
         <div className="task-badges">
-          <span className={`prio prio-${priorityTone(task.priority)}`} title={`Priority: ${task.priority}`}>
-            {task.priority}
-          </span>
+          {linkedNoteCount > 0 && (
+            <ChipTooltip label={`${linkedNoteCount} linked note${linkedNoteCount === 1 ? '' : 's'}`}>
+              <span className="task-resource-chip">
+                <Icon path="M6 2h9l3 3v17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm8 1v3h3" />
+                <span>{linkedNoteCount}</span>
+              </span>
+            </ChipTooltip>
+          )}
+          {externalRefCount > 0 && (
+            <ChipTooltip label={`${externalRefCount} external link${externalRefCount === 1 ? '' : 's'}`}>
+              <span className="task-resource-chip">
+                <Icon path="M14 3h7v7m0-7L10 14M5 7v12h12v-5" />
+                <span>{externalRefCount}</span>
+              </span>
+            </ChipTooltip>
+          )}
+          {attachmentCount > 0 && (
+            <ChipTooltip label={`${attachmentCount} attachment${attachmentCount === 1 ? '' : 's'}`}>
+              <span className="task-resource-chip">
+                <Icon path="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.2-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.2a2 2 0 0 1-2.82-2.83l8.49-8.48" />
+                <span>{attachmentCount}</span>
+              </span>
+            </ChipTooltip>
+          )}
+          <ChipTooltip label={`Priority: ${task.priority}`}>
+            <span className={`prio prio-${priorityTone(task.priority)}`}>
+              {task.priority}
+            </span>
+          </ChipTooltip>
         </div>
       </div>
-      <DropdownMenu.Root>
-        <DropdownMenu.Trigger asChild>
-          <button
-            className="action-icon task-item-actions-trigger"
-            type="button"
-            title="Task actions"
-            aria-label="Task actions"
-          >
-            <Icon path="M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0" />
-          </button>
-        </DropdownMenu.Trigger>
-        <DropdownMenu.Portal>
-          <DropdownMenu.Content className="task-group-menu-content task-item-actions-menu-content" sideOffset={8} align="end">
-            <DropdownMenu.Item className="task-group-menu-item" onSelect={() => onOpen(task.id)}>
-              <Icon path="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6zm9 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
-              <span>Open task</span>
-            </DropdownMenu.Item>
-            <DropdownMenu.Separator className="task-group-menu-separator" />
-            <DropdownMenu.Item className="task-group-menu-item" onSelect={primaryAction.onSelect}>
-              <Icon path={primaryAction.iconPath} />
-              <span>{primaryAction.label}</span>
-            </DropdownMenu.Item>
-          </DropdownMenu.Content>
-        </DropdownMenu.Portal>
-      </DropdownMenu.Root>
-    </div>
+      <div className="task-item-actions">
+        <DropdownMenu.Root>
+          <DropdownMenu.Trigger asChild>
+            <button
+              className="action-icon task-item-actions-trigger"
+              type="button"
+              title="Task actions"
+              aria-label="Task actions"
+            >
+              <Icon path="M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0" />
+            </button>
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content className="task-group-menu-content task-item-actions-menu-content" sideOffset={8} align="end">
+              <DropdownMenu.Item className="task-group-menu-item" onSelect={() => onOpen(task.id)}>
+                <Icon path="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6zm9 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
+                <span>Open task</span>
+              </DropdownMenu.Item>
+              <DropdownMenu.Separator className="task-group-menu-separator" />
+              <DropdownMenu.Item className="task-group-menu-item" onSelect={primaryAction.onSelect}>
+                <Icon path={primaryAction.iconPath} />
+                <span>{primaryAction.label}</span>
+              </DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
+      </div>
+      </div>
+    </Tooltip.Provider>
   )
 }
 

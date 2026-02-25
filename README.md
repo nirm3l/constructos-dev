@@ -80,6 +80,27 @@ Deploy local control-plane separately:
 ```bash
 ./scripts/deploy-control-plane.sh up
 ```
+This also starts `license-control-plane-backup`, which creates SQLite backups every hour.
+Default backup retention is 7 days in Docker volume `license-control-plane-backups`.
+
+Optional backup tuning:
+```bash
+export LCP_BACKUP_INTERVAL_SECONDS='3600'
+export LCP_BACKUP_RETENTION_HOURS='168'
+./scripts/deploy-control-plane.sh restart
+```
+
+Restore latest backup:
+```bash
+docker compose -f docker-compose.license-control-plane.yml down
+docker run --rm \
+  -v task-management_license-control-plane-backups:/backups \
+  -v task-management_license-control-plane-data:/data \
+  alpine:3.20 \
+  sh -lc 'cp "$(ls -1t /backups/license-control-plane-*.sqlite3 | head -n 1)" /data/license-control-plane.db'
+./scripts/deploy-control-plane.sh up
+```
+
 Optional control-plane email test setup (Resend):
 ```bash
 export LCP_EMAIL_RESEND_API_KEY='re_xxx'

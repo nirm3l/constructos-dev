@@ -1,4 +1,5 @@
 import React from 'react'
+import * as ToggleGroup from '@radix-ui/react-toggle-group'
 import { attachmentDownloadUrl } from '../../api'
 import type { AttachmentRef, ExternalRef } from '../../types'
 
@@ -10,13 +11,137 @@ export function Icon({ path }: { path: string }) {
   )
 }
 
+export type MarkdownEditorView = 'write' | 'preview' | 'split'
+
+type MarkdownSplitPaneProps = {
+  left: React.ReactNode
+  right: React.ReactNode
+  ariaLabel?: string
+  minLeftPercent?: number
+  maxLeftPercent?: number
+  defaultLeftPercent?: number
+}
+
+export function MarkdownSplitPane({
+  left,
+  right,
+  ariaLabel = 'Resize split editor panels',
+  minLeftPercent = 28,
+  maxLeftPercent = 72,
+  defaultLeftPercent = 50,
+}: MarkdownSplitPaneProps) {
+  const rootRef = React.useRef<HTMLDivElement | null>(null)
+  const activePointerIdRef = React.useRef<number | null>(null)
+
+  const clampPercent = React.useCallback((value: number) => {
+    return Math.min(maxLeftPercent, Math.max(minLeftPercent, value))
+  }, [maxLeftPercent, minLeftPercent])
+
+  const setSplitPercent = React.useCallback((value: number) => {
+    const root = rootRef.current
+    if (!root) return
+    root.style.setProperty('--md-split-left', `${clampPercent(value)}%`)
+  }, [clampPercent])
+
+  const updateFromClientX = React.useCallback((clientX: number) => {
+    const root = rootRef.current
+    if (!root) return
+    const bounds = root.getBoundingClientRect()
+    if (bounds.width <= 0) return
+    const ratio = ((clientX - bounds.left) / bounds.width) * 100
+    setSplitPercent(ratio)
+  }, [setSplitPercent])
+
+  const finishDragging = React.useCallback(() => {
+    activePointerIdRef.current = null
+    rootRef.current?.classList.remove('dragging')
+  }, [])
+
+  React.useEffect(() => {
+    setSplitPercent(defaultLeftPercent)
+  }, [defaultLeftPercent, setSplitPercent])
+
+  const onPointerDown = React.useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 900px)').matches) return
+    event.preventDefault()
+    activePointerIdRef.current = event.pointerId
+    rootRef.current?.classList.add('dragging')
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }, [])
+
+  const onPointerMove = React.useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+    if (activePointerIdRef.current !== event.pointerId) return
+    updateFromClientX(event.clientX)
+  }, [updateFromClientX])
+
+  const onPointerUp = React.useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+    if (activePointerIdRef.current !== event.pointerId) return
+    finishDragging()
+  }, [finishDragging])
+
+  const onPointerCancel = React.useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+    if (activePointerIdRef.current !== event.pointerId) return
+    finishDragging()
+  }, [finishDragging])
+
+  const onKeyDown = React.useCallback((event: React.KeyboardEvent<HTMLButtonElement>) => {
+    const root = rootRef.current
+    if (!root) return
+    const currentRaw = root.style.getPropertyValue('--md-split-left').replace('%', '').trim()
+    const current = Number.parseFloat(currentRaw)
+    const fallback = clampPercent(defaultLeftPercent)
+    const base = Number.isFinite(current) ? current : fallback
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault()
+      setSplitPercent(base - 4)
+      return
+    }
+    if (event.key === 'ArrowRight') {
+      event.preventDefault()
+      setSplitPercent(base + 4)
+      return
+    }
+    if (event.key === 'Home') {
+      event.preventDefault()
+      setSplitPercent(minLeftPercent)
+      return
+    }
+    if (event.key === 'End') {
+      event.preventDefault()
+      setSplitPercent(maxLeftPercent)
+    }
+  }, [clampPercent, defaultLeftPercent, maxLeftPercent, minLeftPercent, setSplitPercent])
+
+  return (
+    <div ref={rootRef} className="md-split-pane">
+      <div className="md-split-pane-left">{left}</div>
+      <button
+        type="button"
+        className="md-split-divider"
+        title={ariaLabel}
+        aria-label={ariaLabel}
+        role="separator"
+        aria-orientation="vertical"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerCancel}
+        onKeyDown={onKeyDown}
+      >
+        <span className="md-split-divider-grip" aria-hidden="true" />
+      </button>
+      <div className="md-split-pane-right">{right}</div>
+    </div>
+  )
+}
+
 export function MarkdownModeToggle({
   view,
   onChange,
   ariaLabel,
 }: {
-  view: 'write' | 'preview'
-  onChange: (next: 'write' | 'preview') => void
+  view: MarkdownEditorView
+  onChange: (next: MarkdownEditorView) => void
   ariaLabel: string
 }) {
   const rootRef = React.useRef<HTMLDivElement | null>(null)
@@ -90,6 +215,12 @@ export function MarkdownModeToggle({
     broadcastFullscreenChange()
   }, [broadcastFullscreenChange, getEditorSurface])
 
+  const onViewValueChange = React.useCallback((nextValue: string) => {
+    if (nextValue === 'write' || nextValue === 'preview' || nextValue === 'split') {
+      onChange(nextValue)
+    }
+  }, [onChange])
+
   return (
     <div ref={rootRef} className="seg md-mode-toggle" role="tablist" aria-label={ariaLabel}>
       <button
@@ -102,20 +233,28 @@ export function MarkdownModeToggle({
         <Icon path={isFullscreen ? 'M9 9H5V5M15 9h4V5M9 15H5v4M15 15h4v4' : 'M9 5H5v4M15 5h4v4M9 19H5v-4M15 19h4v-4'} />
         <span className="md-fullscreen-label">{isFullscreen ? 'Exit' : 'Full'}</span>
       </button>
-      <button
-        className={`seg-btn ${view === 'write' ? 'active' : ''}`}
-        onClick={() => onChange('write')}
-        type="button"
+      <ToggleGroup.Root
+        type="single"
+        value={view}
+        onValueChange={onViewValueChange}
+        className="md-mode-toggle-group"
+        aria-label={ariaLabel}
       >
-        Edit
-      </button>
-      <button
-        className={`seg-btn ${view === 'preview' ? 'active' : ''}`}
-        onClick={() => onChange('preview')}
-        type="button"
-      >
-        Preview
-      </button>
+        <ToggleGroup.Item className="seg-btn" value="write" aria-label="Edit">
+          Edit
+        </ToggleGroup.Item>
+        <ToggleGroup.Item className="seg-btn" value="preview" aria-label="Preview">
+          Preview
+        </ToggleGroup.Item>
+        <ToggleGroup.Item
+          className="seg-btn"
+          value="split"
+          aria-label="Split view"
+          title="Split editor and preview"
+        >
+          Split
+        </ToggleGroup.Item>
+      </ToggleGroup.Root>
       <span className="md-chip">MD</span>
     </div>
   )

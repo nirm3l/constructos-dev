@@ -31,7 +31,7 @@ export function useCoreQueries(c: any) {
   const tasks = useQuery({
     queryKey: ['tasks', c.userId, c.workspaceId, c.tab, c.selectedProjectId, c.searchQ, c.searchStatus, c.searchPriority, c.searchArchived, c.searchTags.join(',')],
     queryFn: () => getTasks(c.userId, c.workspaceId, c.taskParams),
-    enabled: Boolean(c.workspaceId && c.taskParams) && (c.tab === 'today' || c.tab === 'tasks' || c.tab === 'search')
+    enabled: Boolean(c.workspaceId && c.taskParams) && (c.tab === 'inbox' || c.tab === 'tasks' || c.tab === 'search')
   })
 
   const taskLookup = useQuery({

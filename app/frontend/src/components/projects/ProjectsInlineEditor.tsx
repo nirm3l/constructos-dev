@@ -1,4 +1,9 @@
 import React from 'react'
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
+import * as AlertDialog from '@radix-ui/react-alert-dialog'
+import * as Select from '@radix-ui/react-select'
+import * as Accordion from '@radix-ui/react-accordion'
+import * as Tabs from '@radix-ui/react-tabs'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import type {
   AttachmentRef,
@@ -12,7 +17,13 @@ import type {
   WorkspaceSkill,
   WorkspaceSkillsPage,
 } from '../../types'
-import { AttachmentRefList, ExternalRefEditor, Icon, MarkdownModeToggle } from '../shared/uiHelpers'
+import {
+  AttachmentRefList,
+  ExternalRefEditor,
+  Icon,
+  MarkdownModeToggle,
+  MarkdownSplitPane,
+} from '../shared/uiHelpers'
 import { ProjectContextSnapshotPanel } from './ProjectContextSnapshotPanel'
 import {
   attachmentRefsToText,
@@ -134,8 +145,8 @@ export function ProjectsInlineEditor({
   codexChatTurns: Array<{ role?: string; content?: string }>
   saveProjectMutation: ProjectMutation
   deleteProjectMutation: ProjectMutation
-  editProjectDescriptionView: 'write' | 'preview'
-  setEditProjectDescriptionView: React.Dispatch<React.SetStateAction<'write' | 'preview'>>
+  editProjectDescriptionView: 'write' | 'preview' | 'split'
+  setEditProjectDescriptionView: React.Dispatch<React.SetStateAction<'write' | 'preview' | 'split'>>
   editProjectDescriptionRef: React.RefObject<HTMLTextAreaElement | null>
   editProjectDescription: string
   setEditProjectDescription: React.Dispatch<React.SetStateAction<string>>
@@ -150,8 +161,8 @@ export function ProjectsInlineEditor({
   setProjectRuleTitle: React.Dispatch<React.SetStateAction<string>>
   projectRuleBody: string
   setProjectRuleBody: React.Dispatch<React.SetStateAction<string>>
-  projectRuleView: 'write' | 'preview'
-  setProjectRuleView: React.Dispatch<React.SetStateAction<'write' | 'preview'>>
+  projectRuleView: 'write' | 'preview' | 'split'
+  setProjectRuleView: React.Dispatch<React.SetStateAction<'write' | 'preview' | 'split'>>
   createProjectRuleMutation: ProjectMutation
   patchProjectRuleMutation: ProjectMutation
   deleteProjectRuleMutation: ProjectMutation
@@ -243,16 +254,21 @@ export function ProjectsInlineEditor({
     ? 'OFF'
     : editProjectChatIndexMode
   const chatAttachmentDisabled = chatPolicyDisabled || effectiveChatIndexMode === 'OFF'
+  const projectExternalRefs = React.useMemo(
+    () => parseExternalRefsText(editProjectExternalRefsText),
+    [editProjectExternalRefsText]
+  )
+  const projectAttachmentRefs = React.useMemo(
+    () => parseAttachmentRefsText(editProjectAttachmentRefsText),
+    [editProjectAttachmentRefsText]
+  )
   const templateBinding = selectedProject.template_binding
   const [selectedProjectSkillId, setSelectedProjectSkillId] = React.useState<string | null>(null)
   const [skillImportSourceUrl, setSkillImportSourceUrl] = React.useState('')
   const skillImportFileInputRef = React.useRef<HTMLInputElement | null>(null)
-  const rulesSectionRef = React.useRef<HTMLDivElement | null>(null)
-  const rulesFocusTimerRef = React.useRef<number | null>(null)
-  const [rulesSectionFocused, setRulesSectionFocused] = React.useState(false)
-  const skillsSectionRef = React.useRef<HTMLDivElement | null>(null)
-  const skillsFocusTimerRef = React.useRef<number | null>(null)
-  const [skillsSectionFocused, setSkillsSectionFocused] = React.useState(false)
+  const [projectEditorTab, setProjectEditorTab] = React.useState<
+    'overview' | 'rules' | 'skills' | 'resources' | 'context'
+  >('overview')
   const [skillImportKey, setSkillImportKey] = React.useState('')
   const [skillImportMode, setSkillImportMode] = React.useState<'advisory' | 'enforced'>('advisory')
   const [skillImportTrustLevel, setSkillImportTrustLevel] = React.useState<'verified' | 'reviewed' | 'untrusted'>(
@@ -265,9 +281,12 @@ export function ProjectsInlineEditor({
   const [skillEditorTrustLevel, setSkillEditorTrustLevel] = React.useState<'verified' | 'reviewed' | 'untrusted'>(
     'reviewed'
   )
-  const [skillContentView, setSkillContentView] = React.useState<'write' | 'preview'>('write')
+  const [skillContentView, setSkillContentView] = React.useState<'write' | 'preview' | 'split'>('write')
   const [showCatalogPicker, setShowCatalogPicker] = React.useState(false)
   const [catalogSearchQ, setCatalogSearchQ] = React.useState('')
+  const [removeProjectPromptOpen, setRemoveProjectPromptOpen] = React.useState(false)
+  const [deleteRulePrompt, setDeleteRulePrompt] = React.useState<{ id: string; title: string } | null>(null)
+  const [deleteSkillPrompt, setDeleteSkillPrompt] = React.useState<{ id: string; name: string } | null>(null)
 
   const skillItems = projectSkills.data?.items ?? []
   const workspaceSkillItems = workspaceSkills.data?.items ?? []
@@ -308,59 +327,19 @@ export function ProjectsInlineEditor({
     return skillByGeneratedRuleId.get(selectedProjectRuleId) ?? null
   }, [selectedProjectRuleId, skillByGeneratedRuleId])
 
-  React.useEffect(
-    () => () => {
-      if (rulesFocusTimerRef.current !== null) {
-        window.clearTimeout(rulesFocusTimerRef.current)
-        rulesFocusTimerRef.current = null
-      }
-      if (skillsFocusTimerRef.current !== null) {
-        window.clearTimeout(skillsFocusTimerRef.current)
-        skillsFocusTimerRef.current = null
-      }
-    },
-    []
-  )
-
   const openLinkedRule = React.useCallback((ruleId: string | null | undefined) => {
     const normalizedRuleId = String(ruleId || '').trim()
     if (!normalizedRuleId) return
+    setProjectEditorTab('rules')
     setSelectedProjectRuleId(normalizedRuleId)
     setProjectRuleView('preview')
-    setRulesSectionFocused(true)
-    if (rulesFocusTimerRef.current !== null) {
-      window.clearTimeout(rulesFocusTimerRef.current)
-    }
-    rulesFocusTimerRef.current = window.setTimeout(() => {
-      setRulesSectionFocused(false)
-      rulesFocusTimerRef.current = null
-    }, 1400)
-    window.requestAnimationFrame(() => {
-      rulesSectionRef.current?.scrollIntoView({
-        behavior: 'smooth',
-        block: 'start',
-      })
-    })
   }, [])
 
   const openLinkedSkill = React.useCallback((skillId: string | null | undefined) => {
     const normalizedSkillId = String(skillId || '').trim()
     if (!normalizedSkillId) return
+    setProjectEditorTab('skills')
     setSelectedProjectSkillId(normalizedSkillId)
-    setSkillsSectionFocused(true)
-    if (skillsFocusTimerRef.current !== null) {
-      window.clearTimeout(skillsFocusTimerRef.current)
-    }
-    skillsFocusTimerRef.current = window.setTimeout(() => {
-      setSkillsSectionFocused(false)
-      skillsFocusTimerRef.current = null
-    }, 1400)
-    window.requestAnimationFrame(() => {
-      skillsSectionRef.current?.scrollIntoView({
-        behavior: 'smooth',
-        block: 'start',
-      })
-    })
   }, [])
 
   React.useEffect(() => {
@@ -447,6 +426,12 @@ export function ProjectsInlineEditor({
       return haystack.includes(query)
     })
   }, [catalogSearchQ, workspaceSkillItems])
+  const projectRuleCount = projectRules.data?.total ?? projectRules.data?.items?.length ?? 0
+  const projectSkillCount = projectSkills.data?.total ?? skillItems.length
+  const projectResourceCount = projectExternalRefs.length + projectAttachmentRefs.length
+  React.useEffect(() => {
+    setProjectEditorTab('overview')
+  }, [project.id])
 
   return (
     <div className="project-inline-editor" style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
@@ -467,19 +452,65 @@ export function ProjectsInlineEditor({
         >
           <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
         </button>
-        <button
-          className="action-icon danger-ghost"
-          onClick={() => {
-            if (!window.confirm(`Delete ${project.name}? This permanently deletes project resources.`)) return
-            deleteProjectMutation.mutate(project.id)
-          }}
-          disabled={deleteProjectMutation.isPending}
-          title="Delete project"
-          aria-label="Delete project"
-        >
-          <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
-        </button>
+        <DropdownMenu.Root>
+          <DropdownMenu.Trigger asChild>
+            <button
+              className="action-icon"
+              type="button"
+              title="More project actions"
+              aria-label="More project actions"
+            >
+              <Icon path="M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0" />
+            </button>
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content className="task-group-menu-content note-row-menu-content" sideOffset={8} align="end">
+              <DropdownMenu.Item
+                className="task-group-menu-item task-group-menu-item-danger"
+                onSelect={() => {
+                  setRemoveProjectPromptOpen(true)
+                }}
+                disabled={deleteProjectMutation.isPending}
+              >
+                <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                <span>Remove project</span>
+              </DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
       </div>
+      <Tabs.Root
+        className="project-editor-tabs"
+        value={projectEditorTab}
+        onValueChange={(next) => {
+          if (
+            next === 'overview' ||
+            next === 'rules' ||
+            next === 'skills' ||
+            next === 'resources' ||
+            next === 'context'
+          ) {
+            setProjectEditorTab(next)
+          }
+        }}
+      >
+        <Tabs.List className="project-editor-tabs-list" aria-label="Project editor sections">
+          <Tabs.Trigger className="project-editor-tab-trigger" value="overview">Overview</Tabs.Trigger>
+          <Tabs.Trigger className="project-editor-tab-trigger" value="rules">
+            <span>Rules</span>
+            <span className="project-editor-tab-count">{projectRuleCount}</span>
+          </Tabs.Trigger>
+          <Tabs.Trigger className="project-editor-tab-trigger" value="skills">
+            <span>Skills</span>
+            <span className="project-editor-tab-count">{projectSkillCount}</span>
+          </Tabs.Trigger>
+          <Tabs.Trigger className="project-editor-tab-trigger" value="resources">
+            <span>Resources</span>
+            <span className="project-editor-tab-count">{projectResourceCount}</span>
+          </Tabs.Trigger>
+          <Tabs.Trigger className="project-editor-tab-trigger" value="context">Context</Tabs.Trigger>
+        </Tabs.List>
+        <Tabs.Content value="overview" className="project-editor-tab-content">
       <div className="md-editor-surface">
         <MarkdownModeToggle
           view={editProjectDescriptionView}
@@ -495,6 +526,21 @@ export function ProjectsInlineEditor({
               onChange={(e) => setEditProjectDescription(e.target.value)}
               placeholder="Project description (Markdown)"
               style={{ width: '100%', minHeight: 96, maxHeight: 280, resize: 'none', overflowY: 'hidden' }}
+            />
+          ) : editProjectDescriptionView === 'split' ? (
+            <MarkdownSplitPane
+              left={(
+                <textarea
+                  className="md-textarea"
+                  ref={editProjectDescriptionRef}
+                  value={editProjectDescription}
+                  onChange={(e) => setEditProjectDescription(e.target.value)}
+                  placeholder="Project description (Markdown)"
+                  style={{ width: '100%', minHeight: 96, maxHeight: 280, resize: 'none', overflowY: 'hidden' }}
+                />
+              )}
+              right={<MarkdownView value={editProjectDescription} />}
+              ariaLabel="Resize project description editor and preview panels"
             />
           ) : (
             <MarkdownView value={editProjectDescription} />
@@ -530,17 +576,40 @@ export function ProjectsInlineEditor({
             />
             <span>Embedding enabled</span>
           </label>
-          <select
-            value={selectedModel}
+          <Select.Root
+            value={selectedModel || '__none__'}
             disabled={!editProjectEmbeddingEnabled || modelOptions.length === 0}
-            onChange={(e) => setEditProjectEmbeddingModel(e.target.value)}
+            onValueChange={(value) => {
+              if (value === '__none__') return
+              setEditProjectEmbeddingModel(value)
+            }}
           >
-            {modelOptions.map((model) => (
-              <option key={`embedding-model-${model}`} value={model}>
-                {model === defaultModel ? `${model} (default)` : model}
-              </option>
-            ))}
-          </select>
+            <Select.Trigger
+              className="quickadd-project-trigger taskdrawer-select-trigger project-inline-select-trigger"
+              aria-label="Project embedding model"
+            >
+              <Select.Value />
+              <Select.Icon asChild>
+                <Icon path="M6 9l6 6 6-6" />
+              </Select.Icon>
+            </Select.Trigger>
+            <Select.Portal>
+              <Select.Content className="quickadd-project-content" position="popper" sideOffset={6}>
+                <Select.Viewport className="quickadd-project-viewport">
+                  {modelOptions.length === 0 && (
+                    <Select.Item value="__none__" className="quickadd-project-item" disabled>
+                      <Select.ItemText>No models available</Select.ItemText>
+                    </Select.Item>
+                  )}
+                  {modelOptions.map((model) => (
+                    <Select.Item key={`embedding-model-${model}`} value={model} className="quickadd-project-item">
+                      <Select.ItemText>{model === defaultModel ? `${model} (default)` : model}</Select.ItemText>
+                    </Select.Item>
+                  ))}
+                </Select.Viewport>
+              </Select.Content>
+            </Select.Portal>
+          </Select.Root>
           <span className="badge">{embeddingStatusBadgeLabel}</span>
         </div>
         <label className="field-control" style={{ marginTop: 8 }}>
@@ -575,43 +644,81 @@ export function ProjectsInlineEditor({
           <div className="project-chat-policy-controls">
             <label className="field-control project-chat-policy-select">
               <span className="field-label">Messages</span>
-              <select
+              <Select.Root
                 value={effectiveChatIndexMode}
                 disabled={chatPolicyDisabled}
-                onChange={(e) => {
-                  const next = e.target.value
+                onValueChange={(next) => {
                   if (next === 'VECTOR_ONLY' || next === 'KG_AND_VECTOR') {
                     setEditProjectChatIndexMode(next)
                     return
                   }
                   setEditProjectChatIndexMode('OFF')
                 }}
-                aria-label="Chat message indexing mode"
               >
-                <option value="OFF">OFF</option>
-                <option value="VECTOR_ONLY">VECTOR_ONLY</option>
-                <option value="KG_AND_VECTOR">KG_AND_VECTOR</option>
-              </select>
+                <Select.Trigger
+                  className="quickadd-project-trigger taskdrawer-select-trigger project-inline-select-trigger"
+                  aria-label="Chat message indexing mode"
+                >
+                  <Select.Value />
+                  <Select.Icon asChild>
+                    <Icon path="M6 9l6 6 6-6" />
+                  </Select.Icon>
+                </Select.Trigger>
+                <Select.Portal>
+                  <Select.Content className="quickadd-project-content" position="popper" sideOffset={6}>
+                    <Select.Viewport className="quickadd-project-viewport">
+                      <Select.Item value="OFF" className="quickadd-project-item">
+                        <Select.ItemText>OFF</Select.ItemText>
+                      </Select.Item>
+                      <Select.Item value="VECTOR_ONLY" className="quickadd-project-item">
+                        <Select.ItemText>VECTOR_ONLY</Select.ItemText>
+                      </Select.Item>
+                      <Select.Item value="KG_AND_VECTOR" className="quickadd-project-item">
+                        <Select.ItemText>KG_AND_VECTOR</Select.ItemText>
+                      </Select.Item>
+                    </Select.Viewport>
+                  </Select.Content>
+                </Select.Portal>
+              </Select.Root>
             </label>
             <label className="field-control project-chat-policy-select">
               <span className="field-label">Attachments</span>
-              <select
+              <Select.Root
                 value={editProjectChatAttachmentIngestionMode}
                 disabled={chatAttachmentDisabled}
-                onChange={(e) => {
-                  const next = e.target.value
+                onValueChange={(next) => {
                   if (next === 'OFF' || next === 'FULL_TEXT') {
                     setEditProjectChatAttachmentIngestionMode(next)
                     return
                   }
                   setEditProjectChatAttachmentIngestionMode('METADATA_ONLY')
                 }}
-                aria-label="Chat attachment ingestion mode"
               >
-                <option value="METADATA_ONLY">METADATA_ONLY</option>
-                <option value="OFF">OFF</option>
-                <option value="FULL_TEXT">FULL_TEXT</option>
-              </select>
+                <Select.Trigger
+                  className="quickadd-project-trigger taskdrawer-select-trigger project-inline-select-trigger"
+                  aria-label="Chat attachment ingestion mode"
+                >
+                  <Select.Value />
+                  <Select.Icon asChild>
+                    <Icon path="M6 9l6 6 6-6" />
+                  </Select.Icon>
+                </Select.Trigger>
+                <Select.Portal>
+                  <Select.Content className="quickadd-project-content" position="popper" sideOffset={6}>
+                    <Select.Viewport className="quickadd-project-viewport">
+                      <Select.Item value="METADATA_ONLY" className="quickadd-project-item">
+                        <Select.ItemText>METADATA_ONLY</Select.ItemText>
+                      </Select.Item>
+                      <Select.Item value="OFF" className="quickadd-project-item">
+                        <Select.ItemText>OFF</Select.ItemText>
+                      </Select.Item>
+                      <Select.Item value="FULL_TEXT" className="quickadd-project-item">
+                        <Select.ItemText>FULL_TEXT</Select.ItemText>
+                      </Select.Item>
+                    </Select.Viewport>
+                  </Select.Content>
+                </Select.Portal>
+              </Select.Root>
             </label>
           </div>
         </div>
@@ -633,9 +740,10 @@ export function ProjectsInlineEditor({
           </div>
         )}
       </div>
+        </Tabs.Content>
+        <Tabs.Content value="rules" className="project-editor-tab-content">
       <div
-        ref={rulesSectionRef}
-        className={`rules-studio ${rulesSectionFocused ? 'rules-studio-focus' : ''}`}
+        className="rules-studio"
         style={{ marginTop: 10, marginBottom: 14 }}
       >
         <div className="row wrap rules-head-row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
@@ -670,19 +778,40 @@ export function ProjectsInlineEditor({
                         </div>
                         <div className="row" style={{ gap: 6 }}>
                           {isSelected && <span className="badge">Editing</span>}
-                          <button
-                            className="action-icon danger-ghost"
-                            disabled={deleteProjectRuleMutation.isPending}
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              if (!window.confirm('Delete this rule?')) return
-                              deleteProjectRuleMutation.mutate(rule.id)
-                            }}
-                            title="Delete rule"
-                            aria-label="Delete rule"
-                          >
-                            <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
-                          </button>
+                          <DropdownMenu.Root>
+                            <DropdownMenu.Trigger asChild>
+                              <button
+                                className="action-icon task-item-actions-trigger"
+                                type="button"
+                                onClick={(e) => e.stopPropagation()}
+                                title="Rule actions"
+                                aria-label="Rule actions"
+                              >
+                                <Icon path="M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0" />
+                              </button>
+                            </DropdownMenu.Trigger>
+                            <DropdownMenu.Portal>
+                              <DropdownMenu.Content
+                                className="task-group-menu-content note-row-menu-content"
+                                sideOffset={8}
+                                align="end"
+                              >
+                                <DropdownMenu.Item
+                                  className="task-group-menu-item task-group-menu-item-danger"
+                                  disabled={deleteProjectRuleMutation.isPending}
+                                  onSelect={() => {
+                                    setDeleteRulePrompt({
+                                      id: rule.id,
+                                      title: rule.title || 'Untitled rule',
+                                    })
+                                  }}
+                                >
+                                  <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                                  <span>Delete rule</span>
+                                </DropdownMenu.Item>
+                              </DropdownMenu.Content>
+                            </DropdownMenu.Portal>
+                          </DropdownMenu.Root>
                         </div>
                       </div>
                       <div className="meta">{(rule.body || '').replace(/\s+/g, ' ').slice(0, 120) || '(empty)'}</div>
@@ -767,6 +896,20 @@ export function ProjectsInlineEditor({
                     placeholder="Rule details (Markdown)"
                     style={{ width: '100%', minHeight: 140 }}
                   />
+                ) : projectRuleView === 'split' ? (
+                  <MarkdownSplitPane
+                    left={(
+                      <textarea
+                        className="md-textarea"
+                        value={projectRuleBody}
+                        onChange={(e) => setProjectRuleBody(e.target.value)}
+                        placeholder="Rule details (Markdown)"
+                        style={{ width: '100%', minHeight: 140 }}
+                      />
+                    )}
+                    right={<MarkdownView value={projectRuleBody} />}
+                    ariaLabel="Resize project rule editor and preview panels"
+                  />
                 ) : (
                   <MarkdownView value={projectRuleBody} />
                 )}
@@ -775,9 +918,10 @@ export function ProjectsInlineEditor({
           </div>
         </div>
       </div>
+        </Tabs.Content>
+        <Tabs.Content value="skills" className="project-editor-tab-content">
       <div
-        ref={skillsSectionRef}
-        className={`rules-studio ${skillsSectionFocused ? 'rules-studio-focus' : ''}`}
+        className="rules-studio"
         style={{ marginTop: 10, marginBottom: 14 }}
       >
         <div className="row wrap rules-head-row" style={{ justifyContent: 'space-between', marginBottom: 8, gap: 8 }}>
@@ -797,34 +941,84 @@ export function ProjectsInlineEditor({
             placeholder="Key (e.g. testing_skill)"
             style={{ width: 170, minWidth: 140 }}
           />
-          <select
+          <Select.Root
             value={skillImportMode}
-            title="Import mode"
-            aria-label="Import mode"
-            onChange={(e) => setSkillImportMode(e.target.value === 'enforced' ? 'enforced' : 'advisory')}
-            style={{ width: 120 }}
+            onValueChange={(value) => setSkillImportMode(value === 'enforced' ? 'enforced' : 'advisory')}
           >
-            <option value="advisory">advisory</option>
-            <option value="enforced">enforced</option>
-          </select>
-          <select
+            <Select.Trigger
+              className="quickadd-project-trigger taskdrawer-select-trigger project-inline-select-trigger"
+              aria-label="Import mode"
+              style={{ width: 140, minWidth: 120 }}
+            >
+              <Select.Value />
+              <Select.Icon asChild>
+                <Icon path="M6 9l6 6 6-6" />
+              </Select.Icon>
+            </Select.Trigger>
+            <Select.Portal>
+              <Select.Content className="quickadd-project-content" position="popper" sideOffset={6}>
+                <Select.Viewport className="quickadd-project-viewport">
+                  <Select.Item value="advisory" className="quickadd-project-item">
+                    <Select.ItemText>advisory</Select.ItemText>
+                    <Select.ItemIndicator className="quickadd-project-item-indicator">
+                      <Icon path="M5 12l4 4L19 7" />
+                    </Select.ItemIndicator>
+                  </Select.Item>
+                  <Select.Item value="enforced" className="quickadd-project-item">
+                    <Select.ItemText>enforced</Select.ItemText>
+                    <Select.ItemIndicator className="quickadd-project-item-indicator">
+                      <Icon path="M5 12l4 4L19 7" />
+                    </Select.ItemIndicator>
+                  </Select.Item>
+                </Select.Viewport>
+              </Select.Content>
+            </Select.Portal>
+          </Select.Root>
+          <Select.Root
             value={skillImportTrustLevel}
-            title="Trust level"
-            aria-label="Trust level"
-            onChange={(e) => {
-              const next = e.target.value
-              if (next === 'verified' || next === 'untrusted') {
-                setSkillImportTrustLevel(next)
-              } else {
-                setSkillImportTrustLevel('reviewed')
+            onValueChange={(value) => {
+              if (value === 'verified' || value === 'untrusted') {
+                setSkillImportTrustLevel(value)
+                return
               }
+              setSkillImportTrustLevel('reviewed')
             }}
-            style={{ width: 120 }}
           >
-            <option value="reviewed">reviewed</option>
-            <option value="verified">verified</option>
-            <option value="untrusted">untrusted</option>
-          </select>
+            <Select.Trigger
+              className="quickadd-project-trigger taskdrawer-select-trigger project-inline-select-trigger"
+              aria-label="Trust level"
+              style={{ width: 150, minWidth: 120 }}
+            >
+              <Select.Value />
+              <Select.Icon asChild>
+                <Icon path="M6 9l6 6 6-6" />
+              </Select.Icon>
+            </Select.Trigger>
+            <Select.Portal>
+              <Select.Content className="quickadd-project-content" position="popper" sideOffset={6}>
+                <Select.Viewport className="quickadd-project-viewport">
+                  <Select.Item value="reviewed" className="quickadd-project-item">
+                    <Select.ItemText>reviewed</Select.ItemText>
+                    <Select.ItemIndicator className="quickadd-project-item-indicator">
+                      <Icon path="M5 12l4 4L19 7" />
+                    </Select.ItemIndicator>
+                  </Select.Item>
+                  <Select.Item value="verified" className="quickadd-project-item">
+                    <Select.ItemText>verified</Select.ItemText>
+                    <Select.ItemIndicator className="quickadd-project-item-indicator">
+                      <Icon path="M5 12l4 4L19 7" />
+                    </Select.ItemIndicator>
+                  </Select.Item>
+                  <Select.Item value="untrusted" className="quickadd-project-item">
+                    <Select.ItemText>untrusted</Select.ItemText>
+                    <Select.ItemIndicator className="quickadd-project-item-indicator">
+                      <Icon path="M5 12l4 4L19 7" />
+                    </Select.ItemIndicator>
+                  </Select.Item>
+                </Select.Viewport>
+              </Select.Content>
+            </Select.Portal>
+          </Select.Root>
           <div className="row" style={{ gap: 6, marginLeft: 'auto', flexShrink: 0 }}>
             <button
               className="action-icon primary"
@@ -941,33 +1135,55 @@ export function ProjectsInlineEditor({
                 >
                   <div className="task-main">
                     <div className="task-title">
-                      <strong>{skill.name || skill.skill_key || 'Untitled skill'}</strong>
-                      <div className="row" style={{ gap: 6 }}>
-                        <button
-                          className="action-icon danger-ghost"
-                          disabled={deleteProjectSkillMutation.isPending}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            if (!window.confirm('Delete this skill and linked rule?')) return
-                            deleteProjectSkillMutation.mutate(
-                              {
-                                skillId: skill.id,
-                                delete_linked_rule: true,
-                              },
-                              {
-                                onSuccess: () => {
-                                  if (selectedProjectSkillId === skill.id) setSelectedProjectSkillId(null)
-                                },
-                              }
-                            )
-                          }}
-                          title="Delete skill"
-                          aria-label="Delete skill"
-                        >
-                          <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
-                        </button>
+                        <strong>{skill.name || skill.skill_key || 'Untitled skill'}</strong>
+                        <div className="row" style={{ gap: 6 }}>
+                          <DropdownMenu.Root>
+                            <DropdownMenu.Trigger asChild>
+                              <button
+                                className="action-icon task-item-actions-trigger"
+                                type="button"
+                                onClick={(e) => e.stopPropagation()}
+                                title="Skill actions"
+                                aria-label="Skill actions"
+                              >
+                                <Icon path="M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0" />
+                              </button>
+                            </DropdownMenu.Trigger>
+                            <DropdownMenu.Portal>
+                              <DropdownMenu.Content
+                                className="task-group-menu-content note-row-menu-content"
+                                sideOffset={8}
+                                align="end"
+                              >
+                                <DropdownMenu.Item
+                                  className="task-group-menu-item"
+                                  disabled={applyProjectSkillMutation.isPending}
+                                  onSelect={() => {
+                                    applyProjectSkillMutation.mutate({ skillId: skill.id })
+                                  }}
+                                >
+                                  <Icon path="M5 13l4 4L19 7M5 7h8" />
+                                  <span>{hasLinkedRule ? 'Reapply to context' : 'Apply to context'}</span>
+                                </DropdownMenu.Item>
+                                <DropdownMenu.Separator className="task-group-menu-separator" />
+                                <DropdownMenu.Item
+                                  className="task-group-menu-item task-group-menu-item-danger"
+                                  disabled={deleteProjectSkillMutation.isPending}
+                                  onSelect={() => {
+                                    setDeleteSkillPrompt({
+                                      id: skill.id,
+                                      name: skill.name || skill.skill_key || 'Untitled skill',
+                                    })
+                                  }}
+                                >
+                                  <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                                  <span>Delete skill</span>
+                                </DropdownMenu.Item>
+                              </DropdownMenu.Content>
+                            </DropdownMenu.Portal>
+                          </DropdownMenu.Root>
+                        </div>
                       </div>
-                    </div>
                     <div className="meta">
                       key: {skill.skill_key || '-'} | mode: {skill.mode || '-'} | trust: {skill.trust_level || '-'}
                     </div>
@@ -1010,20 +1226,44 @@ export function ProjectsInlineEditor({
                         <div className="row wrap" style={{ gap: 8, marginBottom: 8 }}>
                           <label className="field-control" style={{ minWidth: 150, marginBottom: 0 }}>
                             <span className="field-label">Mode</span>
-                            <select
+                            <Select.Root
                               value={skillEditorMode}
-                              onChange={(e) => setSkillEditorMode(e.target.value === 'enforced' ? 'enforced' : 'advisory')}
+                              onValueChange={(value) => setSkillEditorMode(value === 'enforced' ? 'enforced' : 'advisory')}
                             >
-                              <option value="advisory">advisory</option>
-                              <option value="enforced">enforced</option>
-                            </select>
+                              <Select.Trigger
+                                className="quickadd-project-trigger taskdrawer-select-trigger project-inline-select-trigger"
+                                aria-label="Skill mode"
+                              >
+                                <Select.Value />
+                                <Select.Icon asChild>
+                                  <Icon path="M6 9l6 6 6-6" />
+                                </Select.Icon>
+                              </Select.Trigger>
+                              <Select.Portal>
+                                <Select.Content className="quickadd-project-content" position="popper" sideOffset={6}>
+                                  <Select.Viewport className="quickadd-project-viewport">
+                                    <Select.Item value="advisory" className="quickadd-project-item">
+                                      <Select.ItemText>advisory</Select.ItemText>
+                                      <Select.ItemIndicator className="quickadd-project-item-indicator">
+                                        <Icon path="M5 12l4 4L19 7" />
+                                      </Select.ItemIndicator>
+                                    </Select.Item>
+                                    <Select.Item value="enforced" className="quickadd-project-item">
+                                      <Select.ItemText>enforced</Select.ItemText>
+                                      <Select.ItemIndicator className="quickadd-project-item-indicator">
+                                        <Icon path="M5 12l4 4L19 7" />
+                                      </Select.ItemIndicator>
+                                    </Select.Item>
+                                  </Select.Viewport>
+                                </Select.Content>
+                              </Select.Portal>
+                            </Select.Root>
                           </label>
                           <label className="field-control" style={{ minWidth: 170, marginBottom: 0 }}>
                             <span className="field-label">Trust level</span>
-                            <select
+                            <Select.Root
                               value={skillEditorTrustLevel}
-                              onChange={(e) => {
-                                const next = e.target.value
+                              onValueChange={(next) => {
                                 if (next === 'verified' || next === 'untrusted') {
                                   setSkillEditorTrustLevel(next)
                                 } else {
@@ -1031,10 +1271,40 @@ export function ProjectsInlineEditor({
                                 }
                               }}
                             >
-                              <option value="reviewed">reviewed</option>
-                              <option value="verified">verified</option>
-                              <option value="untrusted">untrusted</option>
-                            </select>
+                              <Select.Trigger
+                                className="quickadd-project-trigger taskdrawer-select-trigger project-inline-select-trigger"
+                                aria-label="Skill trust level"
+                              >
+                                <Select.Value />
+                                <Select.Icon asChild>
+                                  <Icon path="M6 9l6 6 6-6" />
+                                </Select.Icon>
+                              </Select.Trigger>
+                              <Select.Portal>
+                                <Select.Content className="quickadd-project-content" position="popper" sideOffset={6}>
+                                  <Select.Viewport className="quickadd-project-viewport">
+                                    <Select.Item value="reviewed" className="quickadd-project-item">
+                                      <Select.ItemText>reviewed</Select.ItemText>
+                                      <Select.ItemIndicator className="quickadd-project-item-indicator">
+                                        <Icon path="M5 12l4 4L19 7" />
+                                      </Select.ItemIndicator>
+                                    </Select.Item>
+                                    <Select.Item value="verified" className="quickadd-project-item">
+                                      <Select.ItemText>verified</Select.ItemText>
+                                      <Select.ItemIndicator className="quickadd-project-item-indicator">
+                                        <Icon path="M5 12l4 4L19 7" />
+                                      </Select.ItemIndicator>
+                                    </Select.Item>
+                                    <Select.Item value="untrusted" className="quickadd-project-item">
+                                      <Select.ItemText>untrusted</Select.ItemText>
+                                      <Select.ItemIndicator className="quickadd-project-item-indicator">
+                                        <Icon path="M5 12l4 4L19 7" />
+                                      </Select.ItemIndicator>
+                                    </Select.Item>
+                                  </Select.Viewport>
+                                </Select.Content>
+                              </Select.Portal>
+                            </Select.Root>
                           </label>
                         </div>
                         <div className="md-editor-surface">
@@ -1088,6 +1358,20 @@ export function ProjectsInlineEditor({
                                 placeholder="Write skill content in Markdown..."
                                 style={{ width: '100%', minHeight: 180 }}
                               />
+                            ) : skillContentView === 'split' ? (
+                              <MarkdownSplitPane
+                                left={(
+                                  <textarea
+                                    className="md-textarea"
+                                    value={skillEditorContent}
+                                    onChange={(e) => setSkillEditorContent(e.target.value)}
+                                    placeholder="Write skill content in Markdown..."
+                                    style={{ width: '100%', minHeight: 180 }}
+                                  />
+                                )}
+                                right={<MarkdownView value={skillEditorContent} />}
+                                ariaLabel="Resize skill editor and preview panels"
+                              />
                             ) : (
                               <MarkdownView value={skillEditorContent} />
                             )}
@@ -1102,6 +1386,7 @@ export function ProjectsInlineEditor({
           )}
         </div>
       </div>
+        </Tabs.Content>
       {showCatalogPicker ? (
         <div className="drawer open" onClick={() => setShowCatalogPicker(false)}>
           <div className="drawer-body project-skill-catalog-drawer" onClick={(e) => e.stopPropagation()}>
@@ -1178,48 +1463,99 @@ export function ProjectsInlineEditor({
           </div>
         </div>
       ) : null}
-      <div className="meta" style={{ marginTop: 10 }}>External links</div>
-      <ExternalRefEditor
-        refs={parseExternalRefsText(editProjectExternalRefsText)}
-        onRemoveIndex={(idx) => setEditProjectExternalRefsText((prev) => removeExternalRefByIndex(prev, idx))}
-        onAdd={(ref) =>
-          setEditProjectExternalRefsText((prev) => externalRefsToText([...parseExternalRefsText(prev), ref]))
-        }
-      />
-      <div className="meta" style={{ marginTop: 8 }}>File attachments</div>
-      <div className="row" style={{ marginTop: 6 }}>
-        <button
-          className="status-chip"
-          type="button"
-          onClick={() => editProjectFileInputRef.current?.click()}
-        >
-          Upload file
-        </button>
-        <input
-          ref={editProjectFileInputRef}
-          type="file"
-          style={{ display: 'none' }}
-          onChange={async (e) => {
-            const file = e.target.files?.[0]
-            e.currentTarget.value = ''
-            if (!file || !selectedProject) return
-            try {
-              const ref = await uploadAttachmentRef(file, { project_id: selectedProject.id })
-              setEditProjectAttachmentRefsText((prev) => attachmentRefsToText([...parseAttachmentRefsText(prev), ref]))
-            } catch (err) {
-              setUiError(toErrorMessage(err, 'Upload failed'))
-            }
-          }}
-        />
-      </div>
-      <AttachmentRefList
-        refs={parseAttachmentRefsText(editProjectAttachmentRefsText)}
-        workspaceId={workspaceId}
-        userId={userId}
-        onRemovePath={(path) => {
-          setEditProjectAttachmentRefsText((prev) => removeAttachmentByPath(prev, path))
-        }}
-      />
+        <Tabs.Content value="resources" className="project-editor-tab-content">
+      <Accordion.Root
+        className="taskdrawer-sections note-resource-stack"
+        type="multiple"
+        defaultValue={['project-editor-external-links', 'project-editor-file-attachments']}
+      >
+        <Accordion.Item value="project-editor-external-links" className="taskdrawer-section-item taskdrawer-section-links">
+          <div className="taskdrawer-section-headrow">
+            <Accordion.Header className="taskdrawer-section-header">
+              <Accordion.Trigger className="taskdrawer-section-trigger">
+                <span className="taskdrawer-section-icon" aria-hidden="true">
+                  <Icon path="M14 3h7v7m0-7L10 14M5 7v12h12v-5" />
+                </span>
+                <span className="taskdrawer-section-head">
+                  <span className="taskdrawer-section-title">External links</span>
+                  <span className="taskdrawer-section-meta">{`${projectExternalRefs.length} linked`}</span>
+                </span>
+                <span className="taskdrawer-section-badge">{projectExternalRefs.length}</span>
+                <span className="taskdrawer-section-chevron" aria-hidden="true">
+                  <Icon path="M6 9l6 6 6-6" />
+                </span>
+              </Accordion.Trigger>
+            </Accordion.Header>
+          </div>
+          <Accordion.Content className="taskdrawer-section-content">
+            <ExternalRefEditor
+              refs={projectExternalRefs}
+              onRemoveIndex={(idx) => setEditProjectExternalRefsText((prev) => removeExternalRefByIndex(prev, idx))}
+              onAdd={(ref) =>
+                setEditProjectExternalRefsText((prev) => externalRefsToText([...parseExternalRefsText(prev), ref]))
+              }
+            />
+          </Accordion.Content>
+        </Accordion.Item>
+        <Accordion.Item value="project-editor-file-attachments" className="taskdrawer-section-item taskdrawer-section-attachments">
+          <div className="taskdrawer-section-headrow">
+            <Accordion.Header className="taskdrawer-section-header">
+              <Accordion.Trigger className="taskdrawer-section-trigger">
+                <span className="taskdrawer-section-icon" aria-hidden="true">
+                  <Icon path="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.2-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.2a2 2 0 0 1-2.82-2.83l8.49-8.48" />
+                </span>
+                <span className="taskdrawer-section-head">
+                  <span className="taskdrawer-section-title">File attachments</span>
+                  <span className="taskdrawer-section-meta">{`${projectAttachmentRefs.length} files attached`}</span>
+                </span>
+                <span className="taskdrawer-section-badge">{projectAttachmentRefs.length}</span>
+                <span className="taskdrawer-section-chevron" aria-hidden="true">
+                  <Icon path="M6 9l6 6 6-6" />
+                </span>
+              </Accordion.Trigger>
+            </Accordion.Header>
+            <button
+              className="taskdrawer-section-quick-action"
+              type="button"
+              title="Upload file"
+              aria-label="Upload file"
+              onClick={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                editProjectFileInputRef.current?.click()
+              }}
+            >
+              <Icon path="M12 5v10m0 0l4-4m-4 4l-4-4M4 21h16" />
+            </button>
+          </div>
+          <Accordion.Content className="taskdrawer-section-content">
+            <input
+              ref={editProjectFileInputRef}
+              type="file"
+              style={{ display: 'none' }}
+              onChange={async (e) => {
+                const file = e.target.files?.[0]
+                e.currentTarget.value = ''
+                if (!file || !selectedProject) return
+                try {
+                  const ref = await uploadAttachmentRef(file, { project_id: selectedProject.id })
+                  setEditProjectAttachmentRefsText((prev) => attachmentRefsToText([...parseAttachmentRefsText(prev), ref]))
+                } catch (err) {
+                  setUiError(toErrorMessage(err, 'Upload failed'))
+                }
+              }}
+            />
+            <AttachmentRefList
+              refs={projectAttachmentRefs}
+              workspaceId={workspaceId}
+              userId={userId}
+              onRemovePath={(path) => {
+                setEditProjectAttachmentRefsText((prev) => removeAttachmentByPath(prev, path))
+              }}
+            />
+          </Accordion.Content>
+        </Accordion.Item>
+      </Accordion.Root>
       <div style={{ marginTop: 10 }}>
         <div className="meta" style={{ marginBottom: 6 }}>Assigned users</div>
         <div className="row wrap" style={{ gap: 6 }}>
@@ -1253,20 +1589,138 @@ export function ProjectsInlineEditor({
           <div className="meta">Template: Manual project (no template binding)</div>
         )}
       </div>
-      <ProjectContextSnapshotPanel
-        projectId={selectedProject.id || project.id}
-        projectName={selectedProject.name || project.name}
-        projectDescription={String(selectedProject.description || '')}
-        projectRules={projectRules.data?.items ?? []}
-        projectSkills={skillItems}
-        overview={projectGraphOverview?.data}
-        contextPack={projectGraphContextPack?.data}
-        contextLimitTokens={contextLimitTokensDefault > 0 ? contextLimitTokensDefault : undefined}
-        activeChatProjectId={codexChatProjectId}
-        activeChatTurns={codexChatTurns}
-        projectChatIndexMode={selectedProject.chat_index_mode}
-        projectChatAttachmentIngestionMode={selectedProject.chat_attachment_ingestion_mode}
-      />
+        </Tabs.Content>
+        <Tabs.Content value="context" className="project-editor-tab-content">
+          <ProjectContextSnapshotPanel
+            projectId={selectedProject.id || project.id}
+            projectName={selectedProject.name || project.name}
+            projectDescription={String(selectedProject.description || '')}
+            projectRules={projectRules.data?.items ?? []}
+            projectSkills={skillItems}
+            overview={projectGraphOverview?.data}
+            contextPack={projectGraphContextPack?.data}
+            contextLimitTokens={contextLimitTokensDefault > 0 ? contextLimitTokensDefault : undefined}
+            activeChatProjectId={codexChatProjectId}
+            activeChatTurns={codexChatTurns}
+            projectChatIndexMode={selectedProject.chat_index_mode}
+            projectChatAttachmentIngestionMode={selectedProject.chat_attachment_ingestion_mode}
+          />
+        </Tabs.Content>
+      </Tabs.Root>
+      <AlertDialog.Root open={removeProjectPromptOpen} onOpenChange={setRemoveProjectPromptOpen}>
+        <AlertDialog.Portal>
+          <AlertDialog.Overlay className="drawer-backdrop" />
+          <AlertDialog.Content className="dialog-content">
+            <AlertDialog.Title>Remove project</AlertDialog.Title>
+            <AlertDialog.Description className="meta" style={{ marginTop: 6 }}>
+              {`Delete "${project.name}"? This permanently deletes project resources.`}
+            </AlertDialog.Description>
+            <div className="dialog-actions">
+              <AlertDialog.Cancel asChild>
+                <button className="status-chip" type="button">Cancel</button>
+              </AlertDialog.Cancel>
+              <AlertDialog.Action asChild>
+                <button
+                  className="status-chip danger-ghost"
+                  type="button"
+                  disabled={deleteProjectMutation.isPending}
+                  onClick={() => {
+                    deleteProjectMutation.mutate(project.id)
+                    setRemoveProjectPromptOpen(false)
+                  }}
+                >
+                  Remove project
+                </button>
+              </AlertDialog.Action>
+            </div>
+          </AlertDialog.Content>
+        </AlertDialog.Portal>
+      </AlertDialog.Root>
+      <AlertDialog.Root
+        open={Boolean(deleteRulePrompt)}
+        onOpenChange={(open) => {
+          if (!open) setDeleteRulePrompt(null)
+        }}
+      >
+        <AlertDialog.Portal>
+          <AlertDialog.Overlay className="drawer-backdrop" />
+          <AlertDialog.Content className="dialog-content">
+            <AlertDialog.Title>Delete rule</AlertDialog.Title>
+            <AlertDialog.Description className="meta" style={{ marginTop: 6 }}>
+              {deleteRulePrompt
+                ? `Delete "${deleteRulePrompt.title}"?`
+                : 'This action cannot be undone.'}
+            </AlertDialog.Description>
+            <div className="dialog-actions">
+              <AlertDialog.Cancel asChild>
+                <button className="status-chip" type="button">Cancel</button>
+              </AlertDialog.Cancel>
+              <AlertDialog.Action asChild>
+                <button
+                  className="status-chip danger-ghost"
+                  type="button"
+                  disabled={deleteProjectRuleMutation.isPending}
+                  onClick={() => {
+                    if (!deleteRulePrompt) return
+                    deleteProjectRuleMutation.mutate(deleteRulePrompt.id)
+                    setDeleteRulePrompt(null)
+                  }}
+                >
+                  Delete rule
+                </button>
+              </AlertDialog.Action>
+            </div>
+          </AlertDialog.Content>
+        </AlertDialog.Portal>
+      </AlertDialog.Root>
+      <AlertDialog.Root
+        open={Boolean(deleteSkillPrompt)}
+        onOpenChange={(open) => {
+          if (!open) setDeleteSkillPrompt(null)
+        }}
+      >
+        <AlertDialog.Portal>
+          <AlertDialog.Overlay className="drawer-backdrop" />
+          <AlertDialog.Content className="dialog-content">
+            <AlertDialog.Title>Delete skill</AlertDialog.Title>
+            <AlertDialog.Description className="meta" style={{ marginTop: 6 }}>
+              {deleteSkillPrompt
+                ? `Delete "${deleteSkillPrompt.name}" and its linked rule?`
+                : 'This action cannot be undone.'}
+            </AlertDialog.Description>
+            <div className="dialog-actions">
+              <AlertDialog.Cancel asChild>
+                <button className="status-chip" type="button">Cancel</button>
+              </AlertDialog.Cancel>
+              <AlertDialog.Action asChild>
+                <button
+                  className="status-chip danger-ghost"
+                  type="button"
+                  disabled={deleteProjectSkillMutation.isPending}
+                  onClick={() => {
+                    if (!deleteSkillPrompt) return
+                    const deletingSkillId = deleteSkillPrompt.id
+                    deleteProjectSkillMutation.mutate(
+                      {
+                        skillId: deletingSkillId,
+                        delete_linked_rule: true,
+                      },
+                      {
+                        onSuccess: () => {
+                          if (selectedProjectSkillId === deletingSkillId) setSelectedProjectSkillId(null)
+                        },
+                      }
+                    )
+                    setDeleteSkillPrompt(null)
+                  }}
+                >
+                  Delete skill
+                </button>
+              </AlertDialog.Action>
+            </div>
+          </AlertDialog.Content>
+        </AlertDialog.Portal>
+      </AlertDialog.Root>
     </div>
   )
 }
