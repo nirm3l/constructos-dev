@@ -3829,6 +3829,74 @@ def test_agents_chat_endpoint_stitches_history_when_previous_resume_failed(tmp_p
     assert 'Conversation history:' in calls[1]['instruction']
 
 
+def test_agents_chat_endpoint_includes_cross_session_updates_for_resumed_threads(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    calls = []
+
+    def _fake_execute_task_automation(**kwargs):
+        calls.append(kwargs)
+        return AutomationOutcome(
+            action='comment',
+            summary='ok',
+            comment='done',
+            usage=None,
+            codex_session_id='thread-resume-cross-session-1',
+        )
+
+    monkeypatch.setattr(agents_api, 'AGENT_CHAT_HISTORY_COMPACT_THRESHOLD', 999)
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+
+    old_session_first = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'session_id': 'old-session-1',
+            'instruction': 'Initial old-session request',
+            'history': [],
+        },
+    )
+    assert old_session_first.status_code == 200
+
+    new_session_secret = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'session_id': 'new-session-1',
+            'instruction': 'Tajni broj je 44',
+            'history': [],
+        },
+    )
+    assert new_session_secret.status_code == 200
+
+    old_session_followup = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'session_id': 'old-session-1',
+            'instruction': 'Koji je tajni broj?',
+            'history': [],
+        },
+    )
+    assert old_session_followup.status_code == 200
+
+    assert len(calls) == 3
+    assert calls[2]['chat_session_id'] == 'old-session-1'
+    assert calls[2]['codex_session_id'] == 'thread-resume-cross-session-1'
+    assert 'Recent updates from other project chat sessions' in calls[2]['instruction']
+    assert 'Tajni broj je 44' in calls[2]['instruction']
+    assert 'Conversation history:' not in calls[2]['instruction']
+
+
 def test_agents_chat_endpoint_respects_allow_mutations_flag(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()

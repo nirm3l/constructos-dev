@@ -15,7 +15,7 @@ import xml.etree.ElementTree as ET
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from shared.core import AgentChatRun, User, ensure_project_access, ensure_role, get_command_id, get_current_user, get_db
@@ -83,6 +83,8 @@ _TEXT_EXTENSIONS = {
 _MAX_CHAT_ATTACHMENT_FILES = 6
 _MAX_CHAT_ATTACHMENT_CHARS_PER_FILE = 12_000
 _MAX_CHAT_ATTACHMENT_CHARS_TOTAL = 36_000
+_MAX_CROSS_SESSION_DELTA_MESSAGES = 8
+_MAX_CROSS_SESSION_DELTA_CHARS_PER_MESSAGE = 220
 _CREATED_RESOURCE_ACTIONS: dict[str, str] = {
     "TaskCreated": "task",
     "NoteCreated": "note",
@@ -674,6 +676,116 @@ def _load_persisted_chat_history(
     return out
 
 
+def _truncate_chat_delta_text(content: str, *, max_chars: int = _MAX_CROSS_SESSION_DELTA_CHARS_PER_MESSAGE) -> str:
+    normalized = " ".join(str(content or "").split())
+    if len(normalized) <= max_chars:
+        return normalized
+    return f"{normalized[: max(0, max_chars - 3)]}..."
+
+
+def _load_cross_session_recent_updates(
+    *,
+    db: Session,
+    user: User,
+    workspace_id: str,
+    project_id: str | None,
+    session_id: str | None,
+    max_messages: int = _MAX_CROSS_SESSION_DELTA_MESSAGES,
+) -> list[dict[str, str]]:
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_project_id:
+        return []
+
+    session_key = str(session_id or "").strip()
+    current_session_row = db.execute(
+        select(ChatSession.id, ChatSession.last_message_at)
+        .where(
+            ChatSession.workspace_id == workspace_id,
+            ChatSession.project_id == normalized_project_id,
+            ChatSession.session_key == session_key,
+            ChatSession.created_by == user.id,
+        )
+    ).first()
+    current_session_db_id = str(current_session_row[0] or "").strip() if current_session_row else ""
+    current_last_message_at = current_session_row[1] if current_session_row else None
+
+    message_time = func.coalesce(ChatMessage.turn_created_at, ChatMessage.created_at)
+    base_query = (
+        select(
+            ChatMessage.role,
+            ChatMessage.content,
+            ChatSession.session_key,
+            message_time.label("message_time"),
+        )
+        .join(ChatSession, ChatMessage.session_id == ChatSession.id)
+        .where(
+            ChatSession.workspace_id == workspace_id,
+            ChatSession.project_id == normalized_project_id,
+            ChatSession.created_by == user.id,
+            ChatSession.is_archived == False,
+            ChatMessage.is_deleted == False,
+        )
+        .order_by(message_time.desc(), ChatMessage.order_index.desc(), ChatMessage.created_at.desc())
+    )
+    query = base_query.limit(max(8, int(max_messages) * 4))
+    if current_session_db_id:
+        query = query.where(ChatMessage.session_id != current_session_db_id)
+    if current_last_message_at is not None:
+        query = query.where(message_time > current_last_message_at)
+
+    rows = db.execute(query).all()
+    if not rows and current_last_message_at is not None:
+        # Fallback for near-simultaneous timestamps: still provide most recent cross-session context.
+        fallback_query = base_query.limit(max(8, int(max_messages) * 4))
+        if current_session_db_id:
+            fallback_query = fallback_query.where(ChatMessage.session_id != current_session_db_id)
+        rows = db.execute(fallback_query).all()
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for role_raw, content_raw, source_session_key, _ in rows:
+        content = _truncate_chat_delta_text(str(content_raw or ""))
+        if not content:
+            continue
+        normalized_role = "assistant" if str(role_raw or "").strip().lower() == "assistant" else "user"
+        source_key = str(source_session_key or "").strip()
+        dedupe_key = f"{source_key}|{normalized_role}|{content}".lower()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        out.append(
+            {
+                "role": normalized_role,
+                "content": content,
+                "source_session_key": source_key,
+            }
+        )
+        if len(out) >= max(1, int(max_messages)):
+            break
+    out.reverse()
+    return out
+
+
+def _compose_cross_session_updates_text(updates: list[dict[str, str]]) -> str:
+    if not updates:
+        return ""
+    lines = []
+    for item in updates:
+        role = str(item.get("role") or "user").strip().lower()
+        role_label = "ASSISTANT" if role == "assistant" else "USER"
+        source_key = str(item.get("source_session_key") or "").strip()
+        source_label = f"[{source_key}] " if source_key else ""
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        lines.append(f"- {source_label}{role_label}: {content}")
+    if not lines:
+        return ""
+    return (
+        "Recent updates from other project chat sessions (new since this session was last active):\n"
+        + "\n".join(lines)
+    )
+
+
 def _load_chat_session_codex_state(
     *,
     db: Session,
@@ -937,7 +1049,21 @@ def _prepare_chat_instruction(
         instruction_with_context = f"{instruction}\n\n{attachment_context}"
     if resume_active:
         # For resumed Codex threads, avoid resending stitched history on every turn.
-        effective_instruction = instruction_with_context
+        # Instead, inject only small fresh deltas from other project chat sessions so stale
+        # thread memory can pick up newly introduced facts.
+        cross_session_updates = _load_cross_session_recent_updates(
+            db=db,
+            user=user,
+            workspace_id=payload.workspace_id,
+            project_id=payload.project_id,
+            session_id=payload.session_id,
+        )
+        cross_session_updates_text = _compose_cross_session_updates_text(cross_session_updates)
+        effective_instruction = (
+            f"{instruction_with_context}\n\n{cross_session_updates_text}"
+            if cross_session_updates_text
+            else instruction_with_context
+        )
     else:
         effective_instruction = _compose_chat_instruction(instruction_with_context, compacted_history)
     return effective_instruction, compacted_history, False, prepared_attachment_refs, prepared_session_attachment_refs

@@ -446,6 +446,70 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     )
 
 
+def _normalize_snapshot_text(value: object, *, max_chars: int) -> str:
+    normalized = " ".join(str(value or "").split())
+    if len(normalized) <= max_chars:
+        return normalized
+    return f"{normalized[: max(0, max_chars - 3)]}..."
+
+
+def _build_resume_fresh_memory_snapshot(
+    ctx: dict,
+    *,
+    max_summary_chars: int = 1100,
+    max_evidence_items: int = 6,
+    max_evidence_snippet_chars: int = 180,
+    max_block_chars: int = 2400,
+) -> str:
+    blocks: list[str] = []
+
+    summary_markdown = str(ctx.get("graph_summary_markdown") or "").strip()
+    if summary_markdown:
+        summary_text = _normalize_snapshot_text(summary_markdown, max_chars=max_summary_chars)
+        if summary_text:
+            blocks.append("Fresh Summary:\n" + summary_text)
+
+    evidence_json = str(ctx.get("graph_evidence_json") or "").strip()
+    evidence_lines: list[str] = []
+    if evidence_json:
+        try:
+            parsed = json.loads(evidence_json)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, list):
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                evidence_id = str(item.get("evidence_id") or "").strip()
+                entity_type = str(item.get("entity_type") or "").strip() or "Entity"
+                source_type = str(item.get("source_type") or "").strip() or "source"
+                snippet = _normalize_snapshot_text(item.get("snippet"), max_chars=max_evidence_snippet_chars)
+                if not snippet:
+                    continue
+                score_raw = item.get("final_score")
+                score_text = ""
+                try:
+                    score_text = f"{float(score_raw):.3f}"
+                except Exception:
+                    score_text = ""
+                evidence_prefix = f"[{evidence_id}] " if evidence_id else ""
+                score_suffix = f" score={score_text}" if score_text else ""
+                evidence_lines.append(
+                    f"- {evidence_prefix}{entity_type} ({source_type}){score_suffix}: {snippet}"
+                )
+                if len(evidence_lines) >= max(1, int(max_evidence_items)):
+                    break
+    if evidence_lines:
+        blocks.append("Fresh Evidence:\n" + "\n".join(evidence_lines))
+
+    snapshot = "\n\n".join(blocks).strip()
+    if not snapshot:
+        return "_(fresh project snapshot unavailable)_"
+    if len(snapshot) <= max_block_chars:
+        return snapshot
+    return _normalize_snapshot_text(snapshot, max_chars=max_block_chars)
+
+
 def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     task_id = ctx.get("task_id")
     title = ctx.get("title", "")
@@ -456,6 +520,7 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     project_id = ctx.get("project_id") or ""
     actor_user_id = str(ctx.get("actor_user_id") or "").strip()
     project_name = ctx.get("project_name") or ""
+    fresh_memory_snapshot = _build_resume_fresh_memory_snapshot(ctx)
     allow_mutations = bool(ctx.get("allow_mutations", True))
     mcp_servers = _normalize_prompt_mcp_servers(ctx.get("mcp_servers"))
     enabled_mcp_servers_text = ", ".join(mcp_servers) if mcp_servers else "_(none selected)_"
@@ -496,9 +561,12 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         f"Current User ID: {actor_user_id}\n"
         f"Project Name: {project_name}\n"
         f"Instruction: {instruction}\n\n"
+        "Fresh Cross-Session Memory Snapshot (generated for this turn):\n"
+        f"{fresh_memory_snapshot}\n\n"
         "Guidance:\n"
         f"{task_guidance}"
         f"- Enabled MCP servers for this run: {enabled_mcp_servers_text}.\n"
+        "- For factual questions that may depend on other sessions, prefer Fresh Cross-Session Memory Snapshot over stale thread memory.\n"
         "- If prior thread context appears stale or missing, refresh by calling get_project_chat_context(project_ref=..., workspace_id=...).\n"
         "- Prefer bulk tools for batch operations.\n"
         "- For mutating MCP tool calls, always provide command_id.\n"

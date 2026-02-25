@@ -263,7 +263,44 @@ def test_codex_resume_prompt_is_compact_and_turn_focused():
     assert "Context Pack:" not in resume_prompt
     assert "File: Soul.md" not in resume_prompt
     assert "Instruction: Plan this feature" in resume_prompt
+    assert "Fresh Cross-Session Memory Snapshot" in resume_prompt
     assert len(resume_prompt) < len(full_prompt)
+
+
+def test_codex_resume_prompt_includes_compact_fresh_evidence_snapshot():
+    from features.agents.codex_mcp_adapter import _build_resume_prompt
+
+    prompt = _build_resume_prompt(
+        {
+            "task_id": "",
+            "title": "General Codex Chat",
+            "description": "chat",
+            "status": "To do",
+            "instruction": "What is the secret number?",
+            "workspace_id": "ws-1",
+            "project_id": "pr-1",
+            "actor_user_id": "user-1",
+            "project_name": "Alpha",
+            "graph_summary_markdown": "Recent project chat includes a declared secret number.",
+            "graph_evidence_json": json.dumps(
+                [
+                    {
+                        "evidence_id": "ev_001",
+                        "entity_type": "ChatMessage",
+                        "source_type": "chat_message.content",
+                        "final_score": 0.992,
+                        "snippet": "Tajni broj je 44",
+                    }
+                ]
+            ),
+        }
+    )
+
+    assert "Fresh Cross-Session Memory Snapshot" in prompt
+    assert "Fresh Summary:" in prompt
+    assert "Fresh Evidence:" in prompt
+    assert "Tajni broj je 44" in prompt
+    assert "score=0.992" in prompt
 
 
 def test_codex_prompt_includes_project_skills_section():
