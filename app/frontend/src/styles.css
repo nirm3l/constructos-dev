@@ -6289,68 +6289,6 @@ textarea:disabled {
   margin-bottom: 6px;
 }
 
-.codex-chat-header-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.codex-chat-resume-copy-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-width: 0;
-  max-width: min(430px, 62vw);
-  height: 22px;
-  min-height: 22px;
-  appearance: none;
-  -webkit-appearance: none;
-  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 20%);
-  border-radius: 999px;
-  padding: 0 7px;
-  font-size: 10px;
-  line-height: 1;
-  color: color-mix(in srgb, var(--muted), var(--text) 18%);
-  background: color-mix(in srgb, var(--surface), var(--surface-alt) 26%);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  text-align: left;
-  cursor: pointer;
-  outline: none;
-}
-
-.codex-chat-resume-copy-btn:hover {
-  border-color: color-mix(in srgb, var(--brand), var(--line) 28%);
-  color: color-mix(in srgb, var(--text), var(--muted) 16%);
-}
-
-.codex-chat-resume-copy-btn:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--brand), white 30%);
-  outline-offset: 1px;
-}
-
-.codex-chat-resume-copy-btn-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.codex-chat-resume-copy-btn-icon {
-  display: inline-flex;
-  align-items: center;
-  flex-shrink: 0;
-  opacity: 0.78;
-}
-
-.codex-chat-resume-copy-btn-icon .icon {
-  width: 11px;
-  height: 11px;
-  stroke-width: 2.1;
-}
-
 .codex-chat-history {
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -6467,17 +6405,6 @@ textarea:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-}
-
-.codex-chat-toolbar-footer {
-  margin-top: 7px;
-  display: flex;
-  justify-content: flex-end;
-  padding-right: 2px;
-}
-
-.codex-chat-resume-copy-btn-footer {
-  margin-left: auto;
 }
 
 .codex-chat-toolbar .action-icon {
@@ -7923,15 +7850,6 @@ textarea:disabled {
 
   .codex-chat-toolbar-item-send {
     margin-left: 10px;
-  }
-
-  .codex-chat-toolbar-footer {
-    margin-top: 8px;
-    padding-right: 0;
-  }
-
-  .codex-chat-resume-copy-btn-footer {
-    max-width: min(86vw, 360px);
   }
 }
 
