@@ -38,6 +38,7 @@ services:
     build: ./license_control_plane
     container_name: license-control-plane-backup
     command: ["python", "-m", "backup_scheduler"]
+    user: "${LCP_BACKUP_RUN_AS:-1000:1000}"
     depends_on:
       - license-control-plane
     environment:
@@ -51,11 +52,9 @@ services:
       LCP_BACKUP_LOG_LEVEL: "${LCP_BACKUP_LOG_LEVEL:-INFO}"
     volumes:
       - license-control-plane-data:/data:ro
-      - license-control-plane-backups:/backups
+      - "${LCP_BACKUP_HOST_DIR:-./data/license-control-plane-backups}:/backups"
     restart: unless-stopped
 
 volumes:
   license-control-plane-data:
     name: task-management_license-control-plane-data
-  license-control-plane-backups:
-    name: task-management_license-control-plane-backups
