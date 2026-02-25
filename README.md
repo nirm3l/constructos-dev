@@ -190,6 +190,70 @@ codex mcp list
 docker compose run --rm --build task-app pytest
 ```
 
+## COS Wrapper CLI
+`cos` is a thin local wrapper around Codex that:
+- auto-injects the application MCP server (`task-management-tools`)
+- prepends hidden wrapper instructions on every run
+- keeps Codex as the main implementation engine (file edits, commands, tests)
+
+Install (recommended, isolated user install):
+```bash
+pipx install --force ./tools/cos
+```
+
+Install directly from GitHub:
+```bash
+pipx install --force "git+https://github.com/nirm3l/constructos.git@main#subdirectory=tools/cos"
+```
+
+Upgrade:
+```bash
+pipx upgrade constructos-cos
+```
+
+Alternative installer:
+```bash
+./tools/cos/scripts/install.sh
+```
+
+Examples:
+```bash
+# interactive chat mode
+cos chat
+
+# interactive chat with initial request
+cos chat "Implement the notifications retry backoff fix in this repo"
+
+# non-interactive run
+cos exec "Implement project setup improvements and run tests"
+
+# diagnostics
+cos doctor
+
+# inspect/validate config
+cos config show
+cos config validate
+
+# version
+cos --version
+
+# local dev launcher (without install)
+./tools/cos/cos chat
+```
+
+Build package artifacts:
+```bash
+./tools/cos/scripts/build.sh
+```
+
+Useful options:
+- `--repo /path/to/repo` to target a specific project directory
+- `--app-mcp-url http://localhost:8091/mcp` to override MCP endpoint
+- `--system-prompt-file ~/.cos/system.md` for extra hidden instructions
+- `--dangerous` for full bypass mode (same risk profile as Codex flag)
+- config precedence: `default < global (~/.cos/config.toml) < local (./.cos/config.toml) < env < CLI option`
+- see [tools/cos/README.md](/home/m4tr1x/task-management/tools/cos/README.md) for Ubuntu/macOS install/uninstall details
+
 ## Technology Stack
 - Backend: FastAPI, SQLAlchemy, Pydantic.
 - Eventing: KurrentDB/EventStore + persistent subscription projection workers.
