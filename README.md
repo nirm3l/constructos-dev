@@ -195,75 +195,16 @@ docker compose -p constructos-app -f docker-compose.yml run --rm --build task-ap
 ```
 
 ## COS Wrapper CLI
-`cos` is a thin local wrapper around Codex that:
-- auto-injects the application MCP server (`task-management-tools`)
-- prepends hidden wrapper instructions on every run
-- keeps Codex as the main implementation engine (file edits, commands, tests)
-- runs on host and, by default, executes Codex inside Docker app container `task-app`
-
-Install (recommended, isolated user install):
-```bash
-pipx install --force ./tools/cos
-```
+`cos` moved to the public `constructos` repository and is maintained there.
 
 Install directly from GitHub:
 ```bash
 pipx install --force "git+https://github.com/nirm3l/constructos.git@main#subdirectory=tools/cos"
 ```
 
-Upgrade:
-```bash
-pipx upgrade constructos-cos
-```
-
-Alternative installer:
-```bash
-./tools/cos/scripts/install.sh
-```
-
-Examples:
-```bash
-# interactive chat mode
-cos chat
-
-# interactive chat with initial request
-cos chat "Implement the notifications retry backoff fix in this repo"
-
-# resume latest interactive session
-cos resume --last
-
-# non-interactive run
-cos exec "Implement project setup improvements and run tests"
-
-# diagnostics
-cos doctor
-
-# inspect/validate config
-cos config show
-cos config validate
-
-# version
-cos --version
-
-# local dev launcher (without install)
-./tools/cos/cos chat
-```
-
-Build package artifacts:
-```bash
-./tools/cos/scripts/build.sh
-```
-
-Useful options:
-- `--repo /path/to/repo` to target a specific project directory
-- `--app-mcp-url http://localhost:8091/mcp` to override MCP endpoint
-- `--codex-backend docker|local` to choose runtime backend
-- `--docker-container task-app` and `--docker-workdir /app` for Docker backend
-- `--system-prompt-file ~/.cos/system.md` for extra hidden instructions
-- `--terminal-theme green` to force green terminal styling during Codex run (best effort, default)
-- `--dangerous` for full bypass mode (same risk profile as Codex flag)
-- config precedence: `default < global (~/.cos/config.toml) < local (./.cos/config.toml) < env < CLI option`
-- see [tools/cos/README.md](/home/m4tr1x/task-management/tools/cos/README.md) for Ubuntu/macOS install/uninstall details
+Repository and docs:
+- `https://github.com/nirm3l/constructos`
+- `https://github.com/nirm3l/constructos/tree/main/tools/cos`
 
 ## Technology Stack
 - Backend: FastAPI, SQLAlchemy, Pydantic.
