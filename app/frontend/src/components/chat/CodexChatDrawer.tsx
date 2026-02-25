@@ -303,10 +303,9 @@ export function CodexChatDrawer({ state }: { state: any }) {
     normalizeBool(state.codexChatResumeState?.fallbackUsed)
     || normalizeBool(usage?.codex_resume_fallback_used)
   )
-  const codexThreadLabel = codexThreadId
-    ? (codexThreadId.length > 22
-      ? `Thread ${codexThreadId.slice(0, 8)}...${codexThreadId.slice(-6)}`
-      : `Thread ${codexThreadId}`)
+  const codexResumeCommand = codexThreadId ? `cos resume ${codexThreadId}` : null
+  const codexResumeHint = codexResumeCommand
+    ? `Continue this session from command line: ${codexResumeCommand}`
     : null
   const hasContext = contextSummary !== null
   const metaParts: string[] = []
@@ -766,10 +765,10 @@ export function CodexChatDrawer({ state }: { state: any }) {
             {(metaParts.length > 0 || codexThreadId || codexResumeFallbackUsed) && (
               <div className="codex-chat-session-meta-left">
                 {metaParts.map((part, idx) => <span key={`${idx}-${part}`}>{part}</span>)}
-                {codexThreadId && codexThreadLabel && (
-                  <ChatTooltip content={`Codex thread id: ${codexThreadId}`}>
-                    <span className="codex-chat-session-meta-thread" aria-label="Codex thread id">
-                      {codexThreadLabel}
+                {codexThreadId && codexResumeCommand && codexResumeHint && (
+                  <ChatTooltip content={codexResumeHint}>
+                    <span className="codex-chat-session-meta-thread" aria-label={codexResumeHint}>
+                      {codexResumeCommand}
                     </span>
                   </ChatTooltip>
                 )}
