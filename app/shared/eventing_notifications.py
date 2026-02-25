@@ -7,7 +7,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from features.notifications.domain import EVENT_CREATED as NOTIFICATION_EVENT_CREATED
-from features.licensing.read_models import license_status_read_model
 from .eventing_store import allocate_id
 from .models import Notification, Task, WorkspaceMember
 from .serializers import get_user_zoneinfo
@@ -151,6 +150,9 @@ def _maybe_append_license_grace_notification(
     workspace_id: str,
     append_event_fn,
 ) -> bool:
+    # Import lazily to avoid circular imports during shared core startup paths.
+    from features.licensing.read_models import license_status_read_model
+
     license_payload = license_status_read_model(db)
     if str(license_payload.get("status") or "").strip().lower() != "grace":
         return False
