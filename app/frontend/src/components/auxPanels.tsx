@@ -708,18 +708,48 @@ export function ProfilePanel({
           }}
         >
           <Tabs.List className="profile-tabs-list" aria-label="Profile sections">
-            <Tabs.Trigger className="profile-tab-trigger" value="preferences">Preferences</Tabs.Trigger>
-            <Tabs.Trigger className="profile-tab-trigger" value="security">Security</Tabs.Trigger>
-            <Tabs.Trigger className="profile-tab-trigger" value="feedback">Feedback</Tabs.Trigger>
-            <Tabs.Trigger className="profile-tab-trigger" value="runtime">Runtime</Tabs.Trigger>
-            <Tabs.Trigger className="profile-tab-trigger" value="license">License</Tabs.Trigger>
+            <Tabs.Trigger className="profile-tab-trigger" value="preferences">
+              <span className="profile-tab-trigger-icon" aria-hidden="true">
+                <Icon path="M3 6h18M3 12h18M3 18h18" />
+              </span>
+              <span>Preferences</span>
+            </Tabs.Trigger>
+            <Tabs.Trigger className="profile-tab-trigger" value="security">
+              <span className="profile-tab-trigger-icon" aria-hidden="true">
+                <Icon path="M12 2l7 4v6c0 5-3.5 9-7 10-3.5-1-7-5-7-10V6l7-4zM9 12h6M12 9v6" />
+              </span>
+              <span>Security</span>
+            </Tabs.Trigger>
+            <Tabs.Trigger className="profile-tab-trigger" value="feedback">
+              <span className="profile-tab-trigger-icon" aria-hidden="true">
+                <Icon path="M21 15a2 2 0 0 1-2 2H8l-5 5V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+              </span>
+              <span>Feedback</span>
+            </Tabs.Trigger>
+            <Tabs.Trigger className="profile-tab-trigger" value="runtime">
+              <span className="profile-tab-trigger-icon" aria-hidden="true">
+                <Icon path="M4 4h16v12H4zM10 20h4M12 16v4" />
+              </span>
+              <span>Runtime</span>
+            </Tabs.Trigger>
+            <Tabs.Trigger className="profile-tab-trigger" value="license">
+              <span className="profile-tab-trigger-icon" aria-hidden="true">
+                <Icon path="M9 12l2 2 4-4M12 3l7 4v5c0 5-3.5 8.5-7 9.5-3.5-1-7-4.5-7-9.5V7l7-4z" />
+              </span>
+              <span>License</span>
+            </Tabs.Trigger>
           </Tabs.List>
 
           <Tabs.Content className="profile-tab-content" value="preferences">
             <div className="profile-pane-grid">
               <section className="profile-pane-card" aria-label="Appearance">
                 <div className="profile-pane-head">
-                  <h3>Appearance</h3>
+                  <h3>
+                    <span className="profile-pane-head-icon" aria-hidden="true">
+                      <Icon path="M12 3l8 4v5c0 6-5 9-8 9s-8-3-8-9V7l8-4zM8 12h8M12 8v8" />
+                    </span>
+                    <span>Appearance</span>
+                  </h3>
                   <span className="status-chip">Theme</span>
                 </div>
                 <div className="profile-theme-row">
@@ -755,7 +785,12 @@ export function ProfilePanel({
 
               <section className="profile-pane-card" aria-label="Voice language" id="profile-voice-language" ref={voiceFactRef}>
                 <div className="profile-pane-head">
-                  <h3>Voice language</h3>
+                  <h3>
+                    <span className="profile-pane-head-icon" aria-hidden="true">
+                      <Icon path="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3M6 11a6 6 0 0 0 12 0M12 17v4M8 21h8" />
+                    </span>
+                    <span>Voice language</span>
+                  </h3>
                   <span className="status-chip">Speech</span>
                 </div>
                 <Select.Root value={speechLang} onValueChange={onChangeSpeechLang}>
@@ -791,7 +826,12 @@ export function ProfilePanel({
 
               <section className="profile-pane-card" aria-label="Account actions">
                 <div className="profile-pane-head">
-                  <h3>Account</h3>
+                  <h3>
+                    <span className="profile-pane-head-icon" aria-hidden="true">
+                      <Icon path="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8M4 20a8 8 0 0 1 16 0" />
+                    </span>
+                    <span>Account</span>
+                  </h3>
                   <span className="status-chip">Session</span>
                 </div>
                 <div className="profile-account-row">
@@ -987,7 +1027,12 @@ export function ProfilePanel({
 
               <section className="profile-pane-card" aria-label="GitHub issues">
                 <div className="profile-pane-head">
-                  <h3>Bug reports</h3>
+                  <h3>
+                    <span className="profile-pane-head-icon" aria-hidden="true">
+                      <Icon path="M9 3h6l1 2h3v4h-2l-1 8H8L7 9H5V5h3zM10 11h4M10 14h4" />
+                    </span>
+                    <span>Bug reports</span>
+                  </h3>
                   <span className="status-chip">GitHub</span>
                 </div>
                 <p className="meta">For reproducible defects and stack traces, open an issue in the project repository.</p>
@@ -1009,7 +1054,12 @@ export function ProfilePanel({
           <Tabs.Content className="profile-tab-content" value="runtime">
             <section className="profile-pane-card profile-runtime" aria-label="Build details">
               <div className="profile-pane-head">
-                <h3>Runtime</h3>
+                <h3>
+                  <span className="profile-pane-head-icon" aria-hidden="true">
+                    <Icon path="M4 4h16v12H4zM10 20h4M12 16v4" />
+                  </span>
+                  <span>Runtime</span>
+                </h3>
                 <span className="status-chip">Live</span>
               </div>
               <div className="profile-runtime-chip-row">
@@ -1034,7 +1084,12 @@ export function ProfilePanel({
                   <Accordion.Header className="profile-accordion-header">
                     <Accordion.Trigger className="profile-accordion-trigger">
                       <span className="profile-accordion-head">
-                        <span className="profile-accordion-title">Version matrix</span>
+                        <span className="profile-accordion-title">
+                          <span className="profile-accordion-title-icon" aria-hidden="true">
+                            <Icon path="M4 5h16M4 12h16M4 19h16" />
+                          </span>
+                          <span>Version matrix</span>
+                        </span>
                         <span className="profile-accordion-meta">Frontend, backend, and build identifiers</span>
                       </span>
                       <span className="profile-accordion-chevron" aria-hidden="true">
@@ -1063,7 +1118,12 @@ export function ProfilePanel({
                   <Accordion.Header className="profile-accordion-header">
                     <Accordion.Trigger className="profile-accordion-trigger">
                       <span className="profile-accordion-head">
-                        <span className="profile-accordion-title">Deployment</span>
+                        <span className="profile-accordion-title">
+                          <span className="profile-accordion-title-icon" aria-hidden="true">
+                            <Icon path="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-4z" />
+                          </span>
+                          <span>Deployment</span>
+                        </span>
                         <span className="profile-accordion-meta">Timestamp and local environment details</span>
                       </span>
                       <span className="profile-accordion-chevron" aria-hidden="true">
@@ -1092,7 +1152,12 @@ export function ProfilePanel({
                   <Accordion.Header className="profile-accordion-header">
                     <Accordion.Trigger className="profile-accordion-trigger">
                       <span className="profile-accordion-head">
-                        <span className="profile-accordion-title">Active preferences</span>
+                        <span className="profile-accordion-title">
+                          <span className="profile-accordion-title-icon" aria-hidden="true">
+                            <Icon path="M4 7h16M7 12h10M9 17h6" />
+                          </span>
+                          <span>Active preferences</span>
+                        </span>
                         <span className="profile-accordion-meta">Theme and speech language currently in use</span>
                       </span>
                       <span className="profile-accordion-chevron" aria-hidden="true">
@@ -1134,7 +1199,12 @@ export function ProfilePanel({
           <Tabs.Content className="profile-tab-content" value="license">
             <section className="profile-pane-card profile-license" aria-label="License details">
               <div className="profile-pane-head">
-                <h3>License</h3>
+                <h3>
+                  <span className="profile-pane-head-icon" aria-hidden="true">
+                    <Icon path="M9 12l2 2 4-4M12 3l7 4v5c0 5-3.5 8.5-7 9.5-3.5-1-7-4.5-7-9.5V7l7-4z" />
+                  </span>
+                  <span>License</span>
+                </h3>
                 <span className="status-chip">{licenseStatusLabel}</span>
               </div>
               {licenseLoading ? (
@@ -1468,7 +1538,8 @@ export function AdminPanel({
   }
 
   return (
-    <section className="card admin-panel">
+    <Tooltip.Provider delayDuration={180}>
+      <section className="card admin-panel">
       <div className="admin-panel-head">
         <div>
           <h2>Admin</h2>
@@ -1477,10 +1548,24 @@ export function AdminPanel({
         <span className="status-chip admin-workspace-chip">Workspace: {workspaceId || 'n/a'}</span>
       </div>
       <div className="admin-panel-summary">
-        <span className="status-chip">Users: {totalUsers}</span>
-        <span className="status-chip">Active: {activeUsers}</span>
-        {inactiveUsers > 0 ? <span className="status-chip">Inactive: {inactiveUsers}</span> : null}
-        <span className="status-chip">Skills: {totalSkills}</span>
+        <span className="status-chip admin-summary-chip">
+          <Icon path="M16 11c1.66 0 3-1.57 3-3.5S17.66 4 16 4s-3 1.57-3 3.5 1.34 3.5 3 3.5M8 11c1.66 0 3-1.57 3-3.5S9.66 4 8 4 5 5.57 5 7.5 6.34 11 8 11M8 13c-2.67 0-8 1.34-8 4v3h10v-3c0-1.53.82-2.75 2.05-3.73C10.72 13.09 9.32 13 8 13M16 13c-.26 0-.54.02-.83.05 1.43 1 2.33 2.39 2.33 3.95v3H24v-3c0-2.66-5.33-4-8-4" />
+          <span>Users: {totalUsers}</span>
+        </span>
+        <span className="status-chip admin-summary-chip">
+          <Icon path="M9 12l2 2 4-4M12 3l7 4v5c0 5-3.5 8.5-7 9.5-3.5-1-7-4.5-7-9.5V7l7-4z" />
+          <span>Active: {activeUsers}</span>
+        </span>
+        {inactiveUsers > 0 ? (
+          <span className="status-chip admin-summary-chip">
+            <Icon path="M6 6l12 12M18 6 6 18" />
+            <span>Inactive: {inactiveUsers}</span>
+          </span>
+        ) : null}
+        <span className="status-chip admin-summary-chip">
+          <Icon path="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 4.5A2.5 2.5 0 0 1 6.5 7H20M6.5 7A2.5 2.5 0 0 1 4 9.5v10" />
+          <span>Skills: {totalSkills}</span>
+        </span>
       </div>
 
       <Tabs.Root
@@ -1492,10 +1577,16 @@ export function AdminPanel({
       >
         <Tabs.List className="admin-tabs-list" aria-label="Admin sections">
           <Tabs.Trigger className="admin-tab-trigger" value="users">
+            <span className="admin-tab-trigger-icon" aria-hidden="true">
+              <Icon path="M16 11c1.66 0 3-1.57 3-3.5S17.66 4 16 4s-3 1.57-3 3.5 1.34 3.5 3 3.5M8 11c1.66 0 3-1.57 3-3.5S9.66 4 8 4 5 5.57 5 7.5 6.34 11 8 11M8 13c-2.67 0-8 1.34-8 4v3h10v-3c0-1.53.82-2.75 2.05-3.73C10.72 13.09 9.32 13 8 13M16 13c-.26 0-.54.02-.83.05 1.43 1 2.33 2.39 2.33 3.95v3H24v-3c0-2.66-5.33-4-8-4" />
+            </span>
             <span>Users</span>
             <span className="status-chip admin-tab-count">{totalUsers}</span>
           </Tabs.Trigger>
           <Tabs.Trigger className="admin-tab-trigger" value="skills">
+            <span className="admin-tab-trigger-icon" aria-hidden="true">
+              <Icon path="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 4.5A2.5 2.5 0 0 1 6.5 7H20M6.5 7A2.5 2.5 0 0 1 4 9.5v10" />
+            </span>
             <span>Skills catalog</span>
             <span className="status-chip admin-tab-count">{totalSkills}</span>
           </Tabs.Trigger>
@@ -1614,32 +1705,52 @@ export function AdminPanel({
                           />
                         </label>
                         {item.is_active && canResetPassword ? (
-                          <button
-                            className="admin-reset-btn"
-                            type="button"
-                            onClick={() => onResetPassword(item.id)}
-                            disabled={resetPending}
-                          >
-                            <Icon path="M20 11a8 8 0 1 0 2.3 5.6M20 4v7h-7" />
-                            <span>{resetPending ? 'Resetting...' : 'Reset password'}</span>
-                          </button>
+                          <Tooltip.Root>
+                            <Tooltip.Trigger asChild>
+                              <button
+                                className="admin-reset-btn"
+                                type="button"
+                                onClick={() => onResetPassword(item.id)}
+                                disabled={resetPending}
+                              >
+                                <Icon path="M20 11a8 8 0 1 0 2.3 5.6M20 4v7h-7" />
+                                <span>{resetPending ? 'Resetting...' : 'Reset password'}</span>
+                              </button>
+                            </Tooltip.Trigger>
+                            <Tooltip.Portal>
+                              <Tooltip.Content className="header-tooltip-content" sideOffset={6}>
+                                Generate a temporary password for this user
+                                <Tooltip.Arrow className="header-tooltip-arrow" />
+                              </Tooltip.Content>
+                            </Tooltip.Portal>
+                          </Tooltip.Root>
                         ) : null}
                         {item.is_active && canDeactivate ? (
-                          <button
-                            className="admin-deactivate-btn"
-                            type="button"
-                            onClick={() => {
-                              const confirmDeactivate = window.confirm(
-                                `Deactivate ${item.username}? They will be signed out and unable to log in.`
-                              )
-                              if (!confirmDeactivate) return
-                              onDeactivateUser(item.id)
-                            }}
-                            disabled={deactivatePending}
-                          >
-                            <Icon path="M6 6l12 12M18 6 6 18" />
-                            <span>{deactivatePending ? 'Deactivating...' : 'Deactivate user'}</span>
-                          </button>
+                          <Tooltip.Root>
+                            <Tooltip.Trigger asChild>
+                              <button
+                                className="admin-deactivate-btn"
+                                type="button"
+                                onClick={() => {
+                                  const confirmDeactivate = window.confirm(
+                                    `Deactivate ${item.username}? They will be signed out and unable to log in.`
+                                  )
+                                  if (!confirmDeactivate) return
+                                  onDeactivateUser(item.id)
+                                }}
+                                disabled={deactivatePending}
+                              >
+                                <Icon path="M6 6l12 12M18 6 6 18" />
+                                <span>{deactivatePending ? 'Deactivating...' : 'Deactivate user'}</span>
+                              </button>
+                            </Tooltip.Trigger>
+                            <Tooltip.Portal>
+                              <Tooltip.Content className="header-tooltip-content" sideOffset={6}>
+                                Disable login and revoke active sessions
+                                <Tooltip.Arrow className="header-tooltip-arrow" />
+                              </Tooltip.Content>
+                            </Tooltip.Portal>
+                          </Tooltip.Root>
                         ) : null}
                       </div>
                     </article>
@@ -1824,23 +1935,33 @@ export function AdminPanel({
                             {skill.is_seeded ? <span className="rule-kind-chip">[SEEDED]</span> : null}
                             <strong>{skill.name || skill.skill_key || 'Untitled catalog skill'}</strong>
                           </div>
-                          <button
-                            className="action-icon danger-ghost"
-                            type="button"
-                            disabled={deleteWorkspaceSkillPending}
-                            onClick={(event) => {
-                              event.stopPropagation()
-                              const confirmed = window.confirm(`Delete catalog skill "${skill.name || skill.skill_key}"?`)
-                              if (!confirmed) return
-                              void onDeleteWorkspaceSkill(skill.id).catch(() => {
-                                // Error feedback is handled by app-level UI notice.
-                              })
-                            }}
-                            title="Delete catalog skill"
-                            aria-label="Delete catalog skill"
-                          >
-                            <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
-                          </button>
+                          <Tooltip.Root>
+                            <Tooltip.Trigger asChild>
+                              <button
+                                className="action-icon danger-ghost"
+                                type="button"
+                                disabled={deleteWorkspaceSkillPending}
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  const confirmed = window.confirm(`Delete catalog skill "${skill.name || skill.skill_key}"?`)
+                                  if (!confirmed) return
+                                  void onDeleteWorkspaceSkill(skill.id).catch(() => {
+                                    // Error feedback is handled by app-level UI notice.
+                                  })
+                                }}
+                                title="Delete catalog skill"
+                                aria-label="Delete catalog skill"
+                              >
+                                <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                              </button>
+                            </Tooltip.Trigger>
+                            <Tooltip.Portal>
+                              <Tooltip.Content className="header-tooltip-content" sideOffset={6}>
+                                Remove skill from workspace catalog
+                                <Tooltip.Arrow className="header-tooltip-arrow" />
+                              </Tooltip.Content>
+                            </Tooltip.Portal>
+                          </Tooltip.Root>
                         </div>
                         <div className="meta">
                           key: {skill.skill_key || '-'} | mode: {skill.mode || '-'} | trust: {skill.trust_level || '-'}
@@ -1975,7 +2096,8 @@ export function AdminPanel({
           </div>
         </Tabs.Content>
       </Tabs.Root>
-    </section>
+      </section>
+    </Tooltip.Provider>
   )
 }
 

@@ -3817,6 +3817,16 @@ button:disabled {
   letter-spacing: 0.01em;
 }
 
+.profile-tab-trigger-icon {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: color-mix(in srgb, var(--brand-strong), var(--text) 32%);
+  flex-shrink: 0;
+}
+
 .profile-tab-trigger:hover {
   color: color-mix(in srgb, var(--text), var(--brand-strong) 18%);
   background: color-mix(in srgb, var(--surface-alt), var(--brand) 10%);
@@ -3859,7 +3869,20 @@ button:disabled {
 
 .profile-pane-head h3 {
   margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 14px;
+}
+
+.profile-pane-head-icon {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: color-mix(in srgb, var(--brand-strong), var(--text) 28%);
+  flex-shrink: 0;
 }
 
 .profile-theme-row {
@@ -4056,6 +4079,19 @@ button:disabled {
   font-size: 13px;
   font-weight: 800;
   color: color-mix(in srgb, var(--text), var(--brand-strong) 12%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.profile-accordion-title-icon {
+  width: 13px;
+  height: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: color-mix(in srgb, var(--brand-strong), var(--text) 32%);
+  flex-shrink: 0;
 }
 
 .profile-accordion-meta {
@@ -4212,6 +4248,13 @@ button:disabled {
   color: #e6efff;
 }
 
+[data-theme="dark"] .profile-tab-trigger-icon,
+[data-theme="dark"] .profile-pane-head-icon,
+[data-theme="dark"] .profile-accordion-title-icon,
+[data-theme="dark"] .admin-tab-trigger-icon {
+  color: #9fc1f5;
+}
+
 [data-theme="dark"] .profile-pane-card,
 [data-theme="dark"] .profile-accordion-item {
   border-color: #2f4772;
@@ -4242,6 +4285,17 @@ button:disabled {
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+}
+
+.admin-summary-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.admin-summary-chip .icon {
+  width: 13px;
+  height: 13px;
 }
 
 .admin-tabs {
@@ -4276,6 +4330,16 @@ button:disabled {
   cursor: pointer;
   white-space: nowrap;
   transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+}
+
+.admin-tab-trigger-icon {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: color-mix(in srgb, var(--brand-strong), var(--text) 36%);
+  flex-shrink: 0;
 }
 
 .admin-tab-trigger:hover {
