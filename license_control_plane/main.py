@@ -1548,6 +1548,41 @@ def _update_lead_status_by_email(
     }
 
 
+def _resolve_customer_email_for_installation(db: Session, installation: Installation) -> str | None:
+    metadata = _load_metadata(installation.metadata_json)
+    direct_email = _installation_customer_email(metadata)
+    if direct_email:
+        return direct_email
+
+    customer_ref = str(installation.customer_ref or "").strip()
+    if not customer_ref or customer_ref == LCP_UNASSIGNED_CUSTOMER_REF:
+        return None
+    return _lookup_customer_email_by_customer_ref(db, {customer_ref}).get(customer_ref)
+
+
+def _maybe_mark_lead_converted_for_installation(
+    db: Session,
+    *,
+    installation: Installation,
+    entitlement: dict[str, Any],
+    reason: str,
+) -> dict[str, int | str] | None:
+    entitlement_status = str(entitlement.get("status") or "").strip().lower()
+    if entitlement_status not in {"active", "grace"}:
+        return None
+
+    customer_email = _resolve_customer_email_for_installation(db, installation)
+    if not customer_email:
+        return None
+
+    return _update_lead_status_by_email(
+        db,
+        email=customer_email,
+        target_status=LEAD_STATUS_CONVERTED,
+        reason=reason,
+    )
+
+
 def _lookup_customer_email_by_customer_ref(db: Session, customer_refs: set[str]) -> dict[str, str]:
     normalized_refs = {str(customer_ref or "").strip() for customer_ref in customer_refs}
     normalized_refs = {customer_ref for customer_ref in normalized_refs if customer_ref}
@@ -2094,6 +2129,12 @@ def register_installation(
     _enforce_installation_customer_scope(installation, auth_context)
     _ensure_installation_has_customer_ref(installation, payload.customer_ref)
     entitlement = _compute_entitlement(installation)
+    lead_status_updates = _maybe_mark_lead_converted_for_installation(
+        db,
+        installation=installation,
+        entitlement=entitlement,
+        reason="installation_registered",
+    )
 
     if auth_context.auth_type == "client" and token_customer_ref:
         current_customer_ref = str(installation.customer_ref or "").strip()
@@ -2136,6 +2177,7 @@ def register_installation(
         },
         "entitlement": entitlement,
         "entitlement_token": entitlement_token,
+        "lead_status_updates": lead_status_updates,
     }
 
 
@@ -2235,6 +2277,12 @@ def heartbeat_installation(
     _enforce_installation_customer_scope(installation, auth_context)
     _ensure_installation_has_customer_ref(installation, payload.customer_ref)
     entitlement = _compute_entitlement(installation)
+    lead_status_updates = _maybe_mark_lead_converted_for_installation(
+        db,
+        installation=installation,
+        entitlement=entitlement,
+        reason="installation_heartbeat",
+    )
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
     _publish_admin_event(
@@ -2242,7 +2290,12 @@ def heartbeat_installation(
         "heartbeat",
         {"installation_id": installation.installation_id},
     )
-    return {"ok": True, "entitlement": entitlement, "entitlement_token": entitlement_token}
+    return {
+        "ok": True,
+        "entitlement": entitlement,
+        "entitlement_token": entitlement_token,
+        "lead_status_updates": lead_status_updates,
+    }
 
 
 @app.post("/v1/installations/activate")
@@ -2304,26 +2357,49 @@ def activate_installation(
     )
     _enforce_installation_customer_scope(installation, auth_context)
     installation.customer_ref = activation_code.customer_ref
-    # Activation always results in beta entitlement regardless of activation-code plan.
-    installation.plan_code = "beta"
-    installation.subscription_status = "beta"
-    installation.subscription_valid_until = LCP_BETA_PLAN_VALID_UNTIL
+    activation_plan_code = str(activation_code.plan_code or "").strip().lower()
+    activation_plan_code = activation_plan_code or "monthly"
+    activation_uses_lifetime = activation_plan_code == "lifetime"
+    if activation_uses_lifetime:
+        installation.plan_code = "lifetime"
+        installation.subscription_status = "lifetime"
+        installation.subscription_valid_until = None
+    else:
+        # Keep beta entitlements as default for non-lifetime activations.
+        installation.plan_code = "beta"
+        installation.subscription_status = "beta"
+        installation.subscription_valid_until = LCP_BETA_PLAN_VALID_UNTIL
 
     merged_metadata = _load_metadata(installation.metadata_json)
     merged_metadata.update(payload.metadata or {})
     activation_code_email = _installation_customer_email(_load_metadata(activation_code.metadata_json))
-    if activation_code_email:
-        merged_metadata.setdefault("issued_to_email", activation_code_email)
+    resolved_activation_email = activation_code_email
+    if not resolved_activation_email:
+        resolved_activation_email = _lookup_customer_email_by_customer_ref(db, {activation_code.customer_ref}).get(
+            activation_code.customer_ref
+        )
+    if resolved_activation_email:
+        merged_metadata.setdefault("issued_to_email", resolved_activation_email)
     merged_metadata.update(
         {
             "activation_code_suffix": activation_code.code_suffix,
             "activation_code_id": activation_code.id,
+            "activation_plan_code": activation_plan_code,
             "activated_at": now.isoformat(),
-            "beta_auto_assigned": True,
-            "beta_auto_assigned_reason": "activation",
-            "beta_auto_assigned_at": now.isoformat(),
         }
     )
+    if activation_uses_lifetime:
+        merged_metadata.pop("beta_auto_assigned", None)
+        merged_metadata.pop("beta_auto_assigned_reason", None)
+        merged_metadata.pop("beta_auto_assigned_at", None)
+    else:
+        merged_metadata.update(
+            {
+                "beta_auto_assigned": True,
+                "beta_auto_assigned_reason": "activation",
+                "beta_auto_assigned_at": now.isoformat(),
+            }
+        )
     activation_ip = _resolve_request_ip(request)
     if activation_ip:
         merged_metadata["activation_ip"] = activation_ip
@@ -2334,10 +2410,10 @@ def activate_installation(
     activation_code.last_used_at = now
 
     lead_status_updates: dict[str, int | str] | None = None
-    if activation_code_email:
+    if resolved_activation_email:
         lead_status_updates = _update_lead_status_by_email(
             db,
-            email=activation_code_email,
+            email=resolved_activation_email,
             target_status=LEAD_STATUS_CONVERTED,
             reason="installation_activated",
         )

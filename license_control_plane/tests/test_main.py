@@ -731,7 +731,7 @@ def test_register_auto_assigns_customer_ref_when_missing(tmp_path: Path):
         assert payload["installation"]["customer_ref"] == "cust_unassigned"
 
 
-def test_activation_code_lifetime_plan_is_auto_mapped_to_beta_subscription(tmp_path: Path):
+def test_activation_code_lifetime_plan_maps_to_lifetime_subscription(tmp_path: Path):
     with _build_client(tmp_path, beta_plan_valid_until="2099-12-31T23:59:59Z") as client:
         create_code = client.post(
             "/v1/admin/activation-codes",
@@ -762,10 +762,10 @@ def test_activation_code_lifetime_plan_is_auto_mapped_to_beta_subscription(tmp_p
         payload = activate.json()
         assert payload["ok"] is True
         assert payload["entitlement"]["status"] == "active"
-        assert payload["entitlement"]["plan_code"] == "beta"
-        assert payload["entitlement"]["valid_until"] == "2099-12-31T23:59:59+00:00"
-        assert payload["installation"]["subscription_status"] == "beta"
-        assert payload["installation"]["subscription_valid_until"] == "2099-12-31T23:59:59+00:00"
+        assert payload["entitlement"]["plan_code"] == "lifetime"
+        assert payload["entitlement"]["valid_until"] is None
+        assert payload["installation"]["subscription_status"] == "lifetime"
+        assert payload["installation"]["subscription_valid_until"] is None
 
 
 def test_activation_code_trial_plan_is_auto_mapped_to_beta_subscription(tmp_path: Path):
@@ -909,6 +909,64 @@ def test_install_exchange_issues_client_token_for_activation_code(tmp_path: Path
         assert str(second_payload["license_server_token"]).startswith("lcp_")
         assert second_payload["license_server_token"] != payload["license_server_token"]
         assert second_payload["activation_code_record"]["metadata"]["install_exchange_count"] == 2
+
+
+def test_register_with_client_token_marks_onboarding_contact_as_converted(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        create_contact = client.post(
+            "/v1/public/contact-requests",
+            json={
+                "request_type": "onboarding",
+                "email": "convert-via-register@example.com",
+                "source": "marketing-site",
+            },
+        )
+        assert create_contact.status_code == 200
+        assert create_contact.json()["contact_request"]["status"] == "pending"
+
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-convert-register",
+                "plan_code": "monthly",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+                "metadata": {"issued_to_email": "convert-via-register@example.com"},
+            },
+        )
+        assert create_code.status_code == 200
+        activation_code = create_code.json()["activation_code"]
+
+        exchange = client.post(
+            "/v1/install/exchange",
+            json={"activation_code": activation_code},
+        )
+        assert exchange.status_code == 200
+        client_token = exchange.json()["license_server_token"]
+
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": f"Bearer {client_token}"},
+            json={
+                "installation_id": "cp-register-convert-1",
+                "workspace_id": "workspace-register-convert",
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert register.status_code == 200
+        register_payload = register.json()
+        assert register_payload["lead_status_updates"]["target_status"] == "converted"
+        assert register_payload["lead_status_updates"]["updated_total"] == 1
+
+        listed = client.get(
+            "/v1/admin/contact-requests?q=convert-via-register@example.com&request_type=onboarding",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert listed.status_code == 200
+        listed_payload = listed.json()
+        assert listed_payload["total"] == 1
+        assert listed_payload["items"][0]["status"] == "converted"
 
 
 def test_install_exchange_register_enforces_customer_seat_limit(tmp_path: Path):
