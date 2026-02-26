@@ -77,6 +77,7 @@ Behavior:
 - Manual `workflow_dispatch` build (no automatic triggers on branch pushes).
 - Uploads artifacts for each OS matrix target.
 - When `release_tag` input is provided (for example `desktop-v0.1.3`), publishes assets to `nirm3l/constructos` GitHub Releases.
+- For macOS publish runs, workflow validates signing/notarization secrets up front and fails fast if configuration is incomplete.
 
 Optional signing/notarization secrets:
 - `DESKTOP_CSC_LINK`
@@ -87,7 +88,14 @@ Optional signing/notarization secrets:
 - `DESKTOP_APPLE_ID`
 - `DESKTOP_APPLE_APP_SPECIFIC_PASSWORD`
 - `DESKTOP_APPLE_TEAM_ID`
+- `DESKTOP_APPLE_API_KEY`
+- `DESKTOP_APPLE_API_KEY_ID`
+- `DESKTOP_APPLE_API_ISSUER`
 - `CONSTRUCTOS_RELEASE_TOKEN` (required for cross-repo publish to `nirm3l/constructos`)
+
+Notarization credential options (choose one):
+- Apple ID mode: `DESKTOP_APPLE_ID` + `DESKTOP_APPLE_APP_SPECIFIC_PASSWORD` + `DESKTOP_APPLE_TEAM_ID`
+- App Store Connect API key mode: `DESKTOP_APPLE_API_KEY` + `DESKTOP_APPLE_API_KEY_ID` + `DESKTOP_APPLE_API_ISSUER`
 
 Helper script (sets any provided env var via `gh secret set`):
 ```bash

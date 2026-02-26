@@ -55,6 +55,37 @@ jobs:
         working-directory: desktop
         run: npm ci
 
+      - name: Verify macOS signing and notarization secrets
+        if: runner.os == 'macOS' && inputs.publish_release == true && (startsWith(github.ref, 'refs/tags/desktop-v') || inputs.release_tag != '')
+        env:
+          DESKTOP_CSC_LINK: ${{ secrets.DESKTOP_CSC_LINK }}
+          DESKTOP_CSC_KEY_PASSWORD: ${{ secrets.DESKTOP_CSC_KEY_PASSWORD }}
+          DESKTOP_APPLE_ID: ${{ secrets.DESKTOP_APPLE_ID }}
+          DESKTOP_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.DESKTOP_APPLE_APP_SPECIFIC_PASSWORD }}
+          DESKTOP_APPLE_TEAM_ID: ${{ secrets.DESKTOP_APPLE_TEAM_ID }}
+          DESKTOP_APPLE_API_KEY: ${{ secrets.DESKTOP_APPLE_API_KEY }}
+          DESKTOP_APPLE_API_KEY_ID: ${{ secrets.DESKTOP_APPLE_API_KEY_ID }}
+          DESKTOP_APPLE_API_ISSUER: ${{ secrets.DESKTOP_APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${DESKTOP_CSC_LINK:-}" || -z "${DESKTOP_CSC_KEY_PASSWORD:-}" ]]; then
+            echo "::error::Missing macOS signing secrets: DESKTOP_CSC_LINK and/or DESKTOP_CSC_KEY_PASSWORD."
+            exit 1
+          fi
+
+          has_api_key="false"
+          has_apple_id="false"
+          if [[ -n "${DESKTOP_APPLE_API_KEY:-}" && -n "${DESKTOP_APPLE_API_KEY_ID:-}" && -n "${DESKTOP_APPLE_API_ISSUER:-}" ]]; then
+            has_api_key="true"
+          fi
+          if [[ -n "${DESKTOP_APPLE_ID:-}" && -n "${DESKTOP_APPLE_APP_SPECIFIC_PASSWORD:-}" && -n "${DESKTOP_APPLE_TEAM_ID:-}" ]]; then
+            has_apple_id="true"
+          fi
+          if [[ "${has_api_key}" != "true" && "${has_apple_id}" != "true" ]]; then
+            echo "::error::Missing notarization secrets. Provide either Apple API key triplet (DESKTOP_APPLE_API_KEY, DESKTOP_APPLE_API_KEY_ID, DESKTOP_APPLE_API_ISSUER) or Apple ID triplet (DESKTOP_APPLE_ID, DESKTOP_APPLE_APP_SPECIFIC_PASSWORD, DESKTOP_APPLE_TEAM_ID)."
+            exit 1
+          fi
+
       - name: Build desktop installers
         working-directory: desktop
         env:
@@ -66,6 +97,10 @@ jobs:
           APPLE_ID: ${{ secrets.DESKTOP_APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.DESKTOP_APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.DESKTOP_APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.DESKTOP_APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.DESKTOP_APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.DESKTOP_APPLE_API_ISSUER }}
+          DESKTOP_REQUIRE_NOTARIZATION: ${{ runner.os == 'macOS' && inputs.publish_release == true && (startsWith(github.ref, 'refs/tags/desktop-v') || inputs.release_tag != '') }}
         run: npm run dist:ci
 
       - name: Upload desktop artifacts

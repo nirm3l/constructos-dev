@@ -214,6 +214,10 @@ CI workflow for desktop artifacts:
 - set `release_tag` (for example `desktop-v0.1.3`) to publish assets
 - release assets are published to `nirm3l/constructos` (not this repository)
 - required secret for publish step: `CONSTRUCTOS_RELEASE_TOKEN`
+- for macOS release publishing, workflow now requires code-sign + notarization secrets and fails fast if missing
+- notarization auth can use either:
+  - `DESKTOP_APPLE_ID` + `DESKTOP_APPLE_APP_SPECIFIC_PASSWORD` + `DESKTOP_APPLE_TEAM_ID`
+  - `DESKTOP_APPLE_API_KEY` + `DESKTOP_APPLE_API_KEY_ID` + `DESKTOP_APPLE_API_ISSUER`
 - optional helper to upload signing/notarization secrets:
   - `./scripts/set_desktop_signing_secrets.sh` (uses `gh secret set`)
 
