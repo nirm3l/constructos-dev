@@ -10,7 +10,6 @@ type PopularTagFiltersProps = {
   selectedTags: string[]
   onToggleTag: (tag: string) => void
   onClear: () => void
-  getTagUsage: (tag: string) => number
   idPrefix: string
   visibleCount?: number
 }
@@ -20,7 +19,6 @@ export function PopularTagFilters({
   selectedTags,
   onToggleTag,
   onClear,
-  getTagUsage,
   idPrefix,
   visibleCount = DEFAULT_VISIBLE_TAGS,
 }: PopularTagFiltersProps) {
@@ -67,68 +65,65 @@ export function PopularTagFilters({
             title={`#${tag}`}
           >
             <span>#{tag}</span>
-            <span className="tag-filter-count">{getTagUsage(tag)}</span>
           </ToggleGroup.Item>
         ))}
-      </ToggleGroup.Root>
-
-      {overflowTags.length > 0 && (
-        <DropdownMenu.Root onOpenChange={(open) => { if (!open) setOverflowQuery('') }}>
-          <DropdownMenu.Trigger asChild>
-            <button
-              className="status-chip tag-filter-more"
-              type="button"
-              aria-label={`Show ${overflowTags.length} more tags`}
-              title="More tags"
-            >
-              +{overflowTags.length}
-            </button>
-          </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
-            <DropdownMenu.Content className="task-group-menu-content tag-filter-menu-content" sideOffset={8} align="start">
-              <div className="tag-filter-menu-search">
-                <input
-                  value={overflowQuery}
-                  onChange={(event) => setOverflowQuery(event.target.value)}
-                  onKeyDown={(event) => event.stopPropagation()}
-                  placeholder="Filter tags"
-                  aria-label="Filter additional tags"
-                />
-              </div>
-              <DropdownMenu.Separator className="task-group-menu-separator" />
-              {filteredOverflowTags.map((tag) => (
-                <DropdownMenu.CheckboxItem
-                  key={`${idPrefix}-overflow-${tag}`}
-                  className="task-group-menu-item tag-filter-menu-item"
-                  checked={selectedSet.has(tag.toLowerCase())}
+        {overflowTags.length > 0 && (
+          <DropdownMenu.Root onOpenChange={(open) => { if (!open) setOverflowQuery('') }}>
+            <DropdownMenu.Trigger asChild>
+              <button
+                className="status-chip tag-filter-more"
+                type="button"
+                aria-label={`Show ${overflowTags.length} more tags`}
+                title="More tags"
+              >
+                +{overflowTags.length}
+              </button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content className="task-group-menu-content tag-filter-menu-content" sideOffset={8} align="start">
+                <div className="tag-filter-menu-search">
+                  <input
+                    value={overflowQuery}
+                    onChange={(event) => setOverflowQuery(event.target.value)}
+                    onKeyDown={(event) => event.stopPropagation()}
+                    placeholder="Filter tags"
+                    aria-label="Filter additional tags"
+                  />
+                </div>
+                <DropdownMenu.Separator className="task-group-menu-separator" />
+                {filteredOverflowTags.map((tag) => (
+                  <DropdownMenu.CheckboxItem
+                    key={`${idPrefix}-overflow-${tag}`}
+                    className="task-group-menu-item tag-filter-menu-item"
+                    checked={selectedSet.has(tag.toLowerCase())}
                   onCheckedChange={() => onToggleTag(tag)}
                 >
                   <span className="tag-filter-menu-label">#{tag}</span>
-                  <span className="tag-filter-count">{getTagUsage(tag)}</span>
                   <DropdownMenu.ItemIndicator className="tag-filter-menu-item-indicator">
                     <Icon path="M5 13l4 4L19 7" />
                   </DropdownMenu.ItemIndicator>
-                </DropdownMenu.CheckboxItem>
-              ))}
-              {filteredOverflowTags.length === 0 && (
-                <div className="tag-filter-menu-empty">No matching tags.</div>
-              )}
-            </DropdownMenu.Content>
-          </DropdownMenu.Portal>
-        </DropdownMenu.Root>
-      )}
+                  </DropdownMenu.CheckboxItem>
+                ))}
+                {filteredOverflowTags.length === 0 && (
+                  <div className="tag-filter-menu-empty">No matching tags.</div>
+                )}
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
+        )}
 
-      {selectedTags.length > 0 && (
-        <button
-          className="action-icon tag-filter-clear"
-          type="button"
-          onClick={onClear}
-          title="Clear selected tags"
-          aria-label="Clear selected tags"
-        >
-          <Icon path="M6 6l12 12M18 6 6 18" />
-        </button>
-      )}
+        {selectedTags.length > 0 && (
+          <button
+            className="action-icon tag-filter-clear"
+            type="button"
+            onClick={onClear}
+            title="Clear selected tags"
+            aria-label="Clear selected tags"
+          >
+            <Icon path="M6 6l12 12M18 6 6 18" />
+          </button>
+        )}
+      </ToggleGroup.Root>
     </>
   )
 }

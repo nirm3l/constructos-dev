@@ -253,7 +253,6 @@ export function SpecificationsPanel({ state }: { state: any }) {
             selectedTags={state.specificationTags}
             onToggleTag={state.toggleSpecificationFilterTag}
             onClear={() => state.clearSpecificationFilterTags()}
-            getTagUsage={state.getTagUsage}
             idPrefix="spec-filter"
           />
         </div>
@@ -298,6 +297,21 @@ export function SpecificationsPanel({ state }: { state: any }) {
                     <strong>{displayTitle}</strong>
                   </div>
                   <div className="note-row-actions" onClick={(event) => event.stopPropagation()}>
+                    <button
+                      className="action-icon note-row-actions-trigger"
+                      type="button"
+                      title="Copy specification link"
+                      aria-label="Copy specification link"
+                      onClick={() =>
+                        state.copyShareLink({
+                          tab: 'specifications',
+                          projectId: specification.project_id,
+                          specificationId: specification.id,
+                        })
+                      }
+                    >
+                      <Icon path="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4m2 7a5 5 0 0 0-7.07 0L3.1 13.83a5 5 0 1 0 7.07 7.07L13 18" />
+                    </button>
                     <DropdownMenu.Root>
                       <DropdownMenu.Trigger asChild>
                         <button
@@ -314,19 +328,6 @@ export function SpecificationsPanel({ state }: { state: any }) {
                           <DropdownMenu.Item className="task-group-menu-item" onSelect={openSpecificationFromMenu} disabled={isOpen}>
                             <Icon path="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6zm9 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
                             <span>{isOpen ? 'Editor open' : 'Open editor'}</span>
-                          </DropdownMenu.Item>
-                          <DropdownMenu.Item
-                            className="task-group-menu-item"
-                            onSelect={() =>
-                              state.copyShareLink({
-                                tab: 'specifications',
-                                projectId: specification.project_id,
-                                specificationId: specification.id,
-                              })
-                            }
-                          >
-                            <Icon path="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4m2 7a5 5 0 0 0-7.07 0L3.1 13.83a5 5 0 1 0 7.07 7.07L13 18" />
-                            <span>Copy specification link</span>
                           </DropdownMenu.Item>
                           <DropdownMenu.Separator className="task-group-menu-separator" />
                           <DropdownMenu.Item className="task-group-menu-item" onSelect={toggleArchiveFromMenu}>

@@ -274,7 +274,6 @@ type TasksPanelProps = {
   searchTags: string[]
   toggleSearchTag: (tag: string) => void
   clearSearchTags: () => void
-  getTagUsage: (tag: string) => number
   boardData: ProjectBoard | undefined
   onOpenTaskEditor: (taskId: string) => void
   onOpenSpecification: (specificationId: string, projectId: string) => void
@@ -303,7 +302,6 @@ export function TasksPanel({
   searchTags,
   toggleSearchTag,
   clearSearchTags,
-  getTagUsage,
   boardData,
   onOpenTaskEditor,
   onOpenSpecification,
@@ -639,7 +637,6 @@ export function TasksPanel({
           selectedTags={searchTags}
           onToggleTag={toggleSearchTag}
           onClear={clearSearchTags}
-          getTagUsage={getTagUsage}
           idPrefix="project-tag"
         />
       </div>

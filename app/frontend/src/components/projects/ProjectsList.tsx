@@ -158,6 +158,15 @@ export function ProjectsList({
             </div>
             {!isOpen && (
               <div className="project-item-actions" onClick={(event) => event.stopPropagation()}>
+                <button
+                  className="action-icon note-row-actions-trigger"
+                  type="button"
+                  title="Copy project link"
+                  aria-label="Copy project link"
+                  onClick={() => onCopyShareLink(project.id)}
+                >
+                  <Icon path="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4m2 7a5 5 0 0 0-7.07 0L3.1 13.83a5 5 0 1 0 7.07 7.07L13 18" />
+                </button>
                 <DropdownMenu.Root>
                   <DropdownMenu.Trigger asChild>
                     <button
@@ -177,13 +186,6 @@ export function ProjectsList({
                       >
                         <Icon path="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6zm9 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
                         <span>{isOpen ? 'Collapse project' : 'Open project'}</span>
-                      </DropdownMenu.Item>
-                      <DropdownMenu.Item
-                        className="task-group-menu-item"
-                        onSelect={() => onCopyShareLink(project.id)}
-                      >
-                        <Icon path="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4m2 7a5 5 0 0 0-7.07 0L3.1 13.83a5 5 0 1 0 7.07 7.07L13 18" />
-                        <span>Copy project link</span>
                       </DropdownMenu.Item>
                       <DropdownMenu.Separator className="task-group-menu-separator" />
                       <DropdownMenu.Item

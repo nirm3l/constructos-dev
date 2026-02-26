@@ -114,9 +114,7 @@ async function copyTextToClipboard(text: string): Promise<void> {
   const canUseClipboardApi = typeof navigator !== 'undefined' && Boolean(navigator.clipboard?.writeText)
   if (canUseClipboardApi) {
     await navigator.clipboard.writeText(text)
-    return
-  }
-  if (typeof document !== 'undefined') {
+  } else if (typeof document !== 'undefined') {
     const ta = document.createElement('textarea')
     ta.value = text
     ta.setAttribute('readonly', 'true')
@@ -129,9 +127,23 @@ async function copyTextToClipboard(text: string): Promise<void> {
     const ok = document.execCommand('copy')
     document.body.removeChild(ta)
     if (!ok) throw new Error('Clipboard copy is not supported in this browser context')
-    return
+  } else {
+    throw new Error('Clipboard copy is not available')
   }
-  throw new Error('Clipboard copy is not available')
+}
+
+function extractCodexThreadIdFromTurns(turns: any[]): string | null {
+  if (!Array.isArray(turns) || turns.length === 0) return null
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index]
+    const content = String(turn?.content || '')
+    if (!content) continue
+    const fromResumeCommand = content.match(/\bcos\s+resume\s+([0-9a-fA-F-]{20,})\b/)
+    if (fromResumeCommand?.[1]) return fromResumeCommand[1]
+    const fromThreadLabel = content.match(/\bcodex\s+thread\s+id\s*:\s*([0-9a-fA-F-]{20,})\b/i)
+    if (fromThreadLabel?.[1]) return fromThreadLabel[1]
+  }
+  return null
 }
 
 function ChatTooltip({
@@ -172,6 +184,8 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const [deleteSessionId, setDeleteSessionId] = React.useState<string | null>(null)
   const [resumeCommandCopyState, setResumeCommandCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
   const codexThreadId = String(state.codexChatCodexSessionId || '').trim()
+    || extractCodexThreadIdFromTurns(state.codexChatTurns)
+    || ''
   const codexResumeCommand = codexThreadId ? `cos resume ${codexThreadId}` : null
 
   React.useEffect(() => {
@@ -235,9 +249,11 @@ export function CodexChatDrawer({ state }: { state: any }) {
       setResumeCommandCopyState('copied')
     } catch {
       setResumeCommandCopyState('error')
+      if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
+        window.prompt('Copy this command to continue in COS CLI:', codexResumeCommand)
+      }
     }
   }, [codexResumeCommand])
-
   if (!state.showCodexChat) return null
   const usage = state.codexChatUsage
   const inputTokens = typeof usage?.input_tokens === 'number' ? Math.max(0, usage.input_tokens) : null
@@ -356,7 +372,9 @@ export function CodexChatDrawer({ state }: { state: any }) {
     ? 'Continue session in CLI (copied)'
     : resumeCommandCopyState === 'error'
       ? 'Continue session in CLI (copy failed)'
-      : 'Continue session in CLI'
+      : codexResumeCommand
+        ? 'Continue session in CLI'
+        : 'Continue session in CLI (missing Codex thread ID)'
   const hasContext = contextSummary !== null
   const metaParts: string[] = []
   if (hasMessages) metaParts.push(`${state.codexChatTurns.length} ${state.codexChatTurns.length === 1 ? 'message' : 'messages'}`)
@@ -797,11 +815,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
                 <DropdownMenu.Item
                   className="codex-chat-menu-item"
                   disabled={!codexResumeCommand}
-                  onSelect={(event) => {
-                    if (!codexResumeCommand) {
-                      event.preventDefault()
-                      return
-                    }
+                  onSelect={() => {
                     void copyResumeCommandToClipboard()
                   }}
                 >
@@ -888,6 +902,29 @@ export function CodexChatDrawer({ state }: { state: any }) {
               )}
             </div>
           ))}
+          {hasMessages && codexResumeCommand && (
+            <div className="codex-chat-history-resume-row">
+              <ChatTooltip content="Continue this conversation in COS CLI. Click to copy the resume command.">
+                <button
+                  className={`codex-chat-history-resume-link ${
+                    resumeCommandCopyState === 'copied'
+                      ? 'is-copied'
+                      : resumeCommandCopyState === 'error'
+                        ? 'is-error'
+                        : ''
+                  }`}
+                  type="button"
+                  onClick={() => {
+                    void copyResumeCommandToClipboard()
+                  }}
+                  aria-label="Copy COS resume command"
+                >
+                  <span className="codex-chat-history-resume-text">{codexResumeCommand}</span>
+                  <Icon path="M16 4H8a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zM4 8H3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-1v-1" />
+                </button>
+              </ChatTooltip>
+            </div>
+          )}
         </div>
         <div className="codex-chat-composer">
           <textarea

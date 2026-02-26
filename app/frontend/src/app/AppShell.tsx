@@ -197,7 +197,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   const [editSpecificationTags, setEditSpecificationTags] = React.useState('')
   const [editSpecificationExternalRefsText, setEditSpecificationExternalRefsText] = React.useState('')
   const [editSpecificationAttachmentRefsText, setEditSpecificationAttachmentRefsText] = React.useState('')
-  const [specificationEditorView, setSpecificationEditorView] = React.useState<'write' | 'preview' | 'split'>('preview')
+  const [specificationEditorView, setSpecificationEditorView] = React.useState<'write' | 'preview' | 'split'>('split')
   const [editNoteTitle, setEditNoteTitle] = React.useState('')
   const [editNoteBody, setEditNoteBody] = React.useState('')
   const [editNoteGroupId, setEditNoteGroupId] = React.useState('')
@@ -206,7 +206,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   const [editNoteAttachmentRefsText, setEditNoteAttachmentRefsText] = React.useState('')
   const [showTagPicker, setShowTagPicker] = React.useState(false)
   const [tagPickerQuery, setTagPickerQuery] = React.useState('')
-  const [noteEditorView, setNoteEditorView] = React.useState<'write' | 'preview' | 'split'>('preview')
+  const [noteEditorView, setNoteEditorView] = React.useState<'write' | 'preview' | 'split'>('split')
   const {
     editStatus, setEditStatus, editTitle, setEditTitle, editDescription, setEditDescription, editPriority, setEditPriority,
     editDueDate, setEditDueDate, editProjectId, setEditProjectId, editTaskGroupId, setEditTaskGroupId, editTaskTags, setEditTaskTags, editTaskExternalRefsText,
@@ -1434,7 +1434,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       setEditSpecificationTags('')
       setEditSpecificationExternalRefsText('')
       setEditSpecificationAttachmentRefsText('')
-      setSpecificationEditorView('preview')
+      setSpecificationEditorView('split')
       return
     }
     setEditSpecificationTitle(selectedSpecification.title || '')
@@ -1443,8 +1443,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setEditSpecificationTags((selectedSpecification.tags ?? []).join(', '))
     setEditSpecificationExternalRefsText(externalRefsToText(selectedSpecification.external_refs))
     setEditSpecificationAttachmentRefsText(attachmentRefsToText(selectedSpecification.attachment_refs))
-    const hasBody = Boolean((selectedSpecification.body || '').trim())
-    setSpecificationEditorView(hasBody ? 'preview' : 'write')
+    setSpecificationEditorView('split')
   }, [selectedSpecification])
 
   const specificationIsDirty = React.useMemo(() => {

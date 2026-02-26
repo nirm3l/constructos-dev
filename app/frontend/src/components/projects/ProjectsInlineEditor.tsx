@@ -292,7 +292,7 @@ export function ProjectsInlineEditor({
   const [skillEditorTrustLevel, setSkillEditorTrustLevel] = React.useState<'verified' | 'reviewed' | 'untrusted'>(
     'reviewed'
   )
-  const [skillContentView, setSkillContentView] = React.useState<'write' | 'preview' | 'split'>('write')
+  const [skillContentView, setSkillContentView] = React.useState<'write' | 'preview' | 'split'>('split')
   const [showCatalogPicker, setShowCatalogPicker] = React.useState(false)
   const [catalogSearchQ, setCatalogSearchQ] = React.useState('')
   const [removeProjectPromptOpen, setRemoveProjectPromptOpen] = React.useState(false)
@@ -343,7 +343,7 @@ export function ProjectsInlineEditor({
     if (!normalizedRuleId) return
     setProjectEditorTab('rules')
     setSelectedProjectRuleId(normalizedRuleId)
-    setProjectRuleView('preview')
+    setProjectRuleView('split')
   }, [])
 
   const openLinkedSkill = React.useCallback((skillId: string | null | undefined) => {
@@ -844,7 +844,7 @@ export function ProjectsInlineEditor({
                 setSelectedProjectRuleId(null)
                 setProjectRuleTitle('')
                 setProjectRuleBody('')
-                setProjectRuleView('write')
+                setProjectRuleView('split')
               }}
             >
               <div className="task-main">

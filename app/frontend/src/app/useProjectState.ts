@@ -17,7 +17,7 @@ export function useProjectState() {
     'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
   >('METADATA_ONLY')
   const [projectTemplateParametersText, setProjectTemplateParametersText] = React.useState('')
-  const [projectDescriptionView, setProjectDescriptionView] = React.useState<'write' | 'preview'>('write')
+  const [projectDescriptionView, setProjectDescriptionView] = React.useState<'write' | 'preview' | 'split'>('split')
   const [showProjectCreateForm, setShowProjectCreateForm] = React.useState(false)
   const [showProjectEditForm, setShowProjectEditForm] = React.useState(false)
   const [editProjectName, setEditProjectName] = React.useState('')
@@ -36,16 +36,16 @@ export function useProjectState() {
   >('METADATA_ONLY')
   const [createProjectMemberIds, setCreateProjectMemberIds] = React.useState<string[]>([])
   const [editProjectMemberIds, setEditProjectMemberIds] = React.useState<string[]>([])
-  const [editProjectDescriptionView, setEditProjectDescriptionView] = React.useState<'write' | 'preview'>('write')
+  const [editProjectDescriptionView, setEditProjectDescriptionView] = React.useState<'write' | 'preview' | 'split'>('split')
   const [selectedProjectRuleId, setSelectedProjectRuleId] = React.useState<string | null>(null)
   const [projectRuleTitle, setProjectRuleTitle] = React.useState('')
   const [projectRuleBody, setProjectRuleBody] = React.useState('')
-  const [projectRuleView, setProjectRuleView] = React.useState<'write' | 'preview'>('write')
+  const [projectRuleView, setProjectRuleView] = React.useState<'write' | 'preview' | 'split'>('split')
   const [draftProjectRules, setDraftProjectRules] = React.useState<DraftProjectRule[]>([])
   const [selectedDraftProjectRuleId, setSelectedDraftProjectRuleId] = React.useState<string | null>(null)
   const [draftProjectRuleTitle, setDraftProjectRuleTitle] = React.useState('')
   const [draftProjectRuleBody, setDraftProjectRuleBody] = React.useState('')
-  const [draftProjectRuleView, setDraftProjectRuleView] = React.useState<'write' | 'preview'>('write')
+  const [draftProjectRuleView, setDraftProjectRuleView] = React.useState<'write' | 'preview' | 'split'>('split')
   const [selectedProjectId, setSelectedProjectId] = React.useState<string>(() => {
     if (typeof window !== 'undefined') {
       const fromUrl = new URLSearchParams(window.location.search).get('project')
