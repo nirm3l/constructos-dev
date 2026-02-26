@@ -44,27 +44,47 @@ jobs:
             const sha = context.sha;
             const { owner, repo } = context.repo;
             core.info(`Validating push commit ${sha}`);
+            const headCommitMessage = String(context.payload.head_commit?.message || "");
+            const mergeMatch = headCommitMessage.match(/Merge pull request #(\d+)\b/i);
 
+            if (mergeMatch) {
+              const prNumber = Number.parseInt(mergeMatch[1], 10);
+              core.info(`Detected merge commit for PR #${prNumber}`);
+              const prResponse = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: prNumber,
+              });
+              const pr = prResponse.data;
+              if (!pr.merged_at) {
+                core.setFailed(`PR #${prNumber} is not merged.`);
+                return;
+              }
+              if (pr.base?.ref !== "main" || pr.head?.ref !== "develop") {
+                core.setFailed(
+                  `PR #${prNumber} is ${pr.head?.ref}->${pr.base?.ref}; only develop->main is allowed.`
+                );
+                return;
+              }
+              core.info(`Push is linked to merged develop->main PR #${prNumber}.`);
+              return;
+            }
+
+            core.info("No merge-commit PR number found, falling back to associated PR lookup.");
             const response = await github.rest.repos.listPullRequestsAssociatedWithCommit({
               owner,
               repo,
               commit_sha: sha,
             });
-
-            const mergedPrsToMain = response.data.filter((pr) => {
-              return pr.base?.ref === "main" && pr.merged_at;
-            });
-
-            if (mergedPrsToMain.length === 0) {
-              core.setFailed("Push to 'main' must come from a merged pull request.");
-              return;
-            }
-
+            const mergedPrsToMain = response.data.filter((pr) => pr.base?.ref === "main" && pr.merged_at);
             const hasDevelopSource = mergedPrsToMain.some((pr) => pr.head?.ref === "develop");
+
             if (!hasDevelopSource) {
               const refs = mergedPrsToMain.map((pr) => `#${pr.number}:${pr.head?.ref}->${pr.base?.ref}`);
               core.setFailed(
-                `Push to 'main' is linked to PRs that are not develop->main (${refs.join(", ")}).`
+                refs.length
+                  ? `Push to 'main' is linked to PRs that are not develop->main (${refs.join(", ")}).`
+                  : "Push to 'main' must come from a merged develop->main pull request."
               );
               return;
             }
