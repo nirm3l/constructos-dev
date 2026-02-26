@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -14,6 +14,7 @@ from shared.realtime import realtime_hub
 from shared.settings import (
     APP_VERSION,
     LICENSE_HEARTBEAT_SECONDS,
+    LICENSE_GRACE_HOURS,
     LICENSE_PUBLIC_KEY,
     LICENSE_SERVER_TOKEN,
     LICENSE_SERVER_URL,
@@ -25,6 +26,7 @@ from .token_crypto import LicenseTokenError, verify_entitlement_token
 
 _worker_stop_event = threading.Event()
 _worker_thread: threading.Thread | None = None
+_HARD_LICENSE_REJECTION_STATUS_CODES = {400, 401, 402, 403, 404, 409, 410, 422}
 
 
 class LicenseActivationError(RuntimeError):
@@ -222,6 +224,72 @@ def _apply_entitlement_payload(db, installation: LicenseInstallation, payload: d
     )
 
 
+def _apply_hard_control_plane_rejection(
+    db,
+    *,
+    installation: LicenseInstallation,
+    status_code: int,
+    detail: str,
+) -> None:
+    now = _now_utc()
+    grace_hours = max(0, int(LICENSE_GRACE_HOURS))
+    trial_cutoff = now - timedelta(hours=grace_hours + 1)
+
+    installation.status = "expired"
+    installation.last_validated_at = now
+    installation.token_expires_at = None
+    current_trial_ends_at = installation.trial_ends_at
+    if current_trial_ends_at is not None and current_trial_ends_at.tzinfo is None:
+        current_trial_ends_at = current_trial_ends_at.replace(tzinfo=timezone.utc)
+    if current_trial_ends_at is None or current_trial_ends_at > trial_cutoff:
+        installation.trial_ends_at = trial_cutoff
+
+    metadata = {}
+    try:
+        metadata = json.loads(installation.metadata_json or "{}")
+    except Exception:
+        metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata["control_plane_last_error_code"] = int(status_code)
+    metadata["control_plane_last_error_detail"] = str(detail or "").strip()
+    metadata["control_plane_last_error_at"] = now.isoformat()
+    installation.metadata_json = _json_dumps(metadata)
+
+    rejection_payload = {
+        "status": "expired",
+        "plan_code": installation.plan_code,
+        "valid_from": now.isoformat(),
+        "valid_until": None,
+        "metadata": {
+            "reason": "control_plane_rejection",
+            "status_code": int(status_code),
+            "detail": str(detail or "").strip(),
+        },
+    }
+
+    latest = db.execute(
+        select(LicenseEntitlement)
+        .where(LicenseEntitlement.installation_id == installation.id)
+        .order_by(LicenseEntitlement.valid_from.desc(), LicenseEntitlement.id.desc())
+    ).scalars().first()
+    if latest is not None and str(latest.status or "").strip().lower() == "expired" and latest.valid_until is None:
+        latest.raw_payload_json = _json_dumps(rejection_payload)
+        return
+
+    db.add(
+        LicenseEntitlement(
+            installation_id=installation.id,
+            source="control-plane",
+            status="expired",
+            plan_code=installation.plan_code,
+            valid_from=now,
+            valid_until=None,
+            raw_payload_json=_json_dumps(rejection_payload),
+        )
+    )
+
+
 def _publish_license_realtime_signal(installation: LicenseInstallation) -> None:
     workspace_id = str(installation.workspace_id or "").strip()
     if not workspace_id:
@@ -279,6 +347,35 @@ def sync_license_once() -> bool:
             db.commit()
             _publish_license_realtime_signal(installation)
             return True
+        except httpx.HTTPStatusError as exc:
+            db.rollback()
+            status_code = int(exc.response.status_code) if exc.response is not None else 0
+            detail = _control_plane_error_detail(exc.response) if exc.response is not None else str(exc)
+            is_hard_rejection = status_code in _HARD_LICENSE_REJECTION_STATUS_CODES
+
+            if is_hard_rejection:
+                _apply_hard_control_plane_rejection(
+                    db,
+                    installation=installation,
+                    status_code=status_code,
+                    detail=detail,
+                )
+
+            _append_validation_log(
+                db,
+                installation_db_id=installation.id,
+                result="error",
+                reason="control_plane_sync_failed",
+                details={
+                    "error": str(exc),
+                    "status_code": status_code,
+                    "detail": detail,
+                    "hard_rejection": is_hard_rejection,
+                },
+            )
+            db.commit()
+            logger.warning("License sync failed: %s", exc)
+            return False
         except Exception as exc:
             db.rollback()
             _append_validation_log(
