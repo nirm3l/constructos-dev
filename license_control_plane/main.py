@@ -135,6 +135,14 @@ PUBLIC_REQUEST_TYPES = {"demo", "onboarding", "plan_details", "feedback"}
 SUPPORT_FEEDBACK_TYPES = {"general", "feature_request", "question", "other"}
 BUG_REPORT_SEVERITIES = {"low", "medium", "high", "critical"}
 BUG_REPORT_STATUSES = {"new", "triaged", "in_progress", "resolved", "closed", "rejected"}
+LEAD_STATUS_PENDING = "pending"
+LEAD_STATUS_ONBOARDING_SENT = "onboarding_sent"
+LEAD_STATUS_CONVERTED = "converted"
+SUPPORTED_LEAD_STATUSES = {
+    LEAD_STATUS_PENDING,
+    LEAD_STATUS_ONBOARDING_SENT,
+    LEAD_STATUS_CONVERTED,
+}
 SUPPORTED_SUBSCRIPTION_STATUSES = {"none", "active", "trialing", "grace", "lifetime", "beta"}
 SUBSCRIPTION_STATUS_ALIASES = {
     "past_due": "grace",
@@ -1441,6 +1449,65 @@ def _upsert_installation(db: Session, payload: InstallationRegisterRequest | Ins
     return installation
 
 
+def _apply_activation_code_plan_for_client_auth(
+    db: Session,
+    *,
+    installation: Installation,
+    auth_context: InstallationAuthContext,
+) -> bool:
+    if auth_context.auth_type != "client":
+        return False
+    activation_code_id = int(auth_context.activation_code_id or 0)
+    if activation_code_id <= 0:
+        return False
+
+    token_customer_ref = str(auth_context.customer_ref or "").strip()
+    query = select(ActivationCode).where(ActivationCode.id == activation_code_id)
+    if token_customer_ref:
+        query = query.where(ActivationCode.customer_ref == token_customer_ref)
+    activation_code = db.execute(query).scalar_one_or_none()
+    if activation_code is None:
+        return False
+
+    activation_plan_code = str(activation_code.plan_code or "").strip().lower() or "monthly"
+    if activation_plan_code != "lifetime":
+        return False
+
+    changed = False
+    if installation.plan_code != "lifetime":
+        installation.plan_code = "lifetime"
+        changed = True
+    if installation.subscription_status != "lifetime":
+        installation.subscription_status = "lifetime"
+        changed = True
+    if installation.subscription_valid_until is not None:
+        installation.subscription_valid_until = None
+        changed = True
+
+    metadata = _load_metadata(installation.metadata_json)
+    metadata_changed = False
+    if metadata.get("activation_code_id") != activation_code.id:
+        metadata["activation_code_id"] = activation_code.id
+        metadata_changed = True
+    if metadata.get("activation_code_suffix") != activation_code.code_suffix:
+        metadata["activation_code_suffix"] = activation_code.code_suffix
+        metadata_changed = True
+    if metadata.get("activation_plan_code") != activation_plan_code:
+        metadata["activation_plan_code"] = activation_plan_code
+        metadata_changed = True
+    for key in ("beta_auto_assigned", "beta_auto_assigned_reason", "beta_auto_assigned_at"):
+        if key in metadata:
+            metadata.pop(key, None)
+            metadata_changed = True
+    if metadata_changed:
+        installation.metadata_json = _dump_metadata(metadata)
+        changed = True
+
+    if changed:
+        db.flush()
+    return changed
+
+
 def _sign_entitlement_if_configured(entitlement_payload: dict[str, Any]) -> dict[str, Any] | None:
     if not LCP_SIGNING_PRIVATE_KEY_PEM:
         return None
@@ -1466,6 +1533,113 @@ def _installation_customer_email(metadata: dict[str, Any]) -> str | None:
         if normalized and EMAIL_PATTERN.fullmatch(normalized):
             return normalized
     return None
+
+
+def _update_lead_status_by_email(
+    db: Session,
+    *,
+    email: str,
+    target_status: str,
+    reason: str,
+) -> dict[str, int | str]:
+    normalized_email = _normalize_email(email)
+    normalized_target_status = str(target_status or "").strip().lower()
+    if normalized_target_status not in SUPPORTED_LEAD_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Unsupported lead status '{normalized_target_status}'")
+
+    now_iso = _now_utc().isoformat()
+    matched_waitlist = 0
+    matched_contact_requests = 0
+    updated_waitlist = 0
+    updated_contact_requests = 0
+
+    waitlist_rows = db.execute(select(WaitlistEntry).where(WaitlistEntry.email == normalized_email)).scalars().all()
+    for row in waitlist_rows:
+        matched_waitlist += 1
+        current_status = str(row.status or "").strip().lower() or LEAD_STATUS_PENDING
+        if current_status == LEAD_STATUS_CONVERTED and normalized_target_status != LEAD_STATUS_CONVERTED:
+            continue
+        if current_status == normalized_target_status:
+            continue
+        metadata = _load_metadata(row.metadata_json)
+        metadata["lead_status_reason"] = reason
+        metadata["lead_status_from"] = current_status
+        metadata["lead_status_to"] = normalized_target_status
+        metadata["lead_status_updated_at"] = now_iso
+        if normalized_target_status == LEAD_STATUS_ONBOARDING_SENT:
+            metadata.setdefault("onboarding_sent_at", now_iso)
+        if normalized_target_status == LEAD_STATUS_CONVERTED:
+            metadata["converted_at"] = now_iso
+        row.status = normalized_target_status
+        row.metadata_json = _dump_metadata(metadata)
+        updated_waitlist += 1
+
+    contact_rows = db.execute(select(ContactRequest).where(ContactRequest.email == normalized_email)).scalars().all()
+    for row in contact_rows:
+        matched_contact_requests += 1
+        current_status = str(row.status or "").strip().lower() or LEAD_STATUS_PENDING
+        if current_status == LEAD_STATUS_CONVERTED and normalized_target_status != LEAD_STATUS_CONVERTED:
+            continue
+        if current_status == normalized_target_status:
+            continue
+        metadata = _load_metadata(row.metadata_json)
+        metadata["lead_status_reason"] = reason
+        metadata["lead_status_from"] = current_status
+        metadata["lead_status_to"] = normalized_target_status
+        metadata["lead_status_updated_at"] = now_iso
+        if normalized_target_status == LEAD_STATUS_ONBOARDING_SENT:
+            metadata.setdefault("onboarding_sent_at", now_iso)
+        if normalized_target_status == LEAD_STATUS_CONVERTED:
+            metadata["converted_at"] = now_iso
+        row.status = normalized_target_status
+        row.metadata_json = _dump_metadata(metadata)
+        updated_contact_requests += 1
+
+    return {
+        "email": normalized_email,
+        "target_status": normalized_target_status,
+        "matched_waitlist": matched_waitlist,
+        "matched_contact_requests": matched_contact_requests,
+        "updated_waitlist": updated_waitlist,
+        "updated_contact_requests": updated_contact_requests,
+        "matched_total": matched_waitlist + matched_contact_requests,
+        "updated_total": updated_waitlist + updated_contact_requests,
+    }
+
+
+def _resolve_customer_email_for_installation(db: Session, installation: Installation) -> str | None:
+    metadata = _load_metadata(installation.metadata_json)
+    direct_email = _installation_customer_email(metadata)
+    if direct_email:
+        return direct_email
+
+    customer_ref = str(installation.customer_ref or "").strip()
+    if not customer_ref or customer_ref == LCP_UNASSIGNED_CUSTOMER_REF:
+        return None
+    return _lookup_customer_email_by_customer_ref(db, {customer_ref}).get(customer_ref)
+
+
+def _maybe_mark_lead_converted_for_installation(
+    db: Session,
+    *,
+    installation: Installation,
+    entitlement: dict[str, Any],
+    reason: str,
+) -> dict[str, int | str] | None:
+    entitlement_status = str(entitlement.get("status") or "").strip().lower()
+    if entitlement_status not in {"active", "grace"}:
+        return None
+
+    customer_email = _resolve_customer_email_for_installation(db, installation)
+    if not customer_email:
+        return None
+
+    return _update_lead_status_by_email(
+        db,
+        email=customer_email,
+        target_status=LEAD_STATUS_CONVERTED,
+        reason=reason,
+    )
 
 
 def _lookup_customer_email_by_customer_ref(db: Session, customer_refs: set[str]) -> dict[str, str]:
@@ -1505,10 +1679,16 @@ def _lookup_customer_email_by_customer_ref(db: Session, customer_refs: set[str])
     return email_by_customer_ref
 
 
-def _serialize_installation(installation: Installation) -> dict[str, Any]:
+def _serialize_installation(
+    installation: Installation,
+    *,
+    customer_email_override: str | None = None,
+) -> dict[str, Any]:
     metadata = _load_metadata(installation.metadata_json)
     activation_ip = str(metadata.get("activation_ip") or "").strip() or None
-    customer_email = _installation_customer_email(metadata)
+    customer_email = (
+        str(customer_email_override or "").strip().lower() or _installation_customer_email(metadata)
+    )
     subscription_status = _canonicalize_subscription_status(installation.subscription_status)
     if subscription_status not in SUPPORTED_SUBSCRIPTION_STATUSES:
         subscription_status = "none"
@@ -1529,6 +1709,7 @@ def _serialize_installation(installation: Installation) -> dict[str, Any]:
         "activation_ip": activation_ip,
         "customer_email": customer_email,
         "metadata": metadata,
+        "created_at": installation.created_at.isoformat(),
         "updated_at": installation.updated_at.isoformat(),
     }
 
@@ -2006,7 +2187,18 @@ def register_installation(
     installation = _upsert_installation(db, payload)
     _enforce_installation_customer_scope(installation, auth_context)
     _ensure_installation_has_customer_ref(installation, payload.customer_ref)
+    _apply_activation_code_plan_for_client_auth(
+        db,
+        installation=installation,
+        auth_context=auth_context,
+    )
     entitlement = _compute_entitlement(installation)
+    lead_status_updates = _maybe_mark_lead_converted_for_installation(
+        db,
+        installation=installation,
+        entitlement=entitlement,
+        reason="installation_registered",
+    )
 
     if auth_context.auth_type == "client" and token_customer_ref:
         current_customer_ref = str(installation.customer_ref or "").strip()
@@ -2042,11 +2234,14 @@ def register_installation(
             "workspace_id": installation.workspace_id,
             "customer_ref": installation.customer_ref,
             "subscription_status": installation.subscription_status,
+            "created_at": serialized_installation.get("created_at"),
+            "updated_at": serialized_installation.get("updated_at"),
             "trial_ends_at": installation.trial_ends_at.isoformat(),
             "customer_email": serialized_installation.get("customer_email"),
         },
         "entitlement": entitlement,
         "entitlement_token": entitlement_token,
+        "lead_status_updates": lead_status_updates,
     }
 
 
@@ -2145,7 +2340,18 @@ def heartbeat_installation(
     installation = _upsert_installation(db, payload)
     _enforce_installation_customer_scope(installation, auth_context)
     _ensure_installation_has_customer_ref(installation, payload.customer_ref)
+    _apply_activation_code_plan_for_client_auth(
+        db,
+        installation=installation,
+        auth_context=auth_context,
+    )
     entitlement = _compute_entitlement(installation)
+    lead_status_updates = _maybe_mark_lead_converted_for_installation(
+        db,
+        installation=installation,
+        entitlement=entitlement,
+        reason="installation_heartbeat",
+    )
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
     _publish_admin_event(
@@ -2153,7 +2359,12 @@ def heartbeat_installation(
         "heartbeat",
         {"installation_id": installation.installation_id},
     )
-    return {"ok": True, "entitlement": entitlement, "entitlement_token": entitlement_token}
+    return {
+        "ok": True,
+        "entitlement": entitlement,
+        "entitlement_token": entitlement_token,
+        "lead_status_updates": lead_status_updates,
+    }
 
 
 @app.post("/v1/installations/activate")
@@ -2215,26 +2426,49 @@ def activate_installation(
     )
     _enforce_installation_customer_scope(installation, auth_context)
     installation.customer_ref = activation_code.customer_ref
-    # Activation always results in beta entitlement regardless of activation-code plan.
-    installation.plan_code = "beta"
-    installation.subscription_status = "beta"
-    installation.subscription_valid_until = LCP_BETA_PLAN_VALID_UNTIL
+    activation_plan_code = str(activation_code.plan_code or "").strip().lower()
+    activation_plan_code = activation_plan_code or "monthly"
+    activation_uses_lifetime = activation_plan_code == "lifetime"
+    if activation_uses_lifetime:
+        installation.plan_code = "lifetime"
+        installation.subscription_status = "lifetime"
+        installation.subscription_valid_until = None
+    else:
+        # Keep beta entitlements as default for non-lifetime activations.
+        installation.plan_code = "beta"
+        installation.subscription_status = "beta"
+        installation.subscription_valid_until = LCP_BETA_PLAN_VALID_UNTIL
 
     merged_metadata = _load_metadata(installation.metadata_json)
     merged_metadata.update(payload.metadata or {})
     activation_code_email = _installation_customer_email(_load_metadata(activation_code.metadata_json))
-    if activation_code_email:
-        merged_metadata.setdefault("issued_to_email", activation_code_email)
+    resolved_activation_email = activation_code_email
+    if not resolved_activation_email:
+        resolved_activation_email = _lookup_customer_email_by_customer_ref(db, {activation_code.customer_ref}).get(
+            activation_code.customer_ref
+        )
+    if resolved_activation_email:
+        merged_metadata.setdefault("issued_to_email", resolved_activation_email)
     merged_metadata.update(
         {
             "activation_code_suffix": activation_code.code_suffix,
             "activation_code_id": activation_code.id,
+            "activation_plan_code": activation_plan_code,
             "activated_at": now.isoformat(),
-            "beta_auto_assigned": True,
-            "beta_auto_assigned_reason": "activation",
-            "beta_auto_assigned_at": now.isoformat(),
         }
     )
+    if activation_uses_lifetime:
+        merged_metadata.pop("beta_auto_assigned", None)
+        merged_metadata.pop("beta_auto_assigned_reason", None)
+        merged_metadata.pop("beta_auto_assigned_at", None)
+    else:
+        merged_metadata.update(
+            {
+                "beta_auto_assigned": True,
+                "beta_auto_assigned_reason": "activation",
+                "beta_auto_assigned_at": now.isoformat(),
+            }
+        )
     activation_ip = _resolve_request_ip(request)
     if activation_ip:
         merged_metadata["activation_ip"] = activation_ip
@@ -2244,13 +2478,26 @@ def activate_installation(
         activation_code.usage_count = int(activation_code.usage_count) + 1
     activation_code.last_used_at = now
 
+    lead_status_updates: dict[str, int | str] | None = None
+    if resolved_activation_email:
+        lead_status_updates = _update_lead_status_by_email(
+            db,
+            email=resolved_activation_email,
+            target_status=LEAD_STATUS_CONVERTED,
+            reason="installation_activated",
+        )
+
     entitlement = _compute_entitlement(installation)
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
     _publish_admin_event(
         "installations",
         "activated",
-        {"installation_id": installation.installation_id, "customer_ref": installation.customer_ref},
+        {
+            "installation_id": installation.installation_id,
+            "customer_ref": installation.customer_ref,
+            "lead_status_updates": lead_status_updates,
+        },
     )
 
     refreshed_active_count = len(_active_customer_installations(db, activation_code.customer_ref))
@@ -2265,6 +2512,7 @@ def activate_installation(
             "max_installations": int(activation_code.max_installations),
             "customer_ref": activation_code.customer_ref,
         },
+        "lead_status_updates": lead_status_updates,
     }
 
 
@@ -2456,6 +2704,7 @@ def admin_send_email(
 def admin_send_onboarding_email(
     payload: AdminOnboardingEmailSendRequest,
     _auth: None = Depends(_require_admin_token),
+    db: Session = Depends(_get_db),
 ) -> dict[str, Any]:
     to_email = _normalize_email(payload.to_email)
     customer_ref = _normalize_customer_ref(payload.customer_ref)
@@ -2487,6 +2736,14 @@ def admin_send_onboarding_email(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Failed to send onboarding email: {exc}") from exc
 
+    lead_status_updates = _update_lead_status_by_email(
+        db,
+        email=to_email,
+        target_status=LEAD_STATUS_ONBOARDING_SENT,
+        reason="onboarding_email_sent",
+    )
+    db.commit()
+
     _publish_admin_event(
         "email",
         "onboarding_sent",
@@ -2495,6 +2752,7 @@ def admin_send_onboarding_email(
             "customer_ref": customer_ref,
             "provider": "resend",
             "message_id": message_id,
+            "lead_status_updates": lead_status_updates,
         },
     )
     return {
@@ -2504,6 +2762,7 @@ def admin_send_onboarding_email(
         "customer_ref": customer_ref,
         "subject": subject,
         "message_id": message_id,
+        "lead_status_updates": lead_status_updates,
     }
 
 
@@ -2572,6 +2831,13 @@ def admin_provision_onboarding(
             html_body=html_body,
         )
 
+        lead_status_updates = _update_lead_status_by_email(
+            db,
+            email=to_email,
+            target_status=LEAD_STATUS_ONBOARDING_SENT,
+            reason="onboarding_package_provisioned",
+        )
+
         db.commit()
         db.refresh(client_token_record)
         db.refresh(activation_code_record)
@@ -2594,6 +2860,7 @@ def admin_provision_onboarding(
             "client_token_id": client_token_record.id,
             "activation_code_id": activation_code_record.id,
             "message_id": message_id,
+            "lead_status_updates": lead_status_updates,
         },
     )
     return {
@@ -2607,6 +2874,7 @@ def admin_provision_onboarding(
         "client_token_record": _serialize_client_token(client_token_record),
         "activation_code": activation_code_raw,
         "activation_code_record": _serialize_activation_code(activation_code_record),
+        "lead_status_updates": lead_status_updates,
     }
 
 
@@ -2936,12 +3204,32 @@ def admin_list_installations(
         rows_stmt.order_by(Installation.updated_at.desc(), Installation.id.desc()).offset(offset).limit(limit)
     ).scalars().all()
 
+    customer_refs_for_email_lookup: set[str] = set()
+    for installation in installations:
+        metadata = _load_metadata(installation.metadata_json)
+        if _installation_customer_email(metadata):
+            continue
+        customer_ref = str(installation.customer_ref or "").strip()
+        if not customer_ref or customer_ref == LCP_UNASSIGNED_CUSTOMER_REF:
+            continue
+        customer_refs_for_email_lookup.add(customer_ref)
+    email_by_customer_ref = (
+        _lookup_customer_email_by_customer_ref(db, customer_refs_for_email_lookup)
+        if customer_refs_for_email_lookup
+        else {}
+    )
+
     items: list[dict[str, Any]] = []
     for installation in installations:
         entitlement = _compute_entitlement(installation)
+        customer_ref = str(installation.customer_ref or "").strip()
+        customer_email_override = email_by_customer_ref.get(customer_ref) if customer_ref else None
         items.append(
             {
-                "installation": _serialize_installation(installation),
+                "installation": _serialize_installation(
+                    installation,
+                    customer_email_override=customer_email_override,
+                ),
                 "entitlement": entitlement,
             }
         )
@@ -3073,9 +3361,18 @@ def admin_get_installation(
 
     entitlement = _compute_entitlement(installation)
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
+    customer_email_override: str | None = None
+    metadata = _load_metadata(installation.metadata_json)
+    if not _installation_customer_email(metadata):
+        customer_ref = str(installation.customer_ref or "").strip()
+        if customer_ref and customer_ref != LCP_UNASSIGNED_CUSTOMER_REF:
+            customer_email_override = _lookup_customer_email_by_customer_ref(db, {customer_ref}).get(customer_ref)
     return {
         "ok": True,
-        "installation": _serialize_installation(installation),
+        "installation": _serialize_installation(
+            installation,
+            customer_email_override=customer_email_override,
+        ),
         "entitlement": entitlement,
         "entitlement_token": entitlement_token,
     }

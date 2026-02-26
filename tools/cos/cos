@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -h "${SOURCE}" ]]; do
+  SOURCE_DIR="$(cd -P "$(dirname "${SOURCE}")" && pwd)"
+  TARGET="$(readlink "${SOURCE}")"
+  if [[ "${TARGET}" == /* ]]; then
+    SOURCE="${TARGET}"
+  else
+    SOURCE="${SOURCE_DIR}/${TARGET}"
+  fi
+done
+
+SELF_DIR="$(cd -P "$(dirname "${SOURCE}")" && pwd)"
+SRC_DIR="${SELF_DIR}/src"
+
+if [[ -n "${PYTHONPATH:-}" ]]; then
+  export PYTHONPATH="${SRC_DIR}:${PYTHONPATH}"
+else
+  export PYTHONPATH="${SRC_DIR}"
+fi
+
+exec python3 -m cos_cli.main "$@"

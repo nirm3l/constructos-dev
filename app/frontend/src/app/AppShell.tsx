@@ -2030,7 +2030,7 @@ function AuthGate() {
   const [authError, setAuthError] = React.useState<string | null>(null)
   const [pending, setPending] = React.useState(false)
   const [sessionUserId, setSessionUserId] = React.useState('session')
-  const [username, setUsername] = React.useState('m4tr1x')
+  const [username, setUsername] = React.useState('admin')
   const [password, setPassword] = React.useState('')
   const [currentPassword, setCurrentPassword] = React.useState('')
   const [newPassword, setNewPassword] = React.useState('')

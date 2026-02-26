@@ -1194,6 +1194,7 @@ export function App() {
                         <span>sub: {item.installation.subscription_status || '-'} | ent: {item.entitlement.status}</span>
                         <span>plan: {item.installation.plan_code ?? '-'}</span>
                         <span>email: {customerEmail ?? '-'}</span>
+                        <span>installed: {formatDateTime(item.installation.created_at)}</span>
                       </button>
                     </li>
                   )
@@ -1240,6 +1241,9 @@ export function App() {
               </p>
               <p className="muted">
                 Trial ends at: {formatDateTime(details.data?.installation.trial_ends_at ?? selectedFromList?.installation.trial_ends_at ?? null)}
+              </p>
+              <p className="muted">
+                Installed at: {formatDateTime(details.data?.installation.created_at ?? selectedFromList?.installation.created_at ?? null)}
               </p>
               <p className="muted">
                 Activation IP: <code>{String(details.data?.installation.activation_ip ?? selectedFromList?.installation.activation_ip ?? '-')}</code>

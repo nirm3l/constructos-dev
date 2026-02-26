@@ -403,6 +403,7 @@ def test_admin_installation_includes_customer_email_from_metadata(tmp_path: Path
         assert register.status_code == 200
         register_payload = register.json()
         assert register_payload["installation"]["customer_email"] == "owner@example.com"
+        assert register_payload["installation"]["created_at"]
 
         listed = client.get(
             "/v1/admin/installations?limit=50&offset=0",
@@ -416,6 +417,7 @@ def test_admin_installation_includes_customer_email_from_metadata(tmp_path: Path
             if item["installation"]["installation_id"] == "cp-customer-email"
         )
         assert listed_item["installation"]["customer_email"] == "owner@example.com"
+        assert listed_item["installation"]["created_at"]
 
         details = client.get(
             "/v1/admin/installations/cp-customer-email",
@@ -424,10 +426,80 @@ def test_admin_installation_includes_customer_email_from_metadata(tmp_path: Path
         assert details.status_code == 200
         detail_payload = details.json()
         assert detail_payload["installation"]["customer_email"] == "owner@example.com"
+        assert detail_payload["installation"]["created_at"]
+
+
+def test_admin_installation_customer_email_lookup_fallback_from_customer_ref(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-email-lookup",
+                "plan_code": "monthly",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+                "metadata": {"issued_to_email": "lookup@example.com"},
+            },
+        )
+        assert create_code.status_code == 200
+
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-customer-email-lookup",
+                "workspace_id": "workspace-customer-email-lookup",
+                "customer_ref": "customer-email-lookup",
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert register.status_code == 200
+        register_payload = register.json()
+        assert register_payload["installation"]["customer_email"] is None
+
+        listed = client.get(
+            "/v1/admin/installations?limit=50&offset=0",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert listed.status_code == 200
+        listed_payload = listed.json()
+        listed_item = next(
+            item
+            for item in listed_payload["items"]
+            if item["installation"]["installation_id"] == "cp-customer-email-lookup"
+        )
+        assert listed_item["installation"]["customer_email"] == "lookup@example.com"
+        assert listed_item["installation"]["created_at"]
+
+        details = client.get(
+            "/v1/admin/installations/cp-customer-email-lookup",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert details.status_code == 200
+        detail_payload = details.json()
+        assert detail_payload["installation"]["customer_email"] == "lookup@example.com"
+        assert detail_payload["installation"]["created_at"]
 
 
 def test_activation_propagates_customer_email_from_activation_code_metadata(tmp_path: Path):
     with _build_client(tmp_path) as client:
+        waitlist = client.post(
+            "/v1/public/waitlist",
+            json={"email": "propagation@example.com", "source": "marketing-site"},
+        )
+        assert waitlist.status_code == 200
+
+        contact = client.post(
+            "/v1/public/contact-requests",
+            json={
+                "request_type": "onboarding",
+                "email": "propagation@example.com",
+                "source": "marketing-site",
+            },
+        )
+        assert contact.status_code == 200
+
         create_code = client.post(
             "/v1/admin/activation-codes",
             headers={"Authorization": "Bearer control-plane-token"},
@@ -455,6 +527,9 @@ def test_activation_propagates_customer_email_from_activation_code_metadata(tmp_
         assert activate.status_code == 200
         activate_payload = activate.json()
         assert activate_payload["installation"]["customer_email"] == "propagation@example.com"
+        assert activate_payload["lead_status_updates"]["updated_total"] == 2
+        assert activate_payload["lead_status_updates"]["updated_waitlist"] == 1
+        assert activate_payload["lead_status_updates"]["updated_contact_requests"] == 1
 
         details = client.get(
             "/v1/admin/installations/cp-email-propagation",
@@ -463,6 +538,24 @@ def test_activation_propagates_customer_email_from_activation_code_metadata(tmp_
         assert details.status_code == 200
         detail_payload = details.json()
         assert detail_payload["installation"]["customer_email"] == "propagation@example.com"
+
+        waitlist_list = client.get(
+            "/v1/admin/waitlist?q=propagation@example.com",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert waitlist_list.status_code == 200
+        waitlist_payload = waitlist_list.json()
+        assert waitlist_payload["total"] == 1
+        assert waitlist_payload["items"][0]["status"] == "converted"
+
+        contact_list = client.get(
+            "/v1/admin/contact-requests?q=propagation@example.com",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert contact_list.status_code == 200
+        contact_payload = contact_list.json()
+        assert contact_payload["total"] == 1
+        assert contact_payload["items"][0]["status"] == "converted"
 
 
 def test_startup_backfills_customer_email_for_existing_installations(tmp_path: Path):
@@ -638,7 +731,7 @@ def test_register_auto_assigns_customer_ref_when_missing(tmp_path: Path):
         assert payload["installation"]["customer_ref"] == "cust_unassigned"
 
 
-def test_activation_code_lifetime_plan_is_auto_mapped_to_beta_subscription(tmp_path: Path):
+def test_activation_code_lifetime_plan_maps_to_lifetime_subscription(tmp_path: Path):
     with _build_client(tmp_path, beta_plan_valid_until="2099-12-31T23:59:59Z") as client:
         create_code = client.post(
             "/v1/admin/activation-codes",
@@ -669,10 +762,10 @@ def test_activation_code_lifetime_plan_is_auto_mapped_to_beta_subscription(tmp_p
         payload = activate.json()
         assert payload["ok"] is True
         assert payload["entitlement"]["status"] == "active"
-        assert payload["entitlement"]["plan_code"] == "beta"
-        assert payload["entitlement"]["valid_until"] == "2099-12-31T23:59:59+00:00"
-        assert payload["installation"]["subscription_status"] == "beta"
-        assert payload["installation"]["subscription_valid_until"] == "2099-12-31T23:59:59+00:00"
+        assert payload["entitlement"]["plan_code"] == "lifetime"
+        assert payload["entitlement"]["valid_until"] is None
+        assert payload["installation"]["subscription_status"] == "lifetime"
+        assert payload["installation"]["subscription_valid_until"] is None
 
 
 def test_activation_code_trial_plan_is_auto_mapped_to_beta_subscription(tmp_path: Path):
@@ -816,6 +909,115 @@ def test_install_exchange_issues_client_token_for_activation_code(tmp_path: Path
         assert str(second_payload["license_server_token"]).startswith("lcp_")
         assert second_payload["license_server_token"] != payload["license_server_token"]
         assert second_payload["activation_code_record"]["metadata"]["install_exchange_count"] == 2
+
+
+def test_register_with_client_token_marks_onboarding_contact_as_converted(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        create_contact = client.post(
+            "/v1/public/contact-requests",
+            json={
+                "request_type": "onboarding",
+                "email": "convert-via-register@example.com",
+                "source": "marketing-site",
+            },
+        )
+        assert create_contact.status_code == 200
+        assert create_contact.json()["contact_request"]["status"] == "pending"
+
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-convert-register",
+                "plan_code": "monthly",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+                "metadata": {"issued_to_email": "convert-via-register@example.com"},
+            },
+        )
+        assert create_code.status_code == 200
+        activation_code = create_code.json()["activation_code"]
+
+        exchange = client.post(
+            "/v1/install/exchange",
+            json={"activation_code": activation_code},
+        )
+        assert exchange.status_code == 200
+        client_token = exchange.json()["license_server_token"]
+
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": f"Bearer {client_token}"},
+            json={
+                "installation_id": "cp-register-convert-1",
+                "workspace_id": "workspace-register-convert",
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert register.status_code == 200
+        register_payload = register.json()
+        assert register_payload["lead_status_updates"]["target_status"] == "converted"
+        assert register_payload["lead_status_updates"]["updated_total"] == 1
+
+        listed = client.get(
+            "/v1/admin/contact-requests?q=convert-via-register@example.com&request_type=onboarding",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert listed.status_code == 200
+        listed_payload = listed.json()
+        assert listed_payload["total"] == 1
+        assert listed_payload["items"][0]["status"] == "converted"
+
+
+def test_install_exchange_register_lifetime_plan_sets_lifetime_subscription(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-install-lifetime",
+                "plan_code": "lifetime",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+                "metadata": {"issued_to_email": "lifetime-register@example.com"},
+            },
+        )
+        assert create_code.status_code == 200
+        activation_code = create_code.json()["activation_code"]
+
+        exchange = client.post(
+            "/v1/install/exchange",
+            json={"activation_code": activation_code},
+        )
+        assert exchange.status_code == 200
+        client_token = exchange.json()["license_server_token"]
+
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": f"Bearer {client_token}"},
+            json={
+                "installation_id": "cp-exchange-lifetime-1",
+                "workspace_id": "workspace-exchange-lifetime",
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert register.status_code == 200
+        payload = register.json()
+        assert payload["installation"]["subscription_status"] == "lifetime"
+        assert payload["entitlement"]["status"] == "active"
+        assert payload["entitlement"]["plan_code"] == "lifetime"
+        assert payload["entitlement"]["valid_until"] is None
+
+        details = client.get(
+            "/v1/admin/installations/cp-exchange-lifetime-1",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert details.status_code == 200
+        detail_payload = details.json()
+        assert detail_payload["installation"]["subscription_status"] == "lifetime"
+        assert detail_payload["installation"]["plan_code"] == "lifetime"
+        assert detail_payload["installation"]["subscription_valid_until"] is None
+        assert "beta_auto_assigned" not in detail_payload["installation"]["metadata"]
 
 
 def test_install_exchange_register_enforces_customer_seat_limit(tmp_path: Path):
@@ -1405,6 +1607,22 @@ def test_admin_send_onboarding_email_succeeds_with_template(monkeypatch, tmp_pat
 
         monkeypatch.setattr(lcp_main, "_send_email_via_resend", _fake_send)
 
+        waitlist = client.post(
+            "/v1/public/waitlist",
+            json={"email": "ops@example.com", "source": "marketing-site"},
+        )
+        assert waitlist.status_code == 200
+
+        contact = client.post(
+            "/v1/public/contact-requests",
+            json={
+                "request_type": "onboarding",
+                "email": "ops@example.com",
+                "source": "marketing-site",
+            },
+        )
+        assert contact.status_code == 200
+
         response = client.post(
             "/v1/admin/email/send-onboarding",
             headers={"Authorization": "Bearer control-plane-token"},
@@ -1424,6 +1642,9 @@ def test_admin_send_onboarding_email_succeeds_with_template(monkeypatch, tmp_pat
         assert payload["to_email"] == "ops@example.com"
         assert payload["customer_ref"] == "cust_example"
         assert payload["message_id"] == "re_onboarding_message_id"
+        assert payload["lead_status_updates"]["updated_total"] == 2
+        assert payload["lead_status_updates"]["updated_waitlist"] == 1
+        assert payload["lead_status_updates"]["updated_contact_requests"] == 1
         assert "ConstructOS onboarding package" in payload["subject"]
         assert captured["to_email"] == "ops@example.com"
         assert "ACTIVATION_CODE=ACT-TEST-0001" in captured["text_body"]
@@ -1440,6 +1661,24 @@ def test_admin_send_onboarding_email_succeeds_with_template(monkeypatch, tmp_pat
         assert "Windows (cmd.exe):" in captured["html_body"]
         assert "install.ps1" in captured["html_body"]
         assert "Manual deploy command (optional):" not in captured["html_body"]
+
+        waitlist_list = client.get(
+            "/v1/admin/waitlist?q=ops@example.com",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert waitlist_list.status_code == 200
+        waitlist_payload = waitlist_list.json()
+        assert waitlist_payload["total"] == 1
+        assert waitlist_payload["items"][0]["status"] == "onboarding_sent"
+
+        contact_list = client.get(
+            "/v1/admin/contact-requests?q=ops@example.com&request_type=onboarding",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert contact_list.status_code == 200
+        contact_payload = contact_list.json()
+        assert contact_payload["total"] == 1
+        assert contact_payload["items"][0]["status"] == "onboarding_sent"
 
 
 def test_admin_send_onboarding_email_rejects_non_https_script_url(tmp_path: Path):
@@ -1485,6 +1724,22 @@ def test_admin_provision_onboarding_generates_and_sends_package(monkeypatch, tmp
 
         monkeypatch.setattr(lcp_main, "_send_email_via_resend", _fake_send)
 
+        waitlist = client.post(
+            "/v1/public/waitlist",
+            json={"email": "ops@example.com", "source": "marketing-site"},
+        )
+        assert waitlist.status_code == 200
+
+        contact = client.post(
+            "/v1/public/contact-requests",
+            json={
+                "request_type": "onboarding",
+                "email": "ops@example.com",
+                "source": "marketing-site",
+            },
+        )
+        assert contact.status_code == 200
+
         response = client.post(
             "/v1/admin/onboarding/provision",
             headers={"Authorization": "Bearer control-plane-token"},
@@ -1508,6 +1763,9 @@ def test_admin_provision_onboarding_generates_and_sends_package(monkeypatch, tmp
         assert payload["activation_code_record"]["customer_ref"] == payload["customer_ref"]
         assert payload["client_token_record"]["customer_ref"] == payload["customer_ref"]
         assert payload["activation_code_record"]["max_installations"] == 3
+        assert payload["lead_status_updates"]["updated_total"] == 2
+        assert payload["lead_status_updates"]["updated_waitlist"] == 1
+        assert payload["lead_status_updates"]["updated_contact_requests"] == 1
         assert captured["to_email"] == "ops@example.com"
         assert f"ACTIVATION_CODE={payload['activation_code']}" in captured["text_body"]
         assert "INSTALL_COS=true" in captured["text_body"]
@@ -1522,6 +1780,24 @@ def test_admin_provision_onboarding_generates_and_sends_package(monkeypatch, tmp
         assert "Windows (cmd.exe):" in captured["html_body"]
         assert "install.ps1" in captured["html_body"]
         assert "Manual deploy command (optional):" not in captured["html_body"]
+
+        waitlist_list = client.get(
+            "/v1/admin/waitlist?q=ops@example.com",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert waitlist_list.status_code == 200
+        waitlist_payload = waitlist_list.json()
+        assert waitlist_payload["total"] == 1
+        assert waitlist_payload["items"][0]["status"] == "onboarding_sent"
+
+        contact_list = client.get(
+            "/v1/admin/contact-requests?q=ops@example.com&request_type=onboarding",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert contact_list.status_code == 200
+        contact_payload = contact_list.json()
+        assert contact_payload["total"] == 1
+        assert contact_payload["items"][0]["status"] == "onboarding_sent"
 
 
 def test_admin_provision_onboarding_lifetime_plan_ignores_valid_until(monkeypatch, tmp_path: Path):

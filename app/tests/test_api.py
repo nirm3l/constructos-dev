@@ -24,7 +24,7 @@ def build_client(tmp_path: Path):
     main = reload(main)
     main.bootstrap_data()
     client = TestClient(main.app)
-    login = client.post('/api/auth/login', json={'username': 'm4tr1x', 'password': 'testtest'})
+    login = client.post('/api/auth/login', json={'username': 'admin', 'password': 'admin'})
     assert login.status_code == 200
     return client
 
@@ -1268,7 +1268,7 @@ def test_admin_can_deactivate_workspace_user(tmp_path):
     )
     assert login_before_deactivate.status_code == 200
 
-    admin_login = client.post('/api/auth/login', json={'username': 'm4tr1x', 'password': 'testtest'})
+    admin_login = client.post('/api/auth/login', json={'username': 'admin', 'password': 'admin'})
     assert admin_login.status_code == 200
 
     deactivated = client.post(
@@ -2488,7 +2488,7 @@ def test_notifications_stream_emits_refresh_when_user_state_changes_without_sign
     monkeypatch.setattr(notifications_api.realtime_hub, 'subscribe', lambda channels: DummySubscription())  # noqa: ARG005
 
     with SessionLocal() as db:
-        user = db.execute(select(User).where(User.username == 'm4tr1x')).scalar_one()
+        user = db.execute(select(User).where(User.username == 'admin')).scalar_one()
         user_id = user.id
         before_theme = user.theme
 
