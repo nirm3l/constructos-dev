@@ -1,6 +1,4 @@
 const { spawnSync } = require("node:child_process");
-const path = require("node:path");
-
 const optionalEnvKeys = [
   "CSC_LINK",
   "CSC_KEY_PASSWORD",
@@ -19,14 +17,12 @@ for (const key of optionalEnvKeys) {
   }
 }
 
-const electronBuilderBin =
-  process.platform === "win32"
-    ? path.join(__dirname, "..", "node_modules", ".bin", "electron-builder.cmd")
-    : path.join(__dirname, "..", "node_modules", ".bin", "electron-builder");
+const npmExecutable = process.platform === "win32" ? "npm.cmd" : "npm";
 
-const result = spawnSync(electronBuilderBin, ["--publish", "never"], {
+const result = spawnSync(npmExecutable, ["exec", "--", "electron-builder", "--publish", "never"], {
   stdio: "inherit",
   env: process.env,
+  shell: process.platform === "win32",
 });
 
 if (result.error) {
