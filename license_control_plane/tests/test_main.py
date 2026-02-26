@@ -969,6 +969,57 @@ def test_register_with_client_token_marks_onboarding_contact_as_converted(tmp_pa
         assert listed_payload["items"][0]["status"] == "converted"
 
 
+def test_install_exchange_register_lifetime_plan_sets_lifetime_subscription(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-install-lifetime",
+                "plan_code": "lifetime",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+                "metadata": {"issued_to_email": "lifetime-register@example.com"},
+            },
+        )
+        assert create_code.status_code == 200
+        activation_code = create_code.json()["activation_code"]
+
+        exchange = client.post(
+            "/v1/install/exchange",
+            json={"activation_code": activation_code},
+        )
+        assert exchange.status_code == 200
+        client_token = exchange.json()["license_server_token"]
+
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": f"Bearer {client_token}"},
+            json={
+                "installation_id": "cp-exchange-lifetime-1",
+                "workspace_id": "workspace-exchange-lifetime",
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert register.status_code == 200
+        payload = register.json()
+        assert payload["installation"]["subscription_status"] == "lifetime"
+        assert payload["entitlement"]["status"] == "active"
+        assert payload["entitlement"]["plan_code"] == "lifetime"
+        assert payload["entitlement"]["valid_until"] is None
+
+        details = client.get(
+            "/v1/admin/installations/cp-exchange-lifetime-1",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert details.status_code == 200
+        detail_payload = details.json()
+        assert detail_payload["installation"]["subscription_status"] == "lifetime"
+        assert detail_payload["installation"]["plan_code"] == "lifetime"
+        assert detail_payload["installation"]["subscription_valid_until"] is None
+        assert "beta_auto_assigned" not in detail_payload["installation"]["metadata"]
+
+
 def test_install_exchange_register_enforces_customer_seat_limit(tmp_path: Path):
     with _build_client(tmp_path) as client:
         create_code = client.post(

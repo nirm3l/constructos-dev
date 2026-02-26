@@ -1449,6 +1449,65 @@ def _upsert_installation(db: Session, payload: InstallationRegisterRequest | Ins
     return installation
 
 
+def _apply_activation_code_plan_for_client_auth(
+    db: Session,
+    *,
+    installation: Installation,
+    auth_context: InstallationAuthContext,
+) -> bool:
+    if auth_context.auth_type != "client":
+        return False
+    activation_code_id = int(auth_context.activation_code_id or 0)
+    if activation_code_id <= 0:
+        return False
+
+    token_customer_ref = str(auth_context.customer_ref or "").strip()
+    query = select(ActivationCode).where(ActivationCode.id == activation_code_id)
+    if token_customer_ref:
+        query = query.where(ActivationCode.customer_ref == token_customer_ref)
+    activation_code = db.execute(query).scalar_one_or_none()
+    if activation_code is None:
+        return False
+
+    activation_plan_code = str(activation_code.plan_code or "").strip().lower() or "monthly"
+    if activation_plan_code != "lifetime":
+        return False
+
+    changed = False
+    if installation.plan_code != "lifetime":
+        installation.plan_code = "lifetime"
+        changed = True
+    if installation.subscription_status != "lifetime":
+        installation.subscription_status = "lifetime"
+        changed = True
+    if installation.subscription_valid_until is not None:
+        installation.subscription_valid_until = None
+        changed = True
+
+    metadata = _load_metadata(installation.metadata_json)
+    metadata_changed = False
+    if metadata.get("activation_code_id") != activation_code.id:
+        metadata["activation_code_id"] = activation_code.id
+        metadata_changed = True
+    if metadata.get("activation_code_suffix") != activation_code.code_suffix:
+        metadata["activation_code_suffix"] = activation_code.code_suffix
+        metadata_changed = True
+    if metadata.get("activation_plan_code") != activation_plan_code:
+        metadata["activation_plan_code"] = activation_plan_code
+        metadata_changed = True
+    for key in ("beta_auto_assigned", "beta_auto_assigned_reason", "beta_auto_assigned_at"):
+        if key in metadata:
+            metadata.pop(key, None)
+            metadata_changed = True
+    if metadata_changed:
+        installation.metadata_json = _dump_metadata(metadata)
+        changed = True
+
+    if changed:
+        db.flush()
+    return changed
+
+
 def _sign_entitlement_if_configured(entitlement_payload: dict[str, Any]) -> dict[str, Any] | None:
     if not LCP_SIGNING_PRIVATE_KEY_PEM:
         return None
@@ -2128,6 +2187,11 @@ def register_installation(
     installation = _upsert_installation(db, payload)
     _enforce_installation_customer_scope(installation, auth_context)
     _ensure_installation_has_customer_ref(installation, payload.customer_ref)
+    _apply_activation_code_plan_for_client_auth(
+        db,
+        installation=installation,
+        auth_context=auth_context,
+    )
     entitlement = _compute_entitlement(installation)
     lead_status_updates = _maybe_mark_lead_converted_for_installation(
         db,
@@ -2276,6 +2340,11 @@ def heartbeat_installation(
     installation = _upsert_installation(db, payload)
     _enforce_installation_customer_scope(installation, auth_context)
     _ensure_installation_has_customer_ref(installation, payload.customer_ref)
+    _apply_activation_code_plan_for_client_auth(
+        db,
+        installation=installation,
+        auth_context=auth_context,
+    )
     entitlement = _compute_entitlement(installation)
     lead_status_updates = _maybe_mark_lead_converted_for_installation(
         db,
