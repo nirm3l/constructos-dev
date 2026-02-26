@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import json
 import re
 from pathlib import Path
@@ -37,10 +38,27 @@ def write_frontend_package_version(version: str) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Bump VERSION patch segment.")
+    parser.add_argument(
+        "--update-frontend-package",
+        action="store_true",
+        help="Also update app/frontend/package.json version to match VERSION.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print next version without writing files.",
+    )
+    args = parser.parse_args()
+
     current = read_version()
     nxt = bump_patch(current)
+    if args.dry_run:
+        print(nxt)
+        return
     write_version(nxt)
-    write_frontend_package_version(nxt)
+    if args.update_frontend_package:
+        write_frontend_package_version(nxt)
     print(nxt)
 
 

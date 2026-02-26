@@ -1403,6 +1403,43 @@ def _installation_customer_email(metadata: dict[str, Any]) -> str | None:
     return None
 
 
+def _lookup_customer_email_by_customer_ref(db: Session, customer_refs: set[str]) -> dict[str, str]:
+    normalized_refs = {str(customer_ref or "").strip() for customer_ref in customer_refs}
+    normalized_refs = {customer_ref for customer_ref in normalized_refs if customer_ref}
+    if not normalized_refs:
+        return {}
+
+    email_by_customer_ref: dict[str, str] = {}
+
+    activation_rows = db.execute(
+        select(ActivationCode)
+        .where(ActivationCode.customer_ref.in_(sorted(normalized_refs)))
+        .order_by(ActivationCode.updated_at.desc(), ActivationCode.id.desc())
+    ).scalars().all()
+    for record in activation_rows:
+        customer_ref = str(record.customer_ref or "").strip()
+        if not customer_ref or customer_ref in email_by_customer_ref:
+            continue
+        email = _installation_customer_email(_load_metadata(record.metadata_json))
+        if email:
+            email_by_customer_ref[customer_ref] = email
+
+    client_token_rows = db.execute(
+        select(ClientToken)
+        .where(ClientToken.customer_ref.in_(sorted(normalized_refs)))
+        .order_by(ClientToken.updated_at.desc(), ClientToken.id.desc())
+    ).scalars().all()
+    for record in client_token_rows:
+        customer_ref = str(record.customer_ref or "").strip()
+        if not customer_ref or customer_ref in email_by_customer_ref:
+            continue
+        email = _installation_customer_email(_load_metadata(record.metadata_json))
+        if email:
+            email_by_customer_ref[customer_ref] = email
+
+    return email_by_customer_ref
+
+
 def _serialize_installation(installation: Installation) -> dict[str, Any]:
     metadata = _load_metadata(installation.metadata_json)
     activation_ip = str(metadata.get("activation_ip") or "").strip() or None
@@ -1459,6 +1496,7 @@ def _startup() -> None:
 
     # Keep data consistent for customer-first operations.
     with SessionLocal() as db:
+        should_commit = False
         records = db.execute(
             select(Installation).where(
                 or_(
@@ -1475,6 +1513,47 @@ def _startup() -> None:
                 merged_metadata.setdefault("customer_ref_auto_assigned", True)
                 merged_metadata.setdefault("customer_ref_auto_assigned_at", now_iso)
                 installation.metadata_json = _dump_metadata(merged_metadata)
+            should_commit = True
+
+        installations = db.execute(
+            select(Installation).where(
+                Installation.customer_ref.is_not(None),
+                Installation.customer_ref != "",
+            )
+        ).scalars().all()
+        customer_refs_for_email_lookup: set[str] = set()
+        installations_missing_email: list[Installation] = []
+        for installation in installations:
+            metadata = _load_metadata(installation.metadata_json)
+            if _installation_customer_email(metadata):
+                continue
+            customer_ref = str(installation.customer_ref or "").strip()
+            if not customer_ref or customer_ref == LCP_UNASSIGNED_CUSTOMER_REF:
+                continue
+            customer_refs_for_email_lookup.add(customer_ref)
+            installations_missing_email.append(installation)
+
+        if installations_missing_email and customer_refs_for_email_lookup:
+            email_by_customer_ref = _lookup_customer_email_by_customer_ref(db, customer_refs_for_email_lookup)
+            if email_by_customer_ref:
+                now_iso = _now_utc().isoformat()
+                for installation in installations_missing_email:
+                    customer_ref = str(installation.customer_ref or "").strip()
+                    if not customer_ref:
+                        continue
+                    resolved_email = email_by_customer_ref.get(customer_ref)
+                    if not resolved_email:
+                        continue
+                    merged_metadata = _load_metadata(installation.metadata_json)
+                    if _installation_customer_email(merged_metadata):
+                        continue
+                    merged_metadata.setdefault("issued_to_email", resolved_email)
+                    merged_metadata.setdefault("customer_email_backfilled", True)
+                    merged_metadata.setdefault("customer_email_backfilled_at", now_iso)
+                    installation.metadata_json = _dump_metadata(merged_metadata)
+                    should_commit = True
+
+        if should_commit:
             db.commit()
 
 
@@ -2050,6 +2129,9 @@ def activate_installation(
 
     merged_metadata = _load_metadata(installation.metadata_json)
     merged_metadata.update(payload.metadata or {})
+    activation_code_email = _installation_customer_email(_load_metadata(activation_code.metadata_json))
+    if activation_code_email:
+        merged_metadata.setdefault("issued_to_email", activation_code_email)
     merged_metadata.update(
         {
             "activation_code_suffix": activation_code.code_suffix,

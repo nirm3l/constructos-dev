@@ -6,6 +6,17 @@ cd "$ROOT_DIR"
 
 DEPLOY_TARGET="${DEPLOY_TARGET:-auto}"
 APP_COMPOSE_PROJECT_NAME="${APP_COMPOSE_PROJECT_NAME:-constructos-app}"
+CODEX_AUTH_FILE="${CODEX_AUTH_FILE:-${HOME}/.codex/auth.json}"
+CODEX_CONFIG_FILE="${CODEX_CONFIG_FILE:-${ROOT_DIR}/codex.config.toml}"
+
+resolve_absolute_path() {
+  local raw_path="$1"
+  if [[ "$raw_path" == /* ]]; then
+    printf '%s' "$raw_path"
+  else
+    printf '%s/%s' "$ROOT_DIR" "${raw_path#./}"
+  fi
+}
 
 resolve_deploy_target() {
   if [[ "$DEPLOY_TARGET" != "auto" ]]; then
@@ -49,6 +60,23 @@ case "$TARGET_RESOLVED" in
     exit 1
     ;;
 esac
+
+CODEX_AUTH_FILE="$(resolve_absolute_path "$CODEX_AUTH_FILE")"
+CODEX_CONFIG_FILE="$(resolve_absolute_path "$CODEX_CONFIG_FILE")"
+
+if [[ ! -f "$CODEX_AUTH_FILE" ]]; then
+  echo "Missing Codex auth file: $CODEX_AUTH_FILE"
+  echo "Run codex login on host or set CODEX_AUTH_FILE before reset."
+  exit 1
+fi
+if [[ ! -f "$CODEX_CONFIG_FILE" ]]; then
+  echo "Missing Codex config file: $CODEX_CONFIG_FILE"
+  echo "Create it first (or set CODEX_CONFIG_FILE) before reset."
+  exit 1
+fi
+
+export CODEX_AUTH_FILE
+export CODEX_CONFIG_FILE
 
 echo "Using compose project: ${APP_COMPOSE_PROJECT_NAME}"
 

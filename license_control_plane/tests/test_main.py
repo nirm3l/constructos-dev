@@ -426,6 +426,84 @@ def test_admin_installation_includes_customer_email_from_metadata(tmp_path: Path
         assert detail_payload["installation"]["customer_email"] == "owner@example.com"
 
 
+def test_activation_propagates_customer_email_from_activation_code_metadata(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-email-propagation",
+                "plan_code": "monthly",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+                "metadata": {"issued_to_email": "propagation@example.com"},
+            },
+        )
+        assert create_code.status_code == 200
+        activation_code = create_code.json()["activation_code"]
+
+        activate = client.post(
+            "/v1/installations/activate",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-email-propagation",
+                "workspace_id": "workspace-email-propagation",
+                "activation_code": activation_code,
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert activate.status_code == 200
+        activate_payload = activate.json()
+        assert activate_payload["installation"]["customer_email"] == "propagation@example.com"
+
+        details = client.get(
+            "/v1/admin/installations/cp-email-propagation",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert details.status_code == 200
+        detail_payload = details.json()
+        assert detail_payload["installation"]["customer_email"] == "propagation@example.com"
+
+
+def test_startup_backfills_customer_email_for_existing_installations(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-email-backfill",
+                "workspace_id": "workspace-email-backfill",
+                "customer_ref": "customer-email-backfill",
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert register.status_code == 200
+        assert register.json()["installation"]["customer_email"] is None
+
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-email-backfill",
+                "plan_code": "monthly",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+                "metadata": {"issued_to_email": "backfill@example.com"},
+            },
+        )
+        assert create_code.status_code == 200
+
+    with _build_client(tmp_path) as client:
+        details = client.get(
+            "/v1/admin/installations/cp-email-backfill",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert details.status_code == 200
+        payload = details.json()
+        assert payload["installation"]["customer_email"] == "backfill@example.com"
+        assert payload["installation"]["metadata"]["customer_email_backfilled"] is True
+
+
 def test_admin_customer_subscription_update_applies_to_all_installations(tmp_path: Path):
     with _build_client(tmp_path) as client:
         for installation_id in ["cp-customer-a1", "cp-customer-a2"]:
