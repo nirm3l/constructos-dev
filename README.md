@@ -211,6 +211,8 @@ Artifacts are written to `desktop/release/`.
 CI workflow for desktop artifacts:
 - `.github/workflows/desktop-artifacts.yml` (Linux + Windows + macOS)
 - tags matching `desktop-v*` publish release assets
+- optional helper to upload signing/notarization secrets:
+  - `./scripts/set_desktop_signing_secrets.sh` (uses `gh secret set`)
 
 ## Optional: Jira MCP (Separate Compose)
 1. Create local env file:

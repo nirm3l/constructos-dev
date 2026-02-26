@@ -88,6 +88,16 @@ Optional signing/notarization secrets:
 - `DESKTOP_APPLE_APP_SPECIFIC_PASSWORD`
 - `DESKTOP_APPLE_TEAM_ID`
 
+Helper script (sets any provided env var via `gh secret set`):
+```bash
+DESKTOP_CSC_LINK=... \
+DESKTOP_CSC_KEY_PASSWORD=... \
+DESKTOP_APPLE_ID=... \
+DESKTOP_APPLE_APP_SPECIFIC_PASSWORD=... \
+DESKTOP_APPLE_TEAM_ID=... \
+./scripts/set_desktop_signing_secrets.sh
+```
+
 ## Operational guidance
 - Keep backend deployment unchanged (`constructos-app` compose project).
 - Desktop app should be treated as a shell/launcher, not as backend replacement.
