@@ -6,6 +6,7 @@ import base64
 from importlib import reload
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import httpx
 from cryptography.hazmat.primitives import serialization
@@ -64,6 +65,8 @@ def test_sync_license_once_updates_local_entitlement(tmp_path: Path, monkeypatch
     from features.licensing import sync
 
     sync = reload(sync)
+    monkeypatch.setattr(sync, "_resolve_local_operating_system", lambda: "linux-test")
+    captured_payloads: dict[str, dict] = {}
 
     class _MockResponse:
         def __init__(self, payload: dict):
@@ -87,8 +90,10 @@ def test_sync_license_once_updates_local_entitlement(tmp_path: Path, monkeypatch
 
         def post(self, url: str, headers: dict, json: dict):
             if url.endswith("/v1/installations/register"):
+                captured_payloads["register"] = dict(json)
                 return _MockResponse({"ok": True})
             if url.endswith("/v1/installations/heartbeat"):
+                captured_payloads["heartbeat"] = dict(json)
                 return _MockResponse(
                     {
                         "ok": True,
@@ -109,6 +114,8 @@ def test_sync_license_once_updates_local_entitlement(tmp_path: Path, monkeypatch
 
     ok = sync.sync_license_once()
     assert ok is True
+    assert captured_payloads["register"]["operating_system"] == "linux-test"
+    assert captured_payloads["heartbeat"]["operating_system"] == "linux-test"
 
     from shared.models import LicenseEntitlement, LicenseInstallation, LicenseValidationLog, SessionLocal
 
@@ -135,6 +142,82 @@ def test_sync_license_once_updates_local_entitlement(tmp_path: Path, monkeypatch
         ).scalars().first()
         assert validation is not None
         assert validation.result == "active"
+
+
+def test_activate_with_code_once_sends_operating_system(tmp_path: Path, monkeypatch):
+    db_file = tmp_path / "activate-os.db"
+    os.environ["DATABASE_URL"] = f"sqlite:///{db_file}"
+    os.environ["ATTACHMENTS_DIR"] = str(tmp_path / "uploads")
+    os.environ.pop("DB_PATH", None)
+    os.environ["EVENTSTORE_URI"] = ""
+    os.environ["LICENSE_ENFORCEMENT_ENABLED"] = "true"
+    os.environ["LICENSE_INSTALLATION_ID"] = "activate-os-installation"
+    os.environ["LICENSE_SERVER_TOKEN"] = "dev-license-token"
+    os.environ["LICENSE_TRIAL_DAYS"] = "7"
+    os.environ.pop("LICENSE_PUBLIC_KEY", None)
+
+    import shared.models as shared_models
+    import shared.licensing as shared_licensing
+    import shared.settings as shared_settings
+
+    reload(shared_settings)
+    reload(shared_models)
+    reload(shared_licensing)
+    shared_licensing.reset_license_installation_id_cache()
+
+    import main
+
+    main = reload(main)
+    main.bootstrap_data()
+
+    from features.licensing import sync
+
+    sync = reload(sync)
+    monkeypatch.setattr(sync, "_resolve_local_operating_system", lambda: "windows-test")
+    captured_activate_payload: dict[str, Any] = {}
+
+    class _MockResponse:
+        def __init__(self, payload: dict):
+            self._payload = payload
+            self.status_code = 200
+
+        def json(self):
+            return self._payload
+
+    class _MockClient:
+        def __init__(self, timeout: float):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url: str, headers: dict, json: dict):
+            if not url.endswith("/v1/installations/activate"):
+                raise AssertionError(f"Unexpected URL: {url}")
+            captured_activate_payload.update(json)
+            return _MockResponse(
+                {
+                    "ok": True,
+                    "entitlement": {
+                        "status": "active",
+                        "plan_code": "monthly",
+                        "valid_from": "2026-02-21T00:00:00Z",
+                        "valid_until": "2026-03-21T00:00:00Z",
+                        "trial_ends_at": "2026-02-28T00:00:00Z",
+                        "token_expires_at": "2026-02-21T01:00:00Z",
+                        "metadata": {"source": "test"},
+                    },
+                }
+            )
+
+    monkeypatch.setattr(sync.httpx, "Client", _MockClient)
+
+    result = sync.activate_with_code_once("ACT-TEST-0001-0002-0003")
+    assert isinstance(result, dict)
+    assert captured_activate_payload["operating_system"] == "windows-test"
 
 
 def test_sync_license_once_accepts_valid_signed_token(tmp_path: Path, monkeypatch):

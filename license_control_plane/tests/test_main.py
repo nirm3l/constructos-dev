@@ -83,6 +83,80 @@ def test_register_returns_signed_entitlement_when_signing_key_is_configured(tmp_
         assert verified["installation_id"] == "cp-signed-installation"
 
 
+def test_installation_operating_system_is_recorded_and_updated(tmp_path: Path):
+    with _build_client(tmp_path, beta_plan_valid_until="2099-12-31T23:59:59Z") as client:
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-os-recording",
+                "workspace_id": "workspace-os",
+                "operating_system": "Windows 11",
+                "metadata": {"source": "test"},
+            },
+        )
+        assert register.status_code == 200
+
+        details_after_register = client.get(
+            "/v1/admin/installations/cp-os-recording",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert details_after_register.status_code == 200
+        assert details_after_register.json()["installation"]["operating_system"] == "windows"
+
+        heartbeat = client.post(
+            "/v1/installations/heartbeat",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-os-recording",
+                "workspace_id": "workspace-os",
+                "operating_system": "macOS",
+                "metadata": {"source": "test"},
+            },
+        )
+        assert heartbeat.status_code == 200
+
+        details_after_heartbeat = client.get(
+            "/v1/admin/installations/cp-os-recording",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert details_after_heartbeat.status_code == 200
+        assert details_after_heartbeat.json()["installation"]["operating_system"] == "macos"
+
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-os-activation",
+                "plan_code": "monthly",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+            },
+        )
+        assert create_code.status_code == 200
+        activation_code = create_code.json()["activation_code"]
+
+        activate = client.post(
+            "/v1/installations/activate",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-os-activation",
+                "workspace_id": "workspace-os-activation",
+                "activation_code": activation_code,
+                "operating_system": "Ubuntu 22.04",
+                "metadata": {"source": "test"},
+            },
+        )
+        assert activate.status_code == 200
+
+        details_after_activate = client.get(
+            "/v1/admin/installations/cp-os-activation",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert details_after_activate.status_code == 200
+        assert details_after_activate.json()["installation"]["operating_system"] == "ubuntu"
+
+
 def test_admin_subscription_update_changes_installation_status(tmp_path: Path):
     with _build_client(tmp_path) as client:
         register = client.post(
@@ -715,6 +789,44 @@ def test_activation_code_flow_enforces_three_device_limit(tmp_path: Path):
         assert list_payload["items"][0]["usage_count"] == 3
 
 
+def test_activation_code_flow_skips_device_limit_for_lifetime_and_beta_plans(tmp_path: Path):
+    with _build_client(tmp_path, beta_plan_valid_until="2099-12-31T23:59:59Z") as client:
+        for plan_code in ["lifetime", "beta"]:
+            create_code = client.post(
+                "/v1/admin/activation-codes",
+                headers={"Authorization": "Bearer control-plane-token"},
+                json={
+                    "customer_ref": f"customer-unlimited-{plan_code}",
+                    "plan_code": plan_code,
+                    "max_installations": 1,
+                },
+            )
+            assert create_code.status_code == 200
+            activation_code = create_code.json()["activation_code"]
+
+            first_activation = client.post(
+                "/v1/installations/activate",
+                headers={"Authorization": "Bearer control-plane-token"},
+                json={
+                    "installation_id": f"cp-{plan_code}-seat-1",
+                    "workspace_id": "workspace-unlimited",
+                    "activation_code": activation_code,
+                },
+            )
+            assert first_activation.status_code == 200
+
+            second_activation = client.post(
+                "/v1/installations/activate",
+                headers={"Authorization": "Bearer control-plane-token"},
+                json={
+                    "installation_id": f"cp-{plan_code}-seat-2",
+                    "workspace_id": "workspace-unlimited",
+                    "activation_code": activation_code,
+                },
+            )
+            assert second_activation.status_code == 200
+
+
 def test_register_auto_assigns_customer_ref_when_missing(tmp_path: Path):
     with _build_client(tmp_path) as client:
         register = client.post(
@@ -876,7 +988,7 @@ def test_install_exchange_issues_client_token_for_activation_code(tmp_path: Path
         exchange = client.post(
             "/v1/install/exchange",
             headers={"X-Forwarded-For": "203.0.113.27"},
-            json={"activation_code": activation_code},
+            json={"activation_code": activation_code, "operating_system": "Windows 11"},
         )
         assert exchange.status_code == 200
         payload = exchange.json()
@@ -887,6 +999,7 @@ def test_install_exchange_issues_client_token_for_activation_code(tmp_path: Path
         assert payload["install_script_url"] == "https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh"
         assert payload["activation_code_record"]["metadata"]["install_exchange_count"] == 1
         assert payload["activation_code_record"]["metadata"]["install_exchange_last_ip"] == "203.0.113.27"
+        assert payload["activation_code_record"]["metadata"]["install_exchange_last_operating_system"] == "windows"
 
         register = client.post(
             "/v1/installations/register",
@@ -899,6 +1012,13 @@ def test_install_exchange_issues_client_token_for_activation_code(tmp_path: Path
         )
         assert register.status_code == 200
         assert register.json()["installation"]["customer_ref"] == "customer-install-exchange"
+
+        details = client.get(
+            "/v1/admin/installations/cp-exchange-installation",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert details.status_code == 200
+        assert details.json()["installation"]["operating_system"] == "windows"
 
         second_exchange = client.post(
             "/v1/install/exchange",
@@ -1084,6 +1204,41 @@ def test_install_exchange_register_enforces_customer_seat_limit(tmp_path: Path):
         )
         assert fourth_register.status_code == 409
         assert "Seat limit exceeded (3/3)" in fourth_register.json()["detail"]
+
+
+def test_install_exchange_register_skips_customer_seat_limit_for_lifetime_and_beta_plans(tmp_path: Path):
+    with _build_client(tmp_path, beta_plan_valid_until="2099-12-31T23:59:59Z") as client:
+        for plan_code in ["lifetime", "beta"]:
+            create_code = client.post(
+                "/v1/admin/activation-codes",
+                headers={"Authorization": "Bearer control-plane-token"},
+                json={
+                    "customer_ref": f"customer-install-exchange-unlimited-{plan_code}",
+                    "plan_code": plan_code,
+                    "max_installations": 1,
+                },
+            )
+            assert create_code.status_code == 200
+            activation_code = create_code.json()["activation_code"]
+
+            for index in range(1, 3):
+                exchange = client.post(
+                    "/v1/install/exchange",
+                    json={"activation_code": activation_code},
+                )
+                assert exchange.status_code == 200
+                token = exchange.json()["license_server_token"]
+
+                register = client.post(
+                    "/v1/installations/register",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={
+                        "installation_id": f"cp-exchange-unlimited-{plan_code}-{index}",
+                        "workspace_id": "workspace-exchange-unlimited",
+                        "metadata": {"source": "tests"},
+                    },
+                )
+                assert register.status_code == 200
 
 
 def test_install_exchange_rejects_invalid_and_inactive_codes(tmp_path: Path):

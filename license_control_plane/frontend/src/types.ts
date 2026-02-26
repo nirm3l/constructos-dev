@@ -4,6 +4,7 @@ export type InstallationRecord = {
   installation_id: string
   workspace_id: string | null
   customer_ref: string | null
+  operating_system: string | null
   plan_code: string | null
   subscription_status: SubscriptionStatus | string
   subscription_valid_until: string | null

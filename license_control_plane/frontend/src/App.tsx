@@ -30,7 +30,14 @@ const LEGACY_STATUS_ALIASES: Record<string, SubscriptionStatus> = {
   past_due: 'active',
   grace: 'active',
 }
-const PLAN_CODE_SUGGESTIONS = ['monthly', 'yearly', 'beta', 'lifetime', 'trial']
+const ONBOARDING_PLAN_CODES = ['monthly', 'yearly', 'trial', 'beta', 'lifetime'] as const
+const SUBSCRIPTION_PLAN_CODES_BY_STATUS: Record<SubscriptionStatus, string[]> = {
+  none: ['', 'monthly', 'yearly'],
+  active: ['monthly', 'yearly'],
+  trialing: ['trial'],
+  lifetime: ['lifetime'],
+  beta: ['beta'],
+}
 
 type FormState = {
   subscription_status: SubscriptionStatus
@@ -171,6 +178,10 @@ function normalizePlanCodeForStatus(status: SubscriptionStatus, planCodeValue: s
     return raw || null
   }
   return raw || null
+}
+
+function planCodeOptionsForSubscriptionStatus(status: SubscriptionStatus): string[] {
+  return [...(SUBSCRIPTION_PLAN_CODES_BY_STATUS[status] ?? [''])]
 }
 
 const ICON_PATHS = {
@@ -453,20 +464,25 @@ export function App() {
         throw new Error('Admin token is required to provision onboarding package')
       }
       const toEmail = String(onboardingProvisionForm.to_email || '').trim()
-      const maxInstallations = Number.parseInt(String(onboardingProvisionForm.max_installations || '').trim(), 10)
+      const normalizedPlanCode = String(onboardingProvisionForm.plan_code || '').trim().toLowerCase() || 'monthly'
+      const isUnlimitedSeatPlan = isLifetimePlanCode(normalizedPlanCode) || isBetaPlanCode(normalizedPlanCode)
+      let maxInstallations = Number.parseInt(String(onboardingProvisionForm.max_installations || '').trim(), 10)
       if (!toEmail) {
         throw new Error('to_email is required')
+      }
+      if (isUnlimitedSeatPlan) {
+        maxInstallations = Number.parseInt(String(health.data?.default_max_installations ?? 3), 10)
       }
       if (!Number.isFinite(maxInstallations) || maxInstallations < 1 || maxInstallations > 100) {
         throw new Error('max_installations must be between 1 and 100')
       }
       const payload: AdminProvisionOnboardingRequest = {
         to_email: toEmail,
-        plan_code: String(onboardingProvisionForm.plan_code || '').trim() || null,
+        plan_code: normalizedPlanCode || null,
         valid_until:
-          isLifetimePlanCode(onboardingProvisionForm.plan_code)
+          isLifetimePlanCode(normalizedPlanCode)
             ? null
-            : isBetaPlanCode(onboardingProvisionForm.plan_code) && !String(onboardingProvisionForm.valid_until || '').trim()
+            : isBetaPlanCode(normalizedPlanCode) && !String(onboardingProvisionForm.valid_until || '').trim()
               ? defaultBetaValidUntilIso
             : onboardingProvisionForm.valid_until
               ? new Date(onboardingProvisionForm.valid_until).toISOString()
@@ -588,6 +604,18 @@ export function App() {
   const currentInstallationCustomerEmail = installationCustomerEmail(currentInstallation)
   const targetFormCustomerRef = String(form?.customer_ref || '').trim()
   const onboardingPlanIsLifetime = isLifetimePlanCode(onboardingProvisionForm.plan_code)
+  const onboardingPlanSkipsSeatLimit = onboardingPlanIsLifetime || isBetaPlanCode(onboardingProvisionForm.plan_code)
+  const subscriptionPlanCodeOptions = React.useMemo(() => {
+    if (!form) {
+      return [] as string[]
+    }
+    const options = planCodeOptionsForSubscriptionStatus(form.subscription_status)
+    const currentPlanCode = String(form.plan_code || '').trim()
+    if (currentPlanCode && !options.includes(currentPlanCode)) {
+      options.push(currentPlanCode)
+    }
+    return options
+  }, [form])
   const customerCount = customerGroups.length
   const installationCount = installations.data?.items.length ?? 0
   const selectedCustomerInstallationCount = selectedCustomerInstallations.length
@@ -646,12 +674,6 @@ export function App() {
         </div>
       </header>
 
-      <datalist id="plan-code-options">
-        {PLAN_CODE_SUGGESTIONS.map((planCode) => (
-          <option key={planCode} value={planCode} />
-        ))}
-      </datalist>
-
       <section className="panel">
         <h2>Admin API Token</h2>
         <p className="muted">
@@ -700,9 +722,8 @@ export function App() {
             </label>
             <label>
               Plan code
-              <input
+              <select
                 value={onboardingProvisionForm.plan_code}
-                list="plan-code-options"
                 onChange={(event) =>
                   setOnboardingProvisionForm((prev) => ({
                     ...prev,
@@ -715,8 +736,13 @@ export function App() {
                           : prev.valid_until,
                   }))
                 }
-                placeholder="monthly"
-              />
+              >
+                {ONBOARDING_PLAN_CODES.map((planCode) => (
+                  <option key={planCode} value={planCode}>
+                    {planCode}
+                  </option>
+                ))}
+              </select>
             </label>
             <label>
               Valid until
@@ -729,18 +755,21 @@ export function App() {
                 }
               />
             </label>
-            <p className="muted">
-              Plan code suggestions: <code>{PLAN_CODE_SUGGESTIONS.join(', ')}</code>
-            </p>
             <label>
               Max installations
               <input
                 value={onboardingProvisionForm.max_installations}
+                disabled={onboardingPlanSkipsSeatLimit}
                 onChange={(event) =>
                   setOnboardingProvisionForm((prev) => ({ ...prev, max_installations: event.target.value }))
                 }
               />
             </label>
+            {onboardingPlanSkipsSeatLimit && (
+              <p className="muted">
+                Seat limit is not enforced for <code>{onboardingProvisionForm.plan_code}</code> plan.
+              </p>
+            )}
             <label>
               Image tag
               <input
@@ -1193,6 +1222,7 @@ export function App() {
                         <strong>{installationId}</strong>
                         <span>sub: {item.installation.subscription_status || '-'} | ent: {item.entitlement.status}</span>
                         <span>plan: {item.installation.plan_code ?? '-'}</span>
+                        <span>os: {item.installation.operating_system ?? '-'}</span>
                         <span>email: {customerEmail ?? '-'}</span>
                         <span>installed: {formatDateTime(item.installation.created_at)}</span>
                       </button>
@@ -1224,6 +1254,9 @@ export function App() {
               </p>
               <p className="muted">
                 Plan code: <strong>{details.data?.installation.plan_code ?? selectedFromList?.installation.plan_code ?? '-'}</strong>
+              </p>
+              <p className="muted">
+                Operating system: <strong>{details.data?.installation.operating_system ?? selectedFromList?.installation.operating_system ?? '-'}</strong>
               </p>
               <p className="muted">
                 Entitlement status: <strong>{details.data?.entitlement.status ?? selectedFromList?.entitlement.status ?? '-'}</strong>
@@ -1267,20 +1300,30 @@ export function App() {
                             prev
                               ? {
                                   ...prev,
-                                  subscription_status: event.target.value as SubscriptionStatus,
-                                  plan_code: (() => {
-                                    const nextStatus = event.target.value as SubscriptionStatus
-                                    if (nextStatus === 'lifetime') return 'lifetime'
-                                    if (nextStatus === 'beta') return 'beta'
-                                    if (nextStatus === 'trialing') return 'trial'
-                                    const currentPlan = String(prev.plan_code || '').trim().toLowerCase()
-                                    if (currentPlan === 'lifetime' || currentPlan === 'beta' || currentPlan === 'trial') {
-                                      return ''
+                                subscription_status: event.target.value as SubscriptionStatus,
+                                plan_code: (() => {
+                                  const nextStatus = event.target.value as SubscriptionStatus
+                                  if (nextStatus === 'lifetime') return 'lifetime'
+                                  if (nextStatus === 'beta') return 'beta'
+                                  if (nextStatus === 'trialing') return 'trial'
+                                  const currentPlan = String(prev.plan_code || '').trim()
+                                  const currentPlanLower = currentPlan.toLowerCase()
+                                  if (nextStatus === 'active') {
+                                    if (currentPlanLower === 'monthly' || currentPlanLower === 'yearly') {
+                                      return currentPlanLower
                                     }
-                                    return prev.plan_code
-                                  })(),
-                                  valid_until:
-                                    (event.target.value as SubscriptionStatus) === 'lifetime'
+                                    return 'monthly'
+                                  }
+                                  if (nextStatus === 'none') {
+                                    if (currentPlanLower === 'monthly' || currentPlanLower === 'yearly') {
+                                      return currentPlanLower
+                                    }
+                                    return ''
+                                  }
+                                  return currentPlan
+                                })(),
+                                valid_until:
+                                  (event.target.value as SubscriptionStatus) === 'lifetime'
                                       ? ''
                                       : (event.target.value as SubscriptionStatus) === 'beta' && !prev.valid_until
                                         ? defaultBetaValidUntilLocal
@@ -1302,14 +1345,19 @@ export function App() {
 
                     <label>
                       Plan code
-                      <input
+                      <select
                         value={form.plan_code}
-                        list="plan-code-options"
                         disabled={form.subscription_status === 'lifetime' || form.subscription_status === 'beta' || form.subscription_status === 'trialing'}
                         onChange={(event) =>
                           setForm((prev) => (prev ? { ...prev, plan_code: event.target.value } : prev))
                         }
-                      />
+                      >
+                        {subscriptionPlanCodeOptions.map((planCode) => (
+                          <option key={planCode || 'none'} value={planCode}>
+                            {planCode || '(none)'}
+                          </option>
+                        ))}
+                      </select>
                     </label>
 
                     <label>

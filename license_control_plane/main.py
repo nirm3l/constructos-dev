@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, func, or_, select
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, func, inspect, or_, select, text
 from sqlalchemy.orm import Mapped, Session, declarative_base, mapped_column, sessionmaker
 
 try:
@@ -153,6 +153,7 @@ SUBSCRIPTION_STATUS_FILTER_EQUIVALENTS = {
     "grace": {"grace", "past_due"},
 }
 RESERVED_PLAN_CODES = {"lifetime", "beta", "trial"}
+UNLIMITED_INSTALLATION_PLAN_CODES = {"lifetime", "beta"}
 STATUS_CANONICAL_PLAN_CODE = {
     "lifetime": "lifetime",
     "beta": "beta",
@@ -169,6 +170,7 @@ class Installation(Base):
     installation_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
     workspace_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     customer_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    operating_system: Mapped[str | None] = mapped_column(String(64), nullable=True)
     plan_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     subscription_status: Mapped[str] = mapped_column(String(32), default="none")
     subscription_valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -297,6 +299,7 @@ class InstallationRegisterRequest(BaseModel):
     workspace_id: str | None = None
     customer_ref: str | None = Field(default=None, max_length=128)
     app_version: str | None = None
+    operating_system: str | None = Field(default=None, max_length=64)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -305,6 +308,7 @@ class InstallationHeartbeatRequest(BaseModel):
     workspace_id: str | None = None
     customer_ref: str | None = Field(default=None, max_length=128)
     app_version: str | None = None
+    operating_system: str | None = Field(default=None, max_length=64)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -328,12 +332,15 @@ class InstallationActivateRequest(BaseModel):
     installation_id: str = Field(min_length=3, max_length=128)
     activation_code: str = Field(min_length=8, max_length=128)
     workspace_id: str | None = None
+    customer_ref: str | None = Field(default=None, max_length=128)
     app_version: str | None = None
+    operating_system: str | None = Field(default=None, max_length=64)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class InstallExchangeRequest(BaseModel):
     activation_code: str = Field(min_length=8, max_length=128)
+    operating_system: str | None = Field(default=None, max_length=64)
 
 
 class AdminClientTokenCreateRequest(BaseModel):
@@ -419,6 +426,7 @@ class InstallationAuthContext:
     auth_type: str
     customer_ref: str | None = None
     activation_code_id: int | None = None
+    issued_operating_system: str | None = None
 
 
 def _get_db():
@@ -521,6 +529,60 @@ def _normalize_support_email(value: str | None) -> str:
     if not raw:
         return _normalize_email(LCP_ONBOARDING_SUPPORT_EMAIL)
     return _normalize_email(raw)
+
+
+def _normalize_operating_system(value: str | None) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return None
+    aliases = {
+        "windows": "windows",
+        "win32": "windows",
+        "win64": "windows",
+        "windows nt": "windows",
+        "mac": "macos",
+        "macos": "macos",
+        "osx": "macos",
+        "mac os x": "macos",
+        "darwin": "macos",
+        "linux": "linux",
+        "ubuntu": "ubuntu",
+        "debian": "debian",
+    }
+    if normalized in aliases:
+        return aliases[normalized]
+    if "windows" in normalized:
+        return "windows"
+    if normalized.startswith("mac") or "darwin" in normalized or "osx" in normalized:
+        return "macos"
+    if "ubuntu" in normalized:
+        return "ubuntu"
+    if "debian" in normalized:
+        return "debian"
+    if "linux" in normalized:
+        return "linux"
+    return normalized[:64]
+
+
+def _resolve_operating_system_from_payload(
+    payload: InstallationRegisterRequest | InstallationHeartbeatRequest | InstallationActivateRequest,
+) -> str | None:
+    direct_value = _normalize_operating_system(payload.operating_system)
+    if direct_value:
+        return direct_value
+    metadata = payload.metadata if isinstance(payload.metadata, dict) else {}
+    for key in ("operating_system", "os", "platform", "platform_os", "system"):
+        candidate = metadata.get(key)
+        if isinstance(candidate, str):
+            normalized = _normalize_operating_system(candidate)
+            if normalized:
+                return normalized
+    return None
+
+
+def _plan_code_skips_seat_limits(plan_code: str | None) -> bool:
+    normalized = str(plan_code or "").strip().lower()
+    return normalized in UNLIMITED_INSTALLATION_PLAN_CODES
 
 
 def _customer_ref_prefix() -> str:
@@ -905,6 +967,7 @@ def _require_installation_auth(
                 auth_type="client",
                 customer_ref=client_token.customer_ref,
                 activation_code_id=activation_code_id,
+                issued_operating_system=_normalize_operating_system(token_metadata.get("issued_operating_system")),
             )
 
     if not LCP_API_TOKEN:
@@ -1296,6 +1359,23 @@ def _resolve_customer_max_installations(
     return int(LCP_DEFAULT_MAX_INSTALLATIONS)
 
 
+def _activation_code_skips_seat_limits(
+    db: Session,
+    *,
+    activation_code_id: int | None,
+    customer_ref: str | None = None,
+) -> bool:
+    normalized_code_id = int(activation_code_id or 0)
+    if normalized_code_id <= 0:
+        return False
+    query = select(ActivationCode.plan_code).where(ActivationCode.id == normalized_code_id)
+    normalized_customer_ref = str(customer_ref or "").strip()
+    if normalized_customer_ref:
+        query = query.where(ActivationCode.customer_ref == normalized_customer_ref)
+    code_plan = db.execute(query).scalar_one_or_none()
+    return _plan_code_skips_seat_limits(code_plan)
+
+
 def _enforce_installation_customer_scope(installation: Installation, auth_context: InstallationAuthContext) -> None:
     token_customer = str(auth_context.customer_ref or "").strip()
     if not token_customer:
@@ -1399,7 +1479,10 @@ def _resolve_request_ip(request: Request) -> str | None:
     return None
 
 
-def _upsert_installation(db: Session, payload: InstallationRegisterRequest | InstallationHeartbeatRequest) -> Installation:
+def _upsert_installation(
+    db: Session,
+    payload: InstallationRegisterRequest | InstallationHeartbeatRequest | InstallationActivateRequest,
+) -> Installation:
     installation = db.execute(
         select(Installation).where(Installation.installation_id == payload.installation_id)
     ).scalar_one_or_none()
@@ -1411,10 +1494,12 @@ def _upsert_installation(db: Session, payload: InstallationRegisterRequest | Ins
         metadata.setdefault("beta_auto_assigned", True)
         metadata.setdefault("beta_auto_assigned_reason", "install-registration")
         metadata.setdefault("beta_auto_assigned_at", now.isoformat())
+        operating_system = _resolve_operating_system_from_payload(payload)
         installation = Installation(
             installation_id=payload.installation_id,
             workspace_id=payload.workspace_id,
             customer_ref=str(payload.customer_ref or "").strip() or None,
+            operating_system=operating_system,
             plan_code="beta",
             subscription_status="beta",
             subscription_valid_until=LCP_BETA_PLAN_VALID_UNTIL,
@@ -1443,6 +1528,11 @@ def _upsert_installation(db: Session, payload: InstallationRegisterRequest | Ins
         if installation.customer_ref != normalized_customer_ref:
             installation.customer_ref = normalized_customer_ref
             changed = True
+
+    resolved_operating_system = _resolve_operating_system_from_payload(payload)
+    if resolved_operating_system and installation.operating_system != resolved_operating_system:
+        installation.operating_system = resolved_operating_system
+        changed = True
 
     merged_metadata = _load_metadata(installation.metadata_json)
     if payload.metadata:
@@ -1501,6 +1591,14 @@ def _apply_activation_code_plan_for_client_auth(
     if metadata.get("activation_plan_code") != activation_plan_code:
         metadata["activation_plan_code"] = activation_plan_code
         metadata_changed = True
+    if not str(installation.operating_system or "").strip():
+        activation_metadata = _load_metadata(activation_code.metadata_json)
+        activation_operating_system = _normalize_operating_system(
+            activation_metadata.get("install_exchange_last_operating_system")
+        )
+        if activation_operating_system:
+            installation.operating_system = activation_operating_system
+            metadata_changed = True
     for key in ("beta_auto_assigned", "beta_auto_assigned_reason", "beta_auto_assigned_at"):
         if key in metadata:
             metadata.pop(key, None)
@@ -1512,6 +1610,23 @@ def _apply_activation_code_plan_for_client_auth(
     if changed:
         db.flush()
     return changed
+
+
+def _apply_client_token_operating_system(
+    installation: Installation,
+    auth_context: InstallationAuthContext,
+) -> bool:
+    if auth_context.auth_type != "client":
+        return False
+    if str(installation.operating_system or "").strip():
+        return False
+
+    issued_operating_system = _normalize_operating_system(auth_context.issued_operating_system)
+    if not issued_operating_system:
+        return False
+
+    installation.operating_system = issued_operating_system
+    return True
 
 
 def _sign_entitlement_if_configured(entitlement_payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -1707,6 +1822,7 @@ def _serialize_installation(
         "installation_id": installation.installation_id,
         "workspace_id": installation.workspace_id,
         "customer_ref": installation.customer_ref,
+        "operating_system": installation.operating_system,
         "plan_code": installation.plan_code,
         "subscription_status": subscription_status,
         "subscription_valid_until": subscription_valid_until.isoformat() if subscription_valid_until else None,
@@ -1718,6 +1834,25 @@ def _serialize_installation(
         "created_at": installation.created_at.isoformat(),
         "updated_at": installation.updated_at.isoformat(),
     }
+
+
+def _ensure_installation_schema_columns() -> None:
+    required_columns: dict[str, str] = {
+        "operating_system": "VARCHAR(64)",
+    }
+    try:
+        existing_columns = {column["name"] for column in inspect(engine).get_columns("installations")}
+    except Exception:
+        return
+
+    missing_columns = [name for name in required_columns if name not in existing_columns]
+    if not missing_columns:
+        return
+
+    with engine.begin() as connection:
+        for column_name in missing_columns:
+            column_type = required_columns[column_name]
+            connection.execute(text(f"ALTER TABLE installations ADD COLUMN {column_name} {column_type}"))
 
 
 app = FastAPI(title="m4tr1x Licensing Control Plane")
@@ -1733,6 +1868,7 @@ app.add_middleware(
 @app.on_event("startup")
 def _startup() -> None:
     Base.metadata.create_all(bind=engine)
+    _ensure_installation_schema_columns()
     if LCP_REQUIRE_SIGNED_TOKENS and not LCP_SIGNING_PRIVATE_KEY_PEM:
         raise RuntimeError("LCP_REQUIRE_SIGNED_TOKENS is enabled but LCP_SIGNING_PRIVATE_KEY_PEM is not configured")
     if LCP_CLIENT_TOKEN_BUNDLE_SEGMENT_INDEX < 0:
@@ -2192,6 +2328,7 @@ def register_installation(
 
     installation = _upsert_installation(db, payload)
     _enforce_installation_customer_scope(installation, auth_context)
+    _apply_client_token_operating_system(installation, auth_context)
     _ensure_installation_has_customer_ref(installation, payload.customer_ref)
     _apply_activation_code_plan_for_client_auth(
         db,
@@ -2210,7 +2347,12 @@ def register_installation(
         current_customer_ref = str(installation.customer_ref or "").strip()
         is_currently_active = str(entitlement.get("status") or "").strip().lower() in {"active", "grace"}
         consumes_new_seat = is_currently_active and payload.installation_id not in active_ids_before
-        if consumes_new_seat:
+        skip_seat_limit = _activation_code_skips_seat_limits(
+            db,
+            activation_code_id=auth_context.activation_code_id,
+            customer_ref=current_customer_ref,
+        )
+        if consumes_new_seat and not skip_seat_limit:
             max_installations = _resolve_customer_max_installations(
                 db,
                 customer_ref=current_customer_ref,
@@ -2293,6 +2435,9 @@ def install_exchange_token(
     activation_ip = _resolve_request_ip(request)
     if activation_ip:
         code_metadata["install_exchange_last_ip"] = activation_ip
+    exchange_operating_system = _normalize_operating_system(payload.operating_system)
+    if exchange_operating_system:
+        code_metadata["install_exchange_last_operating_system"] = exchange_operating_system
     activation_code.metadata_json = _dump_metadata(code_metadata)
 
     token_metadata = {
@@ -2302,6 +2447,8 @@ def install_exchange_token(
     }
     if activation_ip:
         token_metadata["issued_ip"] = activation_ip
+    if exchange_operating_system:
+        token_metadata["issued_operating_system"] = exchange_operating_system
     client_token_raw, client_token_record = _create_client_token_record(
         db,
         customer_ref=activation_code.customer_ref,
@@ -2345,6 +2492,7 @@ def heartbeat_installation(
 ) -> dict[str, Any]:
     installation = _upsert_installation(db, payload)
     _enforce_installation_customer_scope(installation, auth_context)
+    _apply_client_token_operating_system(installation, auth_context)
     _ensure_installation_has_customer_ref(installation, payload.customer_ref)
     _apply_activation_code_plan_for_client_auth(
         db,
@@ -2415,7 +2563,11 @@ def activate_installation(
         and existing_installation.installation_id in active_ids
     )
 
-    if (not already_counted) and len(active_ids) >= int(activation_code.max_installations):
+    if (
+        (not _plan_code_skips_seat_limits(activation_code.plan_code))
+        and (not already_counted)
+        and len(active_ids) >= int(activation_code.max_installations)
+    ):
         raise HTTPException(
             status_code=409,
             detail=f"Seat limit exceeded ({len(active_ids)}/{int(activation_code.max_installations)}) for customer {activation_code.customer_ref}",
@@ -2426,11 +2578,14 @@ def activate_installation(
         InstallationRegisterRequest(
             installation_id=payload.installation_id,
             workspace_id=payload.workspace_id,
+            customer_ref=payload.customer_ref,
             app_version=payload.app_version,
+            operating_system=payload.operating_system,
             metadata=payload.metadata,
         ),
     )
     _enforce_installation_customer_scope(installation, auth_context)
+    _apply_client_token_operating_system(installation, auth_context)
     installation.customer_ref = activation_code.customer_ref
     activation_plan_code = str(activation_code.plan_code or "").strip().lower()
     activation_plan_code = activation_plan_code or "monthly"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import platform
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -96,6 +97,19 @@ def _server_headers() -> dict[str, str]:
     return headers
 
 
+def _resolve_local_operating_system() -> str:
+    raw = str(platform.system() or "").strip().lower()
+    aliases = {
+        "darwin": "macos",
+        "windows": "windows",
+        "linux": "linux",
+    }
+    normalized = aliases.get(raw, raw)
+    if normalized:
+        return normalized[:64]
+    return "unknown"
+
+
 def _register_payload(installation: LicenseInstallation) -> dict[str, Any]:
     metadata = {
         "source": "task-app",
@@ -104,6 +118,7 @@ def _register_payload(installation: LicenseInstallation) -> dict[str, Any]:
         "installation_id": installation.installation_id,
         "workspace_id": installation.workspace_id,
         "app_version": APP_VERSION,
+        "operating_system": _resolve_local_operating_system(),
         "metadata": metadata,
     }
 
@@ -118,6 +133,7 @@ def _heartbeat_payload(installation: LicenseInstallation) -> dict[str, Any]:
         "installation_id": installation.installation_id,
         "workspace_id": installation.workspace_id,
         "app_version": APP_VERSION,
+        "operating_system": _resolve_local_operating_system(),
         "metadata": metadata,
     }
 
@@ -427,6 +443,7 @@ def activate_with_code_once(activation_code: str) -> dict[str, Any]:
                         "installation_id": installation.installation_id,
                         "workspace_id": installation.workspace_id,
                         "app_version": APP_VERSION,
+                        "operating_system": _resolve_local_operating_system(),
                         "activation_code": code,
                         "metadata": {"source": "task-app"},
                     },
