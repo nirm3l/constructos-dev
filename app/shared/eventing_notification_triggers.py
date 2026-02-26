@@ -13,7 +13,10 @@ from features.projects.domain import (
 )
 from features.tasks.domain import (
     EVENT_AUTOMATION_FAILED as TASK_EVENT_AUTOMATION_FAILED,
+    EVENT_COMPLETED as TASK_EVENT_COMPLETED,
     EVENT_CREATED as TASK_EVENT_CREATED,
+    EVENT_REOPENED as TASK_EVENT_REOPENED,
+    EVENT_REORDERED as TASK_EVENT_REORDERED,
     EVENT_SCHEDULE_FAILED as TASK_EVENT_SCHEDULE_FAILED,
     EVENT_UPDATED as TASK_EVENT_UPDATED,
 )
@@ -62,13 +65,35 @@ def prepare_event_payload_for_notification_triggers(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     normalized_payload = dict(payload or {})
-    if aggregate_type != "Task" or event_type != TASK_EVENT_UPDATED:
+    if aggregate_type != "Task":
         return normalized_payload
+
     previous = _task_state_snapshot(db, aggregate_id)
-    if "status" in normalized_payload and "from_status" not in normalized_payload:
-        normalized_payload["from_status"] = previous.get("status")
-    if "assignee_id" in normalized_payload and "previous_assignee_id" not in normalized_payload:
-        normalized_payload["previous_assignee_id"] = previous.get("assignee_id")
+    previous_status = previous.get("status")
+
+    if event_type == TASK_EVENT_UPDATED:
+        if "status" in normalized_payload:
+            if "from_status" not in normalized_payload:
+                normalized_payload["from_status"] = previous_status
+            if "to_status" not in normalized_payload:
+                normalized_payload["to_status"] = normalized_payload.get("status")
+        if "assignee_id" in normalized_payload and "previous_assignee_id" not in normalized_payload:
+            normalized_payload["previous_assignee_id"] = previous.get("assignee_id")
+    elif event_type == TASK_EVENT_REORDERED and "status" in normalized_payload:
+        if "from_status" not in normalized_payload:
+            normalized_payload["from_status"] = previous_status
+        if "to_status" not in normalized_payload:
+            normalized_payload["to_status"] = normalized_payload.get("status")
+    elif event_type == TASK_EVENT_COMPLETED:
+        if "from_status" not in normalized_payload:
+            normalized_payload["from_status"] = previous_status
+        if "to_status" not in normalized_payload:
+            normalized_payload["to_status"] = "Done"
+    elif event_type == TASK_EVENT_REOPENED:
+        if "from_status" not in normalized_payload:
+            normalized_payload["from_status"] = previous_status
+        if "to_status" not in normalized_payload:
+            normalized_payload["to_status"] = normalized_payload.get("status") or "To do"
     return normalized_payload
 
 

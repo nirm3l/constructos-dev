@@ -410,6 +410,7 @@ class AdminBugReportUpdateRequest(BaseModel):
 class InstallationAuthContext:
     auth_type: str
     customer_ref: str | None = None
+    activation_code_id: int | None = None
 
 
 def _get_db():
@@ -611,19 +612,30 @@ def _build_onboarding_email_template(
     max_installations: int = LCP_DEFAULT_MAX_INSTALLATIONS,
 ) -> tuple[str, str, str]:
     subject = "ConstructOS onboarding package"
+    windows_install_script_url = re.sub(
+        r"install\.sh(?=$|[?#])",
+        "install.ps1",
+        install_script_url,
+        count=1,
+    )
     install_command = (
         f"curl -fsSL {install_script_url} | "
         f"ACTIVATION_CODE={activation_code} IMAGE_TAG={image_tag} INSTALL_COS=true AUTO_DEPLOY=1 bash"
     )
+    windows_download_command = f"curl -fsSL -o install.ps1 {windows_install_script_url}"
+    windows_install_command = (
+        "powershell -NoProfile -ExecutionPolicy Bypass -File .\\install.ps1 "
+        f"-ActivationCode {activation_code} -ImageTag {image_tag} -InstallCos true -AutoDeploy true"
+    )
+    windows_install_block = f"{windows_download_command}\n{windows_install_command}"
 
     text_body = (
         "Hello,\n\n"
         "Your ConstructOS onboarding package is ready.\n\n"
-        "1) Run the installer (it will exchange activation code for token automatically):\n"
+        "1) Linux/macOS installer (it will exchange activation code for token automatically):\n"
         f"{install_command}\n\n"
-        "2) If needed, manual deploy from install directory:\n"
-        "cd constructos-client\n"
-        f"IMAGE_TAG={image_tag} bash ./scripts/deploy.sh\n\n"
+        "2) Windows installer (cmd.exe):\n"
+        f"{windows_install_block}\n\n"
         "3) Activate license in app with this activation code:\n"
         f"{activation_code}\n\n"
         "Details:\n"
@@ -653,14 +665,15 @@ def _build_onboarding_email_template(
             </tr>
             <tr>
               <td style="padding:20px 24px;">
-                <p style="margin:0 0 12px 0;color:#84bc98;font-size:14px;line-height:1.6;">Your deployment bundle is ready. Run the installer command below:</p>
+                <p style="margin:0 0 12px 0;color:#84bc98;font-size:14px;line-height:1.6;">Your deployment bundle is ready. Run one installer command for your platform:</p>
+                <p style="margin:0 0 8px 0;color:#84bc98;font-size:14px;">Linux/macOS:</p>
                 <pre style="margin:0 0 16px 0;background:rgba(6,17,11,0.92);border:1px solid rgba(89,220,141,0.3);border-radius:10px;padding:12px 14px;overflow:auto;color:#b0ffd0;font-size:13px;line-height:1.5;font-family:'JetBrains Mono','Fira Code','SFMono-Regular',Menlo,monospace;">{html.escape(install_command)}</pre>
+
+                <p style="margin:0 0 8px 0;color:#84bc98;font-size:14px;">Windows (cmd.exe):</p>
+                <pre style="margin:0 0 16px 0;background:rgba(6,17,11,0.92);border:1px solid rgba(89,220,141,0.3);border-radius:10px;padding:12px 14px;overflow:auto;color:#b0ffd0;font-size:13px;line-height:1.5;font-family:'JetBrains Mono','Fira Code','SFMono-Regular',Menlo,monospace;">{html.escape(windows_install_block)}</pre>
 
                 <p style="margin:0 0 8px 0;color:#84bc98;font-size:14px;">Activation code:</p>
                 <pre style="margin:0 0 16px 0;background:rgba(6,17,11,0.92);border:1px solid rgba(89,220,141,0.3);border-radius:10px;padding:12px 14px;overflow:auto;color:#dfffe9;font-size:13px;line-height:1.5;font-family:'JetBrains Mono','Fira Code','SFMono-Regular',Menlo,monospace;">{html.escape(activation_code)}</pre>
-
-                <p style="margin:0 0 8px 0;color:#84bc98;font-size:14px;">Manual deploy command (optional):</p>
-                <pre style="margin:0 0 16px 0;background:rgba(6,17,11,0.92);border:1px solid rgba(89,220,141,0.3);border-radius:10px;padding:12px 14px;overflow:auto;color:#b0ffd0;font-size:13px;line-height:1.5;font-family:'JetBrains Mono','Fira Code','SFMono-Regular',Menlo,monospace;">IMAGE_TAG={html.escape(image_tag)} bash ./scripts/deploy.sh</pre>
 
                 <div style="margin:0;padding:10px 12px;background:rgba(11,25,18,0.86);border:1px solid rgba(122,255,170,0.46);border-radius:10px;color:#dfffe9;font-size:13px;line-height:1.55;">
                   Seat policy: up to {int(max_installations)} active installations per customer reference.
@@ -865,7 +878,20 @@ def _require_installation_auth(
             )
         ).scalar_one_or_none()
         if client_token is not None:
-            return InstallationAuthContext(auth_type="client", customer_ref=client_token.customer_ref)
+            token_metadata = _load_metadata(client_token.metadata_json)
+            raw_activation_code_id = token_metadata.get("activation_code_id")
+            activation_code_id: int | None = None
+            try:
+                candidate = int(raw_activation_code_id)
+                if candidate > 0:
+                    activation_code_id = candidate
+            except Exception:
+                activation_code_id = None
+            return InstallationAuthContext(
+                auth_type="client",
+                customer_ref=client_token.customer_ref,
+                activation_code_id=activation_code_id,
+            )
 
     if not LCP_API_TOKEN:
         has_client_tokens = db.execute(
@@ -1217,6 +1243,45 @@ def _active_customer_installations(db: Session, customer_ref: str) -> list[Insta
     return active
 
 
+def _resolve_customer_max_installations(
+    db: Session,
+    *,
+    customer_ref: str,
+    activation_code_id: int | None = None,
+) -> int:
+    normalized_customer_ref = str(customer_ref or "").strip()
+    if not normalized_customer_ref:
+        return int(LCP_DEFAULT_MAX_INSTALLATIONS)
+
+    if activation_code_id is not None and activation_code_id > 0:
+        code = db.execute(
+            select(ActivationCode).where(
+                ActivationCode.id == activation_code_id,
+                ActivationCode.customer_ref == normalized_customer_ref,
+            )
+        ).scalar_one_or_none()
+        if code is not None:
+            return max(1, int(code.max_installations))
+
+    limits = db.execute(
+        select(ActivationCode.max_installations).where(
+            ActivationCode.customer_ref == normalized_customer_ref,
+            ActivationCode.is_active.is_(True),
+        )
+    ).scalars().all()
+    normalized_limits: list[int] = []
+    for raw_value in limits:
+        try:
+            parsed = int(raw_value)
+        except Exception:
+            continue
+        if parsed > 0:
+            normalized_limits.append(parsed)
+    if normalized_limits:
+        return max(normalized_limits)
+    return int(LCP_DEFAULT_MAX_INSTALLATIONS)
+
+
 def _enforce_installation_customer_scope(installation: Installation, auth_context: InstallationAuthContext) -> None:
     token_customer = str(auth_context.customer_ref or "").strip()
     if not token_customer:
@@ -1393,9 +1458,57 @@ def _build_entitlement_bundle(entitlement_payload: dict[str, Any]) -> tuple[dict
     return entitlement_payload, signed_token
 
 
+def _installation_customer_email(metadata: dict[str, Any]) -> str | None:
+    candidate_fields = ("issued_to_email", "customer_email", "to_email", "contact_email", "email")
+    for key in candidate_fields:
+        value = metadata.get(key)
+        normalized = str(value or "").strip().lower()
+        if normalized and EMAIL_PATTERN.fullmatch(normalized):
+            return normalized
+    return None
+
+
+def _lookup_customer_email_by_customer_ref(db: Session, customer_refs: set[str]) -> dict[str, str]:
+    normalized_refs = {str(customer_ref or "").strip() for customer_ref in customer_refs}
+    normalized_refs = {customer_ref for customer_ref in normalized_refs if customer_ref}
+    if not normalized_refs:
+        return {}
+
+    email_by_customer_ref: dict[str, str] = {}
+
+    activation_rows = db.execute(
+        select(ActivationCode)
+        .where(ActivationCode.customer_ref.in_(sorted(normalized_refs)))
+        .order_by(ActivationCode.updated_at.desc(), ActivationCode.id.desc())
+    ).scalars().all()
+    for record in activation_rows:
+        customer_ref = str(record.customer_ref or "").strip()
+        if not customer_ref or customer_ref in email_by_customer_ref:
+            continue
+        email = _installation_customer_email(_load_metadata(record.metadata_json))
+        if email:
+            email_by_customer_ref[customer_ref] = email
+
+    client_token_rows = db.execute(
+        select(ClientToken)
+        .where(ClientToken.customer_ref.in_(sorted(normalized_refs)))
+        .order_by(ClientToken.updated_at.desc(), ClientToken.id.desc())
+    ).scalars().all()
+    for record in client_token_rows:
+        customer_ref = str(record.customer_ref or "").strip()
+        if not customer_ref or customer_ref in email_by_customer_ref:
+            continue
+        email = _installation_customer_email(_load_metadata(record.metadata_json))
+        if email:
+            email_by_customer_ref[customer_ref] = email
+
+    return email_by_customer_ref
+
+
 def _serialize_installation(installation: Installation) -> dict[str, Any]:
     metadata = _load_metadata(installation.metadata_json)
     activation_ip = str(metadata.get("activation_ip") or "").strip() or None
+    customer_email = _installation_customer_email(metadata)
     subscription_status = _canonicalize_subscription_status(installation.subscription_status)
     if subscription_status not in SUPPORTED_SUBSCRIPTION_STATUSES:
         subscription_status = "none"
@@ -1414,6 +1527,7 @@ def _serialize_installation(installation: Installation) -> dict[str, Any]:
         "trial_started_at": installation.trial_started_at.isoformat(),
         "trial_ends_at": installation.trial_ends_at.isoformat(),
         "activation_ip": activation_ip,
+        "customer_email": customer_email,
         "metadata": metadata,
         "updated_at": installation.updated_at.isoformat(),
     }
@@ -1447,6 +1561,7 @@ def _startup() -> None:
 
     # Keep data consistent for customer-first operations.
     with SessionLocal() as db:
+        should_commit = False
         records = db.execute(
             select(Installation).where(
                 or_(
@@ -1463,6 +1578,47 @@ def _startup() -> None:
                 merged_metadata.setdefault("customer_ref_auto_assigned", True)
                 merged_metadata.setdefault("customer_ref_auto_assigned_at", now_iso)
                 installation.metadata_json = _dump_metadata(merged_metadata)
+            should_commit = True
+
+        installations = db.execute(
+            select(Installation).where(
+                Installation.customer_ref.is_not(None),
+                Installation.customer_ref != "",
+            )
+        ).scalars().all()
+        customer_refs_for_email_lookup: set[str] = set()
+        installations_missing_email: list[Installation] = []
+        for installation in installations:
+            metadata = _load_metadata(installation.metadata_json)
+            if _installation_customer_email(metadata):
+                continue
+            customer_ref = str(installation.customer_ref or "").strip()
+            if not customer_ref or customer_ref == LCP_UNASSIGNED_CUSTOMER_REF:
+                continue
+            customer_refs_for_email_lookup.add(customer_ref)
+            installations_missing_email.append(installation)
+
+        if installations_missing_email and customer_refs_for_email_lookup:
+            email_by_customer_ref = _lookup_customer_email_by_customer_ref(db, customer_refs_for_email_lookup)
+            if email_by_customer_ref:
+                now_iso = _now_utc().isoformat()
+                for installation in installations_missing_email:
+                    customer_ref = str(installation.customer_ref or "").strip()
+                    if not customer_ref:
+                        continue
+                    resolved_email = email_by_customer_ref.get(customer_ref)
+                    if not resolved_email:
+                        continue
+                    merged_metadata = _load_metadata(installation.metadata_json)
+                    if _installation_customer_email(merged_metadata):
+                        continue
+                    merged_metadata.setdefault("issued_to_email", resolved_email)
+                    merged_metadata.setdefault("customer_email_backfilled", True)
+                    merged_metadata.setdefault("customer_email_backfilled_at", now_iso)
+                    installation.metadata_json = _dump_metadata(merged_metadata)
+                    should_commit = True
+
+        if should_commit:
             db.commit()
 
 
@@ -1839,12 +1995,41 @@ def register_installation(
     auth_context: InstallationAuthContext = Depends(_require_installation_auth),
     db: Session = Depends(_get_db),
 ) -> dict[str, Any]:
+    token_customer_ref = str(auth_context.customer_ref or "").strip()
+    active_ids_before: set[str] = set()
+    if auth_context.auth_type == "client" and token_customer_ref:
+        active_ids_before = {
+            item.installation_id
+            for item in _active_customer_installations(db, token_customer_ref)
+        }
+
     installation = _upsert_installation(db, payload)
     _enforce_installation_customer_scope(installation, auth_context)
     _ensure_installation_has_customer_ref(installation, payload.customer_ref)
     entitlement = _compute_entitlement(installation)
+
+    if auth_context.auth_type == "client" and token_customer_ref:
+        current_customer_ref = str(installation.customer_ref or "").strip()
+        is_currently_active = str(entitlement.get("status") or "").strip().lower() in {"active", "grace"}
+        consumes_new_seat = is_currently_active and payload.installation_id not in active_ids_before
+        if consumes_new_seat:
+            max_installations = _resolve_customer_max_installations(
+                db,
+                customer_ref=current_customer_ref,
+                activation_code_id=auth_context.activation_code_id,
+            )
+            if len(active_ids_before) >= max_installations:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Seat limit exceeded ({len(active_ids_before)}/{max_installations}) "
+                        f"for customer {current_customer_ref}"
+                    ),
+                )
+
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
+    serialized_installation = _serialize_installation(installation)
     _publish_admin_event(
         "installations",
         "registered",
@@ -1858,6 +2043,7 @@ def register_installation(
             "customer_ref": installation.customer_ref,
             "subscription_status": installation.subscription_status,
             "trial_ends_at": installation.trial_ends_at.isoformat(),
+            "customer_email": serialized_installation.get("customer_email"),
         },
         "entitlement": entitlement,
         "entitlement_token": entitlement_token,
@@ -2036,6 +2222,9 @@ def activate_installation(
 
     merged_metadata = _load_metadata(installation.metadata_json)
     merged_metadata.update(payload.metadata or {})
+    activation_code_email = _installation_customer_email(_load_metadata(activation_code.metadata_json))
+    if activation_code_email:
+        merged_metadata.setdefault("issued_to_email", activation_code_email)
     merged_metadata.update(
         {
             "activation_code_suffix": activation_code.code_suffix,

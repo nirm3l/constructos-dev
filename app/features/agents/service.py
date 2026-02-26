@@ -1448,10 +1448,12 @@ class AgentTaskService:
         due_date: str | None = None,
         external_refs: list[dict[str, Any]] | None = None,
         attachment_refs: list[dict[str, Any]] | None = None,
+        instruction: str | None = None,
+        execution_triggers: list[dict[str, Any]] | None = None,
         recurring_rule: str | None = None,
         specification_id: str | None = None,
         task_group_id: str | None = None,
-        task_type: str = "manual",
+        task_type: str | None = None,
         scheduled_instruction: str | None = None,
         scheduled_at_utc: str | None = None,
         schedule_timezone: str | None = None,
@@ -1486,6 +1488,8 @@ class AgentTaskService:
                     "due_date": due_date,
                     "external_refs": external_refs or [],
                     "attachment_refs": attachment_refs or [],
+                    "instruction": instruction,
+                    "execution_triggers": execution_triggers or [],
                     "recurring_rule": recurring_rule,
                     "specification_id": specification_id,
                     "task_type": task_type,
@@ -1496,25 +1500,35 @@ class AgentTaskService:
                     "labels": labels or [],
                 },
             )
-            payload = TaskCreate(
-                workspace_id=resolved_workspace_id,
-                project_id=resolved_project_id,
-                task_group_id=task_group_id,
-                title=title,
-                description=description,
-                priority=priority,
-                due_date=due_date,
-                external_refs=external_refs or [],
-                attachment_refs=attachment_refs or [],
-                recurring_rule=recurring_rule,
-                specification_id=specification_id,
-                task_type=task_type,
-                scheduled_instruction=scheduled_instruction,
-                scheduled_at_utc=scheduled_at_utc,
-                schedule_timezone=schedule_timezone,
-                assignee_id=assignee_id,
-                labels=labels or [],
-            )
+            payload_kwargs: dict[str, Any] = {
+                "workspace_id": resolved_workspace_id,
+                "project_id": resolved_project_id,
+                "task_group_id": task_group_id,
+                "title": title,
+                "description": description,
+                "priority": priority,
+                "due_date": due_date,
+                "external_refs": external_refs or [],
+                "attachment_refs": attachment_refs or [],
+                "specification_id": specification_id,
+                "assignee_id": assignee_id,
+                "labels": labels or [],
+            }
+            if instruction is not None:
+                payload_kwargs["instruction"] = instruction
+            if execution_triggers is not None:
+                payload_kwargs["execution_triggers"] = execution_triggers
+            if recurring_rule is not None:
+                payload_kwargs["recurring_rule"] = recurring_rule
+            if task_type is not None:
+                payload_kwargs["task_type"] = task_type
+            if scheduled_instruction is not None:
+                payload_kwargs["scheduled_instruction"] = scheduled_instruction
+            if scheduled_at_utc is not None:
+                payload_kwargs["scheduled_at_utc"] = scheduled_at_utc
+            if schedule_timezone is not None:
+                payload_kwargs["schedule_timezone"] = schedule_timezone
+            payload = TaskCreate(**payload_kwargs)
             return TaskApplicationService(db, user, command_id=effective_command_id).create_task(payload)
 
     def create_note(

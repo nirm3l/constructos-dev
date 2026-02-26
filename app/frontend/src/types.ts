@@ -88,6 +88,42 @@ export type AttachmentRef = {
   size_bytes?: number
 }
 
+export type TaskExecutionTriggerManual = {
+  kind: 'manual'
+  enabled?: boolean
+}
+
+export type TaskExecutionTriggerSchedule = {
+  kind: 'schedule'
+  enabled?: boolean
+  scheduled_at_utc: string
+  schedule_timezone?: string
+  recurring_rule?: string
+  run_on_statuses?: string[]
+}
+
+export type TaskExecutionTriggerStatusChange = {
+  kind: 'status_change'
+  enabled?: boolean
+  scope: 'self' | 'external'
+  match_mode?: 'any' | 'all'
+  from_statuses?: string[]
+  to_statuses?: string[]
+  selector?: {
+    task_ids?: string[]
+    project_id?: string
+    specification_id?: string
+    assignee_id?: string
+    labels_any?: string[]
+  }
+  cooldown_seconds?: number
+}
+
+export type TaskExecutionTrigger =
+  | TaskExecutionTriggerManual
+  | TaskExecutionTriggerSchedule
+  | TaskExecutionTriggerStatusChange
+
 export type Workspace = {
   id: string
   name: string
@@ -255,6 +291,8 @@ export type Task = {
   external_refs: ExternalRef[]
   attachment_refs: AttachmentRef[]
   linked_note_count?: number
+  instruction: string | null
+  execution_triggers: TaskExecutionTrigger[]
   recurring_rule: string | null
   task_type: 'manual' | 'scheduled_instruction'
   scheduled_instruction: string | null
@@ -395,6 +433,9 @@ export type TaskAutomationStatus = {
   last_agent_error: string | null
   last_agent_comment: string | null
   last_requested_instruction: string | null
+  last_requested_source: 'manual' | 'schedule' | 'status_change' | string | null
+  instruction: string | null
+  execution_triggers: TaskExecutionTrigger[]
   task_type: 'manual' | 'scheduled_instruction'
   schedule_state: 'idle' | 'queued' | 'running' | 'done' | 'failed'
   scheduled_at_utc: string | null

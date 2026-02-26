@@ -386,6 +386,124 @@ def test_admin_list_installations_supports_search_and_status_filter(tmp_path: Pa
         assert payload["items"][0]["installation"]["installation_id"] == "cp-tenant-beta"
 
 
+def test_admin_installation_includes_customer_email_from_metadata(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-customer-email",
+                "workspace_id": "workspace-customer-email",
+                "metadata": {
+                    "source": "test",
+                    "issued_to_email": "Owner@Example.com",
+                },
+            },
+        )
+        assert register.status_code == 200
+        register_payload = register.json()
+        assert register_payload["installation"]["customer_email"] == "owner@example.com"
+
+        listed = client.get(
+            "/v1/admin/installations?limit=50&offset=0",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert listed.status_code == 200
+        listed_payload = listed.json()
+        listed_item = next(
+            item
+            for item in listed_payload["items"]
+            if item["installation"]["installation_id"] == "cp-customer-email"
+        )
+        assert listed_item["installation"]["customer_email"] == "owner@example.com"
+
+        details = client.get(
+            "/v1/admin/installations/cp-customer-email",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert details.status_code == 200
+        detail_payload = details.json()
+        assert detail_payload["installation"]["customer_email"] == "owner@example.com"
+
+
+def test_activation_propagates_customer_email_from_activation_code_metadata(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-email-propagation",
+                "plan_code": "monthly",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+                "metadata": {"issued_to_email": "propagation@example.com"},
+            },
+        )
+        assert create_code.status_code == 200
+        activation_code = create_code.json()["activation_code"]
+
+        activate = client.post(
+            "/v1/installations/activate",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-email-propagation",
+                "workspace_id": "workspace-email-propagation",
+                "activation_code": activation_code,
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert activate.status_code == 200
+        activate_payload = activate.json()
+        assert activate_payload["installation"]["customer_email"] == "propagation@example.com"
+
+        details = client.get(
+            "/v1/admin/installations/cp-email-propagation",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert details.status_code == 200
+        detail_payload = details.json()
+        assert detail_payload["installation"]["customer_email"] == "propagation@example.com"
+
+
+def test_startup_backfills_customer_email_for_existing_installations(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-email-backfill",
+                "workspace_id": "workspace-email-backfill",
+                "customer_ref": "customer-email-backfill",
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert register.status_code == 200
+        assert register.json()["installation"]["customer_email"] is None
+
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-email-backfill",
+                "plan_code": "monthly",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+                "metadata": {"issued_to_email": "backfill@example.com"},
+            },
+        )
+        assert create_code.status_code == 200
+
+    with _build_client(tmp_path) as client:
+        details = client.get(
+            "/v1/admin/installations/cp-email-backfill",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert details.status_code == 200
+        payload = details.json()
+        assert payload["installation"]["customer_email"] == "backfill@example.com"
+        assert payload["installation"]["metadata"]["customer_email_backfilled"] is True
+
+
 def test_admin_customer_subscription_update_applies_to_all_installations(tmp_path: Path):
     with _build_client(tmp_path) as client:
         for installation_id in ["cp-customer-a1", "cp-customer-a2"]:
@@ -698,6 +816,72 @@ def test_install_exchange_issues_client_token_for_activation_code(tmp_path: Path
         assert str(second_payload["license_server_token"]).startswith("lcp_")
         assert second_payload["license_server_token"] != payload["license_server_token"]
         assert second_payload["activation_code_record"]["metadata"]["install_exchange_count"] == 2
+
+
+def test_install_exchange_register_enforces_customer_seat_limit(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-install-exchange-limit",
+                "plan_code": "monthly",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+            },
+        )
+        assert create_code.status_code == 200
+        activation_code = create_code.json()["activation_code"]
+
+        for index in range(1, 4):
+            exchange = client.post(
+                "/v1/install/exchange",
+                json={"activation_code": activation_code},
+            )
+            assert exchange.status_code == 200
+            token = exchange.json()["license_server_token"]
+
+            register = client.post(
+                "/v1/installations/register",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "installation_id": f"cp-exchange-limit-{index}",
+                    "workspace_id": "workspace-exchange-limit",
+                    "metadata": {"source": "tests"},
+                },
+            )
+            assert register.status_code == 200
+            assert register.json()["installation"]["customer_ref"] == "customer-install-exchange-limit"
+
+        re_register_existing = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "installation_id": "cp-exchange-limit-1",
+                "workspace_id": "workspace-exchange-limit",
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert re_register_existing.status_code == 200
+
+        extra_exchange = client.post(
+            "/v1/install/exchange",
+            json={"activation_code": activation_code},
+        )
+        assert extra_exchange.status_code == 200
+        extra_token = extra_exchange.json()["license_server_token"]
+
+        fourth_register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": f"Bearer {extra_token}"},
+            json={
+                "installation_id": "cp-exchange-limit-4",
+                "workspace_id": "workspace-exchange-limit",
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert fourth_register.status_code == 409
+        assert "Seat limit exceeded (3/3)" in fourth_register.json()["detail"]
 
 
 def test_install_exchange_rejects_invalid_and_inactive_codes(tmp_path: Path):
@@ -1245,10 +1429,17 @@ def test_admin_send_onboarding_email_succeeds_with_template(monkeypatch, tmp_pat
         assert "ACTIVATION_CODE=ACT-TEST-0001" in captured["text_body"]
         assert "INSTALL_COS=true" in captured["text_body"]
         assert "AUTO_DEPLOY=1" in captured["text_body"]
+        assert "Windows installer (cmd.exe)" in captured["text_body"]
+        assert "curl -fsSL -o install.ps1" in captured["text_body"]
+        assert "-ExecutionPolicy Bypass -File .\\install.ps1" in captured["text_body"]
+        assert "deploy.sh" not in captured["text_body"]
         assert "LICENSE_SERVER_TOKEN=" not in captured["text_body"]
         assert "ACT-TEST-0001" in captured["text_body"]
         assert "ConstructOS" in captured["html_body"]
         assert "cust_example" in captured["html_body"]
+        assert "Windows (cmd.exe):" in captured["html_body"]
+        assert "install.ps1" in captured["html_body"]
+        assert "Manual deploy command (optional):" not in captured["html_body"]
 
 
 def test_admin_send_onboarding_email_rejects_non_https_script_url(tmp_path: Path):
@@ -1321,9 +1512,16 @@ def test_admin_provision_onboarding_generates_and_sends_package(monkeypatch, tmp
         assert f"ACTIVATION_CODE={payload['activation_code']}" in captured["text_body"]
         assert "INSTALL_COS=true" in captured["text_body"]
         assert "AUTO_DEPLOY=1" in captured["text_body"]
+        assert "Windows installer (cmd.exe)" in captured["text_body"]
+        assert "curl -fsSL -o install.ps1" in captured["text_body"]
+        assert "-ExecutionPolicy Bypass -File .\\install.ps1" in captured["text_body"]
+        assert "deploy.sh" not in captured["text_body"]
         assert "LICENSE_SERVER_TOKEN=" not in captured["text_body"]
         assert payload["activation_code"] in captured["text_body"]
         assert payload["customer_ref"] in captured["html_body"]
+        assert "Windows (cmd.exe):" in captured["html_body"]
+        assert "install.ps1" in captured["html_body"]
+        assert "Manual deploy command (optional):" not in captured["html_body"]
 
 
 def test_admin_provision_onboarding_lifetime_plan_ignores_valid_until(monkeypatch, tmp_path: Path):

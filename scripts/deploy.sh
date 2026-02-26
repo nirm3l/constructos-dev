@@ -8,6 +8,7 @@ DEPLOYED_AT_UTC="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo "nogit")"
 DEPLOY_TARGET="${DEPLOY_TARGET:-auto}"
 DEPLOY_SOURCE="${DEPLOY_SOURCE:-local}"
+DEPLOY_SYNC_FRONTEND_PACKAGE_VERSION="${DEPLOY_SYNC_FRONTEND_PACKAGE_VERSION:-false}"
 APP_COMPOSE_PROJECT_NAME="${APP_COMPOSE_PROJECT_NAME:-constructos-app}"
 GHCR_OWNER="${GHCR_OWNER:-nirm3l}"
 GHCR_IMAGE_PREFIX="${GHCR_IMAGE_PREFIX:-${GHCR_REPO:-constructos}}"
@@ -85,7 +86,11 @@ esac
 
 case "$DEPLOY_SOURCE" in
   local)
-    APP_VERSION="$(python3 scripts/bump_version.py)"
+    BUMP_VERSION_ARGS=()
+    if [[ "${DEPLOY_SYNC_FRONTEND_PACKAGE_VERSION,,}" == "true" ]]; then
+      BUMP_VERSION_ARGS+=(--update-frontend-package)
+    fi
+    APP_VERSION="$(python3 scripts/bump_version.py "${BUMP_VERSION_ARGS[@]}")"
     APP_BUILD="$(date -u +"%Y%m%d%H%M%S")-${GIT_SHA}"
     TASK_APP_IMAGE="${TASK_APP_IMAGE:-task-management-task-app:local}"
     MCP_TOOLS_IMAGE="${MCP_TOOLS_IMAGE:-task-management-mcp-tools:local}"

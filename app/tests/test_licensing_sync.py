@@ -7,6 +7,7 @@ from importlib import reload
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
+import httpx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select
@@ -314,6 +315,113 @@ def test_sync_license_once_rejects_invalid_signed_token(tmp_path: Path, monkeypa
         ).scalars().first()
         assert validation is not None
         assert validation.result == "error"
+
+
+def test_sync_license_once_marks_expired_on_seat_limit_rejection(tmp_path: Path, monkeypatch):
+    db_file = tmp_path / "seat-limit-rejection.db"
+    os.environ["DATABASE_URL"] = f"sqlite:///{db_file}"
+    os.environ["ATTACHMENTS_DIR"] = str(tmp_path / "uploads")
+    os.environ.pop("DB_PATH", None)
+    os.environ["EVENTSTORE_URI"] = ""
+    os.environ["LICENSE_ENFORCEMENT_ENABLED"] = "true"
+    os.environ["LICENSE_INSTALLATION_ID"] = "seat-limit-installation"
+    os.environ["LICENSE_SERVER_TOKEN"] = "dev-license-token"
+    os.environ["LICENSE_TRIAL_DAYS"] = "7"
+    os.environ.pop("LICENSE_PUBLIC_KEY", None)
+
+    import shared.models as shared_models
+    import shared.licensing as shared_licensing
+    import shared.settings as shared_settings
+
+    reload(shared_settings)
+    reload(shared_models)
+    reload(shared_licensing)
+    shared_licensing.reset_license_installation_id_cache()
+
+    import main
+
+    main = reload(main)
+    main.bootstrap_data()
+
+    from features.licensing import sync
+
+    sync = reload(sync)
+
+    class _MockResponse:
+        def __init__(self, *, url: str, status_code: int, payload: dict | None = None):
+            self.url = url
+            self.status_code = int(status_code)
+            self._payload = payload or {}
+            self._request = httpx.Request("POST", self.url)
+            self._response = httpx.Response(self.status_code, request=self._request, json=self._payload)
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise httpx.HTTPStatusError(
+                    f"HTTP {self.status_code}",
+                    request=self._request,
+                    response=self._response,
+                )
+
+        def json(self):
+            return self._payload
+
+        @property
+        def text(self) -> str:
+            return json.dumps(self._payload)
+
+    class _MockClient:
+        def __init__(self, timeout: float):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url: str, headers: dict, json: dict):
+            if url.endswith("/v1/installations/register"):
+                return _MockResponse(
+                    url=url,
+                    status_code=409,
+                    payload={"detail": "Seat limit exceeded (3/3) for customer customer-seat-limit"},
+                )
+            raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(sync.httpx, "Client", _MockClient)
+
+    ok = sync.sync_license_once()
+    assert ok is False
+
+    from features.licensing.read_models import license_status_read_model
+    from shared.models import LicenseInstallation, LicenseValidationLog, SessionLocal
+
+    with SessionLocal() as db:
+        payload = license_status_read_model(db)
+        assert payload["status"] == "expired"
+        assert payload["write_access"] is False
+        assert payload["metadata"].get("control_plane_last_error_code") == 409
+        assert "Seat limit exceeded" in str(payload["metadata"].get("control_plane_last_error_detail") or "")
+
+        installation = db.execute(
+            select(LicenseInstallation).where(LicenseInstallation.installation_id == "seat-limit-installation")
+        ).scalar_one()
+        assert installation.status == "expired"
+        assert installation.trial_ends_at is not None
+        trial_ends_at = installation.trial_ends_at
+        if trial_ends_at.tzinfo is None:
+            trial_ends_at = trial_ends_at.replace(tzinfo=timezone.utc)
+        assert trial_ends_at <= datetime.now(timezone.utc) - timedelta(hours=1)
+
+        validation = db.execute(
+            select(LicenseValidationLog)
+            .where(LicenseValidationLog.installation_id == installation.id)
+            .order_by(LicenseValidationLog.id.desc())
+        ).scalars().first()
+        assert validation is not None
+        assert validation.result == "error"
+        assert "hard_rejection" in (validation.details_json or "")
 
 
 def test_assert_license_startup_write_access_allows_trial(tmp_path: Path, monkeypatch):

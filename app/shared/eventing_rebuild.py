@@ -144,6 +144,12 @@ from .typed_notifications import (
     normalize_notification_type,
     normalize_severity,
 )
+from .task_automation import (
+    TRIGGER_KIND_SCHEDULE,
+    build_legacy_schedule_trigger,
+    derive_legacy_schedule_fields,
+    normalize_execution_triggers,
+)
 from .event_upcasters import upcast_event, upcast_snapshot
 from .eventing_store import StreamState, get_kurrent_client, kurrent_read_stream, snapshot_stream_id, stream_id, NotFoundError, serialize_snapshot_event
 
@@ -165,6 +171,37 @@ def _parse_tag_list(raw: str | None) -> list[str]:
         if tag:
             out.append(tag)
     return out
+
+
+def _normalize_task_row_automation_fields(task: Task) -> None:
+    instruction = str(task.instruction or task.scheduled_instruction or "").strip() or None
+    execution_triggers = normalize_execution_triggers(task.execution_triggers)
+    if str(task.task_type or "").strip().lower() == "manual":
+        execution_triggers = [
+            trigger
+            for trigger in execution_triggers
+            if str(trigger.get("kind") or "") != TRIGGER_KIND_SCHEDULE
+        ]
+    if not execution_triggers:
+        legacy_trigger = build_legacy_schedule_trigger(
+            scheduled_at_utc=task.scheduled_at_utc.isoformat() if task.scheduled_at_utc else None,
+            schedule_timezone=task.schedule_timezone,
+            recurring_rule=task.recurring_rule,
+        )
+        if legacy_trigger is not None:
+            execution_triggers = [legacy_trigger]
+    legacy = derive_legacy_schedule_fields(
+        instruction=instruction,
+        execution_triggers=execution_triggers,
+    )
+    task.instruction = instruction
+    task.execution_triggers = json.dumps(execution_triggers)
+    task.task_type = str(legacy.get("task_type") or "manual")
+    task.scheduled_instruction = legacy.get("scheduled_instruction")
+    raw_scheduled_at = legacy.get("scheduled_at_utc")
+    task.scheduled_at_utc = datetime.fromisoformat(raw_scheduled_at) if raw_scheduled_at else None
+    task.schedule_timezone = legacy.get("schedule_timezone")
+    task.recurring_rule = legacy.get("recurring_rule")
 
 
 def _recompute_project_tag_index(db: Session, project_id: str | None) -> None:
@@ -319,9 +356,51 @@ def load_events_after(db: Session, aggregate_type: str, aggregate_id: str, versi
 
 
 def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, Any]:
+    def _normalize_task_automation_state(payload: dict[str, Any]) -> dict[str, Any]:
+        s_local = dict(payload)
+        instruction = str(s_local.get("instruction") or s_local.get("scheduled_instruction") or "").strip() or None
+        execution_triggers = normalize_execution_triggers(s_local.get("execution_triggers"))
+        if str(s_local.get("task_type") or "").strip().lower() == "manual":
+            execution_triggers = [
+                trigger
+                for trigger in execution_triggers
+                if str(trigger.get("kind") or "") != TRIGGER_KIND_SCHEDULE
+            ]
+        if not execution_triggers:
+            legacy_trigger = build_legacy_schedule_trigger(
+                scheduled_at_utc=s_local.get("scheduled_at_utc"),
+                schedule_timezone=s_local.get("schedule_timezone"),
+                recurring_rule=s_local.get("recurring_rule"),
+            )
+            if legacy_trigger is not None:
+                execution_triggers = [legacy_trigger]
+        legacy = derive_legacy_schedule_fields(
+            instruction=instruction,
+            execution_triggers=execution_triggers,
+        )
+        s_local["instruction"] = instruction
+        s_local["execution_triggers"] = execution_triggers
+        s_local["task_type"] = legacy.get("task_type") or "manual"
+        s_local["scheduled_instruction"] = legacy.get("scheduled_instruction")
+        s_local["scheduled_at_utc"] = legacy.get("scheduled_at_utc")
+        s_local["schedule_timezone"] = legacy.get("schedule_timezone")
+        s_local["recurring_rule"] = legacy.get("recurring_rule")
+        return s_local
+
     s = dict(state)
     p = event.payload
     if event.event_type == TASK_EVENT_CREATED:
+        instruction = str(p.get("instruction") or p.get("scheduled_instruction") or "").strip() or None
+        execution_triggers = normalize_execution_triggers(p.get("execution_triggers"))
+        if not execution_triggers:
+            legacy_trigger = build_legacy_schedule_trigger(
+                scheduled_at_utc=p.get("scheduled_at_utc"),
+                schedule_timezone=p.get("schedule_timezone"),
+                recurring_rule=p.get("recurring_rule"),
+            )
+            if legacy_trigger is not None:
+                execution_triggers = [legacy_trigger]
+        legacy = derive_legacy_schedule_fields(instruction=instruction, execution_triggers=execution_triggers)
         s = {
             "id": event.aggregate_id,
             "workspace_id": p["workspace_id"],
@@ -339,11 +418,13 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "attachments": p.get("attachments", []),
             "external_refs": p.get("external_refs", []),
             "attachment_refs": p.get("attachment_refs", p.get("attachments", [])),
-            "recurring_rule": p.get("recurring_rule"),
-            "task_type": p.get("task_type", "manual"),
-            "scheduled_instruction": p.get("scheduled_instruction"),
-            "scheduled_at_utc": p.get("scheduled_at_utc"),
-            "schedule_timezone": p.get("schedule_timezone"),
+            "instruction": instruction,
+            "execution_triggers": execution_triggers,
+            "recurring_rule": legacy.get("recurring_rule"),
+            "task_type": legacy.get("task_type", "manual"),
+            "scheduled_instruction": legacy.get("scheduled_instruction"),
+            "scheduled_at_utc": legacy.get("scheduled_at_utc"),
+            "schedule_timezone": legacy.get("schedule_timezone"),
             "schedule_state": p.get("schedule_state", "idle"),
             "last_schedule_run_at": None,
             "last_schedule_error": None,
@@ -356,6 +437,7 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "last_agent_error": None,
             "last_agent_comment": None,
             "last_requested_instruction": None,
+            "last_requested_source": None,
         }
     elif event.event_type in {TASK_EVENT_UPDATED, TASK_EVENT_REORDERED}:
         s.update(p)
@@ -378,6 +460,7 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
         s["automation_state"] = "queued"
         s["last_agent_error"] = None
         s["last_requested_instruction"] = p.get("instruction")
+        s["last_requested_source"] = p.get("source")
     elif event.event_type == TASK_EVENT_AUTOMATION_STARTED:
         s["automation_state"] = "running"
         s["last_agent_error"] = None
@@ -421,7 +504,7 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
         s["schedule_timezone"] = None
         s["schedule_state"] = "idle"
         s["last_schedule_error"] = None
-    return s
+    return _normalize_task_automation_state(s)
 
 
 def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, Any]:
@@ -996,6 +1079,20 @@ def project_event(db: Session, ev: EventEnvelope):
         if task is None:
             task = Task(id=ev.aggregate_id, workspace_id=p["workspace_id"], title=p["title"])
             db.add(task)
+        instruction = str(p.get("instruction") or p.get("scheduled_instruction") or "").strip() or None
+        execution_triggers = normalize_execution_triggers(p.get("execution_triggers"))
+        if not execution_triggers:
+            legacy_trigger = build_legacy_schedule_trigger(
+                scheduled_at_utc=p.get("scheduled_at_utc"),
+                schedule_timezone=p.get("schedule_timezone"),
+                recurring_rule=p.get("recurring_rule"),
+            )
+            if legacy_trigger is not None:
+                execution_triggers = [legacy_trigger]
+        legacy_schedule = derive_legacy_schedule_fields(
+            instruction=instruction,
+            execution_triggers=execution_triggers,
+        )
         task.workspace_id = p["workspace_id"]
         task.project_id = p.get("project_id")
         task.task_group_id = p.get("task_group_id")
@@ -1011,15 +1108,18 @@ def project_event(db: Session, ev: EventEnvelope):
         task.attachments = json.dumps(p.get("attachments", []))
         task.external_refs = json.dumps(p.get("external_refs", []))
         task.attachment_refs = json.dumps(p.get("attachment_refs", p.get("attachments", [])))
-        task.recurring_rule = p.get("recurring_rule")
-        task.task_type = p.get("task_type", "manual")
-        task.scheduled_instruction = p.get("scheduled_instruction")
-        task.scheduled_at_utc = datetime.fromisoformat(p["scheduled_at_utc"]) if p.get("scheduled_at_utc") else None
-        task.schedule_timezone = p.get("schedule_timezone")
+        task.instruction = instruction
+        task.execution_triggers = json.dumps(execution_triggers)
+        task.recurring_rule = legacy_schedule.get("recurring_rule")
+        task.task_type = legacy_schedule.get("task_type", "manual")
+        task.scheduled_instruction = legacy_schedule.get("scheduled_instruction")
+        task.scheduled_at_utc = datetime.fromisoformat(legacy_schedule["scheduled_at_utc"]) if legacy_schedule.get("scheduled_at_utc") else None
+        task.schedule_timezone = legacy_schedule.get("schedule_timezone")
         task.schedule_state = p.get("schedule_state", "idle")
         task.last_schedule_run_at = None
         task.last_schedule_error = None
         task.order_index = p.get("order_index", 0)
+        _normalize_task_row_automation_fields(task)
         _recompute_project_tag_index(db, task.project_id)
     elif ev.event_type == TASK_GROUP_EVENT_CREATED:
         group = db.get(TaskGroup, ev.aggregate_id)
@@ -1361,7 +1461,7 @@ def project_event(db: Session, ev: EventEnvelope):
             old_project_id = task.project_id
             if ev.event_type == TASK_EVENT_UPDATED:
                 for k, v in p.items():
-                    if k in {"labels", "subtasks", "attachments", "external_refs", "attachment_refs"} and v is not None:
+                    if k in {"labels", "subtasks", "attachments", "external_refs", "attachment_refs", "execution_triggers"} and v is not None:
                         setattr(task, k, json.dumps(v))
                     elif k == "due_date":
                         task.due_date = datetime.fromisoformat(v) if v else None
@@ -1424,6 +1524,7 @@ def project_event(db: Session, ev: EventEnvelope):
                 task.schedule_timezone = None
                 task.schedule_state = "idle"
                 task.last_schedule_error = None
+            _normalize_task_row_automation_fields(task)
             _recompute_project_tag_index(db, old_project_id)
             _recompute_project_tag_index(db, task.project_id)
     elif ev.event_type in TASK_GROUP_MUTATION_EVENTS:

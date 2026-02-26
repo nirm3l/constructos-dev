@@ -17,7 +17,8 @@ Optional separate stack:
 ./scripts/deploy.sh
 ```
 Effects:
-- bumps patch version (`VERSION` + frontend package version) for `DEPLOY_SOURCE=local`,
+- bumps patch version (`VERSION`) for `DEPLOY_SOURCE=local`,
+- optionally syncs `app/frontend/package.json` version when `DEPLOY_SYNC_FRONTEND_PACKAGE_VERSION=true`,
 - generates `.deploy.env` (`APP_VERSION`, `APP_BUILD`, `APP_DEPLOYED_AT_UTC`),
 - resolves `DEPLOY_TARGET` (`auto|base|ubuntu-gpu|macos-m4`),
 - resolves `DEPLOY_SOURCE` (`local|ghcr`),

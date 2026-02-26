@@ -38,10 +38,24 @@ from shared.core import (
     rebuild_state,
     to_iso_utc,
 )
+from shared.task_automation import (
+    TRIGGER_KIND_SCHEDULE,
+    TRIGGER_KIND_STATUS_CHANGE,
+    STATUS_MATCH_ALL,
+    STATUS_MATCH_ANY,
+    STATUS_SCOPE_EXTERNAL,
+    STATUS_SCOPE_SELF,
+    build_legacy_schedule_trigger,
+    derive_legacy_schedule_fields,
+    first_enabled_schedule_trigger,
+    has_enabled_schedule_trigger,
+    normalize_execution_triggers,
+)
 from features.notifications.domain import NotificationAggregate
 from .domain import TaskAggregate
 
 MENTION_PATTERN = re.compile(r"@([A-Za-z0-9_\-]+)")
+_UNSET = object()
 
 
 def _normalize_tags(values: list[str] | None) -> list[str]:
@@ -202,19 +216,137 @@ def _require_task_group_scope(db: Session, *, workspace_id: str, project_id: str
     return task_group
 
 
-def _validate_schedule_fields(
+def _normalize_instruction(value: str | None) -> str | None:
+    normalized = str(value or "").strip()
+    return normalized or None
+
+
+def _with_legacy_schedule_overrides(
     *,
-    task_type: str,
-    scheduled_instruction: str | None,
-    scheduled_at_utc: str | None,
-) -> None:
-    if task_type not in {"manual", "scheduled_instruction"}:
+    instruction: str | None,
+    execution_triggers: list[dict],
+    task_type: str | object = _UNSET,
+    scheduled_instruction: str | object = _UNSET,
+    scheduled_at_utc: str | object = _UNSET,
+    schedule_timezone: str | object = _UNSET,
+    recurring_rule: str | object = _UNSET,
+    schedule_run_on_statuses: list[str] | object = _UNSET,
+) -> tuple[str | None, list[dict]]:
+    effective_instruction = _normalize_instruction(instruction)
+    effective_triggers = normalize_execution_triggers(execution_triggers)
+    _current_schedule_idx, current_schedule_trigger = first_enabled_schedule_trigger(effective_triggers)
+    current_legacy = derive_legacy_schedule_fields(
+        instruction=effective_instruction,
+        execution_triggers=effective_triggers,
+    )
+
+    has_legacy_override = any(
+        value is not _UNSET
+        for value in (
+            task_type,
+            scheduled_instruction,
+            scheduled_at_utc,
+            schedule_timezone,
+            recurring_rule,
+            schedule_run_on_statuses,
+        )
+    )
+    if not has_legacy_override:
+        return effective_instruction, effective_triggers
+
+    effective_task_type_raw = task_type if task_type is not _UNSET else current_legacy.get("task_type")
+    effective_task_type = str(effective_task_type_raw or "manual").strip().lower()
+    if effective_task_type not in {"manual", "scheduled_instruction"}:
         raise HTTPException(status_code=422, detail='task_type must be "manual" or "scheduled_instruction"')
-    if task_type == "scheduled_instruction":
-        if not (scheduled_instruction or "").strip():
-            raise HTTPException(status_code=422, detail="scheduled_instruction is required for scheduled_instruction tasks")
-        if not scheduled_at_utc:
-            raise HTTPException(status_code=422, detail="scheduled_at_utc is required for scheduled_instruction tasks")
+
+    legacy_instruction = (
+        scheduled_instruction
+        if scheduled_instruction is not _UNSET
+        else current_legacy.get("scheduled_instruction")
+    )
+    legacy_scheduled_at = (
+        scheduled_at_utc
+        if scheduled_at_utc is not _UNSET
+        else current_legacy.get("scheduled_at_utc")
+    )
+    legacy_timezone = (
+        schedule_timezone
+        if schedule_timezone is not _UNSET
+        else current_legacy.get("schedule_timezone")
+    )
+    legacy_recurring_rule = (
+        recurring_rule
+        if recurring_rule is not _UNSET
+        else current_legacy.get("recurring_rule")
+    )
+    legacy_run_on_statuses = (
+        schedule_run_on_statuses
+        if schedule_run_on_statuses is not _UNSET
+        else (
+            current_schedule_trigger.get("run_on_statuses")
+            if isinstance(current_schedule_trigger, dict)
+            else None
+        )
+    )
+
+    effective_triggers = [
+        trigger
+        for trigger in effective_triggers
+        if str(trigger.get("kind") or "") != TRIGGER_KIND_SCHEDULE
+    ]
+    if effective_task_type == "scheduled_instruction":
+        normalized_legacy_instruction = (
+            _normalize_instruction(str(legacy_instruction or ""))
+            if legacy_instruction is not _UNSET
+            else effective_instruction
+        )
+        if not str(legacy_scheduled_at or "").strip():
+            raise HTTPException(
+                status_code=422,
+                detail='scheduled_at_utc is required when task_type is "scheduled_instruction"',
+            )
+        if not normalized_legacy_instruction:
+            raise HTTPException(
+                status_code=422,
+                detail='scheduled_instruction is required when task_type is "scheduled_instruction"',
+            )
+        next_schedule = build_legacy_schedule_trigger(
+            scheduled_at_utc=str(legacy_scheduled_at or "").strip() or None,
+            schedule_timezone=str(legacy_timezone or "").strip() or None,
+            recurring_rule=str(legacy_recurring_rule or "").strip() or None,
+            run_on_statuses=legacy_run_on_statuses,
+        )
+        if next_schedule is None:
+            raise HTTPException(status_code=422, detail="schedule trigger requires scheduled_at_utc")
+        effective_triggers.append(next_schedule)
+        effective_instruction = normalized_legacy_instruction
+    return effective_instruction, normalize_execution_triggers(effective_triggers)
+
+
+def _validate_automation_fields(*, instruction: str | None, execution_triggers: list[dict]) -> None:
+    normalized_instruction = _normalize_instruction(instruction)
+    normalized_triggers = normalize_execution_triggers(execution_triggers)
+    has_non_manual = any(str(trigger.get("kind") or "") != "manual" for trigger in normalized_triggers)
+    if has_non_manual and not normalized_instruction:
+        raise HTTPException(status_code=422, detail="instruction is required when non-manual execution triggers are configured")
+
+    for trigger in normalized_triggers:
+        kind = str(trigger.get("kind") or "")
+        if kind == TRIGGER_KIND_SCHEDULE:
+            if not str(trigger.get("scheduled_at_utc") or "").strip():
+                raise HTTPException(status_code=422, detail="schedule trigger requires scheduled_at_utc")
+            continue
+        if kind != TRIGGER_KIND_STATUS_CHANGE:
+            continue
+        scope = str(trigger.get("scope") or STATUS_SCOPE_SELF).strip().lower()
+        if scope not in {STATUS_SCOPE_SELF, STATUS_SCOPE_EXTERNAL}:
+            raise HTTPException(status_code=422, detail='status_change scope must be "self" or "external"')
+        match_mode = str(trigger.get("match_mode") or STATUS_MATCH_ANY).strip().lower()
+        if match_mode not in {STATUS_MATCH_ANY, STATUS_MATCH_ALL}:
+            raise HTTPException(status_code=422, detail='status_change match_mode must be "any" or "all"')
+        to_statuses = trigger.get("to_statuses")
+        if not isinstance(to_statuses, list) or not any(str(item or "").strip() for item in to_statuses):
+            raise HTTPException(status_code=422, detail="status_change trigger requires at least one to_statuses value")
 
 
 def require_task_command_state(db: Session, user: User, task_id: str, *, allowed: set[str]) -> tuple[str, str | None, str, bool]:
@@ -318,18 +450,38 @@ class CreateTaskHandler:
         except Exception:
             statuses = DEFAULT_STATUSES
         initial_status = (statuses[0] if statuses else DEFAULT_STATUSES[0]) or DEFAULT_STATUSES[0]
+        payload_data = self.payload.model_dump(exclude_unset=True)
+        legacy_task_type = payload_data.get("task_type", _UNSET)
+        if legacy_task_type is not _UNSET:
+            normalized_task_type = str(legacy_task_type or "").strip().lower()
+            has_explicit_schedule_fields = any(
+                key in payload_data
+                for key in ("scheduled_instruction", "scheduled_at_utc", "schedule_timezone")
+            )
+            if normalized_task_type == "manual" and not has_explicit_schedule_fields:
+                legacy_task_type = _UNSET
         user_tz = get_user_zoneinfo(self.ctx.user)
-        task_type = (self.payload.task_type or "manual").strip() or "manual"
         scheduled_at = normalize_datetime_to_utc(self.payload.scheduled_at_utc, user_tz)
-        scheduled_instruction = (self.payload.scheduled_instruction or "").strip() or None
         external_refs = _normalize_external_refs([r.model_dump() for r in self.payload.external_refs])
         attachment_refs = _normalize_attachment_refs([r.model_dump() for r in self.payload.attachment_refs])
         if not attachment_refs and self.payload.attachments:
             attachment_refs = _normalize_attachment_refs(self.payload.attachments)
-        _validate_schedule_fields(
-            task_type=task_type,
-            scheduled_instruction=scheduled_instruction,
-            scheduled_at_utc=to_iso_utc(scheduled_at),
+        normalized_instruction, normalized_triggers = _with_legacy_schedule_overrides(
+            instruction=self.payload.instruction,
+            execution_triggers=self.payload.execution_triggers,
+            task_type=legacy_task_type,
+            scheduled_instruction=payload_data.get("scheduled_instruction", _UNSET),
+            scheduled_at_utc=to_iso_utc(scheduled_at) if "scheduled_at_utc" in payload_data else _UNSET,
+            schedule_timezone=payload_data.get("schedule_timezone", _UNSET),
+            recurring_rule=payload_data.get("recurring_rule", _UNSET),
+        )
+        _validate_automation_fields(
+            instruction=normalized_instruction,
+            execution_triggers=normalized_triggers,
+        )
+        legacy_schedule = derive_legacy_schedule_fields(
+            instruction=normalized_instruction,
+            execution_triggers=normalized_triggers,
         )
         max_order = self.ctx.db.execute(
             select(func.max(Task.order_index)).where(Task.workspace_id == self.payload.workspace_id, Task.project_id == self.payload.project_id)
@@ -351,21 +503,16 @@ class CreateTaskHandler:
             attachments=attachment_refs,
             external_refs=external_refs,
             attachment_refs=attachment_refs,
-            recurring_rule=self.payload.recurring_rule,
-            task_type=task_type,
-            scheduled_instruction=scheduled_instruction if task_type == "scheduled_instruction" else None,
-            scheduled_at_utc=to_iso_utc(scheduled_at) if task_type == "scheduled_instruction" else None,
-            schedule_timezone=self.payload.schedule_timezone if task_type == "scheduled_instruction" else None,
+            instruction=normalized_instruction,
+            execution_triggers=normalized_triggers,
+            recurring_rule=legacy_schedule.get("recurring_rule"),
+            task_type=str(legacy_schedule.get("task_type") or "manual"),
+            scheduled_instruction=legacy_schedule.get("scheduled_instruction"),
+            scheduled_at_utc=legacy_schedule.get("scheduled_at_utc"),
+            schedule_timezone=legacy_schedule.get("schedule_timezone"),
             schedule_state="idle",
             order_index=max_order + 1,
         )
-        if task_type == "scheduled_instruction":
-            aggregate.configure_schedule(
-                scheduled_instruction=scheduled_instruction,
-                scheduled_at_utc=to_iso_utc(scheduled_at),
-                schedule_timezone=self.payload.schedule_timezone,
-                schedule_state="idle",
-            )
         _persist_task_aggregate(
             AggregateEventRepository(self.ctx.db),
             aggregate,
@@ -431,6 +578,10 @@ class PatchTaskHandler:
             or (str(current_state.get("task_type")) if current_state else None)
             or "manual"
         )
+        current_instruction = _normalize_instruction(
+            (current_row.instruction if current_row is not None else (current_state.get("instruction") if current_state else None))
+            or (current_row.scheduled_instruction if current_row is not None else (current_state.get("scheduled_instruction") if current_state else None))
+        )
         current_scheduled_instruction = (
             current_row.scheduled_instruction if current_row is not None else (current_state.get("scheduled_instruction") if current_state else None)
         )
@@ -442,6 +593,29 @@ class PatchTaskHandler:
         current_schedule_timezone = (
             current_row.schedule_timezone if current_row is not None else (current_state.get("schedule_timezone") if current_state else None)
         )
+        current_recurring_rule = (
+            current_row.recurring_rule if current_row is not None else (current_state.get("recurring_rule") if current_state else None)
+        )
+        current_schedule_state = (
+            current_row.schedule_state if current_row is not None else (current_state.get("schedule_state") if current_state else "idle")
+        )
+        current_execution_triggers = normalize_execution_triggers(
+            current_row.execution_triggers if current_row is not None else (current_state.get("execution_triggers") if current_state else [])
+        )
+        if str(current_task_type).strip().lower() == "manual":
+            current_execution_triggers = [
+                trigger
+                for trigger in current_execution_triggers
+                if str(trigger.get("kind") or "") != TRIGGER_KIND_SCHEDULE
+            ]
+        if not current_execution_triggers and str(current_task_type).strip().lower() != "manual":
+            legacy_trigger = build_legacy_schedule_trigger(
+                scheduled_at_utc=current_scheduled_at_utc,
+                schedule_timezone=current_schedule_timezone,
+                recurring_rule=current_recurring_rule,
+            )
+            if legacy_trigger is not None:
+                current_execution_triggers = [legacy_trigger]
         current_specification_id = (
             current_row.specification_id if current_row is not None else (current_state.get("specification_id") if current_state else None)
         )
@@ -482,34 +656,64 @@ class PatchTaskHandler:
             event_payload["due_date"] = to_iso_utc(normalize_datetime_to_utc(event_payload["due_date"], user_tz))
         if "scheduled_at_utc" in event_payload:
             event_payload["scheduled_at_utc"] = to_iso_utc(normalize_datetime_to_utc(event_payload["scheduled_at_utc"], user_tz))
+        if "instruction" in event_payload:
+            event_payload["instruction"] = _normalize_instruction(event_payload.get("instruction"))
         if "scheduled_instruction" in event_payload and event_payload["scheduled_instruction"] is not None:
             event_payload["scheduled_instruction"] = str(event_payload["scheduled_instruction"]).strip() or None
 
-        effective_task_type = str(event_payload.get("task_type", current_task_type))
-        effective_scheduled_instruction = event_payload.get("scheduled_instruction", current_scheduled_instruction)
-        effective_scheduled_at_utc = event_payload.get("scheduled_at_utc", current_scheduled_at_utc)
-        _validate_schedule_fields(
-            task_type=effective_task_type,
-            scheduled_instruction=effective_scheduled_instruction,
-            scheduled_at_utc=effective_scheduled_at_utc,
+        requested_instruction = event_payload.get("instruction", current_instruction)
+        requested_triggers = (
+            normalize_execution_triggers(event_payload.get("execution_triggers"))
+            if "execution_triggers" in event_payload
+            else current_execution_triggers
         )
-        if effective_task_type == "manual":
-            event_payload["scheduled_instruction"] = None
-            event_payload["scheduled_at_utc"] = None
-            event_payload["schedule_timezone"] = None
+        normalized_instruction, normalized_triggers = _with_legacy_schedule_overrides(
+            instruction=requested_instruction,
+            execution_triggers=requested_triggers,
+            task_type=event_payload.get("task_type", _UNSET),
+            scheduled_instruction=event_payload.get("scheduled_instruction", _UNSET),
+            scheduled_at_utc=event_payload.get("scheduled_at_utc", _UNSET),
+            schedule_timezone=event_payload.get("schedule_timezone", _UNSET),
+            recurring_rule=event_payload.get("recurring_rule", _UNSET),
+        )
+        _validate_automation_fields(
+            instruction=normalized_instruction,
+            execution_triggers=normalized_triggers,
+        )
+        legacy_schedule = derive_legacy_schedule_fields(
+            instruction=normalized_instruction,
+            execution_triggers=normalized_triggers,
+        )
+        event_payload["instruction"] = normalized_instruction
+        event_payload["execution_triggers"] = normalized_triggers
+        event_payload["task_type"] = str(legacy_schedule.get("task_type") or "manual")
+        event_payload["scheduled_instruction"] = legacy_schedule.get("scheduled_instruction")
+        event_payload["scheduled_at_utc"] = legacy_schedule.get("scheduled_at_utc")
+        event_payload["schedule_timezone"] = legacy_schedule.get("schedule_timezone")
+        event_payload["recurring_rule"] = legacy_schedule.get("recurring_rule")
+
+        automation_config_fields = {
+            "instruction",
+            "execution_triggers",
+            "task_type",
+            "scheduled_instruction",
+            "scheduled_at_utc",
+            "schedule_timezone",
+            "recurring_rule",
+        }
+        automation_config_touched = any(field in data for field in automation_config_fields)
+        if automation_config_touched:
             event_payload["schedule_state"] = "idle"
             event_payload["last_schedule_error"] = None
-            event_payload["recurring_rule"] = None
+        if not has_enabled_schedule_trigger(normalized_triggers):
+            event_payload["schedule_state"] = "idle"
+            event_payload["last_schedule_error"] = None
+        elif "schedule_state" in event_payload and event_payload["schedule_state"] is None:
+            event_payload["schedule_state"] = current_schedule_state or "idle"
+
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, self.task_id)
         aggregate.update(changes=event_payload)
-        if effective_task_type == "scheduled_instruction":
-            aggregate.configure_schedule(
-                scheduled_instruction=effective_scheduled_instruction,
-                scheduled_at_utc=effective_scheduled_at_utc,
-                schedule_timezone=event_payload.get("schedule_timezone", current_schedule_timezone),
-                schedule_state=event_payload.get("schedule_state", "idle"),
-            )
         _persist_task_aggregate(
             repo,
             aggregate,
@@ -807,9 +1011,18 @@ class RequestAutomationRunHandler:
     def __call__(self) -> dict:
         workspace_id, project_id, _, _ = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member"})
         requested_at = to_iso_utc(datetime.now(timezone.utc))
+        task_view = load_task_view(self.ctx.db, self.task_id)
+        fallback_instruction = _normalize_instruction(task_view.get("instruction") if task_view else None)
+        effective_instruction = _normalize_instruction(self.instruction) or fallback_instruction
+        if not effective_instruction:
+            raise HTTPException(status_code=422, detail="instruction is required")
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, self.task_id)
-        aggregate.request_automation(requested_at=requested_at, instruction=self.instruction)
+        aggregate.request_automation(
+            requested_at=requested_at,
+            instruction=effective_instruction,
+            source="manual",
+        )
         _persist_task_aggregate(
             repo,
             aggregate,

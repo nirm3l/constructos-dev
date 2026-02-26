@@ -357,6 +357,8 @@ def ensure_user_password_defaults(db: Session):
 def ensure_task_table_columns(db: Session):
     existing = {column["name"] for column in inspect(db.bind).get_columns("tasks")}
     required_columns = {
+        "instruction": "ALTER TABLE tasks ADD COLUMN instruction TEXT",
+        "execution_triggers": "ALTER TABLE tasks ADD COLUMN execution_triggers TEXT DEFAULT '[]'",
         "task_type": "ALTER TABLE tasks ADD COLUMN task_type VARCHAR(32) DEFAULT 'manual'",
         "scheduled_instruction": "ALTER TABLE tasks ADD COLUMN scheduled_instruction TEXT",
         "scheduled_at_utc": "ALTER TABLE tasks ADD COLUMN scheduled_at_utc TIMESTAMP WITH TIME ZONE",
@@ -800,6 +802,10 @@ def _backfill_task_streams_from_read_model(db: Session) -> None:
             attachment_refs = json.loads(t.attachment_refs or "[]")
         except Exception:
             attachment_refs = attachments
+        try:
+            execution_triggers = json.loads(t.execution_triggers or "[]")
+        except Exception:
+            execution_triggers = []
 
         append_event(
             db,
@@ -821,6 +827,8 @@ def _backfill_task_streams_from_read_model(db: Session) -> None:
                 "attachments": attachments,
                 "external_refs": external_refs,
                 "attachment_refs": attachment_refs,
+                "instruction": t.instruction,
+                "execution_triggers": execution_triggers,
                 "recurring_rule": t.recurring_rule,
                 "order_index": int(t.order_index or 0),
                 "task_type": t.task_type or "manual",

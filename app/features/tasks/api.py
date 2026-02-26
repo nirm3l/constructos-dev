@@ -85,6 +85,7 @@ def create_task(
     command_id: str | None = Depends(get_command_id),
 ):
     gateway = build_ui_gateway(actor_user_id=user.id)
+    provided_fields = payload.model_fields_set
     return gateway.create_task(
         workspace_id=payload.workspace_id,
         title=payload.title,
@@ -94,13 +95,19 @@ def create_task(
         due_date=payload.due_date.isoformat() if payload.due_date else None,
         external_refs=[item.model_dump() for item in payload.external_refs],
         attachment_refs=[item.model_dump() for item in payload.attachment_refs],
-        recurring_rule=payload.recurring_rule,
+        instruction=payload.instruction if "instruction" in provided_fields else None,
+        execution_triggers=payload.execution_triggers if "execution_triggers" in provided_fields else None,
+        recurring_rule=payload.recurring_rule if "recurring_rule" in provided_fields else None,
         specification_id=payload.specification_id,
         task_group_id=payload.task_group_id,
-        task_type=payload.task_type,
-        scheduled_instruction=payload.scheduled_instruction,
-        scheduled_at_utc=payload.scheduled_at_utc.isoformat() if payload.scheduled_at_utc else None,
-        schedule_timezone=payload.schedule_timezone,
+        task_type=payload.task_type if "task_type" in provided_fields else None,
+        scheduled_instruction=payload.scheduled_instruction if "scheduled_instruction" in provided_fields else None,
+        scheduled_at_utc=(
+            payload.scheduled_at_utc.isoformat()
+            if "scheduled_at_utc" in provided_fields and payload.scheduled_at_utc
+            else None
+        ),
+        schedule_timezone=payload.schedule_timezone if "schedule_timezone" in provided_fields else None,
         assignee_id=payload.assignee_id,
         labels=payload.labels,
         command_id=command_id,

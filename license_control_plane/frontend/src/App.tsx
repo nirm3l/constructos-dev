@@ -18,6 +18,7 @@ import type {
   AdminProvisionOnboardingRequest,
   AdminSendEmailRequest,
   InstallationListItem,
+  InstallationRecord,
   SubscriptionStatus,
   UpdateSubscriptionRequest,
 } from './types'
@@ -110,6 +111,25 @@ function isLifetimePlanCode(value: string | null | undefined): boolean {
 
 function isBetaPlanCode(value: string | null | undefined): boolean {
   return String(value || '').trim().toLowerCase() === 'beta'
+}
+
+function installationCustomerEmail(installation: InstallationRecord | null | undefined): string | null {
+  const directValue = String(installation?.customer_email || '').trim().toLowerCase()
+  if (directValue) {
+    return directValue
+  }
+  const metadata = installation?.metadata
+  if (!metadata || typeof metadata !== 'object') {
+    return null
+  }
+  const candidateFields = ['issued_to_email', 'customer_email', 'to_email', 'contact_email', 'email']
+  for (const key of candidateFields) {
+    const value = String((metadata as Record<string, unknown>)[key] || '').trim().toLowerCase()
+    if (value) {
+      return value
+    }
+  }
+  return null
 }
 
 function normalizePlanCodeForStatus(status: SubscriptionStatus, planCodeValue: string): string | null {
@@ -563,9 +583,9 @@ export function App() {
   const selectedFromList = (installations.data?.items ?? []).find(
     (item) => item.installation.installation_id === selectedInstallationId
   )
-  const currentInstallationCustomerRef = String(
-    details.data?.installation.customer_ref ?? selectedFromList?.installation.customer_ref ?? ''
-  ).trim()
+  const currentInstallation = details.data?.installation ?? selectedFromList?.installation ?? null
+  const currentInstallationCustomerRef = String(currentInstallation?.customer_ref ?? '').trim()
+  const currentInstallationCustomerEmail = installationCustomerEmail(currentInstallation)
   const targetFormCustomerRef = String(form?.customer_ref || '').trim()
   const onboardingPlanIsLifetime = isLifetimePlanCode(onboardingProvisionForm.plan_code)
   const customerCount = customerGroups.length
@@ -1119,6 +1139,13 @@ export function App() {
             {customerGroups.map((group) => {
               const active = group.customer_ref === selectedCustomerRef
               const customerActiveCount = group.items.filter((item) => item.entitlement.status === 'active').length
+              const customerEmails = Array.from(
+                new Set(
+                  group.items
+                    .map((item) => installationCustomerEmail(item.installation))
+                    .filter((value): value is string => Boolean(value))
+                )
+              )
               return (
                 <li key={group.customer_ref} className={active ? 'active' : ''}>
                   <button
@@ -1130,6 +1157,11 @@ export function App() {
                     <strong>{group.customer_ref}</strong>
                     <span>Installations: {group.items.length}</span>
                     <span>Active entitlements: {customerActiveCount}</span>
+                    <span>
+                      {customerEmails.length <= 1
+                        ? `Email: ${customerEmails[0] ?? '-'}`
+                        : `Emails: ${customerEmails.length}`}
+                    </span>
                   </button>
                 </li>
               )
@@ -1147,6 +1179,7 @@ export function App() {
                 {selectedCustomerInstallations.map((item) => {
                   const installationId = item.installation.installation_id
                   const active = installationId === selectedInstallationId
+                  const customerEmail = installationCustomerEmail(item.installation)
                   return (
                     <li key={installationId} className={active ? 'active' : ''}>
                       <button
@@ -1160,6 +1193,7 @@ export function App() {
                         <strong>{installationId}</strong>
                         <span>sub: {item.installation.subscription_status || '-'} | ent: {item.entitlement.status}</span>
                         <span>plan: {item.installation.plan_code ?? '-'}</span>
+                        <span>email: {customerEmail ?? '-'}</span>
                       </button>
                     </li>
                   )
@@ -1177,6 +1211,7 @@ export function App() {
             <>
               <p className="muted">Installation: <code>{selectedInstallationId}</code></p>
               <p className="muted">Customer: <code>{selectedCustomerRef ?? '-'}</code></p>
+              <p className="muted">Customer email: <code>{currentInstallationCustomerEmail ?? '-'}</code></p>
               <p className="muted">
                 Subscription changes are applied at customer level for all installations sharing the selected <code>customer_ref</code>.
               </p>

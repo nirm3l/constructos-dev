@@ -7220,6 +7220,53 @@ textarea:disabled {
   outline-offset: 1px;
 }
 
+.taskdrawer-schedule-statuses-field {
+  grid-column: 1 / -1;
+}
+
+.taskdrawer-status-toggle-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.taskdrawer-status-toggle-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--surface) 24%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 14%);
+  color: color-mix(in srgb, var(--text), var(--muted) 14%);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.taskdrawer-status-toggle-item[data-state="on"] {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 20%);
+  background: color-mix(in srgb, var(--brand), var(--surface) 86%);
+  color: color-mix(in srgb, var(--brand-strong), var(--text) 10%);
+}
+
+.taskdrawer-status-toggle-item:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--brand), transparent 72%);
+  outline-offset: 1px;
+}
+
+.taskdrawer-status-toggle-check {
+  width: 13px;
+  height: 13px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.taskdrawer-status-toggle-item[data-state="on"] .taskdrawer-status-toggle-check {
+  opacity: 1;
+}
+
 .taskdrawer-due-popover {
   width: min(260px, calc(100vw - 24px));
 }

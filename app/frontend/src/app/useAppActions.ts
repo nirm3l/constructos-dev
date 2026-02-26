@@ -9,6 +9,12 @@ import {
   uploadAttachment,
 } from '../api'
 import { parseCommaTags, parseProjectEvidenceTopKInput, parseProjectStatusesText, toErrorMessage } from '../utils/ui'
+import {
+  buildExecutionTriggersFromEditor,
+  buildRecurringRule,
+  csvToUniqueList,
+  hasConfiguredNonManualTrigger,
+} from '../utils/taskAutomation'
 
 type SharePayload = {
   tab?: string
@@ -244,10 +250,31 @@ export function useAppActions(c: any) {
 
   const buildTaskPatchPayload = React.useCallback(() => {
     if (!c.selectedTaskId) throw new Error('No task selected')
+    const instruction = c.editScheduledInstruction.trim() || null
+    const scheduledAtUtc =
+      c.editTaskType === 'scheduled_instruction' && c.editScheduledAtUtc
+        ? new Date(c.editScheduledAtUtc).toISOString()
+        : ''
     const recurringRule =
-      c.editTaskType === 'scheduled_instruction' && c.editRecurringEvery.trim()
-        ? `every:${Math.max(1, Number(c.editRecurringEvery) || 1)}${c.editRecurringUnit}`
+      c.editTaskType === 'scheduled_instruction'
+        ? buildRecurringRule(c.editRecurringEvery, c.editRecurringUnit)
         : null
+    const executionTriggers = buildExecutionTriggersFromEditor({
+      taskType: c.editTaskType,
+      scheduledAtUtc,
+      scheduleTimezone: String(c.editScheduleTimezone || ''),
+      scheduleRunOnStatuses: c.editScheduleRunOnStatuses,
+      recurringEvery: c.editRecurringEvery,
+      recurringUnit: c.editRecurringUnit,
+      selfEnabled: Boolean(c.editStatusTriggerSelfEnabled),
+      selfFromStatusesText: c.editStatusTriggerSelfFromStatusesText,
+      selfToStatusesText: c.editStatusTriggerSelfToStatusesText,
+      externalEnabled: Boolean(c.editStatusTriggerExternalEnabled),
+      externalMatchMode: c.editStatusTriggerExternalMatchMode === 'all' ? 'all' : 'any',
+      externalTaskIdsText: c.editStatusTriggerExternalTaskIdsText,
+      externalFromStatusesText: c.editStatusTriggerExternalFromStatusesText,
+      externalToStatusesText: c.editStatusTriggerExternalToStatusesText,
+    })
     const payload = {
       title: c.editTitle.trim() || 'Untitled',
       description: c.editDescription,
@@ -259,10 +286,12 @@ export function useAppActions(c: any) {
       external_refs: c.parseExternalRefsText(c.editTaskExternalRefsText),
       attachment_refs: c.parseAttachmentRefsText(c.editTaskAttachmentRefsText),
       due_date: c.editDueDate ? new Date(c.editDueDate).toISOString() : null,
+      instruction,
+      execution_triggers: executionTriggers,
       task_type: c.editTaskType,
-      scheduled_at_utc: c.editTaskType === 'scheduled_instruction' && c.editScheduledAtUtc ? new Date(c.editScheduledAtUtc).toISOString() : null,
+      scheduled_at_utc: scheduledAtUtc || null,
       schedule_timezone: c.editTaskType === 'scheduled_instruction' ? (c.editScheduleTimezone || null) : null,
-      scheduled_instruction: c.editTaskType === 'scheduled_instruction' ? (c.editScheduledInstruction.trim() || null) : null,
+      scheduled_instruction: c.editTaskType === 'scheduled_instruction' ? instruction : null,
       recurring_rule: recurringRule,
     }
     return { payload }
@@ -277,6 +306,15 @@ export function useAppActions(c: any) {
     c.editScheduledAtUtc,
     c.editScheduledInstruction,
     c.editScheduleTimezone,
+    c.editScheduleRunOnStatuses,
+    c.editStatusTriggerSelfEnabled,
+    c.editStatusTriggerSelfFromStatusesText,
+    c.editStatusTriggerSelfToStatusesText,
+    c.editStatusTriggerExternalEnabled,
+    c.editStatusTriggerExternalMatchMode,
+    c.editStatusTriggerExternalTaskIdsText,
+    c.editStatusTriggerExternalFromStatusesText,
+    c.editStatusTriggerExternalToStatusesText,
     c.editStatus,
     c.editTaskAttachmentRefsText,
     c.editTaskExternalRefsText,
@@ -291,14 +329,71 @@ export function useAppActions(c: any) {
 
   const saveTaskNow = React.useCallback(async () => {
     if (!c.selectedTaskId) throw new Error('No task selected')
-    if (c.editTaskType === 'scheduled_instruction' && !c.editScheduledInstruction.trim()) {
-      throw new Error('Add scheduled instruction to save.')
+    if (c.editTaskType === 'scheduled_instruction' && !c.editScheduledAtUtc) {
+      throw new Error('Set schedule date and time to save.')
+    }
+    if (c.editTaskType === 'scheduled_instruction' && !String(c.editScheduleTimezone || '').trim()) {
+      throw new Error('Set schedule timezone to save.')
+    }
+    if (c.editTaskType === 'scheduled_instruction' && (!Array.isArray(c.editScheduleRunOnStatuses) || c.editScheduleRunOnStatuses.length === 0)) {
+      throw new Error('Pick at least one status for scheduled runs.')
+    }
+    if (c.editStatusTriggerSelfEnabled && csvToUniqueList(c.editStatusTriggerSelfToStatusesText).length === 0) {
+      throw new Error('Add at least one target status for self trigger.')
+    }
+    if (c.editStatusTriggerExternalEnabled && csvToUniqueList(c.editStatusTriggerExternalToStatusesText).length === 0) {
+      throw new Error('Add at least one target status for external trigger.')
+    }
+    if (c.editStatusTriggerExternalEnabled && csvToUniqueList(c.editStatusTriggerExternalTaskIdsText).length === 0) {
+      throw new Error('Add at least one source task ID for external trigger.')
+    }
+    const executionTriggers = buildExecutionTriggersFromEditor({
+      taskType: c.editTaskType,
+      scheduledAtUtc:
+        c.editTaskType === 'scheduled_instruction' && c.editScheduledAtUtc
+          ? new Date(c.editScheduledAtUtc).toISOString()
+          : '',
+      scheduleTimezone: String(c.editScheduleTimezone || ''),
+      scheduleRunOnStatuses: c.editScheduleRunOnStatuses,
+      recurringEvery: c.editRecurringEvery,
+      recurringUnit: c.editRecurringUnit,
+      selfEnabled: Boolean(c.editStatusTriggerSelfEnabled),
+      selfFromStatusesText: c.editStatusTriggerSelfFromStatusesText,
+      selfToStatusesText: c.editStatusTriggerSelfToStatusesText,
+      externalEnabled: Boolean(c.editStatusTriggerExternalEnabled),
+      externalMatchMode: c.editStatusTriggerExternalMatchMode === 'all' ? 'all' : 'any',
+      externalTaskIdsText: c.editStatusTriggerExternalTaskIdsText,
+      externalFromStatusesText: c.editStatusTriggerExternalFromStatusesText,
+      externalToStatusesText: c.editStatusTriggerExternalToStatusesText,
+    })
+    if (hasConfiguredNonManualTrigger(executionTriggers) && !c.editScheduledInstruction.trim()) {
+      throw new Error('Add automation instruction to save.')
     }
     const { payload } = buildTaskPatchPayload()
     await patchTask(c.userId, c.selectedTaskId, payload)
     await c.qc.invalidateQueries({ queryKey: ['tasks'] })
     await c.qc.invalidateQueries({ queryKey: ['board'] })
-  }, [buildTaskPatchPayload, c.editScheduledInstruction, c.editTaskType, c.qc, c.selectedTaskId, c.userId])
+  }, [
+    buildTaskPatchPayload,
+    c.editScheduledInstruction,
+    c.editScheduledAtUtc,
+    c.editScheduleTimezone,
+    c.editRecurringEvery,
+    c.editRecurringUnit,
+    c.editStatusTriggerSelfEnabled,
+    c.editStatusTriggerSelfFromStatusesText,
+    c.editStatusTriggerSelfToStatusesText,
+    c.editStatusTriggerExternalEnabled,
+    c.editStatusTriggerExternalMatchMode,
+    c.editStatusTriggerExternalTaskIdsText,
+    c.editStatusTriggerExternalFromStatusesText,
+    c.editStatusTriggerExternalToStatusesText,
+    c.editTaskType,
+    c.editScheduleRunOnStatuses,
+    c.qc,
+    c.selectedTaskId,
+    c.userId,
+  ])
 
   return {
     invalidateAll,

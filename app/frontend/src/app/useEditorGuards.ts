@@ -1,5 +1,13 @@
 import React from 'react'
 import { parseCommaTags, parseProjectStatusesText, stableJson, toLocalDateTimeInput } from '../utils/ui'
+import {
+  buildExecutionTriggersFromEditor,
+  deriveInstruction,
+  extractEnabledScheduleTrigger,
+  extractEnabledStatusTrigger,
+  listToCsv,
+  normalizeExecutionTriggers,
+} from '../utils/taskAutomation'
 
 export function useEditorGuards(c: any) {
   const toggleCreateProjectMember = React.useCallback((userIdToToggle: string) => {
@@ -111,6 +119,31 @@ export function useEditorGuards(c: any) {
 
   const taskIsDirty = React.useMemo(() => {
     if (!c.selectedTask) return false
+    const currentExecutionTriggers = buildExecutionTriggersFromEditor({
+      taskType: c.editTaskType,
+      scheduledAtUtc:
+        c.editTaskType === 'scheduled_instruction' && c.editScheduledAtUtc
+          ? new Date(c.editScheduledAtUtc).toISOString()
+          : '',
+      scheduleTimezone: String(c.editScheduleTimezone || ''),
+      scheduleRunOnStatuses: c.editScheduleRunOnStatuses,
+      recurringEvery: c.editRecurringEvery,
+      recurringUnit: c.editRecurringUnit,
+      selfEnabled: Boolean(c.editStatusTriggerSelfEnabled),
+      selfFromStatusesText: c.editStatusTriggerSelfFromStatusesText,
+      selfToStatusesText: c.editStatusTriggerSelfToStatusesText,
+      externalEnabled: Boolean(c.editStatusTriggerExternalEnabled),
+      externalMatchMode: c.editStatusTriggerExternalMatchMode === 'all' ? 'all' : 'any',
+      externalTaskIdsText: c.editStatusTriggerExternalTaskIdsText,
+      externalFromStatusesText: c.editStatusTriggerExternalFromStatusesText,
+      externalToStatusesText: c.editStatusTriggerExternalToStatusesText,
+    })
+
+    const originalExecutionTriggers = normalizeExecutionTriggers(c.selectedTask.execution_triggers)
+    const originalScheduleTrigger = extractEnabledScheduleTrigger(originalExecutionTriggers)
+    const originalSelfTrigger = extractEnabledStatusTrigger(originalExecutionTriggers, 'self')
+    const originalExternalTrigger = extractEnabledStatusTrigger(originalExecutionTriggers, 'external')
+
     const current = {
       title: (c.editTitle.trim() || 'Untitled'),
       description: c.editDescription,
@@ -123,11 +156,21 @@ export function useEditorGuards(c: any) {
       task_type: c.editTaskType,
       scheduled_at_utc: c.editScheduledAtUtc || '',
       schedule_timezone: c.editTaskType === 'scheduled_instruction' ? (c.editScheduleTimezone || '') : '',
-      scheduled_instruction: c.editTaskType === 'scheduled_instruction' ? c.editScheduledInstruction : '',
+      schedule_run_on_statuses: c.editTaskType === 'scheduled_instruction' ? (c.editScheduleRunOnStatuses || []) : [],
+      instruction: c.editScheduledInstruction.trim(),
       recurring_rule:
         c.editTaskType === 'scheduled_instruction' && c.editRecurringEvery.trim()
           ? `every:${Math.max(1, Number(c.editRecurringEvery) || 1)}${c.editRecurringUnit}`
           : '',
+      status_trigger_self_enabled: Boolean(c.editStatusTriggerSelfEnabled),
+      status_trigger_self_from: c.editStatusTriggerSelfFromStatusesText,
+      status_trigger_self_to: c.editStatusTriggerSelfToStatusesText,
+      status_trigger_external_enabled: Boolean(c.editStatusTriggerExternalEnabled),
+      status_trigger_external_match_mode: c.editStatusTriggerExternalMatchMode === 'all' ? 'all' : 'any',
+      status_trigger_external_task_ids: c.editStatusTriggerExternalTaskIdsText,
+      status_trigger_external_from: c.editStatusTriggerExternalFromStatusesText,
+      status_trigger_external_to: c.editStatusTriggerExternalToStatusesText,
+      execution_triggers: currentExecutionTriggers,
       external_refs: c.parseExternalRefsText(c.editTaskExternalRefsText),
       attachment_refs: c.parseAttachmentRefsText(c.editTaskAttachmentRefsText),
     }
@@ -144,10 +187,20 @@ export function useEditorGuards(c: any) {
       scheduled_at_utc: toLocalDateTimeInput(c.selectedTask.scheduled_at_utc),
       schedule_timezone:
         (c.selectedTask.task_type ?? 'manual') === 'scheduled_instruction' ? (c.selectedTask.schedule_timezone ?? '') : '',
-      scheduled_instruction:
-        (c.selectedTask.task_type ?? 'manual') === 'scheduled_instruction' ? (c.selectedTask.scheduled_instruction ?? '') : '',
+      schedule_run_on_statuses:
+        (c.selectedTask.task_type ?? 'manual') === 'scheduled_instruction' ? (originalScheduleTrigger?.run_on_statuses ?? []) : [],
+      instruction: deriveInstruction(c.selectedTask),
       recurring_rule:
         (c.selectedTask.task_type ?? 'manual') === 'scheduled_instruction' ? String(c.selectedTask.recurring_rule ?? '') : '',
+      status_trigger_self_enabled: Boolean(originalSelfTrigger),
+      status_trigger_self_from: listToCsv(originalSelfTrigger?.from_statuses),
+      status_trigger_self_to: listToCsv(originalSelfTrigger?.to_statuses),
+      status_trigger_external_enabled: Boolean(originalExternalTrigger),
+      status_trigger_external_match_mode: originalExternalTrigger?.match_mode === 'all' ? 'all' : 'any',
+      status_trigger_external_task_ids: listToCsv(originalExternalTrigger?.selector?.task_ids),
+      status_trigger_external_from: listToCsv(originalExternalTrigger?.from_statuses),
+      status_trigger_external_to: listToCsv(originalExternalTrigger?.to_statuses),
+      execution_triggers: originalExecutionTriggers,
       external_refs: c.selectedTask.external_refs ?? [],
       attachment_refs: c.selectedTask.attachment_refs ?? [],
     }
@@ -163,7 +216,16 @@ export function useEditorGuards(c: any) {
     c.editScheduledAtUtc,
     c.editScheduledInstruction,
     c.editScheduleTimezone,
+    c.editScheduleRunOnStatuses,
     c.editStatus,
+    c.editStatusTriggerSelfEnabled,
+    c.editStatusTriggerSelfFromStatusesText,
+    c.editStatusTriggerSelfToStatusesText,
+    c.editStatusTriggerExternalEnabled,
+    c.editStatusTriggerExternalMatchMode,
+    c.editStatusTriggerExternalTaskIdsText,
+    c.editStatusTriggerExternalFromStatusesText,
+    c.editStatusTriggerExternalToStatusesText,
     c.editTaskAttachmentRefsText,
     c.editTaskExternalRefsText,
     c.editTaskTags,

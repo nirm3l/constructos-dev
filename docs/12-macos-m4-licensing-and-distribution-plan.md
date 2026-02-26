@@ -18,7 +18,7 @@ This plan defines the changes needed to:
 - Current `docker-compose.yml` contains Linux-specific Ollama GPU settings (`/dev/dri`, `group_add`), which are not portable to macOS.
 - Docker Desktop GPU support is currently available only on Windows with WSL2 backend, not on macOS containers.
 - Ollama Docker GPU docs are Linux-focused (`--gpus=all` for NVIDIA, AMD ROCm variants). For macOS, Ollama supports Apple M-series natively outside containers.
-- Current `eventstore/eventstore:24.10.0-jammy` image is effectively `linux/amd64` only (verified via local `docker pull --platform linux/arm64` warning).
+- Current `kurrentplatform/kurrentdb:25.1` image is effectively `linux/amd64` only.
 
 ## Target Runtime Matrix
 ### Ubuntu (primary production)

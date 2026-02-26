@@ -22,18 +22,18 @@ from features.tasks.domain import (
 )
 from shared.eventing import append_event, rebuild_state
 from shared.models import SessionLocal, Task
-from shared.schedule import next_scheduled_at_utc, parse_recurring_rule
 from shared.serializers import to_iso_utc
 from shared.settings import AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS, AGENT_RUNNER_INTERVAL_SECONDS, AGENT_SYSTEM_USER_ID
 from shared.settings import AGENT_EXECUTOR_TIMEOUT_SECONDS
+from shared.task_automation import (
+    first_enabled_schedule_trigger,
+    parse_schedule_due_at,
+    rearm_first_schedule_trigger,
+    schedule_trigger_matches_status,
+)
 
 _runner_stop_event = threading.Event()
 _runner_thread: threading.Thread | None = None
-
-
-def _is_schedule_active_status(status: str | None) -> bool:
-    # Scheduled tasks should run only while actively being worked.
-    return str(status or "").strip().lower() == "in progress"
 
 
 def run_queued_automation_once(limit: int = 10) -> int:
@@ -47,21 +47,24 @@ def run_queued_automation_once(limit: int = 10) -> int:
             state, _ = rebuild_state(db, "Task", task_id)
             if state.get("automation_state", "idle") != "queued":
                 continue
-            if state.get("status") == "Done":
-                continue
+            request_source = str(state.get("last_requested_source") or "").strip().lower()
             workspace_id = state.get("workspace_id")
             if not workspace_id:
                 continue
 
             project_id = state.get("project_id")
             now_iso = to_iso_utc(datetime.now(timezone.utc))
-            instruction = (state.get("last_requested_instruction") or "").strip()
-            is_scheduled = state.get("task_type") == "scheduled_instruction"
+            instruction = (
+                (state.get("last_requested_instruction") or "").strip()
+                or (state.get("instruction") or "").strip()
+                or (state.get("scheduled_instruction") or "").strip()
+            )
+            is_scheduled_run = request_source == "schedule"
             schedule_state = state.get("schedule_state", "idle")
-            recurring_rule_raw = (state.get("recurring_rule") or "").strip() or None
-            scheduled_at_raw = state.get("scheduled_at_utc")
 
             try:
+                if not instruction:
+                    raise RuntimeError("instruction is empty")
                 append_event(
                     db,
                     aggregate_type="Task",
@@ -70,7 +73,7 @@ def run_queued_automation_once(limit: int = 10) -> int:
                     payload={"started_at": now_iso},
                     metadata={"actor_id": AGENT_SYSTEM_USER_ID, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id},
                 )
-                if is_scheduled and schedule_state in {"queued", "idle"}:
+                if is_scheduled_run and schedule_state in {"queued", "idle"}:
                     append_event(
                         db,
                         aggregate_type="Task",
@@ -126,7 +129,7 @@ def run_queued_automation_once(limit: int = 10) -> int:
                     payload={"completed_at": now_iso, "summary": outcome.summary, "source_event": EVENT_AUTOMATION_REQUESTED},
                     metadata={"actor_id": AGENT_SYSTEM_USER_ID, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id},
                 )
-                if is_scheduled:
+                if is_scheduled_run:
                     append_event(
                         db,
                         aggregate_type="Task",
@@ -140,32 +143,28 @@ def run_queued_automation_once(limit: int = 10) -> int:
                             "task_id": task_id,
                         },
                     )
-                    # Recurring schedules: re-arm the task for the next run.
-                    interval = parse_recurring_rule(recurring_rule_raw)
-                    if interval and scheduled_at_raw:
-                        try:
-                            base_scheduled_at = datetime.fromisoformat(str(scheduled_at_raw))
-                            next_at = next_scheduled_at_utc(
-                                base_scheduled_at_utc=base_scheduled_at,
-                                now_utc=datetime.now(timezone.utc),
-                                interval=interval,
-                            )
-                            append_event(
-                                db,
-                                aggregate_type="Task",
-                                aggregate_id=task_id,
-                                event_type="TaskUpdated",
-                                payload={"scheduled_at_utc": to_iso_utc(next_at), "schedule_state": "idle"},
-                                metadata={
-                                    "actor_id": AGENT_SYSTEM_USER_ID,
-                                    "workspace_id": workspace_id,
-                                    "project_id": project_id,
-                                    "task_id": task_id,
-                                },
-                            )
-                        except Exception:
-                            # If the rule/time is malformed, keep the schedule as-is (one-shot behavior).
-                            pass
+                    updated_triggers, next_due = rearm_first_schedule_trigger(
+                        execution_triggers=state.get("execution_triggers"),
+                        now_utc=datetime.now(timezone.utc),
+                    )
+                    if next_due:
+                        append_event(
+                            db,
+                            aggregate_type="Task",
+                            aggregate_id=task_id,
+                            event_type=TASK_EVENT_UPDATED,
+                            payload={
+                                "execution_triggers": updated_triggers,
+                                "scheduled_at_utc": next_due,
+                                "schedule_state": "idle",
+                            },
+                            metadata={
+                                "actor_id": AGENT_SYSTEM_USER_ID,
+                                "workspace_id": workspace_id,
+                                "project_id": project_id,
+                                "task_id": task_id,
+                            },
+                        )
                 db.commit()
             except Exception as exc:
                 db.rollback()
@@ -178,7 +177,7 @@ def run_queued_automation_once(limit: int = 10) -> int:
                     payload={"failed_at": failed_at, "error": str(exc), "summary": "Automation runner failed."},
                     metadata={"actor_id": AGENT_SYSTEM_USER_ID, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id},
                 )
-                if is_scheduled:
+                if is_scheduled_run:
                     append_event(
                         db,
                         aggregate_type="Task",
@@ -192,31 +191,28 @@ def run_queued_automation_once(limit: int = 10) -> int:
                             "task_id": task_id,
                         },
                     )
-                    # If it's recurring, keep the cadence going even after failures.
-                    interval = parse_recurring_rule(recurring_rule_raw)
-                    if interval and scheduled_at_raw:
-                        try:
-                            base_scheduled_at = datetime.fromisoformat(str(scheduled_at_raw))
-                            next_at = next_scheduled_at_utc(
-                                base_scheduled_at_utc=base_scheduled_at,
-                                now_utc=datetime.now(timezone.utc),
-                                interval=interval,
-                            )
-                            append_event(
-                                db,
-                                aggregate_type="Task",
-                                aggregate_id=task_id,
-                                event_type="TaskUpdated",
-                                payload={"scheduled_at_utc": to_iso_utc(next_at), "schedule_state": "idle"},
-                                metadata={
-                                    "actor_id": AGENT_SYSTEM_USER_ID,
-                                    "workspace_id": workspace_id,
-                                    "project_id": project_id,
-                                    "task_id": task_id,
-                                },
-                            )
-                        except Exception:
-                            pass
+                    updated_triggers, next_due = rearm_first_schedule_trigger(
+                        execution_triggers=state.get("execution_triggers"),
+                        now_utc=datetime.now(timezone.utc),
+                    )
+                    if next_due:
+                        append_event(
+                            db,
+                            aggregate_type="Task",
+                            aggregate_id=task_id,
+                            event_type=TASK_EVENT_UPDATED,
+                            payload={
+                                "execution_triggers": updated_triggers,
+                                "scheduled_at_utc": next_due,
+                                "schedule_state": "idle",
+                            },
+                            metadata={
+                                "actor_id": AGENT_SYSTEM_USER_ID,
+                                "workspace_id": workspace_id,
+                                "project_id": project_id,
+                                "task_id": task_id,
+                            },
+                        )
                 db.commit()
             processed += 1
             if processed >= limit:
@@ -267,8 +263,6 @@ def recover_stale_running_automation_once(limit: int = 20) -> int:
             if not workspace_id:
                 continue
             project_id = state.get("project_id")
-            recurring_rule_raw = (state.get("recurring_rule") or "").strip() or None
-            scheduled_at_raw = state.get("scheduled_at_utc")
             failed_at = to_iso_utc(now)
             error = f"Automation run exceeded stale threshold ({int(stale_after_seconds)}s) and was recovered."
             append_event(
@@ -279,40 +273,32 @@ def recover_stale_running_automation_once(limit: int = 20) -> int:
                 payload={"failed_at": failed_at, "error": error, "summary": "Automation runner recovered stale running task."},
                 metadata={"actor_id": AGENT_SYSTEM_USER_ID, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id},
             )
-            if state.get("task_type") == "scheduled_instruction":
+            request_source = str(state.get("last_requested_source") or "").strip().lower()
+            schedule_state = str(state.get("schedule_state") or "").strip().lower()
+            if request_source == "schedule" or schedule_state in {"queued", "running"}:
                 append_event(
                     db,
                     aggregate_type="Task",
                     aggregate_id=task_id,
                     event_type=EVENT_SCHEDULE_FAILED,
                     payload={"failed_at": failed_at, "error": error},
-                    metadata={"actor_id": AGENT_SYSTEM_USER_ID, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id},
+                        metadata={"actor_id": AGENT_SYSTEM_USER_ID, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id},
                 )
-                # Recurring schedules should self-heal after stale recovery.
-                if recurring_rule_raw:
-                    update_payload = {"schedule_state": "idle"}
-                    interval = parse_recurring_rule(recurring_rule_raw)
-                    if interval:
-                        try:
-                            base_scheduled_at = (
-                                datetime.fromisoformat(str(scheduled_at_raw))
-                                if scheduled_at_raw
-                                else now
-                            )
-                        except Exception:
-                            base_scheduled_at = now
-                        next_at = next_scheduled_at_utc(
-                            base_scheduled_at_utc=base_scheduled_at,
-                            now_utc=now,
-                            interval=interval,
-                        )
-                        update_payload["scheduled_at_utc"] = to_iso_utc(next_at)
+                updated_triggers, next_due = rearm_first_schedule_trigger(
+                    execution_triggers=state.get("execution_triggers"),
+                    now_utc=now,
+                )
+                if next_due:
                     append_event(
                         db,
                         aggregate_type="Task",
                         aggregate_id=task_id,
                         event_type=TASK_EVENT_UPDATED,
-                        payload=update_payload,
+                        payload={
+                            "execution_triggers": updated_triggers,
+                            "scheduled_at_utc": next_due,
+                            "schedule_state": "idle",
+                        },
                         metadata={
                             "actor_id": AGENT_SYSTEM_USER_ID,
                             "workspace_id": workspace_id,
@@ -331,35 +317,39 @@ def queue_due_scheduled_tasks_once(limit: int = 20) -> int:
     queued = 0
     now = datetime.now(timezone.utc)
     with SessionLocal() as db:
-        tasks = db.execute(
+        candidate_tasks = db.execute(
             select(Task)
             .where(
                 Task.is_deleted == False,
                 Task.task_type == "scheduled_instruction",
                 Task.schedule_state == "idle",
-                Task.status != "Done",
-                Task.scheduled_at_utc.is_not(None),
-                Task.scheduled_at_utc <= now,
             )
             .order_by(Task.scheduled_at_utc.asc())
-            .limit(limit)
+            .limit(max(limit * 10, limit))
         ).scalars().all()
 
-        for task in tasks:
+        for task in candidate_tasks:
             state, _ = rebuild_state(db, "Task", task.id)
-            if state.get("task_type") != "scheduled_instruction":
-                continue
-            if not _is_schedule_active_status(state.get("status")):
-                continue
             if state.get("schedule_state", "idle") != "idle":
                 continue
             if state.get("automation_state", "idle") in {"queued", "running"}:
+                continue
+            _idx, schedule_trigger = first_enabled_schedule_trigger(state.get("execution_triggers"))
+            if schedule_trigger is None:
+                continue
+            if not schedule_trigger_matches_status(trigger=schedule_trigger, status=state.get("status")):
+                continue
+            due_at = parse_schedule_due_at(schedule_trigger)
+            if due_at is None or due_at > now:
                 continue
             workspace_id = state.get("workspace_id")
             if not workspace_id:
                 continue
             project_id = state.get("project_id")
-            instruction = (state.get("scheduled_instruction") or "").strip()
+            instruction = (
+                (state.get("instruction") or "").strip()
+                or (state.get("scheduled_instruction") or "").strip()
+            )
             if not instruction:
                 continue
             now_iso = to_iso_utc(datetime.now(timezone.utc))
@@ -394,6 +384,8 @@ def queue_due_scheduled_tasks_once(limit: int = 20) -> int:
             )
             db.commit()
             queued += 1
+            if queued >= limit:
+                break
     return queued
 
 
