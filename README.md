@@ -156,12 +156,12 @@ The image can still be reverse-engineered by a host operator. Treat this as obfu
 
 2. Check health:
 ```bash
-curl -sS http://localhost:8080/api/health
+curl -sS http://localhost:1102/api/health
 ```
 3. Open app and APIs:
-- App/API: `http://localhost:8080`
-- Version: `http://localhost:8080/api/version`
-- License status: `http://localhost:8080/api/license/status`
+- App/API: `http://localhost:1102`
+- Version: `http://localhost:1102/api/version`
+- License status: `http://localhost:1102/api/license/status`
 - Optional local control-plane admin UI: `http://localhost:8092`
 - Optional local control-plane health: `http://localhost:8092/api/health`
 - MCP endpoint (docker): `http://localhost:8091/mcp`

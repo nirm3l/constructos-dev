@@ -95,7 +95,7 @@ echo "[3/5] Running fresh deploy..."
 
 echo "[4/5] Waiting for API health..."
 for i in {1..60}; do
-  if curl -sS "http://localhost:8080/api/health" >/dev/null 2>&1; then
+  if curl -sS "http://localhost:1102/api/health" >/dev/null 2>&1; then
     break
   fi
   sleep 2
@@ -105,9 +105,9 @@ echo "[5/5] Current stack status:"
 docker compose -p "${APP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" ps
 echo "---"
 echo "Health:"
-curl -sS "http://localhost:8080/api/health"
+curl -sS "http://localhost:1102/api/health"
 echo
 echo "---"
 echo "Version:"
-curl -sS "http://localhost:8080/api/version"
+curl -sS "http://localhost:1102/api/version"
 echo

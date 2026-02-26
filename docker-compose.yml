@@ -111,7 +111,7 @@ services:
       - ${CODEX_AUTH_FILE}:/home/app/.codex/auth.json:ro
       - codex-home-data:/home/app/codex-home
     ports:
-      - "8080:8000"
+      - "1102:8000"
     security_opt:
       - no-new-privileges:true
     cap_drop:
