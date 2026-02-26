@@ -1,0 +1,72 @@
+name: Main Flow Guard
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
+      - ready_for_review
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  enforce-pr-source:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR source branch for main
+        run: |
+          set -euo pipefail
+          echo "Base branch: ${GITHUB_BASE_REF}"
+          echo "Head branch: ${GITHUB_HEAD_REF}"
+          if [[ "${GITHUB_HEAD_REF}" != "develop" ]]; then
+            echo "Only PRs from 'develop' can target 'main'."
+            exit 1
+          fi
+
+  enforce-main-push-origin:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate push came from merged develop -> main PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sha = context.sha;
+            const { owner, repo } = context.repo;
+            core.info(`Validating push commit ${sha}`);
+
+            const response = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner,
+              repo,
+              commit_sha: sha,
+            });
+
+            const mergedPrsToMain = response.data.filter((pr) => {
+              return pr.base?.ref === "main" && pr.merged_at;
+            });
+
+            if (mergedPrsToMain.length === 0) {
+              core.setFailed("Push to 'main' must come from a merged pull request.");
+              return;
+            }
+
+            const hasDevelopSource = mergedPrsToMain.some((pr) => pr.head?.ref === "develop");
+            if (!hasDevelopSource) {
+              const refs = mergedPrsToMain.map((pr) => `#${pr.number}:${pr.head?.ref}->${pr.base?.ref}`);
+              core.setFailed(
+                `Push to 'main' is linked to PRs that are not develop->main (${refs.join(", ")}).`
+              );
+              return;
+            }
+
+            core.info("Push is linked to merged develop -> main PR.");
