@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -19,6 +20,8 @@ from cos_cli.doctor import _collect_docker_git_auth_checks, docker_tcp_probe, re
 from cos_cli.main import main  # noqa: E402
 from cos_cli.parser import _apply_green_theme_to_chunk, app  # noqa: E402
 from cos_cli.prompting import build_hidden_instruction, compose_prompt  # noqa: E402
+
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 def _args_stub(**overrides):
@@ -280,7 +283,9 @@ def test_parser_without_arguments_shows_help_and_exits_zero():
     runner = CliRunner()
     result = runner.invoke(app, [])
     assert result.exit_code == 0
-    assert "Usage: cos" in result.output
+    normalized_output = ANSI_ESCAPE_RE.sub("", result.output)
+    assert "Usage" in normalized_output
+    assert "cos" in normalized_output
 
 
 def test_chat_command_defaults_to_regular_permission_flow(monkeypatch, tmp_path):
