@@ -34,6 +34,11 @@ const RECURRING_UNIT_OPTIONS: TaskSelectOption[] = [
   { value: 'd', label: 'days' },
 ]
 
+const STATUS_MATCH_MODE_OPTIONS: TaskSelectOption[] = [
+  { value: 'any', label: 'Any selected task' },
+  { value: 'all', label: 'All selected tasks' },
+]
+
 const TASK_TIMEZONE_OPTIONS_BASE: TaskSelectOption[] = [
   { value: 'UTC', label: 'UTC' },
   { value: 'Europe/Sarajevo', label: 'Europe/Sarajevo' },
@@ -58,6 +63,44 @@ const TASK_TIMEZONE_OPTIONS_BASE: TaskSelectOption[] = [
   { value: 'Asia/Seoul', label: 'Asia/Seoul' },
   { value: 'Australia/Sydney', label: 'Australia/Sydney' },
 ]
+
+function parseCsvIds(raw: string): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const part of String(raw || '').split(',')) {
+    const value = String(part || '').trim()
+    if (!value) continue
+    const key = value.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(value)
+  }
+  return out
+}
+
+function toCsvIds(values: string[]): string {
+  return parseCsvIds(values.join(',')).join(', ')
+}
+
+function normalizeStatusList(values: string[]): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const raw of values) {
+    const value = String(raw || '').trim()
+    if (!value) continue
+    const key = value.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(value)
+  }
+  return out
+}
+
+function shortTaskId(value: string): string {
+  const normalized = String(value || '').trim()
+  if (!normalized) return ''
+  return normalized.length <= 8 ? normalized : normalized.slice(0, 8)
+}
 
 function padTwo(value: number): string {
   return String(value).padStart(2, '0')
@@ -250,6 +293,7 @@ function TaskDueInputWithPresets({
 export function TaskDrawer({ state }: { state: any }) {
   const [openSections, setOpenSections] = React.useState<string[]>([])
   const [confirmDiscardOpen, setConfirmDiscardOpen] = React.useState(false)
+  const [externalTaskPickerQuery, setExternalTaskPickerQuery] = React.useState('')
   const pendingPostDiscardActionRef = React.useRef<(() => void) | null>(null)
 
   const forceCloseTaskEditor = React.useCallback(() => {
@@ -286,6 +330,10 @@ export function TaskDrawer({ state }: { state: any }) {
 
   React.useEffect(() => {
     setOpenSections([])
+  }, [state.selectedTask?.id])
+
+  React.useEffect(() => {
+    setExternalTaskPickerQuery('')
   }, [state.selectedTask?.id])
 
   if (!state.selectedTask) return null
@@ -341,8 +389,94 @@ export function TaskDrawer({ state }: { state: any }) {
     if (normalized === 'm' || normalized === 'h' || normalized === 'd') return normalized
     return 'h'
   })()
+  const externalMatchModeValue = String(state.editStatusTriggerExternalMatchMode || '').trim().toLowerCase() === 'all' ? 'all' : 'any'
   const timezoneSelectValue = String(state.editScheduleTimezone || '').trim() || localTimezone
   const timezoneOptions = buildTimezoneOptions(timezoneSelectValue)
+  const scheduleRunOnStatusesValue = (() => {
+    const current = normalizeStatusList(Array.isArray(state.editScheduleRunOnStatuses) ? state.editScheduleRunOnStatuses : [])
+    if (current.length > 0) return current
+    return ['In progress']
+  })()
+  const scheduleRunStatusOptions = (() => {
+    const ordered = [...statusOptions, ...scheduleRunOnStatusesValue].map((item) => String(item || '').trim())
+    const out: string[] = []
+    const seen = new Set<string>()
+    for (const status of ordered) {
+      if (!status) continue
+      const key = status.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(status)
+    }
+    return out
+  })()
+  const selectedExternalTaskIds = parseCsvIds(state.editStatusTriggerExternalTaskIdsText)
+  const externalSourceTaskOptions = (() => {
+    const selectedTaskId = String(state.selectedTask?.id || '').trim()
+    const selectedProjectId = String(state.selectedTask?.project_id || '').trim()
+    const out: Array<{ id: string; title: string; status: string }> = []
+    const seen = new Set<string>()
+    const attach = (items: any[] | undefined) => {
+      for (const item of items ?? []) {
+        const id = String(item?.id || '').trim()
+        if (!id || seen.has(id)) continue
+        if (id === selectedTaskId) continue
+        const projectId = String(item?.project_id || '').trim()
+        if (selectedProjectId && projectId && projectId !== selectedProjectId) continue
+        seen.add(id)
+        out.push({
+          id,
+          title: String(item?.title || 'Untitled task').trim() || 'Untitled task',
+          status: String(item?.status || '').trim(),
+        })
+      }
+    }
+    attach(state.taskLookupItems)
+    attach(state.taskListItems)
+    out.sort((a, b) => a.title.localeCompare(b.title))
+    return out
+  })()
+  const filteredExternalSourceTaskOptions = (() => {
+    const query = String(externalTaskPickerQuery || '').trim().toLowerCase()
+    if (!query) return externalSourceTaskOptions
+    return externalSourceTaskOptions.filter((item) => {
+      return (
+        item.id.toLowerCase().includes(query) ||
+        item.title.toLowerCase().includes(query) ||
+        item.status.toLowerCase().includes(query)
+      )
+    })
+  })()
+  const selectedExternalSourceTaskLabels = (() => {
+    if (selectedExternalTaskIds.length === 0) return []
+    const byId = new Map<string, { title: string; status: string }>()
+    for (const item of externalSourceTaskOptions) {
+      byId.set(item.id, { title: item.title, status: item.status })
+    }
+    return selectedExternalTaskIds.map((taskId) => {
+      const fallbackTitle = String(state.taskNameMap?.[taskId] || '').trim() || `Task ${taskId.slice(0, 8)}`
+      const fromOptions = byId.get(taskId)
+      return {
+        id: taskId,
+        title: fromOptions?.title || fallbackTitle,
+        status: fromOptions?.status || '',
+      }
+    })
+  })()
+
+  const toggleExternalSourceTask = (taskId: string) => {
+    const current = parseCsvIds(state.editStatusTriggerExternalTaskIdsText)
+    const taskIdKey = String(taskId || '').trim().toLowerCase()
+    const next = current.filter((value) => String(value || '').trim().toLowerCase() !== taskIdKey)
+    if (next.length === current.length) {
+      next.push(taskId)
+    }
+    state.setEditStatusTriggerExternalTaskIdsText(toCsvIds(next))
+  }
+
+  const clearExternalSourceTasks = () => {
+    state.setEditStatusTriggerExternalTaskIdsText('')
+  }
   const externalRefs = state.parseExternalRefsText(state.editTaskExternalRefsText)
   const attachmentRefs = state.parseAttachmentRefsText(state.editTaskAttachmentRefsText)
   const externalLinksMeta = externalRefs.length === 0 ? 'No links yet' : `${externalRefs.length} linked reference${externalRefs.length === 1 ? '' : 's'}`
@@ -679,8 +813,190 @@ export function TaskDrawer({ state }: { state: any }) {
               ))}
             </ToggleGroup.Root>
           </label>
+          <label className="field-control">
+            <span className="field-label">Status triggers</span>
+            <div className="row wrap">
+              <label className="status-chip" style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(state.editStatusTriggerSelfEnabled)}
+                  onChange={(e) => state.setEditStatusTriggerSelfEnabled(Boolean(e.target.checked))}
+                />
+                This task changes status
+              </label>
+              <label className="status-chip" style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(state.editStatusTriggerExternalEnabled)}
+                  onChange={(e) => state.setEditStatusTriggerExternalEnabled(Boolean(e.target.checked))}
+                />
+                Other task changes status
+              </label>
+            </div>
+          </label>
         </div>
         {state.taskEditorError && <div className="notice notice-error" role="alert" style={{ marginBottom: 8 }}>{state.taskEditorError}</div>}
+        {(state.editTaskType === 'scheduled_instruction' ||
+          state.editStatusTriggerSelfEnabled ||
+          state.editStatusTriggerExternalEnabled) && (
+          <label className="field-control" style={{ marginBottom: 8 }}>
+            <span className="field-label">Instruction</span>
+            <textarea
+              value={state.editScheduledInstruction}
+              onChange={(e) => state.setEditScheduledInstruction(e.target.value)}
+              rows={3}
+              style={{ width: '100%' }}
+              placeholder="Executed when any enabled trigger fires"
+            />
+          </label>
+        )}
+        {state.editStatusTriggerSelfEnabled && (
+          <div className="task-edit-grid" style={{ marginBottom: 8 }}>
+            <label className="field-control">
+              <span className="field-label">Self trigger from statuses (optional)</span>
+              <input
+                value={state.editStatusTriggerSelfFromStatusesText}
+                onChange={(e) => state.setEditStatusTriggerSelfFromStatusesText(e.target.value)}
+                placeholder="To do, In progress"
+              />
+            </label>
+            <label className="field-control">
+              <span className="field-label">Self trigger to statuses (required)</span>
+              <input
+                value={state.editStatusTriggerSelfToStatusesText}
+                onChange={(e) => state.setEditStatusTriggerSelfToStatusesText(e.target.value)}
+                placeholder="Done"
+              />
+            </label>
+          </div>
+        )}
+        {state.editStatusTriggerExternalEnabled && (
+          <>
+            <div className="task-edit-grid" style={{ marginBottom: 8 }}>
+              <label className="field-control">
+                <span className="field-label">External match mode</span>
+                <TaskDrawerSelect
+                  value={externalMatchModeValue}
+                  onValueChange={(value) => state.setEditStatusTriggerExternalMatchMode(value === 'all' ? 'all' : 'any')}
+                  placeholder="Match mode"
+                  ariaLabel="External trigger match mode"
+                  options={STATUS_MATCH_MODE_OPTIONS}
+                />
+              </label>
+              <label className="field-control">
+                <span className="field-label">Source task IDs (comma-separated)</span>
+                <input
+                  value={state.editStatusTriggerExternalTaskIdsText}
+                  onChange={(e) => state.setEditStatusTriggerExternalTaskIdsText(e.target.value)}
+                  placeholder="a1b2c3, d4e5f6"
+                />
+                <div className="meta" style={{ marginTop: 6 }}>
+                  Paste IDs directly, or use picker below.
+                </div>
+                <div className="row wrap" style={{ marginTop: 8, gap: 8 }}>
+                  <Popover.Root>
+                    <Popover.Trigger asChild>
+                      <button
+                        type="button"
+                        className="status-chip"
+                        aria-label="Pick source tasks"
+                        title="Pick source tasks"
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}
+                      >
+                        <Icon path="M3 7h7l2 2h9v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 7V5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2" />
+                        <span>Pick source tasks</span>
+                        <span className="badge">{selectedExternalTaskIds.length}</span>
+                      </button>
+                    </Popover.Trigger>
+                    <Popover.Portal>
+                      <Popover.Content className="quickadd-tag-popover taskdrawer-tag-popover" side="top" align="start" sideOffset={8}>
+                        <div className="quickadd-tag-popover-header">
+                          <h4 className="quickadd-tag-popover-title">Source Tasks</h4>
+                          <button
+                            className="status-chip"
+                            type="button"
+                            onClick={clearExternalSourceTasks}
+                            title="Clear selection"
+                            aria-label="Clear selection"
+                          >
+                            Clear
+                          </button>
+                        </div>
+                        <div className="tag-picker-input-row">
+                          <input
+                            value={externalTaskPickerQuery}
+                            onChange={(e) => setExternalTaskPickerQuery(e.target.value)}
+                            placeholder="Search by title, status, or ID"
+                          />
+                        </div>
+                        <div className="tag-picker-list" role="listbox" aria-label="Source task list">
+                          {filteredExternalSourceTaskOptions.map((taskItem) => {
+                            const selected = selectedExternalTaskIds.some((id) => id.toLowerCase() === taskItem.id.toLowerCase())
+                            return (
+                              <button
+                                key={taskItem.id}
+                                className={`tag-picker-item ${selected ? 'selected' : ''}`}
+                                onClick={() => toggleExternalSourceTask(taskItem.id)}
+                                aria-label={selected ? `Remove ${taskItem.title}` : `Add ${taskItem.title}`}
+                                title={taskItem.id}
+                              >
+                                <span className="tag-picker-check" aria-hidden="true">
+                                  <Icon path={selected ? 'm5 13 4 4L19 7' : 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z'} />
+                                </span>
+                                <span className="tag-picker-name">{taskItem.title}</span>
+                                <span className="meta">#{shortTaskId(taskItem.id)}</span>
+                                {taskItem.status && <span className="meta">{taskItem.status}</span>}
+                              </button>
+                            )
+                          })}
+                          {filteredExternalSourceTaskOptions.length === 0 && <div className="meta">No tasks found.</div>}
+                        </div>
+                        <Popover.Arrow className="quickadd-tag-popover-arrow" />
+                      </Popover.Content>
+                    </Popover.Portal>
+                  </Popover.Root>
+                </div>
+                {selectedExternalSourceTaskLabels.length > 0 && (
+                  <div className="row wrap" style={{ marginTop: 8 }}>
+                    {selectedExternalSourceTaskLabels.map((taskItem) => (
+                      <button
+                        key={taskItem.id}
+                        type="button"
+                        className="status-chip"
+                        onClick={() => toggleExternalSourceTask(taskItem.id)}
+                        title={taskItem.id}
+                        aria-label={`Remove ${taskItem.title}`}
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Icon path="M6 6l12 12M18 6 6 18" />
+                        <span>{taskItem.title}</span>
+                        {taskItem.status && <span className="meta">{taskItem.status}</span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </label>
+            </div>
+            <div className="task-edit-grid" style={{ marginBottom: 8 }}>
+              <label className="field-control">
+                <span className="field-label">External trigger from statuses (optional)</span>
+                <input
+                  value={state.editStatusTriggerExternalFromStatusesText}
+                  onChange={(e) => state.setEditStatusTriggerExternalFromStatusesText(e.target.value)}
+                  placeholder="To do, In progress"
+                />
+              </label>
+              <label className="field-control">
+                <span className="field-label">External trigger to statuses (required)</span>
+                <input
+                  value={state.editStatusTriggerExternalToStatusesText}
+                  onChange={(e) => state.setEditStatusTriggerExternalToStatusesText(e.target.value)}
+                  placeholder="Done"
+                />
+              </label>
+            </div>
+          </>
+        )}
         {state.editTaskType === 'scheduled_instruction' && (
           <>
             <div className="task-edit-grid" style={{ marginBottom: 8 }}>
@@ -702,6 +1018,37 @@ export function TaskDrawer({ state }: { state: any }) {
                   ariaLabel="Schedule timezone"
                   options={timezoneOptions}
                 />
+              </label>
+              <label className="field-control taskdrawer-schedule-statuses-field">
+                <span className="field-label">Run on statuses</span>
+                <ToggleGroup.Root
+                  type="multiple"
+                  className="taskdrawer-status-toggle-group"
+                  value={scheduleRunOnStatusesValue}
+                  onValueChange={(value) => {
+                    const normalized = normalizeStatusList(value)
+                    if (normalized.length === 0) return
+                    state.setEditScheduleRunOnStatuses(normalized)
+                  }}
+                  aria-label="Statuses that allow scheduled runs"
+                >
+                  {scheduleRunStatusOptions.map((status) => (
+                    <ToggleGroup.Item
+                      key={status}
+                      value={status}
+                      className="taskdrawer-status-toggle-item"
+                      aria-label={`Schedule runs on ${status}`}
+                    >
+                      <span className="taskdrawer-status-toggle-check" aria-hidden="true">
+                        <Icon path="M5 13l4 4L19 7" />
+                      </span>
+                      <span>{status}</span>
+                    </ToggleGroup.Item>
+                  ))}
+                </ToggleGroup.Root>
+                <div className="meta" style={{ marginTop: 6 }}>
+                  Scheduler queues only while task status matches one of the selected values.
+                </div>
               </label>
             </div>
             <div className="task-edit-grid" style={{ marginBottom: 8 }}>
@@ -739,16 +1086,6 @@ export function TaskDrawer({ state }: { state: any }) {
                 </div>
               </div>
             </div>
-            <label className="field-control" style={{ marginBottom: 8 }}>
-              <span className="field-label">Instruction</span>
-              <textarea
-                value={state.editScheduledInstruction}
-                onChange={(e) => state.setEditScheduledInstruction(e.target.value)}
-                rows={3}
-                style={{ width: '100%' }}
-                placeholder="Scheduled (executed automatically when due)"
-              />
-            </label>
           </>
         )}
         {state.selectedTask.schedule_state && state.editTaskType === 'scheduled_instruction' && (
@@ -758,6 +1095,7 @@ export function TaskDrawer({ state }: { state: any }) {
               {state.selectedTask.priority}
             </span>
             {state.selectedTask.scheduled_at_utc && <span className="meta">Scheduled for: {new Date(state.selectedTask.scheduled_at_utc).toLocaleString()}</span>}
+            {scheduleRunOnStatusesValue.length > 0 && <span className="meta">Runs on: {scheduleRunOnStatusesValue.join(', ')}</span>}
             {state.selectedTask.recurring_rule && <span className="meta">Repeats: {String(state.selectedTask.recurring_rule)}</span>}
             {state.selectedTask.last_schedule_error && <span className="meta">Last error: {state.selectedTask.last_schedule_error}</span>}
           </div>

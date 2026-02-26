@@ -19,6 +19,11 @@ from shared.core import (
     serialize_task,
 )
 from shared.serializers import load_created_by_map
+from shared.task_automation import (
+    build_legacy_schedule_trigger,
+    derive_legacy_schedule_fields,
+    normalize_execution_triggers,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +161,20 @@ def get_task_automation_status_read_model(db: Session, user, task_id: str) -> di
         ensure_role(db, command_state.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
 
     state, _ = rebuild_state(db, "Task", task_id)
+    instruction = str(state.get("instruction") or state.get("scheduled_instruction") or "").strip() or None
+    execution_triggers = normalize_execution_triggers(state.get("execution_triggers"))
+    if not execution_triggers:
+        legacy_trigger = build_legacy_schedule_trigger(
+            scheduled_at_utc=state.get("scheduled_at_utc"),
+            schedule_timezone=state.get("schedule_timezone"),
+            recurring_rule=state.get("recurring_rule"),
+        )
+        if legacy_trigger is not None:
+            execution_triggers = [legacy_trigger]
+    legacy_schedule = derive_legacy_schedule_fields(
+        instruction=instruction,
+        execution_triggers=execution_triggers,
+    )
     return {
         "task_id": task_id,
         "automation_state": state.get("automation_state", "idle"),
@@ -163,10 +182,13 @@ def get_task_automation_status_read_model(db: Session, user, task_id: str) -> di
         "last_agent_error": state.get("last_agent_error"),
         "last_agent_comment": state.get("last_agent_comment"),
         "last_requested_instruction": state.get("last_requested_instruction"),
-        "task_type": state.get("task_type", "manual"),
+        "last_requested_source": state.get("last_requested_source"),
+        "instruction": instruction,
+        "execution_triggers": execution_triggers,
+        "task_type": str(legacy_schedule.get("task_type") or state.get("task_type") or "manual"),
         "schedule_state": state.get("schedule_state", "idle"),
-        "scheduled_at_utc": state.get("scheduled_at_utc"),
-        "scheduled_instruction": state.get("scheduled_instruction"),
+        "scheduled_at_utc": legacy_schedule.get("scheduled_at_utc"),
+        "scheduled_instruction": legacy_schedule.get("scheduled_instruction"),
         "last_schedule_run_at": state.get("last_schedule_run_at"),
         "last_schedule_error": state.get("last_schedule_error"),
     }

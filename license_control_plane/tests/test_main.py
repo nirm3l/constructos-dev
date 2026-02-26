@@ -818,6 +818,72 @@ def test_install_exchange_issues_client_token_for_activation_code(tmp_path: Path
         assert second_payload["activation_code_record"]["metadata"]["install_exchange_count"] == 2
 
 
+def test_install_exchange_register_enforces_customer_seat_limit(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-install-exchange-limit",
+                "plan_code": "monthly",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+            },
+        )
+        assert create_code.status_code == 200
+        activation_code = create_code.json()["activation_code"]
+
+        for index in range(1, 4):
+            exchange = client.post(
+                "/v1/install/exchange",
+                json={"activation_code": activation_code},
+            )
+            assert exchange.status_code == 200
+            token = exchange.json()["license_server_token"]
+
+            register = client.post(
+                "/v1/installations/register",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "installation_id": f"cp-exchange-limit-{index}",
+                    "workspace_id": "workspace-exchange-limit",
+                    "metadata": {"source": "tests"},
+                },
+            )
+            assert register.status_code == 200
+            assert register.json()["installation"]["customer_ref"] == "customer-install-exchange-limit"
+
+        re_register_existing = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "installation_id": "cp-exchange-limit-1",
+                "workspace_id": "workspace-exchange-limit",
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert re_register_existing.status_code == 200
+
+        extra_exchange = client.post(
+            "/v1/install/exchange",
+            json={"activation_code": activation_code},
+        )
+        assert extra_exchange.status_code == 200
+        extra_token = extra_exchange.json()["license_server_token"]
+
+        fourth_register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": f"Bearer {extra_token}"},
+            json={
+                "installation_id": "cp-exchange-limit-4",
+                "workspace_id": "workspace-exchange-limit",
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert fourth_register.status_code == 409
+        assert "Seat limit exceeded (3/3)" in fourth_register.json()["detail"]
+
+
 def test_install_exchange_rejects_invalid_and_inactive_codes(tmp_path: Path):
     with _build_client(tmp_path) as client:
         invalid = client.post(
@@ -1363,10 +1429,17 @@ def test_admin_send_onboarding_email_succeeds_with_template(monkeypatch, tmp_pat
         assert "ACTIVATION_CODE=ACT-TEST-0001" in captured["text_body"]
         assert "INSTALL_COS=true" in captured["text_body"]
         assert "AUTO_DEPLOY=1" in captured["text_body"]
+        assert "Windows installer (cmd.exe)" in captured["text_body"]
+        assert "curl -fsSL -o install.ps1" in captured["text_body"]
+        assert "-ExecutionPolicy Bypass -File .\\install.ps1" in captured["text_body"]
+        assert "deploy.sh" not in captured["text_body"]
         assert "LICENSE_SERVER_TOKEN=" not in captured["text_body"]
         assert "ACT-TEST-0001" in captured["text_body"]
         assert "ConstructOS" in captured["html_body"]
         assert "cust_example" in captured["html_body"]
+        assert "Windows (cmd.exe):" in captured["html_body"]
+        assert "install.ps1" in captured["html_body"]
+        assert "Manual deploy command (optional):" not in captured["html_body"]
 
 
 def test_admin_send_onboarding_email_rejects_non_https_script_url(tmp_path: Path):
@@ -1439,9 +1512,16 @@ def test_admin_provision_onboarding_generates_and_sends_package(monkeypatch, tmp
         assert f"ACTIVATION_CODE={payload['activation_code']}" in captured["text_body"]
         assert "INSTALL_COS=true" in captured["text_body"]
         assert "AUTO_DEPLOY=1" in captured["text_body"]
+        assert "Windows installer (cmd.exe)" in captured["text_body"]
+        assert "curl -fsSL -o install.ps1" in captured["text_body"]
+        assert "-ExecutionPolicy Bypass -File .\\install.ps1" in captured["text_body"]
+        assert "deploy.sh" not in captured["text_body"]
         assert "LICENSE_SERVER_TOKEN=" not in captured["text_body"]
         assert payload["activation_code"] in captured["text_body"]
         assert payload["customer_ref"] in captured["html_body"]
+        assert "Windows (cmd.exe):" in captured["html_body"]
+        assert "install.ps1" in captured["html_body"]
+        assert "Manual deploy command (optional):" not in captured["html_body"]
 
 
 def test_admin_provision_onboarding_lifetime_plan_ignores_valid_until(monkeypatch, tmp_path: Path):

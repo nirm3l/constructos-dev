@@ -37,6 +37,11 @@ from .typed_notifications import (
     normalize_notification_type,
     normalize_severity,
 )
+from .task_automation import (
+    build_legacy_schedule_trigger,
+    derive_legacy_schedule_fields,
+    normalize_execution_triggers,
+)
 from .vector_store import project_embedding_index_snapshot
 
 
@@ -102,6 +107,20 @@ def load_created_by_map(db: Session, aggregate_type: str, aggregate_ids: list[st
 
 
 def serialize_task(task: Task, created_by: str = "", linked_note_count: int = 0) -> dict[str, Any]:
+    instruction = str(task.instruction or task.scheduled_instruction or "").strip() or None
+    execution_triggers = normalize_execution_triggers(task.execution_triggers)
+    if not execution_triggers:
+        legacy_trigger = build_legacy_schedule_trigger(
+            scheduled_at_utc=to_iso_utc(task.scheduled_at_utc),
+            schedule_timezone=task.schedule_timezone,
+            recurring_rule=task.recurring_rule,
+        )
+        if legacy_trigger is not None:
+            execution_triggers = [legacy_trigger]
+    legacy_schedule = derive_legacy_schedule_fields(
+        instruction=instruction,
+        execution_triggers=execution_triggers,
+    )
     dto = TaskDTO(
         id=task.id,
         workspace_id=task.workspace_id,
@@ -119,11 +138,13 @@ def serialize_task(task: Task, created_by: str = "", linked_note_count: int = 0)
         attachments=json.loads(task.attachments or "[]"),
         external_refs=json.loads(task.external_refs or "[]"),
         attachment_refs=json.loads(task.attachment_refs or "[]"),
-        recurring_rule=task.recurring_rule,
-        task_type=task.task_type or "manual",
-        scheduled_instruction=task.scheduled_instruction,
-        scheduled_at_utc=to_iso_utc(task.scheduled_at_utc),
-        schedule_timezone=task.schedule_timezone,
+        instruction=instruction,
+        execution_triggers=execution_triggers,
+        recurring_rule=legacy_schedule.get("recurring_rule") or task.recurring_rule,
+        task_type=str(legacy_schedule.get("task_type") or "manual"),
+        scheduled_instruction=legacy_schedule.get("scheduled_instruction"),
+        scheduled_at_utc=legacy_schedule.get("scheduled_at_utc"),
+        schedule_timezone=legacy_schedule.get("schedule_timezone"),
         schedule_state=task.schedule_state or "idle",
         last_schedule_run_at=to_iso_utc(task.last_schedule_run_at),
         last_schedule_error=task.last_schedule_error,
@@ -254,6 +275,20 @@ def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
         if not state or state.get("is_deleted"):
             return None
         created_by = str(state.get("created_by") or "") or load_created_by(db, "Task", task_id)
+        instruction = str(state.get("instruction") or state.get("scheduled_instruction") or "").strip() or None
+        execution_triggers = normalize_execution_triggers(state.get("execution_triggers"))
+        if not execution_triggers:
+            legacy_trigger = build_legacy_schedule_trigger(
+                scheduled_at_utc=state.get("scheduled_at_utc"),
+                schedule_timezone=state.get("schedule_timezone"),
+                recurring_rule=state.get("recurring_rule"),
+            )
+            if legacy_trigger is not None:
+                execution_triggers = [legacy_trigger]
+        legacy_schedule = derive_legacy_schedule_fields(
+            instruction=instruction,
+            execution_triggers=execution_triggers,
+        )
         return {
             "id": task_id,
             "workspace_id": state.get("workspace_id"),
@@ -271,11 +306,13 @@ def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
             "attachments": state.get("attachments", []),
             "external_refs": state.get("external_refs", []),
             "attachment_refs": state.get("attachment_refs", state.get("attachments", [])),
-            "recurring_rule": state.get("recurring_rule"),
-            "task_type": state.get("task_type", "manual"),
-            "scheduled_instruction": state.get("scheduled_instruction"),
-            "scheduled_at_utc": state.get("scheduled_at_utc"),
-            "schedule_timezone": state.get("schedule_timezone"),
+            "instruction": instruction,
+            "execution_triggers": execution_triggers,
+            "recurring_rule": legacy_schedule.get("recurring_rule") or state.get("recurring_rule"),
+            "task_type": str(legacy_schedule.get("task_type") or state.get("task_type") or "manual"),
+            "scheduled_instruction": legacy_schedule.get("scheduled_instruction"),
+            "scheduled_at_utc": legacy_schedule.get("scheduled_at_utc"),
+            "schedule_timezone": legacy_schedule.get("schedule_timezone"),
             "schedule_state": state.get("schedule_state", "idle"),
             "last_schedule_run_at": state.get("last_schedule_run_at"),
             "last_schedule_error": state.get("last_schedule_error"),

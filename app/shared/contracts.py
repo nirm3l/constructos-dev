@@ -38,6 +38,8 @@ class TaskCreate(BaseModel):
     attachments: list[dict[str, Any]] = Field(default_factory=list)
     external_refs: list[ExternalRef] = Field(default_factory=list)
     attachment_refs: list[AttachmentRef] = Field(default_factory=list)
+    instruction: str | None = None
+    execution_triggers: list[dict[str, Any]] = Field(default_factory=list)
     recurring_rule: str | None = None
     task_type: str = "manual"
     scheduled_instruction: str | None = None
@@ -57,6 +59,8 @@ class TaskPatch(BaseModel):
     attachments: list[dict[str, Any]] | None = None
     external_refs: list[ExternalRef] | None = None
     attachment_refs: list[AttachmentRef] | None = None
+    instruction: str | None = None
+    execution_triggers: list[dict[str, Any]] | None = None
     archived: bool | None = None
     project_id: str | None = None
     task_group_id: str | None = None
@@ -265,6 +269,8 @@ class TaskDTO:
     attachments: list[dict[str, Any]]
     external_refs: list[dict[str, Any]]
     attachment_refs: list[dict[str, Any]]
+    instruction: str | None
+    execution_triggers: list[dict[str, Any]]
     recurring_rule: str | None
     task_type: str
     scheduled_instruction: str | None

@@ -43,6 +43,7 @@ import type {
   SpecificationsPage,
   ProjectTags,
   Task,
+  TaskExecutionTrigger,
   TaskGroup,
   TaskGroupsPage,
   TaskActivity,
@@ -297,6 +298,8 @@ export const createTask = (
     labels?: string[]
     external_refs?: ExternalRef[]
     attachment_refs?: AttachmentRef[]
+    instruction?: string | null
+    execution_triggers?: TaskExecutionTrigger[]
     recurring_rule?: string | null
     task_type?: 'manual' | 'scheduled_instruction'
     scheduled_instruction?: string | null
@@ -336,6 +339,8 @@ export const patchTask = (
       | 'scheduled_instruction'
       | 'scheduled_at_utc'
       | 'schedule_timezone'
+      | 'instruction'
+      | 'execution_triggers'
       | 'specification_id'
       | 'external_refs'
       | 'attachment_refs'
@@ -1137,6 +1142,8 @@ export const createSpecificationTask = (
     labels?: string[]
     external_refs?: ExternalRef[]
     attachment_refs?: AttachmentRef[]
+    instruction?: string | null
+    execution_triggers?: TaskExecutionTrigger[]
     recurring_rule?: string | null
     task_type?: 'manual' | 'scheduled_instruction'
     scheduled_instruction?: string | null

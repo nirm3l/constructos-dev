@@ -1,6 +1,15 @@
 import React from 'react'
 import type { TaskComment } from '../types'
 import { attachmentRefsToText, externalRefsToText, toLocalDateTimeInput } from '../utils/ui'
+import {
+  deriveInstruction,
+  extractEnabledScheduleTrigger,
+  extractEnabledStatusTrigger,
+  listToCsv,
+  normalizeExecutionTriggers,
+  normalizeScheduleRunOnStatuses,
+  parseRecurringRule,
+} from '../utils/taskAutomation'
 
 export function useTaskNoteEditorEffects(c: any) {
   React.useEffect(() => {
@@ -20,18 +29,28 @@ export function useTaskNoteEditorEffects(c: any) {
     c.setEditTaskType((c.selectedTask.task_type ?? 'manual') as 'manual' | 'scheduled_instruction')
     c.setEditScheduledAtUtc(toLocalDateTimeInput(c.selectedTask.scheduled_at_utc))
     c.setEditScheduleTimezone(c.selectedTask.schedule_timezone ?? (c.currentUserTimezone ?? 'UTC'))
-    c.setEditScheduledInstruction(c.selectedTask.scheduled_instruction ?? '')
+    c.setEditScheduledInstruction(deriveInstruction(c.selectedTask))
     ;(() => {
-      const raw = String(c.selectedTask.recurring_rule ?? '').trim()
-      const m = raw.match(/^(?:every:)?\s*(\d+)\s*([mhd])\s*$/i)
-      if (!m) {
-        c.setEditRecurringEvery('')
-        c.setEditRecurringUnit('h')
-        return
-      }
-      c.setEditRecurringEvery(String(m[1] || ''))
-      const unit = String(m[2] || 'h').toLowerCase()
-      c.setEditRecurringUnit(unit === 'm' || unit === 'h' || unit === 'd' ? unit : 'h')
+      const parsedRecurring = parseRecurringRule(c.selectedTask.recurring_rule)
+      c.setEditRecurringEvery(parsedRecurring.every)
+      c.setEditRecurringUnit(parsedRecurring.unit)
+    })()
+    ;(() => {
+      const triggers = normalizeExecutionTriggers(c.selectedTask.execution_triggers)
+      const scheduleTrigger = extractEnabledScheduleTrigger(triggers)
+      const selfTrigger = extractEnabledStatusTrigger(triggers, 'self')
+      const externalTrigger = extractEnabledStatusTrigger(triggers, 'external')
+
+      c.setEditScheduleRunOnStatuses(normalizeScheduleRunOnStatuses(scheduleTrigger?.run_on_statuses))
+      c.setEditStatusTriggerSelfEnabled(Boolean(selfTrigger))
+      c.setEditStatusTriggerSelfFromStatusesText(listToCsv(selfTrigger?.from_statuses))
+      c.setEditStatusTriggerSelfToStatusesText(listToCsv(selfTrigger?.to_statuses))
+
+      c.setEditStatusTriggerExternalEnabled(Boolean(externalTrigger))
+      c.setEditStatusTriggerExternalMatchMode(externalTrigger?.match_mode === 'all' ? 'all' : 'any')
+      c.setEditStatusTriggerExternalTaskIdsText(listToCsv(externalTrigger?.selector?.task_ids))
+      c.setEditStatusTriggerExternalFromStatusesText(listToCsv(externalTrigger?.from_statuses))
+      c.setEditStatusTriggerExternalToStatusesText(listToCsv(externalTrigger?.to_statuses))
     })()
     c.setAutomationInstruction('')
     c.setCommentBody('')
@@ -42,7 +61,24 @@ export function useTaskNoteEditorEffects(c: any) {
   React.useEffect(() => {
     if (!c.taskEditorError) return
     c.setTaskEditorError(null)
-  }, [c.taskEditorError, c.editTaskType, c.editScheduledInstruction, c.editScheduledAtUtc, c.editScheduleTimezone, c.editRecurringEvery, c.editRecurringUnit])
+  }, [
+    c.taskEditorError,
+    c.editTaskType,
+    c.editScheduledInstruction,
+    c.editScheduledAtUtc,
+    c.editScheduleTimezone,
+    c.editScheduleRunOnStatuses,
+    c.editRecurringEvery,
+    c.editRecurringUnit,
+    c.editStatusTriggerSelfEnabled,
+    c.editStatusTriggerSelfFromStatusesText,
+    c.editStatusTriggerSelfToStatusesText,
+    c.editStatusTriggerExternalEnabled,
+    c.editStatusTriggerExternalMatchMode,
+    c.editStatusTriggerExternalTaskIdsText,
+    c.editStatusTriggerExternalFromStatusesText,
+    c.editStatusTriggerExternalToStatusesText,
+  ])
 
   React.useEffect(() => {
     if (!c.selectedNote) return

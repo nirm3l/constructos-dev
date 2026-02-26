@@ -176,6 +176,8 @@ class Task(Base, TimeMixin):
     attachments: Mapped[str] = mapped_column(Text, default="[]")
     external_refs: Mapped[str] = mapped_column(Text, default="[]")
     attachment_refs: Mapped[str] = mapped_column(Text, default="[]")
+    instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_triggers: Mapped[str] = mapped_column(Text, default="[]")
     recurring_rule: Mapped[str | None] = mapped_column(String(64), nullable=True)
     task_type: Mapped[str] = mapped_column(String(32), default="manual")
     scheduled_instruction: Mapped[str | None] = mapped_column(Text, nullable=True)

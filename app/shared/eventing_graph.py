@@ -837,6 +837,8 @@ def _task_props_from_event(ev: EventEnvelope) -> dict[str, Any]:
         "due_date",
         "assignee_id",
         "labels",
+        "instruction",
+        "execution_triggers",
         "task_type",
         "scheduled_instruction",
         "scheduled_at_utc",
@@ -873,6 +875,7 @@ def _task_props_from_event(ev: EventEnvelope) -> dict[str, Any]:
         props["automation_state"] = "queued"
         props["last_agent_error"] = None
         props["last_requested_instruction"] = p.get("instruction")
+        props["last_requested_source"] = p.get("source")
     elif ev.event_type == TASK_EVENT_AUTOMATION_STARTED:
         props["automation_state"] = "running"
         props["last_agent_error"] = None

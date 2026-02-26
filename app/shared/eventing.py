@@ -16,6 +16,7 @@ from .eventing_notification_triggers import (
     emit_typed_notifications_for_event,
     prepare_event_payload_for_notification_triggers,
 )
+from .eventing_task_automation_triggers import emit_task_automation_triggers_for_event
 from .eventing_notifications import emit_system_notifications as _emit_system_notifications
 from .eventing_projections import project_kurrent_events_once, start_projection_worker, stop_projection_worker
 from .eventing_rebuild import (
@@ -116,6 +117,7 @@ def append_event(
 
     maybe_snapshot(db, aggregate_type, aggregate_id, version)
     emit_typed_notifications_for_event(db, env, append_event_fn=append_event)
+    emit_task_automation_triggers_for_event(db, env, append_event_fn=append_event)
     _queue_realtime_signals(db, env)
 
     return env

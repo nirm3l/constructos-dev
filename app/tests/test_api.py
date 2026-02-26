@@ -4495,6 +4495,46 @@ def test_scheduled_instruction_is_not_queued_outside_in_progress(tmp_path):
     assert status['schedule_state'] == 'idle'
 
 
+def test_scheduled_instruction_can_queue_on_selected_statuses(tmp_path):
+    client = build_client(tmp_path)
+    ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
+    project_id = client.get('/api/bootstrap').json()['projects'][0]['id']
+    due_at = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Scheduled run on todo',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Leave progress note',
+            'execution_triggers': [
+                {
+                    'kind': 'schedule',
+                    'enabled': True,
+                    'scheduled_at_utc': due_at,
+                    'schedule_timezone': 'UTC',
+                    'run_on_statuses': ['To do'],
+                },
+            ],
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()['id']
+    schedule_trigger = next(
+        trigger for trigger in created.json()['execution_triggers'] if trigger.get('kind') == 'schedule'
+    )
+    assert schedule_trigger.get('run_on_statuses') == ['To do']
+
+    from features.agents.runner import queue_due_scheduled_tasks_once
+
+    queued = queue_due_scheduled_tasks_once(limit=10)
+    assert queued >= 1
+
+    status = client.get(f'/api/tasks/{task_id}/automation').json()
+    assert status['automation_state'] in {'queued', 'running', 'completed'}
+
+
 def test_recover_stale_recurring_scheduled_task_rearms_schedule(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -4554,6 +4594,239 @@ def test_recover_stale_recurring_scheduled_task_rearms_schedule(tmp_path):
     assert status['schedule_state'] == 'idle'
     assert status['scheduled_at_utc'] is not None
     assert datetime.fromisoformat(status['scheduled_at_utc']) > datetime.now(timezone.utc)
+
+
+def test_create_task_accepts_instruction_and_execution_triggers(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    due_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Trigger roundtrip',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Leave a progress note',
+            'execution_triggers': [
+                {'kind': 'manual', 'enabled': True},
+                {
+                    'kind': 'schedule',
+                    'enabled': True,
+                    'scheduled_at_utc': due_at,
+                    'schedule_timezone': 'UTC',
+                    'recurring_rule': 'every:1h',
+                },
+            ],
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    assert payload['instruction'] == 'Leave a progress note'
+    assert payload['task_type'] == 'scheduled_instruction'
+    assert any(trigger.get('kind') == 'schedule' for trigger in payload['execution_triggers'])
+
+
+def test_status_change_trigger_self_queues_automation(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Self status trigger',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Run a completion checklist',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'self',
+                    'match_mode': 'any',
+                    'to_statuses': ['Done'],
+                },
+            ],
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()['id']
+
+    completed = client.post(f'/api/tasks/{task_id}/complete')
+    assert completed.status_code == 200
+
+    automation = client.get(f'/api/tasks/{task_id}/automation')
+    assert automation.status_code == 200
+    payload = automation.json()
+    assert payload['automation_state'] == 'queued'
+    assert payload['last_requested_source'] == 'status_change'
+    assert payload['last_requested_instruction'] == 'Run a completion checklist'
+
+
+def test_runner_processes_status_change_trigger_when_task_is_done(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Self status trigger run',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Run after completion',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'self',
+                    'match_mode': 'any',
+                    'to_statuses': ['Done'],
+                },
+            ],
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()['id']
+
+    completed = client.post(f'/api/tasks/{task_id}/complete')
+    assert completed.status_code == 200
+
+    queued = client.get(f'/api/tasks/{task_id}/automation')
+    assert queued.status_code == 200
+    assert queued.json()['automation_state'] == 'queued'
+    assert queued.json()['last_requested_source'] == 'status_change'
+
+    from features.agents.runner import run_queued_automation_once
+
+    processed = run_queued_automation_once(limit=5)
+    assert processed >= 1
+
+    final = client.get(f'/api/tasks/{task_id}/automation')
+    assert final.status_code == 200
+    payload = final.json()
+    assert payload['automation_state'] == 'completed'
+    assert payload['last_requested_source'] == 'status_change'
+
+
+def test_status_change_trigger_external_any_queues_target(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    source = client.post(
+        '/api/tasks',
+        json={
+            'title': 'External any source',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert source.status_code == 200
+    source_id = source.json()['id']
+
+    target = client.post(
+        '/api/tasks',
+        json={
+            'title': 'External any target',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'React to source completion',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'external',
+                    'match_mode': 'any',
+                    'selector': {'task_ids': [source_id]},
+                    'to_statuses': ['Done'],
+                },
+            ],
+        },
+    )
+    assert target.status_code == 200
+    target_id = target.json()['id']
+
+    completed = client.post(f'/api/tasks/{source_id}/complete')
+    assert completed.status_code == 200
+
+    automation = client.get(f'/api/tasks/{target_id}/automation')
+    assert automation.status_code == 200
+    payload = automation.json()
+    assert payload['automation_state'] == 'queued'
+    assert payload['last_requested_source'] == 'status_change'
+    assert payload['last_requested_instruction'] == 'React to source completion'
+
+
+def test_status_change_trigger_external_all_waits_for_all_selected_tasks(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    source_a = client.post(
+        '/api/tasks',
+        json={
+            'title': 'External all source A',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    source_b = client.post(
+        '/api/tasks',
+        json={
+            'title': 'External all source B',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert source_a.status_code == 200
+    assert source_b.status_code == 200
+    source_a_id = source_a.json()['id']
+    source_b_id = source_b.json()['id']
+
+    target = client.post(
+        '/api/tasks',
+        json={
+            'title': 'External all target',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Run after both dependencies are done',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'external',
+                    'match_mode': 'all',
+                    'selector': {'task_ids': [source_a_id, source_b_id]},
+                    'to_statuses': ['Done'],
+                },
+            ],
+        },
+    )
+    assert target.status_code == 200
+    target_id = target.json()['id']
+
+    complete_a = client.post(f'/api/tasks/{source_a_id}/complete')
+    assert complete_a.status_code == 200
+    after_a = client.get(f'/api/tasks/{target_id}/automation')
+    assert after_a.status_code == 200
+    assert after_a.json()['automation_state'] == 'idle'
+
+    complete_b = client.post(f'/api/tasks/{source_b_id}/complete')
+    assert complete_b.status_code == 200
+    after_b = client.get(f'/api/tasks/{target_id}/automation')
+    assert after_b.status_code == 200
+    payload = after_b.json()
+    assert payload['automation_state'] == 'queued'
+    assert payload['last_requested_source'] == 'status_change'
+    assert payload['last_requested_instruction'] == 'Run after both dependencies are done'
 
 
 def test_create_task_requires_project_id(tmp_path):

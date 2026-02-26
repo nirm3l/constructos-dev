@@ -29,6 +29,8 @@ class TaskAggregate(Aggregate):
         attachment_refs: list[dict[str, Any]],
         recurring_rule: str | None,
         order_index: int,
+        instruction: str | None = None,
+        execution_triggers: list[dict[str, Any]] | None = None,
         task_type: str = "manual",
         scheduled_instruction: str | None = None,
         scheduled_at_utc: str | None = None,
@@ -51,6 +53,8 @@ class TaskAggregate(Aggregate):
         self.attachments = attachments
         self.external_refs = external_refs
         self.attachment_refs = attachment_refs
+        self.instruction = instruction
+        self.execution_triggers = execution_triggers or []
         self.recurring_rule = recurring_rule
         self.task_type = task_type
         self.scheduled_instruction = scheduled_instruction
@@ -69,6 +73,7 @@ class TaskAggregate(Aggregate):
         self.automation_completed_at = None
         self.automation_failed_at = None
         self.last_automation_error = None
+        self.last_requested_source = None
 
     @event("Updated")
     def update(self, changes: dict[str, Any]) -> None:
@@ -121,10 +126,17 @@ class TaskAggregate(Aggregate):
         _ = (task_id, user_id, watched)
 
     @event("AutomationRequested")
-    def request_automation(self, requested_at: str, instruction: str | None = None) -> None:
+    def request_automation(
+        self,
+        requested_at: str,
+        instruction: str | None = None,
+        source: str | None = None,
+        trigger_task_id: str | None = None,
+    ) -> None:
         self.automation_state = "queued"
         self.automation_requested_at = requested_at
-        _ = instruction
+        self.last_requested_source = source
+        _ = (instruction, trigger_task_id)
 
     @event("AutomationStarted")
     def mark_automation_started(self, started_at: str) -> None:
