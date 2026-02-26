@@ -403,6 +403,7 @@ def test_admin_installation_includes_customer_email_from_metadata(tmp_path: Path
         assert register.status_code == 200
         register_payload = register.json()
         assert register_payload["installation"]["customer_email"] == "owner@example.com"
+        assert register_payload["installation"]["created_at"]
 
         listed = client.get(
             "/v1/admin/installations?limit=50&offset=0",
@@ -416,6 +417,7 @@ def test_admin_installation_includes_customer_email_from_metadata(tmp_path: Path
             if item["installation"]["installation_id"] == "cp-customer-email"
         )
         assert listed_item["installation"]["customer_email"] == "owner@example.com"
+        assert listed_item["installation"]["created_at"]
 
         details = client.get(
             "/v1/admin/installations/cp-customer-email",
@@ -424,6 +426,60 @@ def test_admin_installation_includes_customer_email_from_metadata(tmp_path: Path
         assert details.status_code == 200
         detail_payload = details.json()
         assert detail_payload["installation"]["customer_email"] == "owner@example.com"
+        assert detail_payload["installation"]["created_at"]
+
+
+def test_admin_installation_customer_email_lookup_fallback_from_customer_ref(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        create_code = client.post(
+            "/v1/admin/activation-codes",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "customer_ref": "customer-email-lookup",
+                "plan_code": "monthly",
+                "valid_until": "2026-12-31T00:00:00Z",
+                "max_installations": 3,
+                "metadata": {"issued_to_email": "lookup@example.com"},
+            },
+        )
+        assert create_code.status_code == 200
+
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-customer-email-lookup",
+                "workspace_id": "workspace-customer-email-lookup",
+                "customer_ref": "customer-email-lookup",
+                "metadata": {"source": "tests"},
+            },
+        )
+        assert register.status_code == 200
+        register_payload = register.json()
+        assert register_payload["installation"]["customer_email"] is None
+
+        listed = client.get(
+            "/v1/admin/installations?limit=50&offset=0",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert listed.status_code == 200
+        listed_payload = listed.json()
+        listed_item = next(
+            item
+            for item in listed_payload["items"]
+            if item["installation"]["installation_id"] == "cp-customer-email-lookup"
+        )
+        assert listed_item["installation"]["customer_email"] == "lookup@example.com"
+        assert listed_item["installation"]["created_at"]
+
+        details = client.get(
+            "/v1/admin/installations/cp-customer-email-lookup",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert details.status_code == 200
+        detail_payload = details.json()
+        assert detail_payload["installation"]["customer_email"] == "lookup@example.com"
+        assert detail_payload["installation"]["created_at"]
 
 
 def test_activation_propagates_customer_email_from_activation_code_metadata(tmp_path: Path):

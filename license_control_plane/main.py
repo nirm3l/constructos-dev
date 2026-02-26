@@ -1505,10 +1505,16 @@ def _lookup_customer_email_by_customer_ref(db: Session, customer_refs: set[str])
     return email_by_customer_ref
 
 
-def _serialize_installation(installation: Installation) -> dict[str, Any]:
+def _serialize_installation(
+    installation: Installation,
+    *,
+    customer_email_override: str | None = None,
+) -> dict[str, Any]:
     metadata = _load_metadata(installation.metadata_json)
     activation_ip = str(metadata.get("activation_ip") or "").strip() or None
-    customer_email = _installation_customer_email(metadata)
+    customer_email = (
+        str(customer_email_override or "").strip().lower() or _installation_customer_email(metadata)
+    )
     subscription_status = _canonicalize_subscription_status(installation.subscription_status)
     if subscription_status not in SUPPORTED_SUBSCRIPTION_STATUSES:
         subscription_status = "none"
@@ -1529,6 +1535,7 @@ def _serialize_installation(installation: Installation) -> dict[str, Any]:
         "activation_ip": activation_ip,
         "customer_email": customer_email,
         "metadata": metadata,
+        "created_at": installation.created_at.isoformat(),
         "updated_at": installation.updated_at.isoformat(),
     }
 
@@ -2042,6 +2049,8 @@ def register_installation(
             "workspace_id": installation.workspace_id,
             "customer_ref": installation.customer_ref,
             "subscription_status": installation.subscription_status,
+            "created_at": serialized_installation.get("created_at"),
+            "updated_at": serialized_installation.get("updated_at"),
             "trial_ends_at": installation.trial_ends_at.isoformat(),
             "customer_email": serialized_installation.get("customer_email"),
         },
@@ -2936,12 +2945,32 @@ def admin_list_installations(
         rows_stmt.order_by(Installation.updated_at.desc(), Installation.id.desc()).offset(offset).limit(limit)
     ).scalars().all()
 
+    customer_refs_for_email_lookup: set[str] = set()
+    for installation in installations:
+        metadata = _load_metadata(installation.metadata_json)
+        if _installation_customer_email(metadata):
+            continue
+        customer_ref = str(installation.customer_ref or "").strip()
+        if not customer_ref or customer_ref == LCP_UNASSIGNED_CUSTOMER_REF:
+            continue
+        customer_refs_for_email_lookup.add(customer_ref)
+    email_by_customer_ref = (
+        _lookup_customer_email_by_customer_ref(db, customer_refs_for_email_lookup)
+        if customer_refs_for_email_lookup
+        else {}
+    )
+
     items: list[dict[str, Any]] = []
     for installation in installations:
         entitlement = _compute_entitlement(installation)
+        customer_ref = str(installation.customer_ref or "").strip()
+        customer_email_override = email_by_customer_ref.get(customer_ref) if customer_ref else None
         items.append(
             {
-                "installation": _serialize_installation(installation),
+                "installation": _serialize_installation(
+                    installation,
+                    customer_email_override=customer_email_override,
+                ),
                 "entitlement": entitlement,
             }
         )
@@ -3073,9 +3102,18 @@ def admin_get_installation(
 
     entitlement = _compute_entitlement(installation)
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
+    customer_email_override: str | None = None
+    metadata = _load_metadata(installation.metadata_json)
+    if not _installation_customer_email(metadata):
+        customer_ref = str(installation.customer_ref or "").strip()
+        if customer_ref and customer_ref != LCP_UNASSIGNED_CUSTOMER_REF:
+            customer_email_override = _lookup_customer_email_by_customer_ref(db, {customer_ref}).get(customer_ref)
     return {
         "ok": True,
-        "installation": _serialize_installation(installation),
+        "installation": _serialize_installation(
+            installation,
+            customer_email_override=customer_email_override,
+        ),
         "entitlement": entitlement,
         "entitlement_token": entitlement_token,
     }

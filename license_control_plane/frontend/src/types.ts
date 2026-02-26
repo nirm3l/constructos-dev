@@ -12,6 +12,7 @@ export type InstallationRecord = {
   activation_ip?: string | null
   customer_email?: string | null
   metadata: Record<string, unknown>
+  created_at: string
   updated_at: string
 }
 
