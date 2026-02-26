@@ -3,13 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "description": "ConstructOS desktop shell for macOS, Windows, and Linux.",
+  "homepage": "https://github.com/nirm3l/m4tr1x",
   "main": "main.cjs",
-  "author": "ConstructOS",
+  "author": {
+    "name": "ConstructOS",
+    "email": "support@constructos.dev"
+  },
   "license": "UNLICENSED",
   "scripts": {
     "start": "node scripts/run-electron.cjs",
     "start:no-sandbox": "electron --no-sandbox .",
     "package": "electron-builder --dir",
+    "dist:ci": "node scripts/ci-dist.cjs",
     "dist": "electron-builder",
     "dist:mac": "electron-builder --mac",
     "dist:win": "electron-builder --win",
@@ -54,6 +59,7 @@
         "deb",
         "tar.gz"
       ],
+      "maintainer": "ConstructOS <support@constructos.dev>",
       "category": "Office"
     }
   }
