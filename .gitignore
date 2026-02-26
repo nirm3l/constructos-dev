@@ -33,3 +33,8 @@ license_control_plane/frontend/dist/
 license_control_plane/frontend/*.tsbuildinfo
 license_control_plane/frontend/vite.config.js
 license_control_plane/frontend/vite.config.d.ts
+
+# Desktop (Electron) artifacts
+desktop/node_modules/
+desktop/release/
+desktop/dist/
