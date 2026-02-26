@@ -35,7 +35,7 @@ def build_client(tmp_path: Path, installation_id: str | None = TEST_INSTALLATION
     main = reload(main)
     main.bootstrap_data()
     client = TestClient(main.app)
-    login = client.post("/api/auth/login", json={"username": "m4tr1x", "password": "testtest"})
+    login = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
     assert login.status_code == 200
     return client
 

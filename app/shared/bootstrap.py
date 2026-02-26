@@ -18,7 +18,7 @@ from features.projects.domain import EVENT_CREATED as PROJECT_EVENT_CREATED
 from features.rules.domain import EVENT_CREATED as PROJECT_RULE_EVENT_CREATED
 from features.specifications.domain import EVENT_CREATED as SPECIFICATION_EVENT_CREATED
 from features.tasks.domain import EVENT_CREATED as TASK_EVENT_CREATED
-from .auth import generate_temporary_password, hash_password
+from .auth import generate_temporary_password, hash_password, verify_password
 from .licensing import resolve_license_installation_id
 from . import models as shared_models
 from .models import (
@@ -44,12 +44,14 @@ from .settings import (
     AGENT_SYSTEM_USER_ID,
     AGENT_SYSTEM_USERNAME,
     BOOTSTRAP_PROJECT_ID,
+    BOOTSTRAP_PASSWORD,
     BOOTSTRAP_TASK_ID,
     BOOTSTRAP_FULL_NAME,
     BOOTSTRAP_USERNAME,
     BOOTSTRAP_WORKSPACE_ID,
     DEFAULT_USER_ID,
     DEFAULT_STATUSES,
+    LEGACY_BOOTSTRAP_PASSWORD,
     LICENSE_TRIAL_DAYS,
     logger,
 )
@@ -322,8 +324,25 @@ def ensure_user_table_columns(db: Session):
 def ensure_user_password_defaults(db: Session):
     default_user = db.get(User, DEFAULT_USER_ID)
     if default_user:
-        if not default_user.password_hash:
-            default_user.password_hash = hash_password("testtest")
+        default_user_username = str(default_user.username or "").strip()
+        default_user_full_name = str(default_user.full_name or "").strip()
+        default_user_password_hash = str(default_user.password_hash or "").strip()
+
+        if default_user_username in {"", "m4tr1x"} and default_user.username != BOOTSTRAP_USERNAME:
+            default_user.username = BOOTSTRAP_USERNAME
+        if default_user_full_name in {"", "m4tr1x"} and default_user.full_name != BOOTSTRAP_FULL_NAME:
+            default_user.full_name = BOOTSTRAP_FULL_NAME
+
+        should_reset_password = False
+        if not default_user_password_hash:
+            should_reset_password = True
+        elif verify_password(LEGACY_BOOTSTRAP_PASSWORD, default_user_password_hash) and (
+            not verify_password(BOOTSTRAP_PASSWORD, default_user_password_hash)
+        ):
+            should_reset_password = True
+
+        if should_reset_password:
+            default_user.password_hash = hash_password(BOOTSTRAP_PASSWORD)
             default_user.must_change_password = False
             default_user.password_changed_at = datetime.now(timezone.utc)
         default_user.is_active = True
@@ -587,7 +606,7 @@ def bootstrap_data():
                         username=BOOTSTRAP_USERNAME,
                         full_name=BOOTSTRAP_FULL_NAME,
                         user_type="human",
-                        password_hash=hash_password("testtest"),
+                        password_hash=hash_password(BOOTSTRAP_PASSWORD),
                         must_change_password=False,
                         password_changed_at=datetime.now(timezone.utc),
                         is_active=True,

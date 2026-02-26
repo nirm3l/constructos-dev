@@ -17,8 +17,8 @@ from typing import Any
 import httpx
 
 
-DEFAULT_USERNAME = os.getenv("QA_USERNAME", "m4tr1x")
-DEFAULT_PASSWORD = os.getenv("QA_PASSWORD", "testtest")
+DEFAULT_USERNAME = os.getenv("QA_USERNAME", "admin")
+DEFAULT_PASSWORD = os.getenv("QA_PASSWORD", "admin")
 
 
 @dataclass

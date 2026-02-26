@@ -21,8 +21,8 @@ import httpx
 
 
 BASE_URL = "http://127.0.0.1:8000"
-DEFAULT_USERNAME = os.getenv("QA_USERNAME", "m4tr1x")
-DEFAULT_PASSWORD = os.getenv("QA_PASSWORD", "testtest")
+DEFAULT_USERNAME = os.getenv("QA_USERNAME", "admin")
+DEFAULT_PASSWORD = os.getenv("QA_PASSWORD", "admin")
 
 
 def _iso(dt: datetime) -> str:
