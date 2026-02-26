@@ -202,16 +202,17 @@ docker compose -p constructos-app -f docker-compose.yml run --rm --build task-ap
 ```
 
 ## COS Wrapper CLI
-`cos` moved to the public `constructos` repository and is maintained there.
+`cos` (package: `constructos-cli`) is maintained in this private repository and distributed as release artifacts.
 
-Install directly from GitHub:
+Install from release artifact:
 ```bash
-pipx install --force "git+https://github.com/nirm3l/constructos.git@main#subdirectory=tools/cos"
+COS_CLI_VERSION=0.1.1
+pipx install --force "https://github.com/nirm3l/m4tr1x/releases/download/cos-v${COS_CLI_VERSION}/constructos_cli-${COS_CLI_VERSION}-py3-none-any.whl"
 ```
 
 Repository and docs:
-- `https://github.com/nirm3l/constructos`
-- `https://github.com/nirm3l/constructos/tree/main/tools/cos`
+- `https://github.com/nirm3l/m4tr1x`
+- `tools/cos/README.md`
 
 ## Technology Stack
 - Backend: FastAPI, SQLAlchemy, Pydantic.
