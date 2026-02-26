@@ -2,6 +2,16 @@ name: Desktop Artifacts
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to publish in nirm3l/constructos (for example desktop-v0.1.3)"
+        required: false
+        type: string
+      publish_release:
+        description: "Publish release assets after build"
+        required: false
+        default: true
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -75,11 +85,11 @@ jobs:
           retention-days: 14
 
   publish-release:
-    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    if: needs.build.result == 'success' && inputs.publish_release == true && (startsWith(github.ref, 'refs/tags/desktop-v') || inputs.release_tag != '')
     needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Download all desktop artifacts
         uses: actions/download-artifact@v4
@@ -87,9 +97,44 @@ jobs:
           pattern: desktop-*
           path: release-assets
 
+      - name: Resolve release tag
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.release_tag }}"
+          if [[ -z "$tag" ]]; then
+            if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+              tag="${GITHUB_REF#refs/tags/}"
+            fi
+          fi
+          if [[ -z "$tag" ]]; then
+            echo "::error::No release tag resolved. Pass workflow input release_tag (desktop-v*)."
+            exit 1
+          fi
+          if [[ ! "$tag" =~ ^desktop-v ]]; then
+            echo "::error::Release tag must start with desktop-v (got: $tag)"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Verify ConstructOS release token
+        shell: bash
+        env:
+          CONSTRUCTOS_RELEASE_TOKEN: ${{ secrets.CONSTRUCTOS_RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CONSTRUCTOS_RELEASE_TOKEN:-}" ]]; then
+            echo "::error::Missing secret CONSTRUCTOS_RELEASE_TOKEN for cross-repo release publishing."
+            exit 1
+          fi
+
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
+          repository: nirm3l/constructos
+          tag_name: ${{ steps.meta.outputs.tag }}
+          target_commitish: main
           files: |
             release-assets/**/*.dmg
             release-assets/**/*.zip
@@ -100,3 +145,4 @@ jobs:
             release-assets/**/*.blockmap
             release-assets/**/latest*.yml
           generate_release_notes: true
+          token: ${{ secrets.CONSTRUCTOS_RELEASE_TOKEN }}

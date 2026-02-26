@@ -74,9 +74,9 @@ Workflow:
 - `.github/workflows/desktop-artifacts.yml`
 
 Behavior:
-- Builds desktop installers on `main/master` pushes and PRs that touch `desktop/**`.
+- Manual `workflow_dispatch` build (no automatic triggers on branch pushes).
 - Uploads artifacts for each OS matrix target.
-- On tags matching `desktop-v*`, publishes assets to GitHub Releases.
+- When `release_tag` input is provided (for example `desktop-v0.1.3`), publishes assets to `nirm3l/constructos` GitHub Releases.
 
 Optional signing/notarization secrets:
 - `DESKTOP_CSC_LINK`
@@ -87,6 +87,7 @@ Optional signing/notarization secrets:
 - `DESKTOP_APPLE_ID`
 - `DESKTOP_APPLE_APP_SPECIFIC_PASSWORD`
 - `DESKTOP_APPLE_TEAM_ID`
+- `CONSTRUCTOS_RELEASE_TOKEN` (required for cross-repo publish to `nirm3l/constructos`)
 
 Helper script (sets any provided env var via `gh secret set`):
 ```bash

@@ -210,7 +210,10 @@ Artifacts are written to `desktop/release/`.
 
 CI workflow for desktop artifacts:
 - `.github/workflows/desktop-artifacts.yml` (Linux + Windows + macOS)
-- tags matching `desktop-v*` publish release assets
+- manual run (`workflow_dispatch`) builds all desktop installers
+- set `release_tag` (for example `desktop-v0.1.3`) to publish assets
+- release assets are published to `nirm3l/constructos` (not this repository)
+- required secret for publish step: `CONSTRUCTOS_RELEASE_TOKEN`
 - optional helper to upload signing/notarization secrets:
   - `./scripts/set_desktop_signing_secrets.sh` (uses `gh secret set`)
 
