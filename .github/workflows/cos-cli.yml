@@ -1,19 +1,7 @@
 name: COS CLI
 
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/cos-cli.yml"
-      - "tools/cos/**"
-      - "README.md"
-  push:
-    branches:
-      - main
-      - master
-    paths:
-      - ".github/workflows/cos-cli.yml"
-      - "tools/cos/**"
-      - "README.md"
+  workflow_dispatch:
 
 jobs:
   cos-cli:
