@@ -1393,9 +1393,20 @@ def _build_entitlement_bundle(entitlement_payload: dict[str, Any]) -> tuple[dict
     return entitlement_payload, signed_token
 
 
+def _installation_customer_email(metadata: dict[str, Any]) -> str | None:
+    candidate_fields = ("issued_to_email", "customer_email", "to_email", "contact_email", "email")
+    for key in candidate_fields:
+        value = metadata.get(key)
+        normalized = str(value or "").strip().lower()
+        if normalized and EMAIL_PATTERN.fullmatch(normalized):
+            return normalized
+    return None
+
+
 def _serialize_installation(installation: Installation) -> dict[str, Any]:
     metadata = _load_metadata(installation.metadata_json)
     activation_ip = str(metadata.get("activation_ip") or "").strip() or None
+    customer_email = _installation_customer_email(metadata)
     subscription_status = _canonicalize_subscription_status(installation.subscription_status)
     if subscription_status not in SUPPORTED_SUBSCRIPTION_STATUSES:
         subscription_status = "none"
@@ -1414,6 +1425,7 @@ def _serialize_installation(installation: Installation) -> dict[str, Any]:
         "trial_started_at": installation.trial_started_at.isoformat(),
         "trial_ends_at": installation.trial_ends_at.isoformat(),
         "activation_ip": activation_ip,
+        "customer_email": customer_email,
         "metadata": metadata,
         "updated_at": installation.updated_at.isoformat(),
     }
@@ -1845,6 +1857,7 @@ def register_installation(
     entitlement = _compute_entitlement(installation)
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
+    serialized_installation = _serialize_installation(installation)
     _publish_admin_event(
         "installations",
         "registered",
@@ -1858,6 +1871,7 @@ def register_installation(
             "customer_ref": installation.customer_ref,
             "subscription_status": installation.subscription_status,
             "trial_ends_at": installation.trial_ends_at.isoformat(),
+            "customer_email": serialized_installation.get("customer_email"),
         },
         "entitlement": entitlement,
         "entitlement_token": entitlement_token,

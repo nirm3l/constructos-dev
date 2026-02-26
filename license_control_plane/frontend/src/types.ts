@@ -10,6 +10,7 @@ export type InstallationRecord = {
   trial_started_at: string
   trial_ends_at: string
   activation_ip?: string | null
+  customer_email?: string | null
   metadata: Record<string, unknown>
   updated_at: string
 }

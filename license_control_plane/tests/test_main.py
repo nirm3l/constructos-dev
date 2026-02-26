@@ -386,6 +386,46 @@ def test_admin_list_installations_supports_search_and_status_filter(tmp_path: Pa
         assert payload["items"][0]["installation"]["installation_id"] == "cp-tenant-beta"
 
 
+def test_admin_installation_includes_customer_email_from_metadata(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-customer-email",
+                "workspace_id": "workspace-customer-email",
+                "metadata": {
+                    "source": "test",
+                    "issued_to_email": "Owner@Example.com",
+                },
+            },
+        )
+        assert register.status_code == 200
+        register_payload = register.json()
+        assert register_payload["installation"]["customer_email"] == "owner@example.com"
+
+        listed = client.get(
+            "/v1/admin/installations?limit=50&offset=0",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert listed.status_code == 200
+        listed_payload = listed.json()
+        listed_item = next(
+            item
+            for item in listed_payload["items"]
+            if item["installation"]["installation_id"] == "cp-customer-email"
+        )
+        assert listed_item["installation"]["customer_email"] == "owner@example.com"
+
+        details = client.get(
+            "/v1/admin/installations/cp-customer-email",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert details.status_code == 200
+        detail_payload = details.json()
+        assert detail_payload["installation"]["customer_email"] == "owner@example.com"
+
+
 def test_admin_customer_subscription_update_applies_to_all_installations(tmp_path: Path):
     with _build_client(tmp_path) as client:
         for installation_id in ["cp-customer-a1", "cp-customer-a2"]:

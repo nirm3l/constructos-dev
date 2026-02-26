@@ -20,7 +20,7 @@ services:
     restart: unless-stopped
 
   kurrentdb:
-    image: eventstore/eventstore:24.10.0-jammy
+    image: kurrentplatform/kurrentdb:25.1
     container_name: kurrentdb
     environment:
       EVENTSTORE_CLUSTER_SIZE: 1
