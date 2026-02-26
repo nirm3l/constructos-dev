@@ -2264,11 +2264,15 @@ textarea:disabled {
 .notes-tag-filters {
   margin-top: -2px;
   margin-bottom: 2px;
+  width: 100%;
+  min-width: 0;
 }
 
 .task-tag-filters {
   margin-top: -2px;
   margin-bottom: 2px;
+  width: 100%;
+  min-width: 0;
 }
 
 .notes-archived-filter {
@@ -2566,6 +2570,7 @@ textarea:disabled {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
+  gap: 6px;
 }
 
 .note-row-actions-trigger .icon {
@@ -3264,6 +3269,8 @@ textarea:disabled {
   color: color-mix(in srgb, var(--text), var(--muted) 18%);
   font-weight: 700;
   display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
   align-items: center;
   gap: 6px;
   transition: border-color 0.16s ease, background-color 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
@@ -3271,8 +3278,18 @@ textarea:disabled {
 
 .tag-filter-toggle-group {
   display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.tag-filter-chip > span:first-child {
+  min-width: 0;
+  max-width: clamp(90px, 32vw, 220px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tag-filter-chip:hover {
@@ -3525,20 +3542,20 @@ textarea:disabled {
 }
 
 .search-panel-tags-scroll {
-  overflow-x: auto;
-  scrollbar-width: thin;
+  overflow-x: visible;
 }
 
 .search-panel-tags-wrap {
-  width: max-content;
+  width: 100%;
   max-width: 100%;
-  flex-wrap: nowrap;
+  min-width: 0;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
 }
 
 .search-panel-tags-wrap .tag-filter-toggle-group {
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
 }
 
 .search-results-summary-card {
@@ -3646,12 +3663,6 @@ textarea:disabled {
 }
 
 @media (max-width: 900px) {
-  .search-panel-card {
-    position: sticky;
-    top: 72px;
-    z-index: 20;
-  }
-
   .search-panel-advanced-grid {
     grid-template-columns: 1fr;
   }
@@ -6387,6 +6398,53 @@ textarea:disabled {
   border-color: color-mix(in srgb, var(--line), var(--primary) 20%);
 }
 
+.codex-chat-history-resume-row {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.codex-chat-history-resume-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  border: 1px dashed color-mix(in srgb, var(--line), var(--brand) 30%);
+  border-radius: 999px;
+  padding: 5px 10px;
+  background: color-mix(in srgb, var(--surface-alt), var(--surface) 55%);
+  color: color-mix(in srgb, var(--text), var(--muted) 15%);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.codex-chat-history-resume-link .icon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  opacity: 0.84;
+}
+
+.codex-chat-history-resume-link.is-copied {
+  border-color: color-mix(in srgb, #2f9d57, var(--line) 28%);
+  background: color-mix(in srgb, #2f9d57, var(--surface) 88%);
+  color: color-mix(in srgb, #1e6a39, var(--text) 34%);
+}
+
+.codex-chat-history-resume-link.is-error {
+  border-color: color-mix(in srgb, #b83f3f, var(--line) 30%);
+  background: color-mix(in srgb, #b83f3f, var(--surface) 90%);
+  color: color-mix(in srgb, #7a2a2a, var(--text) 35%);
+}
+
+.codex-chat-history-resume-text {
+  min-width: 0;
+  max-width: min(68vw, 520px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
 .codex-chat-attachments .resource-ref-chip:hover,
 .codex-chat-attachments .resource-ref-chip:focus-visible {
   background: color-mix(in srgb, var(--surface-alt), var(--brand) 6%);
@@ -8568,19 +8626,23 @@ textarea:disabled {
 
   .task-tag-filters,
   .notes-tag-filters {
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    padding-bottom: 2px;
+    flex-wrap: wrap;
+    overflow-x: visible;
+    row-gap: 6px;
+    padding-bottom: 0;
   }
 
   .task-tag-filters > *,
   .notes-tag-filters > * {
-    flex: 0 0 auto;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
   }
 
   .tag-filter-toggle-group {
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
+    min-width: 0;
+    max-width: 100%;
   }
 
   .tag-filter-menu-content {

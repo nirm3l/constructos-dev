@@ -200,7 +200,6 @@ export function SearchPanel({
   searchTags,
   toggleSearchTag,
   clearSearchTags,
-  getTagUsage,
   onClose,
 }: {
   searchQ: string
@@ -217,7 +216,6 @@ export function SearchPanel({
   searchTags: string[]
   toggleSearchTag: (tag: string) => void
   clearSearchTags: () => void
-  getTagUsage: (tag: string) => number
   onClose: () => void
 }) {
   const activeAdvancedFilterCount = React.useMemo(() => {
@@ -350,7 +348,6 @@ export function SearchPanel({
               selectedTags={searchTags}
               onToggleTag={toggleSearchTag}
               onClear={clearSearchTags}
-              getTagUsage={getTagUsage}
               idPrefix="search-tag"
             />
           </div>

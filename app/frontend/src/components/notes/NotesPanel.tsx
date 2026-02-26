@@ -424,6 +424,15 @@ export function NotesPanel({
             <strong>{displayTitle}</strong>
           </div>
           <div className="note-row-actions" onClick={(event) => event.stopPropagation()}>
+            <button
+              className="action-icon note-row-actions-trigger"
+              type="button"
+              title="Copy note link"
+              aria-label="Copy note link"
+              onClick={() => actions.copyShareLink({ tab: 'notes', projectId: n.project_id, noteId: n.id })}
+            >
+              <Icon path="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4m2 7a5 5 0 0 0-7.07 0L3.1 13.83a5 5 0 1 0 7.07 7.07L13 18" />
+            </button>
             <DropdownMenu.Root>
               <DropdownMenu.Trigger asChild>
                 <button
@@ -440,13 +449,6 @@ export function NotesPanel({
                   <DropdownMenu.Item className="task-group-menu-item" onSelect={openNoteFromMenu} disabled={isOpen}>
                     <Icon path="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6zm9 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
                     <span>{isOpen ? 'Editor open' : 'Open editor'}</span>
-                  </DropdownMenu.Item>
-                  <DropdownMenu.Item
-                    className="task-group-menu-item"
-                    onSelect={() => actions.copyShareLink({ tab: 'notes', projectId: n.project_id, noteId: n.id })}
-                  >
-                    <Icon path="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4m2 7a5 5 0 0 0-7.07 0L3.1 13.83a5 5 0 1 0 7.07 7.07L13 18" />
-                    <span>Copy note link</span>
                   </DropdownMenu.Item>
                   <DropdownMenu.Separator className="task-group-menu-separator" />
                   <DropdownMenu.Item className="task-group-menu-item" onSelect={togglePinFromMenu}>
@@ -924,7 +926,6 @@ export function NotesPanel({
             selectedTags={state.noteTags}
             onToggleTag={state.toggleNoteFilterTag}
             onClear={() => state.clearNoteFilterTags()}
-            getTagUsage={state.getTagUsage}
             idPrefix="note-filter"
           />
         </div>

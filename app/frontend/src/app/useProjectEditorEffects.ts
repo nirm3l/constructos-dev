@@ -29,12 +29,12 @@ export function useProjectEditorEffects(c: any) {
       c.setEditProjectContextPackEvidenceTopKText('')
       c.setEditProjectChatIndexMode('OFF')
       c.setEditProjectChatAttachmentIngestionMode('METADATA_ONLY')
-      c.setEditProjectDescriptionView('write')
+      c.setEditProjectDescriptionView('split')
       if (!c.selectedProjectId) c.setShowProjectEditForm(false)
       c.setSelectedProjectRuleId(null)
       c.setProjectRuleTitle('')
       c.setProjectRuleBody('')
-      c.setProjectRuleView('write')
+      c.setProjectRuleView('split')
       return
     }
     c.setEditProjectName(c.selectedProject.name ?? '')
@@ -51,18 +51,16 @@ export function useProjectEditorEffects(c: any) {
     c.setEditProjectChatAttachmentIngestionMode(
       normalizeChatAttachmentIngestionMode(c.selectedProject.chat_attachment_ingestion_mode)
     )
-    const hasDescription = Boolean((c.selectedProject.description ?? '').trim())
-    c.setEditProjectDescriptionView(hasDescription ? 'preview' : 'write')
+    c.setEditProjectDescriptionView('split')
     c.setSelectedProjectRuleId(null)
     c.setProjectRuleTitle('')
     c.setProjectRuleBody('')
-    c.setProjectRuleView('write')
+    c.setProjectRuleView('split')
   }, [c.selectedProject?.id, c.selectedProjectId, c.setShowProjectEditForm])
 
   React.useEffect(() => {
     if (!c.showProjectCreateForm) return
-    const hasDescription = Boolean(c.projectDescription.trim())
-    c.setProjectDescriptionView(hasDescription ? 'preview' : 'write')
+    c.setProjectDescriptionView('split')
   }, [c.showProjectCreateForm])
 
   React.useEffect(() => {
@@ -76,7 +74,7 @@ export function useProjectEditorEffects(c: any) {
     if (!c.selectedProjectRule) return
     c.setProjectRuleTitle(c.selectedProjectRule.title ?? '')
     c.setProjectRuleBody(c.selectedProjectRule.body ?? '')
-    c.setProjectRuleView('write')
+    c.setProjectRuleView('split')
   }, [c.selectedProjectRule?.id])
 
   React.useEffect(() => {
@@ -85,7 +83,7 @@ export function useProjectEditorEffects(c: any) {
     if (!selected) return
     c.setDraftProjectRuleTitle(selected.title)
     c.setDraftProjectRuleBody(selected.body)
-    c.setDraftProjectRuleView('write')
+    c.setDraftProjectRuleView('split')
   }, [c.selectedDraftProjectRuleId, c.draftProjectRules])
 
   React.useEffect(() => {

@@ -16,12 +16,12 @@ Use this skill when a project must be implemented and published through GitHub.
 - Use only the repository and branching policy defined there.
 
 ## Implementation Workflow
-- When asked to implement the project, create the project structure on disk as defined by the project specification (for example `/<project-name>`).
+- When asked to implement the project, create the project structure on disk (outside /app) as defined by the project specification (for example `/<project-name>`).
 - Use GitHub MCP for repository operations and publishing to the repository defined in the specification.
 - Implement work task by task.
-- For each implemented task, create a commit and add the commit ID as an external reference on that task.
-- Add a project-level external reference to the GitHub repository.
-- As task implementation progresses, move tasks across the board columns according to project workflow.
+- For each implemented task, create a commit and add the commit ID as an external link on that task (not comment).
+- Add a project-level external link to the GitHub repository.
+- As task implementation progresses, move tasks across the board columns according to project workflow. This is important to keep realtime progress.
 
 ## Pull Request Decision Rules
 - If specifications, project description, or project rules require pull requests per task: create PRs per task.

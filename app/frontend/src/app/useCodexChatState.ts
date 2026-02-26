@@ -40,6 +40,7 @@ export type ChatSessionServerSnapshot = {
   mcpServers?: ChatMcpServer[]
   sessionAttachmentRefs?: AttachmentRef[]
   codexSessionId?: string | null
+  codex_session_id?: string | null
   codexResumeState?: CodexResumeState | null
   createdAt?: number
   updatedAt?: number
@@ -248,9 +249,10 @@ function normalizeSession(value: unknown): ChatSession | null {
   const createdAt = Number.isFinite(createdAtRaw) && createdAtRaw > 0 ? Math.floor(createdAtRaw) : Date.now()
   const updatedAt = Number.isFinite(updatedAtRaw) && updatedAtRaw > 0 ? Math.floor(updatedAtRaw) : createdAt
   const lastTaskEventAtRaw = Number(session.lastTaskEventAt)
+  const rawCodexSessionId = session.codexSessionId ?? session.codex_session_id
   const codexSessionId =
-    typeof session.codexSessionId === 'string' && session.codexSessionId.trim()
-      ? session.codexSessionId.trim()
+    typeof rawCodexSessionId === 'string' && rawCodexSessionId.trim()
+      ? rawCodexSessionId.trim()
       : null
   const codexResumeState = normalizeResumeState(session.codexResumeState ?? session.codex_resume_state ?? session.usage)
   return {
@@ -509,9 +511,9 @@ export function useCodexChatState(storageUserId?: string | null) {
             ?? []
           ),
           codexSessionId:
-            snapshot.codexSessionId !== undefined
-              ? (snapshot.codexSessionId && String(snapshot.codexSessionId).trim()
-                ? String(snapshot.codexSessionId).trim()
+            (snapshot.codexSessionId !== undefined || snapshot.codex_session_id !== undefined)
+              ? ((snapshot.codexSessionId ?? snapshot.codex_session_id) && String(snapshot.codexSessionId ?? snapshot.codex_session_id).trim()
+                ? String(snapshot.codexSessionId ?? snapshot.codex_session_id).trim()
                 : null)
               : (existing?.codexSessionId ?? null),
           codexResumeState: resumeState,

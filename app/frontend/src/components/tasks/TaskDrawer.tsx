@@ -421,6 +421,22 @@ export function TaskDrawer({ state }: { state: any }) {
                 <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
               </button>
             </TaskDrawerTooltip>
+            <TaskDrawerTooltip content="Copy task link">
+              <button
+                className="action-icon"
+                onClick={() =>
+                  state.copyShareLink({
+                    tab: 'tasks',
+                    projectId: state.selectedTask.project_id,
+                    taskId: state.selectedTask.id,
+                  })
+                }
+                title="Copy task link"
+                aria-label="Copy task link"
+              >
+                <Icon path="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4m2 7a5 5 0 0 0-7.07 0L3.1 13.83a5 5 0 1 0 7.07 7.07L13 18" />
+              </button>
+            </TaskDrawerTooltip>
             <DropdownMenu.Root>
               <TaskDrawerTooltip content="More actions">
                 <DropdownMenu.Trigger asChild>
@@ -431,18 +447,6 @@ export function TaskDrawer({ state }: { state: any }) {
               </TaskDrawerTooltip>
               <DropdownMenu.Portal>
                 <DropdownMenu.Content className="taskdrawer-actions-menu-content" sideOffset={8} align="end">
-                  <DropdownMenu.Item
-                    className="taskdrawer-actions-menu-item"
-                    onSelect={() =>
-                      state.copyShareLink({
-                        tab: 'tasks',
-                        projectId: state.selectedTask.project_id,
-                        taskId: state.selectedTask.id,
-                      })
-                    }
-                  >
-                    Copy task link
-                  </DropdownMenu.Item>
                   <DropdownMenu.Item
                     className="taskdrawer-actions-menu-item"
                     onSelect={() => {

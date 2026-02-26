@@ -71,7 +71,6 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           searchTags={state.searchTags}
           toggleSearchTag={state.toggleSearchTag}
           clearSearchTags={state.clearSearchTags}
-          getTagUsage={state.getTagUsage}
           boardData={state.tab === 'inbox' ? undefined : state.board.data}
           onOpenTaskEditor={state.openTaskEditor}
           onOpenSpecification={state.openSpecification}
@@ -397,7 +396,6 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           searchTags={state.searchTags}
           toggleSearchTag={state.toggleSearchTag}
           clearSearchTags={state.clearSearchTags}
-          getTagUsage={state.getTagUsage}
           onClose={() => state.setTab('tasks')}
         />
       )}
