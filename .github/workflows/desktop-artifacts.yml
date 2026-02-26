@@ -2,19 +2,6 @@ name: Desktop Artifacts
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      - master
-    tags:
-      - "desktop-v*"
-    paths:
-      - ".github/workflows/desktop-artifacts.yml"
-      - "desktop/**"
-  pull_request:
-    paths:
-      - ".github/workflows/desktop-artifacts.yml"
-      - "desktop/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

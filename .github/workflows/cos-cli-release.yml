@@ -2,9 +2,6 @@ name: COS CLI Release
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "cos-v*"
 
 jobs:
   build-and-release:
