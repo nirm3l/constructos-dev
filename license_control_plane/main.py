@@ -135,6 +135,14 @@ PUBLIC_REQUEST_TYPES = {"demo", "onboarding", "plan_details", "feedback"}
 SUPPORT_FEEDBACK_TYPES = {"general", "feature_request", "question", "other"}
 BUG_REPORT_SEVERITIES = {"low", "medium", "high", "critical"}
 BUG_REPORT_STATUSES = {"new", "triaged", "in_progress", "resolved", "closed", "rejected"}
+LEAD_STATUS_PENDING = "pending"
+LEAD_STATUS_ONBOARDING_SENT = "onboarding_sent"
+LEAD_STATUS_CONVERTED = "converted"
+SUPPORTED_LEAD_STATUSES = {
+    LEAD_STATUS_PENDING,
+    LEAD_STATUS_ONBOARDING_SENT,
+    LEAD_STATUS_CONVERTED,
+}
 SUPPORTED_SUBSCRIPTION_STATUSES = {"none", "active", "trialing", "grace", "lifetime", "beta"}
 SUBSCRIPTION_STATUS_ALIASES = {
     "past_due": "grace",
@@ -1468,6 +1476,78 @@ def _installation_customer_email(metadata: dict[str, Any]) -> str | None:
     return None
 
 
+def _update_lead_status_by_email(
+    db: Session,
+    *,
+    email: str,
+    target_status: str,
+    reason: str,
+) -> dict[str, int | str]:
+    normalized_email = _normalize_email(email)
+    normalized_target_status = str(target_status or "").strip().lower()
+    if normalized_target_status not in SUPPORTED_LEAD_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Unsupported lead status '{normalized_target_status}'")
+
+    now_iso = _now_utc().isoformat()
+    matched_waitlist = 0
+    matched_contact_requests = 0
+    updated_waitlist = 0
+    updated_contact_requests = 0
+
+    waitlist_rows = db.execute(select(WaitlistEntry).where(WaitlistEntry.email == normalized_email)).scalars().all()
+    for row in waitlist_rows:
+        matched_waitlist += 1
+        current_status = str(row.status or "").strip().lower() or LEAD_STATUS_PENDING
+        if current_status == LEAD_STATUS_CONVERTED and normalized_target_status != LEAD_STATUS_CONVERTED:
+            continue
+        if current_status == normalized_target_status:
+            continue
+        metadata = _load_metadata(row.metadata_json)
+        metadata["lead_status_reason"] = reason
+        metadata["lead_status_from"] = current_status
+        metadata["lead_status_to"] = normalized_target_status
+        metadata["lead_status_updated_at"] = now_iso
+        if normalized_target_status == LEAD_STATUS_ONBOARDING_SENT:
+            metadata.setdefault("onboarding_sent_at", now_iso)
+        if normalized_target_status == LEAD_STATUS_CONVERTED:
+            metadata["converted_at"] = now_iso
+        row.status = normalized_target_status
+        row.metadata_json = _dump_metadata(metadata)
+        updated_waitlist += 1
+
+    contact_rows = db.execute(select(ContactRequest).where(ContactRequest.email == normalized_email)).scalars().all()
+    for row in contact_rows:
+        matched_contact_requests += 1
+        current_status = str(row.status or "").strip().lower() or LEAD_STATUS_PENDING
+        if current_status == LEAD_STATUS_CONVERTED and normalized_target_status != LEAD_STATUS_CONVERTED:
+            continue
+        if current_status == normalized_target_status:
+            continue
+        metadata = _load_metadata(row.metadata_json)
+        metadata["lead_status_reason"] = reason
+        metadata["lead_status_from"] = current_status
+        metadata["lead_status_to"] = normalized_target_status
+        metadata["lead_status_updated_at"] = now_iso
+        if normalized_target_status == LEAD_STATUS_ONBOARDING_SENT:
+            metadata.setdefault("onboarding_sent_at", now_iso)
+        if normalized_target_status == LEAD_STATUS_CONVERTED:
+            metadata["converted_at"] = now_iso
+        row.status = normalized_target_status
+        row.metadata_json = _dump_metadata(metadata)
+        updated_contact_requests += 1
+
+    return {
+        "email": normalized_email,
+        "target_status": normalized_target_status,
+        "matched_waitlist": matched_waitlist,
+        "matched_contact_requests": matched_contact_requests,
+        "updated_waitlist": updated_waitlist,
+        "updated_contact_requests": updated_contact_requests,
+        "matched_total": matched_waitlist + matched_contact_requests,
+        "updated_total": updated_waitlist + updated_contact_requests,
+    }
+
+
 def _lookup_customer_email_by_customer_ref(db: Session, customer_refs: set[str]) -> dict[str, str]:
     normalized_refs = {str(customer_ref or "").strip() for customer_ref in customer_refs}
     normalized_refs = {customer_ref for customer_ref in normalized_refs if customer_ref}
@@ -2253,13 +2333,26 @@ def activate_installation(
         activation_code.usage_count = int(activation_code.usage_count) + 1
     activation_code.last_used_at = now
 
+    lead_status_updates: dict[str, int | str] | None = None
+    if activation_code_email:
+        lead_status_updates = _update_lead_status_by_email(
+            db,
+            email=activation_code_email,
+            target_status=LEAD_STATUS_CONVERTED,
+            reason="installation_activated",
+        )
+
     entitlement = _compute_entitlement(installation)
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
     _publish_admin_event(
         "installations",
         "activated",
-        {"installation_id": installation.installation_id, "customer_ref": installation.customer_ref},
+        {
+            "installation_id": installation.installation_id,
+            "customer_ref": installation.customer_ref,
+            "lead_status_updates": lead_status_updates,
+        },
     )
 
     refreshed_active_count = len(_active_customer_installations(db, activation_code.customer_ref))
@@ -2274,6 +2367,7 @@ def activate_installation(
             "max_installations": int(activation_code.max_installations),
             "customer_ref": activation_code.customer_ref,
         },
+        "lead_status_updates": lead_status_updates,
     }
 
 
@@ -2465,6 +2559,7 @@ def admin_send_email(
 def admin_send_onboarding_email(
     payload: AdminOnboardingEmailSendRequest,
     _auth: None = Depends(_require_admin_token),
+    db: Session = Depends(_get_db),
 ) -> dict[str, Any]:
     to_email = _normalize_email(payload.to_email)
     customer_ref = _normalize_customer_ref(payload.customer_ref)
@@ -2496,6 +2591,14 @@ def admin_send_onboarding_email(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Failed to send onboarding email: {exc}") from exc
 
+    lead_status_updates = _update_lead_status_by_email(
+        db,
+        email=to_email,
+        target_status=LEAD_STATUS_ONBOARDING_SENT,
+        reason="onboarding_email_sent",
+    )
+    db.commit()
+
     _publish_admin_event(
         "email",
         "onboarding_sent",
@@ -2504,6 +2607,7 @@ def admin_send_onboarding_email(
             "customer_ref": customer_ref,
             "provider": "resend",
             "message_id": message_id,
+            "lead_status_updates": lead_status_updates,
         },
     )
     return {
@@ -2513,6 +2617,7 @@ def admin_send_onboarding_email(
         "customer_ref": customer_ref,
         "subject": subject,
         "message_id": message_id,
+        "lead_status_updates": lead_status_updates,
     }
 
 
@@ -2581,6 +2686,13 @@ def admin_provision_onboarding(
             html_body=html_body,
         )
 
+        lead_status_updates = _update_lead_status_by_email(
+            db,
+            email=to_email,
+            target_status=LEAD_STATUS_ONBOARDING_SENT,
+            reason="onboarding_package_provisioned",
+        )
+
         db.commit()
         db.refresh(client_token_record)
         db.refresh(activation_code_record)
@@ -2603,6 +2715,7 @@ def admin_provision_onboarding(
             "client_token_id": client_token_record.id,
             "activation_code_id": activation_code_record.id,
             "message_id": message_id,
+            "lead_status_updates": lead_status_updates,
         },
     )
     return {
@@ -2616,6 +2729,7 @@ def admin_provision_onboarding(
         "client_token_record": _serialize_client_token(client_token_record),
         "activation_code": activation_code_raw,
         "activation_code_record": _serialize_activation_code(activation_code_record),
+        "lead_status_updates": lead_status_updates,
     }
 
 

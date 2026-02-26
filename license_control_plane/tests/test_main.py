@@ -484,6 +484,22 @@ def test_admin_installation_customer_email_lookup_fallback_from_customer_ref(tmp
 
 def test_activation_propagates_customer_email_from_activation_code_metadata(tmp_path: Path):
     with _build_client(tmp_path) as client:
+        waitlist = client.post(
+            "/v1/public/waitlist",
+            json={"email": "propagation@example.com", "source": "marketing-site"},
+        )
+        assert waitlist.status_code == 200
+
+        contact = client.post(
+            "/v1/public/contact-requests",
+            json={
+                "request_type": "onboarding",
+                "email": "propagation@example.com",
+                "source": "marketing-site",
+            },
+        )
+        assert contact.status_code == 200
+
         create_code = client.post(
             "/v1/admin/activation-codes",
             headers={"Authorization": "Bearer control-plane-token"},
@@ -511,6 +527,9 @@ def test_activation_propagates_customer_email_from_activation_code_metadata(tmp_
         assert activate.status_code == 200
         activate_payload = activate.json()
         assert activate_payload["installation"]["customer_email"] == "propagation@example.com"
+        assert activate_payload["lead_status_updates"]["updated_total"] == 2
+        assert activate_payload["lead_status_updates"]["updated_waitlist"] == 1
+        assert activate_payload["lead_status_updates"]["updated_contact_requests"] == 1
 
         details = client.get(
             "/v1/admin/installations/cp-email-propagation",
@@ -519,6 +538,24 @@ def test_activation_propagates_customer_email_from_activation_code_metadata(tmp_
         assert details.status_code == 200
         detail_payload = details.json()
         assert detail_payload["installation"]["customer_email"] == "propagation@example.com"
+
+        waitlist_list = client.get(
+            "/v1/admin/waitlist?q=propagation@example.com",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert waitlist_list.status_code == 200
+        waitlist_payload = waitlist_list.json()
+        assert waitlist_payload["total"] == 1
+        assert waitlist_payload["items"][0]["status"] == "converted"
+
+        contact_list = client.get(
+            "/v1/admin/contact-requests?q=propagation@example.com",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert contact_list.status_code == 200
+        contact_payload = contact_list.json()
+        assert contact_payload["total"] == 1
+        assert contact_payload["items"][0]["status"] == "converted"
 
 
 def test_startup_backfills_customer_email_for_existing_installations(tmp_path: Path):
@@ -1461,6 +1498,22 @@ def test_admin_send_onboarding_email_succeeds_with_template(monkeypatch, tmp_pat
 
         monkeypatch.setattr(lcp_main, "_send_email_via_resend", _fake_send)
 
+        waitlist = client.post(
+            "/v1/public/waitlist",
+            json={"email": "ops@example.com", "source": "marketing-site"},
+        )
+        assert waitlist.status_code == 200
+
+        contact = client.post(
+            "/v1/public/contact-requests",
+            json={
+                "request_type": "onboarding",
+                "email": "ops@example.com",
+                "source": "marketing-site",
+            },
+        )
+        assert contact.status_code == 200
+
         response = client.post(
             "/v1/admin/email/send-onboarding",
             headers={"Authorization": "Bearer control-plane-token"},
@@ -1480,6 +1533,9 @@ def test_admin_send_onboarding_email_succeeds_with_template(monkeypatch, tmp_pat
         assert payload["to_email"] == "ops@example.com"
         assert payload["customer_ref"] == "cust_example"
         assert payload["message_id"] == "re_onboarding_message_id"
+        assert payload["lead_status_updates"]["updated_total"] == 2
+        assert payload["lead_status_updates"]["updated_waitlist"] == 1
+        assert payload["lead_status_updates"]["updated_contact_requests"] == 1
         assert "ConstructOS onboarding package" in payload["subject"]
         assert captured["to_email"] == "ops@example.com"
         assert "ACTIVATION_CODE=ACT-TEST-0001" in captured["text_body"]
@@ -1496,6 +1552,24 @@ def test_admin_send_onboarding_email_succeeds_with_template(monkeypatch, tmp_pat
         assert "Windows (cmd.exe):" in captured["html_body"]
         assert "install.ps1" in captured["html_body"]
         assert "Manual deploy command (optional):" not in captured["html_body"]
+
+        waitlist_list = client.get(
+            "/v1/admin/waitlist?q=ops@example.com",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert waitlist_list.status_code == 200
+        waitlist_payload = waitlist_list.json()
+        assert waitlist_payload["total"] == 1
+        assert waitlist_payload["items"][0]["status"] == "onboarding_sent"
+
+        contact_list = client.get(
+            "/v1/admin/contact-requests?q=ops@example.com&request_type=onboarding",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert contact_list.status_code == 200
+        contact_payload = contact_list.json()
+        assert contact_payload["total"] == 1
+        assert contact_payload["items"][0]["status"] == "onboarding_sent"
 
 
 def test_admin_send_onboarding_email_rejects_non_https_script_url(tmp_path: Path):
@@ -1541,6 +1615,22 @@ def test_admin_provision_onboarding_generates_and_sends_package(monkeypatch, tmp
 
         monkeypatch.setattr(lcp_main, "_send_email_via_resend", _fake_send)
 
+        waitlist = client.post(
+            "/v1/public/waitlist",
+            json={"email": "ops@example.com", "source": "marketing-site"},
+        )
+        assert waitlist.status_code == 200
+
+        contact = client.post(
+            "/v1/public/contact-requests",
+            json={
+                "request_type": "onboarding",
+                "email": "ops@example.com",
+                "source": "marketing-site",
+            },
+        )
+        assert contact.status_code == 200
+
         response = client.post(
             "/v1/admin/onboarding/provision",
             headers={"Authorization": "Bearer control-plane-token"},
@@ -1564,6 +1654,9 @@ def test_admin_provision_onboarding_generates_and_sends_package(monkeypatch, tmp
         assert payload["activation_code_record"]["customer_ref"] == payload["customer_ref"]
         assert payload["client_token_record"]["customer_ref"] == payload["customer_ref"]
         assert payload["activation_code_record"]["max_installations"] == 3
+        assert payload["lead_status_updates"]["updated_total"] == 2
+        assert payload["lead_status_updates"]["updated_waitlist"] == 1
+        assert payload["lead_status_updates"]["updated_contact_requests"] == 1
         assert captured["to_email"] == "ops@example.com"
         assert f"ACTIVATION_CODE={payload['activation_code']}" in captured["text_body"]
         assert "INSTALL_COS=true" in captured["text_body"]
@@ -1578,6 +1671,24 @@ def test_admin_provision_onboarding_generates_and_sends_package(monkeypatch, tmp
         assert "Windows (cmd.exe):" in captured["html_body"]
         assert "install.ps1" in captured["html_body"]
         assert "Manual deploy command (optional):" not in captured["html_body"]
+
+        waitlist_list = client.get(
+            "/v1/admin/waitlist?q=ops@example.com",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert waitlist_list.status_code == 200
+        waitlist_payload = waitlist_list.json()
+        assert waitlist_payload["total"] == 1
+        assert waitlist_payload["items"][0]["status"] == "onboarding_sent"
+
+        contact_list = client.get(
+            "/v1/admin/contact-requests?q=ops@example.com&request_type=onboarding",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert contact_list.status_code == 200
+        contact_payload = contact_list.json()
+        assert contact_payload["total"] == 1
+        assert contact_payload["items"][0]["status"] == "onboarding_sent"
 
 
 def test_admin_provision_onboarding_lifetime_plan_ignores_valid_until(monkeypatch, tmp_path: Path):
