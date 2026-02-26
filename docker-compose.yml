@@ -20,7 +20,7 @@ services:
     restart: unless-stopped
 
   kurrentdb:
-    image: kurrentplatform/kurrentdb:25.1
+    image: docker.kurrent.io/kurrent-latest/kurrentdb:latest
     container_name: kurrentdb
     environment:
       KURRENTDB_CLUSTER_SIZE: 1
