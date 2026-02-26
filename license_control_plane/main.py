@@ -105,9 +105,6 @@ LCP_ONBOARDING_INSTALL_SCRIPT_URL = (
     or "https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh"
 )
 LCP_ONBOARDING_SUPPORT_EMAIL = os.getenv("LCP_ONBOARDING_SUPPORT_EMAIL", "support@constructos.dev").strip() or "support@constructos.dev"
-LCP_ONBOARDING_INSTALL_DESKTOP_APP = os.getenv("LCP_ONBOARDING_INSTALL_DESKTOP_APP", "ask").strip().lower() or "ask"
-if LCP_ONBOARDING_INSTALL_DESKTOP_APP not in {"ask", "always", "skip"}:
-    LCP_ONBOARDING_INSTALL_DESKTOP_APP = "ask"
 LCP_BETA_PLAN_VALID_UNTIL = (
     _env_datetime_utc("LCP_BETA_PLAN_VALID_UNTIL")
     or _env_datetime_utc("LCP_PUBLIC_BETA_FREE_UNTIL")
@@ -629,25 +626,18 @@ def _build_onboarding_email_template(
         install_script_url,
         count=1,
     )
-    desktop_install_mode = LCP_ONBOARDING_INSTALL_DESKTOP_APP
     install_env_segments = [
         f"ACTIVATION_CODE={activation_code}",
         f"IMAGE_TAG={image_tag}",
         "INSTALL_COS=true",
         "AUTO_DEPLOY=1",
     ]
-    if desktop_install_mode != "skip":
-        install_env_segments.append(f"INSTALL_DESKTOP_APP={desktop_install_mode}")
     install_command = (
         f"curl -fsSL {install_script_url} | "
         f"{' '.join(install_env_segments)} bash"
     )
     windows_download_command = f"curl -fsSL -o install.ps1 {windows_install_script_url}"
-    windows_prefix = ""
-    if desktop_install_mode != "skip":
-        windows_prefix = f"set INSTALL_DESKTOP_APP={desktop_install_mode} && "
     windows_install_command = (
-        f"{windows_prefix}"
         "powershell -NoProfile -ExecutionPolicy Bypass -File .\\install.ps1 "
         f"-ActivationCode {activation_code} -ImageTag {image_tag} -InstallCos true -AutoDeploy true"
     )

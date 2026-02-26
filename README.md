@@ -16,7 +16,6 @@ m4tr1x is a task/project platform that combines:
 - `docs/05-operations-runbook.md` - deployment, env config, observability, troubleshooting.
 - `docs/08-cqrs-consistency-guardrails.md` - CQRS consistency rules, allowlist policy, and guardrail enforcement.
 - `docs/12-macos-m4-licensing-and-distribution-plan.md` - cross-platform runtime, licensing, and distribution roadmap.
-- `docs/19-electron-desktop-packaging.md` - desktop shell architecture and Electron packaging workflow.
 
 ## System At A Glance
 ```mermaid
@@ -117,7 +116,6 @@ export LCP_EMAIL_REPLY_TO='support@constructos.dev'
 export LCP_CUSTOMER_REF_SECRET='replace-with-long-random-secret'
 export LCP_ONBOARDING_IMAGE_TAG='main'
 export LCP_ONBOARDING_INSTALL_SCRIPT_URL='https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh'
-export LCP_ONBOARDING_INSTALL_DESKTOP_APP='ask'  # ask | always | skip
 export LCP_ONBOARDING_SUPPORT_EMAIL='support@constructos.dev'
 ./scripts/deploy-control-plane.sh restart
 ```
@@ -174,53 +172,6 @@ Optional for Codex git push from `task-app` container:
 - set `GITHUB_PAT` in `.env` to a GitHub token with repository write access.
 - runtime maps `GITHUB_PAT` to `GITHUB_TOKEN` when `GITHUB_TOKEN` is not already set.
 
-## Desktop App (Electron)
-The repository includes a cross-platform Electron shell in `desktop/`.
-
-```bash
-cd desktop
-npm install
-npm run start
-```
-
-Default backend target is `http://127.0.0.1:8080`. Override if needed:
-
-```bash
-CONSTRUCTOS_APP_URL=http://127.0.0.1:8080 npm run start
-```
-
-In-app endpoint configuration is also available:
-- `File -> Connection Settings` (`Cmd/Ctrl + ,`)
-- offline screen editor (`Save Endpoint + Retry`)
-
-Build desktop artifacts:
-
-```bash
-cd desktop
-npm install
-npm run dist
-```
-
-Platform-specific packaging:
-- `npm run dist:mac`
-- `npm run dist:win`
-- `npm run dist:linux`
-
-Artifacts are written to `desktop/release/`.
-
-CI workflow for desktop artifacts:
-- `.github/workflows/desktop-artifacts.yml` (Linux + Windows + macOS)
-- manual run (`workflow_dispatch`) builds all desktop installers
-- set `release_tag` (for example `desktop-v0.1.3`) to publish assets
-- release assets are published to `nirm3l/constructos` (not this repository)
-- required secret for publish step: `CONSTRUCTOS_RELEASE_TOKEN`
-- for macOS release publishing, workflow now requires code-sign + notarization secrets and fails fast if missing
-- notarization auth can use either:
-  - `DESKTOP_APPLE_ID` + `DESKTOP_APPLE_APP_SPECIFIC_PASSWORD` + `DESKTOP_APPLE_TEAM_ID`
-  - `DESKTOP_APPLE_API_KEY` + `DESKTOP_APPLE_API_KEY_ID` + `DESKTOP_APPLE_API_ISSUER`
-- optional helper to upload signing/notarization secrets:
-  - `./scripts/set_desktop_signing_secrets.sh` (uses `gh secret set`)
-
 ## Optional: Jira MCP (Separate Compose)
 1. Create local env file:
 ```bash
@@ -268,7 +219,6 @@ Repository and docs:
 - Eventing: KurrentDB/EventStore + persistent subscription projection workers.
 - Datastores: PostgreSQL (read), KurrentDB (event source), Neo4j (graph).
 - Frontend: React + TypeScript + TanStack Query.
-- Desktop shell: Electron + electron-builder.
 - AI integration: FastMCP server + Codex command adapter.
 
 ## Repository Layout
@@ -276,7 +226,6 @@ Repository and docs:
 - `app/features/*` - vertical slices (tasks, projects, specs, notes, rules, agents...).
 - `app/shared/*` - eventing, projections, models, settings, bootstrap, graph.
 - `app/frontend/*` - SPA and UI state management.
-- `desktop/*` - Electron desktop wrapper and packaging config.
 - `marketing-site/*` - static marketing website served by dedicated Nginx container.
 - `license_control_plane/*` - standalone licensing control-plane service (register/heartbeat/admin subscription update + activation code issuance + seat limits).
 - `scripts/*` - deploy, reset, and helper scripts.
