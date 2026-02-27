@@ -9,10 +9,13 @@ import {
   getProjectGraphSubgraph,
   getProjectRules,
   getProjectSkills,
+  getNote,
   getWorkspaceSkills,
   listProjectTemplates,
   searchProjectKnowledge,
+  getSpecification,
   getTaskGroups,
+  getTask,
   getSpecifications,
   getProjectTags,
   getTasks,
@@ -29,9 +32,15 @@ export function useCoreQueries(c: any) {
     (c.selectedProjectEmbeddingIndexStatus === 'ready' || c.selectedProjectEmbeddingIndexStatus === 'stale')
 
   const tasks = useQuery({
-    queryKey: ['tasks', c.userId, c.workspaceId, c.tab, c.selectedProjectId, c.searchQ, c.searchStatus, c.searchPriority, c.searchArchived, c.searchTags.join(',')],
+    queryKey: ['tasks', c.userId, c.workspaceId, c.tab, c.selectedProjectId, c.searchQ, c.searchStatus, c.searchPriority, c.searchArchived, c.searchTags.join(','), c.taskParams?.limit, c.taskParams?.offset],
     queryFn: () => getTasks(c.userId, c.workspaceId, c.taskParams),
     enabled: Boolean(c.workspaceId && c.taskParams) && (c.tab === 'inbox' || c.tab === 'tasks' || c.tab === 'search')
+  })
+
+  const selectedTask = useQuery({
+    queryKey: ['task', c.userId, c.selectedTaskId],
+    queryFn: () => getTask(c.userId, c.selectedTaskId),
+    enabled: Boolean(c.userId && c.selectedTaskId && c.tab === 'tasks'),
   })
 
   const taskLookup = useQuery({
@@ -39,20 +48,22 @@ export function useCoreQueries(c: any) {
     queryFn: () =>
       getTasks(c.userId, c.workspaceId, {
         project_id: c.selectedProjectId,
-        limit: 200,
+        limit: 500,
         offset: 0,
       }),
     enabled: Boolean(c.workspaceId && c.selectedProjectId),
   })
 
   const notes = useQuery({
-    queryKey: ['notes', c.userId, c.workspaceId, c.selectedProjectId, c.noteGroupFilterId, c.noteArchived, c.noteTags.join(',')],
+    queryKey: ['notes', c.userId, c.workspaceId, c.selectedProjectId, c.noteGroupFilterId, c.noteArchived, c.noteTags.join(','), c.notesPageLimit],
     queryFn: () =>
       getNotes(c.userId, c.workspaceId, {
         project_id: c.selectedProjectId,
         note_group_id: c.noteGroupFilterId || undefined,
         tags: c.noteTags,
-        archived: c.noteArchived
+        archived: c.noteArchived,
+        limit: c.notesPageLimit,
+        offset: 0,
       }),
     enabled: Boolean(c.workspaceId && c.selectedProjectId) && c.tab === 'notes'
   })
@@ -84,10 +95,16 @@ export function useCoreQueries(c: any) {
     queryFn: () =>
       getNotes(c.userId, c.workspaceId, {
         project_id: c.selectedProjectId,
-        limit: 200,
+        limit: 500,
         offset: 0,
       }),
     enabled: Boolean(c.workspaceId && c.selectedProjectId),
+  })
+
+  const selectedNote = useQuery({
+    queryKey: ['note', c.userId, c.selectedNoteId],
+    queryFn: () => getNote(c.userId, c.selectedNoteId),
+    enabled: Boolean(c.userId && c.selectedNoteId && c.tab === 'notes'),
   })
 
   const searchNotes = useQuery({
@@ -178,6 +195,7 @@ export function useCoreQueries(c: any) {
       c.specificationStatus,
       specificationArchivedFilter,
       c.specificationTags.join(','),
+      c.specificationsPageLimit,
     ],
     queryFn: () =>
       getSpecifications(c.userId, c.workspaceId, {
@@ -185,6 +203,8 @@ export function useCoreQueries(c: any) {
         status: c.specificationStatus || undefined,
         tags: c.specificationTags,
         archived: specificationArchivedFilter,
+        limit: c.specificationsPageLimit,
+        offset: 0,
       }),
     enabled: Boolean(c.workspaceId && c.selectedProjectId) && c.tab === 'specifications',
   })
@@ -228,10 +248,16 @@ export function useCoreQueries(c: any) {
     queryFn: () =>
       getSpecifications(c.userId, c.workspaceId, {
         project_id: c.selectedProjectId,
-        limit: 200,
+        limit: 500,
         offset: 0,
       }),
     enabled: Boolean(c.workspaceId && c.selectedProjectId),
+  })
+
+  const selectedSpecification = useQuery({
+    queryKey: ['specification', c.userId, c.selectedSpecificationId],
+    queryFn: () => getSpecification(c.userId, c.selectedSpecificationId),
+    enabled: Boolean(c.userId && c.selectedSpecificationId && c.tab === 'specifications'),
   })
 
   const specTasks = useQuery({
@@ -296,8 +322,10 @@ export function useCoreQueries(c: any) {
 
   return {
     tasks,
+    selectedTask,
     taskLookup,
     notes,
+    selectedNote,
     taskGroups,
     noteGroups,
     noteLookup,
@@ -312,6 +340,7 @@ export function useCoreQueries(c: any) {
     projectGraphContextPack,
     projectGraphSubgraph,
     specifications,
+    selectedSpecification,
     searchSpecifications,
     searchKnowledge,
     specificationLookup,

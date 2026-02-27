@@ -280,6 +280,8 @@ type TasksPanelProps = {
   specificationNames: Record<string, string>
   onMoveTaskStatus: (taskId: string, nextStatus: string, nextTaskGroupId?: string | null) => void
   tasks: Task[]
+  canLoadMoreTasks: boolean
+  onLoadMoreTasks: () => void
   onRestoreTask: (taskId: string) => void
   onReopenTask: (taskId: string) => void
   onCompleteTask: (taskId: string) => void
@@ -308,6 +310,8 @@ export function TasksPanel({
   specificationNames,
   onMoveTaskStatus,
   tasks,
+  canLoadMoreTasks,
+  onLoadMoreTasks,
   onRestoreTask,
   onReopenTask,
   onCompleteTask,
@@ -536,8 +540,23 @@ export function TasksPanel({
 
   const visibleBoardStatuses = React.useMemo(() => {
     if (!boardData || !boardLanes) return []
-    if (hasGroups) return boardData.statuses
-    return boardData.statuses.filter((status) => (boardLanes[status] ?? []).length > 0)
+    const statuses: string[] = []
+    const seen = new Set<string>()
+
+    const pushStatus = (raw: string) => {
+      const status = String(raw || '').trim()
+      if (!status) return
+      const key = status.toLowerCase()
+      if (seen.has(key)) return
+      seen.add(key)
+      statuses.push(status)
+    }
+
+    for (const status of boardData.statuses) pushStatus(status)
+    for (const status of Object.keys(boardLanes)) pushStatus(status)
+
+    if (hasGroups) return statuses
+    return statuses.filter((status) => (boardLanes[status] ?? []).length > 0)
   }, [boardData, boardLanes, hasGroups])
 
   const onProjectsModeChange = React.useCallback((value: string) => {
@@ -1020,6 +1039,20 @@ export function TasksPanel({
           {filteredTasks.length === 0 && (
             <div className="notice" style={{ marginTop: 10 }}>No tasks in this project.</div>
           )}
+        </div>
+      )}
+
+      {canLoadMoreTasks && (
+        <div className="row" style={{ justifyContent: 'center', marginTop: 12 }}>
+          <button
+            className="pill subtle"
+            type="button"
+            onClick={onLoadMoreTasks}
+            title="Load more tasks"
+            aria-label="Load more tasks"
+          >
+            Load more tasks
+          </button>
         </div>
       )}
 

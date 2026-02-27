@@ -76,7 +76,9 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           onOpenSpecification={state.openSpecification}
           specificationNames={state.specificationNameMap}
           onMoveTaskStatus={state.moveTaskToStatus}
-          tasks={state.tasks.data?.items ?? []}
+          tasks={state.taskListItems ?? []}
+          canLoadMoreTasks={state.canLoadMoreTasks}
+          onLoadMoreTasks={state.loadMoreTasks}
           onRestoreTask={(taskId) => state.restoreTaskMutation.mutate(taskId)}
           onReopenTask={(taskId) => state.reopenTaskMutation.mutate(taskId)}
           onCompleteTask={(taskId) => state.completeTaskMutation.mutate(taskId)}

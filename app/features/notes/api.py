@@ -24,7 +24,7 @@ def list_notes(
     tags: str | None = None,
     archived: bool = False,
     pinned: bool | None = None,
-    limit: int = Query(default=30, le=200),
+    limit: int = Query(default=30, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),

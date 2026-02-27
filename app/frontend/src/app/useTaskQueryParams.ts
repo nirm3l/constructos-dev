@@ -3,13 +3,14 @@ import React from 'react'
 export function useTaskQueryParams(args: {
   tab: string
   selectedProjectId: string
+  tasksPageLimit: number
   searchQ: string
   searchStatus: string
   searchPriority: string
   searchArchived: boolean
   searchTags: string[]
 }) {
-  const { tab, selectedProjectId, searchQ, searchStatus, searchPriority, searchArchived, searchTags } = args
+  const { tab, selectedProjectId, tasksPageLimit, searchQ, searchStatus, searchPriority, searchArchived, searchTags } = args
 
   return React.useMemo(() => {
     if (!selectedProjectId) return null
@@ -18,6 +19,8 @@ export function useTaskQueryParams(args: {
       return {
         project_id: selectedProjectId,
         tags: searchTags,
+        limit: tasksPageLimit,
+        offset: 0,
       }
     }
     if (tab === 'search') {
@@ -31,5 +34,5 @@ export function useTaskQueryParams(args: {
       }
     }
     return null
-  }, [tab, selectedProjectId, searchQ, searchStatus, searchPriority, searchArchived, searchTags])
+  }, [tab, selectedProjectId, tasksPageLimit, searchQ, searchStatus, searchPriority, searchArchived, searchTags])
 }

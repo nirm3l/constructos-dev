@@ -881,6 +881,19 @@ export function SpecificationsPanel({ state }: { state: any }) {
               </div>
             )
           })}
+          {!state.specifications.isLoading && state.canLoadMoreSpecifications && (
+            <div className="row" style={{ justifyContent: 'center', marginTop: 12 }}>
+              <button
+                className="pill subtle"
+                type="button"
+                onClick={state.loadMoreSpecifications}
+                title="Load more specifications"
+                aria-label="Load more specifications"
+              >
+                Load more specifications
+              </button>
+            </div>
+          )}
         </div>
       </div>
 

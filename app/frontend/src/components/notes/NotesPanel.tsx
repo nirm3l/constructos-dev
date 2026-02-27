@@ -1067,6 +1067,20 @@ export function NotesPanel({
               <div className="notice">No notes in this project.</div>
             )
           )}
+
+          {!state.notes.isLoading && state.canLoadMoreNotes && (
+            <div className="row" style={{ justifyContent: 'center', marginTop: 12 }}>
+              <button
+                className="pill subtle"
+                type="button"
+                onClick={state.loadMoreNotes}
+                title="Load more notes"
+                aria-label="Load more notes"
+              >
+                Load more notes
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
