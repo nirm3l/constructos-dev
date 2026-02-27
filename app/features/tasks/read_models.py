@@ -178,6 +178,7 @@ def get_task_automation_status_read_model(db: Session, user, task_id: str) -> di
     return {
         "task_id": task_id,
         "automation_state": state.get("automation_state", "idle"),
+        "automation_pending_requests": int(state.get("automation_pending_requests") or 0),
         "last_agent_run_at": state.get("last_agent_run_at"),
         "last_agent_error": state.get("last_agent_error"),
         "last_agent_comment": state.get("last_agent_comment"),

@@ -57,6 +57,14 @@ class QueuedAutomationRun:
     is_scheduled_run: bool
 
 
+def _normalize_nonnegative_int(value) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        return 0
+    return max(0, parsed)
+
+
 def _append_schedule_rearm_update(
     *,
     db,
@@ -87,6 +95,53 @@ def _append_schedule_rearm_update(
             "workspace_id": workspace_id,
             "project_id": project_id,
             "task_id": task_id,
+        },
+    )
+
+
+def _requeue_pending_status_change_request(
+    *,
+    db,
+    run: QueuedAutomationRun,
+    state: dict,
+    workspace_id: str,
+    project_id: str | None,
+    requested_at_iso: str,
+) -> None:
+    pending_requests = _normalize_nonnegative_int(state.get("automation_pending_requests"))
+    if pending_requests <= 0:
+        return
+    append_event(
+        db,
+        aggregate_type="Task",
+        aggregate_id=run.task_id,
+        event_type=TASK_EVENT_UPDATED,
+        payload={"automation_pending_requests": pending_requests - 1},
+        metadata={
+            "actor_id": AGENT_SYSTEM_USER_ID,
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "task_id": run.task_id,
+        },
+    )
+    instruction = run.instruction or str(state.get("instruction") or state.get("scheduled_instruction") or "").strip()
+    if not instruction:
+        return
+    append_event(
+        db,
+        aggregate_type="Task",
+        aggregate_id=run.task_id,
+        event_type=EVENT_AUTOMATION_REQUESTED,
+        payload={
+            "requested_at": requested_at_iso,
+            "instruction": instruction,
+            "source": "status_change",
+        },
+        metadata={
+            "actor_id": AGENT_SYSTEM_USER_ID,
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "task_id": run.task_id,
         },
     )
 
@@ -230,6 +285,14 @@ def _record_automation_success(run: QueuedAutomationRun, *, summary: str, action
                 execution_triggers=state.get("execution_triggers"),
                 now_utc=now_utc,
             )
+        _requeue_pending_status_change_request(
+            db=db,
+            run=run,
+            state=state,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            requested_at_iso=completed_at,
+        )
         db.commit()
 
 
@@ -278,6 +341,14 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 execution_triggers=state.get("execution_triggers"),
                 now_utc=now_utc,
             )
+        _requeue_pending_status_change_request(
+            db=db,
+            run=run,
+            state=state,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            requested_at_iso=failed_at,
+        )
         db.commit()
 
 

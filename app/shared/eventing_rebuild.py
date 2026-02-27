@@ -358,6 +358,11 @@ def load_events_after(db: Session, aggregate_type: str, aggregate_id: str, versi
 def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, Any]:
     def _normalize_task_automation_state(payload: dict[str, Any]) -> dict[str, Any]:
         s_local = dict(payload)
+        try:
+            pending_requests = int(s_local.get("automation_pending_requests") or 0)
+        except Exception:
+            pending_requests = 0
+        s_local["automation_pending_requests"] = max(0, pending_requests)
         instruction = str(s_local.get("instruction") or s_local.get("scheduled_instruction") or "").strip() or None
         execution_triggers = normalize_execution_triggers(s_local.get("execution_triggers"))
         if str(s_local.get("task_type") or "").strip().lower() == "manual":
@@ -438,6 +443,7 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "last_agent_comment": None,
             "last_requested_instruction": None,
             "last_requested_source": None,
+            "automation_pending_requests": 0,
         }
     elif event.event_type in {TASK_EVENT_UPDATED, TASK_EVENT_REORDERED}:
         s.update(p)

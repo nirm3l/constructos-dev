@@ -5448,6 +5448,84 @@ def test_status_change_trigger_external_all_waits_for_all_selected_tasks(tmp_pat
     assert payload['last_requested_instruction'] == 'Run after both dependencies are done'
 
 
+def test_status_change_triggers_queue_pending_requests_when_target_is_busy(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    source_a = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Busy queue source A',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    source_b = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Busy queue source B',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert source_a.status_code == 200
+    assert source_b.status_code == 200
+    source_a_id = source_a.json()['id']
+    source_b_id = source_b.json()['id']
+
+    target = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Busy queue target',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Audit status change',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'external',
+                    'match_mode': 'any',
+                    'selector': {'task_ids': [source_a_id, source_b_id]},
+                    'to_statuses': ['Done'],
+                },
+            ],
+        },
+    )
+    assert target.status_code == 200
+    target_id = target.json()['id']
+
+    complete_a = client.post(f'/api/tasks/{source_a_id}/complete')
+    complete_b = client.post(f'/api/tasks/{source_b_id}/complete')
+    assert complete_a.status_code == 200
+    assert complete_b.status_code == 200
+
+    queued = client.get(f'/api/tasks/{target_id}/automation')
+    assert queued.status_code == 200
+    queued_payload = queued.json()
+    assert queued_payload['automation_state'] == 'queued'
+    assert int(queued_payload.get('automation_pending_requests') or 0) >= 1
+
+    from features.agents.runner import run_queued_automation_once
+
+    first_processed = run_queued_automation_once(limit=10)
+    assert first_processed >= 1
+    after_first = client.get(f'/api/tasks/{target_id}/automation')
+    assert after_first.status_code == 200
+    after_first_payload = after_first.json()
+    assert after_first_payload['automation_state'] == 'queued'
+
+    second_processed = run_queued_automation_once(limit=10)
+    assert second_processed >= 1
+    after_second = client.get(f'/api/tasks/{target_id}/automation')
+    assert after_second.status_code == 200
+    after_second_payload = after_second.json()
+    assert after_second_payload['automation_state'] == 'completed'
+    assert int(after_second_payload.get('automation_pending_requests') or 0) == 0
+
+
 def test_create_task_requires_project_id(tmp_path):
     client = build_client(tmp_path)
     ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']

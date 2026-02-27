@@ -65,6 +65,14 @@ def _normalize_status(value: Any) -> str | None:
     return normalized or None
 
 
+def _normalize_nonnegative_int(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        return 0
+    return max(0, parsed)
+
+
 def _parse_task_labels(raw_labels: str | None) -> list[str]:
     if not raw_labels:
         return []
@@ -276,6 +284,25 @@ def emit_task_automation_triggers_for_event(
 
         task_state, _ = rebuild_state(db, "Task", task_id)
         if str(task_state.get("automation_state") or "idle") in {"queued", "running"}:
+            workspace_id = _normalize_optional_id(task_state.get("workspace_id")) or task_row.workspace_id
+            if not workspace_id:
+                return False
+            project_id = _normalize_optional_id(task_state.get("project_id")) or task_row.project_id
+            pending_requests = _normalize_nonnegative_int(task_state.get("automation_pending_requests"))
+            append_event_fn(
+                db,
+                aggregate_type="Task",
+                aggregate_id=task_id,
+                event_type=TASK_EVENT_UPDATED,
+                payload={"automation_pending_requests": pending_requests + 1},
+                metadata={
+                    "actor_id": AGENT_SYSTEM_USER_ID,
+                    "workspace_id": workspace_id,
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "trigger_task_id": trigger_task_id,
+                },
+            )
             return False
 
         workspace_id = _normalize_optional_id(task_state.get("workspace_id")) or task_row.workspace_id
