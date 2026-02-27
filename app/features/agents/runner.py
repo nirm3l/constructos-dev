@@ -40,6 +40,7 @@ from shared.task_automation import (
 )
 
 _runner_stop_event = threading.Event()
+_runner_wakeup_event = threading.Event()
 _runner_thread: threading.Thread | None = None
 
 
@@ -354,7 +355,9 @@ def _runner_loop():
         except Exception:
             # Keep worker alive; failures are reflected on the next cycle.
             pass
-        _runner_stop_event.wait(AGENT_RUNNER_INTERVAL_SECONDS)
+        woke = _runner_wakeup_event.wait(AGENT_RUNNER_INTERVAL_SECONDS)
+        if woke:
+            _runner_wakeup_event.clear()
 
 
 def recover_stale_running_automation_once(limit: int = 20) -> int:
@@ -518,6 +521,7 @@ def start_automation_runner():
     if _runner_thread and _runner_thread.is_alive():
         return
     _runner_stop_event.clear()
+    _runner_wakeup_event.clear()
     _runner_thread = threading.Thread(target=_runner_loop, name="automation-runner", daemon=True)
     _runner_thread.start()
 
@@ -525,6 +529,11 @@ def start_automation_runner():
 def stop_automation_runner():
     global _runner_thread
     _runner_stop_event.set()
+    _runner_wakeup_event.set()
     if _runner_thread and _runner_thread.is_alive():
         _runner_thread.join(timeout=3)
     _runner_thread = None
+
+
+def wake_automation_runner():
+    _runner_wakeup_event.set()

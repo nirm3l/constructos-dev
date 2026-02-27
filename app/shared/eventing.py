@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from features.notifications.domain import EVENT_CREATED as NOTIFICATION_EVENT_CREATED
 from features.notifications.domain import EVENT_MARKED_READ as NOTIFICATION_EVENT_MARKED_READ
+from features.tasks.domain import EVENT_AUTOMATION_REQUESTED as TASK_EVENT_AUTOMATION_REQUESTED
 from features.users.domain import EVENT_PREFERENCES_UPDATED as USER_EVENT_PREFERENCES_UPDATED
 
 from .contracts import ConcurrencyConflictError, EventEnvelope
@@ -119,6 +120,7 @@ def append_event(
     emit_typed_notifications_for_event(db, env, append_event_fn=append_event)
     emit_task_automation_triggers_for_event(db, env, append_event_fn=append_event)
     _queue_realtime_signals(db, env)
+    _wake_automation_runner_if_needed(event_type)
 
     return env
 
@@ -145,3 +147,15 @@ def _queue_realtime_signals(db: Session, env: EventEnvelope) -> None:
 
     if channels:
         enqueue_realtime_channels(db, channels)
+
+
+def _wake_automation_runner_if_needed(event_type: str) -> None:
+    if event_type != TASK_EVENT_AUTOMATION_REQUESTED:
+        return
+    try:
+        from features.agents.runner import wake_automation_runner
+
+        wake_automation_runner()
+    except Exception:
+        # Wake-up is a best-effort optimization; polling loop remains fallback.
+        return

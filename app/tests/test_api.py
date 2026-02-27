@@ -2123,6 +2123,27 @@ def test_agent_service_can_request_automation_run(tmp_path):
     assert status['automation_state'] == 'queued'
 
 
+def test_task_automation_requested_event_wakes_runner(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    created = client.post('/api/tasks', json={'title': 'Wake runner task', 'workspace_id': ws_id, 'project_id': project_id}).json()
+
+    import features.agents.runner as runner_module
+
+    calls = {"count": 0}
+
+    def fake_wake():
+        calls["count"] += 1
+
+    monkeypatch.setattr(runner_module, "wake_automation_runner", fake_wake)
+
+    queued = client.post(f"/api/tasks/{created['id']}/automation/run", json={'instruction': 'wake check'})
+    assert queued.status_code == 200
+    assert calls["count"] >= 1
+
+
 def test_runner_processes_queued_automation(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
