@@ -112,3 +112,29 @@ Consistency by store:
 - Scope: `app/features/**/api.py`, `app/features/**/application.py`, `app/features/**/command_handlers.py`.
 - Blocked patterns: direct `db.add`, `db.delete`, and direct SQL `insert/update/delete` execution in feature write slices.
 - Temporary exceptions are explicitly tracked in `scripts/cqrs_guardrails_allowlist.json`.
+
+## 12. Agent Prompt and Context Flow
+```mermaid
+sequenceDiagram
+  participant UI as Project/Chat UI
+  participant API as agents/api.py
+  participant EX as executor.py
+  participant AD as codex_mcp_adapter.py
+  participant MR as mcp_registry.py
+  participant CX as Codex App Server
+  participant MS as mcp_server.py
+
+  UI->>API: chat request + selected MCP servers
+  API->>EX: context payload (project/rules/skills/KG + resume metadata)
+  EX->>AD: JSON context
+  AD->>MR: normalize_chat_mcp_servers()
+  MR-->>AD: enabled server list + mcp config text
+  AD->>CX: thread/start or thread/resume + selected prompt
+  Note over AD,CX: Start prompt includes Soul/Rules/Skills/GraphContext/GraphEvidence/GraphSummary
+  Note over AD,CX: Resume prompt includes Fresh Cross-Session Memory Snapshot
+  CX->>MS: MCP tools/call (tool descriptions define payload contracts)
+  MS-->>CX: Tool results from domain service
+  CX-->>AD: assistant result + usage + thread id
+  AD-->>EX: action/summary/comment + resume status flags
+  EX-->>API: structured response for persistence + UI
+```
