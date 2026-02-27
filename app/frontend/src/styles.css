@@ -1928,6 +1928,20 @@ textarea:disabled {
   gap: 8px;
 }
 
+.virtualized-list-scroll {
+  width: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.virtualized-list-window {
+  width: 100%;
+}
+
+.kanban-virtual-scroll {
+  min-height: 64px;
+}
+
 .task-list-dropzone,
 .notes-items-stack {
   display: grid;
