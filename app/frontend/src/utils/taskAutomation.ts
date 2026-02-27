@@ -25,6 +25,20 @@ function uniqueCaseInsensitive(values: string[]): string[] {
   return out
 }
 
+function normalizeListOrCsv(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return uniqueCaseInsensitive(value.map((item) => normalizeString(item)))
+  }
+  const raw = normalizeString(value)
+  if (!raw) return []
+  return uniqueCaseInsensitive(
+    raw
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+  )
+}
+
 export function normalizeScheduleRunOnStatuses(values: unknown): string[] {
   if (!Array.isArray(values)) return [...DEFAULT_SCHEDULE_RUN_ON_STATUSES]
   const normalized = uniqueCaseInsensitive(values.map((value) => normalizeString(value)))
@@ -98,7 +112,7 @@ export function normalizeExecutionTriggers(input: unknown): TaskExecutionTrigger
     }
     if (kind !== 'status_change') continue
     const scopeRaw = normalizeString(item.scope).toLowerCase()
-    const scope = scopeRaw === 'external' ? 'external' : 'self'
+    const scope = ['external', 'other', 'other_task', 'other_tasks'].includes(scopeRaw) ? 'external' : 'self'
     const modeRaw = normalizeString(item.match_mode).toLowerCase()
     const matchMode = modeRaw === 'all' ? 'all' : 'any'
     const fromStatuses = Array.isArray(item.from_statuses)
@@ -112,6 +126,18 @@ export function normalizeExecutionTriggers(input: unknown): TaskExecutionTrigger
       selectorRaw && typeof selectorRaw === 'object' && Array.isArray((selectorRaw as Record<string, unknown>).task_ids)
         ? uniqueCaseInsensitive((((selectorRaw as Record<string, unknown>).task_ids as unknown[]) || []).map((value) => normalizeString(value)))
         : []
+    const selectorSourceTaskIds =
+      selectorRaw && typeof selectorRaw === 'object'
+        ? normalizeListOrCsv((selectorRaw as Record<string, unknown>).source_task_ids)
+        : []
+    const topLevelSourceTaskIds = normalizeListOrCsv(item.source_task_ids)
+    const topLevelSourceTaskId = normalizeString(item.source_task_id)
+    const allSelectorTaskIds = uniqueCaseInsensitive([
+      ...selectorTaskIds,
+      ...selectorSourceTaskIds,
+      ...topLevelSourceTaskIds,
+      ...(topLevelSourceTaskId ? [topLevelSourceTaskId] : []),
+    ])
     const trigger: TaskExecutionTriggerStatusChange = {
       kind: 'status_change',
       enabled: item.enabled !== false,
@@ -120,8 +146,8 @@ export function normalizeExecutionTriggers(input: unknown): TaskExecutionTrigger
       from_statuses: fromStatuses,
       to_statuses: toStatuses,
     }
-    if (selectorTaskIds.length > 0) {
-      trigger.selector = { task_ids: selectorTaskIds }
+    if (allSelectorTaskIds.length > 0) {
+      trigger.selector = { task_ids: allSelectorTaskIds }
     }
     out.push(trigger)
   }

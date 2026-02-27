@@ -23,8 +23,7 @@ export function FloatingActions({ state }: { state: any }) {
       <button
         className={`fab ${state.isCodexChatRunning ? 'busy' : ''} ${state.fabHidden ? 'fab-hide' : ''}`}
         onClick={() => {
-          const targetProjectId = state.selectedProjectId || state.codexChatProjectId || ''
-          state.selectCodexChatProject(targetProjectId)
+          // Preserve the exact last chat context (project + session), including "No project".
           state.setShowCodexChat(true)
         }}
         title="Chat"

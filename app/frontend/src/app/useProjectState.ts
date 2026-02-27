@@ -9,10 +9,12 @@ export function useProjectState() {
   const [projectCustomStatusesText, setProjectCustomStatusesText] = React.useState('')
   const [projectExternalRefsText, setProjectExternalRefsText] = React.useState('')
   const [projectAttachmentRefsText, setProjectAttachmentRefsText] = React.useState('')
-  const [projectEmbeddingEnabled, setProjectEmbeddingEnabled] = React.useState(false)
+  const [projectEmbeddingEnabled, setProjectEmbeddingEnabled] = React.useState(true)
   const [projectEmbeddingModel, setProjectEmbeddingModel] = React.useState('')
   const [projectContextPackEvidenceTopKText, setProjectContextPackEvidenceTopKText] = React.useState('')
-  const [projectChatIndexMode, setProjectChatIndexMode] = React.useState<'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'>('OFF')
+  const [projectChatIndexMode, setProjectChatIndexMode] = React.useState<'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'>(
+    'KG_AND_VECTOR'
+  )
   const [projectChatAttachmentIngestionMode, setProjectChatAttachmentIngestionMode] = React.useState<
     'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
   >('METADATA_ONLY')

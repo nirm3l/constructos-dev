@@ -467,6 +467,19 @@ export const updateChatSessionContext = (
     { method: 'PATCH', body: JSON.stringify(payload) }
   )
 
+export const archiveChatSession = (
+  userId: string,
+  sessionId: string,
+  workspaceId: string
+) =>
+  api<{ ok: boolean; session_id: string }>(
+    `/api/chat/sessions/${encodeURIComponent(sessionId)}/archive${queryString({
+      workspace_id: workspaceId,
+    })}`,
+    userId,
+    { method: 'POST' }
+  )
+
 export const listChatSessionMessages = (
   userId: string,
   workspaceId: string,

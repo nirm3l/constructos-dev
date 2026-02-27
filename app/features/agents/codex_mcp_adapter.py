@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from functools import lru_cache
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,26 @@ EMPTY_ASSISTANT_SUMMARY = "No assistant response content was returned."
 _DEFAULT_CODEX_HOME_ROOT = "/tmp/codex-home"
 _DEFAULT_CODEX_HOME_RETENTION_DAYS = 14
 _DEFAULT_CODEX_HOME_CLEANUP_INTERVAL_SECONDS = 3600
+_PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "shared" / "prompt_templates" / "codex"
+
+
+@lru_cache(maxsize=16)
+def _load_prompt_template(name: str) -> str:
+    template_path = _PROMPT_TEMPLATES_DIR / name
+    try:
+        return template_path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Prompt template file not found: {template_path}") from exc
+
+
+def _render_prompt_template(name: str, values: dict[str, object]) -> str:
+    rendered_values = {key: str(value) for key, value in values.items()}
+    template = _load_prompt_template(name)
+    try:
+        return template.format(**rendered_values)
+    except KeyError as exc:
+        missing_key = str(exc).strip("'")
+        raise RuntimeError(f"Missing prompt template value '{missing_key}' for {name}") from exc
 
 
 def _normalize_prompt_mcp_servers(value: object) -> list[str]:
@@ -368,81 +389,30 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         if structured_response
         else "- Respond directly to the user with clear, actionable text.\n"
     )
-    return (
-        "You are an automation agent for task management.\n"
-        "Use available MCP tools to satisfy the instruction.\n"
-        f"{response_header}"
-        f"Task ID: {task_id}\n"
-        f"Title: {title}\n"
-        f"Status: {status}\n"
-        f"Description: {description}\n"
-        f"Workspace ID: {workspace_id}\n"
-        f"Project ID: {project_id}\n"
-        f"Current User ID: {actor_user_id}\n"
-        f"Project Name: {project_name}\n"
-        f"Instruction: {instruction}\n\n"
-        "Context Pack:\n"
-        "File: Soul.md (source: project.description)\n"
-        f"{soul_md}\n\n"
-        "File: ProjectRules.md (source: project_rules)\n"
-        f"{rules_md}\n\n"
-        "File: ProjectSkills.md (source: project_skills)\n"
-        f"{skills_md}\n\n"
-        "File: GraphContext.md (source: knowledge_graph)\n"
-        f"{graph_md}\n\n"
-        "File: GraphEvidence.json (source: knowledge_graph.evidence)\n"
-        f"{graph_evidence}\n\n"
-        "File: GraphSummary.md (source: knowledge_graph.summary)\n"
-        f"{graph_summary}\n\n"
-        "Guidance:\n"
-        f"{context_guidance}"
-        f"- Enabled MCP servers for this run: {enabled_mcp_servers_text}.\n"
-        "- If the user asks to implement/work on a specific project by ID or name (for example 'Implement project <id|name>'), call `get_project_chat_context(project_ref=..., workspace_id=...)` first.\n"
-        "- If `get_project_chat_context` returns ambiguous name matches, ask for a concrete project ID or workspace_id and then call it again.\n"
-        "- Treat Soul.md, ProjectRules.md, ProjectSkills.md, GraphContext.md, GraphEvidence.json, and GraphSummary.md as durable project-level context.\n"
-        "- ProjectRules.md defines how you should behave within this project.\n"
-        "- ProjectSkills.md captures reusable skills configured for this project.\n"
-        "- Apply ProjectSkills with mode=enforced before advisory skills.\n"
-        "- If no enforced skill applies, use advisory skills as guidance alongside project rules.\n"
-        "- GraphContext.md captures resource relations and should guide dependency-aware decisions.\n"
-        "- GraphEvidence.json is the canonical evidence source for grounded claims.\n"
-        "- GraphSummary.md can be used as a concise overview, but validate against GraphEvidence.json before acting.\n"
-        "- Treat claims without an evidence_id as low confidence.\n"
-        "- If project context conflicts with the latest explicit user instruction, follow the latest explicit user instruction.\n"
-        "- You may call task-management MCP tools relevant to the request.\n"
-        "- For profile preference changes (theme/timezone/notifications), use MCP tools directly.\n"
-        "- For chat theme changes, use set_user_theme(theme='light'|'dark').\n"
-        "- set_user_theme targets the current app user profile.\n"
-        "- Use toggle_my_theme only if the user explicitly asks to toggle (not set) theme.\n"
-        "- Report the final theme based on set_user_theme tool output.\n"
-        "- Use graph_* MCP tools when you need relation-aware lookup across project resources.\n"
-        "- Prefer bulk tools when operating on many tasks (avoid per-task loops when possible).\n"
-        "- Prefer archive_all_notes/archive_all_tasks for 'archive everything' requests.\n"
-        "- For mutating MCP tool calls, always provide command_id.\n"
-        "- If retrying the same mutation, reuse the exact same command_id.\n"
-        "- If the user asks for a plan/spec/design doc, prefer creating a Note (Markdown) via MCP tools so it is visible in the UI.\n"
-        "- When creating a plan note: use a clear title starting with 'Plan:' and include actionable steps.\n"
-        "- If you are in task context, link the note to the task by setting task_id when creating the note.\n"
-        "- For every request to create a new project, always use a strict interactive setup protocol.\n"
-        "- Strict protocol is mandatory even if the user asks for immediate creation.\n"
-        "- Ask one clarifying question at a time and track missing fields until they are resolved.\n"
-        "- Discovery fields before creation: project goal/domain, setup strategy (template or manual), project name, and defaults/overrides (statuses, members, embeddings, context top K, template parameters when applicable).\n"
-        "- Template strategy sequence: list_project_templates -> get_project_template -> collect template parameters -> preview_project_from_template -> explicit user confirmation -> create_project_from_template.\n"
-        "- Manual strategy sequence: collect required fields -> explicit user confirmation -> create_project.\n"
-        "- Never call create_project or create_project_from_template until the user explicitly confirms creation in the current conversation (for example: 'confirm create').\n"
-        "- After successful creation, ask whether seeded tasks/specifications/rules should be adjusted for this specific project; if yes, apply the requested updates via MCP tools.\n"
-        "- When mentioning created/updated entities in summary/comment, include clickable Markdown links (not raw IDs).\n"
-        "- Never return generic phrases like 'open task' or 'open note' without a concrete link target.\n"
-        "- For each created entity, include at least one explicit link that can be clicked in chat.\n"
-        "- Link format in this app:\n"
-        "  - Note: ?tab=notes&project=<project_id>&note=<note_id>\n"
-        "  - Task: ?tab=tasks&project=<project_id>&task=<task_id>\n"
-        "  - Specification: ?tab=specifications&project=<project_id>&specification=<specification_id>\n"
-        "  - Project: ?tab=projects&project=<project_id>\n"
-        f"{mutation_policy}"
-        "- For recurring schedules, set task.recurring_rule explicitly using canonical format: every:<number><m|h|d> (example: every:1m).\n"
-        "- After scheduling changes, verify by reading the task and confirming scheduled_at_utc + recurring_rule values.\n"
-        f"{response_tail}"
+    return _render_prompt_template(
+        "full_prompt.md",
+        {
+            "response_header": response_header,
+            "task_id": task_id,
+            "title": title,
+            "status": status,
+            "description": description,
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "actor_user_id": actor_user_id,
+            "project_name": project_name,
+            "instruction": instruction,
+            "soul_md": soul_md,
+            "rules_md": rules_md,
+            "skills_md": skills_md,
+            "graph_md": graph_md,
+            "graph_evidence": graph_evidence,
+            "graph_summary": graph_summary,
+            "context_guidance": context_guidance,
+            "enabled_mcp_servers_text": enabled_mcp_servers_text,
+            "mutation_policy": mutation_policy,
+            "response_tail": response_tail,
+        },
     )
 
 
@@ -547,32 +517,25 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         if structured_response
         else "- Respond directly to the user with clear, actionable text.\n"
     )
-    return (
-        "You are an automation agent for task management.\n"
-        "This is a resumed Codex thread. Reuse prior thread context instead of re-deriving project bootstrap context.\n"
-        f"{response_header}"
-        "Current Turn Context:\n"
-        f"Task ID: {task_id}\n"
-        f"Title: {title}\n"
-        f"Status: {status}\n"
-        f"Description: {description}\n"
-        f"Workspace ID: {workspace_id}\n"
-        f"Project ID: {project_id}\n"
-        f"Current User ID: {actor_user_id}\n"
-        f"Project Name: {project_name}\n"
-        f"Instruction: {instruction}\n\n"
-        "Fresh Cross-Session Memory Snapshot (generated for this turn):\n"
-        f"{fresh_memory_snapshot}\n\n"
-        "Guidance:\n"
-        f"{task_guidance}"
-        f"- Enabled MCP servers for this run: {enabled_mcp_servers_text}.\n"
-        "- For factual questions that may depend on other sessions, prefer Fresh Cross-Session Memory Snapshot over stale thread memory.\n"
-        "- If prior thread context appears stale or missing, refresh by calling get_project_chat_context(project_ref=..., workspace_id=...).\n"
-        "- Prefer bulk tools for batch operations.\n"
-        "- For mutating MCP tool calls, always provide command_id.\n"
-        "- If retrying the same mutation, reuse the exact same command_id.\n"
-        f"{mutation_policy}"
-        f"{response_tail}"
+    return _render_prompt_template(
+        "resume_prompt.md",
+        {
+            "response_header": response_header,
+            "task_id": task_id,
+            "title": title,
+            "status": status,
+            "description": description,
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "actor_user_id": actor_user_id,
+            "project_name": project_name,
+            "instruction": instruction,
+            "fresh_memory_snapshot": fresh_memory_snapshot,
+            "task_guidance": task_guidance,
+            "enabled_mcp_servers_text": enabled_mcp_servers_text,
+            "mutation_policy": mutation_policy,
+            "response_tail": response_tail,
+        },
     )
 
 

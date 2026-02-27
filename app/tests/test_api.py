@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from importlib import reload
 from pathlib import Path
@@ -2315,6 +2316,208 @@ def test_agent_service_create_task_infers_workspace_from_project(tmp_path):
     assert created['workspace_id'] == ws_id
     assert created['project_id'] == project['id']
     assert created['recurring_rule'] == 'every:1m'
+
+
+def test_agent_service_create_task_accepts_json_string_execution_triggers(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    due_at = (datetime.now(timezone.utc) + timedelta(minutes=20)).isoformat()
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    created = service.create_task(
+        title='MCP JSON trigger create',
+        workspace_id=ws_id,
+        project_id=project_id,
+        instruction='Write a status update note',
+        execution_triggers=json.dumps(
+            [
+                {
+                    'kind': 'schedule',
+                    'enabled': True,
+                    'scheduled_at_utc': due_at,
+                    'schedule_timezone': 'UTC',
+                    'run_on_statuses': ['In progress'],
+                }
+            ]
+        ),
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert created['task_type'] == 'scheduled_instruction'
+    assert any(trigger.get('kind') == 'schedule' for trigger in created['execution_triggers'])
+
+
+def test_agent_service_update_task_accepts_json_string_execution_triggers(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    created = service.create_task(
+        title='MCP JSON trigger update target',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+
+    updated = service.update_task(
+        task_id=created['id'],
+        patch={
+            'instruction': 'Run checks when task is done',
+            'execution_triggers': json.dumps(
+                [
+                    {
+                        'kind': 'status_change',
+                        'enabled': True,
+                        'scope': 'self',
+                        'match_mode': 'any',
+                        'to_statuses': ['Done'],
+                    }
+                ]
+            ),
+        },
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    status_change = [trigger for trigger in updated['execution_triggers'] if trigger.get('kind') == 'status_change']
+    assert len(status_change) == 1
+    assert status_change[0].get('to_statuses') == ['Done']
+
+
+def test_agent_service_update_task_accepts_execution_trigger_mapping_payload(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    created = service.create_task(
+        title='MCP trigger mapping target',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+
+    updated = service.update_task(
+        task_id=created['id'],
+        patch={
+            'instruction': 'Run checks when status changes',
+            'execution_triggers': {
+                'status_change': {
+                    'enabled': True,
+                    'scope': 'self',
+                    'match_mode': 'any',
+                    'to_statuses': ['Done'],
+                }
+            },
+        },
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    status_change = [trigger for trigger in updated['execution_triggers'] if trigger.get('kind') == 'status_change']
+    assert len(status_change) == 1
+    assert status_change[0].get('to_statuses') == ['Done']
+
+
+def test_agent_service_update_task_persists_status_change_direct_target_mapping(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    source = service.create_task(
+        title='MCP direct mapping source',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    target = service.create_task(
+        title='MCP direct mapping target',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+
+    updated = service.update_task(
+        task_id=source['id'],
+        patch={
+            'instruction': 'Run target task automation after completion',
+            'execution_triggers': {
+                'status_change': {
+                    'enabled': True,
+                    'scope': 'self',
+                    'match_mode': 'any',
+                    'to_statuses': ['Done'],
+                    'action': 'run_automation',
+                    'target_task_id': target['id'],
+                }
+            },
+        },
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    status_change = [trigger for trigger in updated['execution_triggers'] if trigger.get('kind') == 'status_change']
+    assert len(status_change) == 1
+    assert status_change[0].get('action') == 'run_automation'
+    assert status_change[0].get('target_task_id') == target['id']
+    assert status_change[0].get('target_task_ids') == [target['id']]
+
+
+def test_agent_service_update_task_scope_other_maps_to_external_with_source_task_ids(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    source = service.create_task(
+        title='MCP scope other source',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    target = service.create_task(
+        title='MCP scope other target',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+
+    updated = service.update_task(
+        task_id=target['id'],
+        patch={
+            'instruction': 'Run when dependency changes status',
+            'execution_triggers': {
+                'status_change': {
+                    'enabled': True,
+                    'scope': 'other',
+                    'match_mode': 'any',
+                    'source_task_ids': [source['id']],
+                    'to_statuses': ['Done'],
+                }
+            },
+        },
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    status_change = [trigger for trigger in updated['execution_triggers'] if trigger.get('kind') == 'status_change']
+    assert len(status_change) == 1
+    assert status_change[0].get('scope') == 'external'
+    assert status_change[0].get('selector', {}).get('task_ids') == [source['id']]
 
 
 def test_agent_service_create_task_is_idempotent_without_explicit_command_id(tmp_path):
@@ -4762,6 +4965,361 @@ def test_status_change_trigger_external_any_queues_target(tmp_path):
     assert payload['automation_state'] == 'queued'
     assert payload['last_requested_source'] == 'status_change'
     assert payload['last_requested_instruction'] == 'React to source completion'
+
+
+def test_status_change_trigger_external_without_selector_matches_any_workspace_source(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    source = client.post(
+        '/api/tasks',
+        json={
+            'title': 'External global source',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert source.status_code == 200
+    source_id = source.json()['id']
+
+    target = client.post(
+        '/api/tasks',
+        json={
+            'title': 'External global target',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'React to any workspace task completion',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'external',
+                    'match_mode': 'any',
+                    'to_statuses': ['Done'],
+                },
+            ],
+        },
+    )
+    assert target.status_code == 200
+    target_id = target.json()['id']
+
+    completed = client.post(f'/api/tasks/{source_id}/complete')
+    assert completed.status_code == 200
+
+    automation = client.get(f'/api/tasks/{target_id}/automation')
+    assert automation.status_code == 200
+    payload = automation.json()
+    assert payload['automation_state'] == 'queued'
+    assert payload['last_requested_source'] == 'status_change'
+    assert payload['last_requested_instruction'] == 'React to any workspace task completion'
+
+
+def test_status_change_trigger_external_project_selector_filters_sources(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_a_id = bootstrap['projects'][0]['id']
+
+    project_b = client.post(
+        '/api/projects',
+        json={'workspace_id': ws_id, 'name': 'External watcher project B'},
+    )
+    assert project_b.status_code == 200
+    project_b_id = project_b.json()['id']
+
+    source_a = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Project A source',
+            'workspace_id': ws_id,
+            'project_id': project_a_id,
+        },
+    )
+    source_b = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Project B source',
+            'workspace_id': ws_id,
+            'project_id': project_b_id,
+        },
+    )
+    assert source_a.status_code == 200
+    assert source_b.status_code == 200
+    source_a_id = source_a.json()['id']
+    source_b_id = source_b.json()['id']
+
+    target = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Project-filtered watcher target',
+            'workspace_id': ws_id,
+            'project_id': project_a_id,
+            'instruction': 'React only to project A status changes',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'external',
+                    'match_mode': 'any',
+                    'selector': {'project_id': project_a_id},
+                    'to_statuses': ['Done'],
+                },
+            ],
+        },
+    )
+    assert target.status_code == 200
+    target_id = target.json()['id']
+
+    complete_b = client.post(f'/api/tasks/{source_b_id}/complete')
+    assert complete_b.status_code == 200
+    after_b = client.get(f'/api/tasks/{target_id}/automation')
+    assert after_b.status_code == 200
+    assert after_b.json()['automation_state'] == 'idle'
+
+    complete_a = client.post(f'/api/tasks/{source_a_id}/complete')
+    assert complete_a.status_code == 200
+    after_a = client.get(f'/api/tasks/{target_id}/automation')
+    assert after_a.status_code == 200
+    payload = after_a.json()
+    assert payload['automation_state'] == 'queued'
+    assert payload['last_requested_source'] == 'status_change'
+    assert payload['last_requested_instruction'] == 'React only to project A status changes'
+
+
+def test_status_change_trigger_direct_target_mapping_queues_target_only(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    target = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Direct mapping target',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Handle source completion',
+        },
+    )
+    assert target.status_code == 200
+    target_id = target.json()['id']
+
+    source = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Direct mapping source',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Observe source completion',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'self',
+                    'match_mode': 'any',
+                    'to_statuses': ['Done'],
+                    'action': 'run_automation',
+                    'target_task_id': target_id,
+                },
+            ],
+        },
+    )
+    assert source.status_code == 200
+    source_id = source.json()['id']
+
+    completed = client.post(f'/api/tasks/{source_id}/complete')
+    assert completed.status_code == 200
+
+    source_automation = client.get(f'/api/tasks/{source_id}/automation')
+    assert source_automation.status_code == 200
+    assert source_automation.json()['automation_state'] == 'idle'
+
+    target_automation = client.get(f'/api/tasks/{target_id}/automation')
+    assert target_automation.status_code == 200
+    payload = target_automation.json()
+    assert payload['automation_state'] == 'queued'
+    assert payload['last_requested_source'] == 'status_change'
+    assert payload['last_requested_instruction'] == 'Handle source completion'
+
+
+def test_status_change_trigger_direct_target_mapping_accepts_run_task_instruction_action(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    target = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Direct mapping target action alias',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Handle source completion via alias action',
+        },
+    )
+    assert target.status_code == 200
+    target_id = target.json()['id']
+
+    source = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Direct mapping source action alias',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Observe source completion',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'self',
+                    'match_mode': 'any',
+                    'to_statuses': ['Done'],
+                    'action': 'run_task_instruction',
+                    'target_task_id': target_id,
+                },
+            ],
+        },
+    )
+    assert source.status_code == 200
+    source_id = source.json()['id']
+
+    completed = client.post(f'/api/tasks/{source_id}/complete')
+    assert completed.status_code == 200
+
+    target_automation = client.get(f'/api/tasks/{target_id}/automation')
+    assert target_automation.status_code == 200
+    payload = target_automation.json()
+    assert payload['automation_state'] == 'queued'
+    assert payload['last_requested_source'] == 'status_change'
+    assert payload['last_requested_instruction'] == 'Handle source completion via alias action'
+
+
+def test_status_change_trigger_external_target_mapping_on_target_task_queues_target(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    source = client.post(
+        '/api/tasks',
+        json={
+            'title': 'External target mapping source',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert source.status_code == 200
+    source_id = source.json()['id']
+
+    target = client.post(
+        '/api/tasks',
+        json={
+            'title': 'External target mapping target',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Run from external watcher with explicit target mapping',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'external',
+                    'match_mode': 'any',
+                    'selector': {'task_ids': [source_id]},
+                    'to_statuses': ['Done'],
+                    'action': 'run_task_instruction',
+                    'target_task_id': None,  # filled below with created id
+                },
+            ],
+        },
+    )
+    assert target.status_code == 200
+    target_id = target.json()['id']
+
+    # Reconfigure trigger with explicit target_task_id equal to target task itself.
+    configured = client.patch(
+        f'/api/tasks/{target_id}',
+        json={
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'external',
+                    'match_mode': 'any',
+                    'selector': {'task_ids': [source_id]},
+                    'to_statuses': ['Done'],
+                    'action': 'run_task_instruction',
+                    'target_task_id': target_id,
+                },
+            ],
+        },
+    )
+    assert configured.status_code == 200
+
+    completed = client.post(f'/api/tasks/{source_id}/complete')
+    assert completed.status_code == 200
+
+    automation = client.get(f'/api/tasks/{target_id}/automation')
+    assert automation.status_code == 200
+    payload = automation.json()
+    assert payload['automation_state'] == 'queued'
+    assert payload['last_requested_source'] == 'status_change'
+    assert payload['last_requested_instruction'] == 'Run from external watcher with explicit target mapping'
+
+
+def test_status_change_trigger_scope_other_with_source_task_ids_queues_target(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    source = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Scope other source',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert source.status_code == 200
+    source_id = source.json()['id']
+
+    target = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Scope other target',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'React to source completion via alias',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'other',
+                    'match_mode': 'any',
+                    'source_task_ids': [source_id],
+                    'to_statuses': ['Done'],
+                },
+            ],
+        },
+    )
+    assert target.status_code == 200
+    target_trigger = [trigger for trigger in target.json()['execution_triggers'] if trigger.get('kind') == 'status_change']
+    assert len(target_trigger) == 1
+    assert target_trigger[0].get('scope') == 'external'
+    assert target_trigger[0].get('selector', {}).get('task_ids') == [source_id]
+    target_id = target.json()['id']
+
+    completed = client.post(f'/api/tasks/{source_id}/complete')
+    assert completed.status_code == 200
+
+    automation = client.get(f'/api/tasks/{target_id}/automation')
+    assert automation.status_code == 200
+    payload = automation.json()
+    assert payload['automation_state'] == 'queued'
+    assert payload['last_requested_source'] == 'status_change'
+    assert payload['last_requested_instruction'] == 'React to source completion via alias'
 
 
 def test_status_change_trigger_external_all_waits_for_all_selected_tasks(tmp_path):

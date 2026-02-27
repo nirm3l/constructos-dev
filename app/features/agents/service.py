@@ -302,6 +302,122 @@ class AgentTaskService:
         if self._allowed_project_ids and project_id not in self._allowed_project_ids:
             raise HTTPException(status_code=403, detail="Project is outside MCP allowlist")
 
+    @staticmethod
+    def _parse_json_string(value: str, *, field_name: str) -> Any:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=422, detail=f"{field_name} must be valid JSON") from exc
+
+    @classmethod
+    def _normalize_execution_triggers_input(
+        cls,
+        value: Any,
+        *,
+        field_name: str = "execution_triggers",
+    ) -> list[dict[str, Any]] | None:
+        if value is None:
+            return None
+
+        def _expand_mapping(raw: dict[str, Any]) -> list[dict[str, Any]] | None:
+            if "kind" in raw:
+                return [dict(raw)]
+            expanded: list[dict[str, Any]] = []
+            for kind in ("manual", "schedule", "status_change"):
+                if kind not in raw:
+                    continue
+                candidate = raw.get(kind)
+                if candidate is None:
+                    continue
+                if isinstance(candidate, list):
+                    for item in candidate:
+                        if isinstance(item, dict):
+                            merged = dict(item)
+                            merged["kind"] = str(merged.get("kind") or kind)
+                            expanded.append(merged)
+                        elif isinstance(item, bool):
+                            expanded.append({"kind": kind, "enabled": item})
+                    continue
+                if isinstance(candidate, dict):
+                    merged = dict(candidate)
+                    merged["kind"] = str(merged.get("kind") or kind)
+                    expanded.append(merged)
+                    continue
+                if isinstance(candidate, bool):
+                    expanded.append({"kind": kind, "enabled": candidate})
+            return expanded or None
+
+        parsed = value
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            parsed = cls._parse_json_string(raw, field_name=field_name)
+        if isinstance(parsed, dict):
+            parsed = _expand_mapping(parsed) or [parsed]
+        if not isinstance(parsed, list):
+            raise HTTPException(status_code=422, detail=f"{field_name} must be a JSON array or object")
+        normalized: list[dict[str, Any]] = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                raise HTTPException(status_code=422, detail=f"{field_name} items must be JSON objects")
+            normalized.extend(_expand_mapping(item) or [dict(item)])
+        return normalized
+
+    @classmethod
+    def _normalize_string_list_input(
+        cls,
+        value: Any,
+        *,
+        field_name: str,
+    ) -> list[str] | None:
+        if value is None:
+            return None
+        parsed = value
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                parsed = cls._parse_json_string(raw, field_name=field_name)
+            else:
+                parsed = [segment.strip() for segment in raw.split(",") if segment.strip()]
+        if not isinstance(parsed, list):
+            raise HTTPException(status_code=422, detail=f"{field_name} must be a list or comma-separated string")
+        out: list[str] = []
+        for item in parsed:
+            clean = str(item or "").strip()
+            if clean:
+                out.append(clean)
+        return out
+
+    @classmethod
+    def _normalize_task_patch_input(cls, patch: Any) -> dict[str, Any]:
+        if isinstance(patch, str):
+            parsed = cls._parse_json_string(patch, field_name="patch")
+            if not isinstance(parsed, dict):
+                raise HTTPException(status_code=422, detail="patch must be a JSON object")
+            normalized_patch: dict[str, Any] = dict(parsed)
+        elif isinstance(patch, dict):
+            normalized_patch = dict(patch)
+        else:
+            raise HTTPException(status_code=422, detail="patch must be an object")
+
+        if "execution_triggers" in normalized_patch:
+            normalized_patch["execution_triggers"] = cls._normalize_execution_triggers_input(
+                normalized_patch.get("execution_triggers"),
+                field_name="patch.execution_triggers",
+            )
+        if "labels" in normalized_patch:
+            normalized_patch["labels"] = cls._normalize_string_list_input(
+                normalized_patch.get("labels"),
+                field_name="patch.labels",
+            )
+        return normalized_patch
+
     def _assert_task_allowed(self, *, db, task_id: str | None):
         if not task_id:
             return None
@@ -1449,7 +1565,7 @@ class AgentTaskService:
         external_refs: list[dict[str, Any]] | None = None,
         attachment_refs: list[dict[str, Any]] | None = None,
         instruction: str | None = None,
-        execution_triggers: list[dict[str, Any]] | None = None,
+        execution_triggers: Any | None = None,
         recurring_rule: str | None = None,
         specification_id: str | None = None,
         task_group_id: str | None = None,
@@ -1458,11 +1574,13 @@ class AgentTaskService:
         scheduled_at_utc: str | None = None,
         schedule_timezone: str | None = None,
         assignee_id: str | None = None,
-        labels: list[str] | None = None,
+        labels: Any | None = None,
         command_id: str | None = None,
     ) -> dict:
         self._require_token(auth_token)
         user = self._resolve_actor_user()
+        normalized_execution_triggers = self._normalize_execution_triggers_input(execution_triggers)
+        normalized_labels = self._normalize_string_list_input(labels, field_name="labels")
         with SessionLocal() as db:
             resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_create(
                 db=db,
@@ -1489,7 +1607,7 @@ class AgentTaskService:
                     "external_refs": external_refs or [],
                     "attachment_refs": attachment_refs or [],
                     "instruction": instruction,
-                    "execution_triggers": execution_triggers or [],
+                    "execution_triggers": normalized_execution_triggers or [],
                     "recurring_rule": recurring_rule,
                     "specification_id": specification_id,
                     "task_type": task_type,
@@ -1497,7 +1615,7 @@ class AgentTaskService:
                     "scheduled_at_utc": scheduled_at_utc,
                     "schedule_timezone": schedule_timezone,
                     "assignee_id": assignee_id,
-                    "labels": labels or [],
+                    "labels": normalized_labels or [],
                 },
             )
             payload_kwargs: dict[str, Any] = {
@@ -1512,12 +1630,12 @@ class AgentTaskService:
                 "attachment_refs": attachment_refs or [],
                 "specification_id": specification_id,
                 "assignee_id": assignee_id,
-                "labels": labels or [],
+                "labels": normalized_labels or [],
             }
             if instruction is not None:
                 payload_kwargs["instruction"] = instruction
-            if execution_triggers is not None:
-                payload_kwargs["execution_triggers"] = execution_triggers
+            if normalized_execution_triggers is not None:
+                payload_kwargs["execution_triggers"] = normalized_execution_triggers
             if recurring_rule is not None:
                 payload_kwargs["recurring_rule"] = recurring_rule
             if task_type is not None:
@@ -2497,7 +2615,7 @@ class AgentTaskService:
             self._assert_project_allowed(state.project_id)
             return NoteApplicationService(db, user, command_id=command_id or f"mcp-note-delete-{uuid.uuid4()}").delete_note(note_id)
 
-    def update_task(self, *, task_id: str, patch: dict, auth_token: str | None = None, command_id: str | None = None) -> dict:
+    def update_task(self, *, task_id: str, patch: Any, auth_token: str | None = None, command_id: str | None = None) -> dict:
         self._require_token(auth_token)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
@@ -2506,7 +2624,8 @@ class AgentTaskService:
                 raise HTTPException(status_code=404, detail="Task not found")
             self._assert_workspace_allowed(state.workspace_id)
             self._assert_project_allowed(state.project_id)
-            payload = TaskPatch(**patch)
+            normalized_patch = self._normalize_task_patch_input(patch)
+            payload = TaskPatch(**normalized_patch)
             return TaskApplicationService(db, user, command_id=command_id or f"mcp-patch-{uuid.uuid4()}").patch_task(task_id, payload)
 
     def complete_task(self, *, task_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict:

@@ -36,6 +36,23 @@ _STATUS_TRANSITION_EVENTS = {
     TASK_EVENT_COMPLETED,
     TASK_EVENT_REOPENED,
 }
+_STATUS_CHANGE_AUTOMATION_ACTIONS = {
+    "automation",
+    "execute_instruction",
+    "queue",
+    "queue_automation",
+    "queue_instruction",
+    "request_automation",
+    "request_instruction",
+    "run",
+    "run_automation",
+    "run_instruction",
+    "run_task_instruction",
+    "start_automation",
+    "start_instruction",
+    "trigger_automation",
+    "trigger_instruction",
+}
 
 
 def _normalize_optional_id(value: Any) -> str | None:
@@ -120,6 +137,87 @@ def _all_selector_tasks_match_status(
     return all(str(item.get("status") or "").strip().casefold() in allowed_statuses for item in selected)
 
 
+def _normalize_status_change_action(raw: Any) -> str | None:
+    if isinstance(raw, dict):
+        return _normalize_status(raw.get("type") or raw.get("action"))
+    return _normalize_status(raw)
+
+
+def _extract_status_change_target_task_ids(trigger: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _append(value: Any) -> None:
+        normalized = _normalize_optional_id(value)
+        if not normalized:
+            return
+        key = normalized.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(normalized)
+
+    _append(trigger.get("target_task_id"))
+    raw_ids = trigger.get("target_task_ids")
+    if isinstance(raw_ids, list):
+        for item in raw_ids:
+            _append(item)
+    action = trigger.get("action")
+    if isinstance(action, dict):
+        _append(action.get("target_task_id"))
+        raw_action_ids = action.get("target_task_ids")
+        if isinstance(raw_action_ids, list):
+            for item in raw_action_ids:
+                _append(item)
+    return out
+
+
+def _is_cross_task_automation_action(action: str | None) -> bool:
+    if action is None:
+        return True
+    return action.casefold() in _STATUS_CHANGE_AUTOMATION_ACTIONS
+
+
+def _trigger_matches_status_change_event(
+    *,
+    trigger: dict[str, Any],
+    source_task_state: dict[str, Any],
+    from_status: str | None,
+    to_status: str | None,
+    workspace_tasks_fn: Callable[[str], list[dict[str, Any]]],
+) -> bool:
+    if str(trigger.get("kind") or "") != TRIGGER_KIND_STATUS_CHANGE:
+        return False
+    if not bool(trigger.get("enabled", True)):
+        return False
+    if not status_transition_matches(
+        from_status=from_status,
+        to_status=to_status,
+        from_statuses=trigger.get("from_statuses"),
+        to_statuses=trigger.get("to_statuses"),
+    ):
+        return False
+    scope = str(trigger.get("scope") or STATUS_SCOPE_SELF).strip().lower()
+    if scope != STATUS_SCOPE_EXTERNAL:
+        return True
+    selector = trigger.get("selector")
+    if not selector_matches_task(task_state=source_task_state, selector=selector):
+        return False
+    match_mode = str(trigger.get("match_mode") or "").strip().lower()
+    if match_mode != STATUS_MATCH_ALL:
+        return True
+    workspace_id = _normalize_optional_id(source_task_state.get("workspace_id"))
+    if not workspace_id:
+        return False
+    tasks_for_workspace = workspace_tasks_fn(workspace_id)
+    return _all_selector_tasks_match_status(
+        tasks_for_workspace=tasks_for_workspace,
+        source_task_state=source_task_state,
+        selector=selector,
+        to_statuses=trigger.get("to_statuses"),
+    )
+
+
 def emit_task_automation_triggers_for_event(
     db: Session,
     env: EventEnvelope,
@@ -148,15 +246,6 @@ def emit_task_automation_triggers_for_event(
         return
     source_task_state = _task_state_from_row(source_task)
 
-    candidate_rows = db.execute(
-        select(Task).where(
-            Task.is_deleted == False,
-            Task.execution_triggers.ilike("%status_change%"),
-        )
-    ).scalars().all()
-    if not candidate_rows:
-        return
-
     now_iso = to_iso_utc(datetime.now(timezone.utc))
     workspace_task_cache: dict[str, list[dict[str, Any]]] = {}
     requested_task_ids: set[str] = set()
@@ -172,6 +261,88 @@ def emit_task_automation_triggers_for_event(
             workspace_task_cache[workspace_id] = [_task_state_from_row(row) for row in rows]
         return workspace_task_cache[workspace_id]
 
+    def _queue_automation_for_task(*, task_row: Task, trigger_task_id: str) -> bool:
+        task_id = _normalize_optional_id(task_row.id)
+        if not task_id or task_id in requested_task_ids:
+            return False
+        if task_row.is_deleted:
+            return False
+        if task_row.workspace_id != source_task.workspace_id:
+            return False
+
+        task_instruction = _normalize_status(task_row.instruction or task_row.scheduled_instruction)
+        if not task_instruction:
+            return False
+
+        task_state, _ = rebuild_state(db, "Task", task_id)
+        if str(task_state.get("automation_state") or "idle") in {"queued", "running"}:
+            return False
+
+        workspace_id = _normalize_optional_id(task_state.get("workspace_id")) or task_row.workspace_id
+        if not workspace_id:
+            return False
+        project_id = _normalize_optional_id(task_state.get("project_id")) or task_row.project_id
+        effective_instruction = _normalize_status(
+            task_state.get("instruction")
+            or task_state.get("scheduled_instruction")
+            or task_instruction
+        )
+        if not effective_instruction:
+            return False
+
+        append_event_fn(
+            db,
+            aggregate_type="Task",
+            aggregate_id=task_id,
+            event_type=TASK_EVENT_AUTOMATION_REQUESTED,
+            payload={
+                "requested_at": now_iso,
+                "instruction": effective_instruction,
+                "source": "status_change",
+                "trigger_task_id": trigger_task_id,
+            },
+            metadata={
+                "actor_id": AGENT_SYSTEM_USER_ID,
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "task_id": task_id,
+                "trigger_task_id": trigger_task_id,
+            },
+        )
+        requested_task_ids.add(task_id)
+        return True
+
+    source_triggers = normalize_execution_triggers(source_task.execution_triggers)
+    for trigger in source_triggers:
+        if not _trigger_matches_status_change_event(
+            trigger=trigger,
+            source_task_state=source_task_state,
+            from_status=from_status,
+            to_status=to_status,
+            workspace_tasks_fn=_workspace_tasks,
+        ):
+            continue
+        action = _normalize_status_change_action(trigger.get("action"))
+        target_task_ids = _extract_status_change_target_task_ids(trigger)
+        if not target_task_ids or not _is_cross_task_automation_action(action):
+            continue
+        for target_task_id in target_task_ids:
+            if target_task_id == source_task_id:
+                continue
+            target_task = db.get(Task, target_task_id)
+            if target_task is None:
+                continue
+            _queue_automation_for_task(task_row=target_task, trigger_task_id=source_task_id)
+
+    candidate_rows = db.execute(
+        select(Task).where(
+            Task.is_deleted == False,
+            Task.execution_triggers.ilike("%status_change%"),
+        )
+    ).scalars().all()
+    if not candidate_rows:
+        return
+
     for candidate in candidate_rows:
         candidate_task_id = _normalize_optional_id(candidate.id)
         if not candidate_task_id or candidate_task_id in requested_task_ids:
@@ -179,86 +350,34 @@ def emit_task_automation_triggers_for_event(
         if candidate.workspace_id != source_task.workspace_id:
             continue
 
-        candidate_instruction = _normalize_status(candidate.instruction or candidate.scheduled_instruction)
-        if not candidate_instruction:
-            continue
-
         triggers = normalize_execution_triggers(candidate.execution_triggers)
         matched = False
         for trigger in triggers:
-            if str(trigger.get("kind") or "") != TRIGGER_KIND_STATUS_CHANGE:
-                continue
-            if not bool(trigger.get("enabled", True)):
-                continue
-
+            trigger_target_task_ids = _extract_status_change_target_task_ids(trigger)
+            if trigger_target_task_ids:
+                if candidate_task_id not in set(trigger_target_task_ids):
+                    # Explicit target mappings should not fire for non-target tasks.
+                    continue
+                action = _normalize_status_change_action(trigger.get("action"))
+                if not _is_cross_task_automation_action(action):
+                    continue
             scope = str(trigger.get("scope") or STATUS_SCOPE_SELF).strip().lower()
             if scope == STATUS_SCOPE_SELF and candidate_task_id != source_task_id:
                 continue
             if scope == STATUS_SCOPE_EXTERNAL and candidate_task_id == source_task_id:
                 continue
-
-            if not status_transition_matches(
+            if not _trigger_matches_status_change_event(
+                trigger=trigger,
+                source_task_state=source_task_state,
                 from_status=from_status,
                 to_status=to_status,
-                from_statuses=trigger.get("from_statuses"),
-                to_statuses=trigger.get("to_statuses"),
+                workspace_tasks_fn=_workspace_tasks,
             ):
                 continue
-
-            selector = trigger.get("selector")
-            if scope == STATUS_SCOPE_EXTERNAL and not selector_matches_task(task_state=source_task_state, selector=selector):
-                continue
-
-            match_mode = str(trigger.get("match_mode") or "").strip().lower()
-            if scope == STATUS_SCOPE_EXTERNAL and match_mode == STATUS_MATCH_ALL:
-                tasks_for_workspace = _workspace_tasks(candidate.workspace_id)
-                if not _all_selector_tasks_match_status(
-                    tasks_for_workspace=tasks_for_workspace,
-                    source_task_state=source_task_state,
-                    selector=selector,
-                    to_statuses=trigger.get("to_statuses"),
-                ):
-                    continue
 
             matched = True
             break
 
         if not matched:
             continue
-
-        candidate_state, _ = rebuild_state(db, "Task", candidate_task_id)
-        if str(candidate_state.get("automation_state") or "idle") in {"queued", "running"}:
-            continue
-
-        workspace_id = _normalize_optional_id(candidate_state.get("workspace_id")) or candidate.workspace_id
-        if not workspace_id:
-            continue
-        project_id = _normalize_optional_id(candidate_state.get("project_id")) or candidate.project_id
-        effective_instruction = _normalize_status(
-            candidate_state.get("instruction")
-            or candidate_state.get("scheduled_instruction")
-            or candidate_instruction
-        )
-        if not effective_instruction:
-            continue
-
-        append_event_fn(
-            db,
-            aggregate_type="Task",
-            aggregate_id=candidate_task_id,
-            event_type=TASK_EVENT_AUTOMATION_REQUESTED,
-            payload={
-                "requested_at": now_iso,
-                "instruction": effective_instruction,
-                "source": "status_change",
-                "trigger_task_id": source_task_id,
-            },
-            metadata={
-                "actor_id": AGENT_SYSTEM_USER_ID,
-                "workspace_id": workspace_id,
-                "project_id": project_id,
-                "task_id": candidate_task_id,
-                "trigger_task_id": source_task_id,
-            },
-        )
-        requested_task_ids.add(candidate_task_id)
+        _queue_automation_for_task(task_row=candidate, trigger_task_id=source_task_id)

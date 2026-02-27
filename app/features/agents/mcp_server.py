@@ -5,6 +5,91 @@ from typing import Any
 
 from .gateway import build_mcp_gateway
 
+MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED = True
+MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE = "KG_AND_VECTOR"
+MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE = "METADATA_ONLY"
+
+TASK_CREATE_TOOL_DESCRIPTION = (
+    "Create a task in a workspace/project. "
+    "execution_triggers accepts JSON string, array, or object. "
+    "For status watchers use kind='status_change' with scope='self' or scope='external'. "
+    "Use selector.task_ids or source_task_ids to listen to specific source tasks. "
+    "External without selector.task_ids listens to all source tasks in workspace scope; "
+    "add selector.project_id to constrain to one project. "
+    "status_change requires at least one to_statuses value. "
+    "For recurring schedules set recurring_rule with canonical format every:<number><m|h|d> (for example every:1m)."
+)
+
+TASK_UPDATE_TOOL_DESCRIPTION = (
+    "Patch a task. Accepts the same fields as TaskPatch. "
+    "execution_triggers accepts JSON string, array, or object. "
+    "For status watchers in patch.execution_triggers: "
+    "kind='status_change', scope='self'|'external', match_mode='any'|'all', "
+    "to_statuses (required), optional selector.task_ids/source_task_ids, and optional selector.project_id. "
+    "For recurring schedules set recurring_rule with canonical format every:<number><m|h|d> (for example every:1m), "
+    "then verify scheduled_at_utc and recurring_rule by reading the task."
+)
+
+THEME_TOGGLE_TOOL_DESCRIPTION = (
+    "Toggle current app-user theme between light and dark. "
+    "Use this only when the user explicitly asks to toggle (not set) theme."
+)
+
+THEME_SET_TOOL_DESCRIPTION = (
+    "Set current app-user theme to light or dark for the current app user profile. "
+    "Use this for explicit set requests and report the resulting theme from the tool output."
+)
+
+BULK_TASK_ACTION_TOOL_DESCRIPTION = (
+    "Apply a bulk action to multiple tasks (for example archive, complete, delete). "
+    "Prefer this over per-task loops when the same action applies to many tasks."
+)
+
+ARCHIVE_ALL_TASKS_TOOL_DESCRIPTION = (
+    "Archive all non-archived tasks in a workspace (optionally filtered by project or query). "
+    "Preferred tool for 'archive all tasks/everything' requests."
+)
+
+ARCHIVE_ALL_NOTES_TOOL_DESCRIPTION = (
+    "Archive all non-archived notes in a workspace (optionally filtered by project or query). "
+    "Preferred tool for 'archive all notes/everything' requests."
+)
+
+CREATE_NOTE_TOOL_DESCRIPTION = (
+    "Create a note in a workspace/project (Markdown body). "
+    "Use this for plans/specs/design docs so they are visible in the UI. "
+    "When operating in task context, pass task_id to link the note to that task."
+)
+
+CREATE_PROJECT_TOOL_DESCRIPTION = (
+    "Create a project in a workspace for manual/custom setup (no template). "
+    "Use when required fields are known and template seeding is not requested. "
+    "Chat default profile: embedding_enabled=true, chat_index_mode=KG_AND_VECTOR, "
+    "chat_attachment_ingestion_mode=METADATA_ONLY."
+)
+
+LIST_PROJECT_TEMPLATES_TOOL_DESCRIPTION = (
+    "List available project templates for template-based project setup."
+)
+
+GET_PROJECT_TEMPLATE_TOOL_DESCRIPTION = (
+    "Get one project template definition by key, including expected parameters and seeded entities."
+)
+
+PREVIEW_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION = (
+    "Preview project creation from a template without writing data. "
+    "Use after parameters are known to validate what would be created. "
+    "Chat default profile: embedding_enabled=true, chat_index_mode=KG_AND_VECTOR, "
+    "chat_attachment_ingestion_mode=METADATA_ONLY."
+)
+
+CREATE_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION = (
+    "Create a project and seed specifications/tasks/rules from a project template. "
+    "Recommended flow: list_project_templates -> get_project_template -> preview_project_from_template -> create_project_from_template. "
+    "Chat default profile: embedding_enabled=true, chat_index_mode=KG_AND_VECTOR, "
+    "chat_attachment_ingestion_mode=METADATA_ONLY."
+)
+
 
 def create_mcp():
     try:
@@ -90,7 +175,7 @@ def create_mcp():
         auth_token = auth_token or default_tool_token
         return service.get_note(note_id=note_id, auth_token=auth_token)
 
-    @mcp.tool(description="Toggle current app-user theme between light and dark.")
+    @mcp.tool(description=THEME_TOGGLE_TOOL_DESCRIPTION)
     def toggle_my_theme(
         auth_token: str | None = None,
         command_id: str | None = None,
@@ -98,7 +183,7 @@ def create_mcp():
         auth_token = auth_token or default_tool_token
         return service.toggle_my_theme(auth_token=auth_token, command_id=command_id)
 
-    @mcp.tool(description="Set current app-user theme to light or dark.")
+    @mcp.tool(description=THEME_SET_TOOL_DESCRIPTION)
     def set_user_theme(
         theme: str,
         auth_token: str | None = None,
@@ -500,7 +585,7 @@ def create_mcp():
             limit=limit,
         )
 
-    @mcp.tool(description="Apply a bulk action to multiple tasks (e.g. archive, complete, delete).")
+    @mcp.tool(description=BULK_TASK_ACTION_TOOL_DESCRIPTION)
     def bulk_task_action(
         task_ids: list[str],
         action: str,
@@ -511,7 +596,7 @@ def create_mcp():
         auth_token = auth_token or default_tool_token
         return service.bulk_task_action(task_ids=task_ids, action=action, payload=payload or {}, auth_token=auth_token, command_id=command_id)
 
-    @mcp.tool(description="Archive all non-archived tasks in a workspace (optionally filtered by project or query).")
+    @mcp.tool(description=ARCHIVE_ALL_TASKS_TOOL_DESCRIPTION)
     def archive_all_tasks(
         workspace_id: str,
         project_id: str | None = None,
@@ -530,7 +615,7 @@ def create_mcp():
             command_id=command_id,
         )
 
-    @mcp.tool(description="Archive all non-archived notes in a workspace (optionally filtered by project or query).")
+    @mcp.tool(description=ARCHIVE_ALL_NOTES_TOOL_DESCRIPTION)
     def archive_all_notes(
         workspace_id: str,
         project_id: str | None = None,
@@ -549,7 +634,7 @@ def create_mcp():
             command_id=command_id,
         )
 
-    @mcp.tool(description="Create a task in a workspace/project.")
+    @mcp.tool(description=TASK_CREATE_TOOL_DESCRIPTION)
     def create_task(
         title: str,
         workspace_id: str | None = None,
@@ -559,7 +644,7 @@ def create_mcp():
         priority: str = "Med",
         due_date: str | None = None,
         instruction: str | None = None,
-        execution_triggers: list[dict[str, Any]] | None = None,
+        execution_triggers: str | list[dict[str, Any]] | dict[str, Any] | None = None,
         recurring_rule: str | None = None,
         specification_id: str | None = None,
         task_group_id: str | None = None,
@@ -568,7 +653,7 @@ def create_mcp():
         scheduled_at_utc: str | None = None,
         schedule_timezone: str | None = None,
         assignee_id: str | None = None,
-        labels: list[str] | None = None,
+        labels: str | list[str] | None = None,
         command_id: str | None = None,
     ) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
@@ -594,7 +679,7 @@ def create_mcp():
             command_id=command_id,
         )
 
-    @mcp.tool(description="Create a note in a workspace/project (Markdown body).")
+    @mcp.tool(description=CREATE_NOTE_TOOL_DESCRIPTION)
     def create_note(
         title: str,
         body: str = "",
@@ -658,16 +743,18 @@ def create_mcp():
         auth_token = auth_token or default_tool_token
         return service.delete_note(note_id=note_id, auth_token=auth_token, command_id=command_id)
 
-    @mcp.tool(description="Create a project in a workspace.")
+    @mcp.tool(description=CREATE_PROJECT_TOOL_DESCRIPTION)
     def create_project(
         name: str,
         workspace_id: str | None = None,
         auth_token: str | None = None,
         description: str = "",
         custom_statuses: list[str] | None = None,
-        embedding_enabled: bool = False,
+        embedding_enabled: bool = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED,
         embedding_model: str | None = None,
         context_pack_evidence_top_k: int | None = None,
+        chat_index_mode: str = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE,
+        chat_attachment_ingestion_mode: str = MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE,
         command_id: str | None = None,
     ) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
@@ -680,17 +767,19 @@ def create_mcp():
             embedding_enabled=embedding_enabled,
             embedding_model=embedding_model,
             context_pack_evidence_top_k=context_pack_evidence_top_k,
+            chat_index_mode=chat_index_mode,
+            chat_attachment_ingestion_mode=chat_attachment_ingestion_mode,
             command_id=command_id,
         )
 
-    @mcp.tool(description="List available project templates for accelerated project setup.")
+    @mcp.tool(description=LIST_PROJECT_TEMPLATES_TOOL_DESCRIPTION)
     def list_project_templates(
         auth_token: str | None = None,
     ) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
         return service.list_project_templates(auth_token=auth_token)
 
-    @mcp.tool(description="Get one project template definition by key.")
+    @mcp.tool(description=GET_PROJECT_TEMPLATE_TOOL_DESCRIPTION)
     def get_project_template(
         template_key: str,
         auth_token: str | None = None,
@@ -701,7 +790,7 @@ def create_mcp():
             auth_token=auth_token,
         )
 
-    @mcp.tool(description="Preview project creation from a template without writing data.")
+    @mcp.tool(description=PREVIEW_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION)
     def preview_project_from_template(
         template_key: str,
         workspace_id: str | None = None,
@@ -710,9 +799,11 @@ def create_mcp():
         description: str = "",
         custom_statuses: list[str] | None = None,
         member_user_ids: list[str] | None = None,
-        embedding_enabled: bool | None = None,
+        embedding_enabled: bool | None = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED,
         embedding_model: str | None = None,
         context_pack_evidence_top_k: int | None = None,
+        chat_index_mode: str | None = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE,
+        chat_attachment_ingestion_mode: str | None = MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE,
         parameters: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
@@ -727,10 +818,12 @@ def create_mcp():
             embedding_enabled=embedding_enabled,
             embedding_model=embedding_model,
             context_pack_evidence_top_k=context_pack_evidence_top_k,
+            chat_index_mode=chat_index_mode,
+            chat_attachment_ingestion_mode=chat_attachment_ingestion_mode,
             parameters=parameters,
         )
 
-    @mcp.tool(description="Create a project and seed specifications/tasks/rules from a project template.")
+    @mcp.tool(description=CREATE_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION)
     def create_project_from_template(
         template_key: str,
         name: str,
@@ -739,9 +832,11 @@ def create_mcp():
         description: str = "",
         custom_statuses: list[str] | None = None,
         member_user_ids: list[str] | None = None,
-        embedding_enabled: bool | None = None,
+        embedding_enabled: bool | None = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED,
         embedding_model: str | None = None,
         context_pack_evidence_top_k: int | None = None,
+        chat_index_mode: str | None = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE,
+        chat_attachment_ingestion_mode: str | None = MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE,
         parameters: dict[str, Any] | None = None,
         command_id: str | None = None,
     ) -> dict[str, Any]:
@@ -757,6 +852,8 @@ def create_mcp():
             embedding_enabled=embedding_enabled,
             embedding_model=embedding_model,
             context_pack_evidence_top_k=context_pack_evidence_top_k,
+            chat_index_mode=chat_index_mode,
+            chat_attachment_ingestion_mode=chat_attachment_ingestion_mode,
             parameters=parameters,
             command_id=command_id,
         )
@@ -1023,8 +1120,13 @@ def create_mcp():
             command_id=command_id,
         )
 
-    @mcp.tool(description="Patch a task. Accepts the same fields as TaskPatch.")
-    def update_task(task_id: str, patch: dict[str, Any], auth_token: str | None = None, command_id: str | None = None) -> dict[str, Any]:
+    @mcp.tool(description=TASK_UPDATE_TOOL_DESCRIPTION)
+    def update_task(
+        task_id: str,
+        patch: dict[str, Any] | str,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
         return service.update_task(task_id=task_id, patch=patch, auth_token=auth_token, command_id=command_id)
 

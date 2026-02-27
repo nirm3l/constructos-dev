@@ -6452,9 +6452,56 @@ textarea:disabled {
 }
 
 .codex-chat-role {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   font-size: 12px;
   color: var(--muted);
   margin-bottom: 4px;
+}
+
+.codex-chat-role-meta {
+  min-width: 0;
+}
+
+.codex-chat-turn-copy {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  min-height: 24px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 16%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 20%);
+  color: color-mix(in srgb, var(--muted), var(--text) 12%);
+}
+
+.codex-chat-turn-copy .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.codex-chat-bubble.user .codex-chat-turn-copy {
+  background: color-mix(in srgb, var(--surface), white 16%);
+  border-color: color-mix(in srgb, var(--line), var(--primary) 24%);
+}
+
+.codex-chat-turn-copy:hover:not(:disabled),
+.codex-chat-turn-copy:focus-visible:not(:disabled) {
+  background: color-mix(in srgb, var(--surface-alt), var(--brand) 8%);
+  border-color: color-mix(in srgb, var(--brand), var(--line) 34%);
+}
+
+.codex-chat-turn-copy.is-copied {
+  border-color: color-mix(in srgb, #2f9d57, var(--line) 30%);
+  background: color-mix(in srgb, #2f9d57, var(--surface) 88%);
+  color: color-mix(in srgb, #1e6a39, var(--text) 36%);
+}
+
+.codex-chat-turn-copy.is-error {
+  border-color: color-mix(in srgb, #b83f3f, var(--line) 32%);
+  background: color-mix(in srgb, #b83f3f, var(--surface) 90%);
+  color: color-mix(in srgb, #7a2a2a, var(--text) 34%);
 }
 
 .codex-chat-toolbar {
@@ -6849,14 +6896,16 @@ textarea:disabled {
   fill: color-mix(in srgb, var(--surface), var(--surface-alt) 10%);
 }
 
-.codex-chat-alert-overlay {
+.codex-chat-alert-overlay,
+.drawer-backdrop {
   position: fixed;
   inset: 0;
   z-index: 1500;
   background: rgba(4, 14, 9, 0.58);
 }
 
-.codex-chat-alert-content {
+.codex-chat-alert-content,
+.dialog-content {
   position: fixed;
   z-index: 1501;
   left: 50%;
@@ -6885,7 +6934,8 @@ textarea:disabled {
   line-height: 1.35;
 }
 
-.codex-chat-alert-actions {
+.codex-chat-alert-actions,
+.dialog-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;

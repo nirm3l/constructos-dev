@@ -574,7 +574,7 @@ export function ProjectsCreateForm({
                         value={projectDescription}
                         onChange={(e) => setProjectDescription(e.target.value)}
                         placeholder="Project description (Markdown)"
-                        style={{ width: '100%', minHeight: 96, maxHeight: 280, resize: 'none', overflowY: 'hidden' }}
+                        style={{ width: '100%' }}
                       />
                     )}
                     right={<MarkdownView value={projectDescription} />}
