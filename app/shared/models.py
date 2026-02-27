@@ -363,6 +363,50 @@ class ProjectionCheckpoint(Base):
     )
 
 
+class EventStormingAnalysisJob(Base, TimeMixin):
+    __tablename__ = "event_storming_analysis_jobs"
+    __table_args__ = (
+        UniqueConstraint("dedup_key", name="ux_event_storming_jobs_dedup"),
+        Index("ix_event_storming_jobs_status_next_attempt", "status", "next_attempt_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[str | None] = mapped_column(ForeignKey("workspaces.id"), nullable=True, index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    entity_type: Mapped[str] = mapped_column(String(32), index=True)
+    entity_id: Mapped[str] = mapped_column(String(64), index=True)
+    reason: Mapped[str] = mapped_column(String(24), default="updated")
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dedup_key: Mapped[str] = mapped_column(String(200), index=True)
+    last_commit_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class EventStormingAnalysisRun(Base, TimeMixin):
+    __tablename__ = "event_storming_analysis_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_id: Mapped[int | None] = mapped_column(ForeignKey("event_storming_analysis_jobs.id"), nullable=True, index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    entity_type: Mapped[str] = mapped_column(String(32), index=True)
+    entity_id: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="done", index=True)
+    inference_method: Mapped[str] = mapped_column(String(32), default="heuristic")
+    extractor_version: Mapped[str] = mapped_column(String(32), default="es-heuristic-v1")
+    components_count: Mapped[int] = mapped_column(Integer, default=0)
+    relations_count: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    output_json: Mapped[str] = mapped_column(Text, default="{}")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class CommandExecution(Base):
     __tablename__ = "command_executions"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

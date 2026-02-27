@@ -61,6 +61,32 @@ def test_health(tmp_path):
     assert res.json()['ok'] is True
 
 
+def test_event_storming_endpoints_exist_and_return_503_when_graph_disabled(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    project_id = bootstrap['projects'][0]['id']
+
+    overview = client.get(f'/api/projects/{project_id}/event-storming/overview')
+    assert overview.status_code == 503
+    assert 'Event storming projection is unavailable' in str(overview.json().get('detail', ''))
+
+    subgraph = client.get(f'/api/projects/{project_id}/event-storming/subgraph')
+    assert subgraph.status_code == 503
+    assert 'Event storming projection is unavailable' in str(subgraph.json().get('detail', ''))
+
+    review = client.post(
+        f'/api/projects/{project_id}/event-storming/review-link',
+        json={
+            'entity_type': 'task',
+            'entity_id': 'x',
+            'component_id': 'y',
+            'review_status': 'approved',
+        },
+    )
+    assert review.status_code == 503
+    assert 'Event storming projection is unavailable' in str(review.json().get('detail', ''))
+
+
 def test_bootstrap_requires_authenticated_session(tmp_path):
     client = build_anonymous_client(tmp_path)
     res = client.get('/api/bootstrap')

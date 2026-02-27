@@ -1,9 +1,26 @@
 import React from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import ForceGraph2D from 'react-force-graph-2d'
 import * as Accordion from '@radix-ui/react-accordion'
 import * as Tabs from '@radix-ui/react-tabs'
+import { Background, Controls, MarkerType, MiniMap, Position, ReactFlow, type Edge as FlowEdge, type Node as FlowNode, type ReactFlowInstance } from '@xyflow/react'
+import '@xyflow/react/dist/style.css'
+import {
+  getProjectEventStormingComponentLinks,
+  getProjectEventStormingEntityLinks,
+  patchProjectEventStormingLinkReview,
+} from '../../api'
 import { MarkdownView } from '../../markdown/MarkdownView'
-import type { GraphContextPack, GraphProjectOverview, GraphProjectSubgraph, ProjectKnowledgeSearchResult } from '../../types'
+import type {
+  EventStormingComponentLinks,
+  EventStormingEntityLinks,
+  EventStormingOverview,
+  EventStormingSubgraph,
+  GraphContextPack,
+  GraphProjectOverview,
+  GraphProjectSubgraph,
+  ProjectKnowledgeSearchResult,
+} from '../../types'
 import { Icon } from '../shared/uiHelpers'
 
 type QueryLike<T> = {
@@ -36,6 +53,130 @@ type VizLink = {
   source: string
   target: string
   relationship: string
+}
+
+type ReactFlowNodeData = {
+  label: string
+  entityType: string
+  contextLabel?: string
+}
+
+type EventStormingTypeKey =
+  | 'boundedcontext'
+  | 'aggregate'
+  | 'command'
+  | 'domainevent'
+  | 'policy'
+  | 'readmodel'
+  | 'task'
+  | 'specification'
+  | 'note'
+  | 'other'
+
+type EventStormingTypeMeta = {
+  label: string
+  sticky: string
+  text: string
+  border: string
+  lane: 'core' | 'artifact' | 'context'
+}
+
+const EVENT_STORMING_TYPE_META: Record<EventStormingTypeKey, EventStormingTypeMeta> = {
+  boundedcontext: {
+    label: 'Bounded Context',
+    sticky: '#d5f5f1',
+    text: '#134e4a',
+    border: '#14b8a6',
+    lane: 'context',
+  },
+  aggregate: {
+    label: 'Aggregate',
+    sticky: '#fde68a',
+    text: '#78350f',
+    border: '#f59e0b',
+    lane: 'core',
+  },
+  command: {
+    label: 'Command',
+    sticky: '#bfdbfe',
+    text: '#1e3a8a',
+    border: '#2563eb',
+    lane: 'core',
+  },
+  domainevent: {
+    label: 'Domain Event',
+    sticky: '#fed7aa',
+    text: '#9a3412',
+    border: '#ea580c',
+    lane: 'core',
+  },
+  policy: {
+    label: 'Policy',
+    sticky: '#e9d5ff',
+    text: '#581c87',
+    border: '#7c3aed',
+    lane: 'core',
+  },
+  readmodel: {
+    label: 'Read Model',
+    sticky: '#bbf7d0',
+    text: '#14532d',
+    border: '#16a34a',
+    lane: 'core',
+  },
+  task: {
+    label: 'Task',
+    sticky: '#e2e8f0',
+    text: '#0f172a',
+    border: '#64748b',
+    lane: 'artifact',
+  },
+  specification: {
+    label: 'Specification',
+    sticky: '#e2e8f0',
+    text: '#0f172a',
+    border: '#64748b',
+    lane: 'artifact',
+  },
+  note: {
+    label: 'Note',
+    sticky: '#e2e8f0',
+    text: '#0f172a',
+    border: '#64748b',
+    lane: 'artifact',
+  },
+  other: {
+    label: 'Entity',
+    sticky: '#e2e8f0',
+    text: '#0f172a',
+    border: '#64748b',
+    lane: 'artifact',
+  },
+}
+
+const EVENT_STORMING_STAGE_ORDER: EventStormingTypeKey[] = [
+  'command',
+  'aggregate',
+  'domainevent',
+  'policy',
+  'readmodel',
+  'task',
+  'specification',
+  'note',
+]
+
+function normalizeEventStormingTypeKey(entityType: string): EventStormingTypeKey {
+  const normalized = String(entityType || '').trim().toLowerCase()
+  if (normalized === 'boundedcontext') return 'boundedcontext'
+  if (normalized === 'aggregate') return 'aggregate'
+  if (normalized === 'command') return 'command'
+  if (normalized === 'domainevent') return 'domainevent'
+  if (normalized === 'policy') return 'policy'
+  if (normalized === 'readmodel') return 'readmodel'
+  if (normalized === 'task') return 'task'
+  if (normalized === 'specification') return 'specification'
+  if (normalized === 'note') return 'note'
+  return 'other'
 }
 
 function getLinkNodeId(value: unknown): string {
@@ -206,12 +347,16 @@ function renderGraphSummaryMarkdown(summary: GraphContextPack['summary'] | undef
 }
 
 export function ProjectKnowledgeGraphPanel({
+  userId,
+  projectId,
   projectName,
   projectChatIndexMode,
   projectChatAttachmentIngestionMode,
   overviewQuery,
   contextPackQuery,
   subgraphQuery,
+  eventStormingOverviewQuery,
+  eventStormingSubgraphQuery,
   knowledgeSearchQuery,
   setKnowledgeSearchQuery,
   knowledgeSearchResultsQuery,
@@ -219,12 +364,16 @@ export function ProjectKnowledgeGraphPanel({
   onCreateNoteFromSummary,
   onLinkFocusTaskToSpecification,
 }: {
+  userId: string
+  projectId: string
   projectName: string
   projectChatIndexMode?: string
   projectChatAttachmentIngestionMode?: string
   overviewQuery: QueryLike<GraphProjectOverview>
   contextPackQuery: QueryLike<GraphContextPack>
   subgraphQuery: QueryLike<GraphProjectSubgraph>
+  eventStormingOverviewQuery: QueryLike<EventStormingOverview>
+  eventStormingSubgraphQuery: QueryLike<EventStormingSubgraph>
   knowledgeSearchQuery: string
   setKnowledgeSearchQuery: React.Dispatch<React.SetStateAction<string>>
   knowledgeSearchResultsQuery: QueryLike<ProjectKnowledgeSearchResult>
@@ -235,6 +384,10 @@ export function ProjectKnowledgeGraphPanel({
   const [selectedNodeId, setSelectedNodeId] = React.useState<string | null>(null)
   const [hoveredNodeId, setHoveredNodeId] = React.useState<string | null>(null)
   const [isGraphFullscreen, setIsGraphFullscreen] = React.useState(false)
+  const [isEventStormingFullscreen, setIsEventStormingFullscreen] = React.useState(false)
+  const [selectedEventStormingNodeId, setSelectedEventStormingNodeId] = React.useState<string | null>(null)
+  const [showEventStormingArtifactsOnDiagram, setShowEventStormingArtifactsOnDiagram] = React.useState(false)
+  const [showRejectedEventStormingLinks, setShowRejectedEventStormingLinks] = React.useState(false)
   const [selectedEvidenceId, setSelectedEvidenceId] = React.useState<string | null>(null)
   const [activeTab, setActiveTab] = React.useState<KnowledgeGraphTab>('explore')
   const [overviewTab, setOverviewTab] = React.useState<'summary' | 'composition'>('summary')
@@ -247,6 +400,8 @@ export function ProjectKnowledgeGraphPanel({
   const graphRef = React.useRef<any>(null)
   const graphShellRef = React.useRef<HTMLDivElement | null>(null)
   const graphCanvasRef = React.useRef<HTMLDivElement | null>(null)
+  const eventStormingShellRef = React.useRef<HTMLDivElement | null>(null)
+  const eventStormingFlowRef = React.useRef<ReactFlowInstance<FlowNode<ReactFlowNodeData>, FlowEdge> | null>(null)
   const [canvasSize, setCanvasSize] = React.useState<{ width: number; height: number }>({
     width: 640,
     height: 320,
@@ -281,6 +436,77 @@ export function ProjectKnowledgeGraphPanel({
   const subgraph = subgraphQuery.data
   const graphNodes = subgraph?.nodes ?? []
   const graphEdges = subgraph?.edges ?? []
+  const eventStormingOverview = eventStormingOverviewQuery.data
+  const eventStormingSubgraph = eventStormingSubgraphQuery.data
+  const eventStormingNodes = eventStormingSubgraph?.nodes ?? []
+  const eventStormingEdges = eventStormingSubgraph?.edges ?? []
+  const queryClient = useQueryClient()
+  const eventStormingComponentTypes = React.useMemo(
+    () => new Set(['boundedcontext', 'aggregate', 'command', 'domainevent', 'policy', 'readmodel']),
+    []
+  )
+  const eventStormingArtifactTypes = React.useMemo(() => new Set(['task', 'note', 'specification']), [])
+  const selectedEventStormingNode = React.useMemo(
+    () => eventStormingNodes.find((node) => String(node.entity_id || '') === String(selectedEventStormingNodeId || '')) ?? null,
+    [eventStormingNodes, selectedEventStormingNodeId]
+  )
+  const selectedEventStormingNodeType = String(selectedEventStormingNode?.entity_type || '')
+    .trim()
+    .toLowerCase()
+  const selectedEventStormingIsComponent = eventStormingComponentTypes.has(selectedEventStormingNodeType)
+  const selectedEventStormingIsArtifact = eventStormingArtifactTypes.has(selectedEventStormingNodeType)
+  const eventStormingEntityLinksQuery = useQuery<EventStormingEntityLinks>({
+    queryKey: [
+      'project-event-storming-entity-links',
+      userId,
+      projectId,
+      selectedEventStormingNodeType,
+      selectedEventStormingNodeId,
+    ],
+    queryFn: () =>
+      getProjectEventStormingEntityLinks(userId, projectId, {
+        entity_type: String(selectedEventStormingNode?.entity_type || ''),
+        entity_id: String(selectedEventStormingNode?.entity_id || ''),
+      }),
+    enabled: Boolean(
+      userId &&
+      projectId &&
+      selectedEventStormingNodeId &&
+      selectedEventStormingNode &&
+      selectedEventStormingIsArtifact
+    ),
+  })
+  const eventStormingComponentLinksQuery = useQuery<EventStormingComponentLinks>({
+    queryKey: ['project-event-storming-component-links', userId, projectId, selectedEventStormingNodeId],
+    queryFn: () =>
+      getProjectEventStormingComponentLinks(userId, projectId, {
+        component_id: String(selectedEventStormingNode?.entity_id || ''),
+      }),
+    enabled: Boolean(
+      userId &&
+      projectId &&
+      selectedEventStormingNodeId &&
+      selectedEventStormingNode &&
+      selectedEventStormingIsComponent
+    ),
+  })
+  const reviewEventStormingLinkMutation = useMutation({
+    mutationFn: (payload: {
+      entity_type: string
+      entity_id: string
+      component_id: string
+      review_status: 'candidate' | 'approved' | 'rejected'
+      confidence?: number
+    }) => patchProjectEventStormingLinkReview(userId, projectId, payload),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['project-event-storming-overview', userId, projectId] }),
+        queryClient.invalidateQueries({ queryKey: ['project-event-storming-subgraph', userId, projectId] }),
+        queryClient.invalidateQueries({ queryKey: ['project-event-storming-entity-links', userId, projectId] }),
+        queryClient.invalidateQueries({ queryKey: ['project-event-storming-component-links', userId, projectId] }),
+      ])
+    },
+  })
   const evidenceById = React.useMemo(
     () => new Map(evidenceItems.map((item) => [item.evidence_id, item])),
     [evidenceItems]
@@ -471,6 +697,15 @@ export function ProjectKnowledgeGraphPanel({
   }, [filteredGraph.nodes, selectedNodeId])
 
   React.useEffect(() => {
+    if (!eventStormingNodes.length) {
+      setSelectedEventStormingNodeId(null)
+      return
+    }
+    if (selectedEventStormingNodeId && eventStormingNodes.some((node) => node.entity_id === selectedEventStormingNodeId)) return
+    setSelectedEventStormingNodeId(eventStormingNodes[0]?.entity_id ?? null)
+  }, [eventStormingNodes, selectedEventStormingNodeId])
+
+  React.useEffect(() => {
     if (!evidenceItems.length) {
       setSelectedEvidenceId(null)
       return
@@ -481,6 +716,12 @@ export function ProjectKnowledgeGraphPanel({
 
   const nodeColor = React.useCallback((entityType: string) => {
     const key = String(entityType || '').toLowerCase()
+    if (key === 'boundedcontext') return '#14b8a6'
+    if (key === 'aggregate') return '#f59e0b'
+    if (key === 'command') return '#2563eb'
+    if (key === 'domainevent') return '#ea580c'
+    if (key === 'policy') return '#7c3aed'
+    if (key === 'readmodel') return '#16a34a'
     if (key === 'project') return '#2563eb'
     if (key === 'specification') return '#0d9488'
     if (key === 'task') return '#0284c7'
@@ -491,6 +732,11 @@ export function ProjectKnowledgeGraphPanel({
     if (key === 'user') return '#4f46e5'
     if (key === 'workspace') return '#6b7280'
     return '#334155'
+  }, [])
+
+  const eventStormingNodeColor = React.useCallback((entityType: string) => {
+    const key = normalizeEventStormingTypeKey(entityType)
+    return EVENT_STORMING_TYPE_META[key].border
   }, [])
 
   const graphData = React.useMemo(() => {
@@ -509,6 +755,370 @@ export function ProjectKnowledgeGraphPanel({
     }))
     return { nodes, links }
   }, [filteredGraph.nodes, filteredGraph.edges, nodeColor])
+
+  const eventStormingFlowNodes = React.useMemo(() => {
+    if (!eventStormingNodes.length) return [] as FlowNode<ReactFlowNodeData>[]
+    const diagramEdges = eventStormingEdges.filter((edge) => {
+      const relation = String(edge.relationship || '').trim().toUpperCase()
+      const reviewStatus = String(edge.review_status || 'candidate').trim().toLowerCase()
+      if (!showRejectedEventStormingLinks && relation === 'RELATES_TO_ES' && reviewStatus === 'rejected') return false
+      return true
+    })
+    const supportedComponentIds = new Set<string>()
+    for (const edge of diagramEdges) {
+      const relation = String(edge.relationship || '').trim().toUpperCase()
+      if (relation !== 'RELATES_TO_ES') continue
+      const source = String(edge.source_entity_id || '').trim()
+      const target = String(edge.target_entity_id || '').trim()
+      const sourceNode = eventStormingNodes.find((node) => String(node.entity_id || '').trim() === source)
+      const targetNode = eventStormingNodes.find((node) => String(node.entity_id || '').trim() === target)
+      const sourceType = normalizeEventStormingTypeKey(String(sourceNode?.entity_type || ''))
+      const targetType = normalizeEventStormingTypeKey(String(targetNode?.entity_type || ''))
+      const sourceIsArtifact = sourceType === 'task' || sourceType === 'specification' || sourceType === 'note'
+      const targetIsArtifact = targetType === 'task' || targetType === 'specification' || targetType === 'note'
+      if (!sourceIsArtifact && !targetIsArtifact) continue
+      if (!targetIsArtifact) supportedComponentIds.add(target)
+      if (!sourceIsArtifact) supportedComponentIds.add(source)
+    }
+    const visibleNodeIds = new Set<string>()
+    for (const edge of diagramEdges) {
+      const source = String(edge.source_entity_id || '').trim()
+      const target = String(edge.target_entity_id || '').trim()
+      if (source) visibleNodeIds.add(source)
+      if (target) visibleNodeIds.add(target)
+    }
+    const diagramNodes = eventStormingNodes.filter((node) => {
+      const nodeId = String(node.entity_id || '').trim()
+      const typeKey = normalizeEventStormingTypeKey(String(node.entity_type || ''))
+      if (typeKey === 'boundedcontext') return true
+      if (!showEventStormingArtifactsOnDiagram && (typeKey === 'task' || typeKey === 'specification' || typeKey === 'note')) {
+        return false
+      }
+      if (
+        typeKey !== 'task' &&
+        typeKey !== 'specification' &&
+        typeKey !== 'note' &&
+        !supportedComponentIds.has(nodeId)
+      ) {
+        return false
+      }
+      return visibleNodeIds.has(nodeId)
+    })
+    const nodeById = new Map(diagramNodes.map((node) => [String(node.entity_id || ''), node]))
+    const componentTypeSet = new Set(['boundedcontext', 'aggregate', 'command', 'domainevent', 'policy', 'readmodel'])
+    const componentIds = new Set(
+      diagramNodes
+        .filter((node) => componentTypeSet.has(normalizeEventStormingTypeKey(String(node.entity_type || ''))))
+        .map((node) => String(node.entity_id || ''))
+    )
+    const contextIds = eventStormingNodes
+      .filter((node) => normalizeEventStormingTypeKey(String(node.entity_type || '')) === 'boundedcontext')
+      .map((node) => String(node.entity_id || ''))
+      .filter(Boolean)
+    const adjacency = new Map<string, Set<string>>()
+    for (const edge of diagramEdges) {
+      const source = String(edge.source_entity_id || '')
+      const target = String(edge.target_entity_id || '')
+      if (!source || !target) continue
+      if (!componentIds.has(source) || !componentIds.has(target)) continue
+      const srcNeighbors = adjacency.get(source) ?? new Set<string>()
+      srcNeighbors.add(target)
+      adjacency.set(source, srcNeighbors)
+      const dstNeighbors = adjacency.get(target) ?? new Set<string>()
+      dstNeighbors.add(source)
+      adjacency.set(target, dstNeighbors)
+    }
+
+    const contextDistanceByNode = new Map<string, number>()
+    const contextByNodeId = new Map<string, string>()
+    const queue: Array<{ nodeId: string; rootContextId: string; distance: number }> = []
+    for (const contextId of contextIds) {
+      contextByNodeId.set(contextId, contextId)
+      contextDistanceByNode.set(contextId, 0)
+      queue.push({ nodeId: contextId, rootContextId: contextId, distance: 0 })
+    }
+    while (queue.length > 0) {
+      const current = queue.shift()
+      if (!current) break
+      const neighbors = adjacency.get(current.nodeId)
+      if (!neighbors || neighbors.size === 0) continue
+      for (const nextId of neighbors) {
+        const nextDistance = current.distance + 1
+        const bestDistance = contextDistanceByNode.get(nextId)
+        if (bestDistance !== undefined && bestDistance <= nextDistance) continue
+        contextDistanceByNode.set(nextId, nextDistance)
+        contextByNodeId.set(nextId, current.rootContextId)
+        queue.push({ nodeId: nextId, rootContextId: current.rootContextId, distance: nextDistance })
+      }
+    }
+
+    const contextLabelById = new Map<string, string>()
+    for (const contextId of contextIds) {
+      const node = nodeById.get(contextId)
+      contextLabelById.set(contextId, String(node?.title || contextId))
+    }
+    const sharedContextLabel = 'Shared Context'
+    const rows = new Map<string, typeof eventStormingNodes>()
+    const ensureRow = (contextLabel: string) => {
+      const bucket = rows.get(contextLabel)
+      if (bucket) return bucket
+      const next: typeof eventStormingNodes = []
+      rows.set(contextLabel, next)
+      return next
+    }
+    const resolveContextLabel = (nodeId: string): string => {
+      const contextId = contextByNodeId.get(nodeId)
+      if (!contextId) return sharedContextLabel
+      return String(contextLabelById.get(contextId) || sharedContextLabel)
+    }
+
+    for (const node of diagramNodes) {
+      const nodeId = String(node.entity_id || '')
+      if (!nodeId) continue
+      const typeKey = normalizeEventStormingTypeKey(String(node.entity_type || ''))
+      if (typeKey === 'other') continue
+      const isArtifact = EVENT_STORMING_TYPE_META[typeKey].lane === 'artifact'
+      if (isArtifact) {
+        const linkedComponents = eventStormingEdges
+          .filter((edge) => String(edge.source_entity_id || '') === nodeId || String(edge.target_entity_id || '') === nodeId)
+          .map((edge) => {
+            const source = String(edge.source_entity_id || '')
+            const target = String(edge.target_entity_id || '')
+            return source === nodeId ? target : source
+          })
+          .filter((candidateId) => componentIds.has(candidateId))
+        const contextLabel = linkedComponents.length ? resolveContextLabel(linkedComponents[0] || '') : sharedContextLabel
+        ensureRow(contextLabel).push(node)
+        continue
+      }
+      ensureRow(resolveContextLabel(nodeId)).push(node)
+    }
+
+    const orderedContexts = Array.from(rows.keys()).sort((a, b) => {
+      if (a === sharedContextLabel) return 1
+      if (b === sharedContextLabel) return -1
+      return a.localeCompare(b)
+    })
+
+    const stageByTypeKey: Record<EventStormingTypeKey, EventStormingTypeKey> = {
+      boundedcontext: 'boundedcontext',
+      aggregate: 'aggregate',
+      command: 'command',
+      domainevent: 'domainevent',
+      policy: 'policy',
+      readmodel: 'readmodel',
+      task: 'task',
+      specification: 'specification',
+      note: 'note',
+      other: 'task',
+    }
+
+    const stageX: Record<EventStormingTypeKey, number> = {
+      boundedcontext: 18,
+      command: 252,
+      aggregate: 468,
+      domainevent: 684,
+      policy: 900,
+      readmodel: 1116,
+      task: 1360,
+      specification: 1588,
+      note: 1816,
+      other: 1360,
+    }
+
+    const out: FlowNode<ReactFlowNodeData>[] = []
+    let rowTop = 12
+    for (const contextLabel of orderedContexts) {
+      const rowNodes = [...(rows.get(contextLabel) ?? [])]
+      const byStage = new Map<EventStormingTypeKey, typeof rowNodes>()
+      for (const item of rowNodes) {
+        const typeKey = normalizeEventStormingTypeKey(String(item.entity_type || ''))
+        const stageKey = stageByTypeKey[typeKey]
+        const stageItems = byStage.get(stageKey) ?? []
+        stageItems.push(item)
+        byStage.set(stageKey, stageItems)
+      }
+      for (const stageItems of byStage.values()) {
+        stageItems.sort((a, b) => {
+          const degreeDiff = Number(b.degree || 0) - Number(a.degree || 0)
+          if (degreeDiff !== 0) return degreeDiff
+          const titleA = String(a.title || a.entity_id || '').toLowerCase()
+          const titleB = String(b.title || b.entity_id || '').toLowerCase()
+          if (titleA !== titleB) return titleA.localeCompare(titleB)
+          return String(a.entity_id || '').localeCompare(String(b.entity_id || ''))
+        })
+      }
+
+      const maxStageCount = Array.from(byStage.values()).reduce((max, items) => Math.max(max, items.length), 1)
+      const rowHeight = Math.max(210, 84 + maxStageCount * 82)
+
+      for (const stageKey of EVENT_STORMING_STAGE_ORDER) {
+        const stageItems = byStage.get(stageKey) ?? []
+        for (let idx = 0; idx < stageItems.length; idx += 1) {
+          const item = stageItems[idx]
+          if (!item) continue
+          const itemId = String(item.entity_id || '')
+          const itemType = normalizeEventStormingTypeKey(String(item.entity_type || ''))
+          const meta = EVENT_STORMING_TYPE_META[itemType]
+          const selected = itemId === String(selectedEventStormingNodeId || '')
+          out.push({
+            id: itemId,
+            position: { x: stageX[stageKey], y: rowTop + 66 + idx * 82 },
+            data: {
+              label: String(item.title || itemId),
+              entityType: String(item.entity_type || 'Entity'),
+              contextLabel,
+            },
+            style: {
+              border: selected ? '2px solid #22c55e' : `1px solid ${meta.border}`,
+              borderRadius: 8,
+              width: stageKey === 'task' ? 216 : 204,
+              minHeight: 60,
+              padding: '8px 10px',
+              color: meta.text,
+              background: meta.sticky,
+              boxShadow: selected ? '0 0 0 2px rgba(34,197,94,0.14), 0 4px 10px rgba(15,23,42,0.12)' : '0 2px 8px rgba(15,23,42,0.10)',
+              fontSize: 12,
+              fontWeight: 700,
+              lineHeight: 1.3,
+            },
+            sourcePosition: Position.Right,
+            targetPosition: Position.Left,
+            draggable: false,
+          })
+        }
+      }
+
+      const contextItems = byStage.get('boundedcontext') ?? []
+      if (contextItems.length > 0) {
+        const contextItem = contextItems[0]
+        const contextId = String(contextItem?.entity_id || `ctx-${contextLabel}`)
+        const selected = contextId === String(selectedEventStormingNodeId || '')
+        const contextMeta = EVENT_STORMING_TYPE_META.boundedcontext
+        out.push({
+          id: contextId,
+          position: { x: stageX.boundedcontext, y: rowTop + 62 },
+          data: {
+            label: String(contextItem?.title || contextLabel),
+            entityType: String(contextItem?.entity_type || 'BoundedContext'),
+            contextLabel,
+          },
+          style: {
+            border: selected ? '2px solid #22c55e' : `1px solid ${contextMeta.border}`,
+            borderRadius: 10,
+            width: 212,
+            minHeight: 64,
+            padding: '8px 10px',
+            color: contextMeta.text,
+            background: contextMeta.sticky,
+            boxShadow: selected ? '0 0 0 2px rgba(34,197,94,0.14), 0 4px 10px rgba(15,23,42,0.12)' : '0 2px 8px rgba(15,23,42,0.10)',
+            fontSize: 12,
+            fontWeight: 800,
+            lineHeight: 1.3,
+          },
+          sourcePosition: Position.Right,
+          targetPosition: Position.Left,
+          draggable: false,
+        })
+      }
+
+      rowTop += rowHeight + 24
+    }
+    return out
+  }, [
+    eventStormingEdges,
+    eventStormingNodes,
+    selectedEventStormingNodeId,
+    showRejectedEventStormingLinks,
+    showEventStormingArtifactsOnDiagram,
+  ])
+
+  const eventStormingFlowEdges = React.useMemo(
+    () => {
+      const flowNodeIdSet = new Set(eventStormingFlowNodes.map((node) => String(node.id || '')))
+      const edgeMeta: Record<
+        string,
+        { color: string; width: number; dash?: string; label: string }
+      > = {
+        CONTAINS_AGGREGATE: { color: '#0284c7', width: 1.6, label: 'contains' },
+        HANDLES_COMMAND: { color: '#2563eb', width: 1.7, label: 'handles' },
+        EMITS_EVENT: { color: '#ea580c', width: 1.9, label: 'emits' },
+        TRIGGERS_POLICY: { color: '#7c3aed', width: 1.7, label: 'triggers' },
+        ENFORCES_POLICY: { color: '#6d28d9', width: 1.7, label: 'enforces' },
+        UPDATES_READ_MODEL: { color: '#16a34a', width: 1.8, label: 'updates' },
+        RELATES_TO_ES: { color: '#64748b', width: 1.3, dash: '4 3', label: 'touches' },
+      }
+
+      return eventStormingEdges
+        .map((edge, idx) => {
+          const source = String(edge.source_entity_id || '')
+          const target = String(edge.target_entity_id || '')
+          if (!source || !target) return null
+          if (!flowNodeIdSet.has(source) || !flowNodeIdSet.has(target)) return null
+          const relation = String(edge.relationship || 'RELATED').trim().toUpperCase()
+          const reviewStatus = String(edge.review_status || 'candidate').trim().toLowerCase()
+          if (!showRejectedEventStormingLinks && relation === 'RELATES_TO_ES' && reviewStatus === 'rejected') {
+            return null
+          }
+          let meta = edgeMeta[relation] ?? { color: '#475569', width: 1.25, label: relation.toLowerCase() }
+          if (relation === 'RELATES_TO_ES') {
+            if (reviewStatus === 'approved') {
+              meta = { color: '#16a34a', width: 1.8, label: 'approved link' }
+            } else if (reviewStatus === 'rejected') {
+              meta = { color: '#dc2626', width: 1.5, dash: '5 4', label: 'rejected link' }
+            } else {
+              meta = { color: '#f59e0b', width: 1.5, dash: '4 3', label: 'candidate link' }
+            }
+          }
+          return {
+            id: `es-edge-${idx}-${source}-${target}`,
+            source,
+            target,
+            type: 'smoothstep',
+            label: meta.label,
+            labelStyle: { fontSize: 10, fill: '#334155', fontWeight: 700 },
+            labelBgStyle: { fill: 'rgba(248,250,252,0.9)', fillOpacity: 0.92 },
+            markerEnd: { type: MarkerType.ArrowClosed, color: meta.color },
+            style: { stroke: meta.color, strokeWidth: meta.width, strokeDasharray: meta.dash },
+            animated: relation === 'EMITS_EVENT' || relation === 'TRIGGERS_POLICY',
+          } as FlowEdge
+        })
+        .filter((edge): edge is FlowEdge => Boolean(edge))
+    },
+    [eventStormingEdges, eventStormingFlowNodes, showRejectedEventStormingLinks]
+  )
+  const eventStormingLaneLegend = React.useMemo(
+    () => [
+      { key: 'command', ...EVENT_STORMING_TYPE_META.command },
+      { key: 'aggregate', ...EVENT_STORMING_TYPE_META.aggregate },
+      { key: 'domainevent', ...EVENT_STORMING_TYPE_META.domainevent },
+      { key: 'policy', ...EVENT_STORMING_TYPE_META.policy },
+      { key: 'readmodel', ...EVENT_STORMING_TYPE_META.readmodel },
+      { key: 'task', label: 'Artifacts', sticky: '#e2e8f0', text: '#0f172a', border: '#64748b', lane: 'artifact' as const },
+    ],
+    []
+  )
+  const eventStormingLaneHeaders = React.useMemo(
+    () => [
+      { key: 'command', label: 'Command' },
+      { key: 'aggregate', label: 'Aggregate' },
+      { key: 'event', label: 'Domain Event' },
+      { key: 'policy', label: 'Policy' },
+      { key: 'readmodel', label: 'Read Model' },
+      { key: 'task', label: 'Task' },
+      { key: 'specification', label: 'Specification' },
+      { key: 'note', label: 'Note' },
+    ],
+    []
+  )
+  const eventStormingReviewLegend = React.useMemo(
+    () => [
+      { key: 'approved', label: 'Approved link', color: '#16a34a' },
+      { key: 'candidate', label: 'Candidate link', color: '#f59e0b' },
+      { key: 'rejected', label: 'Rejected link', color: '#dc2626' },
+    ],
+    []
+  )
 
   const selectedNode = graphData.nodes.find((node) => node.id === selectedNodeId) ?? null
   const connectedSelectedEdges = selectedNode
@@ -624,6 +1234,21 @@ export function ProjectKnowledgeGraphPanel({
     }
   }, [])
 
+  const setEventStormingLinkReview = React.useCallback(
+    async (payload: {
+      entity_type: string
+      entity_id: string
+      component_id: string
+      review_status: 'candidate' | 'approved' | 'rejected'
+      confidence?: number
+    }) => {
+      await runAction(`es-review-${payload.entity_id}-${payload.component_id}-${payload.review_status}`, async () => {
+        await reviewEventStormingLinkMutation.mutateAsync(payload)
+      })
+    },
+    [reviewEventStormingLinkMutation, runAction]
+  )
+
   React.useEffect(() => {
     const el = graphCanvasRef.current
     if (!el || typeof ResizeObserver === 'undefined') return
@@ -636,7 +1261,9 @@ export function ProjectKnowledgeGraphPanel({
   React.useEffect(() => {
     const onFullscreenChange = () => {
       const shell = graphShellRef.current
+      const eventStormingShell = eventStormingShellRef.current
       setIsGraphFullscreen(Boolean(shell && document.fullscreenElement === shell))
+      setIsEventStormingFullscreen(Boolean(eventStormingShell && document.fullscreenElement === eventStormingShell))
       window.setTimeout(() => {
         recalcCanvasSize()
         zoomReset()
@@ -683,6 +1310,35 @@ export function ProjectKnowledgeGraphPanel({
     }
   }, [])
 
+  const toggleEventStormingFullscreen = React.useCallback(async () => {
+    const shell = eventStormingShellRef.current
+    if (!shell) return
+    try {
+      if (document.fullscreenElement === shell) {
+        await document.exitFullscreen()
+        return
+      }
+      if (document.fullscreenElement) {
+        await document.exitFullscreen()
+      }
+      await shell.requestFullscreen()
+    } catch {
+      // no-op
+    }
+  }, [])
+
+  const exitEventStormingFullscreen = React.useCallback(async () => {
+    const shell = eventStormingShellRef.current
+    if (!shell) return
+    try {
+      if (document.fullscreenElement === shell) {
+        await document.exitFullscreen()
+      }
+    } catch {
+      // no-op
+    }
+  }, [])
+
   React.useEffect(() => {
     if (!graphData.nodes.length) return
     const timer = window.setTimeout(() => {
@@ -691,6 +1347,46 @@ export function ProjectKnowledgeGraphPanel({
     return () => window.clearTimeout(timer)
   }, [graphData.nodes.length, graphData.links.length, canvasSize.width, canvasSize.height, zoomReset])
 
+  React.useEffect(() => {
+    if (!eventStormingFlowNodes.length) return
+    const timer = window.setTimeout(() => {
+      try {
+        eventStormingFlowRef.current?.fitView({
+          padding: isEventStormingFullscreen ? 0.08 : 0.12,
+          duration: 420,
+          maxZoom: 1.0,
+        })
+      } catch {
+        // no-op
+      }
+    }, 100)
+    return () => window.clearTimeout(timer)
+  }, [eventStormingFlowNodes.length, eventStormingFlowEdges.length, isEventStormingFullscreen])
+
+  const eventStormingEntityLinkItems = eventStormingEntityLinksQuery.data?.items ?? []
+  const eventStormingComponentLinkItems = eventStormingComponentLinksQuery.data?.items ?? []
+  const visibleEventStormingEntityLinkItems = React.useMemo(
+    () =>
+      showRejectedEventStormingLinks
+        ? eventStormingEntityLinkItems
+        : eventStormingEntityLinkItems.filter((item) => String(item.review_status || '').toLowerCase() !== 'rejected'),
+    [eventStormingEntityLinkItems, showRejectedEventStormingLinks]
+  )
+  const visibleEventStormingComponentLinkItems = React.useMemo(
+    () =>
+      showRejectedEventStormingLinks
+        ? eventStormingComponentLinkItems
+        : eventStormingComponentLinkItems.filter((item) => String(item.review_status || '').toLowerCase() !== 'rejected'),
+    [eventStormingComponentLinkItems, showRejectedEventStormingLinks]
+  )
+  const eventStormingLinksLoading = Boolean(
+    eventStormingEntityLinksQuery.isLoading || eventStormingComponentLinksQuery.isLoading
+  )
+  const eventStormingLinksError = eventStormingEntityLinksQuery.isError
+    ? eventStormingEntityLinksQuery.error
+    : eventStormingComponentLinksQuery.isError
+      ? eventStormingComponentLinksQuery.error
+      : null
   const noVisibleNodes = Boolean(subgraph) && graphData.nodes.length === 0
 
   return (
@@ -1258,6 +1954,274 @@ export function ProjectKnowledgeGraphPanel({
                                 </div>
                               ) : null}
                             </aside>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+
+                  <div className="graph-viz-block graph-reactflow-block">
+                    <div className="row wrap graph-viz-head">
+                      <div className="meta">
+                        Event Storming diagram ({eventStormingFlowNodes.length} nodes, {eventStormingFlowEdges.length} edges)
+                      </div>
+                      <button
+                        className="action-icon"
+                        type="button"
+                        title={isEventStormingFullscreen ? 'Exit full screen' : 'Open full screen graph'}
+                        aria-label={isEventStormingFullscreen ? 'Exit full screen' : 'Open full screen graph'}
+                        onClick={() => void toggleEventStormingFullscreen()}
+                      >
+                        <Icon path={isEventStormingFullscreen ? 'M9 9H3V3h6v2H5v4h4v2zm12 0h-6V7h4V3h2v6zM9 21H3v-6h2v4h4v2zm12 0h-6v-2h4v-4h2v6z' : 'M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6'} />
+                      </button>
+                    </div>
+                    {eventStormingOverviewQuery.isError || eventStormingSubgraphQuery.isError ? (
+                      <div className="notice notice-error">
+                        Event storming projection is unavailable.
+                        <div className="meta" style={{ color: 'inherit', marginTop: 4 }}>
+                          {toErrorMessage(eventStormingOverviewQuery.error || eventStormingSubgraphQuery.error)}
+                        </div>
+                      </div>
+                    ) : eventStormingOverviewQuery.isLoading || eventStormingSubgraphQuery.isLoading ? (
+                      <div className="meta">Loading Event Storming diagram...</div>
+                    ) : (
+                      <>
+                        <div className="graph-insights-meta-row" style={{ marginBottom: 8 }}>
+                          <span className="badge">Artifact links: {eventStormingOverview?.artifact_link_count ?? 0}</span>
+                          {Object.entries(eventStormingOverview?.component_counts ?? {}).map(([key, value]) => (
+                            <span className="badge" key={`es-count-${key}`}>
+                              {key}: {value}
+                            </span>
+                          ))}
+                        </div>
+                        {eventStormingFlowNodes.length === 0 ? (
+                          <div className="meta">No Event Storming components detected yet.</div>
+                        ) : (
+                          <div className="graph-reactflow-shell" ref={eventStormingShellRef}>
+                            {isEventStormingFullscreen ? (
+                              <button
+                                className="action-icon graph-viz-exit-button"
+                                type="button"
+                                title="Exit full screen"
+                                aria-label="Exit full screen"
+                                onClick={() => void exitEventStormingFullscreen()}
+                              >
+                                <Icon path="M9 9H3V3h6v2H5v4h4v2zm12 0h-6V7h4V3h2v6zM9 21H3v-6h2v4h4v2zm12 0h-6v-2h4v-4h2v6z" />
+                              </button>
+                            ) : null}
+                            <div className="graph-viz-composite graph-viz-composite-event-storming">
+                              <div>
+                                <div className="event-storming-lane-legend">
+                                  {eventStormingLaneLegend.map((item) => (
+                                    <span
+                                      key={`es-legend-${item.key}`}
+                                      className="event-storming-lane-chip"
+                                      style={{ borderColor: item.border, backgroundColor: item.sticky, color: item.text }}
+                                    >
+                                      {item.label}
+                                    </span>
+                                  ))}
+                                </div>
+                                <div className="event-storming-review-legend">
+                                  {eventStormingReviewLegend.map((item) => (
+                                    <span key={`es-review-legend-${item.key}`} className="event-storming-review-chip">
+                                      <span className="event-storming-review-dot" style={{ backgroundColor: item.color }} />
+                                      {item.label}
+                                    </span>
+                                  ))}
+                                </div>
+                                <div className="event-storming-lane-header-grid" role="presentation" aria-hidden="true">
+                                  {eventStormingLaneHeaders.map((item) => (
+                                    <span key={`es-lane-header-${item.key}`} className="event-storming-lane-header-item">
+                                      {item.label}
+                                    </span>
+                                  ))}
+                                </div>
+                                <div className="graph-reactflow-canvas event-storming-canvas">
+                                  <ReactFlow
+                                    nodes={eventStormingFlowNodes}
+                                    edges={eventStormingFlowEdges}
+                                    fitView
+                                    fitViewOptions={{ padding: 0.12, maxZoom: 1.0 }}
+                                    nodesDraggable={false}
+                                    nodesConnectable={false}
+                                    elementsSelectable
+                                    onNodeClick={(_, node) => {
+                                      const nodeId = String(node.id || '').trim()
+                                      if (!nodeId) return
+                                      setSelectedEventStormingNodeId(nodeId)
+                                    }}
+                                    minZoom={0.2}
+                                    maxZoom={1.4}
+                                    proOptions={{ hideAttribution: true }}
+                                    onInit={(instance) => {
+                                      eventStormingFlowRef.current = instance
+                                      try {
+                                        instance.fitView({ padding: 0.12, duration: 280, maxZoom: 1.0 })
+                                      } catch {
+                                        // no-op
+                                      }
+                                    }}
+                                  >
+                                    <MiniMap
+                                      pannable
+                                      zoomable
+                                      nodeStrokeWidth={2}
+                                      nodeColor={(node) => eventStormingNodeColor(String((node.data as ReactFlowNodeData | undefined)?.entityType || 'Entity'))}
+                                    />
+                                    <Controls showInteractive={false} />
+                                    <Background gap={18} size={1} color="rgba(148,163,184,0.30)" />
+                                  </ReactFlow>
+                                </div>
+                              </div>
+                            <aside className="graph-viz-side graph-viz-side-event-storming">
+                              <div className="meta">Selected Event Storming Node</div>
+                              <label className="event-storming-toggle">
+                                <input
+                                  type="checkbox"
+                                  checked={showEventStormingArtifactsOnDiagram}
+                                  onChange={(e) => setShowEventStormingArtifactsOnDiagram(Boolean(e.target.checked))}
+                                />
+                                <span>Show artifacts on diagram</span>
+                              </label>
+                              <label className="event-storming-toggle">
+                                <input
+                                  type="checkbox"
+                                  checked={showRejectedEventStormingLinks}
+                                  onChange={(e) => setShowRejectedEventStormingLinks(Boolean(e.target.checked))}
+                                />
+                                <span>Show rejected links</span>
+                              </label>
+                              {selectedEventStormingNode ? (
+                                <div className="graph-viz-selected" style={{ marginBottom: 10 }}>
+                                  <div className="graph-viz-selected-head">
+                                    <span className="meta">Type</span>
+                                    <span className="status-chip">{selectedEventStormingNode.entity_type}</span>
+                                  </div>
+                                  <div className="graph-viz-selected-title">{selectedEventStormingNode.title || selectedEventStormingNode.entity_id}</div>
+                                  <div className="graph-viz-selected-id" title={selectedEventStormingNode.entity_id}>
+                                    {selectedEventStormingNode.entity_id}
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="meta">Select a node to inspect inferred links.</div>
+                              )}
+                              {eventStormingLinksError ? (
+                                <div className="notice notice-error" style={{ marginBottom: 8 }}>
+                                  {toErrorMessage(eventStormingLinksError)}
+                                </div>
+                              ) : null}
+                              {eventStormingLinksLoading ? <div className="meta">Loading inferred links...</div> : null}
+                              {selectedEventStormingNode && selectedEventStormingIsComponent && !eventStormingLinksLoading ? (
+                                <>
+                                  <div className="meta" style={{ marginBottom: 6 }}>
+                                    Linked artifacts ({visibleEventStormingComponentLinkItems.length})
+                                  </div>
+                                  <div className="graph-evidence-list">
+                                    {visibleEventStormingComponentLinkItems.map((item) => (
+                                      <div key={`es-component-link-${item.entity_id}-${selectedEventStormingNode.entity_id}`} className="graph-evidence-item">
+                                        <div className="graph-evidence-head">
+                                          <div className="graph-evidence-badges">
+                                            <span className="status-chip">{item.entity_type}</span>
+                                            <span className="graph-evidence-id">{item.entity_id}</span>
+                                          </div>
+                                          <span className="graph-evidence-score graph-evidence-score-pill">{item.confidence.toFixed(2)}</span>
+                                        </div>
+                                        <div className="graph-evidence-snippet">{item.entity_title || item.entity_id}</div>
+                                        <div className="es-link-review">
+                                          <div className="es-link-review-buttons" role="group" aria-label="Set review status">
+                                            {(['candidate', 'approved', 'rejected'] as const).map((status) => (
+                                              <button
+                                                key={`es-link-status-${item.entity_id}-${status}`}
+                                                type="button"
+                                                className={`es-link-review-btn ${item.review_status === status ? 'active' : ''}`.trim()}
+                                                aria-pressed={item.review_status === status}
+                                                disabled={Boolean(reviewEventStormingLinkMutation.isPending)}
+                                                onClick={() =>
+                                                  void setEventStormingLinkReview({
+                                                    entity_type: String(item.entity_type || '').toLowerCase(),
+                                                    entity_id: String(item.entity_id || ''),
+                                                    component_id: String(selectedEventStormingNode.entity_id || ''),
+                                                    review_status: status,
+                                                  })
+                                                }
+                                              >
+                                                {status}
+                                              </button>
+                                            ))}
+                                          </div>
+                                          <div className="es-link-review-meta">
+                                            <span className="status-chip">Status: {item.review_status}</span>
+                                            <span className="status-chip">Inference: {item.inference_method}</span>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    ))}
+                                    {visibleEventStormingComponentLinkItems.length === 0 ? (
+                                      <div className="meta">No artifact links detected for this component.</div>
+                                    ) : null}
+                                  </div>
+                                </>
+                              ) : null}
+                              {selectedEventStormingNode && selectedEventStormingIsArtifact && !eventStormingLinksLoading ? (
+                                <>
+                                  <div className="meta" style={{ marginBottom: 6 }}>
+                                    Linked components ({visibleEventStormingEntityLinkItems.length})
+                                  </div>
+                                  <div className="graph-evidence-list">
+                                    {visibleEventStormingEntityLinkItems.map((item) => (
+                                      <div key={`es-entity-link-${selectedEventStormingNode.entity_id}-${item.component_id}`} className="graph-evidence-item">
+                                        <div className="graph-evidence-head">
+                                          <div className="graph-evidence-badges">
+                                            <span className="status-chip">{item.component_type}</span>
+                                            <span className="graph-evidence-id">{item.component_id}</span>
+                                          </div>
+                                          <span className="graph-evidence-score graph-evidence-score-pill">{item.confidence.toFixed(2)}</span>
+                                        </div>
+                                        <div className="graph-evidence-snippet">{item.component_title || item.component_id}</div>
+                                        <div className="es-link-review">
+                                          <div className="es-link-review-buttons" role="group" aria-label="Set review status">
+                                            {(['candidate', 'approved', 'rejected'] as const).map((status) => (
+                                              <button
+                                                key={`es-link-status-${item.component_id}-${status}`}
+                                                type="button"
+                                                className={`es-link-review-btn ${item.review_status === status ? 'active' : ''}`.trim()}
+                                                aria-pressed={item.review_status === status}
+                                                disabled={Boolean(reviewEventStormingLinkMutation.isPending)}
+                                                onClick={() =>
+                                                  void setEventStormingLinkReview({
+                                                    entity_type: String(selectedEventStormingNode.entity_type || '').toLowerCase(),
+                                                    entity_id: String(selectedEventStormingNode.entity_id || ''),
+                                                    component_id: String(item.component_id || ''),
+                                                    review_status: status,
+                                                  })
+                                                }
+                                              >
+                                                {status}
+                                              </button>
+                                            ))}
+                                          </div>
+                                          <div className="es-link-review-meta">
+                                            <span className="status-chip">Status: {item.review_status}</span>
+                                            <span className="status-chip">Inference: {item.inference_method}</span>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    ))}
+                                    {visibleEventStormingEntityLinkItems.length === 0 ? (
+                                      <div className="meta">No component links detected for this artifact.</div>
+                                    ) : null}
+                                  </div>
+                                </>
+                              ) : null}
+                              {selectedEventStormingNode &&
+                              !selectedEventStormingIsComponent &&
+                              !selectedEventStormingIsArtifact &&
+                              !eventStormingLinksLoading ? (
+                                <div className="meta">No reviewable links for this node type.</div>
+                              ) : null}
+                            </aside>
+                            </div>
                           </div>
                         )}
                       </>

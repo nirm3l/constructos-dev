@@ -35,6 +35,10 @@ from features.chat.api import router as chat_router
 from features.agents.runner import start_automation_runner, stop_automation_runner
 from features.agents.codex_mcp_adapter import run_codex_home_cleanup_if_due
 from shared.core import bootstrap_data, start_projection_worker, startup_bootstrap, stop_projection_worker
+from shared.eventing_event_storming import (
+    start_event_storming_projection_worker,
+    stop_event_storming_projection_worker,
+)
 from shared.deps import is_license_write_allowed
 from shared.eventing_graph import start_graph_projection_worker, stop_graph_projection_worker
 from shared.eventing_vector import start_vector_projection_worker, stop_vector_projection_worker
@@ -67,6 +71,7 @@ async def lifespan(_app: FastAPI):
     start_projection_worker()
     start_graph_projection_worker()
     start_vector_projection_worker()
+    start_event_storming_projection_worker()
     start_license_sync_worker()
     start_system_notifications_worker()
     if AGENT_RUNNER_ENABLED:
@@ -76,6 +81,7 @@ async def lifespan(_app: FastAPI):
         stop_automation_runner()
     stop_system_notifications_worker()
     stop_license_sync_worker()
+    stop_event_storming_projection_worker()
     stop_vector_projection_worker()
     stop_graph_projection_worker()
     stop_projection_worker()

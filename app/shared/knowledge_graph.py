@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from .json_utils import parse_json_object
 from .observability import incr, observe, set_value
 from .settings import (
     CONTEXT_PACK_EVIDENCE_TOP_K,
@@ -224,6 +225,12 @@ def ensure_graph_schema() -> None:
             "CREATE CONSTRAINT chat_attachment_id_unique IF NOT EXISTS FOR (n:ChatAttachment) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT specification_id_unique IF NOT EXISTS FOR (n:Specification) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT project_rule_id_unique IF NOT EXISTS FOR (n:ProjectRule) REQUIRE n.id IS UNIQUE",
+            "CREATE CONSTRAINT bounded_context_id_unique IF NOT EXISTS FOR (n:BoundedContext) REQUIRE n.id IS UNIQUE",
+            "CREATE CONSTRAINT aggregate_id_unique IF NOT EXISTS FOR (n:Aggregate) REQUIRE n.id IS UNIQUE",
+            "CREATE CONSTRAINT command_id_unique IF NOT EXISTS FOR (n:Command) REQUIRE n.id IS UNIQUE",
+            "CREATE CONSTRAINT domain_event_id_unique IF NOT EXISTS FOR (n:DomainEvent) REQUIRE n.id IS UNIQUE",
+            "CREATE CONSTRAINT policy_id_unique IF NOT EXISTS FOR (n:Policy) REQUIRE n.id IS UNIQUE",
+            "CREATE CONSTRAINT read_model_id_unique IF NOT EXISTS FOR (n:ReadModel) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT user_id_unique IF NOT EXISTS FOR (n:User) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT tag_value_unique IF NOT EXISTS FOR (n:Tag) REQUIRE n.value IS UNIQUE",
             "CREATE INDEX project_workspace_idx IF NOT EXISTS FOR (n:Project) ON (n.workspace_id)",
@@ -235,6 +242,12 @@ def ensure_graph_schema() -> None:
             "CREATE INDEX chat_attachment_project_idx IF NOT EXISTS FOR (n:ChatAttachment) ON (n.project_id)",
             "CREATE INDEX specification_project_idx IF NOT EXISTS FOR (n:Specification) ON (n.project_id)",
             "CREATE INDEX project_rule_project_idx IF NOT EXISTS FOR (n:ProjectRule) ON (n.project_id)",
+            "CREATE INDEX bounded_context_project_idx IF NOT EXISTS FOR (n:BoundedContext) ON (n.project_id)",
+            "CREATE INDEX aggregate_project_idx IF NOT EXISTS FOR (n:Aggregate) ON (n.project_id)",
+            "CREATE INDEX command_project_idx IF NOT EXISTS FOR (n:Command) ON (n.project_id)",
+            "CREATE INDEX domain_event_project_idx IF NOT EXISTS FOR (n:DomainEvent) ON (n.project_id)",
+            "CREATE INDEX policy_project_idx IF NOT EXISTS FOR (n:Policy) ON (n.project_id)",
+            "CREATE INDEX read_model_project_idx IF NOT EXISTS FOR (n:ReadModel) ON (n.project_id)",
         ]
         driver = _get_driver()
         if driver is None:
@@ -696,6 +709,404 @@ def graph_get_project_subgraph(
         "edge_count": len(edges),
         "nodes": nodes,
         "edges": edges,
+    }
+
+
+_EVENT_STORMING_COMPONENT_LABELS = [
+    "BoundedContext",
+    "Aggregate",
+    "Command",
+    "DomainEvent",
+    "Policy",
+    "ReadModel",
+]
+_EVENT_STORMING_ARTIFACT_LABELS = ["Task", "Note", "Specification"]
+
+
+def event_storming_get_project_overview(project_id: str) -> dict[str, Any]:
+    require_graph_available()
+    project_rows = run_graph_query(
+        """
+        MATCH (p:Project {id:$project_id})
+        RETURN p.id AS project_id, coalesce(p.name, '') AS project_name
+        LIMIT 1
+        """,
+        {"project_id": project_id},
+    )
+    if not project_rows:
+        return {
+            "project_id": project_id,
+            "project_name": "",
+            "component_counts": {},
+            "artifact_link_count": 0,
+        }
+
+    component_counts: dict[str, int] = {}
+    for label in _EVENT_STORMING_COMPONENT_LABELS:
+        rows = run_graph_query(
+            f"""
+            MATCH (n:{label})
+            WHERE coalesce(n.project_id, '') = $project_id
+            RETURN count(n) AS count
+            """,
+            {"project_id": project_id},
+        )
+        component_counts[label] = int((rows[0] if rows else {}).get("count") or 0)
+
+    link_rows = run_graph_query(
+        """
+        MATCH (a)-[r:RELATES_TO_ES]->(c)
+        WHERE any(label IN labels(a) WHERE label IN $artifact_labels)
+          AND any(label IN labels(c) WHERE label IN $component_labels)
+          AND coalesce(c.project_id, '') = $project_id
+        RETURN count(r) AS count
+        """,
+        {
+            "project_id": project_id,
+            "artifact_labels": _EVENT_STORMING_ARTIFACT_LABELS,
+            "component_labels": _EVENT_STORMING_COMPONENT_LABELS,
+        },
+    )
+    first = project_rows[0]
+    return {
+        "project_id": str(first.get("project_id") or project_id),
+        "project_name": str(first.get("project_name") or ""),
+        "component_counts": component_counts,
+        "artifact_link_count": int((link_rows[0] if link_rows else {}).get("count") or 0),
+    }
+
+
+def event_storming_get_project_subgraph(
+    project_id: str,
+    *,
+    limit_nodes: int = 120,
+    limit_edges: int = 220,
+) -> dict[str, Any]:
+    require_graph_available()
+    safe_nodes = max(16, min(int(limit_nodes or 120), 300))
+    safe_edges = max(16, min(int(limit_edges or 220), 500))
+
+    project_rows = run_graph_query(
+        """
+        MATCH (p:Project {id:$project_id})
+        RETURN p.id AS project_id, coalesce(p.name, '') AS project_name
+        LIMIT 1
+        """,
+        {"project_id": project_id},
+    )
+    if not project_rows:
+        return {
+            "project_id": project_id,
+            "project_name": "",
+            "node_count": 0,
+            "edge_count": 0,
+            "nodes": [],
+            "edges": [],
+        }
+
+    component_rows = run_graph_query(
+        """
+        MATCH (n)
+        WHERE any(label IN labels(n) WHERE label IN $component_labels)
+          AND coalesce(n.project_id, '') = $project_id
+        RETURN n.id AS entity_id,
+               head([label IN labels(n) WHERE label IN $component_labels]) AS entity_type,
+               coalesce(n.title, n.name, n.id) AS title
+        ORDER BY title ASC
+        LIMIT $limit
+        """,
+        {
+            "project_id": project_id,
+            "component_labels": _EVENT_STORMING_COMPONENT_LABELS,
+            "limit": safe_nodes,
+        },
+    )
+    nodes: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in component_rows:
+        entity_id = str(row.get("entity_id") or "").strip()
+        if not entity_id or entity_id in seen:
+            continue
+        seen.add(entity_id)
+        nodes.append(
+            {
+                "entity_type": str(row.get("entity_type") or "Entity"),
+                "entity_id": entity_id,
+                "title": str(row.get("title") or entity_id),
+                "degree": 0,
+            }
+        )
+
+    component_ids = [str(item["entity_id"]) for item in nodes]
+    if not component_ids:
+        first = project_rows[0]
+        return {
+            "project_id": str(first.get("project_id") or project_id),
+            "project_name": str(first.get("project_name") or ""),
+            "node_count": 0,
+            "edge_count": 0,
+            "nodes": [],
+            "edges": [],
+        }
+
+    component_edge_rows = run_graph_query(
+        """
+        MATCH (a)-[r]->(b)
+        WHERE a.id IN $component_ids
+          AND b.id IN $component_ids
+          AND any(label IN labels(a) WHERE label IN $component_labels)
+          AND any(label IN labels(b) WHERE label IN $component_labels)
+        RETURN a.id AS source_entity_id, b.id AS target_entity_id, type(r) AS relationship
+        ORDER BY relationship ASC
+        LIMIT $limit
+        """,
+        {
+            "component_ids": component_ids,
+            "component_labels": _EVENT_STORMING_COMPONENT_LABELS,
+            "limit": safe_edges,
+        },
+    )
+    artifact_link_rows = run_graph_query(
+        """
+        MATCH (a)-[r:RELATES_TO_ES]->(c)
+        WHERE c.id IN $component_ids
+          AND any(label IN labels(a) WHERE label IN $artifact_labels)
+        RETURN a.id AS source_entity_id,
+               c.id AS target_entity_id,
+               type(r) AS relationship,
+               coalesce(r.review_status, 'candidate') AS review_status,
+               coalesce(r.inference_method, 'heuristic') AS inference_method,
+               toFloat(coalesce(r.confidence, 0.0)) AS confidence,
+               head([label IN labels(a) WHERE label IN $artifact_labels]) AS artifact_label,
+               coalesce(a.title, a.name, a.id) AS artifact_title
+        ORDER BY artifact_title ASC
+        LIMIT $limit
+        """,
+        {
+            "component_ids": component_ids,
+            "artifact_labels": _EVENT_STORMING_ARTIFACT_LABELS,
+            "limit": safe_edges,
+        },
+    )
+
+    for row in artifact_link_rows:
+        artifact_id = str(row.get("source_entity_id") or "").strip()
+        if not artifact_id or artifact_id in seen:
+            continue
+        seen.add(artifact_id)
+        nodes.append(
+            {
+                "entity_type": str(row.get("artifact_label") or "Entity"),
+                "entity_id": artifact_id,
+                "title": str(row.get("artifact_title") or artifact_id),
+                "degree": 0,
+            }
+        )
+
+    edges = [
+        {
+            "source_entity_id": str(row.get("source_entity_id") or ""),
+            "target_entity_id": str(row.get("target_entity_id") or ""),
+            "relationship": str(row.get("relationship") or "RELATED"),
+            "review_status": str(row.get("review_status") or ""),
+            "inference_method": str(row.get("inference_method") or ""),
+            "confidence": float(row.get("confidence") or 0.0),
+        }
+        for row in [*component_edge_rows, *artifact_link_rows]
+        if str(row.get("source_entity_id") or "").strip() and str(row.get("target_entity_id") or "").strip()
+    ]
+    degree_by_id: dict[str, int] = {}
+    for edge in edges:
+        source_id = str(edge["source_entity_id"])
+        target_id = str(edge["target_entity_id"])
+        degree_by_id[source_id] = degree_by_id.get(source_id, 0) + 1
+        degree_by_id[target_id] = degree_by_id.get(target_id, 0) + 1
+    for node in nodes:
+        node_id = str(node.get("entity_id") or "")
+        node["degree"] = int(degree_by_id.get(node_id, 0))
+
+    first = project_rows[0]
+    return {
+        "project_id": str(first.get("project_id") or project_id),
+        "project_name": str(first.get("project_name") or ""),
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "nodes": nodes,
+        "edges": edges,
+    }
+
+
+def event_storming_get_entity_links(
+    *,
+    project_id: str,
+    entity_type: str,
+    entity_id: str,
+) -> dict[str, Any]:
+    require_graph_available()
+    label = normalize_entity_label(entity_type)
+    if label not in _EVENT_STORMING_ARTIFACT_LABELS:
+        raise ValueError("entity_type must be task, note, or specification")
+    links = run_graph_query(
+        f"""
+        MATCH (a:{label} {{id:$entity_id}})-[r:RELATES_TO_ES]->(c)
+        WHERE coalesce(c.project_id, '') = $project_id
+          AND any(lbl IN labels(c) WHERE lbl IN $component_labels)
+        RETURN c.id AS component_id,
+               head([lbl IN labels(c) WHERE lbl IN $component_labels]) AS component_type,
+               coalesce(c.title, c.name, c.id) AS component_title,
+               coalesce(r.confidence, 0.0) AS confidence,
+               coalesce(r.review_status, 'candidate') AS review_status,
+               coalesce(r.inference_method, 'heuristic') AS inference_method,
+               coalesce(r.updated_at, '') AS updated_at
+        ORDER BY confidence DESC, component_title ASC
+        """,
+        {
+            "project_id": project_id,
+            "entity_id": entity_id,
+            "component_labels": _EVENT_STORMING_COMPONENT_LABELS,
+        },
+    )
+    return {
+        "project_id": project_id,
+        "entity_type": label,
+        "entity_id": entity_id,
+        "items": [
+            {
+                "component_id": str(item.get("component_id") or ""),
+                "component_type": str(item.get("component_type") or ""),
+                "component_title": str(item.get("component_title") or ""),
+                "confidence": float(item.get("confidence") or 0.0),
+                "review_status": str(item.get("review_status") or "candidate"),
+                "inference_method": str(item.get("inference_method") or "heuristic"),
+                "updated_at": str(item.get("updated_at") or ""),
+            }
+            for item in links
+        ],
+    }
+
+
+def event_storming_get_component_links(
+    *,
+    project_id: str,
+    component_id: str,
+) -> dict[str, Any]:
+    require_graph_available()
+    rows = run_graph_query(
+        """
+        MATCH (c {id:$component_id})
+        WHERE any(lbl IN labels(c) WHERE lbl IN $component_labels)
+          AND coalesce(c.project_id, '') = $project_id
+        OPTIONAL MATCH (a)-[r:RELATES_TO_ES]->(c)
+        WHERE any(lbl IN labels(a) WHERE lbl IN $artifact_labels)
+        RETURN head([lbl IN labels(c) WHERE lbl IN $component_labels]) AS component_type,
+               coalesce(c.title, c.name, c.id) AS component_title,
+               a.id AS entity_id,
+               head([lbl IN labels(a) WHERE lbl IN $artifact_labels]) AS entity_type,
+               coalesce(a.title, a.name, a.id) AS entity_title,
+               coalesce(r.confidence, 0.0) AS confidence,
+               coalesce(r.review_status, 'candidate') AS review_status,
+               coalesce(r.inference_method, 'heuristic') AS inference_method,
+               coalesce(r.updated_at, '') AS updated_at
+        ORDER BY confidence DESC, entity_title ASC
+        """,
+        {
+            "project_id": project_id,
+            "component_id": component_id,
+            "component_labels": _EVENT_STORMING_COMPONENT_LABELS,
+            "artifact_labels": _EVENT_STORMING_ARTIFACT_LABELS,
+        },
+    )
+    if not rows:
+        return {
+            "project_id": project_id,
+            "component_id": component_id,
+            "component_type": "",
+            "component_title": "",
+            "items": [],
+        }
+    first = rows[0]
+    items = []
+    for item in rows:
+        entity_id = str(item.get("entity_id") or "").strip()
+        if not entity_id:
+            continue
+        items.append(
+            {
+                "entity_id": entity_id,
+                "entity_type": str(item.get("entity_type") or ""),
+                "entity_title": str(item.get("entity_title") or entity_id),
+                "confidence": float(item.get("confidence") or 0.0),
+                "review_status": str(item.get("review_status") or "candidate"),
+                "inference_method": str(item.get("inference_method") or "heuristic"),
+                "updated_at": str(item.get("updated_at") or ""),
+            }
+        )
+    return {
+        "project_id": project_id,
+        "component_id": component_id,
+        "component_type": str(first.get("component_type") or ""),
+        "component_title": str(first.get("component_title") or component_id),
+        "items": items,
+    }
+
+
+def event_storming_set_link_review_status(
+    *,
+    project_id: str,
+    entity_type: str,
+    entity_id: str,
+    component_id: str,
+    review_status: str,
+    confidence: float | None = None,
+) -> dict[str, Any]:
+    require_graph_available()
+    artifact_label = normalize_entity_label(entity_type)
+    if artifact_label not in _EVENT_STORMING_ARTIFACT_LABELS:
+        raise ValueError("entity_type must be task, note, or specification")
+    normalized_status = str(review_status or "").strip().lower()
+    if normalized_status not in {"candidate", "approved", "rejected"}:
+        raise ValueError("review_status must be one of: candidate, approved, rejected")
+    confidence_value = None if confidence is None else max(0.0, min(1.0, float(confidence)))
+
+    rows = run_graph_query(
+        f"""
+        MATCH (a:{artifact_label} {{id:$entity_id}})-[r:RELATES_TO_ES]->(c {{id:$component_id}})
+        WHERE coalesce(c.project_id, '') = $project_id
+        SET r.review_status = $review_status,
+            r.inference_method = 'manual',
+            r.updated_at = $updated_at,
+            r.confidence = coalesce($confidence, r.confidence)
+        RETURN
+            a.id AS entity_id,
+            c.id AS component_id,
+            coalesce(r.review_status, 'candidate') AS review_status,
+            coalesce(r.inference_method, 'manual') AS inference_method,
+            coalesce(r.confidence, 0.0) AS confidence,
+            coalesce(r.updated_at, '') AS updated_at
+        LIMIT 1
+        """,
+        {
+            "project_id": project_id,
+            "entity_id": entity_id,
+            "component_id": component_id,
+            "review_status": normalized_status,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "confidence": confidence_value,
+        },
+        write=True,
+    )
+    if not rows:
+        raise ValueError("RELATES_TO_ES link not found for provided entity/component")
+    row = rows[0]
+    return {
+        "project_id": project_id,
+        "entity_type": artifact_label,
+        "entity_id": str(row.get("entity_id") or entity_id),
+        "component_id": str(row.get("component_id") or component_id),
+        "review_status": str(row.get("review_status") or normalized_status),
+        "inference_method": str(row.get("inference_method") or "manual"),
+        "confidence": float(row.get("confidence") or 0.0),
+        "updated_at": str(row.get("updated_at") or ""),
     }
 
 
@@ -1635,25 +2046,6 @@ def _normalize_summary_payload(raw: dict[str, Any], *, evidence: list[dict[str, 
     }
 
 
-def _parse_json_object(raw_text: str) -> dict[str, Any]:
-    text = str(raw_text or "").strip()
-    if not text:
-        raise ValueError("Summary response is empty")
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception:
-        pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        parsed = json.loads(text[start : end + 1])
-        if isinstance(parsed, dict):
-            return parsed
-    raise ValueError("Summary response is not valid JSON object")
-
-
 def _build_grounded_summary_with_ollama(
     *,
     project_name: str,
@@ -1684,7 +2076,11 @@ def _build_grounded_summary_with_ollama(
         detail = (response.text or f"Ollama summary request failed ({response.status_code})").strip()
         raise RuntimeError(detail)
     data = response.json()
-    summary_raw = _parse_json_object(str(data.get("response") or ""))
+    summary_raw = parse_json_object(
+        str(data.get("response") or ""),
+        empty_error="Summary response is empty",
+        invalid_error="Summary response is not valid JSON object",
+    )
     summary = _normalize_summary_payload(summary_raw, evidence=evidence)
     if not summary.get("key_points"):
         raise RuntimeError("Summary payload has no grounded key points")

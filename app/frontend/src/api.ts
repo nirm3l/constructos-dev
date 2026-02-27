@@ -15,6 +15,11 @@ import type {
   ChatMcpServer,
   ChatReasoningEffort,
   ChatSessionRecord,
+  EventStormingOverview,
+  EventStormingEntityLinks,
+  EventStormingComponentLinks,
+  EventStormingLinkReviewResult,
+  EventStormingSubgraph,
   GraphContextPack,
   ProjectKnowledgeSearchResult,
   GraphProjectOverview,
@@ -776,6 +781,71 @@ export const searchProjectKnowledge = (
     })}`,
     userId
   )
+
+export const getProjectEventStormingOverview = (userId: string, projectId: string) =>
+  api<EventStormingOverview>(`/api/projects/${projectId}/event-storming/overview`, userId)
+
+export const getProjectEventStormingSubgraph = (
+  userId: string,
+  projectId: string,
+  params?: {
+    limit_nodes?: number
+    limit_edges?: number
+  }
+) =>
+  api<EventStormingSubgraph>(
+    `/api/projects/${projectId}/event-storming/subgraph${queryString({
+      limit_nodes: params?.limit_nodes ?? 120,
+      limit_edges: params?.limit_edges ?? 220,
+    })}`,
+    userId
+  )
+
+export const getProjectEventStormingEntityLinks = (
+  userId: string,
+  projectId: string,
+  params: {
+    entity_type: string
+    entity_id: string
+  }
+) =>
+  api<EventStormingEntityLinks>(
+    `/api/projects/${projectId}/event-storming/entity-links${queryString({
+      entity_type: params.entity_type,
+      entity_id: params.entity_id,
+    })}`,
+    userId
+  )
+
+export const getProjectEventStormingComponentLinks = (
+  userId: string,
+  projectId: string,
+  params: {
+    component_id: string
+  }
+) =>
+  api<EventStormingComponentLinks>(
+    `/api/projects/${projectId}/event-storming/component-links${queryString({
+      component_id: params.component_id,
+    })}`,
+    userId
+  )
+
+export const patchProjectEventStormingLinkReview = (
+  userId: string,
+  projectId: string,
+  payload: {
+    entity_type: string
+    entity_id: string
+    component_id: string
+    review_status: 'candidate' | 'approved' | 'rejected'
+    confidence?: number
+  }
+) =>
+  api<EventStormingLinkReviewResult>(`/api/projects/${projectId}/event-storming/review-link`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
 
 export const getProjectMembers = (userId: string, projectId: string) =>
   api<ProjectMembersPage>(`/api/projects/${projectId}/members`, userId)

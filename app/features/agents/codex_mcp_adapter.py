@@ -20,6 +20,7 @@ from shared.settings import (
     AGENT_CODEX_REASONING_EFFORT,
     AGENT_EXECUTOR_TIMEOUT_SECONDS,
 )
+from shared.json_utils import parse_json_object
 
 EMPTY_ASSISTANT_SUMMARY = "No assistant response content was returned."
 _DEFAULT_CODEX_HOME_ROOT = "/tmp/codex-home"
@@ -306,19 +307,21 @@ def _codex_home_env(
     normalized_workspace_id = str(workspace_id or "").strip()
     normalized_chat_session_id = str(chat_session_id or "").strip()
     if normalized_workspace_id and normalized_chat_session_id:
+        persistent_home: Path | None = None
         try:
             persistent_home = _resolve_persistent_codex_home_path(
                 workspace_id=normalized_workspace_id,
                 chat_session_id=normalized_chat_session_id,
             )
             _prepare_codex_home(persistent_home, mcp_config_text=mcp_config_text)
+        except Exception:
+            # Fall back to a temporary home so chat remains available even if persistent storage fails.
+            persistent_home = None
+        if persistent_home is not None:
             env = os.environ.copy()
             env["HOME"] = str(persistent_home)
             yield env
             return
-        except Exception:
-            # Fall back to a temporary home so chat remains available even if persistent storage fails.
-            pass
 
     with tempfile.TemporaryDirectory(prefix="codex-home-") as temp_home:
         temp_home_path = Path(temp_home)
@@ -1197,6 +1200,68 @@ def _run_codex_json_with_optional_stream(
         err_text = "\n".join(lines).strip()
         raise RuntimeError(f"codex exec failed (exit={return_code}): {err_text[:600]}")
     return "\n".join(lines)
+
+
+def run_structured_codex_prompt(
+    *,
+    prompt: str,
+    output_schema: dict[str, object],
+    workspace_id: str | None = None,
+    session_key: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    timeout_seconds: float | None = None,
+    mcp_servers: list[str] | None = None,
+    preferred_thread_id: str | None = None,
+) -> dict[str, object]:
+    normalized_workspace_id = str(workspace_id or "").strip() or None
+    normalized_session_key = str(session_key or "").strip() or None
+    selected_mcp_servers = normalize_chat_mcp_servers(mcp_servers, strict=False)
+    mcp_config_text = build_selected_mcp_config_text(
+        selected_servers=selected_mcp_servers,
+        task_management_mcp_url=AGENT_CODEX_MCP_URL,
+    )
+    preferred_model = str(model or "").strip() or AGENT_CODEX_MODEL or None
+    preferred_reasoning_effort = _normalize_reasoning_effort(reasoning_effort) or _normalize_reasoning_effort(
+        AGENT_CODEX_REASONING_EFFORT
+    )
+    runtime_timeout_seconds = _effective_timeout_seconds(
+        timeout_seconds,
+        fallback_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
+    )
+    run_codex_home_cleanup_if_due()
+    with _chat_session_run_lock(
+        workspace_id=normalized_workspace_id,
+        chat_session_id=normalized_session_key,
+        timeout_seconds=runtime_timeout_seconds,
+    ):
+        with _codex_home_env(
+            mcp_config_text=mcp_config_text,
+            workspace_id=normalized_workspace_id,
+            chat_session_id=normalized_session_key,
+        ) as codex_env:
+            final_message, _, _, _, _ = _run_codex_app_server_with_optional_stream(
+                start_prompt=prompt,
+                resume_prompt=prompt,
+                timeout_seconds=runtime_timeout_seconds,
+                stream_events=False,
+                model=preferred_model,
+                reasoning_effort=preferred_reasoning_effort,
+                output_schema=output_schema,
+                preferred_thread_id=str(preferred_thread_id or "").strip() or None,
+                env=codex_env,
+            )
+    try:
+        parsed_generic = parse_json_object(
+            final_message,
+            empty_error="codex app-server returned an empty response while JSON schema was required",
+            invalid_error="codex app-server returned a non-JSON response while JSON schema was required",
+        )
+    except ValueError as exc:
+        snippet = str(final_message or "").strip().replace("\n", " ")[:320]
+        detail = f"{exc} | response_snippet={snippet}" if snippet else str(exc)
+        raise RuntimeError(detail) from exc
+    return {str(key): value for key, value in parsed_generic.items()}
 
 
 def main() -> int:

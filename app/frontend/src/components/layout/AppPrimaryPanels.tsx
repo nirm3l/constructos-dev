@@ -239,6 +239,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           overviewQuery={state.projectGraphOverview}
           contextPackQuery={state.projectGraphContextPack}
           subgraphQuery={state.projectGraphSubgraph}
+          eventStormingOverviewQuery={state.projectEventStormingOverview}
+          eventStormingSubgraphQuery={state.projectEventStormingSubgraph}
           onCreateTaskFromSummary={state.createTaskFromGraphSummary}
           onCreateNoteFromSummary={state.createNoteFromGraphSummary}
           onLinkFocusTaskToSpecification={state.linkFocusTaskToSpecification}

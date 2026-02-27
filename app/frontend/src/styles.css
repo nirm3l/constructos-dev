@@ -5945,6 +5945,50 @@ textarea:disabled {
   line-height: 1.35;
 }
 
+.es-link-review {
+  margin-top: 4px;
+  display: grid;
+  gap: 6px;
+}
+
+.es-link-review-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.es-link-review-btn {
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 28%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 24%);
+  color: var(--text);
+  border-radius: 999px;
+  min-height: 24px;
+  padding: 2px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: capitalize;
+}
+
+.es-link-review-btn:hover,
+.es-link-review-btn:focus-visible {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 26%);
+  background: color-mix(in srgb, var(--surface), var(--brand) 10%);
+}
+
+.es-link-review-btn.active {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 20%);
+  background: color-mix(in srgb, var(--brand), var(--surface) 82%);
+  color: color-mix(in srgb, var(--text), var(--brand-strong) 20%);
+}
+
+.es-link-review-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .graph-summary-layout {
   margin-top: 6px;
   display: grid;
@@ -6073,6 +6117,13 @@ textarea:disabled {
   margin-bottom: 6px;
 }
 
+.graph-viz-composite {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 260px;
+  gap: 10px;
+  align-items: start;
+}
+
 .graph-viz-shell {
   margin-top: 6px;
   border: 1px solid var(--line);
@@ -6130,6 +6181,193 @@ textarea:disabled {
   height: 100vh;
   border: none;
   border-radius: 0;
+}
+
+.graph-reactflow-block {
+  margin-top: 12px;
+}
+
+.graph-reactflow-shell {
+  margin-top: 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 20%);
+  position: relative;
+}
+
+.graph-reactflow-shell:fullscreen,
+.graph-reactflow-shell:-webkit-full-screen {
+  width: 100vw;
+  height: 100vh;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.graph-reactflow-shell:fullscreen .graph-viz-composite-event-storming,
+.graph-reactflow-shell:-webkit-full-screen .graph-viz-composite-event-storming {
+  height: 100vh;
+  padding: 12px;
+  box-sizing: border-box;
+}
+
+.graph-reactflow-canvas {
+  width: 100%;
+  height: 380px;
+  border: 1px solid color-mix(in srgb, var(--line), transparent 10%);
+  border-radius: 10px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 16% 10%, color-mix(in srgb, var(--surface-alt), white 62%), transparent 38%),
+    color-mix(in srgb, var(--surface), var(--surface-alt) 22%);
+}
+
+.graph-reactflow-canvas .react-flow {
+  background: transparent;
+}
+
+.graph-reactflow-shell:fullscreen .graph-reactflow-canvas,
+.graph-reactflow-shell:-webkit-full-screen .graph-reactflow-canvas {
+  height: 100vh;
+  border: none;
+  border-radius: 0;
+}
+
+.event-storming-canvas {
+  height: 520px;
+  border-color: color-mix(in srgb, var(--line), var(--brand) 12%);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0)),
+    repeating-linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--surface), var(--surface-alt) 12%) 0,
+      color-mix(in srgb, var(--surface), var(--surface-alt) 12%) 116px,
+      color-mix(in srgb, var(--surface), var(--brand) 4%) 116px,
+      color-mix(in srgb, var(--surface), var(--brand) 4%) 118px
+    );
+}
+
+.event-storming-lane-legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.event-storming-review-legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.event-storming-review-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 20%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 20%);
+  color: color-mix(in srgb, var(--text), var(--brand-strong) 12%);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.event-storming-review-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.event-storming-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.event-storming-toggle input[type="checkbox"] {
+  margin: 0;
+}
+
+.event-storming-lane-header-grid {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(120px, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.event-storming-lane-header-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 26px;
+  border: 1px dashed color-mix(in srgb, var(--line), var(--brand) 26%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 20%);
+  color: color-mix(in srgb, var(--text), var(--brand-strong) 16%);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+}
+
+.event-storming-lane-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border: 1px solid;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+}
+
+.graph-viz-side-event-storming {
+  max-height: 520px;
+  overflow: auto;
+}
+
+.graph-reactflow-shell:fullscreen .graph-viz-side-event-storming,
+.graph-reactflow-shell:-webkit-full-screen .graph-viz-side-event-storming {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 6;
+  width: min(300px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 30%);
+  box-shadow: 0 8px 24px color-mix(in srgb, #000, transparent 78%);
+  backdrop-filter: blur(5px);
+}
+
+.graph-reactflow-canvas .react-flow__minimap {
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--line), transparent 8%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 20%);
+}
+
+.graph-reactflow-canvas .react-flow__controls {
+  box-shadow: none;
+  border: 1px solid color-mix(in srgb, var(--line), transparent 10%);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.graph-reactflow-canvas .react-flow__controls-button {
+  border-bottom: 1px solid color-mix(in srgb, var(--line), transparent 14%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 20%);
+  color: var(--text);
 }
 
 .graph-viz-side {
@@ -8744,6 +8982,51 @@ textarea:disabled {
     #0f1d15;
 }
 
+[data-theme="dark"] .graph-reactflow-canvas {
+  border-color: #28543b;
+  background:
+    radial-gradient(circle at 16% 10%, rgba(36, 79, 52, 0.5), transparent 38%),
+    #0f1d15;
+}
+
+[data-theme="dark"] .graph-reactflow-shell {
+  border-color: #28543b;
+  background: #0f1f16;
+}
+
+[data-theme="dark"] .event-storming-canvas {
+  border-color: #2d6c4a;
+  background:
+    linear-gradient(180deg, rgba(23, 40, 28, 0.34), rgba(10, 20, 14, 0)),
+    repeating-linear-gradient(
+      180deg,
+      rgba(14, 28, 20, 0.95) 0,
+      rgba(14, 28, 20, 0.95) 116px,
+      rgba(33, 61, 45, 0.8) 116px,
+      rgba(33, 61, 45, 0.8) 118px
+    );
+}
+
+[data-theme="dark"] .event-storming-lane-header-item {
+  border-color: #2d6c4a;
+  background: rgba(17, 36, 25, 0.82);
+  color: #d9fbe4;
+}
+
+[data-theme="dark"] .event-storming-review-chip {
+  border-color: #2d6c4a;
+  background: rgba(17, 36, 25, 0.82);
+  color: #d9fbe4;
+}
+
+[data-theme="dark"] .graph-reactflow-canvas .react-flow__minimap,
+[data-theme="dark"] .graph-reactflow-canvas .react-flow__controls,
+[data-theme="dark"] .graph-reactflow-canvas .react-flow__controls-button {
+  border-color: #2b6544;
+  background: #0f1f16;
+  color: #d9fbe4;
+}
+
 [data-theme="dark"] .task-item.scheduled {
   border-color: #53a374;
   background: #143124;
@@ -9546,6 +9829,22 @@ textarea {
 
   .graph-viz-canvas {
     height: 280px;
+  }
+
+  .graph-reactflow-canvas {
+    height: 320px;
+  }
+
+  .event-storming-canvas {
+    height: 360px;
+  }
+
+  .event-storming-lane-header-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .graph-viz-composite {
+    grid-template-columns: 1fr;
   }
 
   .graph-viz-shell:fullscreen,

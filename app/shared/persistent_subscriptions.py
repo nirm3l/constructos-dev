@@ -5,6 +5,8 @@ from typing import Sequence
 from .eventing_store import get_kurrent_client
 from .knowledge_graph import graph_enabled
 from .settings import (
+    EVENT_STORMING_ENABLED,
+    PERSISTENT_SUBSCRIPTION_EVENT_STORMING_GROUP,
     PERSISTENT_SUBSCRIPTION_GRAPH_GROUP,
     PERSISTENT_SUBSCRIPTION_READ_MODEL_GROUP,
     PERSISTENT_SUBSCRIPTION_VECTOR_GROUP,
@@ -39,6 +41,11 @@ _VECTOR_FILTER_INCLUDE = (
     r"ProjectRule::.*",
     r"ChatSession::.*",
 )
+_EVENT_STORMING_FILTER_INCLUDE = (
+    r"Task::.*",
+    r"Note::.*",
+    r"Specification::.*",
+)
 
 
 def ensure_persistent_subscriptions() -> None:
@@ -64,6 +71,14 @@ def ensure_persistent_subscriptions() -> None:
             client=client,
             group_name=PERSISTENT_SUBSCRIPTION_VECTOR_GROUP,
             filter_include=_VECTOR_FILTER_INCLUDE,
+            filter_by_stream_name=True,
+        )
+
+    if graph_enabled() and EVENT_STORMING_ENABLED:
+        _ensure_subscription_group(
+            client=client,
+            group_name=PERSISTENT_SUBSCRIPTION_EVENT_STORMING_GROUP,
+            filter_include=_EVENT_STORMING_FILTER_INCLUDE,
             filter_by_stream_name=True,
         )
 

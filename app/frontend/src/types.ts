@@ -572,6 +572,9 @@ export type GraphSubgraphEdge = {
   source_entity_id: string
   target_entity_id: string
   relationship: string
+  review_status?: 'candidate' | 'approved' | 'rejected' | string
+  inference_method?: string
+  confidence?: number
 }
 
 export type GraphProjectSubgraph = {
@@ -581,6 +584,64 @@ export type GraphProjectSubgraph = {
   edge_count: number
   nodes: GraphSubgraphNode[]
   edges: GraphSubgraphEdge[]
+}
+
+export type EventStormingOverview = {
+  project_id: string
+  project_name: string
+  component_counts: Record<string, number>
+  artifact_link_count: number
+}
+
+export type EventStormingSubgraph = {
+  project_id: string
+  project_name: string
+  node_count: number
+  edge_count: number
+  nodes: GraphSubgraphNode[]
+  edges: GraphSubgraphEdge[]
+}
+
+export type EventStormingLinkReviewResult = {
+  project_id: string
+  entity_type: string
+  entity_id: string
+  component_id: string
+  review_status: 'candidate' | 'approved' | 'rejected' | string
+  inference_method: string
+  confidence: number
+  updated_at: string
+}
+
+export type EventStormingEntityLinks = {
+  project_id: string
+  entity_type: string
+  entity_id: string
+  items: Array<{
+    component_id: string
+    component_type: string
+    component_title: string
+    confidence: number
+    review_status: 'candidate' | 'approved' | 'rejected' | string
+    inference_method: string
+    updated_at: string
+  }>
+}
+
+export type EventStormingComponentLinks = {
+  project_id: string
+  component_id: string
+  component_type: string
+  component_title: string
+  items: Array<{
+    entity_id: string
+    entity_type: string
+    entity_title: string
+    confidence: number
+    review_status: 'candidate' | 'approved' | 'rejected' | string
+    inference_method: string
+    updated_at: string
+  }>
 }
 
 export type ProjectKnowledgeSearchItem = {

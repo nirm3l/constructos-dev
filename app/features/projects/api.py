@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from features.agents.gateway import build_ui_gateway
@@ -13,6 +14,11 @@ from shared.core import (
     get_db,
 )
 from shared.knowledge_graph import (
+    event_storming_set_link_review_status,
+    event_storming_get_component_links,
+    event_storming_get_entity_links,
+    event_storming_get_project_overview,
+    event_storming_get_project_subgraph,
     graph_context_pack,
     graph_get_project_overview,
     graph_get_project_subgraph,
@@ -28,6 +34,18 @@ from .read_models import (
 )
 
 router = APIRouter()
+
+
+class EventStormingLinkReviewPatch(BaseModel):
+    entity_type: str = Field(min_length=1)
+    entity_id: str = Field(min_length=1)
+    component_id: str = Field(min_length=1)
+    review_status: str = Field(min_length=1)
+    confidence: float | None = None
+
+
+class EventStormingBulkLinkReviewPatch(BaseModel):
+    items: list[EventStormingLinkReviewPatch] = Field(default_factory=list)
 
 
 def _load_project_with_access(db: Session, user, project_id: str) -> Project:
@@ -177,6 +195,137 @@ def project_knowledge_search(
         focus_entity_id=focus_entity_id,
         limit=limit,
     )
+
+
+@router.get("/api/projects/{project_id}/event-storming/overview")
+def project_event_storming_overview(
+    project_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    project = _load_project_with_access(db, user, project_id)
+    try:
+        require_graph_available()
+        return event_storming_get_project_overview(project.id)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Event storming projection is unavailable: {exc}") from exc
+
+
+@router.get("/api/projects/{project_id}/event-storming/subgraph")
+def project_event_storming_subgraph(
+    project_id: str,
+    limit_nodes: int = Query(default=120, ge=16, le=300),
+    limit_edges: int = Query(default=220, ge=16, le=500),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    project = _load_project_with_access(db, user, project_id)
+    try:
+        require_graph_available()
+        return event_storming_get_project_subgraph(
+            project_id=project.id,
+            limit_nodes=limit_nodes,
+            limit_edges=limit_edges,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Event storming projection is unavailable: {exc}") from exc
+
+
+@router.get("/api/projects/{project_id}/event-storming/entity-links")
+def project_event_storming_entity_links(
+    project_id: str,
+    entity_type: str = Query(..., min_length=1),
+    entity_id: str = Query(..., min_length=1),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    project = _load_project_with_access(db, user, project_id)
+    try:
+        require_graph_available()
+        return event_storming_get_entity_links(
+            project_id=project.id,
+            entity_type=entity_type,
+            entity_id=entity_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Event storming projection is unavailable: {exc}") from exc
+
+
+@router.get("/api/projects/{project_id}/event-storming/component-links")
+def project_event_storming_component_links(
+    project_id: str,
+    component_id: str = Query(..., min_length=1),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    project = _load_project_with_access(db, user, project_id)
+    try:
+        require_graph_available()
+        return event_storming_get_component_links(
+            project_id=project.id,
+            component_id=component_id,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Event storming projection is unavailable: {exc}") from exc
+
+
+@router.post("/api/projects/{project_id}/event-storming/review-link")
+def project_event_storming_review_link(
+    project_id: str,
+    payload: EventStormingLinkReviewPatch,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    project = _load_project_with_access(db, user, project_id)
+    try:
+        require_graph_available()
+        return event_storming_set_link_review_status(
+            project_id=project.id,
+            entity_type=payload.entity_type,
+            entity_id=payload.entity_id,
+            component_id=payload.component_id,
+            review_status=payload.review_status,
+            confidence=payload.confidence,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Event storming projection is unavailable: {exc}") from exc
+
+
+@router.post("/api/projects/{project_id}/event-storming/review-links")
+def project_event_storming_review_links(
+    project_id: str,
+    payload: EventStormingBulkLinkReviewPatch,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    project = _load_project_with_access(db, user, project_id)
+    if not payload.items:
+        return {"project_id": project.id, "updated": [], "errors": []}
+    updated: list[dict] = []
+    errors: list[dict] = []
+    try:
+        require_graph_available()
+        for idx, item in enumerate(payload.items):
+            try:
+                updated.append(
+                    event_storming_set_link_review_status(
+                        project_id=project.id,
+                        entity_type=item.entity_type,
+                        entity_id=item.entity_id,
+                        component_id=item.component_id,
+                        review_status=item.review_status,
+                        confidence=item.confidence,
+                    )
+                )
+            except Exception as exc:
+                errors.append({"index": idx, "entity_id": item.entity_id, "component_id": item.component_id, "detail": str(exc)})
+        return {"project_id": project.id, "updated": updated, "errors": errors}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Event storming projection is unavailable: {exc}") from exc
 
 
 @router.post("/api/projects/{project_id}/members")
