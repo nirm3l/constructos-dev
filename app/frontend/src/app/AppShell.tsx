@@ -251,6 +251,19 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setCodexChatCodexSessionIdForSession,
     mergeCodexChatSessionsFromServer,
   } = useCodexChatState(userId)
+
+  React.useEffect(() => {
+    // Deep links that open a concrete entity should not auto-open chat from persisted UI state.
+    if (initialUrlState.taskId || initialUrlState.noteId || initialUrlState.specificationId) {
+      setShowCodexChat(false)
+    }
+  }, [
+    initialUrlState.noteId,
+    initialUrlState.specificationId,
+    initialUrlState.taskId,
+    setShowCodexChat,
+  ])
+
   const [fabHidden, setFabHidden] = React.useState(false)
   const [showNotificationsPanel, setShowNotificationsPanel] = React.useState(false)
   const [showQuickAdd, setShowQuickAdd] = React.useState(false)

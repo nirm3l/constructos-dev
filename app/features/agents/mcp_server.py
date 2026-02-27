@@ -692,7 +692,7 @@ def create_mcp():
         note_group_id: str | None = None,
         task_id: str | None = None,
         specification_id: str | None = None,
-        tags: list[str] | None = None,
+        tags: str | list[str] | None = None,
         pinned: bool = False,
         command_id: str | None = None,
     ) -> dict[str, Any]:

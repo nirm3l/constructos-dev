@@ -416,6 +416,11 @@ class AgentTaskService:
                 normalized_patch.get("labels"),
                 field_name="patch.labels",
             )
+        recurring_rule = str(normalized_patch.get("recurring_rule") or "").strip()
+        if recurring_rule and "task_type" not in normalized_patch and "scheduled_at_utc" in normalized_patch:
+            normalized_patch["task_type"] = "scheduled_instruction"
+            if "scheduled_instruction" not in normalized_patch and "instruction" in normalized_patch:
+                normalized_patch["scheduled_instruction"] = normalized_patch.get("instruction")
         return normalized_patch
 
     def _assert_task_allowed(self, *, db, task_id: str | None):
@@ -554,6 +559,21 @@ class AgentTaskService:
         encoded = json.dumps(normalized_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
         digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
         return f"{prefix}-{digest}"
+
+    @staticmethod
+    def _derive_child_command_id(command_id: str | None, child_key: str) -> str | None:
+        normalized = str(command_id or "").strip()
+        if not normalized:
+            return None
+        suffix = str(child_key or "").strip()
+        if not suffix:
+            return normalized
+        candidate = f"{normalized}:{suffix}"
+        if len(candidate) <= 64:
+            return candidate
+        suffix_digest = hashlib.sha1(suffix.encode("utf-8")).hexdigest()[:12]
+        keep = max(1, 64 - len(suffix_digest) - 1)
+        return f"{normalized[:keep]}:{suffix_digest}"
 
     def _normalize_project_name(self, value: str) -> str:
         return " ".join(str(value or "").split())
@@ -1582,6 +1602,16 @@ class AgentTaskService:
         user = self._resolve_actor_user()
         normalized_execution_triggers = self._normalize_execution_triggers_input(execution_triggers)
         normalized_labels = self._normalize_string_list_input(labels, field_name="labels")
+        normalized_task_type = str(task_type or "").strip() or None
+        normalized_recurring_rule = str(recurring_rule or "").strip() or None
+        if (
+            normalized_task_type is None
+            and normalized_recurring_rule
+            and scheduled_at_utc is not None
+        ):
+            normalized_task_type = "scheduled_instruction"
+            if scheduled_instruction is None and instruction is not None:
+                scheduled_instruction = instruction
         with SessionLocal() as db:
             resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_create(
                 db=db,
@@ -1610,9 +1640,9 @@ class AgentTaskService:
                     "attachment_refs": attachment_refs or [],
                     "instruction": instruction,
                     "execution_triggers": normalized_execution_triggers or [],
-                    "recurring_rule": recurring_rule,
+                    "recurring_rule": normalized_recurring_rule,
                     "specification_id": specification_id,
-                    "task_type": task_type,
+                    "task_type": normalized_task_type,
                     "scheduled_instruction": scheduled_instruction,
                     "scheduled_at_utc": scheduled_at_utc,
                     "schedule_timezone": schedule_timezone,
@@ -1639,10 +1669,10 @@ class AgentTaskService:
                 payload_kwargs["instruction"] = instruction
             if normalized_execution_triggers is not None:
                 payload_kwargs["execution_triggers"] = normalized_execution_triggers
-            if recurring_rule is not None:
-                payload_kwargs["recurring_rule"] = recurring_rule
-            if task_type is not None:
-                payload_kwargs["task_type"] = task_type
+            if normalized_recurring_rule is not None:
+                payload_kwargs["recurring_rule"] = normalized_recurring_rule
+            if normalized_task_type is not None:
+                payload_kwargs["task_type"] = normalized_task_type
             if scheduled_instruction is not None:
                 payload_kwargs["scheduled_instruction"] = scheduled_instruction
             if scheduled_at_utc is not None:
@@ -1663,7 +1693,7 @@ class AgentTaskService:
         note_group_id: str | None = None,
         task_id: str | None = None,
         specification_id: str | None = None,
-        tags: list[str] | None = None,
+        tags: list[str] | str | None = None,
         pinned: bool = False,
         external_refs: list[dict[str, Any]] | None = None,
         attachment_refs: list[dict[str, Any]] | None = None,
@@ -1672,6 +1702,7 @@ class AgentTaskService:
     ) -> dict:
         self._require_token(auth_token)
         user = self._resolve_actor_user()
+        normalized_tags = self._normalize_string_list_input(tags, field_name="tags")
         with SessionLocal() as db:
             ws_id, proj_id, resolved_task_id = self._resolve_workspace_for_note_create(
                 db=db,
@@ -1696,7 +1727,7 @@ class AgentTaskService:
                     "specification_id": specification_id,
                     "title": title,
                     "body": body or "",
-                    "tags": tags or [],
+                    "tags": normalized_tags or [],
                     "pinned": bool(pinned),
                     "external_refs": external_refs or [],
                     "attachment_refs": attachment_refs or [],
@@ -1711,7 +1742,7 @@ class AgentTaskService:
                 specification_id=specification_id,
                 title=title,
                 body=body or "",
-                tags=tags or [],
+                tags=normalized_tags or [],
                 pinned=bool(pinned),
                 external_refs=external_refs or [],
                 attachment_refs=attachment_refs or [],
@@ -2777,6 +2808,15 @@ class AgentTaskService:
                 ),
             )
             ids = [n["id"] for n in (page.get("items") or []) if n.get("id")]
+            batch_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-archive-notes",
+                payload={
+                    "workspace_id": workspace_id,
+                    "project_id": project_id,
+                    "q": q,
+                    "ids": ids,
+                },
+            )
             for note_id in ids:
                 # Re-validate scope per note to be safe.
                 state = load_note_command_state(db, note_id)
@@ -2784,6 +2824,7 @@ class AgentTaskService:
                     continue
                 self._assert_workspace_allowed(state.workspace_id)
                 self._assert_project_allowed(state.project_id)
-                NoteApplicationService(db, user, command_id=(command_id or f"mcp-archive-notes-{uuid.uuid4()}") + f":{note_id}").archive_note(note_id)
+                note_command_id = self._derive_child_command_id(batch_command_id, note_id)
+                NoteApplicationService(db, user, command_id=note_command_id).archive_note(note_id)
                 updated += 1
             return {"updated": updated}

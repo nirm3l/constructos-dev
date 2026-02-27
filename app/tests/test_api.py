@@ -2379,6 +2379,122 @@ def test_agent_service_create_task_infers_workspace_from_project(tmp_path):
     assert created['recurring_rule'] == 'every:1m'
 
 
+def test_agent_service_recurring_rule_infers_scheduled_task_type_on_create_and_update(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    created = service.create_task(
+        title='MCP infer scheduled task type',
+        workspace_id=ws_id,
+        project_id=project_id,
+        instruction='Run recurring check',
+        scheduled_at_utc='2026-03-01T10:00:00+00:00',
+        recurring_rule='every:1d',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert created['task_type'] == 'scheduled_instruction'
+    assert created['scheduled_instruction'] == 'Run recurring check'
+    assert created['recurring_rule'] == 'every:1d'
+
+    manual = service.create_task(
+        title='MCP infer scheduled patch target',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    updated = service.update_task(
+        task_id=manual['id'],
+        patch={
+            'instruction': 'Run recurring check from patch',
+            'scheduled_at_utc': '2026-03-02T10:00:00+00:00',
+            'recurring_rule': 'every:2d',
+        },
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert updated['task_type'] == 'scheduled_instruction'
+    assert updated['recurring_rule'] == 'every:2d'
+
+
+def test_agent_service_create_note_accepts_string_tags_input(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    created = service.create_note(
+        title='MCP string tags note',
+        workspace_id=ws_id,
+        project_id=project_id,
+        tags='Ops, mcp',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert created['tags'] == ['ops', 'mcp']
+
+
+def test_agent_service_long_command_id_does_not_overflow_bulk_and_archive_all(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    task_a = service.create_task(
+        title='Overflow test A',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    task_b = service.create_task(
+        title='Overflow test B',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    service.create_note(
+        title='Overflow test note',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+
+    bulk_result = service.bulk_task_action(
+        task_ids=[task_a['id'], task_b['id']],
+        action='complete',
+        command_id='b' * 64,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert bulk_result['updated'] >= 1
+
+    archived_tasks = service.archive_all_tasks(
+        workspace_id=ws_id,
+        project_id=project_id,
+        command_id='c' * 64,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert archived_tasks['updated'] >= 1
+
+    archived_notes = service.archive_all_notes(
+        workspace_id=ws_id,
+        project_id=project_id,
+        command_id='d' * 64,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert archived_notes['updated'] >= 1
+
+
 def test_agent_service_create_task_accepts_status_on_create(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()

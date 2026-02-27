@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 from sqlalchemy.orm import Session
 
 from shared.commanding import execute_command
@@ -91,7 +93,7 @@ class TaskApplicationService:
                 self.db,
                 command_name=f"Task.Bulk.{payload.action}",
                 user_id=self.user.id,
-                command_id=f"{self.command_id}:{task_id}" if self.command_id else None,
+                command_id=_derive_child_command_id(self.command_id, task_id),
                 handler=lambda task_id=task_id: per_task_handler(task_id),
             ):
                 updated += 1
@@ -105,7 +107,7 @@ class TaskApplicationService:
                 self.db,
                 command_name="Task.Reorder",
                 user_id=self.user.id,
-                command_id=f"{self.command_id}:{task_id}" if self.command_id else None,
+                command_id=_derive_child_command_id(self.command_id, task_id),
                 handler=lambda task_id=task_id, idx=idx: handler(task_id, idx + 1),
             )
         return {"ok": True}
@@ -145,3 +147,20 @@ class TaskApplicationService:
             command_id=self.command_id,
             handler=RequestAutomationRunHandler(self.ctx, task_id, payload.instruction),
         )
+
+
+def _derive_child_command_id(command_id: str | None, child_key: str) -> str | None:
+    if not command_id:
+        return None
+    base = str(command_id or "").strip()
+    if not base:
+        return None
+    suffix = str(child_key or "").strip()
+    if not suffix:
+        return base
+    candidate = f"{base}:{suffix}"
+    if len(candidate) <= 64:
+        return candidate
+    suffix_digest = hashlib.sha1(suffix.encode("utf-8")).hexdigest()[:12]
+    keep = max(1, 64 - len(suffix_digest) - 1)
+    return f"{base[:keep]}:{suffix_digest}"

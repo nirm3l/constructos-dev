@@ -3344,7 +3344,11 @@ textarea:disabled {
 }
 
 .tag-filter-menu-content {
-  min-width: 220px;
+  width: min(320px, calc(100vw - 24px));
+  max-width: min(320px, calc(100vw - 24px));
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .tag-filter-menu-search {
@@ -3357,6 +3361,8 @@ textarea:disabled {
 
 .tag-filter-menu-item {
   position: relative;
+  display: flex;
+  width: 100%;
   padding-right: 34px;
   justify-content: space-between;
 }
