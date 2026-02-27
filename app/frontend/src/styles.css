@@ -1928,20 +1928,6 @@ textarea:disabled {
   gap: 8px;
 }
 
-.virtualized-list-scroll {
-  width: 100%;
-  overflow-y: auto;
-  overflow-x: hidden;
-}
-
-.virtualized-list-window {
-  width: 100%;
-}
-
-.kanban-virtual-scroll {
-  min-height: 64px;
-}
-
 .task-list-dropzone,
 .notes-items-stack {
   display: grid;
@@ -2527,6 +2513,9 @@ textarea:disabled {
 
 .note-row.open {
   border-color: color-mix(in srgb, var(--brand), var(--line) 55%);
+  overflow: visible;
+  content-visibility: visible;
+  contain-intrinsic-size: auto;
 }
 
 .note-accordion {

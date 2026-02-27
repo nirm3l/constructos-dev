@@ -9,7 +9,6 @@ import type { Note, Specification, Task } from '../../types'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import { parseCommaTags } from '../../utils/ui'
 import { PopularTagFilters } from '../shared/PopularTagFilters'
-import { VirtualizedList } from '../shared/VirtualizedList'
 import {
   AttachmentRefList,
   ExternalRefEditor,
@@ -48,6 +47,7 @@ export function SpecificationsPanel({ state }: { state: any }) {
     setSpecTagQuery('')
     setSpecResourceSections(['external-links', 'file-attachments'])
   }, [selectedSpecificationId])
+
 
   const taskLinkCandidates = useQuery({
     queryKey: [
@@ -261,12 +261,7 @@ export function SpecificationsPanel({ state }: { state: any }) {
         <div className="task-list">
           {state.specifications.isLoading && <div className="notice">Loading specifications...</div>}
           {!state.specifications.isLoading && items.length > 0 && (
-            <VirtualizedList
-              items={items}
-              estimateSize={280}
-              overscan={8}
-              itemKey={(specification) => specification.id}
-              renderItem={(specification) => {
+            items.map((specification) => {
                 const isOpen = state.selectedSpecificationId === specification.id
                 const status = isOpen ? state.editSpecificationStatus : specification.status
                 const displayTitle = isOpen ? state.editSpecificationTitle || 'Untitled spec' : specification.title || 'Untitled spec'
@@ -294,8 +289,11 @@ export function SpecificationsPanel({ state }: { state: any }) {
                 return (
                   <div
                     key={specification.id}
+                    id={`spec-row-${specification.id}`}
                     className={`note-row ${isOpen ? 'open selected' : ''}`}
-                    onClick={() => state.toggleSpecificationEditor(specification.id)}
+                    onClick={() => {
+                      state.toggleSpecificationEditor(specification.id)
+                    }}
                     role="button"
                   >
                 <div className="note-title">
@@ -887,8 +885,7 @@ export function SpecificationsPanel({ state }: { state: any }) {
                 )}
                   </div>
                 )
-              }}
-            />
+              })
           )}
           {!state.specifications.isLoading && state.canLoadMoreSpecifications && (
             <div className="row" style={{ justifyContent: 'center', marginTop: 12 }}>

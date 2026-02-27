@@ -7,7 +7,6 @@ import type { ProjectBoard, Task, TaskGroup } from '../../types'
 import { priorityTone, tagHue } from '../../utils/ui'
 import { Icon } from '../shared/uiHelpers'
 import { PopularTagFilters } from '../shared/PopularTagFilters'
-import { VirtualizedList } from '../shared/VirtualizedList'
 import { taskDescriptionPreview, TaskListItem } from './taskViews'
 
 type TaskSection = {
@@ -690,30 +689,20 @@ export function TasksPanel({
                             }}
                             onDrop={(event) => onBoardLaneDrop(event, status, null)}
                           >
-                            {laneTasks.length > 0 && (
-                              <VirtualizedList
-                                items={laneTasks}
-                                estimateSize={170}
-                                overscan={10}
-                                maxHeight="68vh"
-                                className="kanban-virtual-scroll"
-                                itemKey={(task) => task.id}
-                                renderItem={(task) => (
-                                  <BoardTaskCard
-                                    key={task.id}
-                                    task={task}
-                                    status={status}
-                                    statuses={boardData.statuses}
-                                    targetGroupId={null}
-                                    onTagClick={toggleSearchTag}
-                                    onOpenTaskEditor={onOpenTaskEditor}
-                                    onMoveTaskStatus={onMoveTaskStatus}
-                                    onDragStart={onBoardCardDragStart}
-                                    onDragEnd={onBoardCardDragEnd}
-                                  />
-                                )}
+                            {laneTasks.length > 0 && laneTasks.map((task) => (
+                              <BoardTaskCard
+                                key={task.id}
+                                task={task}
+                                status={status}
+                                statuses={boardData.statuses}
+                                targetGroupId={null}
+                                onTagClick={toggleSearchTag}
+                                onOpenTaskEditor={onOpenTaskEditor}
+                                onMoveTaskStatus={onMoveTaskStatus}
+                                onDragStart={onBoardCardDragStart}
+                                onDragEnd={onBoardCardDragEnd}
                               />
-                            )}
+                            ))}
                             {laneTasks.length === 0 && <div className="meta">Drop task here</div>}
                           </div>
                         </div>
@@ -723,12 +712,7 @@ export function TasksPanel({
                 </div>
               )}
               {boardGroupSections.length > 0 && (
-                <VirtualizedList
-                  items={boardGroupSections}
-                  estimateSize={520}
-                  overscan={2}
-                  itemKey={(group) => group.key}
-                  renderItem={(group) => {
+                boardGroupSections.map((group) => {
                     const groupIndex = group.groupId ? taskGroups.findIndex((item) => item.id === group.groupId) : -1
                     const canMoveUp = Boolean(group.managed && groupIndex > 0)
                     const canMoveDown = Boolean(group.managed && groupIndex >= 0 && groupIndex < taskGroups.length - 1)
@@ -825,8 +809,7 @@ export function TasksPanel({
                         {!groupHasTasks && <div className="meta" style={{ marginTop: 6 }}>No tasks in this group.</div>}
                       </div>
                     )
-                  }}
-                />
+                  })
               )}
               {boardGroupSections.length === 0 && <div className="notice">No groups available.</div>}
             </div>
@@ -856,30 +839,20 @@ export function TasksPanel({
                           }}
                           onDrop={(event) => onBoardLaneDrop(event, status, null)}
                         >
-                          {laneTasks.length > 0 && (
-                            <VirtualizedList
-                              items={laneTasks}
-                              estimateSize={170}
-                              overscan={10}
-                              maxHeight="68vh"
-                              className="kanban-virtual-scroll"
-                              itemKey={(task) => task.id}
-                              renderItem={(task) => (
-                                <BoardTaskCard
-                                  key={task.id}
-                                  task={task}
-                                  status={status}
-                                  statuses={boardData.statuses}
-                                  targetGroupId={null}
-                                  onTagClick={toggleSearchTag}
-                                  onOpenTaskEditor={onOpenTaskEditor}
-                                  onMoveTaskStatus={onMoveTaskStatus}
-                                  onDragStart={onBoardCardDragStart}
-                                  onDragEnd={onBoardCardDragEnd}
-                                />
-                              )}
+                          {laneTasks.length > 0 && laneTasks.map((task) => (
+                            <BoardTaskCard
+                              key={task.id}
+                              task={task}
+                              status={status}
+                              statuses={boardData.statuses}
+                              targetGroupId={null}
+                              onTagClick={toggleSearchTag}
+                              onOpenTaskEditor={onOpenTaskEditor}
+                              onMoveTaskStatus={onMoveTaskStatus}
+                              onDragStart={onBoardCardDragStart}
+                              onDragEnd={onBoardCardDragEnd}
                             />
-                          )}
+                          ))}
                           {laneTasks.length === 0 && <div className="meta">Drop task here</div>}
                         </div>
                       </div>
@@ -911,45 +884,14 @@ export function TasksPanel({
                 }}
               onDrop={(event) => onListSectionDrop(event, null)}
               >
-                {ungroupedTasks.length > 0 && (
-                  <VirtualizedList
-                    items={ungroupedTasks}
-                    estimateSize={170}
-                    overscan={10}
-                    itemKey={(task) => task.id}
-                    renderItem={(task) => (
-                      <div
-                        key={task.id}
-                        draggable
-                        onDragStart={(event) => onBoardCardDragStart(event, task.id)}
-                        onDragEnd={onBoardCardDragEnd}
-                      >
-                        <TaskListItem
-                          task={task}
-                          onOpen={onOpenTaskEditor}
-                          onOpenSpecification={onOpenSpecification}
-                          onTagClick={toggleSearchTag}
-                          onRestore={onRestoreTask}
-                          onReopen={onReopenTask}
-                          onComplete={onCompleteTask}
-                          specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
-                        />
-                      </div>
-                    )}
-                  />
-                )}
-                {ungroupedTasks.length === 0 && <div className="meta">Drop task here</div>}
-              </div>
-            ) : (
-              <div style={{ marginBottom: 10 }}>
-                <VirtualizedList
-                  items={ungroupedTasks}
-                  estimateSize={170}
-                  overscan={10}
-                  itemKey={(task) => task.id}
-                  renderItem={(task) => (
+                {ungroupedTasks.length > 0 && ungroupedTasks.map((task) => (
+                  <div
+                    key={task.id}
+                    draggable
+                    onDragStart={(event) => onBoardCardDragStart(event, task.id)}
+                    onDragEnd={onBoardCardDragEnd}
+                  >
                     <TaskListItem
-                      key={task.id}
                       task={task}
                       onOpen={onOpenTaskEditor}
                       onOpenSpecification={onOpenSpecification}
@@ -959,8 +901,25 @@ export function TasksPanel({
                       onComplete={onCompleteTask}
                       specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
                     />
-                  )}
-                />
+                  </div>
+                ))}
+                {ungroupedTasks.length === 0 && <div className="meta">Drop task here</div>}
+              </div>
+            ) : (
+              <div style={{ marginBottom: 10 }}>
+                {ungroupedTasks.map((task) => (
+                  <TaskListItem
+                    key={task.id}
+                    task={task}
+                    onOpen={onOpenTaskEditor}
+                    onOpenSpecification={onOpenSpecification}
+                    onTagClick={toggleSearchTag}
+                    onRestore={onRestoreTask}
+                    onReopen={onReopenTask}
+                    onComplete={onCompleteTask}
+                    specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
+                  />
+                ))}
               </div>
             )
           )}
@@ -971,12 +930,7 @@ export function TasksPanel({
             className="tasks-sections-accordion"
           >
             {taskSections.length > 0 && (
-              <VirtualizedList
-                items={taskSections}
-                estimateSize={360}
-                overscan={4}
-                itemKey={(section) => section.key}
-                renderItem={(section) => {
+              taskSections.map((section) => {
                   const sectionGroup = section.groupId
                     ? taskGroups.find((group) => group.id === section.groupId) ?? null
                     : null
@@ -1082,8 +1036,7 @@ export function TasksPanel({
                       </Accordion.Content>
                     </Accordion.Item>
                   )
-                }}
-              />
+                })
             )}
           </Accordion.Root>
 

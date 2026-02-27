@@ -7,7 +7,6 @@ import * as Select from '@radix-ui/react-select'
 import type { Note, NoteGroup } from '../../types'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import { PopularTagFilters } from '../shared/PopularTagFilters'
-import { VirtualizedList } from '../shared/VirtualizedList'
 import {
   AttachmentRefList,
   ExternalRefEditor,
@@ -136,6 +135,7 @@ export function NotesPanel({
   React.useEffect(() => {
     setNoteEditorOpenSections([])
   }, [state.selectedNote?.id])
+
 
   const createGroupBusy = Boolean(state.createNoteGroupMutation?.isPending)
   const updateGroupBusy = Boolean(state.patchNoteGroupMutation?.isPending)
@@ -401,6 +401,7 @@ export function NotesPanel({
     return (
       <div
         key={n.id}
+        id={`note-row-${n.id}`}
         className={`note-row note-draggable ${isOpen ? 'open selected' : ''}`}
         onClick={() => {
           const changed = state.toggleNoteEditor(n.id)
@@ -948,15 +949,7 @@ export function NotesPanel({
               }}
               onDrop={(event) => onSectionDrop(event, null)}
             >
-              {ungroupedNotes.length > 0 && (
-                <VirtualizedList
-                  items={ungroupedNotes}
-                  estimateSize={240}
-                  overscan={8}
-                  itemKey={(note) => note.id}
-                  renderItem={(note) => renderNoteRow(note)}
-                />
-              )}
+              {ungroupedNotes.length > 0 && ungroupedNotes.map((note) => renderNoteRow(note))}
               {ungroupedNotes.length === 0 && (
                 <div className="meta" style={{ minHeight: 56, display: 'grid', alignItems: 'center' }}>
                   Drop note here to remove it from a group.
@@ -973,12 +966,7 @@ export function NotesPanel({
               className="tasks-sections-accordion"
             >
               {noteSections.length > 0 && (
-                <VirtualizedList
-                  items={noteSections}
-                  estimateSize={420}
-                  overscan={4}
-                  itemKey={(section) => section.key}
-                  renderItem={(section) => {
+                noteSections.map((section) => {
                     const sectionGroup = section.groupId
                       ? noteGroups.find((group) => group.id === section.groupId) ?? null
                       : null
@@ -1066,21 +1054,14 @@ export function NotesPanel({
                         </Accordion.Content>
                       </Accordion.Item>
                     )
-                  }}
-                />
+                  })
               )}
             </Accordion.Root>
           )}
 
           {!state.notes.isLoading && !hasGroups && filteredNotes.length > 0 && (
             <div className="notes-items-stack">
-              <VirtualizedList
-                items={filteredNotes}
-                estimateSize={240}
-                overscan={8}
-                itemKey={(note) => note.id}
-                renderItem={(note) => renderNoteRow(note)}
-              />
+              {filteredNotes.map((note) => renderNoteRow(note))}
             </div>
           )}
 
