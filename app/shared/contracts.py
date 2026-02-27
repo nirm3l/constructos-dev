@@ -30,6 +30,7 @@ class TaskCreate(BaseModel):
     task_group_id: str | None = None
     specification_id: str | None = None
     description: str = ""
+    status: str | None = None
     priority: str = "Med"
     due_date: datetime | None = None
     assignee_id: str | None = None
@@ -96,6 +97,8 @@ class AgentChatRun(BaseModel):
     attachment_refs: list[AttachmentRef] = Field(default_factory=list)
     session_attachment_refs: list[AttachmentRef] = Field(default_factory=list)
     allow_mutations: bool = True
+    model: str | None = None
+    reasoning_effort: str | None = None
 
 
 class NoteCreate(BaseModel):
@@ -239,6 +242,8 @@ class UserPreferencesPatch(BaseModel):
     theme: str | None = None
     timezone: str | None = None
     notifications_enabled: bool | None = None
+    agent_chat_model: str | None = None
+    agent_chat_reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

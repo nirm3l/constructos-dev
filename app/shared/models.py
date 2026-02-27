@@ -40,6 +40,8 @@ class User(Base, TimeMixin):
     theme: Mapped[str] = mapped_column(String(16), default="light")
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")
     notifications_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    agent_chat_model: Mapped[str] = mapped_column(String(128), default="")
+    agent_chat_reasoning_effort: Mapped[str] = mapped_column(String(16), default="medium")
 
 
 class Workspace(Base, TimeMixin):

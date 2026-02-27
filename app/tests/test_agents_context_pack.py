@@ -60,8 +60,9 @@ def test_execute_task_automation_includes_project_description_in_context(tmp_pat
         stdout = '{"action":"comment","summary":"ok","comment":null}'
         stderr = ""
 
-    def fake_run(command, *, input, text, capture_output, timeout, check):  # noqa: A002
+    def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
         _ = (command, text, capture_output, timeout, check)
+        _ = cwd
         captured.update(json.loads(input))
         return DummyProcess()
 
@@ -137,8 +138,9 @@ def test_execute_task_automation_includes_project_skills_in_context(tmp_path, mo
         stdout = '{"action":"comment","summary":"ok","comment":null}'
         stderr = ""
 
-    def fake_run(command, *, input, text, capture_output, timeout, check):  # noqa: A002
+    def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
         _ = (command, text, capture_output, timeout, check)
+        _ = cwd
         captured.update(json.loads(input))
         return DummyProcess()
 
@@ -181,8 +183,9 @@ def test_execute_task_automation_includes_chat_and_codex_session_ids(tmp_path, m
         stdout = '{"action":"comment","summary":"ok","comment":null}'
         stderr = ""
 
-    def fake_run(command, *, input, text, capture_output, timeout, check):  # noqa: A002
+    def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
         _ = (command, text, capture_output, timeout, check)
+        _ = cwd
         captured.update(json.loads(input))
         return DummyProcess()
 
@@ -233,9 +236,9 @@ def test_codex_prompt_includes_soul_md_section():
     assert "File: ProjectRules.md (source: project_rules)" in prompt
     assert "Quality: Do not skip tests." in prompt
     assert "Current User ID: user-1" in prompt
-    assert "set_user_theme(theme='light'|'dark')" in prompt
     assert "File: GraphContext.md (source: knowledge_graph)" in prompt
     assert "Task A IMPLEMENTS Spec B" in prompt
+    assert "Read each MCP tool description and follow its payload contract and operational guidance." in prompt
 
 
 def test_codex_resume_prompt_is_compact_and_turn_focused():
@@ -264,6 +267,7 @@ def test_codex_resume_prompt_is_compact_and_turn_focused():
     assert "File: Soul.md" not in resume_prompt
     assert "Instruction: Plan this feature" in resume_prompt
     assert "Fresh Cross-Session Memory Snapshot" in resume_prompt
+    assert "Read each MCP tool description and follow its payload contract and operational guidance." in resume_prompt
     assert len(resume_prompt) < len(full_prompt)
 
 
@@ -358,10 +362,35 @@ def test_codex_prompt_includes_interactive_project_creation_guidance():
         }
     )
 
-    assert "strict interactive setup protocol" in prompt
-    assert "Strict protocol is mandatory" in prompt
-    assert "list_project_templates -> get_project_template -> collect template parameters -> preview_project_from_template" in prompt
-    assert "Never call create_project or create_project_from_template" in prompt
+    assert "Read each MCP tool description and follow its payload contract and operational guidance." in prompt
+
+
+def test_mcp_tool_descriptions_include_operation_specific_guidance():
+    import inspect
+    from features.agents import mcp_server
+
+    assert mcp_server.MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED is True
+    assert mcp_server.MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE == "KG_AND_VECTOR"
+    assert mcp_server.MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE == "METADATA_ONLY"
+    assert "status watchers" in mcp_server.TASK_CREATE_TOOL_DESCRIPTION
+    assert "to_statuses" in mcp_server.TASK_UPDATE_TOOL_DESCRIPTION
+    assert "toggle" in mcp_server.THEME_TOGGLE_TOOL_DESCRIPTION
+    assert "current app user profile" in mcp_server.THEME_SET_TOOL_DESCRIPTION
+    assert "Prefer this over per-task loops" in mcp_server.BULK_TASK_ACTION_TOOL_DESCRIPTION
+    assert "archive all tasks" in mcp_server.ARCHIVE_ALL_TASKS_TOOL_DESCRIPTION.lower()
+    assert "plans/specs/design docs" in mcp_server.CREATE_NOTE_TOOL_DESCRIPTION
+    assert "manual/custom setup" in mcp_server.CREATE_PROJECT_TOOL_DESCRIPTION
+    assert "chat default profile" in mcp_server.CREATE_PROJECT_TOOL_DESCRIPTION.lower()
+    assert "chat default profile" in mcp_server.PREVIEW_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION.lower()
+    assert "chat default profile" in mcp_server.CREATE_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION.lower()
+    assert "preview_project_from_template" in mcp_server.CREATE_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION
+    source = inspect.getsource(mcp_server)
+    assert "embedding_enabled: bool = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED" in source
+    assert "chat_index_mode: str = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE" in source
+    assert "chat_attachment_ingestion_mode: str = MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE" in source
+    assert "embedding_enabled: bool | None = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED" in source
+    assert "chat_index_mode: str | None = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE" in source
+    assert "chat_attachment_ingestion_mode: str | None = MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE" in source
 
 
 def test_codex_usage_extraction_from_json_stream():
@@ -580,6 +609,7 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
         timeout_seconds: float,
         stream_events: bool,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         output_schema: dict | None = None,
         preferred_thread_id: str | None = None,
         env: dict[str, str] | None = None,
@@ -592,7 +622,7 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
         captured["start_prompt_contains_context_pack"] = "Context Pack:" in start_prompt
         captured["resume_prompt_contains_context_pack"] = "Context Pack:" in str(resume_prompt or "")
         captured["resume_prompt_text"] = str(resume_prompt or "")
-        _ = model
+        _ = (model, reasoning_effort)
         return (
             '{"action":"comment","summary":"ok","comment":null}',
             {"input_tokens": 12, "output_tokens": 3},

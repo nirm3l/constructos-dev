@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from functools import lru_cache
 import json
 import os
 from pathlib import Path
@@ -16,13 +17,36 @@ from shared.settings import (
     AGENT_CHAT_CONTEXT_LIMIT_TOKENS,
     AGENT_CODEX_MCP_URL,
     AGENT_CODEX_MODEL,
+    AGENT_CODEX_REASONING_EFFORT,
     AGENT_EXECUTOR_TIMEOUT_SECONDS,
 )
 
 EMPTY_ASSISTANT_SUMMARY = "No assistant response content was returned."
 _DEFAULT_CODEX_HOME_ROOT = "/tmp/codex-home"
+_DEFAULT_CODEX_WORKDIR = "/home/app/workspace"
 _DEFAULT_CODEX_HOME_RETENTION_DAYS = 14
 _DEFAULT_CODEX_HOME_CLEANUP_INTERVAL_SECONDS = 3600
+_PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "shared" / "prompt_templates" / "codex"
+_ALLOWED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+
+
+@lru_cache(maxsize=16)
+def _load_prompt_template(name: str) -> str:
+    template_path = _PROMPT_TEMPLATES_DIR / name
+    try:
+        return template_path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Prompt template file not found: {template_path}") from exc
+
+
+def _render_prompt_template(name: str, values: dict[str, object]) -> str:
+    rendered_values = {key: str(value) for key, value in values.items()}
+    template = _load_prompt_template(name)
+    try:
+        return template.format(**rendered_values)
+    except KeyError as exc:
+        missing_key = str(exc).strip("'")
+        raise RuntimeError(f"Missing prompt template value '{missing_key}' for {name}") from exc
 
 
 def _normalize_prompt_mcp_servers(value: object) -> list[str]:
@@ -59,6 +83,15 @@ def _normalize_path_component(value: object, *, fallback: str) -> str:
 def _resolve_codex_home_root() -> Path:
     root_raw = str(os.getenv("AGENT_CODEX_HOME_ROOT", _DEFAULT_CODEX_HOME_ROOT)).strip() or _DEFAULT_CODEX_HOME_ROOT
     return Path(root_raw).expanduser().resolve()
+
+
+def _resolve_codex_workdir() -> Path | None:
+    raw = str(os.getenv("AGENT_CODEX_WORKDIR", _DEFAULT_CODEX_WORKDIR)).strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser().resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _resolve_persistent_codex_home_path(*, workspace_id: str, chat_session_id: str) -> Path:
@@ -103,12 +136,23 @@ def _release_file_lock(lock_handle: object) -> None:
         return
 
 
+def _effective_timeout_seconds(value: object, *, fallback_seconds: float | int | None) -> float | None:
+    candidate = fallback_seconds if value is None else value
+    try:
+        normalized = float(candidate or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if normalized <= 0:
+        return None
+    return normalized
+
+
 @contextmanager
 def _chat_session_run_lock(
     *,
     workspace_id: str | None = None,
     chat_session_id: str | None = None,
-    timeout_seconds: float,
+    timeout_seconds: float | None,
     poll_interval_seconds: float = 0.1,
 ):
     normalized_workspace_id = str(workspace_id or "").strip()
@@ -124,14 +168,14 @@ def _chat_session_run_lock(
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_handle = lock_path.open("a+", encoding="utf-8")
     lock_acquired = False
-    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    deadline = (time.monotonic() + max(0.0, float(timeout_seconds))) if timeout_seconds is not None else None
 
     try:
         while True:
             if _try_acquire_file_lock(lock_handle):
                 lock_acquired = True
                 break
-            if time.monotonic() >= deadline:
+            if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError(
                     f"Timed out waiting for active chat run lock (workspace_id={normalized_workspace_id}, "
                     f"chat_session_id={normalized_chat_session_id})."
@@ -300,6 +344,16 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     graph_context_markdown = str(ctx.get("graph_context_markdown") or "").strip()
     graph_evidence_json = str(ctx.get("graph_evidence_json") or "").strip()
     graph_summary_markdown = str(ctx.get("graph_summary_markdown") or "").strip()
+    trigger_task_id = str(ctx.get("trigger_task_id") or "").strip() or "_(not available)_"
+    trigger_from_status = str(ctx.get("trigger_from_status") or "").strip() or "_(not available)_"
+    trigger_to_status = str(ctx.get("trigger_to_status") or "").strip() or "_(not available)_"
+    trigger_timestamp = str(ctx.get("trigger_timestamp") or "").strip() or "_(not available)_"
+    status_change_trigger_context = (
+        f"- Source task ID: {trigger_task_id}\n"
+        f"- From status: {trigger_from_status}\n"
+        f"- To status: {trigger_to_status}\n"
+        f"- Triggered at: {trigger_timestamp}\n"
+    )
     allow_mutations = bool(ctx.get("allow_mutations", True))
     mcp_servers = _normalize_prompt_mcp_servers(ctx.get("mcp_servers"))
     enabled_mcp_servers_text = ", ".join(mcp_servers)
@@ -368,81 +422,31 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         if structured_response
         else "- Respond directly to the user with clear, actionable text.\n"
     )
-    return (
-        "You are an automation agent for task management.\n"
-        "Use available MCP tools to satisfy the instruction.\n"
-        f"{response_header}"
-        f"Task ID: {task_id}\n"
-        f"Title: {title}\n"
-        f"Status: {status}\n"
-        f"Description: {description}\n"
-        f"Workspace ID: {workspace_id}\n"
-        f"Project ID: {project_id}\n"
-        f"Current User ID: {actor_user_id}\n"
-        f"Project Name: {project_name}\n"
-        f"Instruction: {instruction}\n\n"
-        "Context Pack:\n"
-        "File: Soul.md (source: project.description)\n"
-        f"{soul_md}\n\n"
-        "File: ProjectRules.md (source: project_rules)\n"
-        f"{rules_md}\n\n"
-        "File: ProjectSkills.md (source: project_skills)\n"
-        f"{skills_md}\n\n"
-        "File: GraphContext.md (source: knowledge_graph)\n"
-        f"{graph_md}\n\n"
-        "File: GraphEvidence.json (source: knowledge_graph.evidence)\n"
-        f"{graph_evidence}\n\n"
-        "File: GraphSummary.md (source: knowledge_graph.summary)\n"
-        f"{graph_summary}\n\n"
-        "Guidance:\n"
-        f"{context_guidance}"
-        f"- Enabled MCP servers for this run: {enabled_mcp_servers_text}.\n"
-        "- If the user asks to implement/work on a specific project by ID or name (for example 'Implement project <id|name>'), call `get_project_chat_context(project_ref=..., workspace_id=...)` first.\n"
-        "- If `get_project_chat_context` returns ambiguous name matches, ask for a concrete project ID or workspace_id and then call it again.\n"
-        "- Treat Soul.md, ProjectRules.md, ProjectSkills.md, GraphContext.md, GraphEvidence.json, and GraphSummary.md as durable project-level context.\n"
-        "- ProjectRules.md defines how you should behave within this project.\n"
-        "- ProjectSkills.md captures reusable skills configured for this project.\n"
-        "- Apply ProjectSkills with mode=enforced before advisory skills.\n"
-        "- If no enforced skill applies, use advisory skills as guidance alongside project rules.\n"
-        "- GraphContext.md captures resource relations and should guide dependency-aware decisions.\n"
-        "- GraphEvidence.json is the canonical evidence source for grounded claims.\n"
-        "- GraphSummary.md can be used as a concise overview, but validate against GraphEvidence.json before acting.\n"
-        "- Treat claims without an evidence_id as low confidence.\n"
-        "- If project context conflicts with the latest explicit user instruction, follow the latest explicit user instruction.\n"
-        "- You may call task-management MCP tools relevant to the request.\n"
-        "- For profile preference changes (theme/timezone/notifications), use MCP tools directly.\n"
-        "- For chat theme changes, use set_user_theme(theme='light'|'dark').\n"
-        "- set_user_theme targets the current app user profile.\n"
-        "- Use toggle_my_theme only if the user explicitly asks to toggle (not set) theme.\n"
-        "- Report the final theme based on set_user_theme tool output.\n"
-        "- Use graph_* MCP tools when you need relation-aware lookup across project resources.\n"
-        "- Prefer bulk tools when operating on many tasks (avoid per-task loops when possible).\n"
-        "- Prefer archive_all_notes/archive_all_tasks for 'archive everything' requests.\n"
-        "- For mutating MCP tool calls, always provide command_id.\n"
-        "- If retrying the same mutation, reuse the exact same command_id.\n"
-        "- If the user asks for a plan/spec/design doc, prefer creating a Note (Markdown) via MCP tools so it is visible in the UI.\n"
-        "- When creating a plan note: use a clear title starting with 'Plan:' and include actionable steps.\n"
-        "- If you are in task context, link the note to the task by setting task_id when creating the note.\n"
-        "- For every request to create a new project, always use a strict interactive setup protocol.\n"
-        "- Strict protocol is mandatory even if the user asks for immediate creation.\n"
-        "- Ask one clarifying question at a time and track missing fields until they are resolved.\n"
-        "- Discovery fields before creation: project goal/domain, setup strategy (template or manual), project name, and defaults/overrides (statuses, members, embeddings, context top K, template parameters when applicable).\n"
-        "- Template strategy sequence: list_project_templates -> get_project_template -> collect template parameters -> preview_project_from_template -> explicit user confirmation -> create_project_from_template.\n"
-        "- Manual strategy sequence: collect required fields -> explicit user confirmation -> create_project.\n"
-        "- Never call create_project or create_project_from_template until the user explicitly confirms creation in the current conversation (for example: 'confirm create').\n"
-        "- After successful creation, ask whether seeded tasks/specifications/rules should be adjusted for this specific project; if yes, apply the requested updates via MCP tools.\n"
-        "- When mentioning created/updated entities in summary/comment, include clickable Markdown links (not raw IDs).\n"
-        "- Never return generic phrases like 'open task' or 'open note' without a concrete link target.\n"
-        "- For each created entity, include at least one explicit link that can be clicked in chat.\n"
-        "- Link format in this app:\n"
-        "  - Note: ?tab=notes&project=<project_id>&note=<note_id>\n"
-        "  - Task: ?tab=tasks&project=<project_id>&task=<task_id>\n"
-        "  - Specification: ?tab=specifications&project=<project_id>&specification=<specification_id>\n"
-        "  - Project: ?tab=projects&project=<project_id>\n"
-        f"{mutation_policy}"
-        "- For recurring schedules, set task.recurring_rule explicitly using canonical format: every:<number><m|h|d> (example: every:1m).\n"
-        "- After scheduling changes, verify by reading the task and confirming scheduled_at_utc + recurring_rule values.\n"
-        f"{response_tail}"
+    return _render_prompt_template(
+        "full_prompt.md",
+        {
+            "response_header": response_header,
+            "task_id": task_id,
+            "title": title,
+            "status": status,
+            "description": description,
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "actor_user_id": actor_user_id,
+            "project_name": project_name,
+            "instruction": instruction,
+            "status_change_trigger_context": status_change_trigger_context,
+            "soul_md": soul_md,
+            "rules_md": rules_md,
+            "skills_md": skills_md,
+            "graph_md": graph_md,
+            "graph_evidence": graph_evidence,
+            "graph_summary": graph_summary,
+            "context_guidance": context_guidance,
+            "enabled_mcp_servers_text": enabled_mcp_servers_text,
+            "mutation_policy": mutation_policy,
+            "response_tail": response_tail,
+        },
     )
 
 
@@ -520,6 +524,16 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     project_id = ctx.get("project_id") or ""
     actor_user_id = str(ctx.get("actor_user_id") or "").strip()
     project_name = ctx.get("project_name") or ""
+    trigger_task_id = str(ctx.get("trigger_task_id") or "").strip() or "_(not available)_"
+    trigger_from_status = str(ctx.get("trigger_from_status") or "").strip() or "_(not available)_"
+    trigger_to_status = str(ctx.get("trigger_to_status") or "").strip() or "_(not available)_"
+    trigger_timestamp = str(ctx.get("trigger_timestamp") or "").strip() or "_(not available)_"
+    status_change_trigger_context = (
+        f"- Source task ID: {trigger_task_id}\n"
+        f"- From status: {trigger_from_status}\n"
+        f"- To status: {trigger_to_status}\n"
+        f"- Triggered at: {trigger_timestamp}\n"
+    )
     fresh_memory_snapshot = _build_resume_fresh_memory_snapshot(ctx)
     allow_mutations = bool(ctx.get("allow_mutations", True))
     mcp_servers = _normalize_prompt_mcp_servers(ctx.get("mcp_servers"))
@@ -547,32 +561,26 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         if structured_response
         else "- Respond directly to the user with clear, actionable text.\n"
     )
-    return (
-        "You are an automation agent for task management.\n"
-        "This is a resumed Codex thread. Reuse prior thread context instead of re-deriving project bootstrap context.\n"
-        f"{response_header}"
-        "Current Turn Context:\n"
-        f"Task ID: {task_id}\n"
-        f"Title: {title}\n"
-        f"Status: {status}\n"
-        f"Description: {description}\n"
-        f"Workspace ID: {workspace_id}\n"
-        f"Project ID: {project_id}\n"
-        f"Current User ID: {actor_user_id}\n"
-        f"Project Name: {project_name}\n"
-        f"Instruction: {instruction}\n\n"
-        "Fresh Cross-Session Memory Snapshot (generated for this turn):\n"
-        f"{fresh_memory_snapshot}\n\n"
-        "Guidance:\n"
-        f"{task_guidance}"
-        f"- Enabled MCP servers for this run: {enabled_mcp_servers_text}.\n"
-        "- For factual questions that may depend on other sessions, prefer Fresh Cross-Session Memory Snapshot over stale thread memory.\n"
-        "- If prior thread context appears stale or missing, refresh by calling get_project_chat_context(project_ref=..., workspace_id=...).\n"
-        "- Prefer bulk tools for batch operations.\n"
-        "- For mutating MCP tool calls, always provide command_id.\n"
-        "- If retrying the same mutation, reuse the exact same command_id.\n"
-        f"{mutation_policy}"
-        f"{response_tail}"
+    return _render_prompt_template(
+        "resume_prompt.md",
+        {
+            "response_header": response_header,
+            "task_id": task_id,
+            "title": title,
+            "status": status,
+            "description": description,
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "actor_user_id": actor_user_id,
+            "project_name": project_name,
+            "instruction": instruction,
+            "status_change_trigger_context": status_change_trigger_context,
+            "fresh_memory_snapshot": fresh_memory_snapshot,
+            "task_guidance": task_guidance,
+            "enabled_mcp_servers_text": enabled_mcp_servers_text,
+            "mutation_policy": mutation_policy,
+            "response_tail": response_tail,
+        },
     )
 
 
@@ -583,6 +591,21 @@ def _safe_non_negative_int(value: object) -> int | None:
         return max(0, int(value))
     except (TypeError, ValueError):
         return None
+
+
+def _normalize_reasoning_effort(value: object) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return None
+    alias_map = {
+        "very-high": "xhigh",
+        "very_high": "xhigh",
+        "very high": "xhigh",
+    }
+    canonical = alias_map.get(normalized, normalized)
+    if canonical not in _ALLOWED_REASONING_EFFORTS:
+        return None
+    return canonical
 
 
 def _extract_turn_usage(stdout: str) -> dict[str, int] | None:
@@ -784,13 +807,15 @@ def _run_codex_app_server_with_optional_stream(
     *,
     start_prompt: str,
     resume_prompt: str | None,
-    timeout_seconds: float,
+    timeout_seconds: float | None,
     stream_events: bool,
     model: str | None = None,
+    reasoning_effort: str | None = None,
     output_schema: dict | None = None,
     preferred_thread_id: str | None = None,
     env: dict[str, str] | None = None,
 ) -> tuple[str, dict[str, int] | None, str | None, bool, bool]:
+    run_cwd = _resolve_codex_workdir()
     cmd = [
         "codex",
         "app-server",
@@ -805,20 +830,27 @@ def _run_codex_app_server_with_optional_stream(
         text=True,
         bufsize=1,
         env=env,
+        cwd=str(run_cwd) if run_cwd is not None else None,
     )
     timed_out = False
     done = threading.Event()
+    timeout_error_message = "codex app-server timed out"
+    if timeout_seconds is not None:
+        timeout_error_message = f"codex app-server timed out after {timeout_seconds:.1f}s"
 
     def _timeout_watchdog() -> None:
         nonlocal timed_out
+        if timeout_seconds is None:
+            return
         if done.wait(timeout_seconds):
             return
         if proc.poll() is None:
             timed_out = True
             proc.kill()
 
-    watchdog = threading.Thread(target=_timeout_watchdog, daemon=True)
-    watchdog.start()
+    if timeout_seconds is not None:
+        watchdog = threading.Thread(target=_timeout_watchdog, daemon=True)
+        watchdog.start()
 
     if proc.stdin is None:
         raise RuntimeError("codex app-server stdin unavailable")
@@ -861,6 +893,8 @@ def _run_codex_app_server_with_optional_stream(
         }
         if model:
             params["model"] = model
+        if reasoning_effort:
+            params["reasoningEffort"] = reasoning_effort
         return params
 
     def _request_thread_start() -> None:
@@ -986,7 +1020,7 @@ def _run_codex_app_server_with_optional_stream(
 
     done.set()
     if timed_out:
-        raise TimeoutError(f"codex app-server timed out after {timeout_seconds:.1f}s")
+        raise TimeoutError(timeout_error_message)
 
     if proc.poll() is None:
         # codex app-server is long-lived; after turn/completed we stop it ourselves.
@@ -1083,10 +1117,11 @@ def _render_stream_assistant_text(message_text: str) -> str:
 def _run_codex_json_with_optional_stream(
     *,
     command: list[str],
-    timeout_seconds: float,
+    timeout_seconds: float | None,
     stream_events: bool,
     env: dict[str, str] | None = None,
 ) -> str:
+    run_cwd = _resolve_codex_workdir()
     proc = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -1094,20 +1129,27 @@ def _run_codex_json_with_optional_stream(
         text=True,
         bufsize=1,
         env=env,
+        cwd=str(run_cwd) if run_cwd is not None else None,
     )
     timed_out = False
     done = threading.Event()
+    timeout_error_message = "codex exec timed out"
+    if timeout_seconds is not None:
+        timeout_error_message = f"codex exec timed out after {timeout_seconds:.1f}s"
 
     def _timeout_watchdog() -> None:
         nonlocal timed_out
+        if timeout_seconds is None:
+            return
         if done.wait(timeout_seconds):
             return
         if proc.poll() is None:
             timed_out = True
             proc.kill()
 
-    watchdog = threading.Thread(target=_timeout_watchdog, daemon=True)
-    watchdog.start()
+    if timeout_seconds is not None:
+        watchdog = threading.Thread(target=_timeout_watchdog, daemon=True)
+        watchdog.start()
 
     lines: list[str] = []
     emitted_message_count = 0
@@ -1150,7 +1192,7 @@ def _run_codex_json_with_optional_stream(
     return_code = proc.wait()
     done.set()
     if timed_out:
-        raise TimeoutError(f"codex exec timed out after {timeout_seconds:.1f}s")
+        raise TimeoutError(timeout_error_message)
     if return_code != 0:
         err_text = "\n".join(lines).strip()
         raise RuntimeError(f"codex exec failed (exit={return_code}): {err_text[:600]}")
@@ -1178,6 +1220,15 @@ def main() -> int:
     )
     stream_events = bool(ctx.get("stream_events"))
     stream_plain_text = bool(ctx.get("stream_plain_text"))
+    preferred_model = str(ctx.get("model") or "").strip() or AGENT_CODEX_MODEL or None
+    preferred_reasoning_effort = (
+        _normalize_reasoning_effort(ctx.get("reasoning_effort"))
+        or _normalize_reasoning_effort(AGENT_CODEX_REASONING_EFFORT)
+    )
+    runtime_timeout_seconds = _effective_timeout_seconds(
+        ctx.get("executor_timeout_seconds"),
+        fallback_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
+    )
     structured_response = not (stream_events and stream_plain_text)
     start_prompt = _build_prompt(ctx, structured_response=structured_response)
     resume_prompt = _build_resume_prompt(ctx, structured_response=structured_response)
@@ -1198,7 +1249,7 @@ def main() -> int:
     with _chat_session_run_lock(
         workspace_id=workspace_id,
         chat_session_id=chat_session_id,
-        timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
+        timeout_seconds=runtime_timeout_seconds,
     ):
         with _codex_home_env(
             mcp_config_text=mcp_config_text,
@@ -1209,9 +1260,10 @@ def main() -> int:
                 final_message, usage, codex_session_id, resume_attempted, resume_succeeded = _run_codex_app_server_with_optional_stream(
                     start_prompt=start_prompt,
                     resume_prompt=resume_prompt,
-                    timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
+                    timeout_seconds=runtime_timeout_seconds,
                     stream_events=True,
-                    model=AGENT_CODEX_MODEL or None,
+                    model=preferred_model,
+                    reasoning_effort=preferred_reasoning_effort,
                     output_schema=schema if structured_response else None,
                     preferred_thread_id=preferred_codex_session_id,
                     env=codex_env,
@@ -1227,9 +1279,10 @@ def main() -> int:
                 final_message, usage, codex_session_id, resume_attempted, resume_succeeded = _run_codex_app_server_with_optional_stream(
                     start_prompt=start_prompt,
                     resume_prompt=resume_prompt,
-                    timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
+                    timeout_seconds=runtime_timeout_seconds,
                     stream_events=False,
-                    model=AGENT_CODEX_MODEL or None,
+                    model=preferred_model,
+                    reasoning_effort=preferred_reasoning_effort,
                     output_schema=schema,
                     preferred_thread_id=preferred_codex_session_id,
                     env=codex_env,

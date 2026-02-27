@@ -73,7 +73,12 @@ class TaskAggregate(Aggregate):
         self.automation_completed_at = None
         self.automation_failed_at = None
         self.last_automation_error = None
+        self.last_requested_instruction = None
         self.last_requested_source = None
+        self.last_requested_trigger_task_id = None
+        self.last_requested_from_status = None
+        self.last_requested_to_status = None
+        self.last_requested_triggered_at = None
 
     @event("Updated")
     def update(self, changes: dict[str, Any]) -> None:
@@ -132,11 +137,18 @@ class TaskAggregate(Aggregate):
         instruction: str | None = None,
         source: str | None = None,
         trigger_task_id: str | None = None,
+        from_status: str | None = None,
+        to_status: str | None = None,
+        triggered_at: str | None = None,
     ) -> None:
         self.automation_state = "queued"
         self.automation_requested_at = requested_at
+        self.last_requested_instruction = instruction
         self.last_requested_source = source
-        _ = (instruction, trigger_task_id)
+        self.last_requested_trigger_task_id = trigger_task_id
+        self.last_requested_from_status = from_status
+        self.last_requested_to_status = to_status
+        self.last_requested_triggered_at = triggered_at
 
     @event("AutomationStarted")
     def mark_automation_started(self, started_at: str) -> None:

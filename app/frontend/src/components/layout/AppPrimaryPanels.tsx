@@ -131,6 +131,12 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             setProjectEmbeddingEnabled: state.setProjectEmbeddingEnabled,
             projectEmbeddingModel: state.projectEmbeddingModel,
             setProjectEmbeddingModel: state.setProjectEmbeddingModel,
+            projectContextPackEvidenceTopKText: state.projectContextPackEvidenceTopKText,
+            setProjectContextPackEvidenceTopKText: state.setProjectContextPackEvidenceTopKText,
+            projectChatIndexMode: state.projectChatIndexMode,
+            setProjectChatIndexMode: state.setProjectChatIndexMode,
+            projectChatAttachmentIngestionMode: state.projectChatAttachmentIngestionMode,
+            setProjectChatAttachmentIngestionMode: state.setProjectChatAttachmentIngestionMode,
             embeddingAllowedModels: state.embeddingAllowedModels,
             embeddingDefaultModel: state.embeddingDefaultModel,
             vectorStoreEnabled: state.vectorStoreEnabled,
@@ -406,6 +412,11 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             userName={state.bootstrap.data.current_user.full_name}
             theme={state.theme}
             speechLang={state.speechLang}
+            agentChatModel={state.agentChatModel}
+            agentChatReasoningEffort={state.agentChatReasoningEffort}
+            agentChatDefaultModel={String(state.bootstrap.data.agent_chat_default_model || '').trim()}
+            agentChatDefaultReasoningEffort={String(state.bootstrap.data.agent_chat_default_reasoning_effort || '').trim().toLowerCase() || 'medium'}
+            agentChatAvailableModels={Array.isArray(state.bootstrap.data.agent_chat_available_models) ? state.bootstrap.data.agent_chat_available_models : []}
             frontendVersion={state.frontendVersion}
             backendVersion={state.backendVersion}
             backendBuild={state.backendBuild}
@@ -415,6 +426,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             licenseError={state.licenseStatus?.isError ? 'Unable to load license status.' : null}
             onLogout={state.logout}
             onChangeSpeechLang={state.setSpeechLang}
+            onSaveChatExecutionPreferences={state.saveChatExecutionPreferences}
+            saveChatExecutionPreferencesPending={state.saveChatExecutionPreferencesPending}
             onToggleTheme={() => {
               const next = state.theme === 'light' ? 'dark' : 'light'
               state.setTheme(next)

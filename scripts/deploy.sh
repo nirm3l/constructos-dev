@@ -113,7 +113,7 @@ case "$DEPLOY_SOURCE" in
     ;;
 esac
 
-DEPLOY_SERVICES=(task-app mcp-tools)
+DEPLOY_SERVICES=(task-app mcp-tools docker-socket-proxy)
 if [[ "$TARGET_RESOLVED" != "macos-m4" ]]; then
   DEPLOY_SERVICES+=(ollama)
 fi

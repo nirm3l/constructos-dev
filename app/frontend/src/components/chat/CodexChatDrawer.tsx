@@ -5,7 +5,7 @@ import * as Popover from '@radix-ui/react-popover'
 import * as Select from '@radix-ui/react-select'
 import * as ToggleGroup from '@radix-ui/react-toggle-group'
 import * as Tooltip from '@radix-ui/react-tooltip'
-import { updateChatSessionContext } from '../../api'
+import { archiveChatSession, updateChatSessionContext } from '../../api'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import type { AttachmentRef } from '../../types'
 import { AttachmentRefList, Icon } from '../shared/uiHelpers'
@@ -27,19 +27,21 @@ function appendTranscript(base: string, transcript: string): string {
 
 function buildProjectCreationStarter(): string {
   return [
-    'Help me create a new project through a strict interactive setup flow.',
-    'Workflow requirements (mandatory):',
-    '1. Ask one clarifying question at a time for missing inputs.',
-    '2. Collect and confirm these discovery fields before any create call: project goal/domain, setup strategy (template or manual), project name, and key defaults/overrides.',
-    '3. If template setup is chosen, list templates, show chosen template details, and run preview_project_from_template before create.',
-    '4. Do not call create_project or create_project_from_template until I explicitly say: confirm create.',
-    '5. After creation, ask whether seeded tasks/specifications/rules should be adjusted for this project, and apply updates if requested.',
-    '6. Return a clickable project link in this format: ?tab=projects&project=<project_id>.',
+    'Help me create a new project with a streamlined setup flow.',
+    'Workflow requirements:',
+    '1. Ask one clarifying question at a time, but only for missing inputs.',
+    '2. Default to manual setup unless I explicitly ask for a template.',
+    '3. Do not ask template-vs-manual when my request already implies a custom/manual setup.',
+    '4. If I directly ask to create the project, treat that as confirmation and create once required fields are complete.',
+    '5. If template setup is requested, run list_project_templates -> get_project_template -> preview_project_from_template -> create_project_from_template.',
+    '6. After creation, ask whether tasks/specifications/rules should be adjusted.',
+    '7. Return a clickable project link in this format: ?tab=projects&project=<project_id>.',
   ].join('\n')
 }
 
 const CHAT_INPUT_MIN_HEIGHT_PX = 64
 const CHAT_INPUT_MAX_HEIGHT_PX = 116
+const VOICE_LANG_HINT_SEEN_STORAGE_KEY = 'ui_codex_chat_voice_lang_hint_seen'
 
 function normalizeMcpLookupKey(value: string): string {
   return String(value || '').trim().toLowerCase().replace(/_/g, '-')
@@ -110,6 +112,17 @@ function normalizeBool(value: unknown): boolean {
   return false
 }
 
+function normalizeReasoningEffort(value: unknown): 'low' | 'medium' | 'high' | 'xhigh' {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'low' || normalized === 'high' || normalized === 'xhigh') return normalized
+  return 'medium'
+}
+
+function reasoningEffortLabel(value: 'low' | 'medium' | 'high' | 'xhigh'): string {
+  if (value === 'xhigh') return 'Very high'
+  return value.charAt(0).toUpperCase() + value.slice(1)
+}
+
 async function copyTextToClipboard(text: string): Promise<void> {
   const canUseClipboardApi = typeof navigator !== 'undefined' && Boolean(navigator.clipboard?.writeText)
   if (canUseClipboardApi) {
@@ -166,12 +179,17 @@ function ChatTooltip({
   )
 }
 
+type TurnCopyState =
+  | { status: 'copied' | 'error'; turnId: string }
+  | { status: 'idle'; turnId: null }
+
 export function CodexChatDrawer({ state }: { state: any }) {
   const fileInputRef = React.useRef<HTMLInputElement | null>(null)
   const inputRef = React.useRef<HTMLTextAreaElement | null>(null)
   const [chatAttachmentRefs, setChatAttachmentRefs] = React.useState<AttachmentRef[]>([])
   const [isUploadingAttachments, setIsUploadingAttachments] = React.useState(false)
   const [isUpdatingSessionAttachments, setIsUpdatingSessionAttachments] = React.useState(false)
+  const [isDeletingSession, setIsDeletingSession] = React.useState(false)
   const recognitionRef = React.useRef<any>(null)
   const speechBaseInstructionRef = React.useRef('')
   const speechHadResultRef = React.useRef(false)
@@ -179,14 +197,32 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const [isListening, setIsListening] = React.useState(false)
   const [speechSupported, setSpeechSupported] = React.useState(false)
   const [showVoiceLangHint, setShowVoiceLangHint] = React.useState(false)
+  const [hasSeenVoiceLangHint, setHasSeenVoiceLangHint] = React.useState<boolean>(() => {
+    if (typeof window === 'undefined') return true
+    try {
+      return window.localStorage.getItem(VOICE_LANG_HINT_SEEN_STORAGE_KEY) === '1'
+    } catch {
+      return true
+    }
+  })
   const [deleteSessionDialogOpen, setDeleteSessionDialogOpen] = React.useState(false)
   const [clearChatDialogOpen, setClearChatDialogOpen] = React.useState(false)
   const [deleteSessionId, setDeleteSessionId] = React.useState<string | null>(null)
   const [resumeCommandCopyState, setResumeCommandCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
+  const [turnCopyState, setTurnCopyState] = React.useState<TurnCopyState>({ status: 'idle', turnId: null })
   const codexThreadId = String(state.codexChatCodexSessionId || '').trim()
     || extractCodexThreadIdFromTurns(state.codexChatTurns)
     || ''
   const codexResumeCommand = codexThreadId ? `cos resume ${codexThreadId}` : null
+  const markVoiceLangHintSeen = React.useCallback(() => {
+    setHasSeenVoiceLangHint(true)
+    if (typeof window === 'undefined') return
+    try {
+      window.localStorage.setItem(VOICE_LANG_HINT_SEEN_STORAGE_KEY, '1')
+    } catch {
+      // Ignore storage failures for one-time hint tracking.
+    }
+  }, [])
 
   React.useEffect(() => {
     setChatAttachmentRefs([])
@@ -234,6 +270,10 @@ export function CodexChatDrawer({ state }: { state: any }) {
   }, [codexResumeCommand])
 
   React.useEffect(() => {
+    setTurnCopyState({ status: 'idle', turnId: null })
+  }, [state.codexChatSessionId])
+
+  React.useEffect(() => {
     if (resumeCommandCopyState === 'idle') return
     const timeoutMs = resumeCommandCopyState === 'copied' ? 1400 : 1800
     const timer = window.setTimeout(() => {
@@ -241,6 +281,15 @@ export function CodexChatDrawer({ state }: { state: any }) {
     }, timeoutMs)
     return () => window.clearTimeout(timer)
   }, [resumeCommandCopyState])
+
+  React.useEffect(() => {
+    if (turnCopyState.status === 'idle' || !turnCopyState.turnId) return
+    const timeoutMs = turnCopyState.status === 'copied' ? 1400 : 1800
+    const timer = window.setTimeout(() => {
+      setTurnCopyState({ status: 'idle', turnId: null })
+    }, timeoutMs)
+    return () => window.clearTimeout(timer)
+  }, [turnCopyState])
 
   const copyResumeCommandToClipboard = React.useCallback(async () => {
     if (!codexResumeCommand) return
@@ -254,6 +303,22 @@ export function CodexChatDrawer({ state }: { state: any }) {
       }
     }
   }, [codexResumeCommand])
+
+  const copyTurnToClipboard = React.useCallback(async (turn: any) => {
+    const turnId = String(turn?.id || '').trim()
+    const content = String(turn?.content || '')
+    if (!turnId || !content.trim()) return
+    try {
+      await copyTextToClipboard(content)
+      setTurnCopyState({ status: 'copied', turnId })
+    } catch {
+      setTurnCopyState({ status: 'error', turnId })
+      if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
+        window.prompt('Copy this message manually:', content)
+      }
+    }
+  }, [])
+
   if (!state.showCodexChat) return null
   const usage = state.codexChatUsage
   const inputTokens = typeof usage?.input_tokens === 'number' ? Math.max(0, usage.input_tokens) : null
@@ -380,7 +445,12 @@ export function CodexChatDrawer({ state }: { state: any }) {
   if (hasMessages) metaParts.push(`${state.codexChatTurns.length} ${state.codexChatTurns.length === 1 ? 'message' : 'messages'}`)
   if (activeSessionUpdatedAt && (hasMessages || hasContext)) metaParts.push(activeSessionUpdatedAt)
   const hasSessionMeta = metaParts.length > 0 || Boolean(contextSummary) || codexResumeFallbackUsed
-  const canDeleteSession = Array.isArray(state.codexChatSessions) && state.codexChatSessions.length > 1 && !state.runAgentChatMutation.isPending
+  const canDeleteSession = (
+    Array.isArray(state.codexChatSessions)
+    && state.codexChatSessions.length > 1
+    && !state.runAgentChatMutation.isPending
+    && !isDeletingSession
+  )
   const canCreateSession = !state.runAgentChatMutation.isPending
   const canUseProjectCreationStarter =
     !state.runAgentChatMutation.isPending &&
@@ -397,6 +467,14 @@ export function CodexChatDrawer({ state }: { state: any }) {
       ? state.codexChatSessionAttachmentRefs
       : []
   )
+  const chatModelOverride = String(state.agentChatModel || '').trim()
+  const defaultChatModel = String(state.agentChatDefaultModel || '').trim()
+  const effectiveChatModel = chatModelOverride || defaultChatModel || 'system default'
+  const compactChatModelLabel = chatModelOverride || defaultChatModel || 'System'
+  const effectiveReasoningEffort = normalizeReasoningEffort(
+    state.agentChatReasoningEffort || state.agentChatDefaultReasoningEffort
+  )
+  const effectiveReasoningLabel = reasoningEffortLabel(effectiveReasoningEffort)
 
   const stopVoiceInput = () => {
     const recognition = recognitionRef.current
@@ -537,13 +615,32 @@ export function CodexChatDrawer({ state }: { state: any }) {
       })
   }
 
-  const confirmDeleteSession = () => {
+  const confirmDeleteSession = async () => {
     if (!canDeleteSession) return
     const sessionId = String(deleteSessionId || state.codexChatActiveSessionId || '').trim()
     if (!sessionId) return
-    state.deleteCodexChatSession(sessionId)
-    setDeleteSessionId(null)
-    setDeleteSessionDialogOpen(false)
+    setIsDeletingSession(true)
+    try {
+      if (state.workspaceId && state.userId) {
+        await archiveChatSession(state.userId, sessionId, state.workspaceId)
+      }
+      state.deleteCodexChatSession(sessionId)
+      setDeleteSessionId(null)
+      setDeleteSessionDialogOpen(false)
+      state.setUiError(null)
+    } catch (err: any) {
+      const message = String(err?.message || '').trim()
+      if (message.toLowerCase().includes('chat session not found')) {
+        state.deleteCodexChatSession(sessionId)
+        setDeleteSessionId(null)
+        setDeleteSessionDialogOpen(false)
+        state.setUiError(null)
+      } else {
+        state.setUiError(message || 'Failed to delete chat session')
+      }
+    } finally {
+      setIsDeletingSession(false)
+    }
   }
 
   const confirmClearChat = () => {
@@ -566,6 +663,18 @@ export function CodexChatDrawer({ state }: { state: any }) {
     try {
       window.sessionStorage.setItem('ui_profile_scroll_target', 'voice_language')
       window.dispatchEvent(new Event('ui:focus-voice-language'))
+    } catch {
+      // Ignore storage failures and still navigate.
+    }
+    state.setTab?.('profile')
+    state.setShowCodexChat?.(false)
+  }
+
+  const openChatExecutionSettings = () => {
+    stopVoiceInput()
+    try {
+      window.sessionStorage.setItem('ui_profile_scroll_target', 'chat_execution')
+      window.dispatchEvent(new Event('ui:focus-chat-execution'))
     } catch {
       // Ignore storage failures and still navigate.
     }
@@ -635,6 +744,8 @@ export function CodexChatDrawer({ state }: { state: any }) {
       sessionId: state.codexChatSessionId,
       projectId: state.codexChatProjectId.trim() ? state.codexChatProjectId : null,
       mcpServers: selectedMcpServers,
+      model: chatModelOverride || null,
+      reasoningEffort: effectiveReasoningEffort,
       attachmentRefs: attachedRefs,
       sessionAttachmentRefs,
     })
@@ -645,12 +756,29 @@ export function CodexChatDrawer({ state }: { state: any }) {
       <div className="drawer open" onClick={() => state.setShowCodexChat(false)}>
         <div className="drawer-body codex-chat-drawer-body" onClick={(e) => e.stopPropagation()}>
           <div className="row codex-chat-header-row">
-            <h3 style={{ margin: 0 }}>Chat</h3>
-            <ChatTooltip content="Close chat">
-              <button className="action-icon" onClick={() => state.setShowCodexChat(false)} aria-label="Close">
-                <Icon path="M6 6l12 12M18 6 6 18" />
-              </button>
-            </ChatTooltip>
+            <div className="codex-chat-header-main">
+              <h3 className="codex-chat-header-title">Chat</h3>
+              <ChatTooltip content="Open Profile settings to change chat model and reasoning level">
+                <button
+                  className="status-chip tag-filter-chip codex-chat-execution-chip codex-chat-header-inline-chip"
+                  type="button"
+                  onClick={openChatExecutionSettings}
+                >
+                  <span className="codex-chat-execution-chip-main">
+                    {compactChatModelLabel}
+                  </span>
+                  <span className="codex-chat-execution-chip-sep">·</span>
+                  <span className="codex-chat-execution-chip-meta">{effectiveReasoningLabel}</span>
+                </button>
+              </ChatTooltip>
+            </div>
+            <div className="codex-chat-header-actions">
+              <ChatTooltip content="Close chat">
+                <button className="action-icon" onClick={() => state.setShowCodexChat(false)} aria-label="Close">
+                  <Icon path="M6 6l12 12M18 6 6 18" />
+                </button>
+              </ChatTooltip>
+            </div>
           </div>
         <div className="codex-chat-context-top-row">
           <div className="codex-chat-context">
@@ -877,8 +1005,33 @@ export function CodexChatDrawer({ state }: { state: any }) {
           {state.codexChatTurns.map((turn: any) => (
             <div key={turn.id} className={`codex-chat-bubble ${turn.role}`}>
               <div className="codex-chat-role">
-                {turn.role === 'user' ? 'You' : 'Assistant'}
-                {turn.createdAt ? ` · ${new Date(turn.createdAt).toLocaleTimeString()}` : ''}
+                <span className="codex-chat-role-meta">
+                  {turn.role === 'user' ? 'You' : 'Assistant'}
+                  {turn.createdAt ? ` · ${new Date(turn.createdAt).toLocaleTimeString()}` : ''}
+                </span>
+                <ChatTooltip
+                  content={
+                    turnCopyState.turnId === turn.id
+                      ? turnCopyState.status === 'copied'
+                        ? 'Copied'
+                        : turnCopyState.status === 'error'
+                          ? 'Copy failed'
+                          : 'Copy message'
+                      : 'Copy message'
+                  }
+                >
+                  <button
+                    className={`action-icon codex-chat-turn-copy ${turnCopyState.turnId === turn.id && turnCopyState.status !== 'idle' ? `is-${turnCopyState.status}` : ''}`}
+                    type="button"
+                    onClick={() => {
+                      void copyTurnToClipboard(turn)
+                    }}
+                    aria-label={turn.role === 'user' ? 'Copy your message' : 'Copy assistant message'}
+                    disabled={!String(turn?.content || '').trim()}
+                  >
+                    <Icon path="M16 4H8a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zM4 8H3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-1v-1" />
+                  </button>
+                </ChatTooltip>
               </div>
               {turn.role === 'assistant' ? (
                 <MarkdownView
@@ -933,7 +1086,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
             value={state.codexChatInstruction}
             onChange={(e) => state.setCodexChatInstruction(e.target.value)}
             rows={2}
-            placeholder='Example: "Create 3 tasks for tomorrow in project Test2 with High priority"'
+            placeholder="Try: Create 3 high-priority tasks for tomorrow in the Website Redesign project and assign them to me."
           />
           {!state.codexChatProjectId.trim() && (
             <div className="row wrap" style={{ marginTop: 8, alignItems: 'center', gap: 8 }}>
@@ -1036,7 +1189,12 @@ export function CodexChatDrawer({ state }: { state: any }) {
             </div>
           )}
           <div className="codex-chat-toolbar">
-            <Popover.Root open={showVoiceLangHint} onOpenChange={setShowVoiceLangHint}>
+            <Popover.Root
+              open={showVoiceLangHint}
+              onOpenChange={(nextOpen) => {
+                if (!nextOpen) setShowVoiceLangHint(false)
+              }}
+            >
               <ChatTooltip
                 content={
                   speechSupported
@@ -1044,11 +1202,14 @@ export function CodexChatDrawer({ state }: { state: any }) {
                     : 'Voice input is not supported in this browser'
                 }
               >
-                <Popover.Trigger asChild>
+                <Popover.Anchor asChild>
                   <button
                     className={`action-icon codex-chat-toolbar-item codex-chat-toolbar-item-voice ${isListening ? 'primary' : ''}`}
                     onClick={() => {
-                      setShowVoiceLangHint(true)
+                      if (!hasSeenVoiceLangHint) {
+                        setShowVoiceLangHint(true)
+                        markVoiceLangHintSeen()
+                      }
                       if (isListening) {
                         stopVoiceInput()
                         return
@@ -1060,7 +1221,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
                   >
                     <Icon path="M12 15a3 3 0 0 0 3-3V7a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0m5 5v4m-4 0h8" />
                   </button>
-                </Popover.Trigger>
+                </Popover.Anchor>
               </ChatTooltip>
               <Popover.Portal>
                 <Popover.Content
@@ -1184,9 +1345,10 @@ export function CodexChatDrawer({ state }: { state: any }) {
                     <button
                       type="button"
                       className="status-chip danger-ghost"
+                      disabled={isDeletingSession}
                       onClick={confirmDeleteSession}
                     >
-                      Delete session
+                      {isDeletingSession ? 'Deleting...' : 'Delete session'}
                     </button>
                   </AlertDialog.Action>
                 </div>

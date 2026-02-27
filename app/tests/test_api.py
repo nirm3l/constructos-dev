@@ -1,5 +1,7 @@
 import asyncio
+import json
 import os
+import threading
 from importlib import reload
 from pathlib import Path
 import zipfile
@@ -2121,6 +2123,27 @@ def test_agent_service_can_request_automation_run(tmp_path):
     assert status['automation_state'] == 'queued'
 
 
+def test_task_automation_requested_event_wakes_runner(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    created = client.post('/api/tasks', json={'title': 'Wake runner task', 'workspace_id': ws_id, 'project_id': project_id}).json()
+
+    import features.agents.runner as runner_module
+
+    calls = {"count": 0}
+
+    def fake_wake():
+        calls["count"] += 1
+
+    monkeypatch.setattr(runner_module, "wake_automation_runner", fake_wake)
+
+    queued = client.post(f"/api/tasks/{created['id']}/automation/run", json={'instruction': 'wake check'})
+    assert queued.status_code == 200
+    assert calls["count"] >= 1
+
+
 def test_runner_processes_queued_automation(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -2292,6 +2315,45 @@ def test_runner_marks_failed_when_executor_raises(tmp_path, monkeypatch):
     assert 'executor boom' in (payload['last_agent_error'] or '')
 
 
+def test_runner_marks_running_while_executor_is_in_progress(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    task = client.post('/api/tasks', json={'title': 'Slow executor task', 'workspace_id': ws_id, 'project_id': project_id}).json()
+    queued = client.post(f"/api/tasks/{task['id']}/automation/run", json={'instruction': 'slow run'})
+    assert queued.status_code == 200
+
+    import features.agents.runner as runner_module
+    from features.agents.executor import AutomationOutcome
+
+    entered_executor = threading.Event()
+    release_executor = threading.Event()
+
+    def slow_executor(**_kwargs):
+        entered_executor.set()
+        release_executor.wait(timeout=3)
+        return AutomationOutcome(action='comment', summary='Slow run finished.', comment='done')
+
+    monkeypatch.setattr(runner_module, "execute_task_automation", slow_executor)
+
+    run_thread = threading.Thread(target=lambda: runner_module.run_queued_automation_once(limit=5), daemon=True)
+    run_thread.start()
+
+    assert entered_executor.wait(timeout=2), "Executor did not start in time"
+    mid_status = client.get(f"/api/tasks/{task['id']}/automation")
+    assert mid_status.status_code == 200
+    assert mid_status.json()['automation_state'] == 'running'
+
+    release_executor.set()
+    run_thread.join(timeout=5)
+    assert not run_thread.is_alive()
+
+    final_status = client.get(f"/api/tasks/{task['id']}/automation")
+    assert final_status.status_code == 200
+    assert final_status.json()['automation_state'] == 'completed'
+
+
 def test_agent_service_create_task_infers_workspace_from_project(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -2315,6 +2377,344 @@ def test_agent_service_create_task_infers_workspace_from_project(tmp_path):
     assert created['workspace_id'] == ws_id
     assert created['project_id'] == project['id']
     assert created['recurring_rule'] == 'every:1m'
+
+
+def test_agent_service_recurring_rule_infers_scheduled_task_type_on_create_and_update(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    created = service.create_task(
+        title='MCP infer scheduled task type',
+        workspace_id=ws_id,
+        project_id=project_id,
+        instruction='Run recurring check',
+        scheduled_at_utc='2026-03-01T10:00:00+00:00',
+        recurring_rule='every:1d',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert created['task_type'] == 'scheduled_instruction'
+    assert created['scheduled_instruction'] == 'Run recurring check'
+    assert created['recurring_rule'] == 'every:1d'
+
+    manual = service.create_task(
+        title='MCP infer scheduled patch target',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    updated = service.update_task(
+        task_id=manual['id'],
+        patch={
+            'instruction': 'Run recurring check from patch',
+            'scheduled_at_utc': '2026-03-02T10:00:00+00:00',
+            'recurring_rule': 'every:2d',
+        },
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert updated['task_type'] == 'scheduled_instruction'
+    assert updated['recurring_rule'] == 'every:2d'
+
+
+def test_agent_service_create_note_accepts_string_tags_input(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    created = service.create_note(
+        title='MCP string tags note',
+        workspace_id=ws_id,
+        project_id=project_id,
+        tags='Ops, mcp',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert created['tags'] == ['ops', 'mcp']
+
+
+def test_agent_service_long_command_id_does_not_overflow_bulk_and_archive_all(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    task_a = service.create_task(
+        title='Overflow test A',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    task_b = service.create_task(
+        title='Overflow test B',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    service.create_note(
+        title='Overflow test note',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+
+    bulk_result = service.bulk_task_action(
+        task_ids=[task_a['id'], task_b['id']],
+        action='complete',
+        command_id='b' * 64,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert bulk_result['updated'] >= 1
+
+    archived_tasks = service.archive_all_tasks(
+        workspace_id=ws_id,
+        project_id=project_id,
+        command_id='c' * 64,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert archived_tasks['updated'] >= 1
+
+    archived_notes = service.archive_all_notes(
+        workspace_id=ws_id,
+        project_id=project_id,
+        command_id='d' * 64,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert archived_notes['updated'] >= 1
+
+
+def test_agent_service_create_task_accepts_status_on_create(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    created = service.create_task(
+        title='MCP create with explicit status',
+        workspace_id=ws_id,
+        project_id=project_id,
+        status='In progress',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert created['status'] == 'In progress'
+
+
+def test_agent_service_create_task_accepts_json_string_execution_triggers(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    due_at = (datetime.now(timezone.utc) + timedelta(minutes=20)).isoformat()
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    created = service.create_task(
+        title='MCP JSON trigger create',
+        workspace_id=ws_id,
+        project_id=project_id,
+        instruction='Write a status update note',
+        execution_triggers=json.dumps(
+            [
+                {
+                    'kind': 'schedule',
+                    'enabled': True,
+                    'scheduled_at_utc': due_at,
+                    'schedule_timezone': 'UTC',
+                    'run_on_statuses': ['In progress'],
+                }
+            ]
+        ),
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert created['task_type'] == 'scheduled_instruction'
+    assert any(trigger.get('kind') == 'schedule' for trigger in created['execution_triggers'])
+
+
+def test_agent_service_update_task_accepts_json_string_execution_triggers(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    created = service.create_task(
+        title='MCP JSON trigger update target',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+
+    updated = service.update_task(
+        task_id=created['id'],
+        patch={
+            'instruction': 'Run checks when task is done',
+            'execution_triggers': json.dumps(
+                [
+                    {
+                        'kind': 'status_change',
+                        'enabled': True,
+                        'scope': 'self',
+                        'match_mode': 'any',
+                        'to_statuses': ['Done'],
+                    }
+                ]
+            ),
+        },
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    status_change = [trigger for trigger in updated['execution_triggers'] if trigger.get('kind') == 'status_change']
+    assert len(status_change) == 1
+    assert status_change[0].get('to_statuses') == ['Done']
+
+
+def test_agent_service_update_task_accepts_execution_trigger_mapping_payload(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    created = service.create_task(
+        title='MCP trigger mapping target',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+
+    updated = service.update_task(
+        task_id=created['id'],
+        patch={
+            'instruction': 'Run checks when status changes',
+            'execution_triggers': {
+                'status_change': {
+                    'enabled': True,
+                    'scope': 'self',
+                    'match_mode': 'any',
+                    'to_statuses': ['Done'],
+                }
+            },
+        },
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    status_change = [trigger for trigger in updated['execution_triggers'] if trigger.get('kind') == 'status_change']
+    assert len(status_change) == 1
+    assert status_change[0].get('to_statuses') == ['Done']
+
+
+def test_agent_service_update_task_persists_status_change_direct_target_mapping(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    source = service.create_task(
+        title='MCP direct mapping source',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    target = service.create_task(
+        title='MCP direct mapping target',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+
+    updated = service.update_task(
+        task_id=source['id'],
+        patch={
+            'instruction': 'Run target task automation after completion',
+            'execution_triggers': {
+                'status_change': {
+                    'enabled': True,
+                    'scope': 'self',
+                    'match_mode': 'any',
+                    'to_statuses': ['Done'],
+                    'action': 'run_automation',
+                    'target_task_id': target['id'],
+                }
+            },
+        },
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    status_change = [trigger for trigger in updated['execution_triggers'] if trigger.get('kind') == 'status_change']
+    assert len(status_change) == 1
+    assert status_change[0].get('action') == 'run_automation'
+    assert status_change[0].get('target_task_id') == target['id']
+    assert status_change[0].get('target_task_ids') == [target['id']]
+
+
+def test_agent_service_update_task_scope_other_maps_to_external_with_source_task_ids(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    source = service.create_task(
+        title='MCP scope other source',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    target = service.create_task(
+        title='MCP scope other target',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+
+    updated = service.update_task(
+        task_id=target['id'],
+        patch={
+            'instruction': 'Run when dependency changes status',
+            'execution_triggers': {
+                'status_change': {
+                    'enabled': True,
+                    'scope': 'other',
+                    'match_mode': 'any',
+                    'source_task_ids': [source['id']],
+                    'to_statuses': ['Done'],
+                }
+            },
+        },
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    status_change = [trigger for trigger in updated['execution_triggers'] if trigger.get('kind') == 'status_change']
+    assert len(status_change) == 1
+    assert status_change[0].get('scope') == 'external'
+    assert status_change[0].get('selector', {}).get('task_ids') == [source['id']]
 
 
 def test_agent_service_create_task_is_idempotent_without_explicit_command_id(tmp_path):
@@ -3386,6 +3786,7 @@ def test_agents_chat_endpoint_normalizes_selected_mcp_servers(tmp_path, monkeypa
     )
     assert res.status_code == 200
     assert captured['mcp_servers'] == ['task-management-tools', 'jira', 'github']
+    assert captured['timeout_seconds'] == 0
 
 
 def test_agents_chat_endpoint_skips_disabled_mcp_servers_from_defaults(tmp_path, monkeypatch):
@@ -3858,7 +4259,10 @@ def test_agents_chat_stream_endpoint_persists_attachment_without_fk_error(tmp_pa
     from features.agents import api as agents_api
     from features.agents.executor import AutomationOutcome
 
+    captured: dict[str, object] = {}
+
     def _fake_execute_task_automation_stream(**kwargs):
+        captured.update(kwargs)
         on_event = kwargs.get('on_event')
         if callable(on_event):
             on_event({'type': 'assistant_text', 'delta': 'Streamed response with attachment.'})
@@ -3878,6 +4282,7 @@ def test_agents_chat_stream_endpoint_persists_attachment_without_fk_error(tmp_pa
         },
     )
     assert res.status_code == 200
+    assert captured['timeout_seconds'] == 0
     lines = [line for line in (res.text or '').splitlines() if line.strip()]
     assert any('"type": "final"' in line for line in lines)
 
@@ -4094,8 +4499,10 @@ def test_agents_chat_endpoint_auto_compacts_history_with_codex(tmp_path, monkeyp
     assert len(calls) == 2
     assert calls[0]['allow_mutations'] is False
     assert "Compact this conversation history" in calls[0]['instruction']
+    assert calls[0]['timeout_seconds'] == 0
     assert calls[1]['allow_mutations'] is True
     assert "[Compacted conversation context]" in calls[1]['instruction']
+    assert calls[1]['timeout_seconds'] == 0
 
 
 def test_agents_chat_endpoint_uses_stored_codex_session_id_and_skips_history_stitching(tmp_path, monkeypatch):
@@ -4383,6 +4790,48 @@ def test_create_scheduled_task_requires_instruction_and_time(tmp_path):
     assert 'scheduled_instruction' in res.text or 'scheduled_at_utc' in res.text
 
 
+def test_create_task_infers_scheduled_type_from_schedule_fields(tmp_path):
+    client = build_client(tmp_path)
+    ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
+    project_id = client.get('/api/bootstrap').json()['projects'][0]['id']
+    due_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Inferred scheduled',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Leave progress note',
+            'scheduled_at_utc': due_at,
+            'recurring_rule': 'every:1d',
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    assert payload['task_type'] == 'scheduled_instruction'
+    assert payload['recurring_rule'] == 'every:1d'
+
+
+def test_create_task_rejects_schedule_fields_with_manual_task_type(tmp_path):
+    client = build_client(tmp_path)
+    ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
+    project_id = client.get('/api/bootstrap').json()['projects'][0]['id']
+
+    res = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Manual with recurring',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'task_type': 'manual',
+            'recurring_rule': 'every:1d',
+        },
+    )
+    assert res.status_code == 422
+    assert 'manual' in res.text and 'scheduled_instruction' in res.text
+
+
 def test_scheduled_instruction_task_is_queued_and_processed(tmp_path):
     client = build_client(tmp_path)
     ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
@@ -4665,6 +5114,11 @@ def test_status_change_trigger_self_queues_automation(tmp_path):
     assert payload['automation_state'] == 'queued'
     assert payload['last_requested_source'] == 'status_change'
     assert payload['last_requested_instruction'] == 'Run a completion checklist'
+    assert payload['last_requested_trigger_task_id'] == task_id
+    assert payload['last_requested_from_status'] == 'To do'
+    assert payload['last_requested_to_status'] == 'Done'
+    assert isinstance(payload.get('last_requested_triggered_at'), str)
+    assert payload['last_requested_triggered_at']
 
 
 def test_runner_processes_status_change_trigger_when_task_is_done(tmp_path):
@@ -4712,6 +5166,81 @@ def test_runner_processes_status_change_trigger_when_task_is_done(tmp_path):
     payload = final.json()
     assert payload['automation_state'] == 'completed'
     assert payload['last_requested_source'] == 'status_change'
+
+
+def test_runner_passes_status_change_trigger_metadata_to_executor(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    source = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Metadata source',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert source.status_code == 200
+    source_id = source.json()['id']
+
+    target = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Metadata target',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Capture metadata',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'external',
+                    'match_mode': 'any',
+                    'selector': {'task_ids': [source_id]},
+                    'to_statuses': ['Done'],
+                },
+            ],
+        },
+    )
+    assert target.status_code == 200
+    target_id = target.json()['id']
+
+    completed = client.post(f'/api/tasks/{source_id}/complete')
+    assert completed.status_code == 200
+
+    import features.agents.runner as runner_module
+    from features.agents.executor import AutomationOutcome
+
+    captured: dict[str, str | None] = {}
+
+    def capture_executor(**kwargs):
+        captured['trigger_task_id'] = kwargs.get('trigger_task_id')
+        captured['trigger_from_status'] = kwargs.get('trigger_from_status')
+        captured['trigger_to_status'] = kwargs.get('trigger_to_status')
+        captured['trigger_timestamp'] = kwargs.get('trigger_timestamp')
+        return AutomationOutcome(action='comment', summary='Captured metadata.', comment='ok')
+
+    monkeypatch.setattr(runner_module, "execute_task_automation", capture_executor)
+    processed = runner_module.run_queued_automation_once(limit=5)
+    assert processed >= 1
+
+    assert captured['trigger_task_id'] == source_id
+    assert captured['trigger_from_status'] == 'To do'
+    assert captured['trigger_to_status'] == 'Done'
+    assert isinstance(captured.get('trigger_timestamp'), str)
+    assert captured['trigger_timestamp']
+
+    automation = client.get(f'/api/tasks/{target_id}/automation')
+    assert automation.status_code == 200
+    payload = automation.json()
+    assert payload['automation_state'] == 'completed'
+    assert payload['last_requested_trigger_task_id'] == source_id
+    assert payload['last_requested_from_status'] == 'To do'
+    assert payload['last_requested_to_status'] == 'Done'
+    assert isinstance(payload.get('last_requested_triggered_at'), str)
+    assert payload['last_requested_triggered_at']
 
 
 def test_status_change_trigger_external_any_queues_target(tmp_path):
@@ -4762,6 +5291,366 @@ def test_status_change_trigger_external_any_queues_target(tmp_path):
     assert payload['automation_state'] == 'queued'
     assert payload['last_requested_source'] == 'status_change'
     assert payload['last_requested_instruction'] == 'React to source completion'
+    assert payload['last_requested_trigger_task_id'] == source_id
+    assert payload['last_requested_from_status'] == 'To do'
+    assert payload['last_requested_to_status'] == 'Done'
+    assert isinstance(payload.get('last_requested_triggered_at'), str)
+    assert payload['last_requested_triggered_at']
+
+
+def test_status_change_trigger_external_without_selector_matches_any_workspace_source(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    source = client.post(
+        '/api/tasks',
+        json={
+            'title': 'External global source',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert source.status_code == 200
+    source_id = source.json()['id']
+
+    target = client.post(
+        '/api/tasks',
+        json={
+            'title': 'External global target',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'React to any workspace task completion',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'external',
+                    'match_mode': 'any',
+                    'to_statuses': ['Done'],
+                },
+            ],
+        },
+    )
+    assert target.status_code == 200
+    target_id = target.json()['id']
+
+    completed = client.post(f'/api/tasks/{source_id}/complete')
+    assert completed.status_code == 200
+
+    automation = client.get(f'/api/tasks/{target_id}/automation')
+    assert automation.status_code == 200
+    payload = automation.json()
+    assert payload['automation_state'] == 'queued'
+    assert payload['last_requested_source'] == 'status_change'
+    assert payload['last_requested_instruction'] == 'React to any workspace task completion'
+
+
+def test_status_change_trigger_external_project_selector_filters_sources(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_a_id = bootstrap['projects'][0]['id']
+
+    project_b = client.post(
+        '/api/projects',
+        json={'workspace_id': ws_id, 'name': 'External watcher project B'},
+    )
+    assert project_b.status_code == 200
+    project_b_id = project_b.json()['id']
+
+    source_a = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Project A source',
+            'workspace_id': ws_id,
+            'project_id': project_a_id,
+        },
+    )
+    source_b = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Project B source',
+            'workspace_id': ws_id,
+            'project_id': project_b_id,
+        },
+    )
+    assert source_a.status_code == 200
+    assert source_b.status_code == 200
+    source_a_id = source_a.json()['id']
+    source_b_id = source_b.json()['id']
+
+    target = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Project-filtered watcher target',
+            'workspace_id': ws_id,
+            'project_id': project_a_id,
+            'instruction': 'React only to project A status changes',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'external',
+                    'match_mode': 'any',
+                    'selector': {'project_id': project_a_id},
+                    'to_statuses': ['Done'],
+                },
+            ],
+        },
+    )
+    assert target.status_code == 200
+    target_id = target.json()['id']
+
+    complete_b = client.post(f'/api/tasks/{source_b_id}/complete')
+    assert complete_b.status_code == 200
+    after_b = client.get(f'/api/tasks/{target_id}/automation')
+    assert after_b.status_code == 200
+    assert after_b.json()['automation_state'] == 'idle'
+
+    complete_a = client.post(f'/api/tasks/{source_a_id}/complete')
+    assert complete_a.status_code == 200
+    after_a = client.get(f'/api/tasks/{target_id}/automation')
+    assert after_a.status_code == 200
+    payload = after_a.json()
+    assert payload['automation_state'] == 'queued'
+    assert payload['last_requested_source'] == 'status_change'
+    assert payload['last_requested_instruction'] == 'React only to project A status changes'
+
+
+def test_status_change_trigger_direct_target_mapping_queues_target_only(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    target = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Direct mapping target',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Handle source completion',
+        },
+    )
+    assert target.status_code == 200
+    target_id = target.json()['id']
+
+    source = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Direct mapping source',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Observe source completion',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'self',
+                    'match_mode': 'any',
+                    'to_statuses': ['Done'],
+                    'action': 'run_automation',
+                    'target_task_id': target_id,
+                },
+            ],
+        },
+    )
+    assert source.status_code == 200
+    source_id = source.json()['id']
+
+    completed = client.post(f'/api/tasks/{source_id}/complete')
+    assert completed.status_code == 200
+
+    source_automation = client.get(f'/api/tasks/{source_id}/automation')
+    assert source_automation.status_code == 200
+    assert source_automation.json()['automation_state'] == 'idle'
+
+    target_automation = client.get(f'/api/tasks/{target_id}/automation')
+    assert target_automation.status_code == 200
+    payload = target_automation.json()
+    assert payload['automation_state'] == 'queued'
+    assert payload['last_requested_source'] == 'status_change'
+    assert payload['last_requested_instruction'] == 'Handle source completion'
+
+
+def test_status_change_trigger_direct_target_mapping_accepts_run_task_instruction_action(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    target = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Direct mapping target action alias',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Handle source completion via alias action',
+        },
+    )
+    assert target.status_code == 200
+    target_id = target.json()['id']
+
+    source = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Direct mapping source action alias',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Observe source completion',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'self',
+                    'match_mode': 'any',
+                    'to_statuses': ['Done'],
+                    'action': 'run_task_instruction',
+                    'target_task_id': target_id,
+                },
+            ],
+        },
+    )
+    assert source.status_code == 200
+    source_id = source.json()['id']
+
+    completed = client.post(f'/api/tasks/{source_id}/complete')
+    assert completed.status_code == 200
+
+    target_automation = client.get(f'/api/tasks/{target_id}/automation')
+    assert target_automation.status_code == 200
+    payload = target_automation.json()
+    assert payload['automation_state'] == 'queued'
+    assert payload['last_requested_source'] == 'status_change'
+    assert payload['last_requested_instruction'] == 'Handle source completion via alias action'
+
+
+def test_status_change_trigger_external_target_mapping_on_target_task_queues_target(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    source = client.post(
+        '/api/tasks',
+        json={
+            'title': 'External target mapping source',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert source.status_code == 200
+    source_id = source.json()['id']
+
+    target = client.post(
+        '/api/tasks',
+        json={
+            'title': 'External target mapping target',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Run from external watcher with explicit target mapping',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'external',
+                    'match_mode': 'any',
+                    'selector': {'task_ids': [source_id]},
+                    'to_statuses': ['Done'],
+                    'action': 'run_task_instruction',
+                    'target_task_id': None,  # filled below with created id
+                },
+            ],
+        },
+    )
+    assert target.status_code == 200
+    target_id = target.json()['id']
+
+    # Reconfigure trigger with explicit target_task_id equal to target task itself.
+    configured = client.patch(
+        f'/api/tasks/{target_id}',
+        json={
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'external',
+                    'match_mode': 'any',
+                    'selector': {'task_ids': [source_id]},
+                    'to_statuses': ['Done'],
+                    'action': 'run_task_instruction',
+                    'target_task_id': target_id,
+                },
+            ],
+        },
+    )
+    assert configured.status_code == 200
+
+    completed = client.post(f'/api/tasks/{source_id}/complete')
+    assert completed.status_code == 200
+
+    automation = client.get(f'/api/tasks/{target_id}/automation')
+    assert automation.status_code == 200
+    payload = automation.json()
+    assert payload['automation_state'] == 'queued'
+    assert payload['last_requested_source'] == 'status_change'
+    assert payload['last_requested_instruction'] == 'Run from external watcher with explicit target mapping'
+
+
+def test_status_change_trigger_scope_other_with_source_task_ids_queues_target(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    source = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Scope other source',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert source.status_code == 200
+    source_id = source.json()['id']
+
+    target = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Scope other target',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'React to source completion via alias',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'other',
+                    'match_mode': 'any',
+                    'source_task_ids': [source_id],
+                    'to_statuses': ['Done'],
+                },
+            ],
+        },
+    )
+    assert target.status_code == 200
+    target_trigger = [trigger for trigger in target.json()['execution_triggers'] if trigger.get('kind') == 'status_change']
+    assert len(target_trigger) == 1
+    assert target_trigger[0].get('scope') == 'external'
+    assert target_trigger[0].get('selector', {}).get('task_ids') == [source_id]
+    target_id = target.json()['id']
+
+    completed = client.post(f'/api/tasks/{source_id}/complete')
+    assert completed.status_code == 200
+
+    automation = client.get(f'/api/tasks/{target_id}/automation')
+    assert automation.status_code == 200
+    payload = automation.json()
+    assert payload['automation_state'] == 'queued'
+    assert payload['last_requested_source'] == 'status_change'
+    assert payload['last_requested_instruction'] == 'React to source completion via alias'
 
 
 def test_status_change_trigger_external_all_waits_for_all_selected_tasks(tmp_path):
@@ -4829,11 +5718,108 @@ def test_status_change_trigger_external_all_waits_for_all_selected_tasks(tmp_pat
     assert payload['last_requested_instruction'] == 'Run after both dependencies are done'
 
 
+def test_status_change_triggers_queue_pending_requests_when_target_is_busy(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    source_a = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Busy queue source A',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    source_b = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Busy queue source B',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert source_a.status_code == 200
+    assert source_b.status_code == 200
+    source_a_id = source_a.json()['id']
+    source_b_id = source_b.json()['id']
+
+    target = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Busy queue target',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Audit status change',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'external',
+                    'match_mode': 'any',
+                    'selector': {'task_ids': [source_a_id, source_b_id]},
+                    'to_statuses': ['Done'],
+                },
+            ],
+        },
+    )
+    assert target.status_code == 200
+    target_id = target.json()['id']
+
+    complete_a = client.post(f'/api/tasks/{source_a_id}/complete')
+    complete_b = client.post(f'/api/tasks/{source_b_id}/complete')
+    assert complete_a.status_code == 200
+    assert complete_b.status_code == 200
+
+    queued = client.get(f'/api/tasks/{target_id}/automation')
+    assert queued.status_code == 200
+    queued_payload = queued.json()
+    assert queued_payload['automation_state'] == 'queued'
+    assert int(queued_payload.get('automation_pending_requests') or 0) >= 1
+
+    from features.agents.runner import run_queued_automation_once
+
+    first_processed = run_queued_automation_once(limit=10)
+    assert first_processed >= 1
+    after_first = client.get(f'/api/tasks/{target_id}/automation')
+    assert after_first.status_code == 200
+    after_first_payload = after_first.json()
+    assert after_first_payload['automation_state'] == 'queued'
+
+    second_processed = run_queued_automation_once(limit=10)
+    assert second_processed >= 1
+    after_second = client.get(f'/api/tasks/{target_id}/automation')
+    assert after_second.status_code == 200
+    after_second_payload = after_second.json()
+    assert after_second_payload['automation_state'] == 'completed'
+    assert int(after_second_payload.get('automation_pending_requests') or 0) == 0
+
+
 def test_create_task_requires_project_id(tmp_path):
     client = build_client(tmp_path)
     ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
     res = client.post('/api/tasks', json={'title': 'No project', 'workspace_id': ws_id})
     assert res.status_code == 422
+
+
+def test_create_task_accepts_status_on_create(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'REST create with explicit status',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'In progress',
+        },
+    )
+    assert created.status_code == 200
+    assert created.json()['status'] == 'In progress'
 
 
 def test_task_tags_are_normalized_and_filterable(tmp_path):

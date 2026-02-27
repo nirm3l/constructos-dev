@@ -12,6 +12,12 @@ TRIGGER_KIND_STATUS_CHANGE = "status_change"
 TRIGGER_KINDS = {TRIGGER_KIND_MANUAL, TRIGGER_KIND_SCHEDULE, TRIGGER_KIND_STATUS_CHANGE}
 STATUS_SCOPE_SELF = "self"
 STATUS_SCOPE_EXTERNAL = "external"
+STATUS_SCOPE_EXTERNAL_ALIASES = {
+    STATUS_SCOPE_EXTERNAL,
+    "other",
+    "other_task",
+    "other_tasks",
+}
 STATUS_MATCH_ANY = "any"
 STATUS_MATCH_ALL = "all"
 DEFAULT_SCHEDULE_RUN_ON_STATUSES = ["In progress"]
@@ -37,6 +43,36 @@ def _normalize_string_list(values: Any) -> list[str]:
         seen.add(key)
         out.append(value)
     return out
+
+
+def _normalize_string_list_or_csv(values: Any) -> list[str]:
+    if isinstance(values, list):
+        return _normalize_string_list(values)
+    if isinstance(values, str):
+        return _normalize_string_list([part.strip() for part in values.split(",")])
+    return []
+
+
+def _normalize_status_change_action(raw: Any) -> str | dict[str, Any] | None:
+    if isinstance(raw, str):
+        return _normalize_string(raw)
+    if not isinstance(raw, dict):
+        return None
+    action: dict[str, Any] = {}
+    action_type = _normalize_string(raw.get("type") or raw.get("action"))
+    if action_type:
+        action["type"] = action_type
+    target_task_id = _normalize_string(raw.get("target_task_id"))
+    target_task_ids = _normalize_string_list(raw.get("target_task_ids"))
+    if target_task_id and target_task_id.casefold() not in {item.casefold() for item in target_task_ids}:
+        target_task_ids = [target_task_id, *target_task_ids]
+    if target_task_ids:
+        action["target_task_ids"] = target_task_ids
+        action["target_task_id"] = target_task_ids[0]
+    payload = raw.get("payload")
+    if isinstance(payload, dict):
+        action["payload"] = payload
+    return action or None
 
 
 def _as_bool(value: Any, default: bool = True) -> bool:
@@ -82,7 +118,25 @@ def _normalize_status_selector(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raw = {}
     selector: dict[str, Any] = {}
-    task_ids = _normalize_string_list(raw.get("task_ids"))
+    task_ids: list[str] = []
+    seen_task_ids: set[str] = set()
+
+    def _append_task_id(value: Any) -> None:
+        normalized = _normalize_string(value)
+        if not normalized:
+            return
+        key = normalized.casefold()
+        if key in seen_task_ids:
+            return
+        seen_task_ids.add(key)
+        task_ids.append(normalized)
+
+    for item in _normalize_string_list_or_csv(raw.get("task_ids")):
+        _append_task_id(item)
+    _append_task_id(raw.get("task_id"))
+    for item in _normalize_string_list_or_csv(raw.get("source_task_ids")):
+        _append_task_id(item)
+    _append_task_id(raw.get("source_task_id"))
     if task_ids:
         selector["task_ids"] = task_ids
     project_id = _normalize_string(raw.get("project_id"))
@@ -94,26 +148,46 @@ def _normalize_status_selector(raw: Any) -> dict[str, Any]:
     assignee_id = _normalize_string(raw.get("assignee_id"))
     if assignee_id:
         selector["assignee_id"] = assignee_id
-    labels_any = _normalize_string_list(raw.get("labels_any"))
+    labels_any = _normalize_string_list_or_csv(raw.get("labels_any"))
     if labels_any:
         selector["labels_any"] = labels_any
     return selector
 
 
 def _normalize_status_change_trigger(raw: dict[str, Any], *, enabled: bool) -> dict[str, Any]:
-    scope_raw = str(raw.get("scope") or STATUS_SCOPE_SELF).strip().lower()
-    scope = STATUS_SCOPE_EXTERNAL if scope_raw == STATUS_SCOPE_EXTERNAL else STATUS_SCOPE_SELF
+    scope_raw = str(raw.get("scope") or "").strip().lower()
     match_mode_raw = str(raw.get("match_mode") or STATUS_MATCH_ANY).strip().lower()
     match_mode = STATUS_MATCH_ALL if match_mode_raw == STATUS_MATCH_ALL else STATUS_MATCH_ANY
+    top_level_source_task_ids = _normalize_string_list_or_csv(raw.get("source_task_ids"))
+    top_level_source_task_id = _normalize_string(raw.get("source_task_id"))
+    if top_level_source_task_id and top_level_source_task_id.casefold() not in {
+        item.casefold() for item in top_level_source_task_ids
+    }:
+        top_level_source_task_ids = [top_level_source_task_id, *top_level_source_task_ids]
     out: dict[str, Any] = {
         "kind": TRIGGER_KIND_STATUS_CHANGE,
         "enabled": enabled,
-        "scope": scope,
         "match_mode": match_mode,
         "from_statuses": _normalize_string_list(raw.get("from_statuses")),
         "to_statuses": _normalize_string_list(raw.get("to_statuses")),
     }
     selector = _normalize_status_selector(raw.get("selector"))
+    if top_level_source_task_ids:
+        selector_task_ids = list(selector.get("task_ids") or [])
+        seen_selector_ids = {str(item).casefold() for item in selector_task_ids}
+        for source_task_id in top_level_source_task_ids:
+            if source_task_id.casefold() in seen_selector_ids:
+                continue
+            seen_selector_ids.add(source_task_id.casefold())
+            selector_task_ids.append(source_task_id)
+        selector["task_ids"] = selector_task_ids
+    scope = (
+        STATUS_SCOPE_EXTERNAL
+        if scope_raw in STATUS_SCOPE_EXTERNAL_ALIASES
+        or (scope_raw not in {STATUS_SCOPE_SELF, STATUS_SCOPE_EXTERNAL} and bool(selector.get("task_ids")))
+        else STATUS_SCOPE_SELF
+    )
+    out["scope"] = scope
     if selector:
         out["selector"] = selector
     cooldown_raw = raw.get("cooldown_seconds")
@@ -122,6 +196,16 @@ def _normalize_status_change_trigger(raw: dict[str, Any], *, enabled: bool) -> d
             out["cooldown_seconds"] = max(0, int(cooldown_raw))
         except Exception:
             pass
+    target_task_id = _normalize_string(raw.get("target_task_id"))
+    target_task_ids = _normalize_string_list(raw.get("target_task_ids"))
+    if target_task_id and target_task_id.casefold() not in {item.casefold() for item in target_task_ids}:
+        target_task_ids = [target_task_id, *target_task_ids]
+    if target_task_ids:
+        out["target_task_ids"] = target_task_ids
+        out["target_task_id"] = target_task_ids[0]
+    action = _normalize_status_change_action(raw.get("action"))
+    if action is not None:
+        out["action"] = action
     return out
 
 

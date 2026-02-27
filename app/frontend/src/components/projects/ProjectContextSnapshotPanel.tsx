@@ -10,6 +10,7 @@ type SnapshotSourceKey =
   | 'rules'
   | 'skills'
   | 'knowledge_graph_context'
+  | 'knowledge_graph_fresh_snapshot'
   | 'knowledge_graph_evidence_non_chat'
   | 'knowledge_graph_evidence_chat'
   | 'system_scaffold'
@@ -78,6 +79,8 @@ const START_PROMPT_SCAFFOLD_TEMPLATE = [
   'Current User ID: {actor_user_id}',
   'Project Name: {project_name}',
   'Instruction: {instruction}',
+  'Status Change Trigger Context:',
+  '{status_change_trigger_context}',
   '',
   'Context Pack:',
   'File: Soul.md (source: project.description)',
@@ -89,6 +92,7 @@ const START_PROMPT_SCAFFOLD_TEMPLATE = [
   '',
   'Guidance:',
   '- This is a general chat request (not bound to a single task). Use workspace/project context and MCP tools as needed.',
+  '- Enabled MCP servers for this run: {enabled_mcp_servers}.',
   '- Mutating tools are allowed for this request.',
   '- Apply requested changes via MCP tools directly when possible.',
   '- Respond directly to the user with clear, actionable text.',
@@ -106,27 +110,11 @@ const START_PROMPT_GUIDANCE_TEMPLATE = [
   '- Treat claims without an evidence_id as low confidence.',
   '- If project context conflicts with the latest explicit user instruction, follow the latest explicit user instruction.',
   '- You may call task-management MCP tools relevant to the request.',
-  '- For profile preference changes (theme/timezone/notifications), use MCP tools directly.',
-  '- For chat theme changes, use set_user_theme(theme=\'light\'|\'dark\').',
-  '- set_user_theme targets the current app user profile.',
-  '- Use toggle_my_theme only if the user explicitly asks to toggle (not set) theme.',
-  '- Report the final theme based on set_user_theme tool output.',
-  '- Use graph_* MCP tools when you need relation-aware lookup across project resources.',
-  '- Prefer bulk tools when operating on many tasks (avoid per-task loops when possible).',
-  '- Prefer archive_all_notes/archive_all_tasks for \'archive everything\' requests.',
+  '- If the user asks to implement/work on a specific project by ID or name (for example \'Implement project <id|name>\'), call get_project_chat_context(project_ref=..., workspace_id=...) first.',
+  '- If get_project_chat_context returns ambiguous name matches, ask for a concrete project ID or workspace_id and then call it again.',
+  '- Read each MCP tool description and follow its payload contract and operational guidance.',
   '- For mutating MCP tool calls, always provide command_id.',
   '- If retrying the same mutation, reuse the exact same command_id.',
-  '- If the user asks for a plan/spec/design doc, prefer creating a Note (Markdown) via MCP tools so it is visible in the UI.',
-  '- When creating a plan note: use a clear title starting with \'Plan:\' and include actionable steps.',
-  '- If you are in task context, link the note to the task by setting task_id when creating the note.',
-  '- For every request to create a new project, always use a strict interactive setup protocol.',
-  '- Strict protocol is mandatory even if the user asks for immediate creation.',
-  '- Ask one clarifying question at a time and track missing fields until they are resolved.',
-  '- Discovery fields before creation: project goal/domain, setup strategy (template or manual), project name, and defaults/overrides (statuses, members, embeddings, context top K, template parameters when applicable).',
-  '- Template strategy sequence: list_project_templates -> get_project_template -> collect template parameters -> preview_project_from_template -> explicit user confirmation -> create_project_from_template.',
-  '- Manual strategy sequence: collect required fields -> explicit user confirmation -> create_project.',
-  '- Never call create_project or create_project_from_template until the user explicitly confirms creation in the current conversation (for example: \'confirm create\').',
-  '- After successful creation, ask whether seeded tasks/specifications/rules should be adjusted for this specific project; if yes, apply the requested updates via MCP tools.',
   '- When mentioning created/updated entities in summary/comment, include clickable Markdown links (not raw IDs).',
   '- Never return generic phrases like \'open task\' or \'open note\' without a concrete link target.',
   '- For each created entity, include at least one explicit link that can be clicked in chat.',
@@ -155,6 +143,11 @@ const RESUME_PROMPT_SCAFFOLD_TEMPLATE = [
   'Current User ID: {actor_user_id}',
   'Project Name: {project_name}',
   'Instruction: {instruction}',
+  'Status Change Trigger Context:',
+  '{status_change_trigger_context}',
+  '',
+  'Fresh Cross-Session Memory Snapshot (generated for this turn):',
+  '{fresh_memory_snapshot}',
   '',
   'Guidance:',
   '- This is a general chat request; use workspace/project context as needed.',
@@ -162,8 +155,9 @@ const RESUME_PROMPT_SCAFFOLD_TEMPLATE = [
 ].join('\n')
 
 const RESUME_PROMPT_GUIDANCE_TEMPLATE = [
+  '- For factual questions that may depend on other sessions, prefer Fresh Cross-Session Memory Snapshot over stale thread memory.',
   '- If prior thread context appears stale or missing, refresh by calling get_project_chat_context(project_ref=..., workspace_id=...).',
-  '- Prefer bulk tools for batch operations.',
+  '- Read each MCP tool description and follow its payload contract and operational guidance.',
   '- For mutating MCP tool calls, always provide command_id.',
   '- If retrying the same mutation, reuse the exact same command_id.',
   '- Mutating tools are allowed for this request.',
@@ -374,6 +368,65 @@ function renderGraphSummaryMarkdown(summary: GraphContextPack['summary'] | undef
   return out || '_(summary unavailable)_'
 }
 
+function normalizeSnapshotText(value: unknown, maxChars: number): string {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim()
+  if (!normalized) return ''
+  if (normalized.length <= maxChars) return normalized
+  return `${normalized.slice(0, Math.max(0, maxChars - 3))}...`
+}
+
+function buildResumeFreshMemorySnapshot({
+  summaryMarkdown,
+  evidenceItems,
+  maxSummaryChars = 1100,
+  maxEvidenceItems = 6,
+  maxEvidenceSnippetChars = 180,
+  maxBlockChars = 2400,
+}: {
+  summaryMarkdown: string
+  evidenceItems: Array<{
+    evidence_id?: string | null
+    entity_type?: string | null
+    source_type?: string | null
+    snippet?: string | null
+    final_score?: number | null
+  }>
+  maxSummaryChars?: number
+  maxEvidenceItems?: number
+  maxEvidenceSnippetChars?: number
+  maxBlockChars?: number
+}): string {
+  const blocks: string[] = []
+
+  const summaryText = normalizeSnapshotText(summaryMarkdown, maxSummaryChars)
+  if (summaryText) {
+    blocks.push(`Fresh Summary:\n${summaryText}`)
+  }
+
+  const evidenceLines: string[] = []
+  for (const item of evidenceItems) {
+    const snippet = normalizeSnapshotText(item?.snippet || '', maxEvidenceSnippetChars)
+    if (!snippet) continue
+    const evidenceId = String(item?.evidence_id || '').trim()
+    const entityType = String(item?.entity_type || '').trim() || 'Entity'
+    const sourceType = String(item?.source_type || '').trim() || 'source'
+    const scoreValue = Number(item?.final_score)
+    const scoreText = Number.isFinite(scoreValue) ? scoreValue.toFixed(3) : ''
+    const evidencePrefix = evidenceId ? `[${evidenceId}] ` : ''
+    const scoreSuffix = scoreText ? ` score=${scoreText}` : ''
+    evidenceLines.push(`- ${evidencePrefix}${entityType} (${sourceType})${scoreSuffix}: ${snippet}`)
+    if (evidenceLines.length >= Math.max(1, Math.floor(maxEvidenceItems))) break
+  }
+  if (evidenceLines.length > 0) {
+    blocks.push(`Fresh Evidence:\n${evidenceLines.join('\n')}`)
+  }
+
+  const snapshot = blocks.join('\n\n').trim()
+  if (!snapshot) return '_(fresh project snapshot unavailable)_'
+  if (snapshot.length <= maxBlockChars) return snapshot
+  return normalizeSnapshotText(snapshot, maxBlockChars)
+}
+
 export function ProjectContextSnapshotPanel({
   projectId,
   projectName,
@@ -419,6 +472,20 @@ export function ProjectContextSnapshotPanel({
   const skillsMarkdown = React.useMemo(() => renderSkillsMarkdown(projectSkills), [projectSkills])
   const graphSummaryMarkdown = React.useMemo(() => renderGraphSummaryMarkdown(contextPack?.summary), [contextPack?.summary])
   const graphContextMarkdown = String(contextPack?.markdown || '')
+  const resumeFreshMemorySnapshot = React.useMemo(
+    () =>
+      buildResumeFreshMemorySnapshot({
+        summaryMarkdown: graphSummaryMarkdown,
+        evidenceItems: evidenceItems.map((item) => ({
+          evidence_id: item.evidence_id,
+          entity_type: item.entity_type,
+          source_type: item.source_type,
+          snippet: item.snippet,
+          final_score: item.final_score,
+        })),
+      }),
+    [evidenceItems, graphSummaryMarkdown]
+  )
   const chatEvidenceItems = React.useMemo(() => evidenceItems.filter((item) => isChatEntityType(item.entity_type)), [evidenceItems])
   const nonChatEvidenceItems = React.useMemo(
     () => evidenceItems.filter((item) => !isChatEntityType(item.entity_type)),
@@ -446,15 +513,14 @@ export function ProjectContextSnapshotPanel({
     : null
   const graphEvidenceJsonChat = chatEvidenceItems.length > 0 ? JSON.stringify(chatEvidenceItems) : ''
   const graphEvidenceJsonNonChat = nonChatEvidenceItems.length > 0 ? JSON.stringify(nonChatEvidenceItems) : ''
-  const chatHistoryText = React.useMemo(
-    () =>
-      buildConversationHistoryText({
-        projectId,
-        activeChatProjectId,
-        activeChatTurns: Array.isArray(activeChatTurns) ? activeChatTurns : [],
-      }),
-    [activeChatProjectId, activeChatTurns, projectId]
-  )
+  const chatHistoryText = React.useMemo(() => {
+    if (activePromptMode === 'resume') return ''
+    return buildConversationHistoryText({
+      projectId,
+      activeChatProjectId,
+      activeChatTurns: Array.isArray(activeChatTurns) ? activeChatTurns : [],
+    })
+  }, [activeChatProjectId, activeChatTurns, activePromptMode, projectId])
 
   const snapshot = React.useMemo(() => {
     const runtimeMetadataText = [
@@ -479,48 +545,56 @@ export function ProjectContextSnapshotPanel({
         group: 'project',
         label: 'Project description (Soul.md)',
         color: '#0f766e',
-        chars: projectDescription.length,
-        lines: countLines(projectDescription),
+        chars: activePromptMode === 'resume' ? 0 : projectDescription.length,
+        lines: activePromptMode === 'resume' ? 0 : countLines(projectDescription),
       },
       {
         key: 'rules',
         group: 'project',
         label: 'Project rules (ProjectRules.md)',
         color: '#ea580c',
-        chars: rulesMarkdown.length,
-        lines: countLines(rulesMarkdown),
+        chars: activePromptMode === 'resume' ? 0 : rulesMarkdown.length,
+        lines: activePromptMode === 'resume' ? 0 : countLines(rulesMarkdown),
       },
       {
         key: 'skills',
         group: 'project',
         label: 'Project skills (ProjectSkills.md)',
         color: '#7c3aed',
-        chars: skillsMarkdown.length,
-        lines: countLines(skillsMarkdown),
+        chars: activePromptMode === 'resume' ? 0 : skillsMarkdown.length,
+        lines: activePromptMode === 'resume' ? 0 : countLines(skillsMarkdown),
       },
       {
         key: 'knowledge_graph_context',
         group: 'knowledge_graph',
         label: 'Knowledge graph context + summary',
         color: '#2563eb',
-        chars: graphContextMarkdown.length + graphSummaryMarkdown.length,
-        lines: countLines(graphContextMarkdown) + countLines(graphSummaryMarkdown),
+        chars: activePromptMode === 'resume' ? 0 : graphContextMarkdown.length + graphSummaryMarkdown.length,
+        lines: activePromptMode === 'resume' ? 0 : countLines(graphContextMarkdown) + countLines(graphSummaryMarkdown),
+      },
+      {
+        key: 'knowledge_graph_fresh_snapshot',
+        group: 'knowledge_graph',
+        label: 'Fresh cross-session memory snapshot',
+        color: '#2563eb',
+        chars: activePromptMode === 'resume' ? resumeFreshMemorySnapshot.length : 0,
+        lines: activePromptMode === 'resume' ? countLines(resumeFreshMemorySnapshot) : 0,
       },
       {
         key: 'knowledge_graph_evidence_non_chat',
         group: 'knowledge_graph',
         label: 'Indexed project corpus (non-chat evidence)',
         color: '#0ea5e9',
-        chars: graphEvidenceJsonNonChat.length,
-        lines: countLines(graphEvidenceJsonNonChat),
+        chars: activePromptMode === 'resume' ? 0 : graphEvidenceJsonNonChat.length,
+        lines: activePromptMode === 'resume' ? 0 : countLines(graphEvidenceJsonNonChat),
       },
       {
         key: 'knowledge_graph_evidence_chat',
         group: 'knowledge_graph',
         label: 'Indexed project chat corpus',
         color: '#22c55e',
-        chars: graphEvidenceJsonChat.length,
-        lines: countLines(graphEvidenceJsonChat),
+        chars: activePromptMode === 'resume' ? 0 : graphEvidenceJsonChat.length,
+        lines: activePromptMode === 'resume' ? 0 : countLines(graphEvidenceJsonChat),
       },
       {
         key: 'system_scaffold',
@@ -692,6 +766,7 @@ export function ProjectContextSnapshotPanel({
     observedInputTokens,
     observedOutputTokens,
     projectName,
+    resumeFreshMemorySnapshot,
     rulesMarkdown,
     skillsMarkdown,
   ])
@@ -885,7 +960,7 @@ export function ProjectContextSnapshotPanel({
             </div>
             <div className="context-snapshot-footnotes">
               <div className="meta">
-                Uses the active prompt profile for this session ({snapshot.promptModeLabel}) and includes active-session conversation history when available.
+                Uses the active prompt profile for this session ({snapshot.promptModeLabel}). Conversation history is only included for start-profile turns.
               </div>
               <div className="meta">
                 Cold-start estimate keeps the same project/runtime payload but replaces hardcoded prompt blocks with the start profile.

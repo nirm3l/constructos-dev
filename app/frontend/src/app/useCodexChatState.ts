@@ -51,6 +51,7 @@ type PersistedCodexChatState = {
   version: 1
   activeSessionId: string
   sessions: ChatSession[]
+  showCodexChat: boolean
 }
 
 const STORAGE_KEY_PREFIX = 'codex_chat_state_v1'
@@ -62,6 +63,15 @@ function resolveStorageKey(userId: string | null | undefined): string {
   const normalized = String(userId || '').trim()
   if (!normalized) return STORAGE_KEY_PREFIX
   return `${STORAGE_KEY_PREFIX}:${normalized}`
+}
+
+function normalizeProjectId(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  const normalized = value.trim()
+  if (!normalized) return ''
+  const sentinel = normalized.toLowerCase()
+  if (sentinel === 'null' || sentinel === 'undefined' || sentinel === '__none__') return ''
+  return normalized
 }
 
 function makeId(prefix: string): string {
@@ -217,7 +227,7 @@ function createSession(title: string, projectId = ''): ChatSession {
   return {
     id: makeId('chat'),
     title: title.trim() || `${DEFAULT_SESSION_TITLE_PREFIX} 1`,
-    projectId,
+    projectId: normalizeProjectId(projectId),
     turns: [],
     usage: null,
     mcpServers: [],
@@ -260,7 +270,7 @@ function normalizeSession(value: unknown): ChatSession | null {
     title: typeof session.title === 'string' && session.title.trim()
       ? session.title.trim()
       : `${DEFAULT_SESSION_TITLE_PREFIX} 1`,
-    projectId: typeof session.projectId === 'string' ? session.projectId : '',
+    projectId: normalizeProjectId(session.projectId),
     turns,
     usage: normalizeUsage(session.usage),
     mcpServers: normalizeMcpServers(session.mcpServers),
@@ -286,13 +296,14 @@ function createInitialState(): PersistedCodexChatState {
     version: 1,
     activeSessionId: firstSession.id,
     sessions: [firstSession],
+    showCodexChat: false,
   }
 }
 
 function loadPersistedState(storageKey: string): PersistedCodexChatState | null {
   if (typeof window === 'undefined') return null
   try {
-    const raw = window.localStorage.getItem(storageKey)
+    const raw = window.sessionStorage.getItem(storageKey)
     if (!raw) return null
     const parsed = JSON.parse(raw) as unknown
     if (!parsed || typeof parsed !== 'object') return null
@@ -311,6 +322,7 @@ function loadPersistedState(storageKey: string): PersistedCodexChatState | null 
       version: 1,
       activeSessionId,
       sessions: trimmedSessions,
+      showCodexChat: Boolean(payload.showCodexChat),
     }
   } catch {
     return null
@@ -338,10 +350,12 @@ export function useCodexChatState(storageUserId?: string | null) {
     if (restored) {
       setCodexChatSessions(restored.sessions)
       setCodexChatActiveSessionId(restored.activeSessionId)
+      setShowCodexChat(restored.showCodexChat)
     } else {
       const fallback = createInitialState()
       setCodexChatSessions(fallback.sessions)
       setCodexChatActiveSessionId(fallback.activeSessionId)
+      setShowCodexChat(fallback.showCodexChat)
     }
     setCodexChatInstruction('')
     setIsCodexChatRunning(false)
@@ -375,13 +389,14 @@ export function useCodexChatState(storageUserId?: string | null) {
       version: 1,
       activeSessionId: activeId,
       sessions: codexChatSessions,
+      showCodexChat,
     }
     try {
-      window.localStorage.setItem(storageKey, JSON.stringify(payload))
+      window.sessionStorage.setItem(storageKey, JSON.stringify(payload))
     } catch {
       // Ignore quota/storage failures; chat continues in-memory.
     }
-  }, [codexChatActiveSessionId, codexChatSessions, storageKey])
+  }, [codexChatActiveSessionId, codexChatSessions, showCodexChat, storageKey])
 
   const patchSession = React.useCallback((sessionId: string, mutate: (session: ChatSession) => ChatSession) => {
     setCodexChatSessions((prev) => {
@@ -501,7 +516,7 @@ export function useCodexChatState(storageUserId?: string | null) {
           id,
           title: String(snapshot.title || existing?.title || `${DEFAULT_SESSION_TITLE_PREFIX} 1`).trim()
             || `${DEFAULT_SESSION_TITLE_PREFIX} 1`,
-          projectId: String(snapshot.projectId ?? existing?.projectId ?? ''),
+          projectId: normalizeProjectId(snapshot.projectId ?? existing?.projectId ?? ''),
           turns,
           usage: normalizeUsage(snapshot.usage ?? existing?.usage ?? null),
           mcpServers: normalizeMcpServers(snapshot.mcpServers ?? existing?.mcpServers ?? []),
@@ -556,7 +571,7 @@ export function useCodexChatState(storageUserId?: string | null) {
   }, [codexChatActiveSessionId])
 
   const createCodexChatSession = React.useCallback((opts?: { title?: string; projectId?: string }) => {
-    const projectId = String(opts?.projectId ?? '')
+    const projectId = normalizeProjectId(opts?.projectId)
     const title = String(opts?.title ?? '').trim() || nextSessionTitle(codexChatSessions)
     const nextSession = createSession(title, projectId)
     setCodexChatSessions((prev) => [...prev, nextSession].slice(-MAX_SESSIONS))
@@ -565,7 +580,7 @@ export function useCodexChatState(storageUserId?: string | null) {
   }, [codexChatSessions])
 
   const selectCodexChatProject = React.useCallback((projectId: string) => {
-    const normalizedProjectId = String(projectId || '')
+    const normalizedProjectId = normalizeProjectId(projectId)
     const existing = latestSessionByProject(codexChatSessions, normalizedProjectId)
     if (existing) {
       setCodexChatActiveSessionId(existing.id)
@@ -623,9 +638,10 @@ export function useCodexChatState(storageUserId?: string | null) {
 
   const setCodexChatProjectId = React.useCallback((projectId: string) => {
     if (!codexChatSessionId) return
+    const normalizedProjectId = normalizeProjectId(projectId)
     patchSession(codexChatSessionId, (session) => ({
       ...session,
-      projectId,
+      projectId: normalizedProjectId,
       updatedAt: Date.now(),
     }))
   }, [codexChatSessionId, patchSession])

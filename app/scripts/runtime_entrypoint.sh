@@ -65,11 +65,15 @@ resolve_bundle_passphrase() {
 }
 
 setup_git_runtime() {
-  local workspace_dir="${1:-}"
+  local app_dir="${1:-}"
+  local workspace_dir="${2:-}"
   if ! command -v git >/dev/null 2>&1; then
     return 0
   fi
 
+  if [ -n "${app_dir}" ]; then
+    git config --global --add safe.directory "${app_dir}" >/dev/null 2>&1 || true
+  fi
   if [ -n "${workspace_dir}" ]; then
     git config --global --add safe.directory "${workspace_dir}" >/dev/null 2>&1 || true
   fi
@@ -101,8 +105,28 @@ EOF
   git config --global credential.useHttpPath true >/dev/null 2>&1 || true
 }
 
+resolve_writable_workspace_dir() {
+  local requested_dir="${1:-}"
+  local fallback_dir="${2:-/tmp/constructos-workspace}"
+  local candidate="${requested_dir:-/home/app/workspace}"
+
+  if mkdir -p "${candidate}" >/dev/null 2>&1 && touch "${candidate}/.write-test" >/dev/null 2>&1; then
+    rm -f "${candidate}/.write-test" >/dev/null 2>&1 || true
+    printf '%s' "${candidate}"
+    return 0
+  fi
+
+  echo "Workspace directory is not writable (${candidate}); falling back to ${fallback_dir}." >&2
+  mkdir -p "${fallback_dir}"
+  touch "${fallback_dir}/.write-test"
+  rm -f "${fallback_dir}/.write-test" >/dev/null 2>&1 || true
+  printf '%s' "${fallback_dir}"
+}
+
 main() {
   local app_dir="${APP_RUNTIME_APP_DIR:-/app}"
+  local requested_workspace_dir="${AGENT_CODEX_WORKDIR:-/home/app/workspace}"
+  local app_workspace_dir
   local encrypted_enabled="${APP_ENCRYPTED_BUNDLE_ENABLED:-false}"
   local encrypted_bundle_path="${APP_ENCRYPTED_BUNDLE_PATH:-/opt/constructos/app.tar.gz.enc}"
   local decrypted_app_dir="${APP_DECRYPTED_APP_DIR:-/tmp/constructos-app}"
@@ -113,8 +137,11 @@ main() {
     set -- uvicorn main:app --host 0.0.0.0 --port 8000
   fi
 
+  app_workspace_dir="$(resolve_writable_workspace_dir "${requested_workspace_dir}")"
+  export AGENT_CODEX_WORKDIR="${app_workspace_dir}"
+
   if ! is_truthy "${encrypted_enabled}"; then
-    setup_git_runtime "${app_dir}"
+    setup_git_runtime "${app_dir}" "${app_workspace_dir}"
     cd "${app_dir}"
     exec "$@"
   fi
@@ -143,7 +170,7 @@ main() {
   rm -f "${decrypted_archive_path}"
 
   export PYTHONPATH="${decrypted_app_dir}${PYTHONPATH:+:${PYTHONPATH}}"
-  setup_git_runtime "${decrypted_app_dir}"
+  setup_git_runtime "${decrypted_app_dir}" "${app_workspace_dir}"
   cd "${decrypted_app_dir}"
   exec "$@"
 }
