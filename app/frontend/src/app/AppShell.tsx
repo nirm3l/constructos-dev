@@ -193,12 +193,15 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   const [searchPriority, setSearchPriority] = React.useState('')
   const [searchTags, setSearchTags] = React.useState<string[]>([])
   const [searchArchived, setSearchArchived] = React.useState(false)
+  const [tasksPageLimit, setTasksPageLimit] = React.useState(250)
   const [taskGroupFilterId, setTaskGroupFilterId] = React.useState('')
   const [noteTags, setNoteTags] = React.useState<string[]>([])
   const [noteArchived, setNoteArchived] = React.useState(false)
+  const [notesPageLimit, setNotesPageLimit] = React.useState(250)
   const [noteGroupFilterId, setNoteGroupFilterId] = React.useState('')
   const [specificationStatus, setSpecificationStatus] = React.useState('')
   const [specificationTags, setSpecificationTags] = React.useState<string[]>([])
+  const [specificationsPageLimit, setSpecificationsPageLimit] = React.useState(250)
   const [selectedSpecificationId, setSelectedSpecificationId] = React.useState<string | null>(() => initialUrlState.specificationId)
   const [editSpecificationTitle, setEditSpecificationTitle] = React.useState('')
   const [editSpecificationBody, setEditSpecificationBody] = React.useState('')
@@ -524,6 +527,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   const taskParams = useTaskQueryParams({
     tab,
     selectedProjectId,
+    tasksPageLimit,
     searchQ,
     searchStatus,
     searchPriority,
@@ -537,14 +541,17 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
 
   const {
     tasks,
+    selectedTask: selectedTaskQuery,
     taskLookup,
     notes,
+    selectedNote: selectedNoteQuery,
     taskGroups,
     noteGroups,
     noteLookup,
     searchNotes,
     taskNotes,
     specifications,
+    selectedSpecification: selectedSpecificationQuery,
     searchSpecifications,
     searchKnowledge,
     specificationLookup,
@@ -583,8 +590,10 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     selectedProjectEmbeddingIndexStatus: String(selectedProjectForSearch?.embedding_index_status || 'not_indexed'),
     taskParams,
     noteArchived,
+    notesPageLimit,
     noteTags,
     specificationStatus,
+    specificationsPageLimit,
     specificationTags,
     projects: bootstrap.data?.projects ?? [],
     projectsMode,
@@ -609,12 +618,31 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     mergeCodexChatSessionsFromServer,
   })
 
-  const selectedTask = React.useMemo(() => tasks.data?.items.find((t) => t.id === selectedTaskId) ?? null, [tasks.data?.items, selectedTaskId])
-  const selectedNote = React.useMemo(() => notes.data?.items.find((n) => n.id === selectedNoteId) ?? null, [notes.data?.items, selectedNoteId])
+  const selectedTask = React.useMemo(() => {
+    const fromList = tasks.data?.items.find((t) => t.id === selectedTaskId) ?? null
+    if (fromList) return fromList
+    return selectedTaskQuery.data ?? null
+  }, [selectedTaskId, selectedTaskQuery.data, tasks.data?.items])
+  const selectedNote = React.useMemo(() => {
+    const fromList = notes.data?.items.find((n) => n.id === selectedNoteId) ?? null
+    if (fromList) return fromList
+    return selectedNoteQuery.data ?? null
+  }, [notes.data?.items, selectedNoteId, selectedNoteQuery.data])
   const selectedSpecification = React.useMemo(
-    () => specifications.data?.items.find((s: any) => s.id === selectedSpecificationId) ?? null,
-    [specifications.data?.items, selectedSpecificationId]
+    () => {
+      const fromList = specifications.data?.items.find((s: any) => s.id === selectedSpecificationId) ?? null
+      if (fromList) return fromList
+      return selectedSpecificationQuery.data ?? null
+    },
+    [selectedSpecificationId, selectedSpecificationQuery.data, specifications.data?.items]
   )
+  const taskListItems = tasks.data?.items ?? []
+  const noteListItems = notes.data?.items ?? []
+  const specificationListItems = specifications.data?.items ?? []
+  const canLoadMoreTasks = tasksPageLimit < 500 && taskListItems.length < Number(tasks.data?.total ?? 0)
+  const canLoadMoreNotes = notesPageLimit < 500 && noteListItems.length < Number(notes.data?.total ?? 0)
+  const canLoadMoreSpecifications =
+    specificationsPageLimit < 500 && specificationListItems.length < Number(specifications.data?.total ?? 0)
   const selectedProjectRule = React.useMemo(
     () => projectRules.data?.items.find((r) => r.id === selectedProjectRuleId) ?? null,
     [projectRules.data?.items, selectedProjectRuleId]
@@ -629,6 +657,9 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   React.useEffect(() => {
     setTaskGroupFilterId('')
     setNoteGroupFilterId('')
+    setTasksPageLimit(250)
+    setNotesPageLimit(250)
+    setSpecificationsPageLimit(250)
   }, [selectedProjectId])
 
   React.useEffect(() => {
@@ -642,6 +673,18 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     const exists = (noteGroups.data?.items ?? []).some((group: any) => group.id === noteGroupFilterId)
     if (!exists) setNoteGroupFilterId('')
   }, [noteGroupFilterId, noteGroups.data?.items])
+
+  React.useEffect(() => {
+    setTasksPageLimit(250)
+  }, [searchTags])
+
+  React.useEffect(() => {
+    setNotesPageLimit(250)
+  }, [noteArchived, noteTags, noteGroupFilterId])
+
+  React.useEffect(() => {
+    setSpecificationsPageLimit(250)
+  }, [specificationStatus, specificationTags])
   const taskStatusOptions = React.useMemo(() => {
     const projectIdForStatus = editProjectId || selectedTask?.project_id || selectedProjectId
     const project = (bootstrap.data?.projects ?? []).find((item: any) => item.id === projectIdForStatus)
@@ -1923,10 +1966,16 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       submitFeedback: submitFeedbackMutation.mutateAsync,
       submitFeedbackPending: submitFeedbackMutation.isPending,
       projectNames,
-      taskListItems: tasks.data?.items ?? [],
+      taskListItems,
+      canLoadMoreTasks,
+      loadMoreTasks: () => setTasksPageLimit((prev) => Math.min(prev + 250, 500)),
       taskLookupItems: taskLookup.data?.items ?? [],
       taskNameMap,
       specificationNameMap,
+      canLoadMoreNotes,
+      loadMoreNotes: () => setNotesPageLimit((prev) => Math.min(prev + 250, 500)),
+      canLoadMoreSpecifications,
+      loadMoreSpecifications: () => setSpecificationsPageLimit((prev) => Math.min(prev + 250, 500)),
       openSpecification,
       openTask,
       openNote,

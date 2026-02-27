@@ -100,6 +100,22 @@ def test_create_and_complete_task(tmp_path):
     assert done.json()['status'] == 'Done'
 
 
+def test_get_task_by_id_returns_task(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created = client.post('/api/tasks', json={'title': 'Lookup by id', 'workspace_id': ws_id, 'project_id': project_id})
+    assert created.status_code == 200
+    task = created.json()
+
+    fetched = client.get(f"/api/tasks/{task['id']}")
+    assert fetched.status_code == 200
+    assert fetched.json()['id'] == task['id']
+    assert fetched.json()['title'] == 'Lookup by id'
+
+
 def test_create_task_is_case_insensitive_idempotent_by_title(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()

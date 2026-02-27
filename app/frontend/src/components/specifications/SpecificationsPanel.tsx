@@ -9,6 +9,7 @@ import type { Note, Specification, Task } from '../../types'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import { parseCommaTags } from '../../utils/ui'
 import { PopularTagFilters } from '../shared/PopularTagFilters'
+import { VirtualizedList } from '../shared/VirtualizedList'
 import {
   AttachmentRefList,
   ExternalRefEditor,
@@ -259,38 +260,44 @@ export function SpecificationsPanel({ state }: { state: any }) {
 
         <div className="task-list">
           {state.specifications.isLoading && <div className="notice">Loading specifications...</div>}
-          {items.map((specification) => {
-            const isOpen = state.selectedSpecificationId === specification.id
-            const status = isOpen ? state.editSpecificationStatus : specification.status
-            const displayTitle = isOpen ? state.editSpecificationTitle || 'Untitled spec' : specification.title || 'Untitled spec'
-            const externalRefCount = specification.external_refs?.length ?? 0
-            const attachmentRefCount = specification.attachment_refs?.length ?? 0
-            const editorExternalRefs = state.parseExternalRefsText(state.editSpecificationExternalRefsText)
-            const editorAttachmentRefs = state.parseAttachmentRefsText(state.editSpecificationAttachmentRefsText)
-            const editorExternalLinksMeta = editorExternalRefs.length > 0
-              ? `${editorExternalRefs.length} linked`
-              : 'No links added'
-            const editorAttachmentsMeta = editorAttachmentRefs.length > 0
-              ? `${editorAttachmentRefs.length} files attached`
-              : 'No attachments'
-            const openSpecificationFromMenu = () => {
-              if (isOpen) return
-              state.toggleSpecificationEditor(specification.id)
-            }
-            const toggleArchiveFromMenu = () => {
-              if (specification.archived) {
-                state.restoreSpecificationMutation.mutate(specification.id)
-                return
-              }
-              state.archiveSpecificationMutation.mutate(specification.id)
-            }
-            return (
-              <div
-                key={specification.id}
-                className={`note-row ${isOpen ? 'open selected' : ''}`}
-                onClick={() => state.toggleSpecificationEditor(specification.id)}
-                role="button"
-              >
+          {!state.specifications.isLoading && items.length > 0 && (
+            <VirtualizedList
+              items={items}
+              estimateSize={280}
+              overscan={8}
+              itemKey={(specification) => specification.id}
+              renderItem={(specification) => {
+                const isOpen = state.selectedSpecificationId === specification.id
+                const status = isOpen ? state.editSpecificationStatus : specification.status
+                const displayTitle = isOpen ? state.editSpecificationTitle || 'Untitled spec' : specification.title || 'Untitled spec'
+                const externalRefCount = specification.external_refs?.length ?? 0
+                const attachmentRefCount = specification.attachment_refs?.length ?? 0
+                const editorExternalRefs = state.parseExternalRefsText(state.editSpecificationExternalRefsText)
+                const editorAttachmentRefs = state.parseAttachmentRefsText(state.editSpecificationAttachmentRefsText)
+                const editorExternalLinksMeta = editorExternalRefs.length > 0
+                  ? `${editorExternalRefs.length} linked`
+                  : 'No links added'
+                const editorAttachmentsMeta = editorAttachmentRefs.length > 0
+                  ? `${editorAttachmentRefs.length} files attached`
+                  : 'No attachments'
+                const openSpecificationFromMenu = () => {
+                  if (isOpen) return
+                  state.toggleSpecificationEditor(specification.id)
+                }
+                const toggleArchiveFromMenu = () => {
+                  if (specification.archived) {
+                    state.restoreSpecificationMutation.mutate(specification.id)
+                    return
+                  }
+                  state.archiveSpecificationMutation.mutate(specification.id)
+                }
+                return (
+                  <div
+                    key={specification.id}
+                    className={`note-row ${isOpen ? 'open selected' : ''}`}
+                    onClick={() => state.toggleSpecificationEditor(specification.id)}
+                    role="button"
+                  >
                 <div className="note-title">
                   <div className="note-title-main">
                     {specification.archived && <span className="badge">Archived</span>}
@@ -878,9 +885,24 @@ export function SpecificationsPanel({ state }: { state: any }) {
                     </Accordion.Root>
                   </div>
                 )}
-              </div>
-            )
-          })}
+                  </div>
+                )
+              }}
+            />
+          )}
+          {!state.specifications.isLoading && state.canLoadMoreSpecifications && (
+            <div className="row" style={{ justifyContent: 'center', marginTop: 12 }}>
+              <button
+                className="pill subtle"
+                type="button"
+                onClick={state.loadMoreSpecifications}
+                title="Load more specifications"
+                aria-label="Load more specifications"
+              >
+                Load more specifications
+              </button>
+            </div>
+          )}
         </div>
       </div>
 

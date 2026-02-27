@@ -284,6 +284,9 @@ export const getTasks = (
     userId
   )
 
+export const getTask = (userId: string, taskId: string) =>
+  api<Task>(`/api/tasks/${taskId}`, userId)
+
 export const createTask = (
   userId: string,
   payload: {
@@ -1030,11 +1033,14 @@ export const getNotes = (
       tags: params?.tags?.join(',') || undefined,
       archived: params?.archived ?? false,
       pinned: params?.pinned ?? undefined,
-      limit: params?.limit ?? 100,
+      limit: params?.limit ?? 200,
       offset: params?.offset ?? 0
     })}`,
     userId
   )
+
+export const getNote = (userId: string, noteId: string) =>
+  api<Note>(`/api/notes/${noteId}`, userId)
 
 export const createNote = (
   userId: string,
@@ -1134,11 +1140,14 @@ export const getSpecifications = (
       status: params.status,
       tags: params.tags?.join(',') || undefined,
       archived: params.archived ?? false,
-      limit: params.limit ?? 100,
+      limit: params.limit ?? 200,
       offset: params.offset ?? 0,
     })}`,
     userId
   )
+
+export const getSpecification = (userId: string, specificationId: string) =>
+  api<Specification>(`/api/specifications/${specificationId}`, userId)
 
 export const createSpecification = (
   userId: string,

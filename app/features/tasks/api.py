@@ -26,6 +26,7 @@ from shared.core import (
     get_current_user,
     get_db,
     get_user_zoneinfo,
+    load_task_view,
     serialize_task,
     to_iso_utc,
 )
@@ -51,7 +52,7 @@ def list_tasks(
     due_to: datetime | None = None,
     priority: str | None = None,
     archived: bool = False,
-    limit: int = Query(default=30, le=200),
+    limit: int = Query(default=30, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -75,6 +76,25 @@ def list_tasks(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/api/tasks/{task_id}")
+def get_task(
+    task_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    task = load_task_view(db, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    workspace_id = str(task.get("workspace_id") or "").strip()
+    project_id = str(task.get("project_id") or "").strip()
+    if project_id:
+        ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    else:
+        ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    return task
 
 
 @router.post("/api/tasks")

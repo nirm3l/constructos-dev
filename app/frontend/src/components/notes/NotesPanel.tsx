@@ -7,6 +7,7 @@ import * as Select from '@radix-ui/react-select'
 import type { Note, NoteGroup } from '../../types'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import { PopularTagFilters } from '../shared/PopularTagFilters'
+import { VirtualizedList } from '../shared/VirtualizedList'
 import {
   AttachmentRefList,
   ExternalRefEditor,
@@ -947,7 +948,15 @@ export function NotesPanel({
               }}
               onDrop={(event) => onSectionDrop(event, null)}
             >
-              {ungroupedNotes.map(renderNoteRow)}
+              {ungroupedNotes.length > 0 && (
+                <VirtualizedList
+                  items={ungroupedNotes}
+                  estimateSize={240}
+                  overscan={8}
+                  itemKey={(note) => note.id}
+                  renderItem={(note) => renderNoteRow(note)}
+                />
+              )}
               {ungroupedNotes.length === 0 && (
                 <div className="meta" style={{ minHeight: 56, display: 'grid', alignItems: 'center' }}>
                   Drop note here to remove it from a group.
@@ -963,101 +972,115 @@ export function NotesPanel({
               onValueChange={setOpenSectionKeys}
               className="tasks-sections-accordion"
             >
-              {noteSections.map((section) => {
-                const sectionGroup = section.groupId
-                  ? noteGroups.find((group) => group.id === section.groupId) ?? null
-                  : null
-                const sectionIndex = sectionGroup ? noteGroups.findIndex((group) => group.id === sectionGroup.id) : -1
-                const canMoveUp = sectionGroup ? sectionIndex > 0 : false
-                const canMoveDown = sectionGroup ? sectionIndex >= 0 && sectionIndex < noteGroups.length - 1 : false
-                const listDropKey = `notes:${section.key}`
-                const isListDropTarget = dropTargetKey === listDropKey
+              {noteSections.length > 0 && (
+                <VirtualizedList
+                  items={noteSections}
+                  estimateSize={420}
+                  overscan={4}
+                  itemKey={(section) => section.key}
+                  renderItem={(section) => {
+                    const sectionGroup = section.groupId
+                      ? noteGroups.find((group) => group.id === section.groupId) ?? null
+                      : null
+                    const sectionIndex = sectionGroup ? noteGroups.findIndex((group) => group.id === sectionGroup.id) : -1
+                    const canMoveUp = sectionGroup ? sectionIndex > 0 : false
+                    const canMoveDown = sectionGroup ? sectionIndex >= 0 && sectionIndex < noteGroups.length - 1 : false
+                    const listDropKey = `notes:${section.key}`
+                    const isListDropTarget = dropTargetKey === listDropKey
 
-                return (
-                  <Accordion.Item
-                    key={section.key}
-                    value={section.key}
-                    className="tasks-section-accordion-item"
-                    style={{
-                      borderLeft: section.color ? `3px solid ${section.color}` : '3px solid transparent',
-                      paddingLeft: 8,
-                      marginBottom: 10,
-                    }}
-                  >
-                    <div className="row wrap group-section-head">
-                      <Accordion.Header className="group-section-accordion-header">
-                        <Accordion.Trigger className="pill subtle group-toggle-pill group-toggle-pill-trigger">
-                          <span className="group-toggle-pill-chevron">
-                            <Icon path="M6 9l6 6 6-6" />
-                          </span>
-                          <span className="group-toggle-pill-label">{section.name}</span>
-                          <span className="meta group-toggle-pill-count">({section.notes.length})</span>
-                        </Accordion.Trigger>
-                      </Accordion.Header>
-
-                      {sectionGroup && section.managed && (
-                        <div className="group-actions">
-                          <button
-                            className="action-icon group-action-icon"
-                            type="button"
-                            onClick={() => moveNoteGroup(sectionGroup.id, -1)}
-                            disabled={!canMoveUp || groupActionBusy}
-                            title="Move group up"
-                            aria-label="Move group up"
-                          >
-                            <Icon path="M12 19V5M5 12l7-7 7 7" />
-                          </button>
-                          <button
-                            className="action-icon group-action-icon"
-                            type="button"
-                            onClick={() => moveNoteGroup(sectionGroup.id, 1)}
-                            disabled={!canMoveDown || groupActionBusy}
-                            title="Move group down"
-                            aria-label="Move group down"
-                          >
-                            <Icon path="M12 5v14M5 12l7 7 7-7" />
-                          </button>
-                          <NoteGroupActionsMenu
-                            groupName={sectionGroup.name}
-                            busy={groupActionBusy}
-                            onRename={() => openRenameNoteGroupDialog(sectionGroup.id, sectionGroup.name)}
-                            onDelete={() => requestDeleteNoteGroup(sectionGroup.id, sectionGroup.name)}
-                          />
-                        </div>
-                      )}
-                    </div>
-
-                    <Accordion.Content className="tasks-section-accordion-content">
-                      <div
-                        className="task-list-dropzone notes-items-stack"
-                        style={isListDropTarget ? { outline: '2px dashed rgba(59, 130, 246, 0.55)', borderRadius: 10, padding: 6 } : undefined}
-                        onDragOver={(event) => {
-                          event.preventDefault()
-                          maybeAutoScrollWhileDragging(event)
-                          setDropTargetKey(listDropKey)
+                    return (
+                      <Accordion.Item
+                        key={section.key}
+                        value={section.key}
+                        className="tasks-section-accordion-item"
+                        style={{
+                          borderLeft: section.color ? `3px solid ${section.color}` : '3px solid transparent',
+                          paddingLeft: 8,
+                          marginBottom: 10,
                         }}
-                        onDragLeave={() => {
-                          setDropTargetKey((prev) => (prev === listDropKey ? null : prev))
-                        }}
-                        onDrop={(event) => onSectionDrop(event, section.groupId)}
                       >
-                        {section.notes.map(renderNoteRow)}
-                        {section.notes.length === 0 && (
-                          <div className="meta" style={{ minHeight: 56, display: 'grid', alignItems: 'center' }}>
-                            Drop note here to move it to this group.
+                        <div className="row wrap group-section-head">
+                          <Accordion.Header className="group-section-accordion-header">
+                            <Accordion.Trigger className="pill subtle group-toggle-pill group-toggle-pill-trigger">
+                              <span className="group-toggle-pill-chevron">
+                                <Icon path="M6 9l6 6 6-6" />
+                              </span>
+                              <span className="group-toggle-pill-label">{section.name}</span>
+                              <span className="meta group-toggle-pill-count">({section.notes.length})</span>
+                            </Accordion.Trigger>
+                          </Accordion.Header>
+
+                          {sectionGroup && section.managed && (
+                            <div className="group-actions">
+                              <button
+                                className="action-icon group-action-icon"
+                                type="button"
+                                onClick={() => moveNoteGroup(sectionGroup.id, -1)}
+                                disabled={!canMoveUp || groupActionBusy}
+                                title="Move group up"
+                                aria-label="Move group up"
+                              >
+                                <Icon path="M12 19V5M5 12l7-7 7 7" />
+                              </button>
+                              <button
+                                className="action-icon group-action-icon"
+                                type="button"
+                                onClick={() => moveNoteGroup(sectionGroup.id, 1)}
+                                disabled={!canMoveDown || groupActionBusy}
+                                title="Move group down"
+                                aria-label="Move group down"
+                              >
+                                <Icon path="M12 5v14M5 12l7 7 7-7" />
+                              </button>
+                              <NoteGroupActionsMenu
+                                groupName={sectionGroup.name}
+                                busy={groupActionBusy}
+                                onRename={() => openRenameNoteGroupDialog(sectionGroup.id, sectionGroup.name)}
+                                onDelete={() => requestDeleteNoteGroup(sectionGroup.id, sectionGroup.name)}
+                              />
+                            </div>
+                          )}
+                        </div>
+
+                        <Accordion.Content className="tasks-section-accordion-content">
+                          <div
+                            className="task-list-dropzone notes-items-stack"
+                            style={isListDropTarget ? { outline: '2px dashed rgba(59, 130, 246, 0.55)', borderRadius: 10, padding: 6 } : undefined}
+                            onDragOver={(event) => {
+                              event.preventDefault()
+                              maybeAutoScrollWhileDragging(event)
+                              setDropTargetKey(listDropKey)
+                            }}
+                            onDragLeave={() => {
+                              setDropTargetKey((prev) => (prev === listDropKey ? null : prev))
+                            }}
+                            onDrop={(event) => onSectionDrop(event, section.groupId)}
+                          >
+                            {section.notes.map(renderNoteRow)}
+                            {section.notes.length === 0 && (
+                              <div className="meta" style={{ minHeight: 56, display: 'grid', alignItems: 'center' }}>
+                                Drop note here to move it to this group.
+                              </div>
+                            )}
                           </div>
-                        )}
-                      </div>
-                    </Accordion.Content>
-                  </Accordion.Item>
-                )
-              })}
+                        </Accordion.Content>
+                      </Accordion.Item>
+                    )
+                  }}
+                />
+              )}
             </Accordion.Root>
           )}
 
           {!state.notes.isLoading && !hasGroups && filteredNotes.length > 0 && (
             <div className="notes-items-stack">
-              {filteredNotes.map(renderNoteRow)}
+              <VirtualizedList
+                items={filteredNotes}
+                estimateSize={240}
+                overscan={8}
+                itemKey={(note) => note.id}
+                renderItem={(note) => renderNoteRow(note)}
+              />
             </div>
           )}
 
@@ -1066,6 +1089,20 @@ export function NotesPanel({
               (!hasGroups && filteredNotes.length === 0)) && (
               <div className="notice">No notes in this project.</div>
             )
+          )}
+
+          {!state.notes.isLoading && state.canLoadMoreNotes && (
+            <div className="row" style={{ justifyContent: 'center', marginTop: 12 }}>
+              <button
+                className="pill subtle"
+                type="button"
+                onClick={state.loadMoreNotes}
+                title="Load more notes"
+                aria-label="Load more notes"
+              >
+                Load more notes
+              </button>
+            </div>
           )}
         </div>
       </div>

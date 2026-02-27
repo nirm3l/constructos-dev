@@ -105,10 +105,10 @@ a:focus-visible {
 }
 
 .page {
-  max-width: 980px;
+  max-width: 1180px;
   margin: 0 auto;
   /* Extra bottom space so lists can scroll above FABs + bottom tabs. */
-  padding: 18px 18px 160px;
+  padding: 18px clamp(16px, 2.2vw, 28px) 160px;
 }
 
 .header {
@@ -1928,6 +1928,20 @@ textarea:disabled {
   gap: 8px;
 }
 
+.virtualized-list-scroll {
+  width: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.virtualized-list-window {
+  width: 100%;
+}
+
+.kanban-virtual-scroll {
+  min-height: 64px;
+}
+
 .task-list-dropzone,
 .notes-items-stack {
   display: grid;
@@ -1981,6 +1995,8 @@ textarea:disabled {
   display: grid;
   gap: 7px;
   cursor: pointer;
+  content-visibility: auto;
+  contain-intrinsic-size: 180px;
 }
 
 .kanban-title {
@@ -2488,6 +2504,8 @@ textarea:disabled {
   gap: 6px;
   max-width: 100%;
   overflow: hidden;
+  content-visibility: auto;
+  contain-intrinsic-size: 240px;
 }
 
 .note-draggable {
@@ -3683,6 +3701,8 @@ textarea:disabled {
   justify-content: space-between;
   gap: 8px;
   background: color-mix(in srgb, var(--surface), var(--surface-alt) 25%);
+  content-visibility: auto;
+  contain-intrinsic-size: 170px;
 }
 
 .task-item-actions-trigger .icon {

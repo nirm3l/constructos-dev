@@ -7,6 +7,7 @@ import type { ProjectBoard, Task, TaskGroup } from '../../types'
 import { priorityTone, tagHue } from '../../utils/ui'
 import { Icon } from '../shared/uiHelpers'
 import { PopularTagFilters } from '../shared/PopularTagFilters'
+import { VirtualizedList } from '../shared/VirtualizedList'
 import { taskDescriptionPreview, TaskListItem } from './taskViews'
 
 type TaskSection = {
@@ -280,6 +281,8 @@ type TasksPanelProps = {
   specificationNames: Record<string, string>
   onMoveTaskStatus: (taskId: string, nextStatus: string, nextTaskGroupId?: string | null) => void
   tasks: Task[]
+  canLoadMoreTasks: boolean
+  onLoadMoreTasks: () => void
   onRestoreTask: (taskId: string) => void
   onReopenTask: (taskId: string) => void
   onCompleteTask: (taskId: string) => void
@@ -308,6 +311,8 @@ export function TasksPanel({
   specificationNames,
   onMoveTaskStatus,
   tasks,
+  canLoadMoreTasks,
+  onLoadMoreTasks,
   onRestoreTask,
   onReopenTask,
   onCompleteTask,
@@ -536,8 +541,23 @@ export function TasksPanel({
 
   const visibleBoardStatuses = React.useMemo(() => {
     if (!boardData || !boardLanes) return []
-    if (hasGroups) return boardData.statuses
-    return boardData.statuses.filter((status) => (boardLanes[status] ?? []).length > 0)
+    const statuses: string[] = []
+    const seen = new Set<string>()
+
+    const pushStatus = (raw: string) => {
+      const status = String(raw || '').trim()
+      if (!status) return
+      const key = status.toLowerCase()
+      if (seen.has(key)) return
+      seen.add(key)
+      statuses.push(status)
+    }
+
+    for (const status of boardData.statuses) pushStatus(status)
+    for (const status of Object.keys(boardLanes)) pushStatus(status)
+
+    if (hasGroups) return statuses
+    return statuses.filter((status) => (boardLanes[status] ?? []).length > 0)
   }, [boardData, boardLanes, hasGroups])
 
   const onProjectsModeChange = React.useCallback((value: string) => {
@@ -670,20 +690,30 @@ export function TasksPanel({
                             }}
                             onDrop={(event) => onBoardLaneDrop(event, status, null)}
                           >
-                            {laneTasks.map((task) => (
-                              <BoardTaskCard
-                                key={task.id}
-                                task={task}
-                                status={status}
-                                statuses={boardData.statuses}
-                                targetGroupId={null}
-                                onTagClick={toggleSearchTag}
-                                onOpenTaskEditor={onOpenTaskEditor}
-                                onMoveTaskStatus={onMoveTaskStatus}
-                                onDragStart={onBoardCardDragStart}
-                                onDragEnd={onBoardCardDragEnd}
+                            {laneTasks.length > 0 && (
+                              <VirtualizedList
+                                items={laneTasks}
+                                estimateSize={170}
+                                overscan={10}
+                                maxHeight="68vh"
+                                className="kanban-virtual-scroll"
+                                itemKey={(task) => task.id}
+                                renderItem={(task) => (
+                                  <BoardTaskCard
+                                    key={task.id}
+                                    task={task}
+                                    status={status}
+                                    statuses={boardData.statuses}
+                                    targetGroupId={null}
+                                    onTagClick={toggleSearchTag}
+                                    onOpenTaskEditor={onOpenTaskEditor}
+                                    onMoveTaskStatus={onMoveTaskStatus}
+                                    onDragStart={onBoardCardDragStart}
+                                    onDragEnd={onBoardCardDragEnd}
+                                  />
+                                )}
                               />
-                            ))}
+                            )}
                             {laneTasks.length === 0 && <div className="meta">Drop task here</div>}
                           </div>
                         </div>
@@ -692,104 +722,112 @@ export function TasksPanel({
                   </div>
                 </div>
               )}
-              {boardGroupSections.map((group) => {
-                const groupIndex = group.groupId ? taskGroups.findIndex((item) => item.id === group.groupId) : -1
-                const canMoveUp = Boolean(group.managed && groupIndex > 0)
-                const canMoveDown = Boolean(group.managed && groupIndex >= 0 && groupIndex < taskGroups.length - 1)
-                const groupHasTasks = boardData.statuses.some((status) =>
-                  (boardLanes[status] ?? []).some((task) => task.task_group_id === group.groupId)
-                )
-                return (
-                  <div
-                    key={`board-group-${group.key}`}
-                    style={{
-                      borderLeft: group.color ? `3px solid ${group.color}` : '3px solid transparent',
-                      paddingLeft: 8,
-                      marginBottom: 14,
-                    }}
-                  >
-                    <div className="row wrap group-section-head">
-                      <div className="row" style={{ gap: 6, alignItems: 'center' }}>
-                        <strong className="group-title-text">{group.name}</strong>
-                      </div>
-                      <div className="group-actions">
-                        <button
-                          className="action-icon group-action-icon"
-                          type="button"
-                          onClick={() => group.groupId && moveTaskGroup(group.groupId, -1)}
-                          disabled={!canMoveUp || groupActionBusy}
-                          title="Move group up"
-                          aria-label="Move group up"
-                        >
-                          <Icon path="M12 19V5M5 12l7-7 7 7" />
-                        </button>
-                        <button
-                          className="action-icon group-action-icon"
-                          type="button"
-                          onClick={() => group.groupId && moveTaskGroup(group.groupId, 1)}
-                          disabled={!canMoveDown || groupActionBusy}
-                          title="Move group down"
-                          aria-label="Move group down"
-                        >
-                          <Icon path="M12 5v14M5 12l7 7 7-7" />
-                        </button>
-                        {group.groupId && group.managed && (
-                          <TaskGroupActionsMenu
-                            groupName={group.name}
-                            busy={groupActionBusy}
-                            onRename={() => openRenameTaskGroupDialog(group.groupId as string, group.name)}
-                            onDelete={() => requestDeleteTaskGroup(group.groupId as string, group.name)}
-                          />
-                        )}
-                      </div>
-                    </div>
-                    <div className="kanban">
-                      {visibleBoardStatuses.map((status) => {
-                        const laneTasks = (boardLanes[status] ?? []).filter((task) => task.task_group_id === group.groupId)
-                        const dropKey = `${group.key}:${status}`
-                        const isDropTarget = dropTargetKey === dropKey
-                        return (
-                          <div key={`${group.key}:${status}`} className="kanban-col">
-                            <div className="kanban-head">
-                              <strong>{status}</strong>
-                              <span className="meta">{laneTasks.length}</span>
-                            </div>
-                            <div
-                              className="kanban-list"
-                              style={isDropTarget ? { outline: '2px dashed rgba(59, 130, 246, 0.55)', borderRadius: 10 } : undefined}
-                              onDragOver={(event) => {
-                                event.preventDefault()
-                                setDropTargetKey(dropKey)
-                              }}
-                              onDragLeave={() => {
-                                setDropTargetKey((prev) => (prev === dropKey ? null : prev))
-                              }}
-                              onDrop={(event) => onBoardLaneDrop(event, status, group.groupId)}
-                            >
-                              {laneTasks.map((task) => (
-                                <BoardTaskCard
-                                  key={task.id}
-                                  task={task}
-                                  status={status}
-                                  statuses={boardData.statuses}
-                                  targetGroupId={group.groupId}
-                                  onTagClick={toggleSearchTag}
-                                  onOpenTaskEditor={onOpenTaskEditor}
-                                  onMoveTaskStatus={onMoveTaskStatus}
-                                  onDragStart={onBoardCardDragStart}
-                                  onDragEnd={onBoardCardDragEnd}
-                                />
-                              ))}
-                              {laneTasks.length === 0 && <div className="meta">Drop task here</div>}
-                            </div>
+              {boardGroupSections.length > 0 && (
+                <VirtualizedList
+                  items={boardGroupSections}
+                  estimateSize={520}
+                  overscan={2}
+                  itemKey={(group) => group.key}
+                  renderItem={(group) => {
+                    const groupIndex = group.groupId ? taskGroups.findIndex((item) => item.id === group.groupId) : -1
+                    const canMoveUp = Boolean(group.managed && groupIndex > 0)
+                    const canMoveDown = Boolean(group.managed && groupIndex >= 0 && groupIndex < taskGroups.length - 1)
+                    const groupHasTasks = boardData.statuses.some((status) =>
+                      (boardLanes[status] ?? []).some((task) => task.task_group_id === group.groupId)
+                    )
+                    return (
+                      <div
+                        key={`board-group-${group.key}`}
+                        style={{
+                          borderLeft: group.color ? `3px solid ${group.color}` : '3px solid transparent',
+                          paddingLeft: 8,
+                          marginBottom: 14,
+                        }}
+                      >
+                        <div className="row wrap group-section-head">
+                          <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+                            <strong className="group-title-text">{group.name}</strong>
                           </div>
-                        )
-                      })}
-                    </div>
-                    {!groupHasTasks && <div className="meta" style={{ marginTop: 6 }}>No tasks in this group.</div>}
-                  </div>
-                )
-              })}
+                          <div className="group-actions">
+                            <button
+                              className="action-icon group-action-icon"
+                              type="button"
+                              onClick={() => group.groupId && moveTaskGroup(group.groupId, -1)}
+                              disabled={!canMoveUp || groupActionBusy}
+                              title="Move group up"
+                              aria-label="Move group up"
+                            >
+                              <Icon path="M12 19V5M5 12l7-7 7 7" />
+                            </button>
+                            <button
+                              className="action-icon group-action-icon"
+                              type="button"
+                              onClick={() => group.groupId && moveTaskGroup(group.groupId, 1)}
+                              disabled={!canMoveDown || groupActionBusy}
+                              title="Move group down"
+                              aria-label="Move group down"
+                            >
+                              <Icon path="M12 5v14M5 12l7 7 7-7" />
+                            </button>
+                            {group.groupId && group.managed && (
+                              <TaskGroupActionsMenu
+                                groupName={group.name}
+                                busy={groupActionBusy}
+                                onRename={() => openRenameTaskGroupDialog(group.groupId as string, group.name)}
+                                onDelete={() => requestDeleteTaskGroup(group.groupId as string, group.name)}
+                              />
+                            )}
+                          </div>
+                        </div>
+                        <div className="kanban">
+                          {visibleBoardStatuses.map((status) => {
+                            const laneTasks = (boardLanes[status] ?? []).filter((task) => task.task_group_id === group.groupId)
+                            const dropKey = `${group.key}:${status}`
+                            const isDropTarget = dropTargetKey === dropKey
+                            return (
+                              <div key={`${group.key}:${status}`} className="kanban-col">
+                                <div className="kanban-head">
+                                  <strong>{status}</strong>
+                                  <span className="meta">{laneTasks.length}</span>
+                                </div>
+                                <div
+                                  className="kanban-list"
+                                  style={isDropTarget ? { outline: '2px dashed rgba(59, 130, 246, 0.55)', borderRadius: 10 } : undefined}
+                                  onDragOver={(event) => {
+                                    event.preventDefault()
+                                    setDropTargetKey(dropKey)
+                                  }}
+                                  onDragLeave={() => {
+                                    setDropTargetKey((prev) => (prev === dropKey ? null : prev))
+                                  }}
+                                  onDrop={(event) => onBoardLaneDrop(event, status, group.groupId)}
+                                >
+                                  {laneTasks.length > 0 && laneTasks.map((task) => (
+                                    <BoardTaskCard
+                                      key={task.id}
+                                      task={task}
+                                      status={status}
+                                      statuses={boardData.statuses}
+                                      targetGroupId={group.groupId}
+                                      onTagClick={toggleSearchTag}
+                                      onOpenTaskEditor={onOpenTaskEditor}
+                                      onMoveTaskStatus={onMoveTaskStatus}
+                                      onDragStart={onBoardCardDragStart}
+                                      onDragEnd={onBoardCardDragEnd}
+                                    />
+                                  ))}
+                                  {laneTasks.length === 0 && <div className="meta">Drop task here</div>}
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                        {!groupHasTasks && <div className="meta" style={{ marginTop: 6 }}>No tasks in this group.</div>}
+                      </div>
+                    )
+                  }}
+                />
+              )}
               {boardGroupSections.length === 0 && <div className="notice">No groups available.</div>}
             </div>
           ) : (
@@ -818,20 +856,30 @@ export function TasksPanel({
                           }}
                           onDrop={(event) => onBoardLaneDrop(event, status, null)}
                         >
-                          {laneTasks.map((task) => (
-                            <BoardTaskCard
-                              key={task.id}
-                              task={task}
-                              status={status}
-                              statuses={boardData.statuses}
-                              targetGroupId={null}
-                              onTagClick={toggleSearchTag}
-                              onOpenTaskEditor={onOpenTaskEditor}
-                              onMoveTaskStatus={onMoveTaskStatus}
-                              onDragStart={onBoardCardDragStart}
-                              onDragEnd={onBoardCardDragEnd}
+                          {laneTasks.length > 0 && (
+                            <VirtualizedList
+                              items={laneTasks}
+                              estimateSize={170}
+                              overscan={10}
+                              maxHeight="68vh"
+                              className="kanban-virtual-scroll"
+                              itemKey={(task) => task.id}
+                              renderItem={(task) => (
+                                <BoardTaskCard
+                                  key={task.id}
+                                  task={task}
+                                  status={status}
+                                  statuses={boardData.statuses}
+                                  targetGroupId={null}
+                                  onTagClick={toggleSearchTag}
+                                  onOpenTaskEditor={onOpenTaskEditor}
+                                  onMoveTaskStatus={onMoveTaskStatus}
+                                  onDragStart={onBoardCardDragStart}
+                                  onDragEnd={onBoardCardDragEnd}
+                                />
+                              )}
                             />
-                          ))}
+                          )}
                           {laneTasks.length === 0 && <div className="meta">Drop task here</div>}
                         </div>
                       </div>
@@ -861,16 +909,47 @@ export function TasksPanel({
                 onDragLeave={() => {
                   setDropTargetKey((prev) => (prev === 'list:plain' ? null : prev))
                 }}
-                onDrop={(event) => onListSectionDrop(event, null)}
+              onDrop={(event) => onListSectionDrop(event, null)}
               >
-                {ungroupedTasks.map((task) => (
-                  <div
-                    key={task.id}
-                    draggable
-                    onDragStart={(event) => onBoardCardDragStart(event, task.id)}
-                    onDragEnd={onBoardCardDragEnd}
-                  >
+                {ungroupedTasks.length > 0 && (
+                  <VirtualizedList
+                    items={ungroupedTasks}
+                    estimateSize={170}
+                    overscan={10}
+                    itemKey={(task) => task.id}
+                    renderItem={(task) => (
+                      <div
+                        key={task.id}
+                        draggable
+                        onDragStart={(event) => onBoardCardDragStart(event, task.id)}
+                        onDragEnd={onBoardCardDragEnd}
+                      >
+                        <TaskListItem
+                          task={task}
+                          onOpen={onOpenTaskEditor}
+                          onOpenSpecification={onOpenSpecification}
+                          onTagClick={toggleSearchTag}
+                          onRestore={onRestoreTask}
+                          onReopen={onReopenTask}
+                          onComplete={onCompleteTask}
+                          specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
+                        />
+                      </div>
+                    )}
+                  />
+                )}
+                {ungroupedTasks.length === 0 && <div className="meta">Drop task here</div>}
+              </div>
+            ) : (
+              <div style={{ marginBottom: 10 }}>
+                <VirtualizedList
+                  items={ungroupedTasks}
+                  estimateSize={170}
+                  overscan={10}
+                  itemKey={(task) => task.id}
+                  renderItem={(task) => (
                     <TaskListItem
+                      key={task.id}
                       task={task}
                       onOpen={onOpenTaskEditor}
                       onOpenSpecification={onOpenSpecification}
@@ -880,25 +959,8 @@ export function TasksPanel({
                       onComplete={onCompleteTask}
                       specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
                     />
-                  </div>
-                ))}
-                {ungroupedTasks.length === 0 && <div className="meta">Drop task here</div>}
-              </div>
-            ) : (
-              <div style={{ marginBottom: 10 }}>
-                {ungroupedTasks.map((task) => (
-                  <TaskListItem
-                    key={task.id}
-                    task={task}
-                    onOpen={onOpenTaskEditor}
-                    onOpenSpecification={onOpenSpecification}
-                    onTagClick={toggleSearchTag}
-                    onRestore={onRestoreTask}
-                    onReopen={onReopenTask}
-                    onComplete={onCompleteTask}
-                    specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
-                  />
-                ))}
+                  )}
+                />
               </div>
             )
           )}
@@ -908,118 +970,140 @@ export function TasksPanel({
             onValueChange={setOpenSectionKeys}
             className="tasks-sections-accordion"
           >
-            {taskSections.map((section) => {
-              const sectionGroup = section.groupId
-                ? taskGroups.find((group) => group.id === section.groupId) ?? null
-                : null
-              const listDropKey = `list:${section.key}`
-              const isListDropTarget = dropTargetKey === listDropKey
-              const sectionIndex = sectionGroup ? taskGroups.findIndex((group) => group.id === sectionGroup.id) : -1
-              const canMoveUp = sectionGroup ? sectionIndex > 0 : false
-              const canMoveDown = sectionGroup ? sectionIndex >= 0 && sectionIndex < taskGroups.length - 1 : false
+            {taskSections.length > 0 && (
+              <VirtualizedList
+                items={taskSections}
+                estimateSize={360}
+                overscan={4}
+                itemKey={(section) => section.key}
+                renderItem={(section) => {
+                  const sectionGroup = section.groupId
+                    ? taskGroups.find((group) => group.id === section.groupId) ?? null
+                    : null
+                  const listDropKey = `list:${section.key}`
+                  const isListDropTarget = dropTargetKey === listDropKey
+                  const sectionIndex = sectionGroup ? taskGroups.findIndex((group) => group.id === sectionGroup.id) : -1
+                  const canMoveUp = sectionGroup ? sectionIndex > 0 : false
+                  const canMoveDown = sectionGroup ? sectionIndex >= 0 && sectionIndex < taskGroups.length - 1 : false
 
-              return (
-                <Accordion.Item
-                  key={section.key}
-                  value={section.key}
-                  className="tasks-section-accordion-item"
-                  style={{
-                    borderLeft: section.color ? `3px solid ${section.color}` : '3px solid transparent',
-                    paddingLeft: 8,
-                    marginBottom: 10,
-                  }}
-                >
-                  <div className="row wrap group-section-head">
-                    <Accordion.Header className="group-section-accordion-header">
-                      <Accordion.Trigger className="pill subtle group-toggle-pill group-toggle-pill-trigger">
-                        <span className="group-toggle-pill-chevron">
-                          <Icon path="M6 9l6 6 6-6" />
-                        </span>
-                        <span className="group-toggle-pill-label">{section.name}</span>
-                        <span className="meta group-toggle-pill-count">({section.tasks.length})</span>
-                      </Accordion.Trigger>
-                    </Accordion.Header>
-
-                    {sectionGroup && section.managed && (
-                      <div className="group-actions">
-                        <button
-                          className="action-icon group-action-icon"
-                          type="button"
-                          onClick={() => moveTaskGroup(sectionGroup.id, -1)}
-                          disabled={!canMoveUp || groupActionBusy}
-                          title="Move group up"
-                          aria-label="Move group up"
-                        >
-                          <Icon path="M12 19V5M5 12l7-7 7 7" />
-                        </button>
-                        <button
-                          className="action-icon group-action-icon"
-                          type="button"
-                          onClick={() => moveTaskGroup(sectionGroup.id, 1)}
-                          disabled={!canMoveDown || groupActionBusy}
-                          title="Move group down"
-                          aria-label="Move group down"
-                        >
-                          <Icon path="M12 5v14M5 12l7 7 7-7" />
-                        </button>
-                        <TaskGroupActionsMenu
-                          groupName={sectionGroup.name}
-                          busy={groupActionBusy}
-                          onRename={() => openRenameTaskGroupDialog(sectionGroup.id, sectionGroup.name)}
-                          onDelete={() => requestDeleteTaskGroup(sectionGroup.id, sectionGroup.name)}
-                        />
-                      </div>
-                    )}
-                  </div>
-
-                  <Accordion.Content className="tasks-section-accordion-content">
-                    <div
-                      className="task-list-dropzone"
-                      style={isListDropTarget ? { outline: '2px dashed rgba(59, 130, 246, 0.55)', borderRadius: 10, padding: 6 } : undefined}
-                      onDragOver={(event) => {
-                        event.preventDefault()
-                        maybeAutoScrollWhileDragging(event)
-                        setDropTargetKey(listDropKey)
+                  return (
+                    <Accordion.Item
+                      key={section.key}
+                      value={section.key}
+                      className="tasks-section-accordion-item"
+                      style={{
+                        borderLeft: section.color ? `3px solid ${section.color}` : '3px solid transparent',
+                        paddingLeft: 8,
+                        marginBottom: 10,
                       }}
-                      onDragLeave={() => {
-                        setDropTargetKey((prev) => (prev === listDropKey ? null : prev))
-                      }}
-                      onDrop={(event) => onListSectionDrop(event, section.groupId)}
                     >
-                      {section.tasks.map((task) => (
+                      <div className="row wrap group-section-head">
+                        <Accordion.Header className="group-section-accordion-header">
+                          <Accordion.Trigger className="pill subtle group-toggle-pill group-toggle-pill-trigger">
+                            <span className="group-toggle-pill-chevron">
+                              <Icon path="M6 9l6 6 6-6" />
+                            </span>
+                            <span className="group-toggle-pill-label">{section.name}</span>
+                            <span className="meta group-toggle-pill-count">({section.tasks.length})</span>
+                          </Accordion.Trigger>
+                        </Accordion.Header>
+
+                        {sectionGroup && section.managed && (
+                          <div className="group-actions">
+                            <button
+                              className="action-icon group-action-icon"
+                              type="button"
+                              onClick={() => moveTaskGroup(sectionGroup.id, -1)}
+                              disabled={!canMoveUp || groupActionBusy}
+                              title="Move group up"
+                              aria-label="Move group up"
+                            >
+                              <Icon path="M12 19V5M5 12l7-7 7 7" />
+                            </button>
+                            <button
+                              className="action-icon group-action-icon"
+                              type="button"
+                              onClick={() => moveTaskGroup(sectionGroup.id, 1)}
+                              disabled={!canMoveDown || groupActionBusy}
+                              title="Move group down"
+                              aria-label="Move group down"
+                            >
+                              <Icon path="M12 5v14M5 12l7 7 7-7" />
+                            </button>
+                            <TaskGroupActionsMenu
+                              groupName={sectionGroup.name}
+                              busy={groupActionBusy}
+                              onRename={() => openRenameTaskGroupDialog(sectionGroup.id, sectionGroup.name)}
+                              onDelete={() => requestDeleteTaskGroup(sectionGroup.id, sectionGroup.name)}
+                            />
+                          </div>
+                        )}
+                      </div>
+
+                      <Accordion.Content className="tasks-section-accordion-content">
                         <div
-                          key={task.id}
-                          draggable
-                          onDragStart={(event) => onBoardCardDragStart(event, task.id)}
-                          onDragEnd={onBoardCardDragEnd}
+                          className="task-list-dropzone"
+                          style={isListDropTarget ? { outline: '2px dashed rgba(59, 130, 246, 0.55)', borderRadius: 10, padding: 6 } : undefined}
+                          onDragOver={(event) => {
+                            event.preventDefault()
+                            maybeAutoScrollWhileDragging(event)
+                            setDropTargetKey(listDropKey)
+                          }}
+                          onDragLeave={() => {
+                            setDropTargetKey((prev) => (prev === listDropKey ? null : prev))
+                          }}
+                          onDrop={(event) => onListSectionDrop(event, section.groupId)}
                         >
-                          <TaskListItem
-                            task={task}
-                            onOpen={onOpenTaskEditor}
-                            onOpenSpecification={onOpenSpecification}
-                            onTagClick={toggleSearchTag}
-                            onRestore={onRestoreTask}
-                            onReopen={onReopenTask}
-                            onComplete={onCompleteTask}
-                            specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
-                          />
+                          {section.tasks.map((task) => (
+                            <div
+                              key={task.id}
+                              draggable
+                              onDragStart={(event) => onBoardCardDragStart(event, task.id)}
+                              onDragEnd={onBoardCardDragEnd}
+                            >
+                              <TaskListItem
+                                task={task}
+                                onOpen={onOpenTaskEditor}
+                                onOpenSpecification={onOpenSpecification}
+                                onTagClick={toggleSearchTag}
+                                onRestore={onRestoreTask}
+                                onReopen={onReopenTask}
+                                onComplete={onCompleteTask}
+                                specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
+                              />
+                            </div>
+                          ))}
+                          {section.tasks.length === 0 && (
+                            <div className="meta" style={{ minHeight: 64, display: 'grid', alignItems: 'center' }}>
+                              Drop task here to move it to this section.
+                            </div>
+                          )}
                         </div>
-                      ))}
-                      {section.tasks.length === 0 && (
-                        <div className="meta" style={{ minHeight: 64, display: 'grid', alignItems: 'center' }}>
-                          Drop task here to move it to this section.
-                        </div>
-                      )}
-                    </div>
-                  </Accordion.Content>
-                </Accordion.Item>
-              )
-            })}
+                      </Accordion.Content>
+                    </Accordion.Item>
+                  )
+                }}
+              />
+            )}
           </Accordion.Root>
 
           {filteredTasks.length === 0 && (
             <div className="notice" style={{ marginTop: 10 }}>No tasks in this project.</div>
           )}
+        </div>
+      )}
+
+      {canLoadMoreTasks && (
+        <div className="row" style={{ justifyContent: 'center', marginTop: 12 }}>
+          <button
+            className="pill subtle"
+            type="button"
+            onClick={onLoadMoreTasks}
+            title="Load more tasks"
+            aria-label="Load more tasks"
+          >
+            Load more tasks
+          </button>
         </div>
       )}
 
