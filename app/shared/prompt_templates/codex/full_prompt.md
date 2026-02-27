@@ -47,6 +47,7 @@ Guidance:
 - If project context conflicts with the latest explicit user instruction, follow the latest explicit user instruction.
 - You may call task-management MCP tools relevant to the request.
 - Read each MCP tool description and follow its payload contract and operational guidance.
+- Keep progress updates short and separated by newlines; never merge many status updates into one long paragraph.
 - For mutating MCP tool calls, always provide command_id.
 - If retrying the same mutation, reuse the exact same command_id.
 - When mentioning created/updated entities in summary/comment, include clickable Markdown links (not raw IDs).

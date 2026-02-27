@@ -303,7 +303,7 @@ function createInitialState(): PersistedCodexChatState {
 function loadPersistedState(storageKey: string): PersistedCodexChatState | null {
   if (typeof window === 'undefined') return null
   try {
-    const raw = window.localStorage.getItem(storageKey)
+    const raw = window.sessionStorage.getItem(storageKey)
     if (!raw) return null
     const parsed = JSON.parse(raw) as unknown
     if (!parsed || typeof parsed !== 'object') return null
@@ -392,7 +392,7 @@ export function useCodexChatState(storageUserId?: string | null) {
       showCodexChat,
     }
     try {
-      window.localStorage.setItem(storageKey, JSON.stringify(payload))
+      window.sessionStorage.setItem(storageKey, JSON.stringify(payload))
     } catch {
       // Ignore quota/storage failures; chat continues in-memory.
     }

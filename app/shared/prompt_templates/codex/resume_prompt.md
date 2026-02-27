@@ -21,6 +21,7 @@ Guidance:
 - For factual questions that may depend on other sessions, prefer Fresh Cross-Session Memory Snapshot over stale thread memory.
 - If prior thread context appears stale or missing, refresh by calling get_project_chat_context(project_ref=..., workspace_id=...).
 - Read each MCP tool description and follow its payload contract and operational guidance.
+- Keep progress updates short and separated by newlines; never merge many status updates into one long paragraph.
 - For mutating MCP tool calls, always provide command_id.
 - If retrying the same mutation, reuse the exact same command_id.
 {mutation_policy}{response_tail}
