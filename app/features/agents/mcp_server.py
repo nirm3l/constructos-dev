@@ -11,6 +11,7 @@ MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE = "METADATA_ONLY"
 
 TASK_CREATE_TOOL_DESCRIPTION = (
     "Create a task in a workspace/project. "
+    "Set status to choose an initial task status at creation time. "
     "execution_triggers accepts JSON string, array, or object. "
     "For status watchers use kind='status_change' with scope='self' or scope='external'. "
     "Use selector.task_ids or source_task_ids to listen to specific source tasks. "
@@ -641,6 +642,7 @@ def create_mcp():
         auth_token: str | None = None,
         project_id: str | None = None,
         description: str = "",
+        status: str | None = None,
         priority: str = "Med",
         due_date: str | None = None,
         instruction: str | None = None,
@@ -663,6 +665,7 @@ def create_mcp():
             auth_token=auth_token,
             project_id=project_id,
             description=description,
+            status=status,
             priority=priority,
             due_date=due_date,
             instruction=instruction,

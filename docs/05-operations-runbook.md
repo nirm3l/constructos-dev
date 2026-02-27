@@ -139,6 +139,7 @@ docker run --rm \
 - `AGENT_RUNNER_MAX_CONCURRENCY`
 - `AGENT_EXECUTOR_MODE` (`placeholder|command`)
 - `AGENT_CODEX_COMMAND`
+- `AGENT_CODEX_WORKDIR` (default `/home/app/workspace`, shared build/edit workspace used as Codex working directory)
 - `AGENT_EXECUTOR_TIMEOUT_SECONDS`
 - `GITHUB_PAT` (optional, enables non-interactive HTTPS git auth for Codex operations in container)
 

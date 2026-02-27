@@ -60,8 +60,9 @@ def test_execute_task_automation_includes_project_description_in_context(tmp_pat
         stdout = '{"action":"comment","summary":"ok","comment":null}'
         stderr = ""
 
-    def fake_run(command, *, input, text, capture_output, timeout, check):  # noqa: A002
+    def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
         _ = (command, text, capture_output, timeout, check)
+        _ = cwd
         captured.update(json.loads(input))
         return DummyProcess()
 
@@ -137,8 +138,9 @@ def test_execute_task_automation_includes_project_skills_in_context(tmp_path, mo
         stdout = '{"action":"comment","summary":"ok","comment":null}'
         stderr = ""
 
-    def fake_run(command, *, input, text, capture_output, timeout, check):  # noqa: A002
+    def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
         _ = (command, text, capture_output, timeout, check)
+        _ = cwd
         captured.update(json.loads(input))
         return DummyProcess()
 
@@ -181,8 +183,9 @@ def test_execute_task_automation_includes_chat_and_codex_session_ids(tmp_path, m
         stdout = '{"action":"comment","summary":"ok","comment":null}'
         stderr = ""
 
-    def fake_run(command, *, input, text, capture_output, timeout, check):  # noqa: A002
+    def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
         _ = (command, text, capture_output, timeout, check)
+        _ = cwd
         captured.update(json.loads(input))
         return DummyProcess()
 
@@ -606,6 +609,7 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
         timeout_seconds: float,
         stream_events: bool,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         output_schema: dict | None = None,
         preferred_thread_id: str | None = None,
         env: dict[str, str] | None = None,
@@ -618,7 +622,7 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
         captured["start_prompt_contains_context_pack"] = "Context Pack:" in start_prompt
         captured["resume_prompt_contains_context_pack"] = "Context Pack:" in str(resume_prompt or "")
         captured["resume_prompt_text"] = str(resume_prompt or "")
-        _ = model
+        _ = (model, reasoning_effort)
         return (
             '{"action":"comment","summary":"ok","comment":null}',
             {"input_tokens": 12, "output_tokens": 3},

@@ -11,7 +11,9 @@ from sqlalchemy import select
 
 from shared.knowledge_graph import build_graph_context_markdown, build_graph_context_pack
 from shared.models import Project, ProjectRule, ProjectSkill, SessionLocal
-from shared.settings import AGENT_CODEX_COMMAND, AGENT_EXECUTOR_MODE, AGENT_EXECUTOR_TIMEOUT_SECONDS
+from shared.settings import AGENT_CODEX_COMMAND, AGENT_CODEX_WORKDIR, AGENT_EXECUTOR_MODE, AGENT_EXECUTOR_TIMEOUT_SECONDS
+
+_TIMEOUT_UNSET = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +26,26 @@ class AutomationOutcome:
     resume_attempted: bool = False
     resume_succeeded: bool = False
     resume_fallback_used: bool = False
+
+
+def _resolve_executor_cwd() -> str | None:
+    value = str(AGENT_CODEX_WORKDIR or "").strip()
+    return value or None
+
+
+def _effective_timeout_seconds(value: object) -> float | None:
+    try:
+        normalized = float(value or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if normalized <= 0:
+        return None
+    return normalized
+
+
+def _resolve_run_timeout_seconds(override: object = _TIMEOUT_UNSET) -> tuple[float | int | None, float | None]:
+    raw_timeout = AGENT_EXECUTOR_TIMEOUT_SECONDS if override is _TIMEOUT_UNSET else override
+    return raw_timeout, _effective_timeout_seconds(raw_timeout)
 
 
 def _coerce_bool(value: object) -> bool | None:
@@ -198,9 +220,10 @@ def _run_command_streaming(
     *,
     command: list[str],
     context: dict[str, object],
-    timeout_seconds: float,
+    timeout_seconds: float | None,
     on_event: Callable[[dict[str, object]], None] | None = None,
 ) -> str:
+    run_cwd = _resolve_executor_cwd()
     proc = subprocess.Popen(
         command,
         stdin=subprocess.PIPE,
@@ -208,20 +231,27 @@ def _run_command_streaming(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        cwd=run_cwd,
     )
     timed_out = False
     done = threading.Event()
+    timeout_error_message = "Executor timed out."
+    if timeout_seconds is not None:
+        timeout_error_message = f"Executor timed out after {timeout_seconds:.1f}s"
 
     def _timeout_watchdog() -> None:
         nonlocal timed_out
+        if timeout_seconds is None:
+            return
         if done.wait(timeout_seconds):
             return
         if proc.poll() is None:
             timed_out = True
             proc.kill()
 
-    watchdog = threading.Thread(target=_timeout_watchdog, daemon=True)
-    watchdog.start()
+    if timeout_seconds is not None:
+        watchdog = threading.Thread(target=_timeout_watchdog, daemon=True)
+        watchdog.start()
 
     input_payload = json.dumps(context)
     if proc.stdin is None:
@@ -252,7 +282,7 @@ def _run_command_streaming(
     return_code = proc.wait()
     done.set()
     if timed_out:
-        raise TimeoutError(f"Executor timed out after {timeout_seconds:.1f}s")
+        raise TimeoutError(timeout_error_message)
     if return_code != 0:
         err_text = "\n".join(lines).strip()
         raise RuntimeError(f"Executor failed (exit={return_code}): {err_text[:300]}")
@@ -279,6 +309,7 @@ def execute_task_automation(
     mcp_servers: list[str] | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    timeout_seconds: float | int | None | object = _TIMEOUT_UNSET,
 ) -> AutomationOutcome:
     # Deterministic shortcut: users can explicitly complete a task via "#complete".
     # This should work regardless of executor mode, and avoids reliance on the LLM for a simple directive.
@@ -308,6 +339,7 @@ def execute_task_automation(
         )
     graph_evidence_json = json.dumps(graph_context_pack.get("evidence") or [], ensure_ascii=True) if graph_context_pack else "[]"
     graph_summary_markdown = _graph_summary_to_markdown(graph_context_pack.get("summary")) if graph_context_pack else ""
+    raw_timeout, run_timeout_seconds = _resolve_run_timeout_seconds(timeout_seconds)
     context = {
         "task_id": task_id,
         "title": title,
@@ -334,18 +366,23 @@ def execute_task_automation(
         "mcp_servers": mcp_servers,
         "model": model,
         "reasoning_effort": reasoning_effort,
+        "executor_timeout_seconds": raw_timeout,
     }
     try:
+        run_cwd = _resolve_executor_cwd()
         proc = subprocess.run(
             command,
             input=json.dumps(context),
             text=True,
             capture_output=True,
-            timeout=AGENT_EXECUTOR_TIMEOUT_SECONDS,
+            timeout=run_timeout_seconds,
             check=False,
+            cwd=run_cwd,
         )
     except subprocess.TimeoutExpired as exc:
-        raise TimeoutError(f"Executor timed out after {AGENT_EXECUTOR_TIMEOUT_SECONDS:.1f}s") from exc
+        if run_timeout_seconds is None:
+            raise TimeoutError("Executor timed out.") from exc
+        raise TimeoutError(f"Executor timed out after {run_timeout_seconds:.1f}s") from exc
 
     if proc.returncode != 0:
         err_text = (proc.stderr or proc.stdout or "").strip()
@@ -374,6 +411,7 @@ def execute_task_automation_stream(
     on_event: Callable[[dict[str, object]], None] | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    timeout_seconds: float | int | None | object = _TIMEOUT_UNSET,
 ) -> AutomationOutcome:
     # Deterministic shortcut for explicit completion requests.
     lower_instruction = (instruction or "").lower()
@@ -402,6 +440,7 @@ def execute_task_automation_stream(
         )
     graph_evidence_json = json.dumps(graph_context_pack.get("evidence") or [], ensure_ascii=True) if graph_context_pack else "[]"
     graph_summary_markdown = _graph_summary_to_markdown(graph_context_pack.get("summary")) if graph_context_pack else ""
+    raw_timeout, run_timeout_seconds = _resolve_run_timeout_seconds(timeout_seconds)
     context = {
         "task_id": task_id,
         "title": title,
@@ -428,13 +467,14 @@ def execute_task_automation_stream(
         "mcp_servers": mcp_servers,
         "model": model,
         "reasoning_effort": reasoning_effort,
+        "executor_timeout_seconds": raw_timeout,
         "stream_events": True,
         "stream_plain_text": not bool(str(task_id or "").strip()),
     }
     stdout = _run_command_streaming(
         command=command,
         context=context,
-        timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
+        timeout_seconds=run_timeout_seconds,
         on_event=on_event,
     )
     return _parse_command_outcome(stdout)

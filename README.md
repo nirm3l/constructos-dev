@@ -172,6 +172,16 @@ Optional for Codex git push from `task-app` container:
 - set `GITHUB_PAT` in `.env` to a GitHub token with repository write access.
 - runtime maps `GITHUB_PAT` to `GITHUB_TOKEN` when `GITHUB_TOKEN` is not already set.
 
+Optional: map Codex workspace to a host folder
+- By default, Codex uses container path `/home/app/workspace` mapped to host path `/workspace`.
+- To see generated code directly on host, set bind mount source via env:
+```bash
+mkdir -p ./codex-workspace
+export AGENT_CODEX_WORKSPACE_MOUNT="$PWD/codex-workspace"
+./scripts/deploy.sh
+```
+- After deploy, files created by Codex in `/home/app/workspace` are visible in `./codex-workspace` on host.
+
 ## Optional: Jira MCP (Separate Compose)
 1. Create local env file:
 ```bash

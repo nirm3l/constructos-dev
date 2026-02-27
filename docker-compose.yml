@@ -78,9 +78,10 @@ services:
       AGENT_RUNNER_MAX_CONCURRENCY: "3"
       AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS: "true"
       AGENT_EXECUTOR_MODE: "command"
-      AGENT_EXECUTOR_TIMEOUT_SECONDS: "180"
+      AGENT_EXECUTOR_TIMEOUT_SECONDS: "900"
       AGENT_CHAT_CONTEXT_LIMIT_TOKENS: "${AGENT_CHAT_CONTEXT_LIMIT_TOKENS:-400000}"
       AGENT_CODEX_HOME_ROOT: "${AGENT_CODEX_HOME_ROOT:-/home/app/codex-home}"
+      AGENT_CODEX_WORKDIR: "${AGENT_CODEX_WORKDIR:-/home/app/workspace}"
       AGENT_CODEX_COMMAND: "python -m features.agents.codex_mcp_adapter"
       AGENT_CODEX_MCP_URL: "http://mcp-tools:8091/mcp"
       GITHUB_PAT: "${GITHUB_PAT:-}"
@@ -111,6 +112,7 @@ services:
       - ${CODEX_CONFIG_FILE}:/home/app/.codex/config.toml:ro
       - ${CODEX_AUTH_FILE}:/home/app/.codex/auth.json:ro
       - codex-home-data:/home/app/codex-home
+      - ${AGENT_CODEX_WORKSPACE_MOUNT:-/workspace}:/home/app/workspace
     ports:
       - "1102:8000"
     security_opt:
@@ -139,8 +141,9 @@ services:
       MCP_SERVER_PORT: "8091"
       MCP_SERVER_PATH: /mcp
       MCP_SERVER_STATELESS_HTTP: "true"
-      AGENT_EXECUTOR_TIMEOUT_SECONDS: "180"
+      AGENT_EXECUTOR_TIMEOUT_SECONDS: "900"
       AGENT_CHAT_CONTEXT_LIMIT_TOKENS: "${AGENT_CHAT_CONTEXT_LIMIT_TOKENS:-400000}"
+      AGENT_CODEX_WORKDIR: "${AGENT_CODEX_WORKDIR:-/home/app/workspace}"
       MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:-dev-mcp-token}"
       MCP_TOOL_AUTH_TOKEN: "${MCP_TOOL_AUTH_TOKEN:-dev-mcp-token}"
       MCP_ACTOR_USER_ID: "00000000-0000-0000-0000-000000000099"
@@ -169,6 +172,8 @@ services:
       LICENSE_SERVER_TOKEN: "${LICENSE_SERVER_TOKEN:-dev-license-token}"
     ports:
       - "8091:8091"
+    volumes:
+      - ${AGENT_CODEX_WORKSPACE_MOUNT:-/workspace}:/home/app/workspace
     security_opt:
       - no-new-privileges:true
     cap_drop:

@@ -450,6 +450,9 @@ class CreateTaskHandler:
         except Exception:
             statuses = DEFAULT_STATUSES
         initial_status = (statuses[0] if statuses else DEFAULT_STATUSES[0]) or DEFAULT_STATUSES[0]
+        requested_status = str(self.payload.status or "").strip()
+        if requested_status:
+            initial_status = requested_status
         payload_data = self.payload.model_dump(exclude_unset=True)
         legacy_task_type = payload_data.get("task_type", _UNSET)
         if legacy_task_type is not _UNSET:

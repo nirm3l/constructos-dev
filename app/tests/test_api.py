@@ -2379,6 +2379,26 @@ def test_agent_service_create_task_infers_workspace_from_project(tmp_path):
     assert created['recurring_rule'] == 'every:1m'
 
 
+def test_agent_service_create_task_accepts_status_on_create(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    created = service.create_task(
+        title='MCP create with explicit status',
+        workspace_id=ws_id,
+        project_id=project_id,
+        status='In progress',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert created['status'] == 'In progress'
+
+
 def test_agent_service_create_task_accepts_json_string_execution_triggers(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -3650,6 +3670,7 @@ def test_agents_chat_endpoint_normalizes_selected_mcp_servers(tmp_path, monkeypa
     )
     assert res.status_code == 200
     assert captured['mcp_servers'] == ['task-management-tools', 'jira', 'github']
+    assert captured['timeout_seconds'] == 0
 
 
 def test_agents_chat_endpoint_skips_disabled_mcp_servers_from_defaults(tmp_path, monkeypatch):
@@ -4122,7 +4143,10 @@ def test_agents_chat_stream_endpoint_persists_attachment_without_fk_error(tmp_pa
     from features.agents import api as agents_api
     from features.agents.executor import AutomationOutcome
 
+    captured: dict[str, object] = {}
+
     def _fake_execute_task_automation_stream(**kwargs):
+        captured.update(kwargs)
         on_event = kwargs.get('on_event')
         if callable(on_event):
             on_event({'type': 'assistant_text', 'delta': 'Streamed response with attachment.'})
@@ -4142,6 +4166,7 @@ def test_agents_chat_stream_endpoint_persists_attachment_without_fk_error(tmp_pa
         },
     )
     assert res.status_code == 200
+    assert captured['timeout_seconds'] == 0
     lines = [line for line in (res.text or '').splitlines() if line.strip()]
     assert any('"type": "final"' in line for line in lines)
 
@@ -4358,8 +4383,10 @@ def test_agents_chat_endpoint_auto_compacts_history_with_codex(tmp_path, monkeyp
     assert len(calls) == 2
     assert calls[0]['allow_mutations'] is False
     assert "Compact this conversation history" in calls[0]['instruction']
+    assert calls[0]['timeout_seconds'] == 0
     assert calls[1]['allow_mutations'] is True
     assert "[Compacted conversation context]" in calls[1]['instruction']
+    assert calls[1]['timeout_seconds'] == 0
 
 
 def test_agents_chat_endpoint_uses_stored_codex_session_id_and_skips_history_stitching(tmp_path, monkeypatch):
@@ -5616,6 +5643,25 @@ def test_create_task_requires_project_id(tmp_path):
     ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
     res = client.post('/api/tasks', json={'title': 'No project', 'workspace_id': ws_id})
     assert res.status_code == 422
+
+
+def test_create_task_accepts_status_on_create(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'REST create with explicit status',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'In progress',
+        },
+    )
+    assert created.status_code == 200
+    assert created.json()['status'] == 'In progress'
 
 
 def test_task_tags_are_normalized_and_filterable(tmp_path):

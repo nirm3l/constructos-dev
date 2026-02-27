@@ -71,7 +71,7 @@ RUN chmod 0755 /usr/local/bin/constructos-entrypoint.sh \
     && mkdir -p /opt/constructos \
     && groupadd --gid "${APP_GID}" app \
     && useradd --uid "${APP_UID}" --gid app --create-home --home-dir /home/app app \
-    && mkdir -p /data/uploads /home/app/.codex /home/app/codex-home \
+    && mkdir -p /data/uploads /home/app/.codex /home/app/codex-home /home/app/workspace \
     && chown -R app:app /app /data/uploads /home/app /opt/constructos
 
 USER app

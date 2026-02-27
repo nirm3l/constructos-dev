@@ -23,6 +23,7 @@ from shared.settings import (
 
 EMPTY_ASSISTANT_SUMMARY = "No assistant response content was returned."
 _DEFAULT_CODEX_HOME_ROOT = "/tmp/codex-home"
+_DEFAULT_CODEX_WORKDIR = "/home/app/workspace"
 _DEFAULT_CODEX_HOME_RETENTION_DAYS = 14
 _DEFAULT_CODEX_HOME_CLEANUP_INTERVAL_SECONDS = 3600
 _PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "shared" / "prompt_templates" / "codex"
@@ -84,6 +85,15 @@ def _resolve_codex_home_root() -> Path:
     return Path(root_raw).expanduser().resolve()
 
 
+def _resolve_codex_workdir() -> Path | None:
+    raw = str(os.getenv("AGENT_CODEX_WORKDIR", _DEFAULT_CODEX_WORKDIR)).strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser().resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def _resolve_persistent_codex_home_path(*, workspace_id: str, chat_session_id: str) -> Path:
     root = _resolve_codex_home_root()
     workspace_part = _normalize_path_component(workspace_id, fallback="workspace")
@@ -126,12 +136,23 @@ def _release_file_lock(lock_handle: object) -> None:
         return
 
 
+def _effective_timeout_seconds(value: object, *, fallback_seconds: float | int | None) -> float | None:
+    candidate = fallback_seconds if value is None else value
+    try:
+        normalized = float(candidate or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if normalized <= 0:
+        return None
+    return normalized
+
+
 @contextmanager
 def _chat_session_run_lock(
     *,
     workspace_id: str | None = None,
     chat_session_id: str | None = None,
-    timeout_seconds: float,
+    timeout_seconds: float | None,
     poll_interval_seconds: float = 0.1,
 ):
     normalized_workspace_id = str(workspace_id or "").strip()
@@ -147,14 +168,14 @@ def _chat_session_run_lock(
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_handle = lock_path.open("a+", encoding="utf-8")
     lock_acquired = False
-    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    deadline = (time.monotonic() + max(0.0, float(timeout_seconds))) if timeout_seconds is not None else None
 
     try:
         while True:
             if _try_acquire_file_lock(lock_handle):
                 lock_acquired = True
                 break
-            if time.monotonic() >= deadline:
+            if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError(
                     f"Timed out waiting for active chat run lock (workspace_id={normalized_workspace_id}, "
                     f"chat_session_id={normalized_chat_session_id})."
@@ -786,7 +807,7 @@ def _run_codex_app_server_with_optional_stream(
     *,
     start_prompt: str,
     resume_prompt: str | None,
-    timeout_seconds: float,
+    timeout_seconds: float | None,
     stream_events: bool,
     model: str | None = None,
     reasoning_effort: str | None = None,
@@ -794,6 +815,7 @@ def _run_codex_app_server_with_optional_stream(
     preferred_thread_id: str | None = None,
     env: dict[str, str] | None = None,
 ) -> tuple[str, dict[str, int] | None, str | None, bool, bool]:
+    run_cwd = _resolve_codex_workdir()
     cmd = [
         "codex",
         "app-server",
@@ -808,20 +830,27 @@ def _run_codex_app_server_with_optional_stream(
         text=True,
         bufsize=1,
         env=env,
+        cwd=str(run_cwd) if run_cwd is not None else None,
     )
     timed_out = False
     done = threading.Event()
+    timeout_error_message = "codex app-server timed out"
+    if timeout_seconds is not None:
+        timeout_error_message = f"codex app-server timed out after {timeout_seconds:.1f}s"
 
     def _timeout_watchdog() -> None:
         nonlocal timed_out
+        if timeout_seconds is None:
+            return
         if done.wait(timeout_seconds):
             return
         if proc.poll() is None:
             timed_out = True
             proc.kill()
 
-    watchdog = threading.Thread(target=_timeout_watchdog, daemon=True)
-    watchdog.start()
+    if timeout_seconds is not None:
+        watchdog = threading.Thread(target=_timeout_watchdog, daemon=True)
+        watchdog.start()
 
     if proc.stdin is None:
         raise RuntimeError("codex app-server stdin unavailable")
@@ -991,7 +1020,7 @@ def _run_codex_app_server_with_optional_stream(
 
     done.set()
     if timed_out:
-        raise TimeoutError(f"codex app-server timed out after {timeout_seconds:.1f}s")
+        raise TimeoutError(timeout_error_message)
 
     if proc.poll() is None:
         # codex app-server is long-lived; after turn/completed we stop it ourselves.
@@ -1088,10 +1117,11 @@ def _render_stream_assistant_text(message_text: str) -> str:
 def _run_codex_json_with_optional_stream(
     *,
     command: list[str],
-    timeout_seconds: float,
+    timeout_seconds: float | None,
     stream_events: bool,
     env: dict[str, str] | None = None,
 ) -> str:
+    run_cwd = _resolve_codex_workdir()
     proc = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -1099,20 +1129,27 @@ def _run_codex_json_with_optional_stream(
         text=True,
         bufsize=1,
         env=env,
+        cwd=str(run_cwd) if run_cwd is not None else None,
     )
     timed_out = False
     done = threading.Event()
+    timeout_error_message = "codex exec timed out"
+    if timeout_seconds is not None:
+        timeout_error_message = f"codex exec timed out after {timeout_seconds:.1f}s"
 
     def _timeout_watchdog() -> None:
         nonlocal timed_out
+        if timeout_seconds is None:
+            return
         if done.wait(timeout_seconds):
             return
         if proc.poll() is None:
             timed_out = True
             proc.kill()
 
-    watchdog = threading.Thread(target=_timeout_watchdog, daemon=True)
-    watchdog.start()
+    if timeout_seconds is not None:
+        watchdog = threading.Thread(target=_timeout_watchdog, daemon=True)
+        watchdog.start()
 
     lines: list[str] = []
     emitted_message_count = 0
@@ -1155,7 +1192,7 @@ def _run_codex_json_with_optional_stream(
     return_code = proc.wait()
     done.set()
     if timed_out:
-        raise TimeoutError(f"codex exec timed out after {timeout_seconds:.1f}s")
+        raise TimeoutError(timeout_error_message)
     if return_code != 0:
         err_text = "\n".join(lines).strip()
         raise RuntimeError(f"codex exec failed (exit={return_code}): {err_text[:600]}")
@@ -1188,6 +1225,10 @@ def main() -> int:
         _normalize_reasoning_effort(ctx.get("reasoning_effort"))
         or _normalize_reasoning_effort(AGENT_CODEX_REASONING_EFFORT)
     )
+    runtime_timeout_seconds = _effective_timeout_seconds(
+        ctx.get("executor_timeout_seconds"),
+        fallback_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
+    )
     structured_response = not (stream_events and stream_plain_text)
     start_prompt = _build_prompt(ctx, structured_response=structured_response)
     resume_prompt = _build_resume_prompt(ctx, structured_response=structured_response)
@@ -1208,7 +1249,7 @@ def main() -> int:
     with _chat_session_run_lock(
         workspace_id=workspace_id,
         chat_session_id=chat_session_id,
-        timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
+        timeout_seconds=runtime_timeout_seconds,
     ):
         with _codex_home_env(
             mcp_config_text=mcp_config_text,
@@ -1219,7 +1260,7 @@ def main() -> int:
                 final_message, usage, codex_session_id, resume_attempted, resume_succeeded = _run_codex_app_server_with_optional_stream(
                     start_prompt=start_prompt,
                     resume_prompt=resume_prompt,
-                    timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
+                    timeout_seconds=runtime_timeout_seconds,
                     stream_events=True,
                     model=preferred_model,
                     reasoning_effort=preferred_reasoning_effort,
@@ -1238,7 +1279,7 @@ def main() -> int:
                 final_message, usage, codex_session_id, resume_attempted, resume_succeeded = _run_codex_app_server_with_optional_stream(
                     start_prompt=start_prompt,
                     resume_prompt=resume_prompt,
-                    timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
+                    timeout_seconds=runtime_timeout_seconds,
                     stream_events=False,
                     model=preferred_model,
                     reasoning_effort=preferred_reasoning_effort,

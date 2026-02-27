@@ -748,30 +748,81 @@ def graph_find_related_resources(*, project_id: str, query: str, limit: int = 20
     q = str(query or "").strip().lower()
     if not q:
         return {"project_id": project_id, "query": "", "items": []}
+    tokens = _extract_related_query_terms(q)
+    if not tokens:
+        tokens = [q]
 
     rows = run_graph_query(
         """
+        MATCH (p:Project {id:$project_id})
         MATCH (n)
-        WHERE n.project_id = $project_id
-          AND coalesce(n.is_deleted, false) = false
-          AND (
-            toLower(coalesce(n.title, '')) CONTAINS $q
-            OR toLower(coalesce(n.description, '')) CONTAINS $q
-            OR toLower(coalesce(n.body, '')) CONTAINS $q
-            OR toLower(coalesce(n.name, '')) CONTAINS $q
+        WHERE (
+            n.project_id = $project_id
+            OR n.id = $project_id
+            OR EXISTS { MATCH (n)-[:IN_PROJECT]->(p) }
           )
+          AND coalesce(n.is_deleted, false) = false
+        WITH
+          n,
+          toLower(trim(coalesce(n.title, ''))) AS title_text,
+          toLower(trim(coalesce(n.description, ''))) AS description_text,
+          toLower(trim(coalesce(n.body, ''))) AS body_text,
+          toLower(trim(coalesce(n.name, ''))) AS name_text
+        WITH
+          n,
+          title_text,
+          description_text,
+          body_text,
+          name_text,
+          [tok IN $tokens WHERE (
+            title_text CONTAINS tok
+            OR description_text CONTAINS tok
+            OR body_text CONTAINS tok
+            OR name_text CONTAINS tok
+          )] AS matched_tokens,
+          size([tok IN $tokens WHERE title_text CONTAINS tok]) AS title_hits
+        WITH
+          n,
+          matched_tokens,
+          title_hits,
+          size(matched_tokens) AS token_hits,
+          CASE
+            WHEN title_text = $q THEN 400
+            WHEN title_text STARTS WITH $q THEN 320
+            WHEN title_text CONTAINS $q THEN 260
+            WHEN description_text CONTAINS $q OR body_text CONTAINS $q OR name_text CONTAINS $q THEN 200
+            ELSE 0
+          END AS phrase_score
+        WHERE phrase_score > 0 OR token_hits >= CASE WHEN size($tokens) >= 4 THEN 2 ELSE 1 END
         OPTIONAL MATCH (n)-[r]-()
+        WITH
+          n,
+          matched_tokens,
+          token_hits,
+          title_hits,
+          phrase_score,
+          count(r) AS degree
         RETURN
           head(labels(n)) AS entity_type,
           n.id AS entity_id,
           coalesce(n.title, n.name, n.id) AS title,
-          count(r) AS score
-        ORDER BY score DESC, title ASC
+          (
+            phrase_score
+            + (title_hits * 28)
+            + (token_hits * 14)
+            + CASE WHEN size($tokens) > 0 AND token_hits = size($tokens) THEN 25 ELSE 0 END
+            + degree
+          ) AS score,
+          token_hits,
+          title_hits,
+          matched_tokens[0..8] AS matched_terms
+        ORDER BY score DESC, token_hits DESC, title_hits DESC, title ASC
         LIMIT $limit
         """,
         {
             "project_id": project_id,
             "q": q,
+            "tokens": tokens,
             "limit": safe_limit,
         },
     )
@@ -780,6 +831,22 @@ def graph_find_related_resources(*, project_id: str, query: str, limit: int = 20
         "query": query,
         "items": rows,
     }
+
+
+def _extract_related_query_terms(query: str, *, max_terms: int = 16) -> list[str]:
+    seen: set[str] = set()
+    terms: list[str] = []
+    for raw in re.findall(r"[a-z0-9][a-z0-9._-]*", str(query or "").lower()):
+        term = raw.strip("._-")
+        if len(term) < 2:
+            continue
+        if term in seen:
+            continue
+        seen.add(term)
+        terms.append(term)
+        if len(terms) >= max_terms:
+            break
+    return terms
 
 
 def graph_get_dependency_path(

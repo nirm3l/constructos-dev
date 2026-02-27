@@ -24,7 +24,6 @@ from shared.settings import (
     ATTACHMENTS_DIR,
     AGENT_CHAT_HISTORY_COMPACT_THRESHOLD,
     AGENT_CHAT_HISTORY_RECENT_TAIL,
-    AGENT_EXECUTOR_TIMEOUT_SECONDS,
 )
 
 from .executor import AutomationOutcome, execute_task_automation, execute_task_automation_stream
@@ -118,6 +117,10 @@ def _resolve_chat_execution_preferences(payload: AgentChatRun, user: User) -> tu
     user_reasoning = _normalize_reasoning_effort(getattr(user, "agent_chat_reasoning_effort", None))
     reasoning_effort = payload_reasoning or user_reasoning
     return model, reasoning_effort
+
+
+def _chat_timeout_summary() -> str:
+    return "Codex execution timed out."
 
 
 def _normalize_chat_mcp_servers(raw_servers: list[str] | None) -> list[str]:
@@ -964,6 +967,7 @@ def _compact_history_with_codex(
         project_id=project_id,
         actor_user_id=actor_user_id,
         allow_mutations=False,
+        timeout_seconds=0,
     )
     parts = [str(outcome.summary or "").strip(), str(outcome.comment or "").strip()]
     compacted = "\n\n".join(part for part in parts if part).strip()
@@ -1193,6 +1197,7 @@ def agent_chat(
             mcp_servers=mcp_servers,
             model=model,
             reasoning_effort=reasoning_effort,
+            timeout_seconds=0,
         )
         _persist_assistant_message_with_links(
             db=db,
@@ -1220,7 +1225,7 @@ def agent_chat(
             "resume_fallback_used": bool(outcome.resume_fallback_used),
         }
     except TimeoutError:
-        timeout_summary = f"Codex timed out after {AGENT_EXECUTOR_TIMEOUT_SECONDS:.0f}s."
+        timeout_summary = _chat_timeout_summary()
         timeout_comment = "Try a narrower request (e.g. one project at a time) or run again."
         _persist_assistant_message_with_links(
             db=db,
@@ -1390,6 +1395,7 @@ def agent_chat_stream(
                     on_event=_on_event,
                     model=model,
                     reasoning_effort=reasoning_effort,
+                    timeout_seconds=0,
                 )
                 final_payload = {
                     "ok": True,
@@ -1408,7 +1414,7 @@ def agent_chat_stream(
                 timeout_payload = {
                     "ok": False,
                     "action": "comment",
-                    "summary": f"Codex timed out after {AGENT_EXECUTOR_TIMEOUT_SECONDS:.0f}s.",
+                    "summary": _chat_timeout_summary(),
                     "comment": "Try a narrower request (e.g. one project at a time) or run again.",
                     "session_id": session_id,
                     "codex_session_id": None,

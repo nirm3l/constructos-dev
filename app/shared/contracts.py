@@ -30,6 +30,7 @@ class TaskCreate(BaseModel):
     task_group_id: str | None = None
     specification_id: str | None = None
     description: str = ""
+    status: str | None = None
     priority: str = "Med"
     due_date: datetime | None = None
     assignee_id: str | None = None

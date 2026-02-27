@@ -91,6 +91,7 @@ def create_task(
         title=payload.title,
         project_id=payload.project_id,
         description=payload.description,
+        status=payload.status if "status" in provided_fields else None,
         priority=payload.priority,
         due_date=payload.due_date.isoformat() if payload.due_date else None,
         external_refs=[item.model_dump() for item in payload.external_refs],

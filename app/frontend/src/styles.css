@@ -4216,7 +4216,7 @@ textarea:disabled {
 
 .profile-chat-execution-field-reasoning {
   min-width: 0;
-  width: clamp(132px, 16vw, 152px);
+  width: clamp(66px, 8vw, 76px);
 }
 
 .profile-chat-model-trigger {
@@ -4226,6 +4226,17 @@ textarea:disabled {
 
 .profile-chat-reasoning-trigger {
   width: 100%;
+}
+
+.profile-chat-reasoning-trigger.quickadd-project-trigger {
+  padding: 5px 6px;
+  gap: 5px;
+  font-size: 11px;
+}
+
+.profile-chat-reasoning-trigger .quickadd-project-trigger-icon {
+  width: 12px;
+  height: 12px;
 }
 
 .profile-chat-execution-status {

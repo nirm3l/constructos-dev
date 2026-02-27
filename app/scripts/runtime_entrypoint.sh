@@ -65,11 +65,15 @@ resolve_bundle_passphrase() {
 }
 
 setup_git_runtime() {
-  local workspace_dir="${1:-}"
+  local app_dir="${1:-}"
+  local workspace_dir="${2:-}"
   if ! command -v git >/dev/null 2>&1; then
     return 0
   fi
 
+  if [ -n "${app_dir}" ]; then
+    git config --global --add safe.directory "${app_dir}" >/dev/null 2>&1 || true
+  fi
   if [ -n "${workspace_dir}" ]; then
     git config --global --add safe.directory "${workspace_dir}" >/dev/null 2>&1 || true
   fi
@@ -103,6 +107,7 @@ EOF
 
 main() {
   local app_dir="${APP_RUNTIME_APP_DIR:-/app}"
+  local app_workspace_dir="${AGENT_CODEX_WORKDIR:-/home/app/workspace}"
   local encrypted_enabled="${APP_ENCRYPTED_BUNDLE_ENABLED:-false}"
   local encrypted_bundle_path="${APP_ENCRYPTED_BUNDLE_PATH:-/opt/constructos/app.tar.gz.enc}"
   local decrypted_app_dir="${APP_DECRYPTED_APP_DIR:-/tmp/constructos-app}"
@@ -114,7 +119,8 @@ main() {
   fi
 
   if ! is_truthy "${encrypted_enabled}"; then
-    setup_git_runtime "${app_dir}"
+    mkdir -p "${app_workspace_dir}"
+    setup_git_runtime "${app_dir}" "${app_workspace_dir}"
     cd "${app_dir}"
     exec "$@"
   fi
@@ -143,7 +149,8 @@ main() {
   rm -f "${decrypted_archive_path}"
 
   export PYTHONPATH="${decrypted_app_dir}${PYTHONPATH:+:${PYTHONPATH}}"
-  setup_git_runtime "${decrypted_app_dir}"
+  mkdir -p "${app_workspace_dir}"
+  setup_git_runtime "${decrypted_app_dir}" "${app_workspace_dir}"
   cd "${decrypted_app_dir}"
   exec "$@"
 }
