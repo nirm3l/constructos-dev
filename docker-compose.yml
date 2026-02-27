@@ -85,6 +85,10 @@ services:
       AGENT_CODEX_COMMAND: "python -m features.agents.codex_mcp_adapter"
       AGENT_CODEX_MCP_URL: "http://mcp-tools:8091/mcp"
       GITHUB_PAT: "${GITHUB_PAT:-}"
+      DOCKER_HOST: "${DOCKER_HOST-tcp://docker-socket-proxy:2375}"
+      AGENT_DOCKER_SOFT_ISOLATION: "${AGENT_DOCKER_SOFT_ISOLATION:-true}"
+      AGENT_DOCKER_PROJECT_NAME: "${AGENT_DOCKER_PROJECT_NAME:-constructos-ws-default}"
+      AGENT_DOCKER_ALLOWED_PROJECT_PREFIX: "${AGENT_DOCKER_ALLOWED_PROJECT_PREFIX:-constructos-ws-}"
       MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:-dev-mcp-token}"
       MCP_ALLOWED_WORKSPACE_IDS: "10000000-0000-0000-0000-000000000001"
       KNOWLEDGE_GRAPH_ENABLED: "true"
@@ -174,6 +178,28 @@ services:
       - "8091:8091"
     volumes:
       - ${AGENT_CODEX_WORKSPACE_MOUNT:-/workspace}:/home/app/workspace
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    container_name: docker-socket-proxy
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      NETWORKS: 1
+      VOLUMES: 1
+      INFO: 1
+      VERSION: 1
+      EVENTS: 1
+      POST: 1
+      DELETE: 1
+      BUILD: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     security_opt:
       - no-new-privileges:true
     cap_drop:

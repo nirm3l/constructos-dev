@@ -26,6 +26,7 @@ graph LR
   ES[(KurrentDB Event Store)]
   N4[(Neo4j Knowledge Graph)]
   MCP[mcp-tools service]
+  DSP[docker-socket-proxy]
   COD[Codex executor]
 
   UI -->|REST + SSE| API
@@ -37,6 +38,7 @@ graph LR
   MCP -->|graph queries| N4
   MCP -->|domain services| API
 
+  COD -->|Docker API via proxy| DSP
   COD -->|JSON-RPC MCP| MCP
   API -->|runner command mode| COD
 ```
@@ -181,6 +183,19 @@ export AGENT_CODEX_WORKSPACE_MOUNT="$PWD/codex-workspace"
 ./scripts/deploy.sh
 ```
 - After deploy, files created by Codex in `/home/app/workspace` are visible in `./codex-workspace` on host.
+
+Docker access from `task-app` (safe proxy path)
+- `task-app` uses `DOCKER_HOST=tcp://docker-socket-proxy:2375` by default.
+- Direct Docker socket is mounted only in `docker-socket-proxy`, not in `task-app`.
+- This keeps Docker daemon exposure narrower than mounting `/var/run/docker.sock` directly into `task-app`.
+- Soft isolation is enabled by default inside `task-app` Docker CLI wrapper:
+  - `AGENT_DOCKER_SOFT_ISOLATION=true`
+  - `AGENT_DOCKER_PROJECT_NAME=constructos-ws-default`
+  - `AGENT_DOCKER_ALLOWED_PROJECT_PREFIX=constructos-ws-`
+- With soft isolation enabled, allowed commands are limited to:
+  - `docker compose` (forced to the configured project)
+  - `docker ps` and `docker container ls` (auto-filtered to the configured project)
+  - `docker info|version|context`
 
 ## Optional: Jira MCP (Separate Compose)
 1. Create local env file:

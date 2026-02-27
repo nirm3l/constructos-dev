@@ -4,6 +4,7 @@
 The default Docker Compose stack includes:
 - `task-app` (FastAPI + automation runner)
 - `mcp-tools` (FastMCP server)
+- `docker-socket-proxy` (restricted Docker API bridge for task-app)
 - `postgres`
 - `kurrentdb`
 - `neo4j`
@@ -142,6 +143,10 @@ docker run --rm \
 - `AGENT_CODEX_WORKDIR` (default `/home/app/workspace`, shared build/edit workspace used as Codex working directory)
 - `AGENT_EXECUTOR_TIMEOUT_SECONDS`
 - `GITHUB_PAT` (optional, enables non-interactive HTTPS git auth for Codex operations in container)
+- `DOCKER_HOST` (default `tcp://docker-socket-proxy:2375`, used for Docker operations via proxy from task-app)
+- `AGENT_DOCKER_SOFT_ISOLATION` (default `true`, enables in-container Docker command guardrails)
+- `AGENT_DOCKER_PROJECT_NAME` (default `constructos-ws-default`, required project scope when soft isolation is enabled)
+- `AGENT_DOCKER_ALLOWED_PROJECT_PREFIX` (default `constructos-ws-`, allowed prefix for scoped project name)
 
 ### 3.3 MCP Security
 - `MCP_AUTH_TOKEN`

@@ -11,7 +11,7 @@ from sqlalchemy import select
 
 from shared.knowledge_graph import build_graph_context_markdown, build_graph_context_pack
 from shared.models import Project, ProjectRule, ProjectSkill, SessionLocal
-from shared.settings import AGENT_CODEX_COMMAND, AGENT_CODEX_WORKDIR, AGENT_EXECUTOR_MODE, AGENT_EXECUTOR_TIMEOUT_SECONDS
+from shared.settings import AGENT_CODEX_COMMAND, AGENT_EXECUTOR_MODE, AGENT_EXECUTOR_TIMEOUT_SECONDS
 
 _TIMEOUT_UNSET = object()
 
@@ -26,11 +26,6 @@ class AutomationOutcome:
     resume_attempted: bool = False
     resume_succeeded: bool = False
     resume_fallback_used: bool = False
-
-
-def _resolve_executor_cwd() -> str | None:
-    value = str(AGENT_CODEX_WORKDIR or "").strip()
-    return value or None
 
 
 def _effective_timeout_seconds(value: object) -> float | None:
@@ -223,7 +218,6 @@ def _run_command_streaming(
     timeout_seconds: float | None,
     on_event: Callable[[dict[str, object]], None] | None = None,
 ) -> str:
-    run_cwd = _resolve_executor_cwd()
     proc = subprocess.Popen(
         command,
         stdin=subprocess.PIPE,
@@ -231,7 +225,6 @@ def _run_command_streaming(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
-        cwd=run_cwd,
     )
     timed_out = False
     done = threading.Event()
@@ -369,7 +362,6 @@ def execute_task_automation(
         "executor_timeout_seconds": raw_timeout,
     }
     try:
-        run_cwd = _resolve_executor_cwd()
         proc = subprocess.run(
             command,
             input=json.dumps(context),
@@ -377,7 +369,6 @@ def execute_task_automation(
             capture_output=True,
             timeout=run_timeout_seconds,
             check=False,
-            cwd=run_cwd,
         )
     except subprocess.TimeoutExpired as exc:
         if run_timeout_seconds is None:
