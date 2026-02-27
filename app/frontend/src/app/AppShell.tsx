@@ -12,6 +12,7 @@ import {
   getLicenseStatus,
   linkTaskToSpecification,
   listAdminUsers,
+  patchMyPreferences,
   resetAdminUserPassword,
   submitFeedback,
   updateAdminUserRole,
@@ -68,6 +69,12 @@ const SEMANTIC_RELATIVE_VECTOR_FACTOR = 0.66
 const SEMANTIC_STRONG_VECTOR_SIMILARITY = 0.72
 const SEMANTIC_MIN_FALLBACK_VECTOR_SIMILARITY = 0.38
 const SEMANTIC_FALLBACK_MAX_ITEMS_WITHOUT_TOKEN_MATCH = 2
+
+function normalizeReasoningEffort(value: unknown): 'low' | 'medium' | 'high' | 'xhigh' {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'low' || normalized === 'high' || normalized === 'xhigh') return normalized
+  return 'medium'
+}
 
 function normalizeSemanticText(value: string): string {
   return String(value || '')
@@ -136,6 +143,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   })
   const [theme, setTheme] = React.useState<'light' | 'dark'>('light')
   const [speechLang, setSpeechLang] = React.useState<string>(resolveInitialSpeechLang)
+  const [agentChatModel, setAgentChatModel] = React.useState('')
+  const [agentChatReasoningEffort, setAgentChatReasoningEffort] = React.useState<'low' | 'medium' | 'high' | 'xhigh'>('medium')
   const quickTaskLocalTimezone = React.useMemo(() => resolveLocalTimezone(), [])
   const [taskTitle, setTaskTitle] = React.useState('')
   const [quickDueDate, setQuickDueDate] = React.useState('')
@@ -351,6 +360,21 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       setUiError(toErrorMessage(error, 'Password change failed'))
     },
   })
+  const chatExecutionPreferencesMutation = useMutation({
+    mutationFn: (payload: {
+      agent_chat_model: string | null
+      agent_chat_reasoning_effort: string | null
+    }) => patchMyPreferences(userId, payload),
+    onSuccess: async (payload) => {
+      setAgentChatModel(String(payload?.agent_chat_model || '').trim())
+      setAgentChatReasoningEffort(normalizeReasoningEffort(payload?.agent_chat_reasoning_effort))
+      setUiError(null)
+      await qc.invalidateQueries({ queryKey: ['bootstrap', userId] })
+    },
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Chat execution settings update failed'))
+    },
+  })
   const { frontendVersion, backendVersion, backendBuild, backendDeployedAtUtc } = useAppVersion()
   const workspaceId = bootstrap.data?.workspaces[0]?.id ?? ''
   const userTimezone = bootstrap.data?.current_user?.timezone
@@ -470,6 +494,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   useBootstrapSelectionEffects({
     bootstrap,
     setTheme,
+    setAgentChatModel,
+    setAgentChatReasoningEffort,
     selectedProjectId,
     setSelectedProjectId,
     urlInitAppliedRef,
@@ -1870,9 +1896,15 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       setSearchArchived,
       theme,
       speechLang,
+      agentChatModel,
+      agentChatReasoningEffort,
       setTheme,
       setSpeechLang,
+      setAgentChatModel,
+      setAgentChatReasoningEffort,
       themeMutation,
+      saveChatExecutionPreferences: chatExecutionPreferencesMutation.mutateAsync,
+      saveChatExecutionPreferencesPending: chatExecutionPreferencesMutation.isPending,
       changeMyPassword: changeMyPasswordMutation.mutateAsync,
       changeMyPasswordPending: changeMyPasswordMutation.isPending,
       submitFeedback: submitFeedbackMutation.mutateAsync,
@@ -2010,6 +2042,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       codexChatHistoryRef,
       codexChatTurns,
       codexChatInstruction,
+      agentChatDefaultModel: String(bootstrap.data.agent_chat_default_model || '').trim(),
+      agentChatDefaultReasoningEffort: normalizeReasoningEffort(bootstrap.data.agent_chat_default_reasoning_effort),
       setCodexChatInstruction,
       setCodexChatTurns,
       setCodexChatTurnsForSession,

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from shared.auth import generate_temporary_password, hash_password, verify_password
 from shared.core import AggregateEventRepository, User, UserPreferencesPatch, WorkspaceMember, allocate_id, coerce_originator_id
-from shared.settings import BOOTSTRAP_WORKSPACE_ID
+from shared.settings import AGENT_CODEX_REASONING_EFFORT, BOOTSTRAP_WORKSPACE_ID
 
 from .domain import (
     UserAggregate,
@@ -19,6 +19,7 @@ from .domain import (
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]{3,64}$")
 ADMIN_ROLES = {"Owner", "Admin"}
 WORKSPACE_ROLES = {"Owner", "Admin", "Member", "Guest"}
+ALLOWED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 
 
 def _now_utc() -> datetime:
@@ -48,6 +49,27 @@ def _normalize_workspace_role(raw: str) -> str:
         allowed = ", ".join(sorted(WORKSPACE_ROLES))
         raise HTTPException(status_code=422, detail=f"role must be one of: {allowed}")
     return role
+
+
+def _normalize_chat_model(raw: object) -> str:
+    return str(raw or "").strip()
+
+
+def _normalize_reasoning_effort(raw: object) -> str:
+    normalized = str(raw or "").strip().lower()
+    if not normalized:
+        fallback = str(AGENT_CODEX_REASONING_EFFORT or "").strip().lower()
+        return fallback if fallback in ALLOWED_REASONING_EFFORTS else "medium"
+    alias_map = {
+        "very-high": "xhigh",
+        "very_high": "xhigh",
+        "very high": "xhigh",
+    }
+    canonical = alias_map.get(normalized, normalized)
+    if canonical not in ALLOWED_REASONING_EFFORTS:
+        allowed = ", ".join(sorted(ALLOWED_REASONING_EFFORTS))
+        raise HTTPException(status_code=422, detail=f"agent_chat_reasoning_effort must be one of: {allowed}")
+    return canonical
 
 
 def _require_workspace_admin(db: Session, workspace_id: str, user_id: str) -> WorkspaceMember:
@@ -89,6 +111,12 @@ class PatchUserPreferencesHandler:
             event_payload["timezone"] = data.get("timezone")
         if "notifications_enabled" in data:
             event_payload["notifications_enabled"] = data.get("notifications_enabled")
+        if "agent_chat_model" in data:
+            event_payload["agent_chat_model"] = _normalize_chat_model(data.get("agent_chat_model"))
+        if "agent_chat_reasoning_effort" in data:
+            event_payload["agent_chat_reasoning_effort"] = _normalize_reasoning_effort(
+                data.get("agent_chat_reasoning_effort")
+            )
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = repo.load_with_class(
             aggregate_type="User",
@@ -109,6 +137,14 @@ class PatchUserPreferencesHandler:
             "theme": data.get("theme", self.ctx.user.theme),
             "timezone": data.get("timezone", self.ctx.user.timezone),
             "notifications_enabled": bool(data.get("notifications_enabled", self.ctx.user.notifications_enabled)),
+            "agent_chat_model": event_payload.get(
+                "agent_chat_model",
+                self.ctx.user.agent_chat_model,
+            ),
+            "agent_chat_reasoning_effort": event_payload.get(
+                "agent_chat_reasoning_effort",
+                self.ctx.user.agent_chat_reasoning_effort,
+            ),
         }
 
 
@@ -185,6 +221,8 @@ class CreateWorkspaceUserHandler:
             timezone="UTC",
             theme="light",
             notifications_enabled=True,
+            agent_chat_model="",
+            agent_chat_reasoning_effort="medium",
             workspace_id=self.workspace_id,
             workspace_role=role,
         )

@@ -9,6 +9,7 @@ import * as Tabs from '@radix-ui/react-tabs'
 import * as Tooltip from '@radix-ui/react-tooltip'
 import type {
   AdminWorkspaceUser,
+  ChatReasoningEffort,
   LicenseStatus,
   Note,
   Specification,
@@ -26,6 +27,20 @@ const VOICE_LANG_OPTIONS = [
   { value: 'bs-BA', label: 'Bosnian (bs-BA)' },
   { value: 'en-US', label: 'English (en-US)' },
 ]
+
+const CHAT_REASONING_OPTIONS: Array<{ value: ChatReasoningEffort; label: string }> = [
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'Very high' },
+]
+const CHAT_MODEL_DEFAULT_VALUE = '__default__'
+
+function normalizeChatReasoningEffort(value: unknown): ChatReasoningEffort {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'low' || normalized === 'high' || normalized === 'xhigh') return normalized
+  return 'medium'
+}
 
 const PROFILE_FEEDBACK_TYPE_OPTIONS: Array<{
   value: 'general' | 'feature_request' | 'question' | 'other'
@@ -361,6 +376,11 @@ export function ProfilePanel({
   userName,
   theme,
   speechLang,
+  agentChatModel,
+  agentChatReasoningEffort,
+  agentChatDefaultModel,
+  agentChatDefaultReasoningEffort,
+  agentChatAvailableModels,
   frontendVersion,
   backendVersion,
   backendBuild,
@@ -371,6 +391,8 @@ export function ProfilePanel({
   onLogout,
   onToggleTheme,
   onChangeSpeechLang,
+  onSaveChatExecutionPreferences,
+  saveChatExecutionPreferencesPending,
   changePassword,
   passwordChangePending,
   submitFeedback,
@@ -379,6 +401,11 @@ export function ProfilePanel({
   userName: string
   theme: 'light' | 'dark'
   speechLang: string
+  agentChatModel: string
+  agentChatReasoningEffort: ChatReasoningEffort | string
+  agentChatDefaultModel: string
+  agentChatDefaultReasoningEffort: ChatReasoningEffort | string
+  agentChatAvailableModels: string[]
   frontendVersion: string
   backendVersion: string
   backendBuild: string | null
@@ -389,6 +416,11 @@ export function ProfilePanel({
   onLogout: () => void
   onToggleTheme: () => void
   onChangeSpeechLang: (value: string) => void
+  onSaveChatExecutionPreferences: (payload: {
+    agent_chat_model: string | null
+    agent_chat_reasoning_effort: ChatReasoningEffort
+  }) => Promise<unknown>
+  saveChatExecutionPreferencesPending: boolean
   changePassword: (payload: { current_password: string; new_password: string }) => Promise<unknown>
   passwordChangePending: boolean
   submitFeedback: (payload: {
@@ -443,6 +475,15 @@ export function ProfilePanel({
   const [runtimeCopyState, setRuntimeCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
   const voiceFactRef = React.useRef<HTMLDivElement | null>(null)
   const voiceSelectTriggerRef = React.useRef<HTMLButtonElement | null>(null)
+  const chatExecutionFactRef = React.useRef<HTMLDivElement | null>(null)
+  const chatExecutionModelTriggerRef = React.useRef<HTMLButtonElement | null>(null)
+  const [chatModelInput, setChatModelInput] = React.useState(() => String(agentChatModel || '').trim())
+  const [chatReasoningInput, setChatReasoningInput] = React.useState<ChatReasoningEffort>(() =>
+    normalizeChatReasoningEffort(agentChatReasoningEffort)
+  )
+  const [chatExecutionFeedback, setChatExecutionFeedback] = React.useState<{ tone: 'error'; message: string } | null>(null)
+  const chatExecutionLastAttemptKeyRef = React.useRef('')
+  const chatExecutionLastFailedKeyRef = React.useRef('')
   const browserTimeZone = React.useMemo(() => {
     try {
       return Intl.DateTimeFormat().resolvedOptions().timeZone || 'n/a'
@@ -453,6 +494,42 @@ export function ProfilePanel({
   const selectedVoiceLabel = React.useMemo(() => {
     return VOICE_LANG_OPTIONS.find((item) => item.value === speechLang)?.label || speechLang
   }, [speechLang])
+  const chatModelOptions = React.useMemo(() => {
+    const out: string[] = []
+    const seen = new Set<string>()
+    const push = (value: string) => {
+      const model = String(value || '').trim()
+      if (!model) return
+      const key = model.toLowerCase()
+      if (seen.has(key)) return
+      seen.add(key)
+      out.push(model)
+    }
+    for (const model of Array.isArray(agentChatAvailableModels) ? agentChatAvailableModels : []) {
+      push(model)
+    }
+    push(agentChatDefaultModel)
+    push(agentChatModel)
+    push(chatModelInput)
+    return out
+  }, [agentChatAvailableModels, agentChatDefaultModel, agentChatModel, chatModelInput])
+  const selectedChatReasoningLabel = React.useMemo(() => {
+    const normalized = normalizeChatReasoningEffort(chatReasoningInput)
+    return CHAT_REASONING_OPTIONS.find((item) => item.value === normalized)?.label || 'Medium'
+  }, [chatReasoningInput])
+  const normalizedChatModelInput = String(chatModelInput || '').trim()
+  const normalizedChatReasoningInput = normalizeChatReasoningEffort(chatReasoningInput)
+  const normalizedPersistedChatModel = String(agentChatModel || '').trim()
+  const normalizedPersistedChatReasoning = normalizeChatReasoningEffort(agentChatReasoningEffort)
+  const chatExecutionHasPendingChanges = (
+    normalizedChatModelInput !== normalizedPersistedChatModel
+    || normalizedChatReasoningInput !== normalizedPersistedChatReasoning
+  )
+  const chatExecutionStatusLabel: string | null = chatExecutionFeedback
+    ? 'Save failed'
+    : (saveChatExecutionPreferencesPending || chatExecutionHasPendingChanges)
+      ? 'Saving automatically...'
+      : null
   const selectedFeedbackTypeLabel = React.useMemo(() => {
     return PROFILE_FEEDBACK_TYPE_OPTIONS.find((item) => item.value === feedbackTypeInput)?.label || 'General'
   }, [feedbackTypeInput])
@@ -464,9 +541,22 @@ export function ProfilePanel({
       `Deployed UTC: ${deployedAtUtc || 'unknown'}`,
       `Theme: ${theme}`,
       `Voice language: ${selectedVoiceLabel}`,
+      `Chat model: ${String(agentChatModel || '').trim() || agentChatDefaultModel || 'system default'}`,
+      `Chat reasoning: ${normalizeChatReasoningEffort(agentChatReasoningEffort)}`,
       `Browser timezone: ${browserTimeZone}`,
     ].join('\n')
-  }, [backendBuild, backendVersion, browserTimeZone, deployedAtUtc, frontendVersion, selectedVoiceLabel, theme])
+  }, [
+    agentChatDefaultModel,
+    agentChatModel,
+    agentChatReasoningEffort,
+    backendBuild,
+    backendVersion,
+    browserTimeZone,
+    deployedAtUtc,
+    frontendVersion,
+    selectedVoiceLabel,
+    theme,
+  ])
 
   const scrollVoiceLanguageIntoView = React.useCallback(() => {
     if (typeof window === 'undefined') return
@@ -514,6 +604,52 @@ export function ProfilePanel({
     window.setTimeout(focusVoiceSelect, 340)
   }, [])
 
+  const scrollChatExecutionIntoView = React.useCallback(() => {
+    if (typeof window === 'undefined') return
+
+    const scrollNearestContainer = () => {
+      const target = chatExecutionFactRef.current
+      if (!target) return
+
+      const findScrollableParent = (node: HTMLElement | null): HTMLElement | null => {
+        let current = node?.parentElement ?? null
+        while (current) {
+          const styles = window.getComputedStyle(current)
+          const overflowY = styles.overflowY
+          const isScrollable =
+            (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') &&
+            current.scrollHeight > current.clientHeight + 1
+          if (isScrollable) return current
+          current = current.parentElement
+        }
+        return null
+      }
+
+      target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })
+
+      const parent = findScrollableParent(target)
+      if (parent) {
+        const targetRect = target.getBoundingClientRect()
+        const parentRect = parent.getBoundingClientRect()
+        const nextTop = parent.scrollTop + (targetRect.top - parentRect.top) - parent.clientHeight * 0.35
+        parent.scrollTo({ top: Math.max(0, nextTop), behavior: 'smooth' })
+      }
+    }
+
+    const focusModelInput = () => {
+      try {
+        chatExecutionModelTriggerRef.current?.focus({ preventScroll: true })
+      } catch {
+        chatExecutionModelTriggerRef.current?.focus()
+      }
+    }
+
+    scrollNearestContainer()
+    window.setTimeout(scrollNearestContainer, 120)
+    window.setTimeout(scrollNearestContainer, 300)
+    window.setTimeout(focusModelInput, 340)
+  }, [])
+
   React.useEffect(() => {
     if (typeof window === 'undefined') return
     const handleVoiceFocus = () => {
@@ -548,6 +684,92 @@ export function ProfilePanel({
       window.removeEventListener('ui:focus-voice-language', handleVoiceFocus)
     }
   }, [scrollVoiceLanguageIntoView])
+
+  React.useEffect(() => {
+    setChatModelInput(String(agentChatModel || '').trim())
+    setChatReasoningInput(normalizeChatReasoningEffort(agentChatReasoningEffort))
+  }, [agentChatModel, agentChatReasoningEffort])
+
+  React.useEffect(() => {
+    const currentKey = `${normalizedChatModelInput}::${normalizedChatReasoningInput}`
+    const persistedKey = `${normalizedPersistedChatModel}::${normalizedPersistedChatReasoning}`
+
+    if (chatExecutionLastFailedKeyRef.current && chatExecutionLastFailedKeyRef.current !== currentKey) {
+      chatExecutionLastFailedKeyRef.current = ''
+    }
+
+    if (currentKey === persistedKey) {
+      chatExecutionLastAttemptKeyRef.current = ''
+      if (chatExecutionFeedback) setChatExecutionFeedback(null)
+      return
+    }
+    if (saveChatExecutionPreferencesPending) return
+    if (chatExecutionLastFailedKeyRef.current === currentKey) return
+    if (chatExecutionLastAttemptKeyRef.current === currentKey) return
+
+    const timer = window.setTimeout(() => {
+      chatExecutionLastAttemptKeyRef.current = currentKey
+      void onSaveChatExecutionPreferences({
+        agent_chat_model: normalizedChatModelInput || null,
+        agent_chat_reasoning_effort: normalizedChatReasoningInput,
+      })
+        .then(() => {
+          chatExecutionLastAttemptKeyRef.current = ''
+          chatExecutionLastFailedKeyRef.current = ''
+          setChatExecutionFeedback(null)
+        })
+        .catch((error) => {
+          chatExecutionLastAttemptKeyRef.current = ''
+          chatExecutionLastFailedKeyRef.current = currentKey
+          const message = error instanceof Error ? error.message : 'Failed to save chat execution settings.'
+          setChatExecutionFeedback({ tone: 'error', message })
+        })
+    }, 320)
+    return () => window.clearTimeout(timer)
+  }, [
+    normalizedChatModelInput,
+    normalizedChatReasoningInput,
+    normalizedPersistedChatModel,
+    normalizedPersistedChatReasoning,
+    chatExecutionFeedback,
+    onSaveChatExecutionPreferences,
+    saveChatExecutionPreferencesPending,
+  ])
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return
+    const handleChatExecutionFocus = () => {
+      setProfileTab('preferences')
+      window.setTimeout(() => {
+        scrollChatExecutionIntoView()
+      }, 80)
+    }
+
+    window.addEventListener('ui:focus-chat-execution', handleChatExecutionFocus)
+
+    let shouldScroll = false
+    try {
+      shouldScroll = window.sessionStorage.getItem('ui_profile_scroll_target') === 'chat_execution'
+      if (shouldScroll) {
+        window.sessionStorage.removeItem('ui_profile_scroll_target')
+      }
+    } catch {
+      shouldScroll = false
+    }
+    if (!shouldScroll) {
+      return () => {
+        window.removeEventListener('ui:focus-chat-execution', handleChatExecutionFocus)
+      }
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      handleChatExecutionFocus()
+    })
+    return () => {
+      window.cancelAnimationFrame(frameId)
+      window.removeEventListener('ui:focus-chat-execution', handleChatExecutionFocus)
+    }
+  }, [scrollChatExecutionIntoView])
 
   const resetPasswordForm = React.useCallback(() => {
     setCurrentPasswordInput('')
@@ -819,6 +1041,114 @@ export function ProfilePanel({
                   </Select.Portal>
                 </Select.Root>
                 <p className="meta">Selected: {selectedVoiceLabel}</p>
+              </section>
+
+              <section className="profile-pane-card" aria-label="Chat execution" id="profile-chat-execution" ref={chatExecutionFactRef}>
+                <div className="profile-pane-head">
+                  <h3>
+                    <span className="profile-pane-head-icon" aria-hidden="true">
+                      <Icon path="M4 5h16v10H4zM7 19h10M12 15v4M8 9h8M8 12h5" />
+                    </span>
+                    <span>Chat execution</span>
+                  </h3>
+                  <span className="status-chip">Codex</span>
+                </div>
+                <div className="profile-chat-execution-grid">
+                <label className="field-control profile-chat-execution-field profile-chat-execution-field-model">
+                  <span className="field-label">Model</span>
+                  <Select.Root
+                    value={chatModelInput || CHAT_MODEL_DEFAULT_VALUE}
+                    onValueChange={(value) => {
+                      setChatModelInput(value === CHAT_MODEL_DEFAULT_VALUE ? '' : value)
+                      setChatExecutionFeedback(null)
+                    }}
+                  >
+                    <Select.Trigger
+                      ref={chatExecutionModelTriggerRef}
+                      className="quickadd-project-trigger taskdrawer-select-trigger profile-select-trigger profile-chat-model-trigger"
+                      aria-label="Chat model"
+                    >
+                      <Select.Value />
+                      <Select.Icon asChild>
+                        <span className="quickadd-project-trigger-icon" aria-hidden="true">
+                          <Icon path="M6 9l6 6 6-6" />
+                        </span>
+                      </Select.Icon>
+                    </Select.Trigger>
+                    <Select.Portal>
+                      <Select.Content className="quickadd-project-content profile-select-content" position="popper" sideOffset={6}>
+                        <Select.Viewport className="quickadd-project-viewport">
+                          <Select.Item value={CHAT_MODEL_DEFAULT_VALUE} className="quickadd-project-item">
+                            <Select.ItemText>
+                              {agentChatDefaultModel ? `System default (${agentChatDefaultModel})` : 'System default'}
+                            </Select.ItemText>
+                            <Select.ItemIndicator className="quickadd-project-item-indicator">
+                              <Icon path="M5 13l4 4L19 7" />
+                            </Select.ItemIndicator>
+                          </Select.Item>
+                          {chatModelOptions.map((model) => (
+                            <Select.Item key={model} value={model} className="quickadd-project-item">
+                              <Select.ItemText>{model}</Select.ItemText>
+                              <Select.ItemIndicator className="quickadd-project-item-indicator">
+                                <Icon path="M5 13l4 4L19 7" />
+                              </Select.ItemIndicator>
+                            </Select.Item>
+                          ))}
+                        </Select.Viewport>
+                      </Select.Content>
+                    </Select.Portal>
+                  </Select.Root>
+                </label>
+                <label className="field-control profile-chat-execution-field profile-chat-execution-field-reasoning">
+                  <span className="field-label">Reasoning level</span>
+                  <Select.Root
+                    value={normalizeChatReasoningEffort(chatReasoningInput)}
+                    onValueChange={(value) => {
+                      setChatReasoningInput(normalizeChatReasoningEffort(value))
+                      setChatExecutionFeedback(null)
+                    }}
+                  >
+                    <Select.Trigger
+                      className="quickadd-project-trigger taskdrawer-select-trigger profile-select-trigger profile-chat-reasoning-trigger"
+                      aria-label="Chat reasoning level"
+                    >
+                      <Select.Value />
+                      <Select.Icon asChild>
+                        <span className="quickadd-project-trigger-icon" aria-hidden="true">
+                          <Icon path="M6 9l6 6 6-6" />
+                        </span>
+                      </Select.Icon>
+                    </Select.Trigger>
+                    <Select.Portal>
+                      <Select.Content className="quickadd-project-content profile-select-content" position="popper" sideOffset={6}>
+                        <Select.Viewport className="quickadd-project-viewport">
+                          {CHAT_REASONING_OPTIONS.map((option) => (
+                            <Select.Item key={option.value} value={option.value} className="quickadd-project-item">
+                              <Select.ItemText>{option.label}</Select.ItemText>
+                              <Select.ItemIndicator className="quickadd-project-item-indicator">
+                                <Icon path="M5 13l4 4L19 7" />
+                              </Select.ItemIndicator>
+                            </Select.Item>
+                          ))}
+                        </Select.Viewport>
+                      </Select.Content>
+                    </Select.Portal>
+                  </Select.Root>
+                </label>
+                </div>
+                <div className="profile-chat-execution-status">
+                  {chatExecutionStatusLabel ? (
+                    <span className={`status-chip ${chatExecutionFeedback ? 'is-error' : ''}`.trim()}>{chatExecutionStatusLabel}</span>
+                  ) : null}
+                  <p className="meta">
+                  Active model: {String(agentChatModel || '').trim() || agentChatDefaultModel || 'system default'} · Reasoning: {selectedChatReasoningLabel}
+                  </p>
+                </div>
+                {chatExecutionFeedback ? (
+                  <div className="notice notice-error">
+                    {chatExecutionFeedback.message}
+                  </div>
+                ) : null}
               </section>
 
               <section className="profile-pane-card" aria-label="Account actions">

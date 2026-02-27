@@ -4929,6 +4929,11 @@ def test_status_change_trigger_self_queues_automation(tmp_path):
     assert payload['automation_state'] == 'queued'
     assert payload['last_requested_source'] == 'status_change'
     assert payload['last_requested_instruction'] == 'Run a completion checklist'
+    assert payload['last_requested_trigger_task_id'] == task_id
+    assert payload['last_requested_from_status'] == 'To do'
+    assert payload['last_requested_to_status'] == 'Done'
+    assert isinstance(payload.get('last_requested_triggered_at'), str)
+    assert payload['last_requested_triggered_at']
 
 
 def test_runner_processes_status_change_trigger_when_task_is_done(tmp_path):
@@ -4976,6 +4981,81 @@ def test_runner_processes_status_change_trigger_when_task_is_done(tmp_path):
     payload = final.json()
     assert payload['automation_state'] == 'completed'
     assert payload['last_requested_source'] == 'status_change'
+
+
+def test_runner_passes_status_change_trigger_metadata_to_executor(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    source = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Metadata source',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert source.status_code == 200
+    source_id = source.json()['id']
+
+    target = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Metadata target',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Capture metadata',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'external',
+                    'match_mode': 'any',
+                    'selector': {'task_ids': [source_id]},
+                    'to_statuses': ['Done'],
+                },
+            ],
+        },
+    )
+    assert target.status_code == 200
+    target_id = target.json()['id']
+
+    completed = client.post(f'/api/tasks/{source_id}/complete')
+    assert completed.status_code == 200
+
+    import features.agents.runner as runner_module
+    from features.agents.executor import AutomationOutcome
+
+    captured: dict[str, str | None] = {}
+
+    def capture_executor(**kwargs):
+        captured['trigger_task_id'] = kwargs.get('trigger_task_id')
+        captured['trigger_from_status'] = kwargs.get('trigger_from_status')
+        captured['trigger_to_status'] = kwargs.get('trigger_to_status')
+        captured['trigger_timestamp'] = kwargs.get('trigger_timestamp')
+        return AutomationOutcome(action='comment', summary='Captured metadata.', comment='ok')
+
+    monkeypatch.setattr(runner_module, "execute_task_automation", capture_executor)
+    processed = runner_module.run_queued_automation_once(limit=5)
+    assert processed >= 1
+
+    assert captured['trigger_task_id'] == source_id
+    assert captured['trigger_from_status'] == 'To do'
+    assert captured['trigger_to_status'] == 'Done'
+    assert isinstance(captured.get('trigger_timestamp'), str)
+    assert captured['trigger_timestamp']
+
+    automation = client.get(f'/api/tasks/{target_id}/automation')
+    assert automation.status_code == 200
+    payload = automation.json()
+    assert payload['automation_state'] == 'completed'
+    assert payload['last_requested_trigger_task_id'] == source_id
+    assert payload['last_requested_from_status'] == 'To do'
+    assert payload['last_requested_to_status'] == 'Done'
+    assert isinstance(payload.get('last_requested_triggered_at'), str)
+    assert payload['last_requested_triggered_at']
 
 
 def test_status_change_trigger_external_any_queues_target(tmp_path):
@@ -5026,6 +5106,11 @@ def test_status_change_trigger_external_any_queues_target(tmp_path):
     assert payload['automation_state'] == 'queued'
     assert payload['last_requested_source'] == 'status_change'
     assert payload['last_requested_instruction'] == 'React to source completion'
+    assert payload['last_requested_trigger_task_id'] == source_id
+    assert payload['last_requested_from_status'] == 'To do'
+    assert payload['last_requested_to_status'] == 'Done'
+    assert isinstance(payload.get('last_requested_triggered_at'), str)
+    assert payload['last_requested_triggered_at']
 
 
 def test_status_change_trigger_external_without_selector_matches_any_workspace_source(tmp_path):

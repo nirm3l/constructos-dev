@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from features.agents.model_registry import list_available_codex_models
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -19,12 +20,45 @@ from shared.models import (
 )
 from shared.serializers import load_created_by_map, serialize_notification, to_iso_utc
 from shared.settings import (
+    AGENT_CODEX_AVAILABLE_MODELS,
+    AGENT_CODEX_MODEL,
+    AGENT_CODEX_REASONING_EFFORT,
     AGENT_CHAT_CONTEXT_LIMIT_TOKENS,
     ALLOWED_EMBEDDING_MODELS,
     CONTEXT_PACK_EVIDENCE_TOP_K,
     DEFAULT_EMBEDDING_MODEL,
 )
 from shared.vector_store import normalize_embedding_model, project_embedding_index_snapshot, vector_store_enabled
+
+
+def _parse_agent_chat_available_models(raw: object) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for chunk in str(raw or "").split(","):
+        model = str(chunk or "").strip()
+        if not model:
+            continue
+        key = model.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(model)
+    return out
+
+
+def _append_agent_chat_models(target: list[str], extras: list[str]) -> list[str]:
+    out = list(target)
+    seen = {model.lower() for model in out}
+    for raw_model in extras:
+        model = str(raw_model or "").strip()
+        if not model:
+            continue
+        key = model.lower()
+        if key in seen:
+            continue
+        out.append(model)
+        seen.add(key)
+    return out
 
 
 def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
@@ -122,6 +156,26 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
             }
         )
     vector_enabled = bool(vector_store_enabled())
+    discovered_agent_chat_models, discovered_default_agent_chat_model = list_available_codex_models()
+    default_agent_chat_model = str(AGENT_CODEX_MODEL or "").strip()
+    if not default_agent_chat_model:
+        default_agent_chat_model = str(discovered_default_agent_chat_model or "").strip()
+    agent_chat_available_models = _parse_agent_chat_available_models(AGENT_CODEX_AVAILABLE_MODELS)
+    agent_chat_available_models = _append_agent_chat_models(agent_chat_available_models, discovered_agent_chat_models)
+    available_model_keys = {model.lower() for model in agent_chat_available_models}
+    if default_agent_chat_model and default_agent_chat_model.lower() not in available_model_keys:
+        agent_chat_available_models.insert(0, default_agent_chat_model)
+        available_model_keys.add(default_agent_chat_model.lower())
+    default_agent_chat_reasoning_effort = str(AGENT_CODEX_REASONING_EFFORT or "").strip().lower() or "medium"
+    if default_agent_chat_reasoning_effort not in {"low", "medium", "high", "xhigh"}:
+        default_agent_chat_reasoning_effort = "medium"
+    current_agent_chat_model = str(getattr(user, "agent_chat_model", "") or "").strip()
+    if current_agent_chat_model and current_agent_chat_model.lower() not in available_model_keys:
+        agent_chat_available_models.insert(0, current_agent_chat_model)
+        available_model_keys.add(current_agent_chat_model.lower())
+    current_agent_chat_reasoning_effort = str(getattr(user, "agent_chat_reasoning_effort", "") or "").strip().lower()
+    if current_agent_chat_reasoning_effort not in {"low", "medium", "high", "xhigh"}:
+        current_agent_chat_reasoning_effort = default_agent_chat_reasoning_effort
     embedding_models = list(ALLOWED_EMBEDDING_MODELS)
     default_embedding_model = normalize_embedding_model(DEFAULT_EMBEDDING_MODEL)
     if embedding_models and default_embedding_model not in embedding_models:
@@ -137,6 +191,8 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
             "user_type": user.user_type,
             "theme": user.theme,
             "timezone": user.timezone,
+            "agent_chat_model": current_agent_chat_model,
+            "agent_chat_reasoning_effort": current_agent_chat_reasoning_effort,
         },
         "workspaces": [{"id": w.id, "name": w.name, "type": w.type} for w in workspaces],
         "memberships": [{"workspace_id": m.workspace_id, "role": m.role} for m in memberships],
@@ -146,6 +202,9 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
         "vector_store_enabled": vector_enabled,
         "context_pack_evidence_top_k_default": int(CONTEXT_PACK_EVIDENCE_TOP_K or 10),
         "agent_chat_context_limit_tokens_default": int(AGENT_CHAT_CONTEXT_LIMIT_TOKENS or 0),
+        "agent_chat_default_model": default_agent_chat_model,
+        "agent_chat_default_reasoning_effort": default_agent_chat_reasoning_effort,
+        "agent_chat_available_models": agent_chat_available_models,
         "agent_chat_available_mcp_servers": agent_chat_available_mcp_servers,
         # Backward-compatible mirror for older UI bundles reading bootstrap.config.*
         "config": {
@@ -154,6 +213,9 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
             "vector_store_enabled": vector_enabled,
             "context_pack_evidence_top_k_default": int(CONTEXT_PACK_EVIDENCE_TOP_K or 10),
             "agent_chat_context_limit_tokens_default": int(AGENT_CHAT_CONTEXT_LIMIT_TOKENS or 0),
+            "agent_chat_default_model": default_agent_chat_model,
+            "agent_chat_default_reasoning_effort": default_agent_chat_reasoning_effort,
+            "agent_chat_available_models": agent_chat_available_models,
             "agent_chat_available_mcp_servers": agent_chat_available_mcp_servers,
         },
         "users": [{"id": u.id, "username": u.username, "full_name": u.full_name, "user_type": u.user_type} for u in users],

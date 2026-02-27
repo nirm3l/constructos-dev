@@ -85,12 +85,39 @@ _MAX_CHAT_ATTACHMENT_CHARS_PER_FILE = 12_000
 _MAX_CHAT_ATTACHMENT_CHARS_TOTAL = 36_000
 _MAX_CROSS_SESSION_DELTA_MESSAGES = 8
 _MAX_CROSS_SESSION_DELTA_CHARS_PER_MESSAGE = 220
+_ALLOWED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 _CREATED_RESOURCE_ACTIONS: dict[str, str] = {
     "TaskCreated": "task",
     "NoteCreated": "note",
     "SpecificationCreated": "specification",
     "ProjectRuleCreated": "project_rule",
 }
+
+
+def _normalize_reasoning_effort(value: object) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return None
+    alias_map = {
+        "very-high": "xhigh",
+        "very_high": "xhigh",
+        "very high": "xhigh",
+    }
+    canonical = alias_map.get(normalized, normalized)
+    if canonical not in _ALLOWED_REASONING_EFFORTS:
+        return None
+    return canonical
+
+
+def _resolve_chat_execution_preferences(payload: AgentChatRun, user: User) -> tuple[str | None, str | None]:
+    payload_model = str(payload.model or "").strip()
+    user_model = str(getattr(user, "agent_chat_model", "") or "").strip()
+    model = payload_model or user_model or None
+
+    payload_reasoning = _normalize_reasoning_effort(payload.reasoning_effort)
+    user_reasoning = _normalize_reasoning_effort(getattr(user, "agent_chat_reasoning_effort", None))
+    reasoning_effort = payload_reasoning or user_reasoning
+    return model, reasoning_effort
 
 
 def _normalize_chat_mcp_servers(raw_servers: list[str] | None) -> list[str]:
@@ -1077,6 +1104,7 @@ def agent_chat(
     command_id: str | None = Depends(get_command_id),
 ):
     ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
     mcp_servers = _normalize_chat_mcp_servers(payload.mcp_servers)
     session_id = _resolve_chat_session_id(payload.session_id)
     existing_codex_session_id, resume_last_succeeded = _load_chat_session_codex_state(
@@ -1163,6 +1191,8 @@ def agent_chat(
             actor_user_id=user.id,
             allow_mutations=bool(payload.allow_mutations),
             mcp_servers=mcp_servers,
+            model=model,
+            reasoning_effort=reasoning_effort,
         )
         _persist_assistant_message_with_links(
             db=db,
@@ -1257,6 +1287,7 @@ def agent_chat_stream(
     command_id: str | None = Depends(get_command_id),
 ):
     ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
     mcp_servers = _normalize_chat_mcp_servers(payload.mcp_servers)
     session_id = _resolve_chat_session_id(payload.session_id)
     existing_codex_session_id, resume_last_succeeded = _load_chat_session_codex_state(
@@ -1357,6 +1388,8 @@ def agent_chat_stream(
                     allow_mutations=bool(payload.allow_mutations),
                     mcp_servers=mcp_servers,
                     on_event=_on_event,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
                 )
                 final_payload = {
                     "ok": True,

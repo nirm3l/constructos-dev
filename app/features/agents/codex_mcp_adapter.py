@@ -17,6 +17,7 @@ from shared.settings import (
     AGENT_CHAT_CONTEXT_LIMIT_TOKENS,
     AGENT_CODEX_MCP_URL,
     AGENT_CODEX_MODEL,
+    AGENT_CODEX_REASONING_EFFORT,
     AGENT_EXECUTOR_TIMEOUT_SECONDS,
 )
 
@@ -25,6 +26,7 @@ _DEFAULT_CODEX_HOME_ROOT = "/tmp/codex-home"
 _DEFAULT_CODEX_HOME_RETENTION_DAYS = 14
 _DEFAULT_CODEX_HOME_CLEANUP_INTERVAL_SECONDS = 3600
 _PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "shared" / "prompt_templates" / "codex"
+_ALLOWED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 
 
 @lru_cache(maxsize=16)
@@ -321,6 +323,16 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     graph_context_markdown = str(ctx.get("graph_context_markdown") or "").strip()
     graph_evidence_json = str(ctx.get("graph_evidence_json") or "").strip()
     graph_summary_markdown = str(ctx.get("graph_summary_markdown") or "").strip()
+    trigger_task_id = str(ctx.get("trigger_task_id") or "").strip() or "_(not available)_"
+    trigger_from_status = str(ctx.get("trigger_from_status") or "").strip() or "_(not available)_"
+    trigger_to_status = str(ctx.get("trigger_to_status") or "").strip() or "_(not available)_"
+    trigger_timestamp = str(ctx.get("trigger_timestamp") or "").strip() or "_(not available)_"
+    status_change_trigger_context = (
+        f"- Source task ID: {trigger_task_id}\n"
+        f"- From status: {trigger_from_status}\n"
+        f"- To status: {trigger_to_status}\n"
+        f"- Triggered at: {trigger_timestamp}\n"
+    )
     allow_mutations = bool(ctx.get("allow_mutations", True))
     mcp_servers = _normalize_prompt_mcp_servers(ctx.get("mcp_servers"))
     enabled_mcp_servers_text = ", ".join(mcp_servers)
@@ -402,6 +414,7 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
             "actor_user_id": actor_user_id,
             "project_name": project_name,
             "instruction": instruction,
+            "status_change_trigger_context": status_change_trigger_context,
             "soul_md": soul_md,
             "rules_md": rules_md,
             "skills_md": skills_md,
@@ -490,6 +503,16 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     project_id = ctx.get("project_id") or ""
     actor_user_id = str(ctx.get("actor_user_id") or "").strip()
     project_name = ctx.get("project_name") or ""
+    trigger_task_id = str(ctx.get("trigger_task_id") or "").strip() or "_(not available)_"
+    trigger_from_status = str(ctx.get("trigger_from_status") or "").strip() or "_(not available)_"
+    trigger_to_status = str(ctx.get("trigger_to_status") or "").strip() or "_(not available)_"
+    trigger_timestamp = str(ctx.get("trigger_timestamp") or "").strip() or "_(not available)_"
+    status_change_trigger_context = (
+        f"- Source task ID: {trigger_task_id}\n"
+        f"- From status: {trigger_from_status}\n"
+        f"- To status: {trigger_to_status}\n"
+        f"- Triggered at: {trigger_timestamp}\n"
+    )
     fresh_memory_snapshot = _build_resume_fresh_memory_snapshot(ctx)
     allow_mutations = bool(ctx.get("allow_mutations", True))
     mcp_servers = _normalize_prompt_mcp_servers(ctx.get("mcp_servers"))
@@ -530,6 +553,7 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
             "actor_user_id": actor_user_id,
             "project_name": project_name,
             "instruction": instruction,
+            "status_change_trigger_context": status_change_trigger_context,
             "fresh_memory_snapshot": fresh_memory_snapshot,
             "task_guidance": task_guidance,
             "enabled_mcp_servers_text": enabled_mcp_servers_text,
@@ -546,6 +570,21 @@ def _safe_non_negative_int(value: object) -> int | None:
         return max(0, int(value))
     except (TypeError, ValueError):
         return None
+
+
+def _normalize_reasoning_effort(value: object) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return None
+    alias_map = {
+        "very-high": "xhigh",
+        "very_high": "xhigh",
+        "very high": "xhigh",
+    }
+    canonical = alias_map.get(normalized, normalized)
+    if canonical not in _ALLOWED_REASONING_EFFORTS:
+        return None
+    return canonical
 
 
 def _extract_turn_usage(stdout: str) -> dict[str, int] | None:
@@ -750,6 +789,7 @@ def _run_codex_app_server_with_optional_stream(
     timeout_seconds: float,
     stream_events: bool,
     model: str | None = None,
+    reasoning_effort: str | None = None,
     output_schema: dict | None = None,
     preferred_thread_id: str | None = None,
     env: dict[str, str] | None = None,
@@ -824,6 +864,8 @@ def _run_codex_app_server_with_optional_stream(
         }
         if model:
             params["model"] = model
+        if reasoning_effort:
+            params["reasoningEffort"] = reasoning_effort
         return params
 
     def _request_thread_start() -> None:
@@ -1141,6 +1183,11 @@ def main() -> int:
     )
     stream_events = bool(ctx.get("stream_events"))
     stream_plain_text = bool(ctx.get("stream_plain_text"))
+    preferred_model = str(ctx.get("model") or "").strip() or AGENT_CODEX_MODEL or None
+    preferred_reasoning_effort = (
+        _normalize_reasoning_effort(ctx.get("reasoning_effort"))
+        or _normalize_reasoning_effort(AGENT_CODEX_REASONING_EFFORT)
+    )
     structured_response = not (stream_events and stream_plain_text)
     start_prompt = _build_prompt(ctx, structured_response=structured_response)
     resume_prompt = _build_resume_prompt(ctx, structured_response=structured_response)
@@ -1174,7 +1221,8 @@ def main() -> int:
                     resume_prompt=resume_prompt,
                     timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
                     stream_events=True,
-                    model=AGENT_CODEX_MODEL or None,
+                    model=preferred_model,
+                    reasoning_effort=preferred_reasoning_effort,
                     output_schema=schema if structured_response else None,
                     preferred_thread_id=preferred_codex_session_id,
                     env=codex_env,
@@ -1192,7 +1240,8 @@ def main() -> int:
                     resume_prompt=resume_prompt,
                     timeout_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
                     stream_events=False,
-                    model=AGENT_CODEX_MODEL or None,
+                    model=preferred_model,
+                    reasoning_effort=preferred_reasoning_effort,
                     output_schema=schema,
                     preferred_thread_id=preferred_codex_session_id,
                     env=codex_env,

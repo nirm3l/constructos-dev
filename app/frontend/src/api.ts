@@ -13,6 +13,7 @@ import type {
   AgentChatResponse,
   ChatMessageRecord,
   ChatMcpServer,
+  ChatReasoningEffort,
   ChatSessionRecord,
   GraphContextPack,
   ProjectKnowledgeSearchResult,
@@ -425,6 +426,8 @@ export const runAgentChat = (
     attachment_refs?: AttachmentRef[]
     session_attachment_refs?: AttachmentRef[]
     mcp_servers?: ChatMcpServer[]
+    model?: string | null
+    reasoning_effort?: ChatReasoningEffort | string | null
     allow_mutations?: boolean
   }
 ) =>
@@ -509,6 +512,8 @@ export async function runAgentChatStream(
     attachment_refs?: AttachmentRef[]
     session_attachment_refs?: AttachmentRef[]
     mcp_servers?: ChatMcpServer[]
+    model?: string | null
+    reasoning_effort?: ChatReasoningEffort | string | null
     allow_mutations?: boolean
   },
   handlers?: {
@@ -982,8 +987,21 @@ export const attachWorkspaceSkillToProject = (
 
 export const patchMyPreferences = (
   userId: string,
-  payload: { theme?: 'light' | 'dark'; timezone?: string; notifications_enabled?: boolean }
-) => api<{ id: string; theme: string; timezone: string; notifications_enabled: boolean }>('/api/me/preferences', userId, { method: 'PATCH', body: JSON.stringify(payload) })
+  payload: {
+    theme?: 'light' | 'dark'
+    timezone?: string
+    notifications_enabled?: boolean
+    agent_chat_model?: string | null
+    agent_chat_reasoning_effort?: ChatReasoningEffort | string | null
+  }
+) => api<{
+  id: string
+  theme: string
+  timezone: string
+  notifications_enabled: boolean
+  agent_chat_model?: string
+  agent_chat_reasoning_effort?: ChatReasoningEffort | string
+}>('/api/me/preferences', userId, { method: 'PATCH', body: JSON.stringify(payload) })
 
 export const getNotes = (
   userId: string,

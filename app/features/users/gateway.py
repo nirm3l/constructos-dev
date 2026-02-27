@@ -92,6 +92,8 @@ class UserOperationGateway:
             "theme": str(resolved.target.theme or "light"),
             "timezone": str(resolved.target.timezone or "UTC"),
             "notifications_enabled": bool(resolved.target.notifications_enabled),
+            "agent_chat_model": str(resolved.target.agent_chat_model or ""),
+            "agent_chat_reasoning_effort": str(resolved.target.agent_chat_reasoning_effort or "medium"),
         }
 
     def patch_preferences(
@@ -117,4 +119,3 @@ class UserOperationGateway:
             resolved.target,
             command_id=command_id,
         ).patch_preferences(payload)
-

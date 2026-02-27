@@ -363,6 +363,12 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
         except Exception:
             pending_requests = 0
         s_local["automation_pending_requests"] = max(0, pending_requests)
+        s_local.setdefault("last_requested_instruction", None)
+        s_local.setdefault("last_requested_source", None)
+        s_local.setdefault("last_requested_trigger_task_id", None)
+        s_local.setdefault("last_requested_from_status", None)
+        s_local.setdefault("last_requested_to_status", None)
+        s_local.setdefault("last_requested_triggered_at", None)
         instruction = str(s_local.get("instruction") or s_local.get("scheduled_instruction") or "").strip() or None
         execution_triggers = normalize_execution_triggers(s_local.get("execution_triggers"))
         if str(s_local.get("task_type") or "").strip().lower() == "manual":
@@ -443,6 +449,10 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "last_agent_comment": None,
             "last_requested_instruction": None,
             "last_requested_source": None,
+            "last_requested_trigger_task_id": None,
+            "last_requested_from_status": None,
+            "last_requested_to_status": None,
+            "last_requested_triggered_at": None,
             "automation_pending_requests": 0,
         }
     elif event.event_type in {TASK_EVENT_UPDATED, TASK_EVENT_REORDERED}:
@@ -467,6 +477,10 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
         s["last_agent_error"] = None
         s["last_requested_instruction"] = p.get("instruction")
         s["last_requested_source"] = p.get("source")
+        s["last_requested_trigger_task_id"] = p.get("trigger_task_id")
+        s["last_requested_from_status"] = p.get("from_status")
+        s["last_requested_to_status"] = p.get("to_status")
+        s["last_requested_triggered_at"] = p.get("triggered_at")
     elif event.event_type == TASK_EVENT_AUTOMATION_STARTED:
         s["automation_state"] = "running"
         s["last_agent_error"] = None
@@ -1725,6 +1739,10 @@ def project_event(db: Session, ev: EventEnvelope):
         user.theme = str(p.get("theme") or user.theme or "light")
         user.timezone = str(p.get("timezone") or user.timezone or "UTC")
         user.notifications_enabled = bool(p.get("notifications_enabled", True))
+        user.agent_chat_model = str(p.get("agent_chat_model") or user.agent_chat_model or "")
+        user.agent_chat_reasoning_effort = str(
+            p.get("agent_chat_reasoning_effort") or user.agent_chat_reasoning_effort or "medium"
+        )
 
         workspace_id = p.get("workspace_id")
         workspace_role = p.get("workspace_role")
@@ -1793,6 +1811,10 @@ def project_event(db: Session, ev: EventEnvelope):
                 user.timezone = p["timezone"]
             if "notifications_enabled" in p:
                 user.notifications_enabled = bool(p["notifications_enabled"])
+            if "agent_chat_model" in p:
+                user.agent_chat_model = str(p.get("agent_chat_model") or "")
+            if "agent_chat_reasoning_effort" in p and p.get("agent_chat_reasoning_effort"):
+                user.agent_chat_reasoning_effort = str(p.get("agent_chat_reasoning_effort"))
 
     workspace_id = m.get("workspace_id")
     actor_id = m.get("actor_id")

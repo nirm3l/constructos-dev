@@ -55,6 +55,10 @@ class QueuedAutomationRun:
     instruction: str
     request_source: str
     is_scheduled_run: bool
+    trigger_task_id: str | None
+    trigger_from_status: str | None
+    trigger_to_status: str | None
+    triggered_at: str | None
 
 
 def _normalize_nonnegative_int(value) -> int:
@@ -127,6 +131,10 @@ def _requeue_pending_status_change_request(
     instruction = run.instruction or str(state.get("instruction") or state.get("scheduled_instruction") or "").strip()
     if not instruction:
         return
+    trigger_task_id = str(state.get("last_requested_trigger_task_id") or run.trigger_task_id or "").strip() or None
+    trigger_from_status = str(state.get("last_requested_from_status") or run.trigger_from_status or "").strip() or None
+    trigger_to_status = str(state.get("last_requested_to_status") or run.trigger_to_status or "").strip() or None
+    triggered_at = str(state.get("last_requested_triggered_at") or run.triggered_at or "").strip() or requested_at_iso
     append_event(
         db,
         aggregate_type="Task",
@@ -136,12 +144,20 @@ def _requeue_pending_status_change_request(
             "requested_at": requested_at_iso,
             "instruction": instruction,
             "source": "status_change",
+            "trigger_task_id": trigger_task_id,
+            "from_status": trigger_from_status,
+            "to_status": trigger_to_status,
+            "triggered_at": triggered_at,
         },
         metadata={
             "actor_id": AGENT_SYSTEM_USER_ID,
             "workspace_id": workspace_id,
             "project_id": project_id,
             "task_id": run.task_id,
+            "trigger_task_id": trigger_task_id,
+            "trigger_from_status": trigger_from_status,
+            "trigger_to_status": trigger_to_status,
+            "triggered_at": triggered_at,
         },
     )
 
@@ -156,6 +172,10 @@ def _claim_queued_task(task_id: str) -> QueuedAutomationRun | None:
             return None
         project_id = str(state.get("project_id") or "").strip() or None
         request_source = str(state.get("last_requested_source") or "").strip().lower()
+        trigger_task_id = str(state.get("last_requested_trigger_task_id") or "").strip() or None
+        trigger_from_status = str(state.get("last_requested_from_status") or "").strip() or None
+        trigger_to_status = str(state.get("last_requested_to_status") or "").strip() or None
+        triggered_at = str(state.get("last_requested_triggered_at") or "").strip() or None
         is_scheduled_run = request_source == "schedule"
         schedule_state = str(state.get("schedule_state", "idle")).strip().lower()
         now_iso = to_iso_utc(datetime.now(timezone.utc))
@@ -207,6 +227,10 @@ def _claim_queued_task(task_id: str) -> QueuedAutomationRun | None:
         instruction=instruction,
         request_source=request_source,
         is_scheduled_run=is_scheduled_run,
+        trigger_task_id=trigger_task_id,
+        trigger_from_status=trigger_from_status,
+        trigger_to_status=trigger_to_status,
+        triggered_at=triggered_at,
     )
 
 
@@ -364,6 +388,10 @@ def _execute_claimed_automation(run: QueuedAutomationRun) -> None:
             instruction=run.instruction,
             workspace_id=run.workspace_id,
             project_id=run.project_id,
+            trigger_task_id=run.trigger_task_id,
+            trigger_from_status=run.trigger_from_status,
+            trigger_to_status=run.trigger_to_status,
+            trigger_timestamp=run.triggered_at,
             allow_mutations=True,
         )
     except Exception as exc:

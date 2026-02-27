@@ -269,7 +269,14 @@ def emit_task_automation_triggers_for_event(
             workspace_task_cache[workspace_id] = [_task_state_from_row(row) for row in rows]
         return workspace_task_cache[workspace_id]
 
-    def _queue_automation_for_task(*, task_row: Task, trigger_task_id: str) -> bool:
+    def _queue_automation_for_task(
+        *,
+        task_row: Task,
+        trigger_task_id: str,
+        trigger_from_status: str | None,
+        trigger_to_status: str | None,
+        triggered_at: str,
+    ) -> bool:
         task_id = _normalize_optional_id(task_row.id)
         if not task_id or task_id in requested_task_ids:
             return False
@@ -283,28 +290,6 @@ def emit_task_automation_triggers_for_event(
             return False
 
         task_state, _ = rebuild_state(db, "Task", task_id)
-        if str(task_state.get("automation_state") or "idle") in {"queued", "running"}:
-            workspace_id = _normalize_optional_id(task_state.get("workspace_id")) or task_row.workspace_id
-            if not workspace_id:
-                return False
-            project_id = _normalize_optional_id(task_state.get("project_id")) or task_row.project_id
-            pending_requests = _normalize_nonnegative_int(task_state.get("automation_pending_requests"))
-            append_event_fn(
-                db,
-                aggregate_type="Task",
-                aggregate_id=task_id,
-                event_type=TASK_EVENT_UPDATED,
-                payload={"automation_pending_requests": pending_requests + 1},
-                metadata={
-                    "actor_id": AGENT_SYSTEM_USER_ID,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
-                    "task_id": task_id,
-                    "trigger_task_id": trigger_task_id,
-                },
-            )
-            return False
-
         workspace_id = _normalize_optional_id(task_state.get("workspace_id")) or task_row.workspace_id
         if not workspace_id:
             return False
@@ -317,6 +302,35 @@ def emit_task_automation_triggers_for_event(
         if not effective_instruction:
             return False
 
+        if str(task_state.get("automation_state") or "idle") in {"queued", "running"}:
+            pending_requests = _normalize_nonnegative_int(task_state.get("automation_pending_requests"))
+            append_event_fn(
+                db,
+                aggregate_type="Task",
+                aggregate_id=task_id,
+                event_type=TASK_EVENT_UPDATED,
+                payload={
+                    "automation_pending_requests": pending_requests + 1,
+                    "last_requested_instruction": effective_instruction,
+                    "last_requested_source": "status_change",
+                    "last_requested_trigger_task_id": trigger_task_id,
+                    "last_requested_from_status": trigger_from_status,
+                    "last_requested_to_status": trigger_to_status,
+                    "last_requested_triggered_at": triggered_at,
+                },
+                metadata={
+                    "actor_id": AGENT_SYSTEM_USER_ID,
+                    "workspace_id": workspace_id,
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "trigger_task_id": trigger_task_id,
+                    "trigger_from_status": trigger_from_status,
+                    "trigger_to_status": trigger_to_status,
+                    "triggered_at": triggered_at,
+                },
+            )
+            return False
+
         append_event_fn(
             db,
             aggregate_type="Task",
@@ -327,6 +341,9 @@ def emit_task_automation_triggers_for_event(
                 "instruction": effective_instruction,
                 "source": "status_change",
                 "trigger_task_id": trigger_task_id,
+                "from_status": trigger_from_status,
+                "to_status": trigger_to_status,
+                "triggered_at": triggered_at,
             },
             metadata={
                 "actor_id": AGENT_SYSTEM_USER_ID,
@@ -334,6 +351,9 @@ def emit_task_automation_triggers_for_event(
                 "project_id": project_id,
                 "task_id": task_id,
                 "trigger_task_id": trigger_task_id,
+                "trigger_from_status": trigger_from_status,
+                "trigger_to_status": trigger_to_status,
+                "triggered_at": triggered_at,
             },
         )
         requested_task_ids.add(task_id)
@@ -359,7 +379,13 @@ def emit_task_automation_triggers_for_event(
             target_task = db.get(Task, target_task_id)
             if target_task is None:
                 continue
-            _queue_automation_for_task(task_row=target_task, trigger_task_id=source_task_id)
+            _queue_automation_for_task(
+                task_row=target_task,
+                trigger_task_id=source_task_id,
+                trigger_from_status=from_status,
+                trigger_to_status=to_status,
+                triggered_at=now_iso,
+            )
 
     candidate_rows = db.execute(
         select(Task).where(
@@ -407,4 +433,10 @@ def emit_task_automation_triggers_for_event(
 
         if not matched:
             continue
-        _queue_automation_for_task(task_row=candidate, trigger_task_id=source_task_id)
+        _queue_automation_for_task(
+            task_row=candidate,
+            trigger_task_id=source_task_id,
+            trigger_from_status=from_status,
+            trigger_to_status=to_status,
+            triggered_at=now_iso,
+        )

@@ -96,6 +96,8 @@ class AgentChatRun(BaseModel):
     attachment_refs: list[AttachmentRef] = Field(default_factory=list)
     session_attachment_refs: list[AttachmentRef] = Field(default_factory=list)
     allow_mutations: bool = True
+    model: str | None = None
+    reasoning_effort: str | None = None
 
 
 class NoteCreate(BaseModel):
@@ -239,6 +241,8 @@ class UserPreferencesPatch(BaseModel):
     theme: str | None = None
     timezone: str | None = None
     notifications_enabled: bool | None = None
+    agent_chat_model: str | None = None
+    agent_chat_reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

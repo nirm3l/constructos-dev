@@ -9,6 +9,8 @@ Project ID: {project_id}
 Current User ID: {actor_user_id}
 Project Name: {project_name}
 Instruction: {instruction}
+Status Change Trigger Context:
+{status_change_trigger_context}
 
 Context Pack:
 File: Soul.md (source: project.description)

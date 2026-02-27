@@ -112,6 +112,17 @@ function normalizeBool(value: unknown): boolean {
   return false
 }
 
+function normalizeReasoningEffort(value: unknown): 'low' | 'medium' | 'high' | 'xhigh' {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'low' || normalized === 'high' || normalized === 'xhigh') return normalized
+  return 'medium'
+}
+
+function reasoningEffortLabel(value: 'low' | 'medium' | 'high' | 'xhigh'): string {
+  if (value === 'xhigh') return 'Very high'
+  return value.charAt(0).toUpperCase() + value.slice(1)
+}
+
 async function copyTextToClipboard(text: string): Promise<void> {
   const canUseClipboardApi = typeof navigator !== 'undefined' && Boolean(navigator.clipboard?.writeText)
   if (canUseClipboardApi) {
@@ -456,6 +467,14 @@ export function CodexChatDrawer({ state }: { state: any }) {
       ? state.codexChatSessionAttachmentRefs
       : []
   )
+  const chatModelOverride = String(state.agentChatModel || '').trim()
+  const defaultChatModel = String(state.agentChatDefaultModel || '').trim()
+  const effectiveChatModel = chatModelOverride || defaultChatModel || 'system default'
+  const compactChatModelLabel = chatModelOverride || defaultChatModel || 'System'
+  const effectiveReasoningEffort = normalizeReasoningEffort(
+    state.agentChatReasoningEffort || state.agentChatDefaultReasoningEffort
+  )
+  const effectiveReasoningLabel = reasoningEffortLabel(effectiveReasoningEffort)
 
   const stopVoiceInput = () => {
     const recognition = recognitionRef.current
@@ -651,6 +670,18 @@ export function CodexChatDrawer({ state }: { state: any }) {
     state.setShowCodexChat?.(false)
   }
 
+  const openChatExecutionSettings = () => {
+    stopVoiceInput()
+    try {
+      window.sessionStorage.setItem('ui_profile_scroll_target', 'chat_execution')
+      window.dispatchEvent(new Event('ui:focus-chat-execution'))
+    } catch {
+      // Ignore storage failures and still navigate.
+    }
+    state.setTab?.('profile')
+    state.setShowCodexChat?.(false)
+  }
+
   const persistSessionAttachmentRefs = async (nextRefs: AttachmentRef[]) => {
     if (!state.workspaceId || !state.codexChatSessionId || !state.userId) return
     if (typeof state.setCodexChatSessionAttachmentRefs !== 'function') return
@@ -713,6 +744,8 @@ export function CodexChatDrawer({ state }: { state: any }) {
       sessionId: state.codexChatSessionId,
       projectId: state.codexChatProjectId.trim() ? state.codexChatProjectId : null,
       mcpServers: selectedMcpServers,
+      model: chatModelOverride || null,
+      reasoningEffort: effectiveReasoningEffort,
       attachmentRefs: attachedRefs,
       sessionAttachmentRefs,
     })
@@ -723,12 +756,29 @@ export function CodexChatDrawer({ state }: { state: any }) {
       <div className="drawer open" onClick={() => state.setShowCodexChat(false)}>
         <div className="drawer-body codex-chat-drawer-body" onClick={(e) => e.stopPropagation()}>
           <div className="row codex-chat-header-row">
-            <h3 style={{ margin: 0 }}>Chat</h3>
-            <ChatTooltip content="Close chat">
-              <button className="action-icon" onClick={() => state.setShowCodexChat(false)} aria-label="Close">
-                <Icon path="M6 6l12 12M18 6 6 18" />
-              </button>
-            </ChatTooltip>
+            <div className="codex-chat-header-main">
+              <h3 className="codex-chat-header-title">Chat</h3>
+              <ChatTooltip content="Open Profile settings to change chat model and reasoning level">
+                <button
+                  className="status-chip tag-filter-chip codex-chat-execution-chip codex-chat-header-inline-chip"
+                  type="button"
+                  onClick={openChatExecutionSettings}
+                >
+                  <span className="codex-chat-execution-chip-main">
+                    {compactChatModelLabel}
+                  </span>
+                  <span className="codex-chat-execution-chip-sep">·</span>
+                  <span className="codex-chat-execution-chip-meta">{effectiveReasoningLabel}</span>
+                </button>
+              </ChatTooltip>
+            </div>
+            <div className="codex-chat-header-actions">
+              <ChatTooltip content="Close chat">
+                <button className="action-icon" onClick={() => state.setShowCodexChat(false)} aria-label="Close">
+                  <Icon path="M6 6l12 12M18 6 6 18" />
+                </button>
+              </ChatTooltip>
+            </div>
           </div>
         <div className="codex-chat-context-top-row">
           <div className="codex-chat-context">

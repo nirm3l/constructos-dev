@@ -7,7 +7,27 @@ import {
   extractEnabledStatusTrigger,
   listToCsv,
   normalizeExecutionTriggers,
+  normalizeScheduleRunOnStatuses,
 } from '../utils/taskAutomation'
+
+function normalizeUtcIsoToMinute(raw: string): string {
+  const value = String(raw || '').trim()
+  if (!value) return ''
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  parsed.setSeconds(0, 0)
+  return parsed.toISOString()
+}
+
+function normalizeExecutionTriggersForDirtyCheck(input: unknown) {
+  return normalizeExecutionTriggers(input).map((trigger) => {
+    if (trigger.kind !== 'schedule') return trigger
+    return {
+      ...trigger,
+      scheduled_at_utc: normalizeUtcIsoToMinute(trigger.scheduled_at_utc),
+    }
+  })
+}
 
 export function useEditorGuards(c: any) {
   const toggleCreateProjectMember = React.useCallback((userIdToToggle: string) => {
@@ -119,13 +139,26 @@ export function useEditorGuards(c: any) {
 
   const taskIsDirty = React.useMemo(() => {
     if (!c.selectedTask) return false
+    const selectedTaskScheduleTimezone = String(c.selectedTask.schedule_timezone || '').trim()
+    const fallbackScheduleTimezone = String(c.currentUserTimezone || 'UTC').trim() || 'UTC'
+    const editScheduleTimezoneRaw = String(c.editScheduleTimezone || '').trim()
+    const scheduleTimezoneForDirty = (
+      c.editTaskType === 'scheduled_instruction'
+        ? (
+            !selectedTaskScheduleTimezone && editScheduleTimezoneRaw === fallbackScheduleTimezone
+              ? ''
+              : editScheduleTimezoneRaw
+          )
+        : ''
+    )
+    const scheduleTriggerIsoForDirty =
+      c.editTaskType === 'scheduled_instruction' && c.editScheduledAtUtc
+        ? normalizeUtcIsoToMinute(new Date(c.editScheduledAtUtc).toISOString())
+        : ''
     const currentExecutionTriggers = buildExecutionTriggersFromEditor({
       taskType: c.editTaskType,
-      scheduledAtUtc:
-        c.editTaskType === 'scheduled_instruction' && c.editScheduledAtUtc
-          ? new Date(c.editScheduledAtUtc).toISOString()
-          : '',
-      scheduleTimezone: String(c.editScheduleTimezone || ''),
+      scheduledAtUtc: scheduleTriggerIsoForDirty,
+      scheduleTimezone: scheduleTimezoneForDirty,
       scheduleRunOnStatuses: c.editScheduleRunOnStatuses,
       recurringEvery: c.editRecurringEvery,
       recurringUnit: c.editRecurringUnit,
@@ -139,7 +172,8 @@ export function useEditorGuards(c: any) {
       externalToStatusesText: c.editStatusTriggerExternalToStatusesText,
     })
 
-    const originalExecutionTriggers = normalizeExecutionTriggers(c.selectedTask.execution_triggers)
+    const originalExecutionTriggers = normalizeExecutionTriggersForDirtyCheck(c.selectedTask.execution_triggers)
+    const normalizedCurrentExecutionTriggers = normalizeExecutionTriggersForDirtyCheck(currentExecutionTriggers)
     const originalScheduleTrigger = extractEnabledScheduleTrigger(originalExecutionTriggers)
     const originalSelfTrigger = extractEnabledStatusTrigger(originalExecutionTriggers, 'self')
     const originalExternalTrigger = extractEnabledStatusTrigger(originalExecutionTriggers, 'external')
@@ -155,8 +189,9 @@ export function useEditorGuards(c: any) {
       due_date: c.editDueDate || '',
       task_type: c.editTaskType,
       scheduled_at_utc: c.editScheduledAtUtc || '',
-      schedule_timezone: c.editTaskType === 'scheduled_instruction' ? (c.editScheduleTimezone || '') : '',
-      schedule_run_on_statuses: c.editTaskType === 'scheduled_instruction' ? (c.editScheduleRunOnStatuses || []) : [],
+      schedule_timezone: scheduleTimezoneForDirty,
+      schedule_run_on_statuses:
+        c.editTaskType === 'scheduled_instruction' ? normalizeScheduleRunOnStatuses(c.editScheduleRunOnStatuses) : [],
       instruction: c.editScheduledInstruction.trim(),
       recurring_rule:
         c.editTaskType === 'scheduled_instruction' && c.editRecurringEvery.trim()
@@ -170,7 +205,7 @@ export function useEditorGuards(c: any) {
       status_trigger_external_task_ids: c.editStatusTriggerExternalTaskIdsText,
       status_trigger_external_from: c.editStatusTriggerExternalFromStatusesText,
       status_trigger_external_to: c.editStatusTriggerExternalToStatusesText,
-      execution_triggers: currentExecutionTriggers,
+      execution_triggers: normalizedCurrentExecutionTriggers,
       external_refs: c.parseExternalRefsText(c.editTaskExternalRefsText),
       attachment_refs: c.parseAttachmentRefsText(c.editTaskAttachmentRefsText),
     }
@@ -186,9 +221,13 @@ export function useEditorGuards(c: any) {
       task_type: c.selectedTask.task_type ?? 'manual',
       scheduled_at_utc: toLocalDateTimeInput(c.selectedTask.scheduled_at_utc),
       schedule_timezone:
-        (c.selectedTask.task_type ?? 'manual') === 'scheduled_instruction' ? (c.selectedTask.schedule_timezone ?? '') : '',
+        (c.selectedTask.task_type ?? 'manual') === 'scheduled_instruction'
+          ? (selectedTaskScheduleTimezone || '')
+          : '',
       schedule_run_on_statuses:
-        (c.selectedTask.task_type ?? 'manual') === 'scheduled_instruction' ? (originalScheduleTrigger?.run_on_statuses ?? []) : [],
+        (c.selectedTask.task_type ?? 'manual') === 'scheduled_instruction'
+          ? normalizeScheduleRunOnStatuses(originalScheduleTrigger?.run_on_statuses)
+          : [],
       instruction: deriveInstruction(c.selectedTask),
       recurring_rule:
         (c.selectedTask.task_type ?? 'manual') === 'scheduled_instruction' ? String(c.selectedTask.recurring_rule ?? '') : '',
@@ -231,6 +270,7 @@ export function useEditorGuards(c: any) {
     c.editTaskTags,
     c.editTaskType,
     c.editTitle,
+    c.currentUserTimezone,
     c.parseAttachmentRefsText,
     c.parseExternalRefsText,
     c.selectedTask,

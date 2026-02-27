@@ -29,8 +29,10 @@ class UserAggregate(Aggregate):
         theme: str,
         timezone: str,
         notifications_enabled: bool,
-        workspace_id: str,
-        workspace_role: str,
+        agent_chat_model: str = "",
+        agent_chat_reasoning_effort: str = "medium",
+        workspace_id: str | None = None,
+        workspace_role: str = "Member",
     ) -> None:
         _ = id
         self.username = username
@@ -43,7 +45,9 @@ class UserAggregate(Aggregate):
         self.theme = theme
         self.timezone = timezone
         self.notifications_enabled = notifications_enabled
-        self.workspace_roles = {workspace_id: workspace_role}
+        self.agent_chat_model = agent_chat_model
+        self.agent_chat_reasoning_effort = agent_chat_reasoning_effort
+        self.workspace_roles = {workspace_id: workspace_role} if workspace_id else {}
 
     @event("PreferencesUpdated")
     def update_preferences(
@@ -51,6 +55,8 @@ class UserAggregate(Aggregate):
         theme: str | None = None,
         timezone: str | None = None,
         notifications_enabled: bool | None = None,
+        agent_chat_model: str | None = None,
+        agent_chat_reasoning_effort: str | None = None,
     ) -> None:
         if theme is not None:
             self.theme = str(theme)
@@ -58,6 +64,10 @@ class UserAggregate(Aggregate):
             self.timezone = str(timezone)
         if notifications_enabled is not None:
             self.notifications_enabled = bool(notifications_enabled)
+        if agent_chat_model is not None:
+            self.agent_chat_model = str(agent_chat_model)
+        if agent_chat_reasoning_effort is not None:
+            self.agent_chat_reasoning_effort = str(agent_chat_reasoning_effort)
 
     @event("PasswordChanged")
     def change_password(

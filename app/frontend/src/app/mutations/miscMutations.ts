@@ -1,7 +1,7 @@
 import React from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { addComment, deleteComment, markAllNotificationsRead, markNotificationRead, patchMyPreferences, runAgentChatStream } from '../../api'
-import type { ChatMcpServer } from '../../types'
+import type { ChatMcpServer, ChatReasoningEffort } from '../../types'
 
 const ENTITY_ID_SOURCE = '[0-9a-fA-F]{8,}(?:-[0-9a-fA-F]{4,}){0,4}'
 const ENTITY_ID_PATTERN = /([0-9a-fA-F]{8,}(?:-[0-9a-fA-F]{4,}){0,4})/
@@ -246,6 +246,8 @@ export function useMiscMutations(c: any) {
       projectId: string | null
       sessionId: string
       mcpServers?: ChatMcpServer[]
+      model?: string | null
+      reasoningEffort?: ChatReasoningEffort | string | null
       attachmentRefs?: Array<{ path: string; name?: string; mime_type?: string; size_bytes?: number }>
       sessionAttachmentRefs?: Array<{ path: string; name?: string; mime_type?: string; size_bytes?: number }>
     }) => {
@@ -359,6 +361,8 @@ export function useMiscMutations(c: any) {
             attachment_refs: payload.attachmentRefs || [],
             session_attachment_refs: payload.sessionAttachmentRefs || [],
             mcp_servers: payload.mcpServers,
+            model: payload.model || null,
+            reasoning_effort: payload.reasoningEffort || null,
             allow_mutations: true,
           },
           {

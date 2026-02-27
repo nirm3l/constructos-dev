@@ -268,11 +268,17 @@ def execute_task_automation(
     instruction: str,
     workspace_id: str | None = None,
     project_id: str | None = None,
+    trigger_task_id: str | None = None,
+    trigger_from_status: str | None = None,
+    trigger_to_status: str | None = None,
+    trigger_timestamp: str | None = None,
     chat_session_id: str | None = None,
     codex_session_id: str | None = None,
     actor_user_id: str | None = None,
     allow_mutations: bool = True,
     mcp_servers: list[str] | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> AutomationOutcome:
     # Deterministic shortcut: users can explicitly complete a task via "#complete".
     # This should work regardless of executor mode, and avoids reliance on the LLM for a simple directive.
@@ -310,6 +316,10 @@ def execute_task_automation(
         "instruction": instruction,
         "workspace_id": workspace_id,
         "project_id": project_id,
+        "trigger_task_id": trigger_task_id,
+        "trigger_from_status": trigger_from_status,
+        "trigger_to_status": trigger_to_status,
+        "trigger_timestamp": trigger_timestamp,
         "chat_session_id": chat_session_id,
         "codex_session_id": codex_session_id,
         "actor_user_id": actor_user_id,
@@ -322,6 +332,8 @@ def execute_task_automation(
         "graph_summary_markdown": graph_summary_markdown,
         "allow_mutations": allow_mutations,
         "mcp_servers": mcp_servers,
+        "model": model,
+        "reasoning_effort": reasoning_effort,
     }
     try:
         proc = subprocess.run(
@@ -350,12 +362,18 @@ def execute_task_automation_stream(
     instruction: str,
     workspace_id: str | None = None,
     project_id: str | None = None,
+    trigger_task_id: str | None = None,
+    trigger_from_status: str | None = None,
+    trigger_to_status: str | None = None,
+    trigger_timestamp: str | None = None,
     chat_session_id: str | None = None,
     codex_session_id: str | None = None,
     actor_user_id: str | None = None,
     allow_mutations: bool = True,
     mcp_servers: list[str] | None = None,
     on_event: Callable[[dict[str, object]], None] | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> AutomationOutcome:
     # Deterministic shortcut for explicit completion requests.
     lower_instruction = (instruction or "").lower()
@@ -392,6 +410,10 @@ def execute_task_automation_stream(
         "instruction": instruction,
         "workspace_id": workspace_id,
         "project_id": project_id,
+        "trigger_task_id": trigger_task_id,
+        "trigger_from_status": trigger_from_status,
+        "trigger_to_status": trigger_to_status,
+        "trigger_timestamp": trigger_timestamp,
         "chat_session_id": chat_session_id,
         "codex_session_id": codex_session_id,
         "actor_user_id": actor_user_id,
@@ -404,6 +426,8 @@ def execute_task_automation_stream(
         "graph_summary_markdown": graph_summary_markdown,
         "allow_mutations": allow_mutations,
         "mcp_servers": mcp_servers,
+        "model": model,
+        "reasoning_effort": reasoning_effort,
         "stream_events": True,
         "stream_plain_text": not bool(str(task_id or "").strip()),
     }

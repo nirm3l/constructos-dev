@@ -876,6 +876,10 @@ def _task_props_from_event(ev: EventEnvelope) -> dict[str, Any]:
         props["last_agent_error"] = None
         props["last_requested_instruction"] = p.get("instruction")
         props["last_requested_source"] = p.get("source")
+        props["last_requested_trigger_task_id"] = p.get("trigger_task_id")
+        props["last_requested_from_status"] = p.get("from_status")
+        props["last_requested_to_status"] = p.get("to_status")
+        props["last_requested_triggered_at"] = p.get("triggered_at")
     elif ev.event_type == TASK_EVENT_AUTOMATION_STARTED:
         props["automation_state"] = "running"
         props["last_agent_error"] = None

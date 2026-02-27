@@ -314,10 +314,21 @@ def ensure_user_table_columns(db: Session):
         db.execute(text("ALTER TABLE users ADD COLUMN password_changed_at TIMESTAMP WITH TIME ZONE"))
     if "is_active" not in existing:
         db.execute(text("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT TRUE"))
+    if "agent_chat_model" not in existing:
+        db.execute(text("ALTER TABLE users ADD COLUMN agent_chat_model VARCHAR(128) DEFAULT ''"))
+    if "agent_chat_reasoning_effort" not in existing:
+        db.execute(text("ALTER TABLE users ADD COLUMN agent_chat_reasoning_effort VARCHAR(16) DEFAULT 'medium'"))
     db.execute(text("UPDATE users SET user_type='human' WHERE user_type IS NULL OR user_type = ''"))
     db.execute(text("UPDATE users SET user_type='agent' WHERE id = :agent_id"), {"agent_id": AGENT_SYSTEM_USER_ID})
     db.execute(text("UPDATE users SET must_change_password=TRUE WHERE must_change_password IS NULL"))
     db.execute(text("UPDATE users SET is_active=TRUE WHERE is_active IS NULL"))
+    db.execute(text("UPDATE users SET agent_chat_model='' WHERE agent_chat_model IS NULL"))
+    db.execute(
+        text(
+            "UPDATE users SET agent_chat_reasoning_effort='medium' "
+            "WHERE agent_chat_reasoning_effort IS NULL OR agent_chat_reasoning_effort = ''"
+        )
+    )
     db.commit()
 
 
@@ -612,6 +623,8 @@ def bootstrap_data():
                         is_active=True,
                         timezone="Europe/Sarajevo",
                         theme="light",
+                        agent_chat_model="",
+                        agent_chat_reasoning_effort="medium",
                     ),
                     Workspace(id=BOOTSTRAP_WORKSPACE_ID, name="My Workspace", type="team"),
                 ]

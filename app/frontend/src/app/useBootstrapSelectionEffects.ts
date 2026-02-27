@@ -1,10 +1,33 @@
 import React from 'react'
 
+const ALLOWED_REASONING_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh'])
+
 export function useBootstrapSelectionEffects(c: any) {
   React.useEffect(() => {
     const fromBackend = c.bootstrap.data?.current_user?.theme
     if (fromBackend === 'dark' || fromBackend === 'light') c.setTheme(fromBackend)
   }, [c.bootstrap.data?.current_user?.theme, c.setTheme])
+
+  React.useEffect(() => {
+    const fromUser = String(c.bootstrap.data?.current_user?.agent_chat_model || '').trim()
+    const fromDefault = String(c.bootstrap.data?.agent_chat_default_model || '').trim()
+    c.setAgentChatModel(fromUser || fromDefault || '')
+  }, [c.bootstrap.data?.current_user?.agent_chat_model, c.bootstrap.data?.agent_chat_default_model, c.setAgentChatModel])
+
+  React.useEffect(() => {
+    const fromUser = String(c.bootstrap.data?.current_user?.agent_chat_reasoning_effort || '').trim().toLowerCase()
+    const fromDefault = String(c.bootstrap.data?.agent_chat_default_reasoning_effort || '').trim().toLowerCase()
+    const resolved = ALLOWED_REASONING_EFFORTS.has(fromUser)
+      ? fromUser
+      : ALLOWED_REASONING_EFFORTS.has(fromDefault)
+        ? fromDefault
+        : 'medium'
+    c.setAgentChatReasoningEffort(resolved)
+  }, [
+    c.bootstrap.data?.current_user?.agent_chat_reasoning_effort,
+    c.bootstrap.data?.agent_chat_default_reasoning_effort,
+    c.setAgentChatReasoningEffort,
+  ])
 
   React.useEffect(() => {
     const firstProjectId = c.bootstrap.data?.projects[0]?.id ?? ''

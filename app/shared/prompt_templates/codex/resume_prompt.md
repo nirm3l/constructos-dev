@@ -10,6 +10,8 @@ Project ID: {project_id}
 Current User ID: {actor_user_id}
 Project Name: {project_name}
 Instruction: {instruction}
+Status Change Trigger Context:
+{status_change_trigger_context}
 
 Fresh Cross-Session Memory Snapshot (generated for this turn):
 {fresh_memory_snapshot}

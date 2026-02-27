@@ -120,6 +120,8 @@ def _serialize_auth_user(db: Session, user: User) -> dict:
         "user_type": user.user_type,
         "timezone": user.timezone,
         "theme": user.theme,
+        "agent_chat_model": str(user.agent_chat_model or ""),
+        "agent_chat_reasoning_effort": str(user.agent_chat_reasoning_effort or "medium"),
         "must_change_password": bool(user.must_change_password),
         "memberships": [{"workspace_id": workspace_id, "role": role} for workspace_id, role in memberships],
     }

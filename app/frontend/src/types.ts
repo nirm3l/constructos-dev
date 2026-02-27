@@ -5,6 +5,8 @@ export type User = {
   user_type: 'human' | 'agent'
   timezone: string
   theme: 'light' | 'dark'
+  agent_chat_model?: string
+  agent_chat_reasoning_effort?: ChatReasoningEffort | string
 }
 
 export type AuthUser = {
@@ -14,6 +16,8 @@ export type AuthUser = {
   user_type: 'human' | 'agent'
   timezone: string
   theme: 'light' | 'dark'
+  agent_chat_model?: string
+  agent_chat_reasoning_effort?: ChatReasoningEffort | string
   must_change_password: boolean
   memberships: Array<{ workspace_id: string; role: string }>
 }
@@ -388,6 +392,9 @@ export type BootstrapPayload = {
   vector_store_enabled: boolean
   context_pack_evidence_top_k_default: number
   agent_chat_context_limit_tokens_default?: number
+  agent_chat_default_model?: string
+  agent_chat_default_reasoning_effort?: ChatReasoningEffort | string
+  agent_chat_available_models?: string[]
   agent_chat_available_mcp_servers?: AgentChatMcpServer[]
   users: Array<{ id: string; username: string; full_name: string; user_type: 'human' | 'agent' }>
   project_members: Array<{ project_id: string; user_id: string; role: string }>
@@ -434,6 +441,10 @@ export type TaskAutomationStatus = {
   last_agent_comment: string | null
   last_requested_instruction: string | null
   last_requested_source: 'manual' | 'schedule' | 'status_change' | string | null
+  last_requested_trigger_task_id: string | null
+  last_requested_from_status: string | null
+  last_requested_to_status: string | null
+  last_requested_triggered_at: string | null
   instruction: string | null
   execution_triggers: TaskExecutionTrigger[]
   task_type: 'manual' | 'scheduled_instruction'
@@ -701,6 +712,7 @@ export type AgentChatResponse = {
 }
 
 export type ChatMcpServer = string
+export type ChatReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 
 export type AgentChatMcpServer = {
   name: string
