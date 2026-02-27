@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import threading
 from importlib import reload
 from pathlib import Path
 import zipfile
@@ -2291,6 +2292,45 @@ def test_runner_marks_failed_when_executor_raises(tmp_path, monkeypatch):
     payload = status.json()
     assert payload['automation_state'] == 'failed'
     assert 'executor boom' in (payload['last_agent_error'] or '')
+
+
+def test_runner_marks_running_while_executor_is_in_progress(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    task = client.post('/api/tasks', json={'title': 'Slow executor task', 'workspace_id': ws_id, 'project_id': project_id}).json()
+    queued = client.post(f"/api/tasks/{task['id']}/automation/run", json={'instruction': 'slow run'})
+    assert queued.status_code == 200
+
+    import features.agents.runner as runner_module
+    from features.agents.executor import AutomationOutcome
+
+    entered_executor = threading.Event()
+    release_executor = threading.Event()
+
+    def slow_executor(**_kwargs):
+        entered_executor.set()
+        release_executor.wait(timeout=3)
+        return AutomationOutcome(action='comment', summary='Slow run finished.', comment='done')
+
+    monkeypatch.setattr(runner_module, "execute_task_automation", slow_executor)
+
+    run_thread = threading.Thread(target=lambda: runner_module.run_queued_automation_once(limit=5), daemon=True)
+    run_thread.start()
+
+    assert entered_executor.wait(timeout=2), "Executor did not start in time"
+    mid_status = client.get(f"/api/tasks/{task['id']}/automation")
+    assert mid_status.status_code == 200
+    assert mid_status.json()['automation_state'] == 'running'
+
+    release_executor.set()
+    run_thread.join(timeout=5)
+    assert not run_thread.is_alive()
+
+    final_status = client.get(f"/api/tasks/{task['id']}/automation")
+    assert final_status.status_code == 200
+    assert final_status.json()['automation_state'] == 'completed'
 
 
 def test_agent_service_create_task_infers_workspace_from_project(tmp_path):

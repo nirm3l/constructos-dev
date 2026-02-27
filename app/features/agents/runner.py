@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 import threading
-import time
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -20,11 +21,17 @@ from features.tasks.domain import (
     EVENT_SCHEDULE_QUEUED,
     EVENT_SCHEDULE_STARTED,
 )
+from shared.contracts import ConcurrencyConflictError
 from shared.eventing import append_event, rebuild_state
 from shared.models import SessionLocal, Task
 from shared.serializers import to_iso_utc
-from shared.settings import AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS, AGENT_RUNNER_INTERVAL_SECONDS, AGENT_SYSTEM_USER_ID
-from shared.settings import AGENT_EXECUTOR_TIMEOUT_SECONDS
+from shared.settings import (
+    AGENT_EXECUTOR_TIMEOUT_SECONDS,
+    AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS,
+    AGENT_RUNNER_INTERVAL_SECONDS,
+    AGENT_RUNNER_MAX_CONCURRENCY,
+    AGENT_SYSTEM_USER_ID,
+)
 from shared.task_automation import (
     first_enabled_schedule_trigger,
     parse_schedule_due_at,
@@ -36,189 +43,306 @@ _runner_stop_event = threading.Event()
 _runner_thread: threading.Thread | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class QueuedAutomationRun:
+    task_id: str
+    workspace_id: str
+    project_id: str | None
+    title: str
+    description: str
+    status: str
+    instruction: str
+    request_source: str
+    is_scheduled_run: bool
+
+
+def _append_schedule_rearm_update(
+    *,
+    db,
+    task_id: str,
+    workspace_id: str,
+    project_id: str | None,
+    execution_triggers,
+    now_utc: datetime,
+) -> None:
+    updated_triggers, next_due = rearm_first_schedule_trigger(
+        execution_triggers=execution_triggers,
+        now_utc=now_utc,
+    )
+    if not next_due:
+        return
+    append_event(
+        db,
+        aggregate_type="Task",
+        aggregate_id=task_id,
+        event_type=TASK_EVENT_UPDATED,
+        payload={
+            "execution_triggers": updated_triggers,
+            "scheduled_at_utc": next_due,
+            "schedule_state": "idle",
+        },
+        metadata={
+            "actor_id": AGENT_SYSTEM_USER_ID,
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "task_id": task_id,
+        },
+    )
+
+
+def _claim_queued_task(task_id: str) -> QueuedAutomationRun | None:
+    with SessionLocal() as db:
+        state, version = rebuild_state(db, "Task", task_id)
+        if state.get("automation_state", "idle") != "queued":
+            return None
+        workspace_id = str(state.get("workspace_id") or "").strip()
+        if not workspace_id:
+            return None
+        project_id = str(state.get("project_id") or "").strip() or None
+        request_source = str(state.get("last_requested_source") or "").strip().lower()
+        is_scheduled_run = request_source == "schedule"
+        schedule_state = str(state.get("schedule_state", "idle")).strip().lower()
+        now_iso = to_iso_utc(datetime.now(timezone.utc))
+        try:
+            append_event(
+                db,
+                aggregate_type="Task",
+                aggregate_id=task_id,
+                event_type=EVENT_AUTOMATION_STARTED,
+                payload={"started_at": now_iso},
+                metadata={
+                    "actor_id": AGENT_SYSTEM_USER_ID,
+                    "workspace_id": workspace_id,
+                    "project_id": project_id,
+                    "task_id": task_id,
+                },
+                expected_version=version,
+            )
+            if is_scheduled_run and schedule_state in {"queued", "idle"}:
+                append_event(
+                    db,
+                    aggregate_type="Task",
+                    aggregate_id=task_id,
+                    event_type=EVENT_SCHEDULE_STARTED,
+                    payload={"started_at": now_iso},
+                    metadata={
+                        "actor_id": AGENT_SYSTEM_USER_ID,
+                        "workspace_id": workspace_id,
+                        "project_id": project_id,
+                        "task_id": task_id,
+                    },
+                )
+            db.commit()
+        except ConcurrencyConflictError:
+            db.rollback()
+            return None
+    instruction = (
+        str(state.get("last_requested_instruction") or "").strip()
+        or str(state.get("instruction") or "").strip()
+        or str(state.get("scheduled_instruction") or "").strip()
+    )
+    return QueuedAutomationRun(
+        task_id=task_id,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        title=str(state.get("title") or ""),
+        description=str(state.get("description") or ""),
+        status=str(state.get("status") or "To do"),
+        instruction=instruction,
+        request_source=request_source,
+        is_scheduled_run=is_scheduled_run,
+    )
+
+
+def _record_automation_success(run: QueuedAutomationRun, *, summary: str, action: str, comment: str | None) -> None:
+    completed_at = to_iso_utc(datetime.now(timezone.utc))
+    now_utc = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        state, _ = rebuild_state(db, "Task", run.task_id)
+        workspace_id = str(state.get("workspace_id") or run.workspace_id or "").strip()
+        if not workspace_id:
+            return
+        project_id = str(state.get("project_id") or run.project_id or "").strip() or None
+
+        if AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS:
+            if action == "complete" and state.get("status") != "Done":
+                append_event(
+                    db,
+                    aggregate_type="Task",
+                    aggregate_id=run.task_id,
+                    event_type=TASK_EVENT_COMPLETED,
+                    payload={"completed_at": completed_at},
+                    metadata={
+                        "actor_id": AGENT_SYSTEM_USER_ID,
+                        "workspace_id": workspace_id,
+                        "project_id": project_id,
+                        "task_id": run.task_id,
+                    },
+                )
+            if comment:
+                append_event(
+                    db,
+                    aggregate_type="Task",
+                    aggregate_id=run.task_id,
+                    event_type=EVENT_COMMENT_ADDED,
+                    payload={"task_id": run.task_id, "user_id": AGENT_SYSTEM_USER_ID, "body": comment},
+                    metadata={
+                        "actor_id": AGENT_SYSTEM_USER_ID,
+                        "workspace_id": workspace_id,
+                        "project_id": project_id,
+                        "task_id": run.task_id,
+                    },
+                )
+
+        append_event(
+            db,
+            aggregate_type="Task",
+            aggregate_id=run.task_id,
+            event_type=EVENT_AUTOMATION_COMPLETED,
+            payload={"completed_at": completed_at, "summary": summary, "source_event": EVENT_AUTOMATION_REQUESTED},
+            metadata={
+                "actor_id": AGENT_SYSTEM_USER_ID,
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "task_id": run.task_id,
+            },
+        )
+        if run.is_scheduled_run:
+            append_event(
+                db,
+                aggregate_type="Task",
+                aggregate_id=run.task_id,
+                event_type=EVENT_SCHEDULE_COMPLETED,
+                payload={"completed_at": completed_at, "summary": summary},
+                metadata={
+                    "actor_id": AGENT_SYSTEM_USER_ID,
+                    "workspace_id": workspace_id,
+                    "project_id": project_id,
+                    "task_id": run.task_id,
+                },
+            )
+            _append_schedule_rearm_update(
+                db=db,
+                task_id=run.task_id,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                execution_triggers=state.get("execution_triggers"),
+                now_utc=now_utc,
+            )
+        db.commit()
+
+
+def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> None:
+    failed_at = to_iso_utc(datetime.now(timezone.utc))
+    now_utc = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        state, _ = rebuild_state(db, "Task", run.task_id)
+        workspace_id = str(state.get("workspace_id") or run.workspace_id or "").strip()
+        if not workspace_id:
+            return
+        project_id = str(state.get("project_id") or run.project_id or "").strip() or None
+        append_event(
+            db,
+            aggregate_type="Task",
+            aggregate_id=run.task_id,
+            event_type=EVENT_AUTOMATION_FAILED,
+            payload={"failed_at": failed_at, "error": str(error), "summary": "Automation runner failed."},
+            metadata={
+                "actor_id": AGENT_SYSTEM_USER_ID,
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "task_id": run.task_id,
+            },
+        )
+        schedule_state = str(state.get("schedule_state") or "").strip().lower()
+        if run.is_scheduled_run or schedule_state in {"queued", "running"}:
+            append_event(
+                db,
+                aggregate_type="Task",
+                aggregate_id=run.task_id,
+                event_type=EVENT_SCHEDULE_FAILED,
+                payload={"failed_at": failed_at, "error": str(error)},
+                metadata={
+                    "actor_id": AGENT_SYSTEM_USER_ID,
+                    "workspace_id": workspace_id,
+                    "project_id": project_id,
+                    "task_id": run.task_id,
+                },
+            )
+            _append_schedule_rearm_update(
+                db=db,
+                task_id=run.task_id,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                execution_triggers=state.get("execution_triggers"),
+                now_utc=now_utc,
+            )
+        db.commit()
+
+
+def _execute_claimed_automation(run: QueuedAutomationRun) -> None:
+    try:
+        if not run.instruction:
+            raise RuntimeError("instruction is empty")
+        outcome = execute_task_automation(
+            task_id=run.task_id,
+            title=run.title,
+            description=run.description,
+            status=run.status,
+            instruction=run.instruction,
+            workspace_id=run.workspace_id,
+            project_id=run.project_id,
+            allow_mutations=True,
+        )
+    except Exception as exc:
+        _record_automation_failure(run, exc)
+        return
+
+    try:
+        _record_automation_success(
+            run,
+            summary=outcome.summary,
+            action=outcome.action,
+            comment=outcome.comment,
+        )
+    except Exception as exc:
+        _record_automation_failure(run, exc)
+
+
 def run_queued_automation_once(limit: int = 10) -> int:
-    processed = 0
+    normalized_limit = max(1, int(limit))
+    scan_limit = max(normalized_limit * 50, normalized_limit, AGENT_RUNNER_MAX_CONCURRENCY * 20)
     with SessionLocal() as db:
         candidate_ids = db.execute(
-            select(Task.id).where(Task.is_deleted == False).order_by(Task.updated_at.asc()).limit(max(limit * 10, limit))
+            select(Task.id).where(Task.is_deleted == False).order_by(Task.updated_at.desc()).limit(scan_limit)
         ).scalars().all()
 
-        for task_id in candidate_ids:
-            state, _ = rebuild_state(db, "Task", task_id)
-            if state.get("automation_state", "idle") != "queued":
-                continue
-            request_source = str(state.get("last_requested_source") or "").strip().lower()
-            workspace_id = state.get("workspace_id")
-            if not workspace_id:
-                continue
+    claimed_runs: list[QueuedAutomationRun] = []
+    for task_id in candidate_ids:
+        claimed = _claim_queued_task(task_id)
+        if claimed is None:
+            continue
+        claimed_runs.append(claimed)
+        if len(claimed_runs) >= normalized_limit:
+            break
+    if not claimed_runs:
+        return 0
 
-            project_id = state.get("project_id")
-            now_iso = to_iso_utc(datetime.now(timezone.utc))
-            instruction = (
-                (state.get("last_requested_instruction") or "").strip()
-                or (state.get("instruction") or "").strip()
-                or (state.get("scheduled_instruction") or "").strip()
-            )
-            is_scheduled_run = request_source == "schedule"
-            schedule_state = state.get("schedule_state", "idle")
+    max_workers = max(1, min(int(AGENT_RUNNER_MAX_CONCURRENCY), normalized_limit, len(claimed_runs)))
+    if max_workers == 1:
+        for run in claimed_runs:
+            _execute_claimed_automation(run)
+        return len(claimed_runs)
 
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="automation-runner") as pool:
+        futures = [pool.submit(_execute_claimed_automation, run) for run in claimed_runs]
+        for future in as_completed(futures):
             try:
-                if not instruction:
-                    raise RuntimeError("instruction is empty")
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=task_id,
-                    event_type=EVENT_AUTOMATION_STARTED,
-                    payload={"started_at": now_iso},
-                    metadata={"actor_id": AGENT_SYSTEM_USER_ID, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id},
-                )
-                if is_scheduled_run and schedule_state in {"queued", "idle"}:
-                    append_event(
-                        db,
-                        aggregate_type="Task",
-                        aggregate_id=task_id,
-                        event_type=EVENT_SCHEDULE_STARTED,
-                        payload={"started_at": now_iso},
-                        metadata={
-                            "actor_id": AGENT_SYSTEM_USER_ID,
-                            "workspace_id": workspace_id,
-                            "project_id": project_id,
-                            "task_id": task_id,
-                        },
-                    )
-
-                outcome = execute_task_automation(
-                    task_id=task_id,
-                    title=str(state.get("title", "")),
-                    description=str(state.get("description", "")),
-                    status=str(state.get("status", "To do")),
-                    instruction=instruction,
-                    workspace_id=workspace_id,
-                    project_id=project_id,
-                    allow_mutations=True,
-                )
-
-                if AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS:
-                    latest_state, _ = rebuild_state(db, "Task", task_id)
-                    if outcome.action == "complete" and latest_state.get("status") != "Done":
-                        append_event(
-                            db,
-                            aggregate_type="Task",
-                            aggregate_id=task_id,
-                            event_type=TASK_EVENT_COMPLETED,
-                            payload={"completed_at": now_iso},
-                            metadata={"actor_id": AGENT_SYSTEM_USER_ID, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id},
-                        )
-                    if outcome.comment:
-                        comment = outcome.comment
-                        append_event(
-                            db,
-                            aggregate_type="Task",
-                            aggregate_id=task_id,
-                            event_type=EVENT_COMMENT_ADDED,
-                            payload={"task_id": task_id, "user_id": AGENT_SYSTEM_USER_ID, "body": comment},
-                            metadata={"actor_id": AGENT_SYSTEM_USER_ID, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id},
-                        )
-
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=task_id,
-                    event_type=EVENT_AUTOMATION_COMPLETED,
-                    payload={"completed_at": now_iso, "summary": outcome.summary, "source_event": EVENT_AUTOMATION_REQUESTED},
-                    metadata={"actor_id": AGENT_SYSTEM_USER_ID, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id},
-                )
-                if is_scheduled_run:
-                    append_event(
-                        db,
-                        aggregate_type="Task",
-                        aggregate_id=task_id,
-                        event_type=EVENT_SCHEDULE_COMPLETED,
-                        payload={"completed_at": now_iso, "summary": outcome.summary},
-                        metadata={
-                            "actor_id": AGENT_SYSTEM_USER_ID,
-                            "workspace_id": workspace_id,
-                            "project_id": project_id,
-                            "task_id": task_id,
-                        },
-                    )
-                    updated_triggers, next_due = rearm_first_schedule_trigger(
-                        execution_triggers=state.get("execution_triggers"),
-                        now_utc=datetime.now(timezone.utc),
-                    )
-                    if next_due:
-                        append_event(
-                            db,
-                            aggregate_type="Task",
-                            aggregate_id=task_id,
-                            event_type=TASK_EVENT_UPDATED,
-                            payload={
-                                "execution_triggers": updated_triggers,
-                                "scheduled_at_utc": next_due,
-                                "schedule_state": "idle",
-                            },
-                            metadata={
-                                "actor_id": AGENT_SYSTEM_USER_ID,
-                                "workspace_id": workspace_id,
-                                "project_id": project_id,
-                                "task_id": task_id,
-                            },
-                        )
-                db.commit()
-            except Exception as exc:
-                db.rollback()
-                failed_at = to_iso_utc(datetime.now(timezone.utc))
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=task_id,
-                    event_type=EVENT_AUTOMATION_FAILED,
-                    payload={"failed_at": failed_at, "error": str(exc), "summary": "Automation runner failed."},
-                    metadata={"actor_id": AGENT_SYSTEM_USER_ID, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id},
-                )
-                if is_scheduled_run:
-                    append_event(
-                        db,
-                        aggregate_type="Task",
-                        aggregate_id=task_id,
-                        event_type=EVENT_SCHEDULE_FAILED,
-                        payload={"failed_at": failed_at, "error": str(exc)},
-                        metadata={
-                            "actor_id": AGENT_SYSTEM_USER_ID,
-                            "workspace_id": workspace_id,
-                            "project_id": project_id,
-                            "task_id": task_id,
-                        },
-                    )
-                    updated_triggers, next_due = rearm_first_schedule_trigger(
-                        execution_triggers=state.get("execution_triggers"),
-                        now_utc=datetime.now(timezone.utc),
-                    )
-                    if next_due:
-                        append_event(
-                            db,
-                            aggregate_type="Task",
-                            aggregate_id=task_id,
-                            event_type=TASK_EVENT_UPDATED,
-                            payload={
-                                "execution_triggers": updated_triggers,
-                                "scheduled_at_utc": next_due,
-                                "schedule_state": "idle",
-                            },
-                            metadata={
-                                "actor_id": AGENT_SYSTEM_USER_ID,
-                                "workspace_id": workspace_id,
-                                "project_id": project_id,
-                                "task_id": task_id,
-                            },
-                        )
-                db.commit()
-            processed += 1
-            if processed >= limit:
-                break
-
-    return processed
+                future.result()
+            except Exception:
+                # Individual worker errors are handled inside _execute_claimed_automation.
+                continue
+    return len(claimed_runs)
 
 
 def _runner_loop():
