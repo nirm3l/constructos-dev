@@ -4790,6 +4790,48 @@ def test_create_scheduled_task_requires_instruction_and_time(tmp_path):
     assert 'scheduled_instruction' in res.text or 'scheduled_at_utc' in res.text
 
 
+def test_create_task_infers_scheduled_type_from_schedule_fields(tmp_path):
+    client = build_client(tmp_path)
+    ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
+    project_id = client.get('/api/bootstrap').json()['projects'][0]['id']
+    due_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Inferred scheduled',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Leave progress note',
+            'scheduled_at_utc': due_at,
+            'recurring_rule': 'every:1d',
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    assert payload['task_type'] == 'scheduled_instruction'
+    assert payload['recurring_rule'] == 'every:1d'
+
+
+def test_create_task_rejects_schedule_fields_with_manual_task_type(tmp_path):
+    client = build_client(tmp_path)
+    ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
+    project_id = client.get('/api/bootstrap').json()['projects'][0]['id']
+
+    res = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Manual with recurring',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'task_type': 'manual',
+            'recurring_rule': 'every:1d',
+        },
+    )
+    assert res.status_code == 422
+    assert 'manual' in res.text and 'scheduled_instruction' in res.text
+
+
 def test_scheduled_instruction_task_is_queued_and_processed(tmp_path):
     client = build_client(tmp_path)
     ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']

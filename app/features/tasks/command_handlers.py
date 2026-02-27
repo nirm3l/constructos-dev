@@ -256,6 +256,18 @@ def _with_legacy_schedule_overrides(
 
     effective_task_type_raw = task_type if task_type is not _UNSET else current_legacy.get("task_type")
     effective_task_type = str(effective_task_type_raw or "manual").strip().lower()
+    explicit_schedule_override_present = any(
+        value is not _UNSET
+        for value in (
+            scheduled_instruction,
+            scheduled_at_utc,
+            schedule_timezone,
+            recurring_rule,
+            schedule_run_on_statuses,
+        )
+    )
+    if task_type is _UNSET and effective_task_type == "manual" and explicit_schedule_override_present:
+        effective_task_type = "scheduled_instruction"
     if effective_task_type not in {"manual", "scheduled_instruction"}:
         raise HTTPException(status_code=422, detail='task_type must be "manual" or "scheduled_instruction"')
 
@@ -288,6 +300,12 @@ def _with_legacy_schedule_overrides(
             else None
         )
     )
+
+    if effective_task_type == "manual" and explicit_schedule_override_present:
+        raise HTTPException(
+            status_code=422,
+            detail='task_type "manual" cannot include schedule fields; set task_type to "scheduled_instruction"',
+        )
 
     effective_triggers = [
         trigger
@@ -459,7 +477,7 @@ class CreateTaskHandler:
             normalized_task_type = str(legacy_task_type or "").strip().lower()
             has_explicit_schedule_fields = any(
                 key in payload_data
-                for key in ("scheduled_instruction", "scheduled_at_utc", "schedule_timezone")
+                for key in ("scheduled_instruction", "scheduled_at_utc", "schedule_timezone", "recurring_rule")
             )
             if normalized_task_type == "manual" and not has_explicit_schedule_fields:
                 legacy_task_type = _UNSET

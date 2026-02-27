@@ -516,6 +516,29 @@ def graph_get_project_subgraph(
     task_ids = [str(node.get("entity_id") or "") for node in nodes if str(node.get("entity_type") or "").lower() == "task"]
     remaining_node_slots = max(0, safe_nodes - len(nodes))
     if task_ids and remaining_node_slots:
+        from .models import SessionLocal, TaskComment
+
+        thread_previews: dict[str, str] = {}
+        with SessionLocal() as db:
+            comment_rows_sql = (
+                db.query(TaskComment.task_id, TaskComment.user_id, TaskComment.body)
+                .filter(TaskComment.task_id.in_(task_ids))
+                .order_by(TaskComment.created_at.desc(), TaskComment.id.desc())
+                .limit(2000)
+                .all()
+            )
+            for task_id_raw, user_id_raw, body_raw in comment_rows_sql:
+                task_id_text = str(task_id_raw or "").strip()
+                user_id_text = str(user_id_raw or "").strip()
+                if not task_id_text or not user_id_text:
+                    continue
+                thread_key = f"{task_id_text}:{user_id_text}"
+                if thread_key in thread_previews:
+                    continue
+                preview = _truncate_snippet(str(body_raw or ""), max_chars=72)
+                if preview:
+                    thread_previews[thread_key] = preview
+
         comment_rows = run_graph_query(
             """
             MATCH (t:Task)-[r:COMMENTED_BY]->(u:User)
@@ -543,7 +566,7 @@ def graph_get_project_subgraph(
                 continue
             count = max(1, int(row.get("comment_count") or 1))
             author = str(row.get("author_label") or user_id).strip() or user_id
-            label = f"{author} · {count} comment{'s' if count != 1 else ''}"
+            label = thread_previews.get(f"{task_id}:{user_id}") or f"{author} · {count} comment{'s' if count != 1 else ''}"
             seen_ids.add(comment_id)
             nodes.append(
                 {
