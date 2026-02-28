@@ -593,6 +593,11 @@ export type EventStormingOverview = {
   component_counts: Record<string, number>
   artifact_link_count: number
   event_storming_enabled: boolean
+  context_frame?: {
+    mode?: 'full' | 'delta' | string | null
+    revision?: string | null
+    updated_at?: string | null
+  }
   processing: {
     artifact_total: number
     processed: number
@@ -799,6 +804,8 @@ export type AgentChatUsage = {
   cached_input_tokens?: number
   output_tokens: number
   context_limit_tokens?: number
+  graph_context_frame_mode?: 'full' | 'delta' | string
+  graph_context_frame_revision?: string
   codex_resume_attempted?: boolean
   codex_resume_succeeded?: boolean
   codex_resume_fallback_used?: boolean

@@ -456,6 +456,16 @@ export function ProjectKnowledgeGraphPanel({
     progress_pct: 0,
   }
   const eventStormingProgressPct = Math.max(0, Math.min(100, Number(eventStormingProcessing.progress_pct || 0)))
+  const eventStormingFrameModeRaw = String(eventStormingOverview?.context_frame?.mode || '').trim().toLowerCase()
+  const eventStormingFrameMode = eventStormingFrameModeRaw === 'full' || eventStormingFrameModeRaw === 'delta'
+    ? eventStormingFrameModeRaw.toUpperCase()
+    : null
+  const eventStormingFrameRevision = String(eventStormingOverview?.context_frame?.revision || '').trim()
+  const eventStormingFrameRevisionShort = eventStormingFrameRevision ? eventStormingFrameRevision.slice(0, 8) : null
+  const eventStormingFrameUpdatedAtRaw = String(eventStormingOverview?.context_frame?.updated_at || '').trim()
+  const eventStormingFrameUpdatedAtLabel = eventStormingFrameUpdatedAtRaw
+    ? new Date(eventStormingFrameUpdatedAtRaw).toLocaleString()
+    : null
   const eventStormingProcessingActive = React.useMemo(() => {
     const enabled = Boolean(eventStormingOverview?.event_storming_enabled ?? true)
     if (!enabled) return false
@@ -2131,6 +2141,14 @@ export function ProjectKnowledgeGraphPanel({
                               </div>
                               <div className="event-storming-mini-stats">
                                 <span className="badge">Artifact links: {eventStormingOverview?.artifact_link_count ?? 0}</span>
+                                {eventStormingFrameMode && (
+                                  <span className="badge">
+                                    Frame: {eventStormingFrameMode}{eventStormingFrameRevisionShort ? ` · ${eventStormingFrameRevisionShort}` : ''}
+                                  </span>
+                                )}
+                                {eventStormingFrameUpdatedAtLabel && (
+                                  <span className="badge">Frame updated: {eventStormingFrameUpdatedAtLabel}</span>
+                                )}
                                 <span className="badge">Queued: {eventStormingProcessing.queued}</span>
                                 <span className="badge">Running: {eventStormingProcessing.running}</span>
                                 <span className="badge">Failed: {eventStormingProcessing.failed}</span>

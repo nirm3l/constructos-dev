@@ -411,6 +411,24 @@ class EventStormingAnalysisRun(Base, TimeMixin):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class ContextSessionState(Base, TimeMixin):
+    __tablename__ = "context_session_states"
+    __table_args__ = (
+        UniqueConstraint("scope_type", "scope_id", name="ux_context_session_scope"),
+        Index("ix_context_session_project_scope", "project_id", "scope_type"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[str | None] = mapped_column(ForeignKey("workspaces.id"), nullable=True, index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    scope_type: Mapped[str] = mapped_column(String(48), index=True)
+    scope_id: Mapped[str] = mapped_column(String(160), index=True)
+    context_revision: Mapped[str] = mapped_column(String(96), default="")
+    last_frame_mode: Mapped[str] = mapped_column(String(16), default="full")
+    last_frame_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
 class CommandExecution(Base):
     __tablename__ = "command_executions"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

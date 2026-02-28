@@ -8,9 +8,10 @@ from datetime import datetime, timedelta, timezone
 from time import perf_counter
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from features.agents.codex_mcp_adapter import run_structured_codex_prompt_with_usage
+from .context_frames import build_project_context_frame
 from features.notes.domain import (
     EVENT_ARCHIVED as NOTE_EVENT_ARCHIVED,
     EVENT_CREATED as NOTE_EVENT_CREATED,
@@ -519,11 +520,16 @@ def _event_storming_ai_prompt(
     text: str,
     entity_graph_context: list[dict[str, str]],
     project_component_snapshot: dict[str, Any],
+    context_frame_mode: str,
+    context_frame_markdown: str,
 ) -> str:
     tag_list = ", ".join(tags) if tags else "(none)"
     source_text = str(text or "").strip()
     if len(source_text) > 5000:
         source_text = source_text[:5000]
+    frame_text = str(context_frame_markdown or "").strip()
+    if len(frame_text) > 3600:
+        frame_text = frame_text[:3600]
     context_lines = [
         f"- {row['relation']} -> {row['neighbor_type']} [{row['neighbor_id']}] {row['neighbor_title']}"
         for row in entity_graph_context
@@ -559,6 +565,9 @@ def _event_storming_ai_prompt(
         + "\n"
         "Source text:\n"
         f"{source_text}\n"
+        "Project context frame:\n"
+        f"Mode: {str(context_frame_mode or 'full').strip().lower()}\n"
+        f"{frame_text or '_(unavailable)_'}\n"
     )
 
 
@@ -573,6 +582,8 @@ def _extract_with_codex_agent(
     text: str,
     entity_graph_context: list[dict[str, str]],
     project_component_snapshot: dict[str, Any],
+    context_frame_mode: str,
+    context_frame_markdown: str,
 ) -> dict[str, Any]:
     model = str(EVENT_STORMING_AI_MODEL or AGENT_CODEX_MODEL or "").strip() or None
     prompt = _event_storming_ai_prompt(
@@ -582,6 +593,8 @@ def _extract_with_codex_agent(
         text=text,
         entity_graph_context=entity_graph_context,
         project_component_snapshot=project_component_snapshot,
+        context_frame_mode=context_frame_mode,
+        context_frame_markdown=context_frame_markdown,
     )
     schema = {
         "type": "object",
@@ -629,7 +642,8 @@ def _extract_with_codex_agent(
         "required": ["components", "relations"],
         "additionalProperties": False,
     }
-    chat_session_id = f"event-storming-{project_id}-{entity_type}-{entity_id}"
+    # Reuse one Codex session per project so artifact runs share cached context.
+    chat_session_id = f"event-storming-{project_id}"
     parsed_payload, usage_payload = run_structured_codex_prompt_with_usage(
         prompt=prompt,
         output_schema=schema,
@@ -824,7 +838,23 @@ def _sync_graph_for_job(job: EventStormingAnalysisJob, snapshot: dict[str, Any] 
         entity_id=entity_id,
         limit=8,
     )
-    project_component_snapshot = _load_project_component_snapshot(project_id=project_id, limit_components=24, limit_relations=0)
+    context_frame = build_project_context_frame(
+        workspace_id=workspace_id,
+        project_id=project_id,
+        scope_type="event_storming_project",
+        scope_id=project_id,
+        focus_entity_type=_ENTITY_LABELS.get(entity_type),
+        focus_entity_id=entity_id,
+        limit=16,
+    )
+    context_frame_mode = str(context_frame.get("mode") or "full").strip().lower()
+    context_frame_revision = str(context_frame.get("revision") or "").strip()
+    context_frame_markdown = str(context_frame.get("markdown") or "").strip()
+    project_component_snapshot = _load_project_component_snapshot(
+        project_id=project_id,
+        limit_components=24 if context_frame_mode == "full" else 8,
+        limit_relations=0,
+    )
     extracted = _extract_with_codex_agent(
         workspace_id=workspace_id,
         project_id=project_id,
@@ -835,6 +865,8 @@ def _sync_graph_for_job(job: EventStormingAnalysisJob, snapshot: dict[str, Any] 
         text=str(snapshot.get("text") or ""),
         entity_graph_context=entity_graph_context,
         project_component_snapshot=project_component_snapshot,
+        context_frame_mode=context_frame_mode,
+        context_frame_markdown=context_frame_markdown,
     )
     extracted_payload = extracted.get("payload") if isinstance(extracted, dict) else {}
     usage_payload = extracted.get("usage") if isinstance(extracted, dict) else {}
@@ -952,6 +984,8 @@ def _sync_graph_for_job(job: EventStormingAnalysisJob, snapshot: dict[str, Any] 
         "relations": component_relations,
         "usage": usage_payload or {},
         "prompt_chars": prompt_chars,
+        "context_frame_mode": context_frame_mode,
+        "context_frame_revision": context_frame_revision,
     }
 
 
@@ -963,6 +997,16 @@ def _process_analysis_job(job_id: int) -> None:
             return
         if job.status != "running":
             return
+        project_key = str(job.project_id or "").strip()
+        lock_key: int | None = None
+        if project_key:
+            lock_key = _project_lock_key(project_key)
+            if not _try_acquire_project_lock(db, lock_key):
+                job.status = "queued"
+                job.next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=2.0)
+                job.last_error = "Waiting for project-level analysis lock."
+                db.commit()
+                return
         try:
             if not _project_event_storming_enabled(db, str(job.project_id or "").strip()):
                 elapsed_ms = int(max(0.0, (perf_counter() - started) * 1000.0))
@@ -1085,6 +1129,9 @@ def _process_analysis_job(job_id: int) -> None:
                 )
             )
             db.commit()
+        finally:
+            if lock_key is not None:
+                _release_project_lock(db, lock_key)
 
 
 def _claim_analysis_jobs(limit: int) -> list[int]:
@@ -1097,15 +1144,50 @@ def _claim_analysis_jobs(limit: int) -> list[int]:
                 EventStormingAnalysisJob.next_attempt_at <= now,
             )
             .order_by(EventStormingAnalysisJob.updated_at.asc(), EventStormingAnalysisJob.id.asc())
-            .limit(max(1, int(limit))),
+            .limit(max(1, int(limit)) * 4),
         ).scalars().all()
         job_ids: list[int] = []
+        claimed_projects: set[str] = set()
         for row in rows:
+            project_key = str(row.project_id or "").strip()
+            if project_key and project_key in claimed_projects:
+                continue
             row.status = "running"
             job_ids.append(int(row.id))
+            if project_key:
+                claimed_projects.add(project_key)
+            if len(job_ids) >= max(1, int(limit)):
+                break
         if job_ids:
             db.commit()
         return job_ids
+
+
+def _project_lock_key(project_id: str) -> int:
+    digest = hashlib.sha256(str(project_id or "").strip().encode("utf-8")).digest()
+    value = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    return int(value & 0x7FFF_FFFF_FFFF_FFFF)
+
+
+def _try_acquire_project_lock(db, lock_key: int) -> bool:
+    try:
+        result = db.execute(
+            text("SELECT pg_try_advisory_lock(CAST(:lock_key AS BIGINT))"),
+            {"lock_key": int(lock_key)},
+        ).scalar_one_or_none()
+        return bool(result)
+    except Exception:
+        return True
+
+
+def _release_project_lock(db, lock_key: int) -> None:
+    try:
+        db.execute(
+            text("SELECT pg_advisory_unlock(CAST(:lock_key AS BIGINT))"),
+            {"lock_key": int(lock_key)},
+        )
+    except Exception:
+        return
 
 
 def _recover_stale_running_analysis_jobs_once(limit: int) -> int:

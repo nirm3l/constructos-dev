@@ -6,7 +6,7 @@
     <title>ConstructOS | Operational Memory and Execution Platform</title>
     <meta
       name="description"
-      content="ConstructOS is a self-hosted only platform for delivery teams with shared operational memory, vector search plus graph retrieval, spec-driven execution, AI automation, and full auditability."
+      content="ConstructOS is a self-hosted only platform for delivery teams with shared operational memory, Event Storming plus DDD context mapping, vector search plus graph retrieval, spec-driven execution, AI automation, and full auditability."
     />
     <meta name="robots" content="index, follow" />
     <link rel="canonical" href="https://constructos.dev/" />
@@ -16,7 +16,7 @@
     <meta property="og:title" content="ConstructOS | Operational Memory and Execution Platform" />
     <meta
       property="og:description"
-      content="Self-hosted only platform to unify project planning, execution, vector search, graph context, and AI automation."
+      content="Self-hosted only platform to unify project planning, execution, Event Storming plus DDD context mapping, vector search, graph context, and AI automation."
     />
     <meta property="og:site_name" content="ConstructOS" />
 
@@ -24,7 +24,7 @@
     <meta name="twitter:title" content="ConstructOS | Operational Memory and Execution Platform" />
     <meta
       name="twitter:description"
-      content="Self-hosted only delivery platform with vector search, graph-linked knowledge, spec-linked tasks, and reliable AI operations."
+      content="Self-hosted only delivery platform with Event Storming plus DDD context mapping, vector search, graph-linked knowledge, spec-linked tasks, and reliable AI operations."
     />
     <meta name="waitlist-api-url" content="" />
     <meta name="contact-request-api-url" content="" />
@@ -105,7 +105,7 @@
           <p class="lead">
             ConstructOS connects project intent, specifications, tasks, notes, rules, and AI execution in a
             single operating layer. Your team keeps context with vector plus graph retrieval, moves faster, and
-            keeps an audit trail.
+            keeps an audit trail. Event Storming plus DDD mapping can be derived from evolving artifacts when needed.
             Deployment model is self-hosted only through Docker Compose.
           </p>
           <div class="hero-cta">
@@ -116,6 +116,7 @@
             <li>CQRS + Event Sourcing Core</li>
             <li>Vector + Graph Retrieval</li>
             <li>Jira + GitHub MCP Integrations</li>
+            <li>Live Event Storming Diagram (DDD-aligned)</li>
             <li>Codex Required</li>
             <li>Self-Hosted Only</li>
             <li>Public Beta: Free Until March 31, 2026</li>
@@ -191,10 +192,17 @@
             <p>Use semantic vector search plus graph traversal to surface dependency-aware context with precision.</p>
           </article>
           <article class="card reveal delay-2">
+            <h3>Event Storming + DDD mapping</h3>
+            <p>
+              Keep bounded contexts, aggregates, commands, domain events, policies, and read models connected to
+              day-to-day artifacts in one living diagram.
+            </p>
+          </article>
+          <article class="card reveal delay-3">
             <h3>Live workspace visibility</h3>
             <p>See changes as they happen with real-time notifications and activity updates.</p>
           </article>
-          <article class="card reveal delay-3">
+          <article class="card reveal delay-1">
             <h3>Enterprise-ready foundation</h3>
             <p>Built-in licensing controls, structured APIs, and event-level auditability for governance.</p>
           </article>
@@ -211,11 +219,14 @@
             <h3>Deterministic write path</h3>
             <p>
               Commands append events, projections update read models, and retrieval combines vectors plus graph context
-              so every state transition stays traceable.
+              so every state transition stays traceable. Event Storming links are inferred asynchronously as a
+              secondary projection with review status controls.
             </p>
             <pre class="arch-code"><code>UI --REST/SSE--> API
 API --append--> Event Store
 Projections --> SQL + Graph
+Event Storming --> Derived Graph Projection
+Review API --> Link Status (candidate/approved/rejected)
 Context API --> Vector Index + Graph</code></pre>
           </article>
           <article class="architecture-card reveal delay-2">
@@ -241,8 +252,11 @@ Command IDs --> Idempotent Mutations</code></pre>
           </article>
           <article class="step-card reveal delay-2">
             <span class="step-number">02</span>
-            <h3>Execute with context</h3>
-            <p>Drive tasks and notes from specifications while retrieving context through vector and graph search.</p>
+            <h3>Map domain flow</h3>
+            <p>
+              Convert evolving tasks, notes, and specifications into Event Storming plus DDD components linked to
+              the project graph.
+            </p>
           </article>
           <article class="step-card reveal delay-3">
             <span class="step-number">03</span>
@@ -287,8 +301,9 @@ Command IDs --> Idempotent Mutations</code></pre>
             <p class="plan-price">$19 <span>/ user / month</span></p>
             <ul>
               <li>Everything in Starter</li>
-              <li>Vector search and graph context tools</li>
+              <li>Vector plus graph context tools</li>
               <li>Advanced AI automation workflows</li>
+              <li>Event Storming diagram with DDD-linked artifacts</li>
               <li>Priority support</li>
             </ul>
             <a class="btn btn-primary" href="#contact-pricing">Request Team Plan</a>
@@ -421,6 +436,13 @@ Command IDs --> Idempotent Mutations</code></pre>
           <article class="faq-item reveal delay-3">
             <h3>Do you support AI operations safely?</h3>
             <p>Yes. Automation flows use controlled command execution, idempotency patterns, and audit trails.</p>
+          </article>
+          <article class="faq-item reveal delay-1">
+            <h3>How does the Event Storming diagram stay up to date?</h3>
+            <p>
+              Artifact changes trigger asynchronous analysis that updates Event Storming plus DDD links in the
+              knowledge graph. Teams can manually approve or reject inferred links.
+            </p>
           </article>
           <article class="faq-item reveal delay-1">
             <h3>Do you support vector search?</h3>

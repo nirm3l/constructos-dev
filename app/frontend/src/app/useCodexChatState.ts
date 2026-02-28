@@ -134,6 +134,12 @@ function normalizeUsage(value: unknown): AgentChatUsage | null {
   }
   if (Number.isFinite(cached) && cached >= 0) normalized.cached_input_tokens = Math.floor(cached)
   if (Number.isFinite(contextLimit) && contextLimit > 0) normalized.context_limit_tokens = Math.floor(contextLimit)
+  const frameMode = String(usage.graph_context_frame_mode || '').trim().toLowerCase()
+  if (frameMode === 'full' || frameMode === 'delta') normalized.graph_context_frame_mode = frameMode
+  const frameRevision = typeof usage.graph_context_frame_revision === 'string'
+    ? usage.graph_context_frame_revision.trim()
+    : ''
+  if (frameRevision) normalized.graph_context_frame_revision = frameRevision
   return normalized
 }
 

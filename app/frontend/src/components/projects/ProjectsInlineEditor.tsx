@@ -286,6 +286,16 @@ export function ProjectsInlineEditor({
     enabled: Boolean(userId && project.id && selectedProject?.id === project.id),
   })
   const eventStormingOverview = inlineEventStormingOverviewQuery.data ?? projectEventStormingOverview?.data
+  const eventStormingFrameModeRaw = String(eventStormingOverview?.context_frame?.mode || '').trim().toLowerCase()
+  const eventStormingFrameMode = eventStormingFrameModeRaw === 'full' || eventStormingFrameModeRaw === 'delta'
+    ? eventStormingFrameModeRaw.toUpperCase()
+    : null
+  const eventStormingFrameRevision = String(eventStormingOverview?.context_frame?.revision || '').trim()
+  const eventStormingFrameRevisionShort = eventStormingFrameRevision ? eventStormingFrameRevision.slice(0, 8) : null
+  const eventStormingFrameUpdatedAtRaw = String(eventStormingOverview?.context_frame?.updated_at || '').trim()
+  const eventStormingFrameUpdatedAtLabel = eventStormingFrameUpdatedAtRaw
+    ? new Date(eventStormingFrameUpdatedAtRaw).toLocaleString()
+    : null
   const eventStormingOverviewLoading = Boolean(
     inlineEventStormingOverviewQuery.isLoading ||
       inlineEventStormingOverviewQuery.isFetching ||
@@ -804,6 +814,14 @@ export function ProjectsInlineEditor({
             <>
               <div className="graph-insights-meta-row event-storming-controls-stats">
                 <span className="badge">Artifact links: {eventStormingOverview.artifact_link_count}</span>
+                {eventStormingFrameMode && (
+                  <span className="badge">
+                    Frame: {eventStormingFrameMode}{eventStormingFrameRevisionShort ? ` · ${eventStormingFrameRevisionShort}` : ''}
+                  </span>
+                )}
+                {eventStormingFrameUpdatedAtLabel && (
+                  <span className="badge">Frame updated: {eventStormingFrameUpdatedAtLabel}</span>
+                )}
                 <span className="badge">
                   Processing: {eventStormingOverview.processing.processed}/{eventStormingOverview.processing.artifact_total} ({eventStormingOverview.processing.progress_pct.toFixed(1)}%)
                 </span>

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import select
 
-from shared.knowledge_graph import build_graph_context_markdown, build_graph_context_pack
+from shared.context_frames import build_project_context_frame
 from shared.models import Project, ProjectRule, ProjectSkill, SessionLocal
 from shared.settings import AGENT_CODEX_COMMAND, AGENT_EXECUTOR_MODE, AGENT_EXECUTOR_TIMEOUT_SECONDS
 
@@ -21,7 +21,7 @@ class AutomationOutcome:
     action: str
     summary: str
     comment: str | None = None
-    usage: dict[str, int] | None = None
+    usage: dict[str, object] | None = None
     codex_session_id: str | None = None
     resume_attempted: bool = False
     resume_succeeded: bool = False
@@ -180,7 +180,7 @@ def _parse_command_outcome(stdout: str) -> AutomationOutcome:
     resume_attempted = _coerce_bool(payload.get("resume_attempted"))
     resume_succeeded = _coerce_bool(payload.get("resume_succeeded"))
     resume_fallback_used = _coerce_bool(payload.get("resume_fallback_used"))
-    usage: dict[str, int] | None = None
+    usage: dict[str, object] | None = None
     if isinstance(usage_raw, dict):
         usage = {}
         for key in ("input_tokens", "cached_input_tokens", "output_tokens", "context_limit_tokens"):
@@ -191,6 +191,12 @@ def _parse_command_outcome(stdout: str) -> AutomationOutcome:
                 usage[key] = max(0, int(raw_value))
             except (TypeError, ValueError):
                 continue
+        frame_mode_raw = str(usage_raw.get("graph_context_frame_mode") or "").strip().lower()
+        if frame_mode_raw in {"full", "delta"}:
+            usage["graph_context_frame_mode"] = frame_mode_raw
+        frame_revision = str(usage_raw.get("graph_context_frame_revision") or "").strip()
+        if frame_revision:
+            usage["graph_context_frame_revision"] = frame_revision
         if not usage:
             usage = None
     if action not in {"complete", "comment"}:
@@ -208,6 +214,31 @@ def _parse_command_outcome(stdout: str) -> AutomationOutcome:
         resume_attempted=bool(resume_attempted),
         resume_succeeded=bool(resume_succeeded),
         resume_fallback_used=bool(resume_fallback_used),
+    )
+
+
+def _attach_context_frame_usage(
+    outcome: AutomationOutcome,
+    *,
+    frame_mode: str,
+    frame_revision: str,
+) -> AutomationOutcome:
+    usage_payload: dict[str, object] = dict(outcome.usage or {})
+    normalized_mode = str(frame_mode or "").strip().lower()
+    normalized_revision = str(frame_revision or "").strip()
+    if normalized_mode in {"full", "delta"}:
+        usage_payload["graph_context_frame_mode"] = normalized_mode
+    if normalized_revision:
+        usage_payload["graph_context_frame_revision"] = normalized_revision
+    return AutomationOutcome(
+        action=outcome.action,
+        summary=outcome.summary,
+        comment=outcome.comment,
+        usage=usage_payload or None,
+        codex_session_id=outcome.codex_session_id,
+        resume_attempted=outcome.resume_attempted,
+        resume_succeeded=outcome.resume_succeeded,
+        resume_fallback_used=outcome.resume_fallback_used,
     )
 
 
@@ -318,20 +349,24 @@ def execute_task_automation(
 
     command = shlex.split(AGENT_CODEX_COMMAND)
     project_name, project_description, project_rules, project_skills = _load_project_context(project_id)
-    graph_context_pack = build_graph_context_pack(
+    context_scope_type = "chat_session" if str(chat_session_id or "").strip() else "task_automation"
+    context_scope_id = str(chat_session_id or "").strip() or str(task_id or "").strip() or "general"
+    context_frame = build_project_context_frame(
+        workspace_id=workspace_id,
         project_id=project_id,
+        scope_type=context_scope_type,
+        scope_id=context_scope_id,
         focus_entity_type="Task" if str(task_id or "").strip() else None,
         focus_entity_id=task_id if str(task_id or "").strip() else None,
+        limit=20,
     )
-    graph_context_markdown = str(graph_context_pack.get("markdown") or "").strip() if graph_context_pack else ""
+    graph_context_markdown = str(context_frame.get("markdown") or "").strip()
     if not graph_context_markdown:
-        graph_context_markdown = build_graph_context_markdown(
-            project_id=project_id,
-            focus_entity_type="Task" if str(task_id or "").strip() else None,
-            focus_entity_id=task_id if str(task_id or "").strip() else None,
-        )
-    graph_evidence_json = json.dumps(graph_context_pack.get("evidence") or [], ensure_ascii=True) if graph_context_pack else "[]"
-    graph_summary_markdown = _graph_summary_to_markdown(graph_context_pack.get("summary")) if graph_context_pack else ""
+        graph_context_markdown = "_(knowledge graph unavailable)_"
+    graph_evidence_json = json.dumps(context_frame.get("evidence") or [], ensure_ascii=True)
+    graph_summary_markdown = str(context_frame.get("summary_markdown") or "").strip()
+    frame_mode = str(context_frame.get("mode") or "full").strip().lower()
+    frame_revision = str(context_frame.get("revision") or "").strip()
     raw_timeout, run_timeout_seconds = _resolve_run_timeout_seconds(timeout_seconds)
     context = {
         "task_id": task_id,
@@ -355,6 +390,8 @@ def execute_task_automation(
         "graph_context_markdown": graph_context_markdown,
         "graph_evidence_json": graph_evidence_json,
         "graph_summary_markdown": graph_summary_markdown,
+        "graph_context_frame_mode": frame_mode,
+        "graph_context_frame_revision": frame_revision,
         "allow_mutations": allow_mutations,
         "mcp_servers": mcp_servers,
         "model": model,
@@ -378,7 +415,11 @@ def execute_task_automation(
     if proc.returncode != 0:
         err_text = (proc.stderr or proc.stdout or "").strip()
         raise RuntimeError(f"Executor failed (exit={proc.returncode}): {err_text[:300]}")
-    return _parse_command_outcome(proc.stdout)
+    return _attach_context_frame_usage(
+        _parse_command_outcome(proc.stdout),
+        frame_mode=frame_mode,
+        frame_revision=frame_revision,
+    )
 
 
 def execute_task_automation_stream(
@@ -417,20 +458,24 @@ def execute_task_automation_stream(
 
     command = shlex.split(AGENT_CODEX_COMMAND)
     project_name, project_description, project_rules, project_skills = _load_project_context(project_id)
-    graph_context_pack = build_graph_context_pack(
+    context_scope_type = "chat_session" if str(chat_session_id or "").strip() else "task_automation"
+    context_scope_id = str(chat_session_id or "").strip() or str(task_id or "").strip() or "general"
+    context_frame = build_project_context_frame(
+        workspace_id=workspace_id,
         project_id=project_id,
+        scope_type=context_scope_type,
+        scope_id=context_scope_id,
         focus_entity_type="Task" if str(task_id or "").strip() else None,
         focus_entity_id=task_id if str(task_id or "").strip() else None,
+        limit=20,
     )
-    graph_context_markdown = str(graph_context_pack.get("markdown") or "").strip() if graph_context_pack else ""
+    graph_context_markdown = str(context_frame.get("markdown") or "").strip()
     if not graph_context_markdown:
-        graph_context_markdown = build_graph_context_markdown(
-            project_id=project_id,
-            focus_entity_type="Task" if str(task_id or "").strip() else None,
-            focus_entity_id=task_id if str(task_id or "").strip() else None,
-        )
-    graph_evidence_json = json.dumps(graph_context_pack.get("evidence") or [], ensure_ascii=True) if graph_context_pack else "[]"
-    graph_summary_markdown = _graph_summary_to_markdown(graph_context_pack.get("summary")) if graph_context_pack else ""
+        graph_context_markdown = "_(knowledge graph unavailable)_"
+    graph_evidence_json = json.dumps(context_frame.get("evidence") or [], ensure_ascii=True)
+    graph_summary_markdown = str(context_frame.get("summary_markdown") or "").strip()
+    frame_mode = str(context_frame.get("mode") or "full").strip().lower()
+    frame_revision = str(context_frame.get("revision") or "").strip()
     raw_timeout, run_timeout_seconds = _resolve_run_timeout_seconds(timeout_seconds)
     context = {
         "task_id": task_id,
@@ -454,6 +499,8 @@ def execute_task_automation_stream(
         "graph_context_markdown": graph_context_markdown,
         "graph_evidence_json": graph_evidence_json,
         "graph_summary_markdown": graph_summary_markdown,
+        "graph_context_frame_mode": frame_mode,
+        "graph_context_frame_revision": frame_revision,
         "allow_mutations": allow_mutations,
         "mcp_servers": mcp_servers,
         "model": model,
@@ -468,4 +515,8 @@ def execute_task_automation_stream(
         timeout_seconds=run_timeout_seconds,
         on_event=on_event,
     )
-    return _parse_command_outcome(stdout)
+    return _attach_context_frame_usage(
+        _parse_command_outcome(stdout),
+        frame_mode=frame_mode,
+        frame_revision=frame_revision,
+    )

@@ -22,6 +22,7 @@ from .auth import generate_temporary_password, hash_password, verify_password
 from .licensing import resolve_license_installation_id
 from . import models as shared_models
 from .models import (
+    ContextSessionState,
     EventStormingAnalysisJob,
     EventStormingAnalysisRun,
     Note,
@@ -492,6 +493,11 @@ def ensure_event_storming_analysis_table_columns(db: Session):
     db.commit()
 
 
+def ensure_context_session_state_table_columns(db: Session):
+    ContextSessionState.__table__.create(bind=db.bind, checkfirst=True)
+    db.commit()
+
+
 def ensure_note_table_columns(db: Session):
     existing = {column["name"] for column in inspect(db.bind).get_columns("notes")}
     if "external_refs" not in existing:
@@ -636,6 +642,7 @@ def bootstrap_data():
         ensure_task_comment_table_columns(db)
         ensure_chat_table_columns(db)
         ensure_event_storming_analysis_table_columns(db)
+        ensure_context_session_state_table_columns(db)
         ensure_task_watcher_table_constraints(db)
         ensure_system_users(db)
         default_user = db.get(User, DEFAULT_USER_ID)

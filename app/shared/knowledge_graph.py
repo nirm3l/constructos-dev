@@ -727,7 +727,7 @@ def event_storming_get_project_overview(project_id: str) -> dict[str, Any]:
     require_graph_available()
     from sqlalchemy import func, select
 
-    from .models import EventStormingAnalysisJob, Note, Project, SessionLocal, Specification, Task
+    from .models import ContextSessionState, EventStormingAnalysisJob, Note, Project, SessionLocal, Specification, Task
 
     project_rows = run_graph_query(
         """
@@ -796,6 +796,13 @@ def event_storming_get_project_overview(project_id: str) -> dict[str, Any]:
         project = db.get(Project, project_id)
         if project is not None and not bool(project.is_deleted):
             event_storming_enabled = bool(getattr(project, "event_storming_enabled", True))
+        frame_state = db.execute(
+            select(ContextSessionState).where(
+                ContextSessionState.project_id == project_id,
+                ContextSessionState.scope_type == "event_storming_project",
+                ContextSessionState.scope_id == project_id,
+            )
+        ).scalar_one_or_none()
         task_count = int(
             db.execute(
                 select(func.count(Task.id)).where(Task.project_id == project_id, Task.is_deleted == False)
@@ -835,6 +842,15 @@ def event_storming_get_project_overview(project_id: str) -> dict[str, Any]:
                 else 100.0
             ),
         }
+    context_frame = {
+        "mode": str(getattr(frame_state, "last_frame_mode", "") or "").strip().lower() or None,
+        "revision": str(getattr(frame_state, "context_revision", "") or "").strip() or None,
+        "updated_at": (
+            frame_state.last_frame_at.astimezone(timezone.utc).isoformat()
+            if getattr(frame_state, "last_frame_at", None) is not None
+            else None
+        ),
+    }
     return {
         "project_id": str(first.get("project_id") or project_id),
         "project_name": str(first.get("project_name") or ""),
@@ -842,6 +858,7 @@ def event_storming_get_project_overview(project_id: str) -> dict[str, Any]:
         "artifact_link_count": int((link_rows[0] if link_rows else {}).get("count") or 0),
         "event_storming_enabled": event_storming_enabled,
         "processing": processing,
+        "context_frame": context_frame,
     }
 
 

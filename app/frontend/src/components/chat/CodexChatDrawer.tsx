@@ -429,6 +429,15 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const contextSummary = inputTokens !== null
     ? (contextLimitTokens && usagePercent !== null ? `Context ${usagePercent}%` : `Context ${inputTokens.toLocaleString()}`)
     : null
+  const contextFrameModeRaw = String(usage?.graph_context_frame_mode || '').trim().toLowerCase()
+  const contextFrameMode = contextFrameModeRaw === 'full' || contextFrameModeRaw === 'delta'
+    ? contextFrameModeRaw.toUpperCase()
+    : null
+  const contextFrameRevision = String(usage?.graph_context_frame_revision || '').trim()
+  const contextFrameRevisionShort = contextFrameRevision ? contextFrameRevision.slice(0, 8) : null
+  const contextFrameSummary = contextFrameMode
+    ? `Frame ${contextFrameMode}${contextFrameRevisionShort ? ` · ${contextFrameRevisionShort}` : ''}`
+    : null
   const codexResumeFallbackUsed = Boolean(
     normalizeBool(state.codexChatResumeState?.fallbackUsed)
     || normalizeBool(usage?.codex_resume_fallback_used)
@@ -444,7 +453,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const metaParts: string[] = []
   if (hasMessages) metaParts.push(`${state.codexChatTurns.length} ${state.codexChatTurns.length === 1 ? 'message' : 'messages'}`)
   if (activeSessionUpdatedAt && (hasMessages || hasContext)) metaParts.push(activeSessionUpdatedAt)
-  const hasSessionMeta = metaParts.length > 0 || Boolean(contextSummary) || codexResumeFallbackUsed
+  const hasSessionMeta = metaParts.length > 0 || Boolean(contextSummary) || Boolean(contextFrameSummary) || codexResumeFallbackUsed
   const canDeleteSession = (
     Array.isArray(state.codexChatSessions)
     && state.codexChatSessions.length > 1
@@ -980,7 +989,13 @@ export function CodexChatDrawer({ state }: { state: any }) {
               </div>
             )}
             {contextSummary && (
-              <span className="codex-chat-session-meta-context">{contextSummary}</span>
+              <span className="codex-chat-session-meta-context">
+                {contextSummary}
+                {contextFrameSummary ? ` · ${contextFrameSummary}` : ''}
+              </span>
+            )}
+            {!contextSummary && contextFrameSummary && (
+              <span className="codex-chat-session-meta-context">{contextFrameSummary}</span>
             )}
           </div>
         )}
