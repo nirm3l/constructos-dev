@@ -148,6 +148,7 @@ export type Project = {
   context_pack_evidence_top_k: number | null
   chat_index_mode: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR' | string
   chat_attachment_ingestion_mode: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT' | string
+  event_storming_enabled: boolean
   embedding_index_status: 'not_indexed' | 'indexing' | 'ready' | 'stale'
   embedding_index_progress_pct: number | null
   embedding_indexed_entities: number
@@ -591,6 +592,16 @@ export type EventStormingOverview = {
   project_name: string
   component_counts: Record<string, number>
   artifact_link_count: number
+  event_storming_enabled: boolean
+  processing: {
+    artifact_total: number
+    processed: number
+    queued: number
+    running: number
+    failed: number
+    done: number
+    progress_pct: number
+  }
 }
 
 export type EventStormingSubgraph = {

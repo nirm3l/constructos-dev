@@ -18,6 +18,7 @@ export function useProjectState() {
   const [projectChatAttachmentIngestionMode, setProjectChatAttachmentIngestionMode] = React.useState<
     'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
   >('METADATA_ONLY')
+  const [projectEventStormingEnabled, setProjectEventStormingEnabled] = React.useState(true)
   const [projectTemplateParametersText, setProjectTemplateParametersText] = React.useState('')
   const [projectDescriptionView, setProjectDescriptionView] = React.useState<'write' | 'preview' | 'split'>('split')
   const [showProjectCreateForm, setShowProjectCreateForm] = React.useState(false)
@@ -36,6 +37,7 @@ export function useProjectState() {
   const [editProjectChatAttachmentIngestionMode, setEditProjectChatAttachmentIngestionMode] = React.useState<
     'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
   >('METADATA_ONLY')
+  const [editProjectEventStormingEnabled, setEditProjectEventStormingEnabled] = React.useState(true)
   const [createProjectMemberIds, setCreateProjectMemberIds] = React.useState<string[]>([])
   const [editProjectMemberIds, setEditProjectMemberIds] = React.useState<string[]>([])
   const [editProjectDescriptionView, setEditProjectDescriptionView] = React.useState<'write' | 'preview' | 'split'>('split')
@@ -82,6 +84,8 @@ export function useProjectState() {
     setProjectChatIndexMode,
     projectChatAttachmentIngestionMode,
     setProjectChatAttachmentIngestionMode,
+    projectEventStormingEnabled,
+    setProjectEventStormingEnabled,
     projectTemplateParametersText,
     setProjectTemplateParametersText,
     projectDescriptionView,
@@ -110,6 +114,8 @@ export function useProjectState() {
     setEditProjectChatIndexMode,
     editProjectChatAttachmentIngestionMode,
     setEditProjectChatAttachmentIngestionMode,
+    editProjectEventStormingEnabled,
+    setEditProjectEventStormingEnabled,
     createProjectMemberIds,
     setCreateProjectMemberIds,
     editProjectMemberIds,

@@ -29,6 +29,7 @@ class ProjectAggregate(Aggregate):
         context_pack_evidence_top_k: int | None = None,
         chat_index_mode: str = "OFF",
         chat_attachment_ingestion_mode: str = "METADATA_ONLY",
+        event_storming_enabled: bool = True,
         status: str = "Active",
     ) -> None:
         _ = id
@@ -43,6 +44,7 @@ class ProjectAggregate(Aggregate):
         self.context_pack_evidence_top_k = context_pack_evidence_top_k
         self.chat_index_mode = chat_index_mode
         self.chat_attachment_ingestion_mode = chat_attachment_ingestion_mode
+        self.event_storming_enabled = event_storming_enabled
         self.status = status
         self.is_deleted = False
         self.member_roles: dict[str, str] = {}
@@ -60,6 +62,7 @@ class ProjectAggregate(Aggregate):
         context_pack_evidence_top_k: int | None = None,
         chat_index_mode: str | None = None,
         chat_attachment_ingestion_mode: str | None = None,
+        event_storming_enabled: bool | None = None,
     ) -> None:
         if name is not None:
             self.name = name
@@ -81,6 +84,8 @@ class ProjectAggregate(Aggregate):
             self.chat_index_mode = chat_index_mode
         if chat_attachment_ingestion_mode is not None:
             self.chat_attachment_ingestion_mode = chat_attachment_ingestion_mode
+        if event_storming_enabled is not None:
+            self.event_storming_enabled = event_storming_enabled
 
     @event("Deleted")
     def delete(self, deleted_tasks: int = 0, deleted_notes: int = 0) -> None:

@@ -25,6 +25,7 @@ from shared.knowledge_graph import (
     require_graph_available,
     search_project_knowledge,
 )
+from shared.eventing_event_storming import enqueue_event_storming_project_backfill
 from .application import ProjectApplicationService
 from .read_models import (
     get_project_activity_read_model,
@@ -76,6 +77,7 @@ def create_project(
         context_pack_evidence_top_k=payload.context_pack_evidence_top_k,
         chat_index_mode=payload.chat_index_mode,
         chat_attachment_ingestion_mode=payload.chat_attachment_ingestion_mode,
+        event_storming_enabled=payload.event_storming_enabled,
         member_user_ids=payload.member_user_ids,
         command_id=command_id,
     )
@@ -99,7 +101,14 @@ def patch_project(
     user=Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    return ProjectApplicationService(db, user, command_id=command_id).patch_project(project_id, payload)
+    project = _load_project_with_access(db, user, project_id)
+    was_enabled = bool(getattr(project, "event_storming_enabled", True))
+    updated = ProjectApplicationService(db, user, command_id=command_id).patch_project(project_id, payload)
+    requested = payload.model_dump(exclude_unset=True)
+    now_enabled = bool(updated.get("event_storming_enabled", was_enabled))
+    if "event_storming_enabled" in requested and requested.get("event_storming_enabled") is True and not was_enabled and now_enabled:
+        enqueue_event_storming_project_backfill(project_id=project_id, workspace_id=str(project.workspace_id))
+    return updated
 
 
 @router.get("/api/projects/{project_id}/board")

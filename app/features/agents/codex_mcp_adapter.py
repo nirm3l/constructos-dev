@@ -1214,6 +1214,32 @@ def run_structured_codex_prompt(
     mcp_servers: list[str] | None = None,
     preferred_thread_id: str | None = None,
 ) -> dict[str, object]:
+    parsed_payload, _ = run_structured_codex_prompt_with_usage(
+        prompt=prompt,
+        output_schema=output_schema,
+        workspace_id=workspace_id,
+        session_key=session_key,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        timeout_seconds=timeout_seconds,
+        mcp_servers=mcp_servers,
+        preferred_thread_id=preferred_thread_id,
+    )
+    return parsed_payload
+
+
+def run_structured_codex_prompt_with_usage(
+    *,
+    prompt: str,
+    output_schema: dict[str, object],
+    workspace_id: str | None = None,
+    session_key: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    timeout_seconds: float | None = None,
+    mcp_servers: list[str] | None = None,
+    preferred_thread_id: str | None = None,
+) -> tuple[dict[str, object], dict[str, int] | None]:
     normalized_workspace_id = str(workspace_id or "").strip() or None
     normalized_session_key = str(session_key or "").strip() or None
     selected_mcp_servers = normalize_chat_mcp_servers(mcp_servers, strict=False)
@@ -1240,7 +1266,7 @@ def run_structured_codex_prompt(
             workspace_id=normalized_workspace_id,
             chat_session_id=normalized_session_key,
         ) as codex_env:
-            final_message, _, _, _, _ = _run_codex_app_server_with_optional_stream(
+            final_message, usage, _, _, _ = _run_codex_app_server_with_optional_stream(
                 start_prompt=prompt,
                 resume_prompt=prompt,
                 timeout_seconds=runtime_timeout_seconds,
@@ -1261,7 +1287,7 @@ def run_structured_codex_prompt(
         snippet = str(final_message or "").strip().replace("\n", " ")[:320]
         detail = f"{exc} | response_snippet={snippet}" if snippet else str(exc)
         raise RuntimeError(detail) from exc
-    return {str(key): value for key, value in parsed_generic.items()}
+    return {str(key): value for key, value in parsed_generic.items()}, usage
 
 
 def main() -> int:

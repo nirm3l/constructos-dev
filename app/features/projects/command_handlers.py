@@ -242,6 +242,7 @@ class CreateProjectHandler:
             chat_attachment_ingestion_mode=_normalize_chat_attachment_ingestion_mode(
                 self.payload.chat_attachment_ingestion_mode
             ),
+            event_storming_enabled=bool(self.payload.event_storming_enabled),
             status="Active",
         )
         for uid in deduped_member_ids:
@@ -398,6 +399,8 @@ class PatchProjectHandler:
             event_payload["attachment_refs"] = _normalize_attachment_refs(data["attachment_refs"])
         if "embedding_enabled" in data and data["embedding_enabled"] is None:
             raise HTTPException(status_code=422, detail="embedding_enabled cannot be null")
+        if "event_storming_enabled" in data and data["event_storming_enabled"] is None:
+            raise HTTPException(status_code=422, detail="event_storming_enabled cannot be null")
 
         if "embedding_enabled" in data or "embedding_model" in data:
             next_enabled = bool(data.get("embedding_enabled", project.embedding_enabled))
@@ -419,6 +422,8 @@ class PatchProjectHandler:
             event_payload["chat_attachment_ingestion_mode"] = _normalize_chat_attachment_ingestion_mode(
                 data.get("chat_attachment_ingestion_mode")
             )
+        if "event_storming_enabled" in data and data["event_storming_enabled"] is not None:
+            event_payload["event_storming_enabled"] = bool(data.get("event_storming_enabled"))
 
         if not event_payload:
             view = load_project_view(self.ctx.db, self.project_id)

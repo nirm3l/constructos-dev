@@ -725,6 +725,10 @@ _EVENT_STORMING_ARTIFACT_LABELS = ["Task", "Note", "Specification"]
 
 def event_storming_get_project_overview(project_id: str) -> dict[str, Any]:
     require_graph_available()
+    from sqlalchemy import func, select
+
+    from .models import EventStormingAnalysisJob, Note, Project, SessionLocal, Specification, Task
+
     project_rows = run_graph_query(
         """
         MATCH (p:Project {id:$project_id})
@@ -739,6 +743,16 @@ def event_storming_get_project_overview(project_id: str) -> dict[str, Any]:
             "project_name": "",
             "component_counts": {},
             "artifact_link_count": 0,
+            "event_storming_enabled": True,
+            "processing": {
+                "artifact_total": 0,
+                "processed": 0,
+                "queued": 0,
+                "running": 0,
+                "failed": 0,
+                "done": 0,
+                "progress_pct": 0.0,
+            },
         }
 
     component_counts: dict[str, int] = {}
@@ -768,11 +782,66 @@ def event_storming_get_project_overview(project_id: str) -> dict[str, Any]:
         },
     )
     first = project_rows[0]
+    processing = {
+        "artifact_total": 0,
+        "processed": 0,
+        "queued": 0,
+        "running": 0,
+        "failed": 0,
+        "done": 0,
+        "progress_pct": 0.0,
+    }
+    event_storming_enabled = True
+    with SessionLocal() as db:
+        project = db.get(Project, project_id)
+        if project is not None and not bool(project.is_deleted):
+            event_storming_enabled = bool(getattr(project, "event_storming_enabled", True))
+        task_count = int(
+            db.execute(
+                select(func.count(Task.id)).where(Task.project_id == project_id, Task.is_deleted == False)
+            ).scalar_one()
+            or 0
+        )
+        note_count = int(
+            db.execute(
+                select(func.count(Note.id)).where(Note.project_id == project_id, Note.is_deleted == False)
+            ).scalar_one()
+            or 0
+        )
+        specification_count = int(
+            db.execute(
+                select(func.count(Specification.id)).where(Specification.project_id == project_id, Specification.is_deleted == False)
+            ).scalar_one()
+            or 0
+        )
+        status_rows = db.execute(
+            select(EventStormingAnalysisJob.status, func.count(EventStormingAnalysisJob.id))
+            .where(EventStormingAnalysisJob.project_id == project_id)
+            .group_by(EventStormingAnalysisJob.status)
+        ).all()
+        status_counts = {str(status or "").strip().lower(): int(count or 0) for status, count in status_rows}
+        artifact_total = task_count + note_count + specification_count
+        done_count = int(status_counts.get("done", 0))
+        processing = {
+            "artifact_total": artifact_total,
+            "processed": min(done_count, artifact_total) if artifact_total > 0 else done_count,
+            "queued": int(status_counts.get("queued", 0)),
+            "running": int(status_counts.get("running", 0)),
+            "failed": int(status_counts.get("failed", 0)),
+            "done": done_count,
+            "progress_pct": (
+                round((min(done_count, artifact_total) / artifact_total) * 100.0, 1)
+                if artifact_total > 0
+                else 100.0
+            ),
+        }
     return {
         "project_id": str(first.get("project_id") or project_id),
         "project_name": str(first.get("project_name") or ""),
         "component_counts": component_counts,
         "artifact_link_count": int((link_rows[0] if link_rows else {}).get("count") or 0),
+        "event_storming_enabled": event_storming_enabled,
+        "processing": processing,
     }
 
 

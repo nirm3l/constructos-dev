@@ -22,6 +22,8 @@ from .auth import generate_temporary_password, hash_password, verify_password
 from .licensing import resolve_license_installation_id
 from . import models as shared_models
 from .models import (
+    EventStormingAnalysisJob,
+    EventStormingAnalysisRun,
     Note,
     NoteGroup,
     LicenseInstallation,
@@ -453,12 +455,39 @@ def ensure_project_table_columns(db: Session):
         db.execute(text("ALTER TABLE projects ADD COLUMN chat_index_mode VARCHAR(32) DEFAULT 'OFF'"))
     if "chat_attachment_ingestion_mode" not in existing:
         db.execute(text("ALTER TABLE projects ADD COLUMN chat_attachment_ingestion_mode VARCHAR(32) DEFAULT 'METADATA_ONLY'"))
+    if "event_storming_enabled" not in existing:
+        db.execute(text("ALTER TABLE projects ADD COLUMN event_storming_enabled BOOLEAN DEFAULT TRUE"))
     db.execute(text("UPDATE projects SET chat_index_mode='OFF' WHERE chat_index_mode IS NULL OR chat_index_mode = ''"))
     db.execute(
         text(
             "UPDATE projects SET chat_attachment_ingestion_mode='METADATA_ONLY' "
             "WHERE chat_attachment_ingestion_mode IS NULL OR chat_attachment_ingestion_mode = ''"
         )
+    )
+    db.execute(
+        text(
+            "UPDATE projects SET event_storming_enabled=TRUE "
+            "WHERE event_storming_enabled IS NULL"
+        )
+    )
+    db.commit()
+
+
+def ensure_event_storming_analysis_table_columns(db: Session):
+    EventStormingAnalysisJob.__table__.create(bind=db.bind, checkfirst=True)
+    EventStormingAnalysisRun.__table__.create(bind=db.bind, checkfirst=True)
+    existing = {column["name"] for column in inspect(db.bind).get_columns("event_storming_analysis_runs")}
+    if "prompt_chars" not in existing:
+        db.execute(text("ALTER TABLE event_storming_analysis_runs ADD COLUMN prompt_chars INTEGER DEFAULT 0"))
+    if "input_hash" not in existing:
+        db.execute(text("ALTER TABLE event_storming_analysis_runs ADD COLUMN input_hash VARCHAR(64)"))
+    if "usage_json" not in existing:
+        db.execute(text("ALTER TABLE event_storming_analysis_runs ADD COLUMN usage_json TEXT DEFAULT '{}'"))
+    db.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_event_storming_analysis_runs_input_hash ON event_storming_analysis_runs(input_hash)")
+    )
+    db.execute(
+        text("UPDATE event_storming_analysis_runs SET usage_json='{}' WHERE usage_json IS NULL OR usage_json = ''")
     )
     db.commit()
 
@@ -606,6 +635,7 @@ def bootstrap_data():
         ensure_saved_view_table_columns(db)
         ensure_task_comment_table_columns(db)
         ensure_chat_table_columns(db)
+        ensure_event_storming_analysis_table_columns(db)
         ensure_task_watcher_table_constraints(db)
         ensure_system_users(db)
         default_user = db.get(User, DEFAULT_USER_ID)
@@ -800,6 +830,7 @@ def _backfill_project_streams_from_read_model(db: Session) -> None:
                 "chat_attachment_ingestion_mode": str(
                     getattr(p, "chat_attachment_ingestion_mode", "") or "METADATA_ONLY"
                 ),
+                "event_storming_enabled": bool(getattr(p, "event_storming_enabled", True)),
             },
             metadata={"actor_id": DEFAULT_USER_ID, "workspace_id": p.workspace_id, "project_id": p.id},
             expected_version=0,

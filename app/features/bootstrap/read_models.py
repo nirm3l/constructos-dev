@@ -144,6 +144,7 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
                 "chat_attachment_ingestion_mode": str(
                     p.chat_attachment_ingestion_mode or "METADATA_ONLY"
                 ),
+                "event_storming_enabled": bool(getattr(p, "event_storming_enabled", True)),
                 "embedding_index_status": str(index_snapshot.get("status") or "not_indexed"),
                 "embedding_index_progress_pct": index_snapshot.get("progress_pct"),
                 "embedding_indexed_entities": int(index_snapshot.get("indexed_entities") or 0),

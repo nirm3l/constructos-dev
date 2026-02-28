@@ -59,6 +59,8 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
           setProjectChatIndexMode={state.setProjectChatIndexMode}
           projectChatAttachmentIngestionMode={state.projectChatAttachmentIngestionMode}
           setProjectChatAttachmentIngestionMode={state.setProjectChatAttachmentIngestionMode}
+          projectEventStormingEnabled={state.projectEventStormingEnabled}
+          setProjectEventStormingEnabled={state.setProjectEventStormingEnabled}
           embeddingAllowedModels={state.embeddingAllowedModels}
           embeddingDefaultModel={state.embeddingDefaultModel}
           vectorStoreEnabled={state.vectorStoreEnabled}
@@ -106,6 +108,7 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
             projectSkills={state.projectSkills}
             projectGraphOverview={state.projectGraphOverview}
             projectGraphContextPack={state.projectGraphContextPack}
+            projectEventStormingOverview={state.projectEventStormingOverview}
             workspaceSkills={state.workspaceSkills}
             selectedProjectRuleId={state.selectedProjectRuleId}
             setSelectedProjectRuleId={state.setSelectedProjectRuleId}
@@ -143,6 +146,8 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
             setEditProjectChatIndexMode={state.setEditProjectChatIndexMode}
             editProjectChatAttachmentIngestionMode={state.editProjectChatAttachmentIngestionMode}
             setEditProjectChatAttachmentIngestionMode={state.setEditProjectChatAttachmentIngestionMode}
+            editProjectEventStormingEnabled={state.editProjectEventStormingEnabled}
+            setEditProjectEventStormingEnabled={state.setEditProjectEventStormingEnabled}
             embeddingAllowedModels={state.embeddingAllowedModels}
             embeddingDefaultModel={state.embeddingDefaultModel}
             vectorStoreEnabled={state.vectorStoreEnabled}

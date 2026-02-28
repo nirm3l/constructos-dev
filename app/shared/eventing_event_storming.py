@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import threading
@@ -9,7 +10,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from features.agents.codex_mcp_adapter import run_structured_codex_prompt
+from features.agents.codex_mcp_adapter import run_structured_codex_prompt_with_usage
 from features.notes.domain import (
     EVENT_ARCHIVED as NOTE_EVENT_ARCHIVED,
     EVENT_CREATED as NOTE_EVENT_CREATED,
@@ -28,7 +29,6 @@ from features.tasks.domain import (
     EVENT_ARCHIVED as TASK_EVENT_ARCHIVED,
     EVENT_CREATED as TASK_EVENT_CREATED,
     EVENT_DELETED as TASK_EVENT_DELETED,
-    EVENT_MOVED_TO_INBOX as TASK_EVENT_MOVED_TO_INBOX,
     EVENT_RESTORED as TASK_EVENT_RESTORED,
     EVENT_UPDATED as TASK_EVENT_UPDATED,
 )
@@ -40,6 +40,7 @@ from .models import (
     EventStormingAnalysisJob,
     EventStormingAnalysisRun,
     Note,
+    Project,
     ProjectionCheckpoint,
     SessionLocal,
     Specification,
@@ -79,7 +80,6 @@ _TRACKED_EVENT_TYPES = {
     TASK_EVENT_ARCHIVED,
     TASK_EVENT_RESTORED,
     TASK_EVENT_DELETED,
-    TASK_EVENT_MOVED_TO_INBOX,
     NOTE_EVENT_CREATED,
     NOTE_EVENT_UPDATED,
     NOTE_EVENT_ARCHIVED,
@@ -90,6 +90,12 @@ _TRACKED_EVENT_TYPES = {
     SPECIFICATION_EVENT_ARCHIVED,
     SPECIFICATION_EVENT_RESTORED,
     SPECIFICATION_EVENT_DELETED,
+}
+
+_DDD_RELEVANT_UPDATE_FIELDS: dict[str, set[str]] = {
+    "task": {"title", "description", "instruction", "labels", "project_id", "is_deleted"},
+    "note": {"title", "body", "tags", "project_id", "is_deleted"},
+    "specification": {"title", "body", "tags", "project_id", "is_deleted"},
 }
 
 _ENTITY_LABELS = {
@@ -235,6 +241,10 @@ def _project_event_to_job_queue(db, ev: EventEnvelope, commit_position: int | No
     workspace_id = _as_str(payload.get("workspace_id") or metadata.get("workspace_id"))
     if not project_id:
         return
+    if not _project_event_storming_enabled(db, project_id):
+        return
+    if not _event_payload_affects_ddd(entity_type=entity_type, event_type=ev.event_type, payload=payload):
+        return
     _enqueue_analysis_job(
         db=db,
         project_id=project_id,
@@ -245,6 +255,30 @@ def _project_event_to_job_queue(db, ev: EventEnvelope, commit_position: int | No
         commit_position=commit_position,
         payload={"event_type": ev.event_type, "event_version": ev.version},
     )
+
+
+def _project_event_storming_enabled(db, project_id: str) -> bool:
+    row = db.get(Project, project_id)
+    if row is None or bool(row.is_deleted):
+        return False
+    return bool(getattr(row, "event_storming_enabled", True))
+
+
+def _event_payload_affects_ddd(*, entity_type: str, event_type: str, payload: dict[str, Any]) -> bool:
+    lowered = str(event_type or "").strip().lower()
+    if "created" in lowered or "deleted" in lowered:
+        return True
+    if "archived" in lowered or "restored" in lowered:
+        return False
+    if "updated" not in lowered:
+        return False
+    relevant_keys = _DDD_RELEVANT_UPDATE_FIELDS.get(entity_type) or set()
+    if not relevant_keys:
+        return True
+    changed_keys = {str(key).strip() for key in (payload or {}).keys() if str(key).strip()}
+    if not changed_keys:
+        return True
+    return bool(changed_keys.intersection(relevant_keys))
 
 
 def _get_checkpoint(db, name: str = _CHECKPOINT_NAME) -> ProjectionCheckpoint:
@@ -414,7 +448,7 @@ def _load_entity_graph_context(*, project_id: str, entity_type: str, entity_id: 
     return out
 
 
-def _load_project_component_snapshot(*, project_id: str, limit_components: int = 60, limit_relations: int = 120) -> dict[str, Any]:
+def _load_project_component_snapshot(*, project_id: str, limit_components: int = 24, limit_relations: int = 0) -> dict[str, Any]:
     component_rows = run_graph_query(
         """
         MATCH (c)
@@ -432,27 +466,29 @@ def _load_project_component_snapshot(*, project_id: str, limit_components: int =
             "limit_components": max(1, int(limit_components)),
         },
     )
-    relation_rows = run_graph_query(
-        """
-        MATCH (a)-[r]->(b)
-        WHERE coalesce(a.project_id, '') = $project_id
-          AND coalesce(b.project_id, '') = $project_id
-          AND any(lbl IN labels(a) WHERE lbl IN $component_labels)
-          AND any(lbl IN labels(b) WHERE lbl IN $component_labels)
-        RETURN head([lbl IN labels(a) WHERE lbl IN $component_labels]) AS source_type,
-               coalesce(a.title, a.name, a.id) AS source_title,
-               type(r) AS relation,
-               head([lbl IN labels(b) WHERE lbl IN $component_labels]) AS target_type,
-               coalesce(b.title, b.name, b.id) AS target_title
-        ORDER BY relation ASC, source_type ASC, source_title ASC
-        LIMIT $limit_relations
-        """,
-        {
-            "project_id": project_id,
-            "component_labels": list(_ES_COMPONENT_LABELS.values()),
-            "limit_relations": max(1, int(limit_relations)),
-        },
-    )
+    relation_rows: list[dict[str, Any]] = []
+    if int(limit_relations or 0) > 0:
+        relation_rows = run_graph_query(
+            """
+            MATCH (a)-[r]->(b)
+            WHERE coalesce(a.project_id, '') = $project_id
+              AND coalesce(b.project_id, '') = $project_id
+              AND any(lbl IN labels(a) WHERE lbl IN $component_labels)
+              AND any(lbl IN labels(b) WHERE lbl IN $component_labels)
+            RETURN head([lbl IN labels(a) WHERE lbl IN $component_labels]) AS source_type,
+                   coalesce(a.title, a.name, a.id) AS source_title,
+                   type(r) AS relation,
+                   head([lbl IN labels(b) WHERE lbl IN $component_labels]) AS target_type,
+                   coalesce(b.title, b.name, b.id) AS target_title
+            ORDER BY relation ASC, source_type ASC, source_title ASC
+            LIMIT $limit_relations
+            """,
+            {
+                "project_id": project_id,
+                "component_labels": list(_ES_COMPONENT_LABELS.values()),
+                "limit_relations": max(1, int(limit_relations)),
+            },
+        )
     return {
         "components": [
             {
@@ -485,6 +521,9 @@ def _event_storming_ai_prompt(
     project_component_snapshot: dict[str, Any],
 ) -> str:
     tag_list = ", ".join(tags) if tags else "(none)"
+    source_text = str(text or "").strip()
+    if len(source_text) > 5000:
+        source_text = source_text[:5000]
     context_lines = [
         f"- {row['relation']} -> {row['neighbor_type']} [{row['neighbor_id']}] {row['neighbor_title']}"
         for row in entity_graph_context
@@ -494,11 +533,6 @@ def _event_storming_ai_prompt(
         f"- {row['component_type']}: {row['component_title']}"
         for row in (project_component_snapshot.get("components") or [])
         if str(row.get("component_type") or "").strip() and str(row.get("component_title") or "").strip()
-    ]
-    existing_relation_lines = [
-        f"- {row['source_type']}:{row['source_title']} -[{row['relation']}]-> {row['target_type']}:{row['target_title']}"
-        for row in (project_component_snapshot.get("relations") or [])
-        if str(row.get("relation") or "").strip()
     ]
     return (
         "You are an expert Event Storming and DDD analyst.\n"
@@ -523,11 +557,8 @@ def _event_storming_ai_prompt(
         "Existing project components:\n"
         + ("\n".join(existing_component_lines) if existing_component_lines else "- (none)")
         + "\n"
-        "Existing project component relations:\n"
-        + ("\n".join(existing_relation_lines) if existing_relation_lines else "- (none)")
-        + "\n"
         "Source text:\n"
-        f"{text}\n"
+        f"{source_text}\n"
     )
 
 
@@ -599,7 +630,7 @@ def _extract_with_codex_agent(
         "additionalProperties": False,
     }
     chat_session_id = f"event-storming-{project_id}-{entity_type}-{entity_id}"
-    parsed_payload = run_structured_codex_prompt(
+    parsed_payload, usage_payload = run_structured_codex_prompt_with_usage(
         prompt=prompt,
         output_schema=schema,
         workspace_id=workspace_id,
@@ -608,7 +639,11 @@ def _extract_with_codex_agent(
         reasoning_effort=str(AGENT_CODEX_REASONING_EFFORT or "").strip() or None,
         mcp_servers=None,
     )
-    return {str(key): value for key, value in parsed_payload.items()}
+    return {
+        "payload": {str(key): value for key, value in parsed_payload.items()},
+        "usage": usage_payload or {},
+        "prompt_chars": len(prompt),
+    }
 
 
 def _normalize_ai_extraction(project_id: str, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -721,6 +756,39 @@ def _retry_backoff(attempt: int) -> float:
     return max(2.0, min(300.0, 2.0 * (2**exponent)))
 
 
+def _normalize_tags(tags: list[str] | None) -> list[str]:
+    return sorted({str(tag or "").strip().lower() for tag in (tags or []) if str(tag or "").strip()})
+
+
+def _build_snapshot_input_hash(*, project_id: str, entity_type: str, entity_id: str, snapshot: dict[str, Any]) -> str:
+    payload = {
+        "project_id": project_id,
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "title": str(snapshot.get("title") or "").strip(),
+        "text": str(snapshot.get("text") or "").strip(),
+        "tags": _normalize_tags([str(item) for item in (snapshot.get("tags") or [])]),
+    }
+    raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _latest_done_input_hash(db, *, project_id: str, entity_type: str, entity_id: str) -> str | None:
+    row = db.execute(
+        select(EventStormingAnalysisRun.input_hash)
+        .where(
+            EventStormingAnalysisRun.project_id == project_id,
+            EventStormingAnalysisRun.entity_type == entity_type,
+            EventStormingAnalysisRun.entity_id == entity_id,
+            EventStormingAnalysisRun.status == "done",
+        )
+        .order_by(EventStormingAnalysisRun.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    text = str(row or "").strip()
+    return text or None
+
+
 def _clear_artifact_links(*, project_id: str, entity_type: str, entity_id: str) -> None:
     label = _ENTITY_LABELS.get(entity_type)
     if not label:
@@ -754,9 +822,10 @@ def _sync_graph_for_job(job: EventStormingAnalysisJob, snapshot: dict[str, Any] 
         project_id=project_id,
         entity_type=entity_type,
         entity_id=entity_id,
+        limit=8,
     )
-    project_component_snapshot = _load_project_component_snapshot(project_id=project_id)
-    extracted_payload = _extract_with_codex_agent(
+    project_component_snapshot = _load_project_component_snapshot(project_id=project_id, limit_components=24, limit_relations=0)
+    extracted = _extract_with_codex_agent(
         workspace_id=workspace_id,
         project_id=project_id,
         entity_type=entity_type,
@@ -767,6 +836,9 @@ def _sync_graph_for_job(job: EventStormingAnalysisJob, snapshot: dict[str, Any] 
         entity_graph_context=entity_graph_context,
         project_component_snapshot=project_component_snapshot,
     )
+    extracted_payload = extracted.get("payload") if isinstance(extracted, dict) else {}
+    usage_payload = extracted.get("usage") if isinstance(extracted, dict) else {}
+    prompt_chars = int(extracted.get("prompt_chars") or 0) if isinstance(extracted, dict) else 0
     components, component_relations = _normalize_ai_extraction(project_id, extracted_payload)
     component_ids = [str(item["id"]) for item in components]
 
@@ -875,7 +947,12 @@ def _sync_graph_for_job(job: EventStormingAnalysisJob, snapshot: dict[str, Any] 
             write=True,
         )
 
-    return len(components), len(component_relations), {"components": components, "relations": component_relations}
+    return len(components), len(component_relations), {
+        "components": components,
+        "relations": component_relations,
+        "usage": usage_payload or {},
+        "prompt_chars": prompt_chars,
+    }
 
 
 def _process_analysis_job(job_id: int) -> None:
@@ -887,9 +964,75 @@ def _process_analysis_job(job_id: int) -> None:
         if job.status != "running":
             return
         try:
+            if not _project_event_storming_enabled(db, str(job.project_id or "").strip()):
+                elapsed_ms = int(max(0.0, (perf_counter() - started) * 1000.0))
+                db.add(
+                    EventStormingAnalysisRun(
+                        job_id=job.id,
+                        project_id=job.project_id,
+                        entity_type=job.entity_type,
+                        entity_id=job.entity_id,
+                        status="done",
+                        inference_method="disabled",
+                        extractor_version="es-codex-v1",
+                        components_count=0,
+                        relations_count=0,
+                        prompt_chars=0,
+                        input_hash=None,
+                        usage_json="{}",
+                        duration_ms=elapsed_ms,
+                        output_json='{"skipped":"project_event_storming_disabled"}',
+                        error=None,
+                    )
+                )
+                job.status = "done"
+                job.last_error = None
+                db.commit()
+                return
             snapshot = _load_entity_snapshot(db, job)
+            input_hash: str | None = None
+            if snapshot is not None and not bool(snapshot.get("is_deleted")):
+                input_hash = _build_snapshot_input_hash(
+                    project_id=str(job.project_id or "").strip(),
+                    entity_type=str(job.entity_type or "").strip().lower(),
+                    entity_id=str(job.entity_id or "").strip(),
+                    snapshot=snapshot,
+                )
+                previous_hash = _latest_done_input_hash(
+                    db,
+                    project_id=str(job.project_id or "").strip(),
+                    entity_type=str(job.entity_type or "").strip(),
+                    entity_id=str(job.entity_id or "").strip(),
+                )
+                if previous_hash and previous_hash == input_hash:
+                    elapsed_ms = int(max(0.0, (perf_counter() - started) * 1000.0))
+                    db.add(
+                        EventStormingAnalysisRun(
+                            job_id=job.id,
+                            project_id=job.project_id,
+                            entity_type=job.entity_type,
+                            entity_id=job.entity_id,
+                            status="done",
+                            inference_method="content_hash_skip",
+                            extractor_version="es-codex-v1",
+                            components_count=0,
+                            relations_count=0,
+                            prompt_chars=0,
+                            input_hash=input_hash,
+                            usage_json="{}",
+                            duration_ms=elapsed_ms,
+                            output_json='{"skipped":"input_hash_unchanged"}',
+                            error=None,
+                        )
+                    )
+                    job.status = "done"
+                    job.last_error = None
+                    db.commit()
+                    return
             components_count, relations_count, output = _sync_graph_for_job(job, snapshot)
             elapsed_ms = int(max(0.0, (perf_counter() - started) * 1000.0))
+            usage_payload = output.get("usage") if isinstance(output, dict) else {}
+            prompt_chars = int(output.get("prompt_chars") or 0) if isinstance(output, dict) else 0
             db.add(
                 EventStormingAnalysisRun(
                     job_id=job.id,
@@ -901,6 +1044,9 @@ def _process_analysis_job(job_id: int) -> None:
                     extractor_version="es-codex-v1",
                     components_count=components_count,
                     relations_count=relations_count,
+                    prompt_chars=prompt_chars,
+                    input_hash=input_hash,
+                    usage_json=json.dumps(usage_payload or {}, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
                     duration_ms=elapsed_ms,
                     output_json=json.dumps(output, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str),
                     error=None,
@@ -930,6 +1076,9 @@ def _process_analysis_job(job_id: int) -> None:
                     extractor_version="es-codex-v1",
                     components_count=0,
                     relations_count=0,
+                    prompt_chars=0,
+                    input_hash=None,
+                    usage_json="{}",
                     duration_ms=elapsed_ms,
                     output_json="{}",
                     error=str(exc)[:4000],
@@ -1003,6 +1152,48 @@ def _analysis_worker_loop() -> None:
         except Exception as exc:
             logger.warning("Event storming analysis worker iteration failed: %s", exc)
             _analysis_stop_event.wait(EVENT_STORMING_ANALYSIS_POLL_SECONDS)
+
+
+def enqueue_event_storming_project_backfill(*, project_id: str, workspace_id: str | None = None) -> dict[str, int]:
+    project_key = str(project_id or "").strip()
+    if not project_key:
+        return {"queued": 0}
+    with SessionLocal() as db:
+        project = db.get(Project, project_key)
+        if project is None or bool(project.is_deleted):
+            return {"queued": 0}
+        if not bool(getattr(project, "event_storming_enabled", True)):
+            return {"queued": 0}
+        resolved_workspace_id = str(workspace_id or project.workspace_id or "").strip() or None
+        queued = 0
+        task_ids = db.execute(
+            select(Task.id).where(Task.project_id == project_key, Task.is_deleted == False)
+        ).scalars().all()
+        note_ids = db.execute(
+            select(Note.id).where(Note.project_id == project_key, Note.is_deleted == False)
+        ).scalars().all()
+        specification_ids = db.execute(
+            select(Specification.id).where(Specification.project_id == project_key, Specification.is_deleted == False)
+        ).scalars().all()
+        for entity_type, ids in (
+            ("task", task_ids),
+            ("note", note_ids),
+            ("specification", specification_ids),
+        ):
+            for entity_id in ids:
+                _enqueue_analysis_job(
+                    db=db,
+                    project_id=project_key,
+                    workspace_id=resolved_workspace_id,
+                    entity_type=entity_type,
+                    entity_id=str(entity_id),
+                    reason="backfill",
+                    commit_position=None,
+                    payload={"event_type": "BackfillRequested", "event_version": 1},
+                )
+                queued += 1
+        db.commit()
+        return {"queued": queued}
 
 
 def start_event_storming_projection_worker() -> None:

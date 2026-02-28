@@ -187,6 +187,7 @@ export function useAppActions(c: any) {
       context_pack_evidence_top_k: contextPackEvidenceTopK,
       chat_index_mode: effectiveChatIndexMode,
       chat_attachment_ingestion_mode: effectiveChatAttachmentMode,
+      event_storming_enabled: Boolean(c.editProjectEventStormingEnabled),
     })
     await syncProjectMembers(c.selectedProjectId, memberIds)
     c.qc.setQueryData(['bootstrap', c.userId], (prev: any) => {
@@ -200,6 +201,8 @@ export function useAppActions(c: any) {
     })
     await c.qc.invalidateQueries({ queryKey: ['bootstrap', c.userId] })
     await c.qc.invalidateQueries({ queryKey: ['project-graph-context-pack', c.userId, c.selectedProjectId] })
+    await c.qc.invalidateQueries({ queryKey: ['project-event-storming-overview', c.userId, c.selectedProjectId] })
+    await c.qc.invalidateQueries({ queryKey: ['project-event-storming-subgraph', c.userId, c.selectedProjectId] })
   }, [
     c.editProjectAttachmentRefsText,
     c.editProjectCustomStatusesText,
@@ -209,6 +212,7 @@ export function useAppActions(c: any) {
     c.editProjectContextPackEvidenceTopKText,
     c.editProjectChatIndexMode,
     c.editProjectChatAttachmentIngestionMode,
+    c.editProjectEventStormingEnabled,
     c.editProjectExternalRefsText,
     c.editProjectMemberIds,
     c.editProjectName,

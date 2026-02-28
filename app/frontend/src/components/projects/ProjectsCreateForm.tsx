@@ -91,6 +91,8 @@ export function ProjectsCreateForm({
   setProjectChatIndexMode,
   projectChatAttachmentIngestionMode,
   setProjectChatAttachmentIngestionMode,
+  projectEventStormingEnabled,
+  setProjectEventStormingEnabled,
   projectTemplateParametersText,
   setProjectTemplateParametersText,
   embeddingAllowedModels,
@@ -145,6 +147,8 @@ export function ProjectsCreateForm({
   setProjectChatAttachmentIngestionMode: React.Dispatch<
     React.SetStateAction<'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'>
   >
+  projectEventStormingEnabled: boolean
+  setProjectEventStormingEnabled: React.Dispatch<React.SetStateAction<boolean>>
   projectTemplateParametersText: string
   setProjectTemplateParametersText: React.Dispatch<React.SetStateAction<string>>
   embeddingAllowedModels: string[]
@@ -674,6 +678,20 @@ export function ProjectsCreateForm({
               )}
             </div>
             <div className="field-control">
+              <div
+                className="row wrap"
+                style={{ gap: 10, alignItems: 'center', marginBottom: 8, padding: '8px 10px', border: '1px solid var(--line)', borderRadius: 8 }}
+              >
+                <span className="field-label" style={{ marginBottom: 0 }}>Event Storming</span>
+                <label className="row" style={{ gap: 6, alignItems: 'center' }}>
+                  <input
+                    type="checkbox"
+                    checked={projectEventStormingEnabled ?? true}
+                    onChange={(e) => setProjectEventStormingEnabled(Boolean(e.target.checked))}
+                  />
+                  <span>Enable processing</span>
+                </label>
+              </div>
               <div className="project-chat-policy-inline">
                 <span className="field-label">Chat indexing policy</span>
                 <div className="project-chat-policy-controls">

@@ -19,6 +19,7 @@ function normalizeChatAttachmentIngestionMode(value: unknown): 'OFF' | 'METADATA
 export function useProjectEditorEffects(c: any) {
   React.useEffect(() => {
     if (!c.selectedProject) {
+      if (c.selectedProjectId) return
       c.setEditProjectName('')
       c.setEditProjectDescription('')
       c.setEditProjectCustomStatusesText('')
@@ -29,8 +30,9 @@ export function useProjectEditorEffects(c: any) {
       c.setEditProjectContextPackEvidenceTopKText('')
       c.setEditProjectChatIndexMode('OFF')
       c.setEditProjectChatAttachmentIngestionMode('METADATA_ONLY')
+      c.setEditProjectEventStormingEnabled(true)
       c.setEditProjectDescriptionView('split')
-      if (!c.selectedProjectId) c.setShowProjectEditForm(false)
+      c.setShowProjectEditForm(false)
       c.setSelectedProjectRuleId(null)
       c.setProjectRuleTitle('')
       c.setProjectRuleBody('')
@@ -51,6 +53,7 @@ export function useProjectEditorEffects(c: any) {
     c.setEditProjectChatAttachmentIngestionMode(
       normalizeChatAttachmentIngestionMode(c.selectedProject.chat_attachment_ingestion_mode)
     )
+    c.setEditProjectEventStormingEnabled(Boolean(c.selectedProject.event_storming_enabled ?? true))
     c.setEditProjectDescriptionView('split')
     c.setSelectedProjectRuleId(null)
     c.setProjectRuleTitle('')
@@ -61,6 +64,7 @@ export function useProjectEditorEffects(c: any) {
   React.useEffect(() => {
     if (!c.showProjectCreateForm) return
     c.setProjectDescriptionView('split')
+    c.setProjectEventStormingEnabled(true)
   }, [c.showProjectCreateForm])
 
   React.useEffect(() => {

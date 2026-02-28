@@ -150,6 +150,7 @@ class ProjectCreate(BaseModel):
     context_pack_evidence_top_k: int | None = Field(default=None, ge=1, le=40)
     chat_index_mode: str = "OFF"
     chat_attachment_ingestion_mode: str = "METADATA_ONLY"
+    event_storming_enabled: bool = True
     member_user_ids: list[str] = Field(default_factory=list)
 
 
@@ -164,6 +165,7 @@ class ProjectPatch(BaseModel):
     context_pack_evidence_top_k: int | None = Field(default=None, ge=1, le=40)
     chat_index_mode: str | None = None
     chat_attachment_ingestion_mode: str | None = None
+    event_storming_enabled: bool | None = None
 
 
 class ProjectMemberUpsert(BaseModel):

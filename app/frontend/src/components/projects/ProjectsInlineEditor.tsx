@@ -1,13 +1,16 @@
 import React from 'react'
+import { useQuery } from '@tanstack/react-query'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as AlertDialog from '@radix-ui/react-alert-dialog'
 import * as Select from '@radix-ui/react-select'
 import * as Accordion from '@radix-ui/react-accordion'
 import * as Tabs from '@radix-ui/react-tabs'
+import { getProjectEventStormingOverview } from '../../api'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import type {
   AgentChatUsage,
   AttachmentRef,
+  EventStormingOverview,
   GraphContextPack,
   GraphProjectOverview,
   Project,
@@ -71,6 +74,8 @@ export function ProjectsInlineEditor({
   setEditProjectChatIndexMode,
   editProjectChatAttachmentIngestionMode,
   setEditProjectChatAttachmentIngestionMode,
+  editProjectEventStormingEnabled,
+  setEditProjectEventStormingEnabled,
   embeddingAllowedModels,
   embeddingDefaultModel,
   vectorStoreEnabled,
@@ -91,6 +96,7 @@ export function ProjectsInlineEditor({
   projectSkills,
   projectGraphOverview,
   projectGraphContextPack,
+  projectEventStormingOverview,
   workspaceSkills,
   selectedProjectRuleId,
   setSelectedProjectRuleId,
@@ -145,6 +151,8 @@ export function ProjectsInlineEditor({
   setEditProjectChatAttachmentIngestionMode: React.Dispatch<
     React.SetStateAction<'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'>
   >
+  editProjectEventStormingEnabled: boolean
+  setEditProjectEventStormingEnabled: React.Dispatch<React.SetStateAction<boolean>>
   embeddingAllowedModels: string[]
   embeddingDefaultModel: string
   vectorStoreEnabled: boolean
@@ -165,6 +173,13 @@ export function ProjectsInlineEditor({
   projectSkills: { data?: ProjectSkillsPage; isLoading?: boolean; isFetching?: boolean }
   projectGraphOverview?: { data?: GraphProjectOverview }
   projectGraphContextPack?: { data?: GraphContextPack }
+  projectEventStormingOverview?: {
+    data?: EventStormingOverview
+    isLoading?: boolean
+    isFetching?: boolean
+    isError?: boolean
+    error?: unknown
+  }
   workspaceSkills: { data?: WorkspaceSkillsPage; isLoading?: boolean; isFetching?: boolean }
   selectedProjectRuleId: string | null
   setSelectedProjectRuleId: React.Dispatch<React.SetStateAction<string | null>>
@@ -265,6 +280,23 @@ export function ProjectsInlineEditor({
     ? 'OFF'
     : editProjectChatIndexMode
   const chatAttachmentDisabled = chatPolicyDisabled || effectiveChatIndexMode === 'OFF'
+  const inlineEventStormingOverviewQuery = useQuery({
+    queryKey: ['project-event-storming-overview', userId, project.id],
+    queryFn: () => getProjectEventStormingOverview(userId, project.id),
+    enabled: Boolean(userId && project.id && selectedProject?.id === project.id),
+  })
+  const eventStormingOverview = inlineEventStormingOverviewQuery.data ?? projectEventStormingOverview?.data
+  const eventStormingOverviewLoading = Boolean(
+    inlineEventStormingOverviewQuery.isLoading ||
+      inlineEventStormingOverviewQuery.isFetching ||
+      (!inlineEventStormingOverviewQuery.data &&
+        (projectEventStormingOverview?.isLoading || projectEventStormingOverview?.isFetching))
+  )
+  const eventStormingOverviewError = Boolean(
+    inlineEventStormingOverviewQuery.isError ||
+      (!inlineEventStormingOverviewQuery.data && projectEventStormingOverview?.isError)
+  )
+  const effectiveEventStormingEnabled = Boolean(editProjectEventStormingEnabled ?? true)
   const projectExternalRefs = React.useMemo(
     () => parseExternalRefsText(editProjectExternalRefsText),
     [editProjectExternalRefsText]
@@ -750,6 +782,50 @@ export function ProjectsInlineEditor({
             Chat history contributes to both Knowledge Graph relations and semantic vector retrieval.
           </div>
         )}
+      </div>
+      <div className="field-control" style={{ marginBottom: 10 }}>
+        <div className="event-storming-controls">
+          <div className="event-storming-controls-head">
+            <div className="event-storming-controls-title">Event Storming processing</div>
+            <label className="event-storming-toggle">
+              <input
+                type="checkbox"
+                checked={effectiveEventStormingEnabled}
+                onChange={(e) => setEditProjectEventStormingEnabled(Boolean(e.target.checked))}
+              />
+              <span>Enable processing</span>
+            </label>
+          </div>
+          {eventStormingOverviewError ? (
+            <div className="meta">Projection status unavailable.</div>
+          ) : eventStormingOverviewLoading ? (
+            <div className="meta">Loading projection status...</div>
+          ) : eventStormingOverview ? (
+            <>
+              <div className="graph-insights-meta-row event-storming-controls-stats">
+                <span className="badge">Artifact links: {eventStormingOverview.artifact_link_count}</span>
+                <span className="badge">
+                  Processing: {eventStormingOverview.processing.processed}/{eventStormingOverview.processing.artifact_total} ({eventStormingOverview.processing.progress_pct.toFixed(1)}%)
+                </span>
+                <span className="badge">Queued: {eventStormingOverview.processing.queued}</span>
+                <span className="badge">Running: {eventStormingOverview.processing.running}</span>
+                <span className="badge">Failed: {eventStormingOverview.processing.failed}</span>
+              </div>
+              <div className="graph-insights-meta-row event-storming-controls-stats">
+                {Object.entries(eventStormingOverview.component_counts ?? {}).map(([key, value]) => (
+                  <span className="badge" key={`project-es-count-${key}`}>
+                    {key}: {value}
+                  </span>
+                ))}
+              </div>
+            </>
+          ) : (
+            <div className="meta">Loading projection status...</div>
+          )}
+        </div>
+        <div className="meta" style={{ marginTop: 6 }}>
+          Save project to persist this setting.
+        </div>
       </div>
         </Tabs.Content>
         <Tabs.Content value="rules" className="project-editor-tab-content">

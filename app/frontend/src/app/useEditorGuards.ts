@@ -53,7 +53,6 @@ export function useEditorGuards(c: any) {
       ).sort(),
     [c.projectMembers, c.selectedProjectId]
   )
-
   const projectIsDirty = React.useMemo(() => {
     if (!c.showProjectEditForm || !c.selectedProject) return false
     return (
@@ -69,6 +68,7 @@ export function useEditorGuards(c: any) {
         String(c.selectedProject.chat_index_mode || 'OFF').trim().toUpperCase() ||
       String(c.editProjectChatAttachmentIngestionMode || 'METADATA_ONLY').trim().toUpperCase() !==
         String(c.selectedProject.chat_attachment_ingestion_mode || 'METADATA_ONLY').trim().toUpperCase() ||
+      Boolean(c.editProjectEventStormingEnabled) !== Boolean(c.selectedProject.event_storming_enabled ?? true) ||
       stableJson(c.parseExternalRefsText(c.editProjectExternalRefsText)) !== stableJson(c.selectedProject.external_refs ?? []) ||
       stableJson(c.parseAttachmentRefsText(c.editProjectAttachmentRefsText)) !== stableJson(c.selectedProject.attachment_refs ?? []) ||
       stableJson(Array.from(new Set(c.editProjectMemberIds.filter(Boolean))).sort()) !== stableJson(selectedProjectMemberIds)
@@ -82,6 +82,7 @@ export function useEditorGuards(c: any) {
     c.editProjectContextPackEvidenceTopKText,
     c.editProjectChatIndexMode,
     c.editProjectChatAttachmentIngestionMode,
+    c.editProjectEventStormingEnabled,
     c.editProjectExternalRefsText,
     c.editProjectMemberIds,
     c.editProjectName,

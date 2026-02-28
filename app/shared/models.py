@@ -75,6 +75,7 @@ class Project(Base, TimeMixin):
     context_pack_evidence_top_k: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chat_index_mode: Mapped[str] = mapped_column(String(32), default="OFF")
     chat_attachment_ingestion_mode: Mapped[str] = mapped_column(String(32), default="METADATA_ONLY")
+    event_storming_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
@@ -402,6 +403,9 @@ class EventStormingAnalysisRun(Base, TimeMixin):
     extractor_version: Mapped[str] = mapped_column(String(32), default="es-heuristic-v1")
     components_count: Mapped[int] = mapped_column(Integer, default=0)
     relations_count: Mapped[int] = mapped_column(Integer, default=0)
+    prompt_chars: Mapped[int] = mapped_column(Integer, default=0)
+    input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    usage_json: Mapped[str] = mapped_column(Text, default="{}")
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     output_json: Mapped[str] = mapped_column(Text, default="{}")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

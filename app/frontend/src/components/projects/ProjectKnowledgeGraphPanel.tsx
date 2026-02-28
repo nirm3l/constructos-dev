@@ -8,6 +8,7 @@ import '@xyflow/react/dist/style.css'
 import {
   getProjectEventStormingComponentLinks,
   getProjectEventStormingEntityLinks,
+  patchProject,
   patchProjectEventStormingLinkReview,
 } from '../../api'
 import { MarkdownView } from '../../markdown/MarkdownView'
@@ -80,6 +81,10 @@ type EventStormingTypeMeta = {
   border: string
   lane: 'core' | 'artifact' | 'context'
 }
+
+const EVENT_STORMING_LANE_START_X = 18
+const EVENT_STORMING_LANE_WIDTH = 216
+const EVENT_STORMING_LANE_GAP = 8
 
 const EVENT_STORMING_TYPE_META: Record<EventStormingTypeKey, EventStormingTypeMeta> = {
   boundedcontext: {
@@ -388,6 +393,7 @@ export function ProjectKnowledgeGraphPanel({
   const [selectedEventStormingNodeId, setSelectedEventStormingNodeId] = React.useState<string | null>(null)
   const [showEventStormingArtifactsOnDiagram, setShowEventStormingArtifactsOnDiagram] = React.useState(false)
   const [showRejectedEventStormingLinks, setShowRejectedEventStormingLinks] = React.useState(false)
+  const [eventStormingViewportTransform, setEventStormingViewportTransform] = React.useState({ x: 0, zoom: 1 })
   const [selectedEvidenceId, setSelectedEvidenceId] = React.useState<string | null>(null)
   const [activeTab, setActiveTab] = React.useState<KnowledgeGraphTab>('explore')
   const [overviewTab, setOverviewTab] = React.useState<'summary' | 'composition'>('summary')
@@ -440,6 +446,54 @@ export function ProjectKnowledgeGraphPanel({
   const eventStormingSubgraph = eventStormingSubgraphQuery.data
   const eventStormingNodes = eventStormingSubgraph?.nodes ?? []
   const eventStormingEdges = eventStormingSubgraph?.edges ?? []
+  const eventStormingProcessing = eventStormingOverview?.processing ?? {
+    artifact_total: 0,
+    processed: 0,
+    queued: 0,
+    running: 0,
+    failed: 0,
+    done: 0,
+    progress_pct: 0,
+  }
+  const eventStormingProgressPct = Math.max(0, Math.min(100, Number(eventStormingProcessing.progress_pct || 0)))
+  const eventStormingProcessingActive = React.useMemo(() => {
+    const enabled = Boolean(eventStormingOverview?.event_storming_enabled ?? true)
+    if (!enabled) return false
+    const queued = Number(eventStormingProcessing.queued || 0)
+    const running = Number(eventStormingProcessing.running || 0)
+    const processed = Number(eventStormingProcessing.processed || 0)
+    const total = Number(eventStormingProcessing.artifact_total || 0)
+    return queued > 0 || running > 0 || (total > 0 && processed < total)
+  }, [
+    eventStormingOverview?.event_storming_enabled,
+    eventStormingProcessing.artifact_total,
+    eventStormingProcessing.processed,
+    eventStormingProcessing.queued,
+    eventStormingProcessing.running,
+  ])
+  const eventStormingComponentStats = React.useMemo(() => {
+    const normalizedCounts = new Map<EventStormingTypeKey, number>()
+    for (const [rawKey, rawValue] of Object.entries(eventStormingOverview?.component_counts ?? {})) {
+      const key = normalizeEventStormingTypeKey(rawKey)
+      const current = normalizedCounts.get(key) ?? 0
+      const nextValue = Number(rawValue || 0)
+      normalizedCounts.set(key, current + (Number.isFinite(nextValue) ? nextValue : 0))
+    }
+    const orderedKeys: EventStormingTypeKey[] = [
+      'boundedcontext',
+      'aggregate',
+      'command',
+      'domainevent',
+      'policy',
+      'readmodel',
+    ]
+    return orderedKeys.map((key) => ({
+      key,
+      label: EVENT_STORMING_TYPE_META[key].label,
+      color: EVENT_STORMING_TYPE_META[key].border,
+      count: normalizedCounts.get(key) ?? 0,
+    }))
+  }, [eventStormingOverview?.component_counts])
   const queryClient = useQueryClient()
   const eventStormingComponentTypes = React.useMemo(
     () => new Set(['boundedcontext', 'aggregate', 'command', 'domainevent', 'policy', 'readmodel']),
@@ -504,6 +558,17 @@ export function ProjectKnowledgeGraphPanel({
         queryClient.invalidateQueries({ queryKey: ['project-event-storming-subgraph', userId, projectId] }),
         queryClient.invalidateQueries({ queryKey: ['project-event-storming-entity-links', userId, projectId] }),
         queryClient.invalidateQueries({ queryKey: ['project-event-storming-component-links', userId, projectId] }),
+      ])
+    },
+  })
+
+  const toggleEventStormingProjectMutation = useMutation({
+    mutationFn: (enabled: boolean) => patchProject(userId, projectId, { event_storming_enabled: enabled }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['bootstrap', userId] }),
+        queryClient.invalidateQueries({ queryKey: ['project-event-storming-overview', userId, projectId] }),
+        queryClient.invalidateQueries({ queryKey: ['project-event-storming-subgraph', userId, projectId] }),
       ])
     },
   })
@@ -913,17 +978,20 @@ export function ProjectKnowledgeGraphPanel({
       other: 'task',
     }
 
+    const laneStartX = EVENT_STORMING_LANE_START_X
+    const lanePitch = EVENT_STORMING_LANE_WIDTH + EVENT_STORMING_LANE_GAP
     const stageX: Record<EventStormingTypeKey, number> = {
-      boundedcontext: 18,
-      command: 252,
-      aggregate: 468,
-      domainevent: 684,
-      policy: 900,
-      readmodel: 1116,
-      task: 1360,
-      specification: 1588,
-      note: 1816,
-      other: 1360,
+      // Keep bounded context anchored to the first lane so Command..Note align with headers.
+      boundedcontext: laneStartX,
+      command: laneStartX + lanePitch * 0,
+      aggregate: laneStartX + lanePitch * 1,
+      domainevent: laneStartX + lanePitch * 2,
+      policy: laneStartX + lanePitch * 3,
+      readmodel: laneStartX + lanePitch * 4,
+      task: laneStartX + lanePitch * 5,
+      specification: laneStartX + lanePitch * 6,
+      note: laneStartX + lanePitch * 7,
+      other: laneStartX + lanePitch * 5,
     }
 
     const out: FlowNode<ReactFlowNodeData>[] = []
@@ -1339,6 +1407,62 @@ export function ProjectKnowledgeGraphPanel({
     }
   }, [])
 
+  const fitEventStormingViewport = React.useCallback(
+    (duration = 420) => {
+      if (!eventStormingFlowNodes.length) return
+      const instance = eventStormingFlowRef.current
+      if (!instance) return
+      try {
+        instance.fitView({
+          padding: isEventStormingFullscreen ? 0.08 : 0.12,
+          duration,
+          maxZoom: 1.0,
+        })
+        const anyInstance = instance as unknown as {
+          getViewport?: () => { x: number; y: number; zoom: number }
+          setViewport?: (viewport: { x: number; y: number; zoom: number }, options?: { duration?: number }) => void
+          getNodesBounds?: (nodes: Array<{ id: string }>) => { x: number; y: number; width: number; height: number }
+        }
+        const viewport = anyInstance.getViewport?.()
+        const bounds = anyInstance.getNodesBounds?.(eventStormingFlowNodes.map((node) => ({ id: String(node.id || '') })))
+        if (!viewport || !bounds) return
+        const leftGutter = EVENT_STORMING_LANE_START_X
+        const alignedX = leftGutter - bounds.x * viewport.zoom
+        if (!Number.isFinite(alignedX)) return
+        anyInstance.setViewport?.({ ...viewport, x: alignedX }, { duration: Math.max(0, Math.round(duration * 0.75)) })
+      } catch {
+        // no-op
+      }
+    },
+    [eventStormingFlowNodes]
+  )
+
+  const syncEventStormingViewportTransform = React.useCallback(() => {
+    const viewport = eventStormingFlowRef.current?.getViewport?.()
+    if (!viewport) return
+    setEventStormingViewportTransform((prev) => {
+      const nextX = Number(viewport.x || 0)
+      const nextZoom = Number(viewport.zoom || 1)
+      if (Math.abs(prev.x - nextX) < 0.1 && Math.abs(prev.zoom - nextZoom) < 0.001) return prev
+      return { x: nextX, zoom: nextZoom }
+    })
+  }, [])
+  const eventStormingHeaderStyle = React.useMemo(() => {
+    const zoom = Math.max(0.35, Number(eventStormingViewportTransform.zoom || 1))
+    const laneWidth = EVENT_STORMING_LANE_WIDTH * zoom
+    const laneGap = EVENT_STORMING_LANE_GAP * zoom
+    const lanePad = EVENT_STORMING_LANE_START_X * zoom
+    const laneFont = Math.max(9.5, Math.min(13, 11 * zoom))
+    return {
+      transform: `translateX(${eventStormingViewportTransform.x}px)`,
+      transformOrigin: 'left center',
+      ['--es-lane-width' as any]: `${laneWidth}px`,
+      ['--es-lane-gap' as any]: `${laneGap}px`,
+      ['--es-lane-pad' as any]: `${lanePad}px`,
+      ['--es-lane-font' as any]: `${laneFont}px`,
+    } as React.CSSProperties
+  }, [eventStormingViewportTransform.x, eventStormingViewportTransform.zoom])
+
   React.useEffect(() => {
     if (!graphData.nodes.length) return
     const timer = window.setTimeout(() => {
@@ -1350,18 +1474,19 @@ export function ProjectKnowledgeGraphPanel({
   React.useEffect(() => {
     if (!eventStormingFlowNodes.length) return
     const timer = window.setTimeout(() => {
-      try {
-        eventStormingFlowRef.current?.fitView({
-          padding: isEventStormingFullscreen ? 0.08 : 0.12,
-          duration: 420,
-          maxZoom: 1.0,
-        })
-      } catch {
-        // no-op
-      }
+      fitEventStormingViewport(420)
     }, 100)
     return () => window.clearTimeout(timer)
-  }, [eventStormingFlowNodes.length, eventStormingFlowEdges.length, isEventStormingFullscreen])
+  }, [eventStormingFlowNodes.length, eventStormingFlowEdges.length, isEventStormingFullscreen, fitEventStormingViewport])
+
+  React.useEffect(() => {
+    if (!eventStormingProcessingActive) return
+    const timer = window.setInterval(() => {
+      eventStormingOverviewQuery.refetch?.()
+      eventStormingSubgraphQuery.refetch?.()
+    }, 2500)
+    return () => window.clearInterval(timer)
+  }, [eventStormingProcessingActive, eventStormingOverviewQuery, eventStormingSubgraphQuery])
 
   const eventStormingEntityLinkItems = eventStormingEntityLinksQuery.data?.items ?? []
   const eventStormingComponentLinkItems = eventStormingComponentLinksQuery.data?.items ?? []
@@ -1965,15 +2090,6 @@ export function ProjectKnowledgeGraphPanel({
                       <div className="meta">
                         Event Storming diagram ({eventStormingFlowNodes.length} nodes, {eventStormingFlowEdges.length} edges)
                       </div>
-                      <button
-                        className="action-icon"
-                        type="button"
-                        title={isEventStormingFullscreen ? 'Exit full screen' : 'Open full screen graph'}
-                        aria-label={isEventStormingFullscreen ? 'Exit full screen' : 'Open full screen graph'}
-                        onClick={() => void toggleEventStormingFullscreen()}
-                      >
-                        <Icon path={isEventStormingFullscreen ? 'M9 9H3V3h6v2H5v4h4v2zm12 0h-6V7h4V3h2v6zM9 21H3v-6h2v4h4v2zm12 0h-6v-2h4v-4h2v6z' : 'M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6'} />
-                      </button>
                     </div>
                     {eventStormingOverviewQuery.isError || eventStormingSubgraphQuery.isError ? (
                       <div className="notice notice-error">
@@ -1986,18 +2102,72 @@ export function ProjectKnowledgeGraphPanel({
                       <div className="meta">Loading Event Storming diagram...</div>
                     ) : (
                       <>
-                        <div className="graph-insights-meta-row" style={{ marginBottom: 8 }}>
-                          <span className="badge">Artifact links: {eventStormingOverview?.artifact_link_count ?? 0}</span>
-                          {Object.entries(eventStormingOverview?.component_counts ?? {}).map(([key, value]) => (
-                            <span className="badge" key={`es-count-${key}`}>
-                              {key}: {value}
-                            </span>
-                          ))}
+                        <div className="event-storming-controls">
+                          <div className="event-storming-controls-head">
+                            <div className="event-storming-controls-title">Event Storming processing</div>
+                            <label className="event-storming-toggle">
+                              <input
+                                type="checkbox"
+                                checked={Boolean(eventStormingOverview?.event_storming_enabled ?? true)}
+                                disabled={Boolean(toggleEventStormingProjectMutation.isPending)}
+                                onChange={(e) => {
+                                  void toggleEventStormingProjectMutation.mutateAsync(Boolean(e.target.checked))
+                                }}
+                              />
+                              <span>Enable processing</span>
+                            </label>
+                          </div>
+                          <div className="event-storming-controls-grid">
+                            <div className="event-storming-controls-card">
+                              <div className="event-storming-controls-card-title">Processing</div>
+                              <div className="event-storming-progress-line">
+                                <span>Artifacts</span>
+                                <strong>
+                                  {eventStormingProcessing.processed}/{eventStormingProcessing.artifact_total} ({eventStormingProgressPct.toFixed(1)}%)
+                                </strong>
+                              </div>
+                              <div className="event-storming-progress-track" role="presentation" aria-hidden="true">
+                                <span className="event-storming-progress-fill" style={{ width: `${eventStormingProgressPct}%` }} />
+                              </div>
+                              <div className="event-storming-mini-stats">
+                                <span className="badge">Artifact links: {eventStormingOverview?.artifact_link_count ?? 0}</span>
+                                <span className="badge">Queued: {eventStormingProcessing.queued}</span>
+                                <span className="badge">Running: {eventStormingProcessing.running}</span>
+                                <span className="badge">Failed: {eventStormingProcessing.failed}</span>
+                              </div>
+                            </div>
+                            <div className="event-storming-controls-card">
+                              <div className="event-storming-controls-card-title">Detected Components</div>
+                              <div className="event-storming-component-grid">
+                                {eventStormingComponentStats.map((item) => (
+                                  <div
+                                    key={`es-count-${item.key}`}
+                                    className={`event-storming-component-chip ${item.count === 0 ? 'zero' : ''}`}
+                                    style={{ borderColor: item.color }}
+                                  >
+                                    <span>{item.label}</span>
+                                    <strong>{item.count}</strong>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
                         </div>
                         {eventStormingFlowNodes.length === 0 ? (
                           <div className="meta">No Event Storming components detected yet.</div>
                         ) : (
                           <div className="graph-reactflow-shell" ref={eventStormingShellRef}>
+                            {!isEventStormingFullscreen ? (
+                              <button
+                                className="action-icon graph-viz-enter-button"
+                                type="button"
+                                title="Open full screen graph"
+                                aria-label="Open full screen graph"
+                                onClick={() => void toggleEventStormingFullscreen()}
+                              >
+                                <Icon path="M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6" />
+                              </button>
+                            ) : null}
                             {isEventStormingFullscreen ? (
                               <button
                                 className="action-icon graph-viz-exit-button"
@@ -2010,7 +2180,7 @@ export function ProjectKnowledgeGraphPanel({
                               </button>
                             ) : null}
                             <div className="graph-viz-composite graph-viz-composite-event-storming">
-                              <div>
+                              <div className="graph-viz-main-event-storming">
                                 <div className="event-storming-lane-legend">
                                   {eventStormingLaneLegend.map((item) => (
                                     <span
@@ -2030,12 +2200,17 @@ export function ProjectKnowledgeGraphPanel({
                                     </span>
                                   ))}
                                 </div>
-                                <div className="event-storming-lane-header-grid" role="presentation" aria-hidden="true">
-                                  {eventStormingLaneHeaders.map((item) => (
-                                    <span key={`es-lane-header-${item.key}`} className="event-storming-lane-header-item">
-                                      {item.label}
-                                    </span>
-                                  ))}
+                                <div className="event-storming-lane-header-shell" role="presentation" aria-hidden="true">
+                                  <div
+                                    className="event-storming-lane-header-grid"
+                                    style={eventStormingHeaderStyle}
+                                  >
+                                    {eventStormingLaneHeaders.map((item) => (
+                                      <span key={`es-lane-header-${item.key}`} className="event-storming-lane-header-item">
+                                        {item.label}
+                                      </span>
+                                    ))}
+                                  </div>
                                 </div>
                                 <div className="graph-reactflow-canvas event-storming-canvas">
                                   <ReactFlow
@@ -2056,12 +2231,10 @@ export function ProjectKnowledgeGraphPanel({
                                     proOptions={{ hideAttribution: true }}
                                     onInit={(instance) => {
                                       eventStormingFlowRef.current = instance
-                                      try {
-                                        instance.fitView({ padding: 0.12, duration: 280, maxZoom: 1.0 })
-                                      } catch {
-                                        // no-op
-                                      }
+                                      fitEventStormingViewport(280)
+                                      window.setTimeout(() => syncEventStormingViewportTransform(), 0)
                                     }}
+                                    onMove={() => syncEventStormingViewportTransform()}
                                   >
                                     <MiniMap
                                       pannable

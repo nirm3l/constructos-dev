@@ -124,6 +124,7 @@ export function useProjectMutations(c: any) {
         embedding_enabled: embeddingEnabled,
         embedding_model: String(c.projectEmbeddingModel || '').trim() || null,
         context_pack_evidence_top_k: contextPackEvidenceTopK,
+        event_storming_enabled: Boolean(c.projectEventStormingEnabled),
         ...chatPolicy,
         member_user_ids: Array.from(new Set(c.createProjectMemberIds)),
       })
@@ -172,6 +173,7 @@ export function useProjectMutations(c: any) {
       c.setProjectContextPackEvidenceTopKText('')
       c.setProjectChatIndexMode('KG_AND_VECTOR')
       c.setProjectChatAttachmentIngestionMode('METADATA_ONLY')
+      c.setProjectEventStormingEnabled(true)
       c.setProjectTemplateParametersText('')
       c.setProjectDescriptionView('write')
       c.setCreateProjectMemberIds([])

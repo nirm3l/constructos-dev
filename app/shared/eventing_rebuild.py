@@ -547,6 +547,7 @@ def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str
             "chat_attachment_ingestion_mode": str(
                 p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
             ),
+            "event_storming_enabled": bool(p.get("event_storming_enabled", True)),
             "is_deleted": False,
         }
     elif event.event_type == PROJECT_EVENT_DELETED:
@@ -575,6 +576,8 @@ def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str
             s["chat_attachment_ingestion_mode"] = str(
                 p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
             )
+        if "event_storming_enabled" in p:
+            s["event_storming_enabled"] = bool(p.get("event_storming_enabled", True))
     return s
 
 
@@ -973,6 +976,7 @@ def project_event(db: Session, ev: EventEnvelope):
         project.chat_attachment_ingestion_mode = str(
             p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
         )
+        project.event_storming_enabled = bool(p.get("event_storming_enabled", True))
     elif ev.event_type == PROJECT_EVENT_DELETED:
         project = db.get(Project, ev.aggregate_id)
         if project:
@@ -1005,6 +1009,8 @@ def project_event(db: Session, ev: EventEnvelope):
                 project.chat_attachment_ingestion_mode = str(
                     p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
                 )
+            if "event_storming_enabled" in p:
+                project.event_storming_enabled = bool(p.get("event_storming_enabled", True))
     elif ev.event_type == PROJECT_EVENT_MEMBER_UPSERTED:
         project_id = p.get("project_id") or ev.aggregate_id
         workspace_id = p.get("workspace_id") or m.get("workspace_id")

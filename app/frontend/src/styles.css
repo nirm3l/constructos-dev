@@ -6124,6 +6124,14 @@ textarea:disabled {
   align-items: start;
 }
 
+.graph-viz-composite-event-storming {
+  align-items: stretch;
+}
+
+.graph-viz-main-event-storming {
+  min-width: 0;
+}
+
 .graph-viz-shell {
   margin-top: 6px;
   border: 1px solid var(--line);
@@ -6154,6 +6162,14 @@ textarea:disabled {
   left: 12px;
   z-index: 8;
   box-shadow: 0 8px 18px color-mix(in srgb, #000, transparent 78%);
+}
+
+.graph-viz-enter-button {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 8;
+  box-shadow: 0 8px 18px color-mix(in srgb, #000, transparent 82%);
 }
 
 .graph-viz-shell:fullscreen .graph-viz-exit-button,
@@ -6211,6 +6227,9 @@ textarea:disabled {
   height: 100vh;
   padding: 12px;
   box-sizing: border-box;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 320px);
+  gap: 12px;
+  align-items: stretch;
 }
 
 .graph-reactflow-canvas {
@@ -6233,6 +6252,12 @@ textarea:disabled {
   height: 100vh;
   border: none;
   border-radius: 0;
+}
+
+.graph-reactflow-shell:fullscreen .event-storming-canvas,
+.graph-reactflow-shell:-webkit-full-screen .event-storming-canvas {
+  height: calc(100vh - 148px);
+  border-radius: 10px;
 }
 
 .event-storming-canvas {
@@ -6298,11 +6323,133 @@ textarea:disabled {
   margin: 0;
 }
 
+.event-storming-controls {
+  margin-bottom: 8px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 14%);
+  border-radius: 10px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 18%);
+}
+
+.event-storming-controls-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.event-storming-controls-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: color-mix(in srgb, var(--text), var(--brand-strong) 12%);
+}
+
+.event-storming-controls-stats {
+  margin-bottom: 0;
+}
+
+.event-storming-controls-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.event-storming-controls-card {
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 12%);
+  border-radius: 10px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 16%);
+}
+
+.event-storming-controls-card-title {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--text), var(--brand-strong) 18%);
+  margin-bottom: 6px;
+}
+
+.event-storming-progress-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.event-storming-progress-line strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.event-storming-progress-track {
+  margin-top: 6px;
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 14%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 28%);
+  overflow: hidden;
+}
+
+.event-storming-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #16a34a 0%, #22c55e 100%);
+}
+
+.event-storming-mini-stats {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.event-storming-component-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.event-storming-component-chip {
+  min-height: 34px;
+  border: 1px solid;
+  border-radius: 8px;
+  padding: 6px 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 20%);
+  font-size: 12px;
+}
+
+.event-storming-component-chip strong {
+  font-size: 13px;
+}
+
+.event-storming-component-chip.zero {
+  opacity: 0.62;
+}
+
 .event-storming-lane-header-grid {
   display: grid;
-  grid-template-columns: repeat(8, minmax(120px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(8, var(--es-lane-width, 216px));
+  width: max-content;
+  padding-left: var(--es-lane-pad, 18px);
+  gap: var(--es-lane-gap, 8px);
+}
+
+.event-storming-lane-header-shell {
+  width: 100%;
+  overflow: hidden;
   margin-bottom: 8px;
+  min-height: 28px;
 }
 
 .event-storming-lane-header-item {
@@ -6314,7 +6461,7 @@ textarea:disabled {
   border-radius: 8px;
   background: color-mix(in srgb, var(--surface), var(--surface-alt) 20%);
   color: color-mix(in srgb, var(--text), var(--brand-strong) 16%);
-  font-size: 11px;
+  font-size: var(--es-lane-font, 11px);
   font-weight: 800;
   letter-spacing: 0.01em;
   text-transform: uppercase;
@@ -6334,21 +6481,24 @@ textarea:disabled {
 }
 
 .graph-viz-side-event-storming {
-  max-height: 520px;
+  align-self: stretch;
+  max-height: none;
+  height: 100%;
+  box-sizing: border-box;
+  padding-top: 42px;
   overflow: auto;
 }
 
 .graph-reactflow-shell:fullscreen .graph-viz-side-event-storming,
 .graph-reactflow-shell:-webkit-full-screen .graph-viz-side-event-storming {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 6;
-  width: min(300px, calc(100vw - 24px));
-  max-height: calc(100vh - 24px);
+  position: static;
+  z-index: auto;
+  width: auto;
+  max-height: none;
   background: color-mix(in srgb, var(--surface), var(--surface-alt) 30%);
   box-shadow: 0 8px 24px color-mix(in srgb, #000, transparent 78%);
   backdrop-filter: blur(5px);
+  padding-top: 42px;
 }
 
 .graph-reactflow-canvas .react-flow__minimap {
@@ -9714,6 +9864,14 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .event-storming-controls-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .event-storming-component-grid {
+    grid-template-columns: 1fr;
+  }
+
   .kg-explore-side {
     position: static;
     top: auto;
@@ -9839,8 +9997,8 @@ textarea {
     height: 360px;
   }
 
-  .event-storming-lane-header-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .event-storming-lane-header-shell {
+    overflow-x: auto;
   }
 
   .graph-viz-composite {

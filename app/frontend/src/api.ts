@@ -626,6 +626,7 @@ export const createProject = (
     context_pack_evidence_top_k?: number | null
     chat_index_mode?: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'
     chat_attachment_ingestion_mode?: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
+    event_storming_enabled?: boolean
     member_user_ids?: string[]
     external_refs?: ExternalRef[]
     attachment_refs?: AttachmentRef[]
@@ -696,6 +697,7 @@ export const patchProject = (
       | 'context_pack_evidence_top_k'
       | 'chat_index_mode'
       | 'chat_attachment_ingestion_mode'
+      | 'event_storming_enabled'
     >
   >
 ) => api<Project>(`/api/projects/${projectId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })

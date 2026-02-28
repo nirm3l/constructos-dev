@@ -131,6 +131,20 @@ if [[ -n "$LICENSE_SERVER_TOKEN_VALUE" ]]; then
   printf 'LICENSE_SERVER_TOKEN=%s\n' "$LICENSE_SERVER_TOKEN_VALUE" >> .deploy.env
 fi
 
+AGENT_CODEX_MODEL_VALUE="$(resolve_compose_env_value "AGENT_CODEX_MODEL" || true)"
+EVENT_STORMING_AI_MODEL_VALUE="$(resolve_compose_env_value "EVENT_STORMING_AI_MODEL" || true)"
+AGENT_CODEX_REASONING_EFFORT_VALUE="$(resolve_compose_env_value "AGENT_CODEX_REASONING_EFFORT" || true)"
+
+if [[ -n "$AGENT_CODEX_MODEL_VALUE" ]]; then
+  printf 'AGENT_CODEX_MODEL=%s\n' "$AGENT_CODEX_MODEL_VALUE" >> .deploy.env
+fi
+if [[ -n "$EVENT_STORMING_AI_MODEL_VALUE" ]]; then
+  printf 'EVENT_STORMING_AI_MODEL=%s\n' "$EVENT_STORMING_AI_MODEL_VALUE" >> .deploy.env
+fi
+if [[ -n "$AGENT_CODEX_REASONING_EFFORT_VALUE" ]]; then
+  printf 'AGENT_CODEX_REASONING_EFFORT=%s\n' "$AGENT_CODEX_REASONING_EFFORT_VALUE" >> .deploy.env
+fi
+
 if [[ "$CODEX_AUTH_FILE" != /* ]]; then
   CODEX_AUTH_FILE="${ROOT_DIR}/${CODEX_AUTH_FILE#./}"
 fi
