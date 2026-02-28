@@ -306,6 +306,27 @@ export function ProjectsInlineEditor({
     inlineEventStormingOverviewQuery.isError ||
       (!inlineEventStormingOverviewQuery.data && projectEventStormingOverview?.isError)
   )
+  const eventStormingProcessing = eventStormingOverview?.processing ?? {
+    artifact_total: 0,
+    processed: 0,
+    queued: 0,
+    running: 0,
+    failed: 0,
+    done: 0,
+    progress_pct: 0,
+  }
+  const eventStormingProgressPct = Math.max(0, Math.min(100, Number(eventStormingProcessing.progress_pct || 0)))
+  const eventStormingComponentStats = React.useMemo(() => {
+    const counts = eventStormingOverview?.component_counts ?? {}
+    return [
+      { key: 'BoundedContext', label: 'Bounded Context', color: '#14b8a6', count: Number(counts.BoundedContext || 0) },
+      { key: 'Aggregate', label: 'Aggregate', color: '#f59e0b', count: Number(counts.Aggregate || 0) },
+      { key: 'Command', label: 'Command', color: '#2563eb', count: Number(counts.Command || 0) },
+      { key: 'DomainEvent', label: 'Domain Event', color: '#ea580c', count: Number(counts.DomainEvent || 0) },
+      { key: 'Policy', label: 'Policy', color: '#8b5cf6', count: Number(counts.Policy || 0) },
+      { key: 'ReadModel', label: 'Read Model', color: '#64748b', count: Number(counts.ReadModel || 0) },
+    ]
+  }, [eventStormingOverview?.component_counts])
   const effectiveEventStormingEnabled = Boolean(editProjectEventStormingEnabled ?? true)
   const projectExternalRefs = React.useMemo(
     () => parseExternalRefsText(editProjectExternalRefsText),
@@ -812,29 +833,48 @@ export function ProjectsInlineEditor({
             <div className="meta">Loading projection status...</div>
           ) : eventStormingOverview ? (
             <>
-              <div className="graph-insights-meta-row event-storming-controls-stats">
-                <span className="badge">Artifact links: {eventStormingOverview.artifact_link_count}</span>
-                {eventStormingFrameMode && (
-                  <span className="badge">
-                    Frame: {eventStormingFrameMode}{eventStormingFrameRevisionShort ? ` · ${eventStormingFrameRevisionShort}` : ''}
-                  </span>
-                )}
-                {eventStormingFrameUpdatedAtLabel && (
-                  <span className="badge">Frame updated: {eventStormingFrameUpdatedAtLabel}</span>
-                )}
-                <span className="badge">
-                  Processing: {eventStormingOverview.processing.processed}/{eventStormingOverview.processing.artifact_total} ({eventStormingOverview.processing.progress_pct.toFixed(1)}%)
-                </span>
-                <span className="badge">Queued: {eventStormingOverview.processing.queued}</span>
-                <span className="badge">Running: {eventStormingOverview.processing.running}</span>
-                <span className="badge">Failed: {eventStormingOverview.processing.failed}</span>
-              </div>
-              <div className="graph-insights-meta-row event-storming-controls-stats">
-                {Object.entries(eventStormingOverview.component_counts ?? {}).map(([key, value]) => (
-                  <span className="badge" key={`project-es-count-${key}`}>
-                    {key}: {value}
-                  </span>
-                ))}
+              <div className="event-storming-controls-grid">
+                <div className="event-storming-controls-card">
+                  <div className="event-storming-controls-card-title">Processing</div>
+                  <div className="event-storming-progress-line">
+                    <span>Artifacts</span>
+                    <strong>
+                      {eventStormingProcessing.processed}/{eventStormingProcessing.artifact_total} ({eventStormingProgressPct.toFixed(1)}%)
+                    </strong>
+                  </div>
+                  <div className="event-storming-progress-track" role="presentation" aria-hidden="true">
+                    <span className="event-storming-progress-fill" style={{ width: `${eventStormingProgressPct}%` }} />
+                  </div>
+                  <div className="event-storming-mini-stats">
+                    <span className="badge">Artifact links: {eventStormingOverview.artifact_link_count}</span>
+                    {eventStormingFrameMode && (
+                      <span className="badge">
+                        Frame: {eventStormingFrameMode}{eventStormingFrameRevisionShort ? ` · ${eventStormingFrameRevisionShort}` : ''}
+                      </span>
+                    )}
+                    {eventStormingFrameUpdatedAtLabel && (
+                      <span className="badge">Frame updated: {eventStormingFrameUpdatedAtLabel}</span>
+                    )}
+                    <span className="badge">Queued: {eventStormingProcessing.queued}</span>
+                    <span className="badge">Running: {eventStormingProcessing.running}</span>
+                    <span className="badge">Failed: {eventStormingProcessing.failed}</span>
+                  </div>
+                </div>
+                <div className="event-storming-controls-card">
+                  <div className="event-storming-controls-card-title">Detected Components</div>
+                  <div className="event-storming-component-grid">
+                    {eventStormingComponentStats.map((item) => (
+                      <div
+                        key={`project-es-count-${item.key}`}
+                        className={`event-storming-component-chip ${item.count === 0 ? 'zero' : ''}`}
+                        style={{ borderColor: item.color }}
+                      >
+                        <span>{item.label}</span>
+                        <strong>{item.count}</strong>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
             </>
           ) : (

@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import ForceGraph2D from 'react-force-graph-2d'
 import * as Accordion from '@radix-ui/react-accordion'
 import * as Tabs from '@radix-ui/react-tabs'
-import { Background, Controls, MarkerType, MiniMap, Position, ReactFlow, type Edge as FlowEdge, type Node as FlowNode, type ReactFlowInstance } from '@xyflow/react'
+import { Background, MarkerType, MiniMap, Position, ReactFlow, type Edge as FlowEdge, type Node as FlowNode, type ReactFlowInstance } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import {
   getProjectEventStormingComponentLinks,
@@ -394,6 +394,8 @@ export function ProjectKnowledgeGraphPanel({
   const [showEventStormingArtifactsOnDiagram, setShowEventStormingArtifactsOnDiagram] = React.useState(false)
   const [showRejectedEventStormingLinks, setShowRejectedEventStormingLinks] = React.useState(false)
   const [eventStormingViewportTransform, setEventStormingViewportTransform] = React.useState({ x: 0, zoom: 1 })
+  const [isEventStormingPortraitMobile, setIsEventStormingPortraitMobile] = React.useState(false)
+  const [isEventStormingInspectorOpen, setIsEventStormingInspectorOpen] = React.useState(true)
   const [selectedEvidenceId, setSelectedEvidenceId] = React.useState<string | null>(null)
   const [activeTab, setActiveTab] = React.useState<KnowledgeGraphTab>('explore')
   const [overviewTab, setOverviewTab] = React.useState<'summary' | 'composition'>('summary')
@@ -514,6 +516,26 @@ export function ProjectKnowledgeGraphPanel({
     () => eventStormingNodes.find((node) => String(node.entity_id || '') === String(selectedEventStormingNodeId || '')) ?? null,
     [eventStormingNodes, selectedEventStormingNodeId]
   )
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return
+    const update = () => {
+      const portrait = window.matchMedia('(max-width: 900px) and (orientation: portrait)').matches
+      setIsEventStormingPortraitMobile(portrait)
+      setIsEventStormingInspectorOpen(!portrait)
+    }
+    update()
+    window.addEventListener('resize', update)
+    window.addEventListener('orientationchange', update)
+    return () => {
+      window.removeEventListener('resize', update)
+      window.removeEventListener('orientationchange', update)
+    }
+  }, [])
+  React.useEffect(() => {
+    if (!isEventStormingPortraitMobile || !isEventStormingFullscreen) return
+    if (!selectedEventStormingNodeId) return
+    setIsEventStormingInspectorOpen(true)
+  }, [isEventStormingPortraitMobile, isEventStormingFullscreen, selectedEventStormingNodeId])
   const selectedEventStormingNodeType = String(selectedEventStormingNode?.entity_type || '')
     .trim()
     .toLowerCase()
@@ -2174,7 +2196,13 @@ export function ProjectKnowledgeGraphPanel({
                         {eventStormingFlowNodes.length === 0 ? (
                           <div className="meta">No Event Storming components detected yet.</div>
                         ) : (
-                          <div className="graph-reactflow-shell" ref={eventStormingShellRef}>
+                          <div
+                            className={[
+                              'graph-reactflow-shell',
+                              isEventStormingPortraitMobile ? 'is-mobile-portrait-event-storming' : '',
+                            ].join(' ').trim()}
+                            ref={eventStormingShellRef}
+                          >
                             {!isEventStormingFullscreen ? (
                               <button
                                 className="action-icon graph-viz-enter-button"
@@ -2254,164 +2282,193 @@ export function ProjectKnowledgeGraphPanel({
                                     }}
                                     onMove={() => syncEventStormingViewportTransform()}
                                   >
-                                    <MiniMap
-                                      pannable
-                                      zoomable
-                                      nodeStrokeWidth={2}
-                                      nodeColor={(node) => eventStormingNodeColor(String((node.data as ReactFlowNodeData | undefined)?.entityType || 'Entity'))}
-                                    />
-                                    <Controls showInteractive={false} />
+                                    {!isEventStormingPortraitMobile ? (
+                                      <MiniMap
+                                        pannable
+                                        zoomable
+                                        nodeStrokeWidth={2}
+                                        nodeColor={(node) => eventStormingNodeColor(String((node.data as ReactFlowNodeData | undefined)?.entityType || 'Entity'))}
+                                      />
+                                    ) : null}
                                     <Background gap={18} size={1} color="rgba(148,163,184,0.30)" />
                                   </ReactFlow>
                                 </div>
                               </div>
-                            <aside className="graph-viz-side graph-viz-side-event-storming">
-                              <div className="meta">Selected Event Storming Node</div>
-                              <label className="event-storming-toggle">
-                                <input
-                                  type="checkbox"
-                                  checked={showEventStormingArtifactsOnDiagram}
-                                  onChange={(e) => setShowEventStormingArtifactsOnDiagram(Boolean(e.target.checked))}
-                                />
-                                <span>Show artifacts on diagram</span>
-                              </label>
-                              <label className="event-storming-toggle">
-                                <input
-                                  type="checkbox"
-                                  checked={showRejectedEventStormingLinks}
-                                  onChange={(e) => setShowRejectedEventStormingLinks(Boolean(e.target.checked))}
-                                />
-                                <span>Show rejected links</span>
-                              </label>
-                              {selectedEventStormingNode ? (
-                                <div className="graph-viz-selected" style={{ marginBottom: 10 }}>
-                                  <div className="graph-viz-selected-head">
-                                    <span className="meta">Type</span>
-                                    <span className="status-chip">{selectedEventStormingNode.entity_type}</span>
-                                  </div>
-                                  <div className="graph-viz-selected-title">{selectedEventStormingNode.title || selectedEventStormingNode.entity_id}</div>
-                                  <div className="graph-viz-selected-id" title={selectedEventStormingNode.entity_id}>
-                                    {selectedEventStormingNode.entity_id}
-                                  </div>
-                                </div>
-                              ) : (
-                                <div className="meta">Select a node to inspect inferred links.</div>
-                              )}
-                              {eventStormingLinksError ? (
-                                <div className="notice notice-error" style={{ marginBottom: 8 }}>
-                                  {toErrorMessage(eventStormingLinksError)}
-                                </div>
-                              ) : null}
-                              {eventStormingLinksLoading ? <div className="meta">Loading inferred links...</div> : null}
-                              {selectedEventStormingNode && selectedEventStormingIsComponent && !eventStormingLinksLoading ? (
-                                <>
-                                  <div className="meta" style={{ marginBottom: 6 }}>
-                                    Linked artifacts ({visibleEventStormingComponentLinkItems.length})
-                                  </div>
-                                  <div className="graph-evidence-list">
-                                    {visibleEventStormingComponentLinkItems.map((item) => (
-                                      <div key={`es-component-link-${item.entity_id}-${selectedEventStormingNode.entity_id}`} className="graph-evidence-item">
-                                        <div className="graph-evidence-head">
-                                          <div className="graph-evidence-badges">
-                                            <span className="status-chip">{item.entity_type}</span>
-                                            <span className="graph-evidence-id">{item.entity_id}</span>
-                                          </div>
-                                          <span className="graph-evidence-score graph-evidence-score-pill">{item.confidence.toFixed(2)}</span>
+                            {isEventStormingPortraitMobile && isEventStormingFullscreen && (
+                              <button
+                                type="button"
+                                className={`event-storming-inspector-side-toggle ${isEventStormingInspectorOpen ? 'is-open' : ''}`.trim()}
+                                onClick={() => setIsEventStormingInspectorOpen((prev) => !prev)}
+                                aria-expanded={isEventStormingInspectorOpen}
+                                aria-label={isEventStormingInspectorOpen ? 'Hide details panel' : 'Show details panel'}
+                              >
+                                {isEventStormingInspectorOpen ? 'Hide' : 'Details'}
+                              </button>
+                            )}
+                            {isEventStormingPortraitMobile && isEventStormingFullscreen && isEventStormingInspectorOpen && (
+                              <button
+                                type="button"
+                                className="event-storming-inspector-backdrop"
+                                aria-label="Close details panel"
+                                onClick={() => setIsEventStormingInspectorOpen(false)}
+                              />
+                            )}
+                            {(!isEventStormingPortraitMobile || isEventStormingFullscreen) && (
+                              <aside
+                                className={[
+                                  'graph-viz-side',
+                                  'graph-viz-side-event-storming',
+                                  isEventStormingInspectorOpen ? 'is-open' : 'is-collapsed',
+                                  isEventStormingPortraitMobile ? 'is-mobile-portrait' : '',
+                                ].join(' ')}
+                              >
+                                <div className="meta">Selected Event Storming Node</div>
+                                    <label className="event-storming-toggle">
+                                      <input
+                                        type="checkbox"
+                                        checked={showEventStormingArtifactsOnDiagram}
+                                        onChange={(e) => setShowEventStormingArtifactsOnDiagram(Boolean(e.target.checked))}
+                                      />
+                                      <span>Show artifacts on diagram</span>
+                                    </label>
+                                    <label className="event-storming-toggle">
+                                      <input
+                                        type="checkbox"
+                                        checked={showRejectedEventStormingLinks}
+                                        onChange={(e) => setShowRejectedEventStormingLinks(Boolean(e.target.checked))}
+                                      />
+                                      <span>Show rejected links</span>
+                                    </label>
+                                    {selectedEventStormingNode ? (
+                                      <div className="graph-viz-selected" style={{ marginBottom: 10 }}>
+                                        <div className="graph-viz-selected-head">
+                                          <span className="meta">Type</span>
+                                          <span className="status-chip">{selectedEventStormingNode.entity_type}</span>
                                         </div>
-                                        <div className="graph-evidence-snippet">{item.entity_title || item.entity_id}</div>
-                                        <div className="es-link-review">
-                                          <div className="es-link-review-buttons" role="group" aria-label="Set review status">
-                                            {(['candidate', 'approved', 'rejected'] as const).map((status) => (
-                                              <button
-                                                key={`es-link-status-${item.entity_id}-${status}`}
-                                                type="button"
-                                                className={`es-link-review-btn ${item.review_status === status ? 'active' : ''}`.trim()}
-                                                aria-pressed={item.review_status === status}
-                                                disabled={Boolean(reviewEventStormingLinkMutation.isPending)}
-                                                onClick={() =>
-                                                  void setEventStormingLinkReview({
-                                                    entity_type: String(item.entity_type || '').toLowerCase(),
-                                                    entity_id: String(item.entity_id || ''),
-                                                    component_id: String(selectedEventStormingNode.entity_id || ''),
-                                                    review_status: status,
-                                                  })
-                                                }
-                                              >
-                                                {status}
-                                              </button>
-                                            ))}
-                                          </div>
-                                          <div className="es-link-review-meta">
-                                            <span className="status-chip">Status: {item.review_status}</span>
-                                            <span className="status-chip">Inference: {item.inference_method}</span>
-                                          </div>
+                                        <div className="graph-viz-selected-title">{selectedEventStormingNode.title || selectedEventStormingNode.entity_id}</div>
+                                        <div className="graph-viz-selected-id" title={selectedEventStormingNode.entity_id}>
+                                          {selectedEventStormingNode.entity_id}
                                         </div>
                                       </div>
-                                    ))}
-                                    {visibleEventStormingComponentLinkItems.length === 0 ? (
-                                      <div className="meta">No artifact links detected for this component.</div>
-                                    ) : null}
-                                  </div>
-                                </>
-                              ) : null}
-                              {selectedEventStormingNode && selectedEventStormingIsArtifact && !eventStormingLinksLoading ? (
-                                <>
-                                  <div className="meta" style={{ marginBottom: 6 }}>
-                                    Linked components ({visibleEventStormingEntityLinkItems.length})
-                                  </div>
-                                  <div className="graph-evidence-list">
-                                    {visibleEventStormingEntityLinkItems.map((item) => (
-                                      <div key={`es-entity-link-${selectedEventStormingNode.entity_id}-${item.component_id}`} className="graph-evidence-item">
-                                        <div className="graph-evidence-head">
-                                          <div className="graph-evidence-badges">
-                                            <span className="status-chip">{item.component_type}</span>
-                                            <span className="graph-evidence-id">{item.component_id}</span>
-                                          </div>
-                                          <span className="graph-evidence-score graph-evidence-score-pill">{item.confidence.toFixed(2)}</span>
-                                        </div>
-                                        <div className="graph-evidence-snippet">{item.component_title || item.component_id}</div>
-                                        <div className="es-link-review">
-                                          <div className="es-link-review-buttons" role="group" aria-label="Set review status">
-                                            {(['candidate', 'approved', 'rejected'] as const).map((status) => (
-                                              <button
-                                                key={`es-link-status-${item.component_id}-${status}`}
-                                                type="button"
-                                                className={`es-link-review-btn ${item.review_status === status ? 'active' : ''}`.trim()}
-                                                aria-pressed={item.review_status === status}
-                                                disabled={Boolean(reviewEventStormingLinkMutation.isPending)}
-                                                onClick={() =>
-                                                  void setEventStormingLinkReview({
-                                                    entity_type: String(selectedEventStormingNode.entity_type || '').toLowerCase(),
-                                                    entity_id: String(selectedEventStormingNode.entity_id || ''),
-                                                    component_id: String(item.component_id || ''),
-                                                    review_status: status,
-                                                  })
-                                                }
-                                              >
-                                                {status}
-                                              </button>
-                                            ))}
-                                          </div>
-                                          <div className="es-link-review-meta">
-                                            <span className="status-chip">Status: {item.review_status}</span>
-                                            <span className="status-chip">Inference: {item.inference_method}</span>
-                                          </div>
-                                        </div>
+                                    ) : (
+                                      <div className="meta">Select a node to inspect inferred links.</div>
+                                    )}
+                                    {eventStormingLinksError ? (
+                                      <div className="notice notice-error" style={{ marginBottom: 8 }}>
+                                        {toErrorMessage(eventStormingLinksError)}
                                       </div>
-                                    ))}
-                                    {visibleEventStormingEntityLinkItems.length === 0 ? (
-                                      <div className="meta">No component links detected for this artifact.</div>
                                     ) : null}
-                                  </div>
-                                </>
-                              ) : null}
-                              {selectedEventStormingNode &&
-                              !selectedEventStormingIsComponent &&
-                              !selectedEventStormingIsArtifact &&
-                              !eventStormingLinksLoading ? (
-                                <div className="meta">No reviewable links for this node type.</div>
-                              ) : null}
-                            </aside>
+                                    {eventStormingLinksLoading ? <div className="meta">Loading inferred links...</div> : null}
+                                    {selectedEventStormingNode && selectedEventStormingIsComponent && !eventStormingLinksLoading ? (
+                                      <>
+                                        <div className="meta" style={{ marginBottom: 6 }}>
+                                          Linked artifacts ({visibleEventStormingComponentLinkItems.length})
+                                        </div>
+                                        <div className="graph-evidence-list">
+                                          {visibleEventStormingComponentLinkItems.map((item) => (
+                                            <div key={`es-component-link-${item.entity_id}-${selectedEventStormingNode.entity_id}`} className="graph-evidence-item">
+                                              <div className="graph-evidence-head">
+                                                <div className="graph-evidence-badges">
+                                                  <span className="status-chip">{item.entity_type}</span>
+                                                  <span className="graph-evidence-id">{item.entity_id}</span>
+                                                </div>
+                                                <span className="graph-evidence-score graph-evidence-score-pill">{item.confidence.toFixed(2)}</span>
+                                              </div>
+                                              <div className="graph-evidence-snippet">{item.entity_title || item.entity_id}</div>
+                                              <div className="es-link-review">
+                                                <div className="es-link-review-buttons" role="group" aria-label="Set review status">
+                                                  {(['candidate', 'approved', 'rejected'] as const).map((status) => (
+                                                    <button
+                                                      key={`es-link-status-${item.entity_id}-${status}`}
+                                                      type="button"
+                                                      className={`es-link-review-btn ${item.review_status === status ? 'active' : ''}`.trim()}
+                                                      aria-pressed={item.review_status === status}
+                                                      disabled={Boolean(reviewEventStormingLinkMutation.isPending)}
+                                                      onClick={() =>
+                                                        void setEventStormingLinkReview({
+                                                          entity_type: String(item.entity_type || '').toLowerCase(),
+                                                          entity_id: String(item.entity_id || ''),
+                                                          component_id: String(selectedEventStormingNode.entity_id || ''),
+                                                          review_status: status,
+                                                        })
+                                                      }
+                                                    >
+                                                      {status}
+                                                    </button>
+                                                  ))}
+                                                </div>
+                                                <div className="es-link-review-meta">
+                                                  <span className="status-chip">Status: {item.review_status}</span>
+                                                  <span className="status-chip">Inference: {item.inference_method}</span>
+                                                </div>
+                                              </div>
+                                            </div>
+                                          ))}
+                                          {visibleEventStormingComponentLinkItems.length === 0 ? (
+                                            <div className="meta">No artifact links detected for this component.</div>
+                                          ) : null}
+                                        </div>
+                                      </>
+                                    ) : null}
+                                    {selectedEventStormingNode && selectedEventStormingIsArtifact && !eventStormingLinksLoading ? (
+                                      <>
+                                        <div className="meta" style={{ marginBottom: 6 }}>
+                                          Linked components ({visibleEventStormingEntityLinkItems.length})
+                                        </div>
+                                        <div className="graph-evidence-list">
+                                          {visibleEventStormingEntityLinkItems.map((item) => (
+                                            <div key={`es-entity-link-${selectedEventStormingNode.entity_id}-${item.component_id}`} className="graph-evidence-item">
+                                              <div className="graph-evidence-head">
+                                                <div className="graph-evidence-badges">
+                                                  <span className="status-chip">{item.component_type}</span>
+                                                  <span className="graph-evidence-id">{item.component_id}</span>
+                                                </div>
+                                                <span className="graph-evidence-score graph-evidence-score-pill">{item.confidence.toFixed(2)}</span>
+                                              </div>
+                                              <div className="graph-evidence-snippet">{item.component_title || item.component_id}</div>
+                                              <div className="es-link-review">
+                                                <div className="es-link-review-buttons" role="group" aria-label="Set review status">
+                                                  {(['candidate', 'approved', 'rejected'] as const).map((status) => (
+                                                    <button
+                                                      key={`es-link-status-${item.component_id}-${status}`}
+                                                      type="button"
+                                                      className={`es-link-review-btn ${item.review_status === status ? 'active' : ''}`.trim()}
+                                                      aria-pressed={item.review_status === status}
+                                                      disabled={Boolean(reviewEventStormingLinkMutation.isPending)}
+                                                      onClick={() =>
+                                                        void setEventStormingLinkReview({
+                                                          entity_type: String(selectedEventStormingNode.entity_type || '').toLowerCase(),
+                                                          entity_id: String(selectedEventStormingNode.entity_id || ''),
+                                                          component_id: String(item.component_id || ''),
+                                                          review_status: status,
+                                                        })
+                                                      }
+                                                    >
+                                                      {status}
+                                                    </button>
+                                                  ))}
+                                                </div>
+                                                <div className="es-link-review-meta">
+                                                  <span className="status-chip">Status: {item.review_status}</span>
+                                                  <span className="status-chip">Inference: {item.inference_method}</span>
+                                                </div>
+                                              </div>
+                                            </div>
+                                          ))}
+                                          {visibleEventStormingEntityLinkItems.length === 0 ? (
+                                            <div className="meta">No component links detected for this artifact.</div>
+                                          ) : null}
+                                        </div>
+                                      </>
+                                    ) : null}
+                                    {selectedEventStormingNode &&
+                                    !selectedEventStormingIsComponent &&
+                                    !selectedEventStormingIsArtifact &&
+                                    !eventStormingLinksLoading ? (
+                                      <div className="meta">No reviewable links for this node type.</div>
+                                    ) : null}
+                              </aside>
+                            )}
                             </div>
                           </div>
                         )}

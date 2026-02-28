@@ -5249,6 +5249,16 @@ textarea:disabled {
   top: 72px;
 }
 
+@media (max-width: 1180px) {
+  .kg-explore-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .kg-explore-side {
+    display: none;
+  }
+}
+
 .kg-explore-accordion {
   display: grid;
   gap: 8px;
@@ -6126,6 +6136,7 @@ textarea:disabled {
 
 .graph-viz-composite-event-storming {
   align-items: stretch;
+  position: relative;
 }
 
 .graph-viz-main-event-storming {
@@ -6230,6 +6241,35 @@ textarea:disabled {
   grid-template-columns: minmax(0, 1fr) minmax(280px, 320px);
   gap: 12px;
   align-items: stretch;
+}
+
+.graph-reactflow-shell.is-mobile-portrait-event-storming:fullscreen .graph-viz-composite-event-storming,
+.graph-reactflow-shell.is-mobile-portrait-event-storming:-webkit-full-screen .graph-viz-composite-event-storming {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
+
+.graph-reactflow-shell.is-mobile-portrait-event-storming:fullscreen .graph-viz-side-event-storming.is-mobile-portrait,
+.graph-reactflow-shell.is-mobile-portrait-event-storming:-webkit-full-screen .graph-viz-side-event-storming.is-mobile-portrait {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 14;
+  width: min(84vw, 340px);
+  height: 100%;
+  max-height: none;
+  padding-top: 8px;
+  border-radius: 10px 0 0 10px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 26%);
+  box-shadow: -14px 0 26px color-mix(in srgb, #000, transparent 80%);
+  transform: translateX(0);
+  transition: transform 0.22s ease;
+}
+
+.graph-reactflow-shell.is-mobile-portrait-event-storming:fullscreen .graph-viz-side-event-storming.is-mobile-portrait.is-collapsed,
+.graph-reactflow-shell.is-mobile-portrait-event-storming:-webkit-full-screen .graph-viz-side-event-storming.is-mobile-portrait.is-collapsed {
+  transform: translateX(calc(100% + 10px));
+  pointer-events: none;
 }
 
 .graph-reactflow-canvas {
@@ -6487,6 +6527,69 @@ textarea:disabled {
   box-sizing: border-box;
   padding-top: 42px;
   overflow: auto;
+}
+
+.event-storming-inspector-accordion {
+  display: grid;
+  gap: 8px;
+}
+
+.event-storming-inspector-trigger {
+  width: 100%;
+  min-height: 32px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 16%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 18%);
+  color: color-mix(in srgb, var(--text), var(--brand-strong) 12%);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.event-storming-inspector-trigger svg {
+  width: 14px;
+  height: 14px;
+  opacity: 0.8;
+  transition: transform 0.18s ease;
+}
+
+.event-storming-inspector-trigger[data-state="open"] svg {
+  transform: rotate(180deg);
+}
+
+.event-storming-inspector-content {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.event-storming-inspector-content[data-state="closed"] {
+  display: none;
+}
+
+.event-storming-inspector-side-toggle {
+  display: none;
+}
+
+.event-storming-inspector-backdrop {
+  display: none;
+}
+
+@media (max-width: 1040px) {
+  .graph-reactflow-shell:not(:fullscreen):not(:-webkit-full-screen) .graph-viz-composite-event-storming {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .graph-reactflow-shell:not(:fullscreen):not(:-webkit-full-screen) .graph-viz-side-event-storming {
+    display: none;
+  }
 }
 
 .graph-reactflow-shell:fullscreen .graph-viz-side-event-storming,
@@ -9998,7 +10101,100 @@ textarea {
   }
 
   .event-storming-lane-header-shell {
-    overflow-x: auto;
+    overflow: hidden;
+  }
+
+  .graph-viz-side-event-storming.is-mobile-portrait {
+    position: absolute;
+    top: 0;
+    right: 0;
+    z-index: 14;
+    width: min(84vw, 340px);
+    height: 100%;
+    max-height: none;
+    padding-top: 8px;
+    border-radius: 10px 0 0 10px;
+    background: color-mix(in srgb, var(--surface), var(--surface-alt) 26%);
+    box-shadow: -14px 0 26px color-mix(in srgb, #000, transparent 80%);
+    transform: translateX(0);
+    transition: transform 0.22s ease;
+  }
+
+  .graph-viz-side-event-storming.is-mobile-portrait.is-collapsed {
+    transform: translateX(calc(100% + 10px));
+    pointer-events: none;
+  }
+
+  .event-storming-inspector-side-toggle {
+    display: inline-flex;
+    position: absolute;
+    top: 50%;
+    right: 0;
+    transform: translate(0, -50%);
+    z-index: 15;
+    min-width: 38px;
+    min-height: 78px;
+    padding: 8px 6px;
+    border: 1px solid color-mix(in srgb, var(--line), var(--brand) 20%);
+    border-right: none;
+    border-radius: 10px 0 0 10px;
+    background: color-mix(in srgb, var(--surface), var(--surface-alt) 22%);
+    color: color-mix(in srgb, var(--text), var(--brand-strong) 10%);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.01em;
+    text-transform: uppercase;
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    cursor: pointer;
+    box-shadow: -6px 6px 16px color-mix(in srgb, #000, transparent 86%);
+  }
+
+  .event-storming-inspector-side-toggle.is-open {
+    right: min(84vw, 340px);
+  }
+
+  .event-storming-inspector-backdrop {
+    display: block;
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: min(84vw, 340px);
+    bottom: 0;
+    z-index: 13;
+    border: none;
+    background: transparent;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+  }
+
+  .graph-reactflow-shell.is-mobile-portrait-event-storming:fullscreen .event-storming-canvas,
+  .graph-reactflow-shell.is-mobile-portrait-event-storming:-webkit-full-screen .event-storming-canvas {
+    height: calc(100vh - 134px);
+  }
+
+  .graph-reactflow-shell.is-mobile-portrait-event-storming:fullscreen .graph-viz-side-event-storming.is-mobile-portrait,
+  .graph-reactflow-shell.is-mobile-portrait-event-storming:-webkit-full-screen .graph-viz-side-event-storming.is-mobile-portrait {
+    position: absolute;
+    top: 0;
+    right: 0;
+    z-index: 14;
+    width: min(84vw, 340px);
+    height: 100%;
+    max-height: none;
+    padding-top: 8px;
+    border-radius: 10px 0 0 10px;
+    transform: translateX(0);
+  }
+
+  .graph-reactflow-shell.is-mobile-portrait-event-storming:fullscreen .graph-viz-side-event-storming.is-mobile-portrait.is-collapsed,
+  .graph-reactflow-shell.is-mobile-portrait-event-storming:-webkit-full-screen .graph-viz-side-event-storming.is-mobile-portrait.is-collapsed {
+    transform: translateX(calc(100% + 10px));
+    pointer-events: none;
   }
 
   .graph-viz-composite {
