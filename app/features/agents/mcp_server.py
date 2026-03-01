@@ -100,11 +100,16 @@ VERIFY_TEAM_MODE_WORKFLOW_TOOL_DESCRIPTION = (
     "Verify Team Mode workflow wiring for a project (role coverage + required trigger chain). "
     "Use this before final success claims for Team Mode setup."
 )
+VERIFY_DELIVERY_WORKFLOW_TOOL_DESCRIPTION = (
+    "Verify delivery contract wiring for a project (Git evidence + QA artifacts). "
+    "Checks include git_contract_ok, dev_tasks_have_commit_evidence, and qa_has_verifiable_artifacts."
+)
 
 ENSURE_TEAM_MODE_PROJECT_TOOL_DESCRIPTION = (
     "Ensure Team Mode is fully ready on a project in one idempotent step: "
-    "attach workspace `team_mode` skill if missing, apply it, provision Team Mode roster members, "
-    "and return verification status. Accepts project id or exact project name via project_ref."
+    "attach/apply workspace `team_mode` and enforced `git_delivery`, provision Team Mode roster members, "
+    "conditionally attach/apply `github_delivery` when GitHub context exists, and return verification status. "
+    "Accepts project id or exact project name via project_ref."
 )
 
 
@@ -947,6 +952,19 @@ def create_mcp():
             workspace_id=workspace_id,
             auth_token=auth_token,
             expected_event_storming_enabled=expected_event_storming_enabled,
+        )
+
+    @mcp.tool(description=VERIFY_DELIVERY_WORKFLOW_TOOL_DESCRIPTION)
+    def verify_delivery_workflow(
+        project_id: str,
+        workspace_id: str | None = None,
+        auth_token: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.verify_delivery_workflow(
+            project_id=project_id,
+            workspace_id=workspace_id,
+            auth_token=auth_token,
         )
 
     @mcp.tool(description=ENSURE_TEAM_MODE_PROJECT_TOOL_DESCRIPTION)

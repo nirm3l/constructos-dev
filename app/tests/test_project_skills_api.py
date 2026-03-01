@@ -476,6 +476,7 @@ def test_workspace_skill_catalog_seed_and_attach_to_project(tmp_path: Path):
     catalog = client.get(f"/api/workspace-skills?workspace_id={workspace_id}")
     assert catalog.status_code == 200
     items = catalog.json()["items"]
+    assert any(item["skill_key"] == "git_delivery" for item in items)
     assert any(item["skill_key"] == "github_delivery" for item in items)
     assert any(item["skill_key"] == "jira_execution" for item in items)
     assert any(item["skill_key"] == "team_mode" for item in items)
@@ -484,7 +485,7 @@ def test_workspace_skill_catalog_seed_and_attach_to_project(tmp_path: Path):
     assert github_skill["source_locator"] == "seed://workspace-skills/github-delivery"
     assert github_skill["is_seeded"] is True
     github_content = str(github_skill["manifest"].get("source_content", ""))
-    assert "Use GitHub MCP for repository operations and publishing" in github_content
+    assert "Core Git execution rules are enforced by `git_delivery`." in github_content
 
     jira_skill = next(item for item in items if item["skill_key"] == "jira_execution")
     assert jira_skill["source_locator"] == "seed://workspace-skills/jira-execution"

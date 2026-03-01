@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import inspect
 import json
+import re
 import uuid
 from datetime import datetime
 from typing import Any
@@ -85,7 +86,16 @@ from shared.knowledge_graph import (
     require_graph_available,
     search_project_knowledge as search_project_knowledge_query,
 )
-from shared.models import ProjectMember, ProjectSkill, WorkspaceSkill, User as UserModel
+from shared.models import (
+    Note,
+    ProjectMember,
+    ProjectRule as ProjectRuleModel,
+    ProjectSkill,
+    Task,
+    TaskComment,
+    WorkspaceSkill,
+    User as UserModel,
+)
 from shared.settings import (
     DEFAULT_USER_ID,
     MCP_ACTOR_USER_ID,
@@ -124,12 +134,15 @@ _READ_ONLY_MCP_METHODS = frozenset(
         "graph_context_pack",
         "search_project_knowledge",
         "verify_team_mode_workflow",
+        "verify_delivery_workflow",
         "list_project_templates",
         "get_project_template",
         "preview_project_from_template",
     }
 )
 _LICENSE_WRITE_BLOCKED_MESSAGE = "License expired. Write access is disabled until subscription is reactivated."
+_COMMIT_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
+_GITHUB_HOST_TOKENS = ("github.com", "www.github.com")
 
 
 def _graph_summary_to_markdown(summary: dict[str, object] | None) -> str:
@@ -1541,6 +1554,93 @@ class AgentTaskService:
         except Exception as exc:
             raise HTTPException(status_code=503, detail=f"Project knowledge search failed: {exc}") from exc
 
+    @staticmethod
+    def _parse_json_list(raw: Any) -> list[dict[str, Any]]:
+        if isinstance(raw, list):
+            return [item for item in raw if isinstance(item, dict)]
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw or "[]")
+            except Exception:
+                return []
+            if isinstance(parsed, list):
+                return [item for item in parsed if isinstance(item, dict)]
+        return []
+
+    @staticmethod
+    def _contains_commit_evidence(text: str) -> bool:
+        normalized = str(text or "").strip().lower()
+        if not normalized:
+            return False
+        if _COMMIT_SHA_RE.search(normalized):
+            return True
+        indicators = ("commit", "changeset", "sha", "git rev", "hash")
+        return any(token in normalized for token in indicators)
+
+    @classmethod
+    def _external_refs_have_commit_evidence(cls, refs: Any) -> bool:
+        for item in cls._parse_json_list(refs):
+            url = str(item.get("url") or "").strip()
+            title = str(item.get("title") or "").strip()
+            lower_url = url.lower()
+            if lower_url.startswith("http://") or lower_url.startswith("https://"):
+                if "/commit/" in lower_url or "sha=" in lower_url:
+                    return True
+                if cls._contains_commit_evidence(f"{url} {title}"):
+                    return True
+        return False
+
+    @staticmethod
+    def _has_http_external_ref(refs: Any) -> bool:
+        parsed = refs if isinstance(refs, list) else []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip().lower()
+            if url.startswith("http://") or url.startswith("https://"):
+                return True
+        return False
+
+    @staticmethod
+    def _has_qa_artifact_text(text: str) -> bool:
+        normalized = str(text or "").strip().lower()
+        if not normalized:
+            return False
+        keywords = (
+            "test",
+            "qa",
+            "artifact",
+            "report",
+            "log",
+            "trace",
+            "playwright",
+            "pytest",
+            "coverage",
+            "reproduc",
+            "screenshot",
+        )
+        return any(token in normalized for token in keywords)
+
+    @classmethod
+    def _project_has_github_context(
+        cls,
+        *,
+        project_description: str,
+        project_external_refs: Any,
+        project_rules: list[ProjectRuleModel],
+    ) -> bool:
+        if any(token in str(project_description or "").lower() for token in _GITHUB_HOST_TOKENS):
+            return True
+        for ref in cls._parse_json_list(project_external_refs):
+            url = str(ref.get("url") or "").strip().lower()
+            if any(token in url for token in _GITHUB_HOST_TOKENS):
+                return True
+        for rule in project_rules:
+            blob = f"{rule.title or ''} {rule.body or ''}".lower()
+            if "github.com" in blob or "github " in blob or blob.endswith("github"):
+                return True
+        return False
+
     def verify_team_mode_workflow(
         self,
         *,
@@ -1711,6 +1811,156 @@ class AgentTaskService:
             "ok": bool(role_coverage_ok and required_triggers_ok and event_storming_ok),
         }
 
+    def verify_delivery_workflow(
+        self,
+        *,
+        project_id: str,
+        auth_token: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            project = self._load_project_scope(db=db, project_id=project_id)
+            if workspace_id and str(project.workspace_id) != str(workspace_id):
+                raise HTTPException(status_code=400, detail="Project does not belong to workspace")
+            ensure_role(db, project.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            members = db.execute(
+                select(ProjectMember, UserModel)
+                .join(UserModel, UserModel.id == ProjectMember.user_id)
+                .where(ProjectMember.project_id == project_id)
+            ).all()
+            member_role_by_user_id = {str(pm.user_id): str(pm.role or "").strip() for pm, _ in members}
+            tasks_payload = list_tasks_read_model(
+                db,
+                user,
+                TaskListQuery(
+                    workspace_id=str(project.workspace_id),
+                    project_id=project_id,
+                    limit=500,
+                    offset=0,
+                    archived=False,
+                ),
+            )
+            project_rules = db.execute(
+                select(ProjectRuleModel).where(
+                    ProjectRuleModel.project_id == project_id,
+                    ProjectRuleModel.is_deleted == False,  # noqa: E712
+                )
+            ).scalars().all()
+            notes = db.execute(
+                select(Note).where(
+                    Note.project_id == project_id,
+                    Note.is_deleted == False,  # noqa: E712
+                )
+            ).scalars().all()
+            comments = db.execute(
+                select(TaskComment).join(Task, Task.id == TaskComment.task_id).where(
+                    Task.project_id == project_id,
+                    Task.is_deleted == False,  # noqa: E712
+                )
+            ).scalars().all()
+
+        tasks = list(tasks_payload.get("items") or [])
+        role_dev_tasks = [t for t in tasks if member_role_by_user_id.get(str(t.get("assignee_id") or "")) == "DeveloperAgent"]
+        role_qa_tasks = [t for t in tasks if member_role_by_user_id.get(str(t.get("assignee_id") or "")) == "QAAgent"]
+        dev_tasks = role_dev_tasks or [t for t in tasks if str(t.get("status") or "").strip() == "Dev"]
+        qa_tasks = role_qa_tasks or [t for t in tasks if str(t.get("status") or "").strip() == "QA"]
+
+        notes_by_task: dict[str, list[Note]] = {}
+        for note in notes:
+            task_id = str(note.task_id or "").strip()
+            if not task_id:
+                continue
+            notes_by_task.setdefault(task_id, []).append(note)
+        comments_by_task: dict[str, list[TaskComment]] = {}
+        for comment in comments:
+            task_id = str(comment.task_id or "").strip()
+            if not task_id:
+                continue
+            comments_by_task.setdefault(task_id, []).append(comment)
+
+        def _task_has_commit_evidence(task: dict[str, Any]) -> bool:
+            task_id = str(task.get("id") or "").strip()
+            if not task_id:
+                return False
+            if self._external_refs_have_commit_evidence(task.get("external_refs")):
+                return True
+            for note in notes_by_task.get(task_id, []):
+                if self._contains_commit_evidence(f"{note.title or ''}\n{note.body or ''}"):
+                    return True
+                if self._external_refs_have_commit_evidence(note.external_refs):
+                    return True
+            for comment in comments_by_task.get(task_id, []):
+                if self._contains_commit_evidence(comment.body):
+                    return True
+            return False
+
+        def _task_has_qa_artifacts(task: dict[str, Any]) -> bool:
+            task_id = str(task.get("id") or "").strip()
+            if not task_id:
+                return False
+            if self._has_http_external_ref(task.get("external_refs")):
+                return True
+            for note in notes_by_task.get(task_id, []):
+                if self._has_qa_artifact_text(f"{note.title or ''}\n{note.body or ''}"):
+                    return True
+                if self._has_http_external_ref(self._parse_json_list(note.external_refs)):
+                    return True
+            for comment in comments_by_task.get(task_id, []):
+                if self._has_qa_artifact_text(comment.body):
+                    return True
+            return False
+
+        dev_missing = [
+            {
+                "task_id": str(task.get("id") or "").strip(),
+                "title": str(task.get("title") or "").strip() or str(task.get("id") or "").strip(),
+            }
+            for task in dev_tasks
+            if not _task_has_commit_evidence(task)
+        ]
+        qa_missing = [
+            {
+                "task_id": str(task.get("id") or "").strip(),
+                "title": str(task.get("title") or "").strip() or str(task.get("id") or "").strip(),
+            }
+            for task in qa_tasks
+            if not _task_has_qa_artifacts(task)
+        ]
+
+        repo_context_present = self._project_has_github_context(
+            project_description=str(getattr(project, "description", "") or ""),
+            project_external_refs=getattr(project, "external_refs", "[]"),
+            project_rules=project_rules,
+        )
+        dev_commit_evidence_ok = bool(dev_tasks) and not dev_missing
+        qa_artifacts_ok = bool(qa_tasks) and not qa_missing
+        git_contract_ok = bool(repo_context_present and dev_commit_evidence_ok)
+
+        return {
+            "project_id": str(project_id),
+            "workspace_id": str(project.workspace_id),
+            "checks": {
+                "repo_context_present": repo_context_present,
+                "git_contract_ok": git_contract_ok,
+                "dev_tasks_have_commit_evidence": dev_commit_evidence_ok,
+                "qa_has_verifiable_artifacts": qa_artifacts_ok,
+            },
+            "counts": {
+                "tasks_total": len(tasks),
+                "developer_tasks": len(dev_tasks),
+                "qa_tasks": len(qa_tasks),
+                "dev_missing_commit_evidence": len(dev_missing),
+                "qa_missing_artifacts": len(qa_missing),
+            },
+            "missing": {
+                "dev_tasks_missing_commit_evidence": dev_missing,
+                "qa_tasks_missing_artifacts": qa_missing,
+            },
+            "ok": bool(git_contract_ok and dev_commit_evidence_ok and qa_artifacts_ok),
+        }
+
     def ensure_team_mode_project(
         self,
         *,
@@ -1733,90 +1983,157 @@ class AgentTaskService:
                 project_ref=resolved_ref,
                 workspace_id=workspace_id,
             )
-            if workspace_id and str(project.workspace_id) != str(workspace_id):
+            resolved_project_id = str(project.id)
+            resolved_workspace_id = str(project.workspace_id)
+            if workspace_id and resolved_workspace_id != str(workspace_id):
                 raise HTTPException(status_code=400, detail="Project does not belong to workspace")
             ensure_role(db, project.workspace_id, user.id, {"Owner", "Admin", "Member"})
             ensure_project_access(db, project.workspace_id, str(project.id), user.id, {"Owner", "Admin", "Member"})
-
-            ws_skill = db.execute(
-                select(WorkspaceSkill).where(
-                    WorkspaceSkill.workspace_id == str(project.workspace_id),
-                    WorkspaceSkill.skill_key == "team_mode",
-                    WorkspaceSkill.is_deleted == False,
+            project_rules = db.execute(
+                select(ProjectRuleModel).where(
+                    ProjectRuleModel.project_id == str(project.id),
+                    ProjectRuleModel.is_deleted == False,  # noqa: E712
                 )
-            ).scalar_one_or_none()
-            if ws_skill is None:
-                raise HTTPException(status_code=404, detail="Workspace Team Mode skill not found")
+            ).scalars().all()
+            has_github_context = self._project_has_github_context(
+                project_description=str(getattr(project, "description", "") or ""),
+                project_external_refs=getattr(project, "external_refs", "[]"),
+                project_rules=project_rules,
+            )
 
-            project_skill = db.execute(
-                select(ProjectSkill).where(
-                    ProjectSkill.workspace_id == str(project.workspace_id),
-                    ProjectSkill.project_id == str(project.id),
-                    ProjectSkill.skill_key == "team_mode",
-                    ProjectSkill.is_deleted == False,
-                )
-            ).scalar_one_or_none()
+            def _workspace_skill_or_404(skill_key: str, *, required: bool) -> WorkspaceSkill | None:
+                ws = db.execute(
+                    select(WorkspaceSkill).where(
+                        WorkspaceSkill.workspace_id == str(project.workspace_id),
+                        WorkspaceSkill.skill_key == skill_key,
+                        WorkspaceSkill.is_deleted == False,  # noqa: E712
+                    )
+                ).scalar_one_or_none()
+                if required and ws is None:
+                    raise HTTPException(status_code=404, detail=f"Workspace skill not found: {skill_key}")
+                return ws
 
-            attached = False
-            if project_skill is None:
-                attach_command_id = command_id or self._fallback_command_id(
-                    prefix="mcp-ensure-team-mode-attach",
-                    payload={
+            def _ensure_project_skill(ws_skill: WorkspaceSkill, *, attach_prefix: str, apply_prefix: str) -> tuple[ProjectSkill, bool, dict]:
+                project_skill = db.execute(
+                    select(ProjectSkill).where(
+                        ProjectSkill.workspace_id == str(project.workspace_id),
+                        ProjectSkill.project_id == str(project.id),
+                        ProjectSkill.skill_key == str(ws_skill.skill_key),
+                        ProjectSkill.is_deleted == False,  # noqa: E712
+                    )
+                ).scalar_one_or_none()
+                attached_local = False
+                if project_skill is None:
+                    attach_command_id = command_id or self._fallback_command_id(
+                        prefix=attach_prefix,
+                        payload={
                         "workspace_id": str(project.workspace_id),
                         "project_ref": str(project.id),
                         "workspace_skill_id": str(ws_skill.id),
-                    },
+                        "skill_key": str(ws_skill.skill_key),
+                        },
+                    )
+                    attached_view = ProjectSkillApplicationService(
+                        db,
+                        user,
+                        command_id=attach_command_id,
+                    ).attach_workspace_skill_to_project(
+                        workspace_skill_id=str(ws_skill.id),
+                        workspace_id=str(project.workspace_id),
+                        project_id=str(project.id),
+                    )
+                    attached_local = True
+                    attached_skill_id = str(attached_view.get("id") or "").strip()
+                    project_skill = db.get(ProjectSkill, attached_skill_id) if attached_skill_id else None
+                if project_skill is None:
+                    raise HTTPException(status_code=500, detail=f"Failed to attach skill: {ws_skill.skill_key}")
+                apply_command_id = command_id or self._fallback_command_id(
+                    prefix=apply_prefix,
+                    payload={"project_ref": str(project.id), "project_skill_id": str(project_skill.id)},
                 )
-                attached_view = ProjectSkillApplicationService(
+                applied_view_local = ProjectSkillApplicationService(
                     db,
                     user,
-                    command_id=attach_command_id,
-                ).attach_workspace_skill_to_project(
-                    workspace_skill_id=str(ws_skill.id),
-                    workspace_id=str(project.workspace_id),
-                    project_id=str(project.id),
-                )
-                attached = True
-                attached_skill_id = str(attached_view.get("id") or "").strip()
-                project_skill = db.get(ProjectSkill, attached_skill_id) if attached_skill_id else None
-                if project_skill is None:
-                    raise HTTPException(status_code=500, detail="Failed to attach Team Mode skill to project")
+                    command_id=apply_command_id,
+                ).apply_project_skill(str(project_skill.id))
+                return project_skill, attached_local, applied_view_local
 
-            apply_command_id = command_id or self._fallback_command_id(
-                prefix="mcp-ensure-team-mode-apply",
-                payload={"project_ref": str(project.id), "project_skill_id": str(project_skill.id)},
+            team_ws = _workspace_skill_or_404("team_mode", required=True)
+            git_ws = _workspace_skill_or_404("git_delivery", required=True)
+            github_ws = _workspace_skill_or_404("github_delivery", required=False)
+            if team_ws is None or git_ws is None:
+                raise HTTPException(status_code=500, detail="Required skills failed to resolve")
+
+            _, team_attached, team_applied_view = _ensure_project_skill(
+                team_ws,
+                attach_prefix="mcp-ensure-team-mode-attach",
+                apply_prefix="mcp-ensure-team-mode-apply",
             )
-            applied_view = ProjectSkillApplicationService(
-                db,
-                user,
-                command_id=apply_command_id,
-            ).apply_project_skill(str(project_skill.id))
+            git_project_skill, git_attached, git_applied_view = _ensure_project_skill(
+                git_ws,
+                attach_prefix="mcp-ensure-git-delivery-attach",
+                apply_prefix="mcp-ensure-git-delivery-apply",
+            )
+
+            github_attached = False
+            github_applied_view: dict[str, Any] | None = None
+            github_project_skill: ProjectSkill | None = None
+            if has_github_context and github_ws is not None:
+                github_project_skill, github_attached, github_applied_view = _ensure_project_skill(
+                    github_ws,
+                    attach_prefix="mcp-ensure-github-delivery-attach",
+                    apply_prefix="mcp-ensure-github-delivery-apply",
+                )
 
         verification = self.verify_team_mode_workflow(
-            project_id=str(project.id),
+            project_id=resolved_project_id,
             workspace_id=workspace_id,
             auth_token=auth_token,
             expected_event_storming_enabled=expected_event_storming_enabled,
         )
+        delivery_verification = self.verify_delivery_workflow(
+            project_id=resolved_project_id,
+            workspace_id=workspace_id,
+            auth_token=auth_token,
+        )
         members = self.list_project_members(
             workspace_id=workspace_id or verification["workspace_id"],
-            project_id=str(project.id),
+            project_id=resolved_project_id,
             auth_token=auth_token,
             limit=200,
             offset=0,
         )
         return {
-            "project_id": str(project.id),
+            "project_id": resolved_project_id,
             "workspace_id": verification["workspace_id"],
-            "attached": attached,
-            "project_skill_id": str(applied_view.get("id") or "").strip(),
-            "generated_rule_id": str(applied_view.get("generated_rule_id") or "").strip() or None,
-            "team_mode_contract_complete": bool(applied_view.get("team_mode_contract_complete")),
-            "team_mode_roster": list(applied_view.get("team_mode_roster") or []),
+            "attached": bool(team_attached or git_attached or github_attached),
+            "project_skill_id": str(team_applied_view.get("id") or "").strip(),
+            "generated_rule_id": str(team_applied_view.get("generated_rule_id") or "").strip() or None,
+            "team_mode_contract_complete": bool(team_applied_view.get("team_mode_contract_complete")),
+            "team_mode_roster": list(team_applied_view.get("team_mode_roster") or []),
+            "git_delivery": {
+                "project_skill_id": str(git_project_skill.id),
+                "attached": git_attached,
+                "applied": bool(git_applied_view),
+                "generated_rule_id": str(git_applied_view.get("generated_rule_id") or "").strip() or None,
+            },
+            "github_delivery": {
+                "eligible": bool(has_github_context and github_ws is not None),
+                "project_skill_id": str(github_project_skill.id) if github_project_skill is not None else None,
+                "attached": github_attached,
+                "applied": bool(github_applied_view) if github_applied_view is not None else False,
+                "generated_rule_id": (
+                    str(github_applied_view.get("generated_rule_id") or "").strip() or None
+                    if github_applied_view is not None
+                    else None
+                ),
+            },
             "members": members,
             "verification": verification,
+            "delivery_verification": delivery_verification,
             "ok": bool(verification.get("ok"))
-            and bool(applied_view.get("team_mode_contract_complete")),
+            and bool(team_applied_view.get("team_mode_contract_complete"))
+            and bool(delivery_verification.get("ok")),
         }
 
     def list_project_templates(

@@ -31,9 +31,8 @@ Use this skill when a project should be executed by a structured multi-agent del
   - Team Mode setup does not rely on generic schedule defaults such as `In progress`.
 
 ## Delivery Workflow
-- Developers implement tasks on Git feature branches and keep branch names tied to task IDs.
-- Developers add commit and pull request links as task external references.
-- Developers track other team member branch changes and resolve merge conflicts before final merge.
+- Developers execute implementation through the delivery contract enforced by `git_delivery`.
+- Team Mode orchestration must not bypass `git_delivery` requirements for branching, commits, and evidence.
 - Move tasks across board statuses exactly as defined by the project workflow.
 
 ## Team Lead Responsibilities
@@ -50,6 +49,7 @@ Use this skill when a project should be executed by a structured multi-agent del
 ## Guardrails
 - Do not skip required QA verification before moving work to final done states.
 - Keep app and external tracker statuses synchronized when GitHub/Jira skills are also active.
+- Keep Team Mode orchestration independent from Git provider details (GitHub specifics belong to `github_delivery`).
 - Keep deployment and automation actions inside project-defined operational boundaries.
 - Prefer explicit Team Mode trigger transitions:
   - Dev tasks self-trigger on `to_statuses=["QA"]`

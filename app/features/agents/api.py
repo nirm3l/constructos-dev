@@ -944,7 +944,7 @@ _EXECUTION_INTENT_MANDATE = (
     "Required behavior:\n"
     "- Treat this as implementation execution kickoff/resume, not Team Mode setup.\n"
     "- Do not create/recreate project and do not re-attach/re-apply skills if already configured.\n"
-    "- First read current tasks and run verify_team_mode_workflow.\n"
+    "- First read current tasks and run verify_team_mode_workflow + verify_delivery_workflow.\n"
     "- If verification passes, execute existing workflow tasks and persist progress.\n"
     "- Only patch missing prerequisites when verification fails.\n"
     "- Completion contract for execution kickoff:\n"

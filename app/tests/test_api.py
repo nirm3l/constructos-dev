@@ -3770,6 +3770,106 @@ def test_agent_service_verify_team_mode_workflow_detects_missing_dev_triggers_an
     assert passed["ok"] is True
 
 
+def test_agent_service_verify_delivery_workflow_requires_commit_and_qa_evidence(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+
+    # Ensure repo context exists for git contract checks.
+    patched_project = client.patch(
+        f"/api/projects/{project_id}",
+        json={
+            "external_refs": [{"url": "https://github.com/example/delivery-demo", "title": "Repo"}],
+        },
+    )
+    assert patched_project.status_code == 200
+
+    # Ensure Team Mode roster exists so role-based task detection works.
+    catalog = client.get(f"/api/workspace-skills?workspace_id={ws_id}")
+    team_mode = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode['id']}/attach",
+        json={"workspace_id": ws_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+    applied = client.post(f"/api/project-skills/{attached.json()['id']}/apply")
+    assert applied.status_code == 200
+
+    members = client.get(f"/api/projects/{project_id}/members")
+    items = members.json()["items"]
+    dev = next(item for item in items if item["user"]["username"] == "agent.tr1n1ty")["user_id"]
+    qa = next(item for item in items if item["user"]["username"] == "agent.0r4cl3")["user_id"]
+
+    dev_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Dev with commit evidence",
+            "status": "Dev",
+            "assignee_id": dev,
+        },
+    )
+    assert dev_task.status_code == 200
+    qa_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "QA with artifacts",
+            "status": "QA",
+            "assignee_id": qa,
+        },
+    )
+    assert qa_task.status_code == 200
+
+    service = AgentTaskService()
+    failed = service.verify_delivery_workflow(project_id=project_id, workspace_id=ws_id)
+    assert failed["checks"]["repo_context_present"] is True
+    assert failed["checks"]["dev_tasks_have_commit_evidence"] is False
+    assert failed["checks"]["qa_has_verifiable_artifacts"] is False
+    assert failed["ok"] is False
+
+    dev_note = client.post(
+        "/api/notes",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "task_id": dev_task.json()["id"],
+            "title": "Commit evidence",
+            "body": "Implemented in commit a1b2c3d4 with branch task/dev-evidence.",
+        },
+    )
+    assert dev_note.status_code == 200
+    qa_note = client.post(
+        "/api/notes",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "task_id": qa_task.json()["id"],
+            "title": "QA Report",
+            "body": "Pytest report attached. All smoke tests passed.",
+        },
+    )
+    assert qa_note.status_code == 200
+
+    passed = service.verify_delivery_workflow(project_id=project_id, workspace_id=ws_id)
+    assert passed["checks"]["repo_context_present"] is True
+    assert passed["checks"]["git_contract_ok"] is True
+    assert passed["checks"]["dev_tasks_have_commit_evidence"] is True
+    assert passed["checks"]["qa_has_verifiable_artifacts"] is True
+    assert passed["ok"] is True
+
+
 def test_agent_service_ensure_team_mode_project_sets_up_skill_and_roster(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -3794,7 +3894,10 @@ def test_agent_service_ensure_team_mode_project_sets_up_skill_and_roster(tmp_pat
     assert isinstance(ensured["project_skill_id"], str) and ensured["project_skill_id"]
     assert isinstance(ensured["generated_rule_id"], str) and ensured["generated_rule_id"]
     assert ensured["team_mode_contract_complete"] is True
+    assert ensured["git_delivery"]["applied"] is True
+    assert isinstance(ensured["git_delivery"]["project_skill_id"], str) and ensured["git_delivery"]["project_skill_id"]
     assert ensured["verification"]["ok"] is False or ensured["verification"]["ok"] is True
+    assert ensured["delivery_verification"]["ok"] is False or ensured["delivery_verification"]["ok"] is True
     member_roles = {
         str(item.get("role") or "").strip()
         for item in (ensured.get("members", {}).get("items") or [])
@@ -3827,6 +3930,7 @@ def test_agent_service_ensure_team_mode_project_accepts_project_name_ref(tmp_pat
     assert ensured["project_id"] == project_id
     assert ensured["ok"] is True or ensured["ok"] is False
     assert isinstance(ensured["project_skill_id"], str) and ensured["project_skill_id"]
+    assert ensured["git_delivery"]["applied"] is True
 
 
 def test_agent_service_search_project_knowledge(tmp_path, monkeypatch):
