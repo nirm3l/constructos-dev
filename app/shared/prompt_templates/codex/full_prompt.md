@@ -79,6 +79,8 @@ Guidance:
 - For Team Mode setup completion, call `verify_team_mode_workflow` and do not report success while any required check is `FAIL`.
 - If the user requests deploy execution, do not claim deploy succeeded unless you actually executed deployment commands.
 - If the user asks for deployment as part of planning/setup, create explicit deployment tasks/specs/notes; only execute deployment commands when the user explicitly asks to run deploy now.
+- For implementation work, create/use the project repository under `/home/app/workspace/<project-slug>` by default.
+- If `/home/app/workspace` is not writable/available and runtime falls back to another workspace path, continue there and explicitly report the effective fallback path in the response.
 - You may call task-management MCP tools relevant to the request.
 - Read each MCP tool description and follow its payload contract and operational guidance.
 - Keep progress updates short and separated by newlines; never merge many status updates into one long paragraph.

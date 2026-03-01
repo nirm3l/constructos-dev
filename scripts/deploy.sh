@@ -17,6 +17,8 @@ TASK_APP_IMAGE="${TASK_APP_IMAGE:-}"
 MCP_TOOLS_IMAGE="${MCP_TOOLS_IMAGE:-}"
 CODEX_AUTH_FILE="${CODEX_AUTH_FILE:-${HOME}/.codex/auth.json}"
 CODEX_CONFIG_FILE="${CODEX_CONFIG_FILE:-${ROOT_DIR}/codex.config.toml}"
+OLLAMA_MODELS_MOUNT="${OLLAMA_MODELS_MOUNT:-}"
+AGENT_CODEX_WORKSPACE_MOUNT="${AGENT_CODEX_WORKSPACE_MOUNT:-}"
 
 resolve_compose_env_value() {
   local var_name="$1"
@@ -65,8 +67,53 @@ resolve_deploy_target() {
   esac
 }
 
+resolve_ollama_models_mount() {
+  local configured
+  configured="$(resolve_compose_env_value "OLLAMA_MODELS_MOUNT" || true)"
+  if [[ -n "$configured" ]]; then
+    printf '%s' "$configured"
+    return 0
+  fi
+  if [[ -d "${HOME}/.ollama" ]]; then
+    printf '%s' "${HOME}/.ollama"
+    return 0
+  fi
+  printf '%s' "ollama-data"
+}
+
+resolve_codex_workspace_mount() {
+  local configured
+  configured="$(resolve_compose_env_value "AGENT_CODEX_WORKSPACE_MOUNT" || true)"
+  if [[ -n "$configured" ]]; then
+    printf '%s' "$configured"
+    return 0
+  fi
+  printf '%s' "/workspace"
+}
+
 TARGET_RESOLVED="$(resolve_deploy_target)"
 COMPOSE_ARGS=(-f docker-compose.yml)
+OLLAMA_MODELS_MOUNT="$(resolve_ollama_models_mount)"
+AGENT_CODEX_WORKSPACE_MOUNT="$(resolve_codex_workspace_mount)"
+
+if [[ "$OLLAMA_MODELS_MOUNT" == "~/"* ]]; then
+  OLLAMA_MODELS_MOUNT="${HOME}/${OLLAMA_MODELS_MOUNT#~/}"
+fi
+if [[ "$AGENT_CODEX_WORKSPACE_MOUNT" == "~/"* ]]; then
+  AGENT_CODEX_WORKSPACE_MOUNT="${HOME}/${AGENT_CODEX_WORKSPACE_MOUNT#~/}"
+fi
+
+if [[ "$OLLAMA_MODELS_MOUNT" == /* ]]; then
+  OLLAMA_MODELS_MOUNT_MODE="host-bind"
+else
+  OLLAMA_MODELS_MOUNT_MODE="named-volume"
+fi
+
+if [[ "$AGENT_CODEX_WORKSPACE_MOUNT" == /* ]]; then
+  AGENT_CODEX_WORKSPACE_MOUNT_MODE="host-bind"
+else
+  AGENT_CODEX_WORKSPACE_MOUNT_MODE="named-volume"
+fi
 
 case "$TARGET_RESOLVED" in
   base)
@@ -125,6 +172,8 @@ APP_BUILD=${APP_BUILD}
 APP_DEPLOYED_AT_UTC=${DEPLOYED_AT_UTC}
 TASK_APP_IMAGE=${TASK_APP_IMAGE}
 MCP_TOOLS_IMAGE=${MCP_TOOLS_IMAGE}
+OLLAMA_MODELS_MOUNT=${OLLAMA_MODELS_MOUNT}
+AGENT_CODEX_WORKSPACE_MOUNT=${AGENT_CODEX_WORKSPACE_MOUNT}
 EOF
 
 if [[ -n "$LICENSE_SERVER_TOKEN_VALUE" ]]; then
@@ -133,6 +182,8 @@ fi
 
 AGENT_CODEX_MODEL_VALUE="$(resolve_compose_env_value "AGENT_CODEX_MODEL" || true)"
 EVENT_STORMING_AI_MODEL_VALUE="$(resolve_compose_env_value "EVENT_STORMING_AI_MODEL" || true)"
+EVENT_STORMING_AI_PROVIDER_VALUE="$(resolve_compose_env_value "EVENT_STORMING_AI_PROVIDER" || true)"
+EVENT_STORMING_AI_LOCAL_PROVIDER_VALUE="$(resolve_compose_env_value "EVENT_STORMING_AI_LOCAL_PROVIDER" || true)"
 AGENT_CODEX_REASONING_EFFORT_VALUE="$(resolve_compose_env_value "AGENT_CODEX_REASONING_EFFORT" || true)"
 
 if [[ -n "$AGENT_CODEX_MODEL_VALUE" ]]; then
@@ -140,6 +191,12 @@ if [[ -n "$AGENT_CODEX_MODEL_VALUE" ]]; then
 fi
 if [[ -n "$EVENT_STORMING_AI_MODEL_VALUE" ]]; then
   printf 'EVENT_STORMING_AI_MODEL=%s\n' "$EVENT_STORMING_AI_MODEL_VALUE" >> .deploy.env
+fi
+if [[ -n "$EVENT_STORMING_AI_PROVIDER_VALUE" ]]; then
+  printf 'EVENT_STORMING_AI_PROVIDER=%s\n' "$EVENT_STORMING_AI_PROVIDER_VALUE" >> .deploy.env
+fi
+if [[ -n "$EVENT_STORMING_AI_LOCAL_PROVIDER_VALUE" ]]; then
+  printf 'EVENT_STORMING_AI_LOCAL_PROVIDER=%s\n' "$EVENT_STORMING_AI_LOCAL_PROVIDER_VALUE" >> .deploy.env
 fi
 if [[ -n "$AGENT_CODEX_REASONING_EFFORT_VALUE" ]]; then
   printf 'AGENT_CODEX_REASONING_EFFORT=%s\n' "$AGENT_CODEX_REASONING_EFFORT_VALUE" >> .deploy.env
@@ -175,12 +232,22 @@ fi
 export CODEX_AUTH_FILE
 export CODEX_CONFIG_FILE
 
+if [[ "$AGENT_CODEX_WORKSPACE_MOUNT" == /* ]]; then
+  mkdir -p "$AGENT_CODEX_WORKSPACE_MOUNT"
+  if ! chmod 0777 "$AGENT_CODEX_WORKSPACE_MOUNT" 2>/dev/null; then
+    echo "Warning: unable to set write permissions on ${AGENT_CODEX_WORKSPACE_MOUNT}"
+    echo "Automation may fall back to /tmp/constructos-workspace if /home/app/workspace is not writable."
+  fi
+fi
+
 echo "Deploy profile: internal"
 echo "Deploying version ${APP_VERSION} (${APP_BUILD}) at ${DEPLOYED_AT_UTC}"
 echo "Resolved deploy target: ${TARGET_RESOLVED}"
 echo "Deploy source: ${DEPLOY_SOURCE}"
 echo "task-app image: ${TASK_APP_IMAGE}"
 echo "mcp-tools image: ${MCP_TOOLS_IMAGE}"
+echo "Ollama models mount: ${OLLAMA_MODELS_MOUNT} (${OLLAMA_MODELS_MOUNT_MODE})"
+echo "Codex workspace mount: ${AGENT_CODEX_WORKSPACE_MOUNT} (${AGENT_CODEX_WORKSPACE_MOUNT_MODE})"
 echo "Compose project: ${APP_COMPOSE_PROJECT_NAME}"
 echo "Compose files: ${COMPOSE_ARGS[*]}"
 echo "Deploy services: ${DEPLOY_SERVICES[*]}"

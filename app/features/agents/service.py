@@ -2059,9 +2059,8 @@ class AgentTaskService:
                 return project_skill, attached_local, applied_view_local
 
             team_ws = _workspace_skill_or_404("team_mode", required=True)
-            git_ws = _workspace_skill_or_404("git_delivery", required=True)
             github_ws = _workspace_skill_or_404("github_delivery", required=False)
-            if team_ws is None or git_ws is None:
+            if team_ws is None:
                 raise HTTPException(status_code=500, detail="Required skills failed to resolve")
 
             _, team_attached, team_applied_view = _ensure_project_skill(
@@ -2069,11 +2068,21 @@ class AgentTaskService:
                 attach_prefix="mcp-ensure-team-mode-attach",
                 apply_prefix="mcp-ensure-team-mode-apply",
             )
-            git_project_skill, git_attached, git_applied_view = _ensure_project_skill(
-                git_ws,
-                attach_prefix="mcp-ensure-git-delivery-attach",
-                apply_prefix="mcp-ensure-git-delivery-apply",
+            team_dependencies = list(team_applied_view.get("resolved_dependencies") or [])
+            git_dependency_from_team = next(
+                (item for item in team_dependencies if str(item.get("skill_key") or "").strip() == "git_delivery"),
+                None,
             )
+            git_project_skill = db.execute(
+                select(ProjectSkill).where(
+                    ProjectSkill.workspace_id == str(project.workspace_id),
+                    ProjectSkill.project_id == str(project.id),
+                    ProjectSkill.skill_key == "git_delivery",
+                    ProjectSkill.is_deleted == False,  # noqa: E712
+                )
+            ).scalar_one_or_none()
+            if git_project_skill is None:
+                raise HTTPException(status_code=500, detail="Team Mode dependency git_delivery was not provisioned")
 
             github_attached = False
             github_applied_view: dict[str, Any] | None = None
@@ -2106,16 +2115,16 @@ class AgentTaskService:
         return {
             "project_id": resolved_project_id,
             "workspace_id": verification["workspace_id"],
-            "attached": bool(team_attached or git_attached or github_attached),
+            "attached": bool(team_attached or bool(git_dependency_from_team and git_dependency_from_team.get("attached")) or github_attached),
             "project_skill_id": str(team_applied_view.get("id") or "").strip(),
             "generated_rule_id": str(team_applied_view.get("generated_rule_id") or "").strip() or None,
             "team_mode_contract_complete": bool(team_applied_view.get("team_mode_contract_complete")),
             "team_mode_roster": list(team_applied_view.get("team_mode_roster") or []),
             "git_delivery": {
                 "project_skill_id": str(git_project_skill.id),
-                "attached": git_attached,
-                "applied": bool(git_applied_view),
-                "generated_rule_id": str(git_applied_view.get("generated_rule_id") or "").strip() or None,
+                "attached": bool(git_dependency_from_team and git_dependency_from_team.get("attached")),
+                "applied": bool(git_dependency_from_team and git_dependency_from_team.get("applied")),
+                "generated_rule_id": str(git_project_skill.generated_rule_id or "").strip() or None,
             },
             "github_delivery": {
                 "eligible": bool(has_github_context and github_ws is not None),

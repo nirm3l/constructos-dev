@@ -26,6 +26,12 @@ _KEY_SANITIZER_RE = re.compile(r"[^a-z0-9]+")
 _FILE_NAME_SANITIZER_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _FRONTMATTER_FIELD_RE = re.compile(r"^([A-Za-z0-9_-]+)\s*:\s*(.*)$")
 _TEAM_MODE_SKILL_KEY = "team_mode"
+_GIT_DELIVERY_SKILL_KEY = "git_delivery"
+_GITHUB_DELIVERY_SKILL_KEY = "github_delivery"
+_SKILL_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    _GITHUB_DELIVERY_SKILL_KEY: (_GIT_DELIVERY_SKILL_KEY,),
+    _TEAM_MODE_SKILL_KEY: (_GIT_DELIVERY_SKILL_KEY,),
+}
 _TEAM_MODE_WORKSPACE_ROLE = "Admin"
 _TEAM_MODE_AGENT_SPECS: tuple[dict[str, str], ...] = (
     {
@@ -405,6 +411,162 @@ class ProjectSkillApplicationService:
         )
         return title, body
 
+    def _derive_command_id(self, suffix: str) -> str | None:
+        base = str(self.command_id or "").strip()
+        if not base:
+            return None
+        normalized_suffix = _normalize_skill_key(str(suffix or "").strip() or "op", max_length=40)
+        derived = f"{base}:{normalized_suffix}"
+        return derived[:64]
+
+    def _get_workspace_skill_by_key(self, *, workspace_id: str, skill_key: str) -> WorkspaceSkill | None:
+        normalized_key = str(skill_key or "").strip().lower()
+        if not normalized_key:
+            return None
+        return self.db.execute(
+            select(WorkspaceSkill).where(
+                WorkspaceSkill.workspace_id == workspace_id,
+                WorkspaceSkill.skill_key == normalized_key,
+                WorkspaceSkill.is_deleted == False,  # noqa: E712
+            )
+        ).scalar_one_or_none()
+
+    def _get_project_skill_by_key(self, *, workspace_id: str, project_id: str, skill_key: str) -> ProjectSkill | None:
+        normalized_key = str(skill_key or "").strip().lower()
+        if not normalized_key:
+            return None
+        return self.db.execute(
+            select(ProjectSkill).where(
+                ProjectSkill.workspace_id == workspace_id,
+                ProjectSkill.project_id == project_id,
+                ProjectSkill.skill_key == normalized_key,
+                ProjectSkill.is_deleted == False,  # noqa: E712
+            )
+        ).scalar_one_or_none()
+
+    def _attach_workspace_catalog_skill_to_project(
+        self,
+        *,
+        catalog_skill: WorkspaceSkill,
+        workspace_id: str,
+        project_id: str,
+    ) -> dict[str, Any]:
+        source_content = _get_manifest_source_content(catalog_skill.manifest_json)
+        if not source_content:
+            raise HTTPException(status_code=422, detail="Workspace skill source content is missing")
+
+        created = self._import_skill_document(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            requested_source=f"workspace-skill://{catalog_skill.id}",
+            source_locator=catalog_skill.source_locator,
+            source_type="workspace_catalog",
+            fetched={
+                "name": catalog_skill.name,
+                "summary": catalog_skill.summary,
+                "content": source_content,
+                "source_version": catalog_skill.source_version,
+                "manifest": {
+                    "workspace_skill_id": catalog_skill.id,
+                    "workspace_skill_key": catalog_skill.skill_key,
+                },
+            },
+            name=catalog_skill.name,
+            skill_key=catalog_skill.skill_key,
+            mode=catalog_skill.mode,
+            trust_level=catalog_skill.trust_level,
+        )
+        created["attached_from_workspace_skill_id"] = catalog_skill.id
+        return created
+
+    def _resolve_skill_dependencies(self, *, skill_key: str) -> list[str]:
+        root_key = str(skill_key or "").strip().lower()
+        if not root_key:
+            return []
+        ordered: list[str] = []
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def _visit(node: str) -> None:
+            normalized = str(node or "").strip().lower()
+            if not normalized:
+                return
+            if normalized in visited:
+                return
+            if normalized in visiting:
+                raise HTTPException(status_code=500, detail=f"Skill dependency cycle detected at: {normalized}")
+            visiting.add(normalized)
+            for dependency in _SKILL_DEPENDENCIES.get(normalized, ()):
+                dep_key = str(dependency or "").strip().lower()
+                if not dep_key:
+                    continue
+                _visit(dep_key)
+                if dep_key not in ordered:
+                    ordered.append(dep_key)
+            visiting.remove(normalized)
+            visited.add(normalized)
+
+        _visit(root_key)
+        return [item for item in ordered if item != root_key]
+
+    def _ensure_skill_dependencies(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        root_skill_key: str,
+        auto_apply: bool,
+    ) -> list[dict[str, Any]]:
+        dependency_keys = self._resolve_skill_dependencies(skill_key=root_skill_key)
+        if not dependency_keys:
+            return []
+        resolved: list[dict[str, Any]] = []
+        for dependency_key in dependency_keys:
+            catalog_skill = self._get_workspace_skill_by_key(
+                workspace_id=workspace_id,
+                skill_key=dependency_key,
+            )
+            if catalog_skill is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{root_skill_key} requires workspace {dependency_key} skill",
+                )
+            attached = False
+            applied = False
+            dependency_project_skill = self._get_project_skill_by_key(
+                workspace_id=workspace_id,
+                project_id=project_id,
+                skill_key=dependency_key,
+            )
+            if dependency_project_skill is None:
+                attached_view = self._attach_workspace_catalog_skill_to_project(
+                    catalog_skill=catalog_skill,
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                )
+                attached = True
+                attached_skill_id = str(attached_view.get("id") or "").strip()
+                dependency_project_skill = self.db.get(ProjectSkill, attached_skill_id) if attached_skill_id else None
+            if dependency_project_skill is None:
+                raise HTTPException(status_code=500, detail=f"Failed to ensure dependency skill: {dependency_key}")
+            if auto_apply:
+                dependency_service = ProjectSkillApplicationService(
+                    self.db,
+                    self.user,
+                    command_id=self._derive_command_id(f"apply-{dependency_key}"),
+                )
+                dependency_service.apply_project_skill(str(dependency_project_skill.id))
+                applied = True
+            resolved.append(
+                {
+                    "skill_key": dependency_key,
+                    "project_skill_id": str(dependency_project_skill.id),
+                    "attached": attached,
+                    "applied": applied,
+                }
+            )
+        return resolved
+
     def _sync_project_rule_for_skill(
         self,
         *,
@@ -434,7 +596,7 @@ class ProjectSkillApplicationService:
             return None
 
         if self.command_id:
-            rule_command_id = self.command_id
+            rule_command_id = self._derive_command_id(f"rule-{skill.skill_key}") or self.command_id
         else:
             refresh_marker = datetime.now(timezone.utc).isoformat()
             refresh_payload = (
@@ -602,6 +764,26 @@ class ProjectSkillApplicationService:
                 }
             )
         return roster
+
+    def _assert_generated_rule_id_uniqueness(self, *, skill: ProjectSkill) -> None:
+        generated_rule_id = str(skill.generated_rule_id or "").strip()
+        if not generated_rule_id:
+            return
+        collisions = self.db.execute(
+            select(ProjectSkill).where(
+                ProjectSkill.workspace_id == skill.workspace_id,
+                ProjectSkill.project_id == skill.project_id,
+                ProjectSkill.generated_rule_id == generated_rule_id,
+                ProjectSkill.is_deleted == False,  # noqa: E712
+            )
+        ).scalars().all()
+        conflicting = [row for row in collisions if str(row.id) != str(skill.id) and str(row.skill_key) != str(skill.skill_key)]
+        if conflicting:
+            conflict_keys = ", ".join(sorted({str(item.skill_key) for item in conflicting}))
+            raise HTTPException(
+                status_code=500,
+                detail=f"generated_rule_id collision for skill {skill.skill_key}: also used by {conflict_keys}",
+            )
 
     def _import_skill_document(
         self,
@@ -1021,33 +1203,22 @@ class ProjectSkillApplicationService:
         ensure_role(self.db, workspace_id, self.user.id, {"Owner", "Admin", "Member"})
         ensure_project_access(self.db, workspace_id, project_id, self.user.id, {"Owner", "Admin", "Member"})
         _require_project_scope(self.db, workspace_id=workspace_id, project_id=project_id)
-
-        source_content = _get_manifest_source_content(catalog_skill.manifest_json)
-        if not source_content:
-            raise HTTPException(status_code=422, detail="Workspace skill source content is missing")
-
-        created = self._import_skill_document(
+        created = self._attach_workspace_catalog_skill_to_project(
+            catalog_skill=catalog_skill,
             workspace_id=workspace_id,
             project_id=project_id,
-            requested_source=f"workspace-skill://{catalog_skill.id}",
-            source_locator=catalog_skill.source_locator,
-            source_type="workspace_catalog",
-            fetched={
-                "name": catalog_skill.name,
-                "summary": catalog_skill.summary,
-                "content": source_content,
-                "source_version": catalog_skill.source_version,
-                "manifest": {
-                    "workspace_skill_id": catalog_skill.id,
-                    "workspace_skill_key": catalog_skill.skill_key,
-                },
-            },
-            name=catalog_skill.name,
-            skill_key=catalog_skill.skill_key,
-            mode=catalog_skill.mode,
-            trust_level=catalog_skill.trust_level,
         )
-        created["attached_from_workspace_skill_id"] = catalog_skill.id
+        dependencies = self._ensure_skill_dependencies(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            root_skill_key=str(catalog_skill.skill_key or "").strip().lower(),
+            auto_apply=False,
+        )
+        if dependencies:
+            created["resolved_dependencies"] = dependencies
+            git_dependency = next((item for item in dependencies if item.get("skill_key") == _GIT_DELIVERY_SKILL_KEY), None)
+            if git_dependency is not None:
+                created["git_delivery_dependency"] = dict(git_dependency)
         return created
 
     def apply_project_skill(self, skill_id: str) -> dict[str, Any]:
@@ -1056,6 +1227,12 @@ class ProjectSkillApplicationService:
             raise HTTPException(status_code=404, detail="Project skill not found")
         ensure_project_access(self.db, skill.workspace_id, skill.project_id, self.user.id, {"Owner", "Admin", "Member"})
         ensure_role(self.db, skill.workspace_id, self.user.id, {"Owner", "Admin", "Member"})
+        dependencies = self._ensure_skill_dependencies(
+            workspace_id=skill.workspace_id,
+            project_id=skill.project_id,
+            root_skill_key=str(skill.skill_key or "").strip().lower(),
+            auto_apply=True,
+        )
 
         source_content = _get_manifest_source_content(skill.manifest_json)
         if not source_content:
@@ -1068,6 +1245,7 @@ class ProjectSkillApplicationService:
         )
         self._apply_team_mode_contract_if_needed(skill=skill)
         skill.generated_rule_id = generated_rule_id
+        self._assert_generated_rule_id_uniqueness(skill=skill)
         skill.updated_by = self.user.id
         self.db.commit()
 
@@ -1089,6 +1267,11 @@ class ProjectSkillApplicationService:
                 and str(item.get("project_member_role") or "").strip() == str(item.get("expected_project_role") or "").strip()
                 for item in roster
             )
+        if dependencies:
+            view["resolved_dependencies"] = dependencies
+            git_dependency = next((item for item in dependencies if item.get("skill_key") == _GIT_DELIVERY_SKILL_KEY), None)
+            if git_dependency is not None:
+                view["git_delivery_dependency"] = dict(git_dependency)
         return view
 
     def patch_project_skill(self, skill_id: str, patch: dict[str, Any]) -> dict[str, Any]:

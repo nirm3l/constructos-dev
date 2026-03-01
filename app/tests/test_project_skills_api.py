@@ -511,6 +511,24 @@ def test_workspace_skill_catalog_seed_and_attach_to_project(tmp_path: Path):
     assert attached_payload["skill_key"] == "github_delivery"
     assert attached_payload["generated_rule_id"] is None
     assert attached_payload["attached_from_workspace_skill_id"] == github_skill["id"]
+    dependency = attached_payload.get("git_delivery_dependency") or {}
+    assert dependency.get("project_skill_id")
+
+    project_skills = client.get(f"/api/project-skills?workspace_id={workspace_id}&project_id={project_id}")
+    assert project_skills.status_code == 200
+    project_skill_keys = {item["skill_key"] for item in project_skills.json()["items"]}
+    assert "github_delivery" in project_skill_keys
+    assert "git_delivery" in project_skill_keys
+
+    github_project_skill_id = next(
+        item["id"] for item in project_skills.json()["items"] if item["skill_key"] == "github_delivery"
+    )
+    applied = client.post(f"/api/project-skills/{github_project_skill_id}/apply")
+    assert applied.status_code == 200
+    apply_payload = applied.json()
+    apply_dependency = apply_payload.get("git_delivery_dependency") or {}
+    assert apply_dependency.get("project_skill_id")
+    assert apply_dependency.get("applied") is True
 
 
 def test_apply_team_mode_skill_ensures_agent_users_and_project_roles(tmp_path: Path):
@@ -536,6 +554,11 @@ def test_apply_team_mode_skill_ensures_agent_users_and_project_roles(tmp_path: P
     applied_payload = applied.json()
     assert isinstance(applied_payload["generated_rule_id"], str) and applied_payload["generated_rule_id"]
     assert applied_payload["team_mode_contract_complete"] is True
+    team_dependencies = applied_payload.get("resolved_dependencies") or []
+    git_dependency = next((item for item in team_dependencies if item.get("skill_key") == "git_delivery"), None)
+    assert git_dependency is not None
+    assert git_dependency.get("project_skill_id")
+    assert git_dependency.get("applied") is True
     roster = applied_payload["team_mode_roster"]
     assert isinstance(roster, list) and len(roster) == 4
     roster_by_username = {str(item["username"]): item for item in roster}
@@ -563,6 +586,17 @@ def test_apply_team_mode_skill_ensures_agent_users_and_project_roles(tmp_path: P
 
     applied_again = client.post(f"/api/project-skills/{attached_payload['id']}/apply")
     assert applied_again.status_code == 200
+
+    project_skills = client.get(f"/api/project-skills?workspace_id={workspace_id}&project_id={project_id}")
+    assert project_skills.status_code == 200
+    skill_by_key = {item["skill_key"]: item for item in project_skills.json()["items"]}
+    assert "team_mode" in skill_by_key
+    assert "git_delivery" in skill_by_key
+    team_rule_id = str(skill_by_key["team_mode"].get("generated_rule_id") or "").strip()
+    git_rule_id = str(skill_by_key["git_delivery"].get("generated_rule_id") or "").strip()
+    assert team_rule_id
+    assert git_rule_id
+    assert team_rule_id != git_rule_id
 
     members_again = client.get(f"/api/projects/{project_id}/members")
     assert members_again.status_code == 200
