@@ -666,9 +666,16 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
     captured: dict[str, object] = {}
 
     @contextmanager
-    def _fake_home_env(*, mcp_config_text: str, workspace_id: str | None = None, chat_session_id: str | None = None):
+    def _fake_home_env(
+        *,
+        mcp_config_text: str,
+        runtime_config_text: str = "",
+        workspace_id: str | None = None,
+        chat_session_id: str | None = None,
+    ):
         captured["home_env_workspace_id"] = workspace_id
         captured["home_env_chat_session_id"] = chat_session_id
+        captured["home_env_runtime_config_text"] = runtime_config_text
         _ = mcp_config_text
         yield {"HOME": "/tmp/fake-codex-home"}
 
@@ -694,6 +701,8 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
         stream_events: bool,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        model_provider: str | None = None,
+        local_provider: str | None = None,
         output_schema: dict | None = None,
         preferred_thread_id: str | None = None,
         env: dict[str, str] | None = None,
@@ -706,7 +715,7 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
         captured["start_prompt_contains_context_pack"] = "Context Pack:" in start_prompt
         captured["resume_prompt_contains_context_pack"] = "Context Pack:" in str(resume_prompt or "")
         captured["resume_prompt_text"] = str(resume_prompt or "")
-        _ = (model, reasoning_effort)
+        _ = (model, reasoning_effort, model_provider, local_provider)
         return (
             '{"action":"comment","summary":"ok","comment":null}',
             {"input_tokens": 12, "output_tokens": 3},
@@ -756,3 +765,90 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
     assert captured["env_home"] == "/tmp/fake-codex-home"
     assert captured["lock_workspace_id"] == "ws-main"
     assert captured["lock_chat_session_id"] == "chat-42"
+
+
+def test_strip_mcp_server_tables_preserves_non_mcp_config():
+    from features.agents.codex_mcp_adapter import _strip_mcp_server_tables
+
+    input_config = """
+model_provider = "oss"
+model = "qwen2.5-coder:14b"
+
+[mcp_servers.task-management-tools]
+url = "http://mcp-tools:8091/mcp"
+
+[mcp_servers.github]
+url = "https://api.githubcopilot.com/mcp/"
+bearer_token_env_var = "GITHUB_PAT"
+
+[profiles.default]
+approval_policy = "never"
+""".strip()
+    stripped = _strip_mcp_server_tables(input_config)
+    assert 'model_provider = "oss"' in stripped
+    assert 'model = "qwen2.5-coder:14b"' in stripped
+    assert "[profiles.default]" in stripped
+    assert "[mcp_servers.task-management-tools]" not in stripped
+    assert "[mcp_servers.github]" not in stripped
+
+
+def test_prepare_codex_home_merges_base_config_with_selected_mcp_servers(monkeypatch, tmp_path):
+    from features.agents.codex_mcp_adapter import _prepare_codex_home
+
+    source_home = tmp_path / "source-home"
+    source_codex_dir = source_home / ".codex"
+    source_codex_dir.mkdir(parents=True, exist_ok=True)
+    (source_codex_dir / "config.toml").write_text(
+        """
+model_provider = "oss"
+model = "qwen2.5-coder:14b"
+
+[mcp_servers.old]
+url = "http://old.example/mcp"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(source_home))
+
+    target_home = tmp_path / "target-home"
+    selected_mcp_text = """
+[mcp_servers.task-management-tools]
+url = "http://mcp-tools:8091/mcp"
+""".strip()
+    _prepare_codex_home(target_home, mcp_config_text=selected_mcp_text)
+    output = (target_home / ".codex" / "config.toml").read_text(encoding="utf-8")
+
+    assert 'model_provider = "oss"' in output
+    assert 'model = "qwen2.5-coder:14b"' in output
+    assert "[mcp_servers.old]" not in output
+    assert "[mcp_servers.task-management-tools]" in output
+
+
+def test_prepare_codex_home_applies_runtime_provider_overrides(monkeypatch, tmp_path):
+    from features.agents.codex_mcp_adapter import _prepare_codex_home
+
+    source_home = tmp_path / "source-home"
+    source_codex_dir = source_home / ".codex"
+    source_codex_dir.mkdir(parents=True, exist_ok=True)
+    (source_codex_dir / "config.toml").write_text(
+        """
+model_provider = "openai"
+model = "gpt-5.3-codex-spark"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(source_home))
+
+    target_home = tmp_path / "target-home"
+    _prepare_codex_home(
+        target_home,
+        mcp_config_text="",
+        runtime_config_text='model_provider = "oss"\nlocal_provider = "ollama"\n',
+    )
+    output = (target_home / ".codex" / "config.toml").read_text(encoding="utf-8")
+
+    assert output.count('model_provider = "openai"') == 1
+    assert output.count('model_provider = "oss"') == 1
+    assert 'local_provider = "ollama"' in output

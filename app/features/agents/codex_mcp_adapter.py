@@ -29,6 +29,43 @@ _DEFAULT_CODEX_HOME_RETENTION_DAYS = 14
 _DEFAULT_CODEX_HOME_CLEANUP_INTERVAL_SECONDS = 3600
 _PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "shared" / "prompt_templates" / "codex"
 _ALLOWED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+_ALLOWED_MODEL_PROVIDERS = {"openai", "oss"}
+_ALLOWED_LOCAL_PROVIDERS = {"ollama", "lmstudio"}
+
+
+def _strip_mcp_server_tables(config_text: str) -> str:
+    lines = str(config_text or "").splitlines()
+    if not lines:
+        return ""
+    out: list[str] = []
+    skipping = False
+    for line in lines:
+        stripped = line.strip()
+        is_table_header = stripped.startswith("[") and stripped.endswith("]")
+        if is_table_header:
+            table_name = stripped[1:-1].strip().lower()
+            if table_name == "mcp_servers" or table_name.startswith("mcp_servers."):
+                skipping = True
+                continue
+            skipping = False
+        if skipping:
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
+
+
+def _normalize_model_provider(value: object) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return None
+    return normalized if normalized in _ALLOWED_MODEL_PROVIDERS else None
+
+
+def _normalize_local_provider(value: object) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return None
+    return normalized if normalized in _ALLOWED_LOCAL_PROVIDERS else None
 
 
 @lru_cache(maxsize=16)
@@ -279,11 +316,23 @@ def run_codex_home_cleanup_if_due(*, now_unix_seconds: float | None = None) -> d
     return {"ran": True, "removed": removed, "failures": failures}
 
 
-def _prepare_codex_home(home_path: Path, *, mcp_config_text: str) -> None:
+def _prepare_codex_home(home_path: Path, *, mcp_config_text: str, runtime_config_text: str = "") -> None:
     codex_dir = home_path / ".codex"
     codex_dir.mkdir(parents=True, exist_ok=True)
     config_path = codex_dir / "config.toml"
-    config_path.write_text(str(mcp_config_text or ""), encoding="utf-8")
+    source_config_path = Path.home() / ".codex" / "config.toml"
+    source_config_text = ""
+    if source_config_path.exists() and source_config_path.is_file():
+        try:
+            source_config_text = source_config_path.read_text(encoding="utf-8")
+        except Exception:
+            source_config_text = ""
+    base_config_text = _strip_mcp_server_tables(source_config_text)
+    scoped_runtime_text = str(runtime_config_text or "").strip()
+    selected_mcp_text = str(mcp_config_text or "").strip()
+    sections = [text for text in [base_config_text, scoped_runtime_text, selected_mcp_text] if text]
+    merged_config_text = "\n\n".join(sections).strip()
+    config_path.write_text(f"{merged_config_text}\n" if merged_config_text else "", encoding="utf-8")
 
     target_auth_path = codex_dir / "auth.json"
     if target_auth_path.exists():
@@ -301,6 +350,7 @@ def _prepare_codex_home(home_path: Path, *, mcp_config_text: str) -> None:
 def _codex_home_env(
     *,
     mcp_config_text: str,
+    runtime_config_text: str = "",
     workspace_id: str | None = None,
     chat_session_id: str | None = None,
 ):
@@ -313,7 +363,11 @@ def _codex_home_env(
                 workspace_id=normalized_workspace_id,
                 chat_session_id=normalized_chat_session_id,
             )
-            _prepare_codex_home(persistent_home, mcp_config_text=mcp_config_text)
+            _prepare_codex_home(
+                persistent_home,
+                mcp_config_text=mcp_config_text,
+                runtime_config_text=runtime_config_text,
+            )
         except Exception:
             # Fall back to a temporary home so chat remains available even if persistent storage fails.
             persistent_home = None
@@ -325,7 +379,11 @@ def _codex_home_env(
 
     with tempfile.TemporaryDirectory(prefix="codex-home-") as temp_home:
         temp_home_path = Path(temp_home)
-        _prepare_codex_home(temp_home_path, mcp_config_text=mcp_config_text)
+        _prepare_codex_home(
+            temp_home_path,
+            mcp_config_text=mcp_config_text,
+            runtime_config_text=runtime_config_text,
+        )
         env = os.environ.copy()
         env["HOME"] = str(temp_home_path)
         yield env
@@ -826,17 +884,27 @@ def _run_codex_app_server_with_optional_stream(
     stream_events: bool,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    model_provider: str | None = None,
+    local_provider: str | None = None,
     output_schema: dict | None = None,
     preferred_thread_id: str | None = None,
     env: dict[str, str] | None = None,
 ) -> tuple[str, dict[str, int] | None, str | None, bool, bool]:
     run_cwd = _resolve_codex_workdir()
-    cmd = [
-        "codex",
-        "app-server",
-        "--listen",
-        "stdio://",
-    ]
+    cmd = ["codex"]
+    normalized_model_provider = _normalize_model_provider(model_provider)
+    normalized_local_provider = _normalize_local_provider(local_provider)
+    if normalized_model_provider == "oss":
+        cmd.append("--oss")
+        if normalized_local_provider:
+            cmd.extend(["--local-provider", normalized_local_provider])
+    cmd.extend(
+        [
+            "app-server",
+            "--listen",
+            "stdio://",
+        ]
+    )
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
@@ -1245,6 +1313,8 @@ def run_structured_codex_prompt(
     session_key: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    model_provider: str | None = None,
+    local_provider: str | None = None,
     timeout_seconds: float | None = None,
     mcp_servers: list[str] | None = None,
     preferred_thread_id: str | None = None,
@@ -1256,6 +1326,8 @@ def run_structured_codex_prompt(
         session_key=session_key,
         model=model,
         reasoning_effort=reasoning_effort,
+        model_provider=model_provider,
+        local_provider=local_provider,
         timeout_seconds=timeout_seconds,
         mcp_servers=mcp_servers,
         preferred_thread_id=preferred_thread_id,
@@ -1271,6 +1343,8 @@ def run_structured_codex_prompt_with_usage(
     session_key: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    model_provider: str | None = None,
+    local_provider: str | None = None,
     timeout_seconds: float | None = None,
     mcp_servers: list[str] | None = None,
     preferred_thread_id: str | None = None,
@@ -1286,6 +1360,8 @@ def run_structured_codex_prompt_with_usage(
     preferred_reasoning_effort = _normalize_reasoning_effort(reasoning_effort) or _normalize_reasoning_effort(
         AGENT_CODEX_REASONING_EFFORT
     )
+    scoped_model_provider = _normalize_model_provider(model_provider)
+    scoped_local_provider = _normalize_local_provider(local_provider)
     runtime_timeout_seconds = _effective_timeout_seconds(
         timeout_seconds,
         fallback_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
@@ -1298,6 +1374,7 @@ def run_structured_codex_prompt_with_usage(
     ):
         with _codex_home_env(
             mcp_config_text=mcp_config_text,
+            runtime_config_text="",
             workspace_id=normalized_workspace_id,
             chat_session_id=normalized_session_key,
         ) as codex_env:
@@ -1308,6 +1385,8 @@ def run_structured_codex_prompt_with_usage(
                 stream_events=False,
                 model=preferred_model,
                 reasoning_effort=preferred_reasoning_effort,
+                model_provider=scoped_model_provider,
+                local_provider=scoped_local_provider,
                 output_schema=output_schema,
                 preferred_thread_id=str(preferred_thread_id or "").strip() or None,
                 env=codex_env,

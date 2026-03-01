@@ -67,6 +67,12 @@ graph LR
 - `GHCR_IMAGE_PREFIX` (default: `constructos`)
 - `CODEX_CONFIG_FILE` (default: `./codex.config.toml`)
 - `CODEX_AUTH_FILE` (default: `${HOME}/.codex/auth.json`)
+- `OLLAMA_MODELS_MOUNT` (optional; host path or volume name)
+
+Ollama model storage behavior on Linux deploy targets:
+- If `OLLAMA_MODELS_MOUNT` is set, that value is used.
+- If not set and host `~/.ollama` exists, deploy auto-binds it into the container.
+- Otherwise, deploy uses named volume `ollama-data` (default container-managed storage).
 
 Examples:
 ```bash
@@ -173,6 +179,16 @@ curl -sS http://localhost:1102/api/health
 Optional for Codex git push from `task-app` container:
 - set `GITHUB_PAT` in `.env` to a GitHub token with repository write access.
 - runtime maps `GITHUB_PAT` to `GITHUB_TOKEN` when `GITHUB_TOKEN` is not already set.
+
+Optional: use a different AI provider only for event storming
+- Keep regular Codex runtime as-is for chat/automation.
+- Override only event-storming extraction:
+```bash
+EVENT_STORMING_AI_PROVIDER=oss
+EVENT_STORMING_AI_LOCAL_PROVIDER=ollama
+EVENT_STORMING_AI_MODEL=qwen2.5-coder:14b
+```
+- Leave these vars empty to use the regular Codex provider/model path.
 
 Optional: map Codex workspace to a host folder
 - By default, Codex uses container path `/home/app/workspace` mapped to host path `/workspace`.

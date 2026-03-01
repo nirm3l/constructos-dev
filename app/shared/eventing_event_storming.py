@@ -51,6 +51,8 @@ from .settings import (
     EVENT_STORMING_ANALYSIS_BATCH_SIZE,
     EVENT_STORMING_ANALYSIS_STALE_AFTER_SECONDS,
     EVENT_STORMING_AI_MODEL,
+    EVENT_STORMING_AI_PROVIDER,
+    EVENT_STORMING_AI_LOCAL_PROVIDER,
     EVENT_STORMING_ANALYSIS_POLL_SECONDS,
     EVENT_STORMING_ANALYSIS_WORKER_ENABLED,
     EVENT_STORMING_ENABLED,
@@ -651,6 +653,8 @@ def _extract_with_codex_agent(
         session_key=chat_session_id,
         model=model,
         reasoning_effort=str(AGENT_CODEX_REASONING_EFFORT or "").strip() or None,
+        model_provider=str(EVENT_STORMING_AI_PROVIDER or "").strip() or None,
+        local_provider=str(EVENT_STORMING_AI_LOCAL_PROVIDER or "").strip() or None,
         mcp_servers=None,
     )
     return {
