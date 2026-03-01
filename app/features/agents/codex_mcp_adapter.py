@@ -340,6 +340,7 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     workspace_id = ctx.get("workspace_id") or ""
     project_id = ctx.get("project_id") or ""
     actor_user_id = str(ctx.get("actor_user_id") or "").strip()
+    actor_project_role = str(ctx.get("actor_project_role") or "").strip() or "_(not available)_"
     project_name = ctx.get("project_name") or ""
     project_description = str(ctx.get("project_description") or "")
     project_rules = ctx.get("project_rules") or []
@@ -436,6 +437,7 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
             "workspace_id": workspace_id,
             "project_id": project_id,
             "actor_user_id": actor_user_id,
+            "actor_project_role": actor_project_role,
             "project_name": project_name,
             "instruction": instruction,
             "status_change_trigger_context": status_change_trigger_context,
@@ -526,6 +528,7 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     workspace_id = ctx.get("workspace_id") or ""
     project_id = ctx.get("project_id") or ""
     actor_user_id = str(ctx.get("actor_user_id") or "").strip()
+    actor_project_role = str(ctx.get("actor_project_role") or "").strip() or "_(not available)_"
     project_name = ctx.get("project_name") or ""
     trigger_task_id = str(ctx.get("trigger_task_id") or "").strip() or "_(not available)_"
     trigger_from_status = str(ctx.get("trigger_from_status") or "").strip() or "_(not available)_"
@@ -575,6 +578,7 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
             "workspace_id": workspace_id,
             "project_id": project_id,
             "actor_user_id": actor_user_id,
+            "actor_project_role": actor_project_role,
             "project_name": project_name,
             "instruction": instruction,
             "status_change_trigger_context": status_change_trigger_context,
@@ -765,15 +769,23 @@ def _extract_delta_text(params: dict[str, object]) -> str:
 
 def _is_message_delta_method(method: str) -> bool:
     normalized = str(method or "").strip().lower()
-    if not normalized.startswith("item/") or not normalized.endswith("/delta"):
+    if not normalized:
         return False
-    middle = normalized[len("item/") : -len("/delta")].replace("_", "").replace("-", "")
-    return middle in {"agentmessage", "assistantmessage"}
+    compact = normalized.replace("_", "").replace("-", "")
+    if compact in {"item.delta", "item/delta"}:
+        return True
+    if compact.startswith("item/") and compact.endswith("/delta"):
+        middle = compact[len("item/") : -len("/delta")]
+        return middle in {"agentmessage", "assistantmessage", "message"}
+    if compact.startswith("item.") and compact.endswith(".delta"):
+        middle = compact[len("item.") : -len(".delta")]
+        return middle in {"agentmessage", "assistantmessage", "message"}
+    return False
 
 
 def _is_assistant_message_item_type(item_type: str) -> bool:
     normalized = str(item_type or "").strip().lower().replace("_", "").replace("-", "")
-    return normalized in {"agentmessage", "assistantmessage"}
+    return normalized in {"agentmessage", "assistantmessage", "message"}
 
 
 def _extract_error_message(payload: object) -> str:
@@ -983,6 +995,25 @@ def _run_codex_app_server_with_optional_stream(
             continue
         if _is_message_delta_method(method):
             delta = _extract_delta_text(params)
+            if not delta and isinstance(params.get("item"), dict):
+                item_payload = params.get("item")
+                item_type = str((item_payload or {}).get("type") or "").strip()
+                if _is_assistant_message_item_type(item_type):
+                    delta = _extract_message_text(item_payload)
+            if not delta:
+                continue
+            delta_parts.append(delta)
+            if stream_events and stream_plain_text:
+                _emit_stream_event({"type": "assistant_text", "delta": delta})
+            continue
+        if method in {"item/updated", "item.updated"}:
+            item_payload = params.get("item") if isinstance(params.get("item"), dict) else None
+            item_type = str((item_payload or {}).get("type") if isinstance(item_payload, dict) else "").strip()
+            if not _is_assistant_message_item_type(item_type):
+                continue
+            delta = _extract_delta_text(params)
+            if not delta and isinstance(item_payload, dict):
+                delta = _extract_message_text(item_payload)
             if not delta:
                 continue
             delta_parts.append(delta)
@@ -997,6 +1028,10 @@ def _run_codex_app_server_with_optional_stream(
                     text = _extract_message_text(item)
                     if text:
                         final_message = text
+                        if stream_events and stream_plain_text and not "".join(delta_parts).strip():
+                            rendered = _render_stream_assistant_text(text)
+                            if rendered:
+                                _emit_stream_event({"type": "assistant_text", "delta": rendered})
                 elif item_type == "reasoning" and stream_events:
                     _emit_stream_event({"type": "status", "message": "Reasoning step completed."})
             continue

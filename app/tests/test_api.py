@@ -126,6 +126,74 @@ def test_create_and_complete_task(tmp_path):
     assert done.json()['status'] == 'Done'
 
 
+def test_task_complete_is_idempotent(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created = client.post('/api/tasks', json={'title': 'Complete idempotent', 'workspace_id': ws_id, 'project_id': project_id})
+    assert created.status_code == 200
+    task_id = created.json()['id']
+
+    first = client.post(f"/api/tasks/{task_id}/complete")
+    second = client.post(f"/api/tasks/{task_id}/complete")
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()['id'] == task_id
+    assert second.json()['status'] == 'Done'
+
+
+def test_task_archive_restore_are_idempotent(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created = client.post('/api/tasks', json={'title': 'Archive restore idempotent', 'workspace_id': ws_id, 'project_id': project_id})
+    assert created.status_code == 200
+    task_id = created.json()['id']
+
+    first_archive = client.post(f"/api/tasks/{task_id}/archive")
+    second_archive = client.post(f"/api/tasks/{task_id}/archive")
+    assert first_archive.status_code == 200
+    assert second_archive.status_code == 200
+    assert first_archive.json()['ok'] is True
+    assert second_archive.json()['ok'] is True
+
+    first_restore = client.post(f"/api/tasks/{task_id}/restore")
+    second_restore = client.post(f"/api/tasks/{task_id}/restore")
+    assert first_restore.status_code == 200
+    assert second_restore.status_code == 200
+    assert first_restore.json()['ok'] is True
+    assert second_restore.json()['ok'] is True
+
+
+def test_task_reopen_is_idempotent(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created = client.post('/api/tasks', json={'title': 'Reopen idempotent', 'workspace_id': ws_id, 'project_id': project_id})
+    assert created.status_code == 200
+    task_id = created.json()['id']
+
+    first = client.post(f"/api/tasks/{task_id}/reopen")
+    assert first.status_code == 200
+    assert first.json()['id'] == task_id
+    assert first.json()['status'] == 'To do'
+
+    completed = client.post(f"/api/tasks/{task_id}/complete")
+    assert completed.status_code == 200
+    assert completed.json()['status'] == 'Done'
+
+    second = client.post(f"/api/tasks/{task_id}/reopen")
+    assert second.status_code == 200
+    assert second.json()['id'] == task_id
+    assert second.json()['status'] == 'To do'
+
+
 def test_get_task_by_id_returns_task(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -580,6 +648,22 @@ def test_create_project(tmp_path):
     payload = res.json()
     assert payload['name'] == 'Mobile Redesign'
     assert payload['workspace_id'] == ws_id
+
+
+def test_create_project_returns_aggregate_fallback_when_view_unavailable(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
+
+    import features.projects.command_handlers as project_handlers
+
+    monkeypatch.setattr(project_handlers, "load_project_view", lambda db, project_id: None)
+
+    created = client.post('/api/projects', json={'workspace_id': ws_id, 'name': 'Fallback Project'})
+    assert created.status_code == 200
+    payload = created.json()
+    assert payload['name'] == 'Fallback Project'
+    assert payload['workspace_id'] == ws_id
+    assert payload['embedding_index_status'] == 'not_indexed'
 
 
 def test_bootstrap_exposes_embedding_runtime_config(tmp_path, monkeypatch):
@@ -3489,6 +3573,262 @@ def test_agent_service_create_project_uses_default_workspace(tmp_path, monkeypat
     assert created['name'] == 'MCP New Project'
 
 
+def test_agent_service_create_project_can_disable_event_storming(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+
+    service = AgentTaskService()
+    created = service.create_project(
+        name='MCP No Event Storming',
+        event_storming_enabled=False,
+    )
+    assert created['workspace_id'] == ws_id
+    assert created['name'] == 'MCP No Event Storming'
+    assert created['event_storming_enabled'] is False
+
+
+def test_agent_service_update_project_can_toggle_event_storming(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+
+    service = AgentTaskService()
+    created = service.create_project(name='MCP Patch Event Storming')
+    assert created['event_storming_enabled'] is True
+
+    patched = service.update_project(
+        project_id=created['id'],
+        patch={'event_storming_enabled': False},
+    )
+    assert patched['id'] == created['id']
+    assert patched['event_storming_enabled'] is False
+
+
+def test_agent_service_verify_team_mode_workflow_detects_missing_dev_triggers_and_passes_after_fix(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={ws_id}")
+    assert catalog.status_code == 200
+    team_mode = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode['id']}/attach",
+        json={"workspace_id": ws_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+    applied = client.post(f"/api/project-skills/{attached.json()['id']}/apply")
+    assert applied.status_code == 200
+
+    members = client.get(f"/api/projects/{project_id}/members")
+    assert members.status_code == 200
+    items = members.json()["items"]
+    dev1 = next(item for item in items if item["user"]["username"] == "agent.tr1n1ty")["user_id"]
+    dev2 = next(item for item in items if item["user"]["username"] == "agent.n30")["user_id"]
+    qa = next(item for item in items if item["user"]["username"] == "agent.0r4cl3")["user_id"]
+    lead = next(item for item in items if item["user"]["username"] == "agent.m0rph3u5")["user_id"]
+
+    d1 = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Dev 1",
+            "status": "Dev",
+            "assignee_id": dev1,
+        },
+    )
+    assert d1.status_code == 200
+    d2 = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Dev 2",
+            "status": "Dev",
+            "assignee_id": dev2,
+        },
+    )
+    assert d2.status_code == 200
+
+    qa_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "QA task",
+            "status": "QA",
+            "assignee_id": qa,
+            "instruction": "Run QA validation",
+            "execution_triggers": [
+                {
+                    "kind": "status_change",
+                    "scope": "external",
+                    "to_statuses": ["QA"],
+                    "selector": {"task_ids": [d1.json()["id"], d2.json()["id"]]},
+                }
+            ],
+        },
+    )
+    assert qa_task.status_code == 200
+
+    lead_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Lead review",
+            "status": "Lead",
+            "assignee_id": lead,
+            "instruction": "Review and gate",
+            "execution_triggers": [
+                {
+                    "kind": "status_change",
+                    "scope": "external",
+                    "to_statuses": ["Done"],
+                    "selector": {"task_ids": [qa_task.json()["id"]]},
+                },
+                {
+                    "kind": "schedule",
+                    "scheduled_at_utc": "2026-03-02T00:00:00Z",
+                    "schedule_timezone": "UTC",
+                    "recurring_rule": "every:1d",
+                    "run_on_statuses": ["Lead"],
+                },
+            ],
+        },
+    )
+    assert lead_task.status_code == 200
+
+    deploy_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Prepare Docker Compose deploy",
+            "status": "Lead",
+            "assignee_id": lead,
+            "instruction": "Prepare deploy",
+            "execution_triggers": [
+                {
+                    "kind": "status_change",
+                    "scope": "external",
+                    "to_statuses": ["Done"],
+                    "selector": {"task_ids": [lead_task.json()["id"]]},
+                }
+            ],
+        },
+    )
+    assert deploy_task.status_code == 200
+
+    service = AgentTaskService()
+    failed = service.verify_team_mode_workflow(
+        project_id=project_id,
+        workspace_id=ws_id,
+    )
+    assert failed["checks"]["dev_self_triggers_to_qa"] is False
+    assert failed["checks"]["required_triggers_present"] is False
+    assert failed["ok"] is False
+
+    patch_payload = {
+        "instruction": "Implement and hand off to QA",
+        "execution_triggers": [{"kind": "status_change", "scope": "self", "to_statuses": ["QA"]}],
+    }
+    patched_d1 = client.patch(f"/api/tasks/{d1.json()['id']}", json=patch_payload)
+    assert patched_d1.status_code == 200
+    patched_d2 = client.patch(f"/api/tasks/{d2.json()['id']}", json=patch_payload)
+    assert patched_d2.status_code == 200
+
+    passed = service.verify_team_mode_workflow(
+        project_id=project_id,
+        workspace_id=ws_id,
+    )
+    assert passed["checks"]["dev_self_triggers_to_qa"] is True
+    assert passed["checks"]["required_triggers_present"] is True
+    assert passed["ok"] is True
+
+
+def test_agent_service_ensure_team_mode_project_sets_up_skill_and_roster(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+
+    service = AgentTaskService()
+    ensured = service.ensure_team_mode_project(
+        project_id=project_id,
+        workspace_id=ws_id,
+    )
+    assert ensured["project_id"] == project_id
+    assert ensured["workspace_id"] == ws_id
+    assert isinstance(ensured["project_skill_id"], str) and ensured["project_skill_id"]
+    assert isinstance(ensured["generated_rule_id"], str) and ensured["generated_rule_id"]
+    assert ensured["team_mode_contract_complete"] is True
+    assert ensured["verification"]["ok"] is False or ensured["verification"]["ok"] is True
+    member_roles = {
+        str(item.get("role") or "").strip()
+        for item in (ensured.get("members", {}).get("items") or [])
+    }
+    assert "TeamLeadAgent" in member_roles
+    assert "DeveloperAgent" in member_roles
+    assert "QAAgent" in member_roles
+
+
+def test_agent_service_ensure_team_mode_project_accepts_project_name_ref(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    project_name = bootstrap['projects'][0]['name']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+
+    service = AgentTaskService()
+    ensured = service.ensure_team_mode_project(
+        project_ref=project_name,
+        workspace_id=ws_id,
+    )
+    assert ensured["project_id"] == project_id
+    assert ensured["ok"] is True or ensured["ok"] is False
+    assert isinstance(ensured["project_skill_id"], str) and ensured["project_skill_id"]
+
+
 def test_agent_service_search_project_knowledge(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -4324,6 +4664,8 @@ def test_agents_chat_stream_endpoint_persists_attachment_without_fk_error(tmp_pa
         },
     )
     assert res.status_code == 200
+    assert res.headers.get('x-accel-buffering', '').lower() == 'no'
+    assert 'no-cache' in str(res.headers.get('cache-control', '')).lower()
     assert captured['timeout_seconds'] == 0
     lines = [line for line in (res.text or '').splitlines() if line.strip()]
     assert any('"type": "final"' in line for line in lines)
@@ -4770,6 +5112,265 @@ def test_agents_chat_endpoint_respects_allow_mutations_flag(tmp_path, monkeypatc
     )
     assert res.status_code == 200
     assert captured['allow_mutations'] is False
+
+
+def test_agents_chat_endpoint_injects_execution_mandate_for_begin_with_implementation(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    captured = {}
+
+    def _fake_execute_task_automation(**kwargs):
+        captured.update(kwargs)
+        return AutomationOutcome(action='comment', summary='ok', comment=None, usage=None)
+
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Begin with implementation',
+            'allow_mutations': True,
+            'history': [],
+        },
+    )
+    assert res.status_code == 200
+    assert 'Execution intent detected for this project.' in captured['instruction']
+    assert 'Completion contract for execution kickoff' in captured['instruction']
+    assert 'Run tests/validation and include concrete results.' in captured['instruction']
+
+
+def test_agents_chat_endpoint_does_not_inject_execution_mandate_for_create_project_prompt(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    captured = {}
+
+    def _fake_execute_task_automation(**kwargs):
+        captured.update(kwargs)
+        return AutomationOutcome(action='comment', summary='ok', comment=None, usage=None)
+
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Create project and begin implementation',
+            'allow_mutations': True,
+            'history': [],
+        },
+    )
+    assert res.status_code == 200
+    assert 'Execution intent detected for this project.' not in captured['instruction']
+
+
+def test_agents_chat_ignores_stale_project_id_for_project_creation_intent(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    captured = {}
+
+    def _fake_execute_task_automation(**kwargs):
+        captured.update(kwargs)
+        return AutomationOutcome(action='comment', summary='ok', comment=None, usage=None)
+
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': '11111111-1111-1111-1111-111111111111',
+            'instruction': 'Create a new project with 5 tasks',
+            'allow_mutations': True,
+            'history': [],
+        },
+    )
+    assert res.status_code == 200
+    assert captured.get('project_id') is None
+
+
+def test_agents_chat_returns_404_for_stale_project_id_when_not_creation_intent(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': '11111111-1111-1111-1111-111111111111',
+            'instruction': 'Continue implementation',
+            'allow_mutations': True,
+            'history': [],
+        },
+    )
+    assert res.status_code == 404
+    assert 'Project not found' in res.text
+
+
+def test_execution_evidence_violations_detect_missing_task_evidence_for_execution_statuses(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    project_id = bootstrap['projects'][0]['id']
+    user_id = bootstrap['users'][0]['id']
+
+    from features.agents import api as agents_api
+    from shared.models import CommandExecution, SessionLocal
+
+    started = datetime.now(timezone.utc) - timedelta(seconds=5)
+    with SessionLocal() as db:
+        db.add(
+            CommandExecution(
+                command_id="test-exec-evidence-1",
+                command_name="Task.Patch",
+                user_id=user_id,
+                response_json=json.dumps(
+                    {
+                        "id": "task-1",
+                        "project_id": project_id,
+                        "title": "Implement endpoint",
+                        "status": "Done",
+                        "external_refs": [],
+                    }
+                ),
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        db.commit()
+
+        violations = agents_api._collect_execution_evidence_violations(
+            db=db,
+            user_id=user_id,
+            project_id=project_id,
+            run_started_at=started,
+        )
+    assert len(violations) == 1
+    assert violations[0]["task_id"] == "task-1"
+
+
+def test_execution_evidence_violations_accept_linked_note_without_external_ref(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    user_id = bootstrap['users'][0]['id']
+
+    from features.agents import api as agents_api
+    from shared.models import CommandExecution, Note, SessionLocal
+
+    started = datetime.now(timezone.utc) - timedelta(seconds=5)
+    with SessionLocal() as db:
+        db.add(
+            CommandExecution(
+                command_id="test-exec-evidence-2",
+                command_name="Task.Patch",
+                user_id=user_id,
+                response_json=json.dumps(
+                    {
+                        "id": "task-2",
+                        "project_id": project_id,
+                        "title": "Implement endpoint",
+                        "status": "Done",
+                        "external_refs": [],
+                    }
+                ),
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        db.add(
+            Note(
+                workspace_id=ws_id,
+                project_id=project_id,
+                task_id="task-2",
+                title="Implementation Evidence",
+                body="Smoke passed.",
+                created_by=user_id,
+                updated_by=user_id,
+            )
+        )
+        db.commit()
+
+        violations = agents_api._collect_execution_evidence_violations(
+            db=db,
+            user_id=user_id,
+            project_id=project_id,
+            run_started_at=started,
+        )
+    assert violations == []
+
+
+def test_agents_chat_execution_intent_fails_contract_when_task_evidence_missing(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    user_id = bootstrap['users'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+    from shared.models import CommandExecution, SessionLocal
+
+    seq = {"n": 0}
+
+    def _fake_execute_task_automation(**kwargs):
+        seq["n"] += 1
+        with SessionLocal() as db:
+            db.add(
+                CommandExecution(
+                    command_id=f"test-exec-evidence-run-{seq['n']}",
+                    command_name="Task.Patch",
+                    user_id=user_id,
+                    response_json=json.dumps(
+                        {
+                            "id": f"task-{seq['n']}",
+                            "project_id": project_id,
+                            "title": "Dev task",
+                            "status": "QA",
+                            "external_refs": [],
+                        }
+                    ),
+                    created_at=datetime.now(timezone.utc),
+                )
+            )
+            db.commit()
+        return AutomationOutcome(action='comment', summary='Execution done', comment='status moved', usage=None)
+
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Begin with implementation',
+            'allow_mutations': True,
+            'history': [],
+        },
+    )
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload['ok'] is False
+    assert 'Execution incomplete' in payload['summary']
+    assert 'evidence' in str(payload['comment']).lower()
 
 
 def test_agents_chat_endpoint_force_compacts_on_slash_command(tmp_path, monkeypatch):
@@ -5862,6 +6463,183 @@ def test_create_task_accepts_status_on_create(tmp_path):
     )
     assert created.status_code == 200
     assert created.json()['status'] == 'In progress'
+
+
+def test_create_task_rejects_non_uuid_assignee_id(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    created_project = client.post('/api/projects', json={'workspace_id': ws_id, 'name': 'Invalid Assignee Project'})
+    assert created_project.status_code == 200
+    project_id = created_project.json()['id']
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Task with invalid assignee',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'assignee_id': 'Tr1n1ty',
+        },
+    )
+    assert created.status_code == 422
+    assert created.json()['detail'] == 'assignee_id must be a user_id UUID (not username/full name)'
+
+
+def test_create_task_returns_aggregate_fallback_when_view_unavailable(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    import features.tasks.command_handlers as task_handlers
+
+    monkeypatch.setattr(task_handlers, "load_task_view", lambda db, task_id: None)
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Fallback task response',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    assert payload['title'] == 'Fallback task response'
+    assert payload['workspace_id'] == ws_id
+    assert payload['project_id'] == project_id
+    assert payload['status'] == 'To do'
+
+
+def test_patch_task_rejects_non_uuid_assignee_id(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Patch invalid assignee',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()['id']
+
+    patched = client.patch(
+        f'/api/tasks/{task_id}',
+        json={
+            'assignee_id': 'Tr1n1ty',
+        },
+    )
+    assert patched.status_code == 422
+    assert patched.json()['detail'] == 'assignee_id must be a user_id UUID (not username/full name)'
+
+
+def test_create_note_returns_aggregate_fallback_when_view_unavailable(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    import features.notes.command_handlers as note_handlers
+
+    monkeypatch.setattr(note_handlers, "load_note_view", lambda db, note_id: None)
+
+    created = client.post(
+        '/api/notes',
+        json={
+            'title': 'Fallback note response',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'body': 'hello',
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    assert payload['title'] == 'Fallback note response'
+    assert payload['workspace_id'] == ws_id
+    assert payload['project_id'] == project_id
+    assert payload['body'] == 'hello'
+
+
+def test_create_task_group_returns_aggregate_fallback_when_view_unavailable(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    import features.task_groups.command_handlers as task_group_handlers
+
+    monkeypatch.setattr(task_group_handlers, "load_task_group_view", lambda db, group_id: None)
+
+    created = client.post(
+        '/api/task-groups',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'name': 'Fallback Task Group',
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    assert payload['name'] == 'Fallback Task Group'
+    assert payload['workspace_id'] == ws_id
+    assert payload['project_id'] == project_id
+
+
+def test_create_note_group_returns_aggregate_fallback_when_view_unavailable(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    import features.note_groups.command_handlers as note_group_handlers
+
+    monkeypatch.setattr(note_group_handlers, "load_note_group_view", lambda db, group_id: None)
+
+    created = client.post(
+        '/api/note-groups',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'name': 'Fallback Note Group',
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    assert payload['name'] == 'Fallback Note Group'
+    assert payload['workspace_id'] == ws_id
+    assert payload['project_id'] == project_id
+
+
+def test_create_project_rule_returns_aggregate_fallback_when_view_unavailable(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    import features.rules.command_handlers as rule_handlers
+
+    monkeypatch.setattr(rule_handlers, "load_project_rule_view", lambda db, rule_id: None)
+
+    created = client.post(
+        '/api/project-rules',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'title': 'Fallback Rule',
+            'body': 'Rule body',
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    assert payload['title'] == 'Fallback Rule'
+    assert payload['workspace_id'] == ws_id
+    assert payload['project_id'] == project_id
 
 
 def test_task_tags_are_normalized_and_filterable(tmp_path):

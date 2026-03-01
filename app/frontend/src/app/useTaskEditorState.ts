@@ -8,6 +8,7 @@ export function useTaskEditorState() {
   const [editDueDate, setEditDueDate] = React.useState('')
   const [editProjectId, setEditProjectId] = React.useState('')
   const [editTaskGroupId, setEditTaskGroupId] = React.useState('')
+  const [editAssigneeId, setEditAssigneeId] = React.useState('')
   const [editTaskTags, setEditTaskTags] = React.useState<string[]>([])
   const [editTaskExternalRefsText, setEditTaskExternalRefsText] = React.useState('')
   const [editTaskAttachmentRefsText, setEditTaskAttachmentRefsText] = React.useState('')
@@ -37,10 +38,11 @@ export function useTaskEditorState() {
   const [uiError, setUiError] = React.useState<string | null>(null)
   const [uiInfo, setUiInfo] = React.useState<string | null>(null)
   const [taskEditorError, setTaskEditorError] = React.useState<string | null>(null)
+  const [taskEditorHydratedTaskId, setTaskEditorHydratedTaskId] = React.useState<string | null>(null)
 
   return {
     editStatus, setEditStatus, editTitle, setEditTitle, editDescription, setEditDescription, editPriority, setEditPriority,
-    editDueDate, setEditDueDate, editProjectId, setEditProjectId, editTaskGroupId, setEditTaskGroupId, editTaskTags, setEditTaskTags, editTaskExternalRefsText,
+    editDueDate, setEditDueDate, editProjectId, setEditProjectId, editTaskGroupId, setEditTaskGroupId, editAssigneeId, setEditAssigneeId, editTaskTags, setEditTaskTags, editTaskExternalRefsText,
     setEditTaskExternalRefsText, editTaskAttachmentRefsText, setEditTaskAttachmentRefsText, showTaskTagPicker,
     setShowTaskTagPicker, taskTagPickerQuery, setTaskTagPickerQuery, editTaskType, setEditTaskType, editScheduledAtUtc,
     setEditScheduledAtUtc, editScheduleTimezone, setEditScheduleTimezone, editScheduleRunOnStatuses, setEditScheduleRunOnStatuses,
@@ -58,5 +60,6 @@ export function useTaskEditorState() {
     expandedCommentIds, setExpandedCommentIds, automationInstruction, setAutomationInstruction, activityExpandedIds,
     setActivityExpandedIds, activityShowRawDetails, setActivityShowRawDetails, scrollToNewestComment, setScrollToNewestComment,
     uiError, setUiError, uiInfo, setUiInfo, taskEditorError, setTaskEditorError,
+    taskEditorHydratedTaskId, setTaskEditorHydratedTaskId,
   }
 }

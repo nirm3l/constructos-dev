@@ -69,6 +69,11 @@ CREATE_PROJECT_TOOL_DESCRIPTION = (
     "chat_attachment_ingestion_mode=METADATA_ONLY."
 )
 
+UPDATE_PROJECT_TOOL_DESCRIPTION = (
+    "Patch a project in a workspace/project scope. "
+    "Use this to update project metadata and flags such as event_storming_enabled."
+)
+
 LIST_PROJECT_TEMPLATES_TOOL_DESCRIPTION = (
     "List available project templates for template-based project setup."
 )
@@ -89,6 +94,17 @@ CREATE_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION = (
     "Recommended flow: list_project_templates -> get_project_template -> preview_project_from_template -> create_project_from_template. "
     "Chat default profile: embedding_enabled=true, chat_index_mode=KG_AND_VECTOR, "
     "chat_attachment_ingestion_mode=METADATA_ONLY."
+)
+
+VERIFY_TEAM_MODE_WORKFLOW_TOOL_DESCRIPTION = (
+    "Verify Team Mode workflow wiring for a project (role coverage + required trigger chain). "
+    "Use this before final success claims for Team Mode setup."
+)
+
+ENSURE_TEAM_MODE_PROJECT_TOOL_DESCRIPTION = (
+    "Ensure Team Mode is fully ready on a project in one idempotent step: "
+    "attach workspace `team_mode` skill if missing, apply it, provision Team Mode roster members, "
+    "and return verification status. Accepts project id or exact project name via project_ref."
 )
 
 
@@ -366,6 +382,29 @@ def create_mcp():
             offset=offset,
         )
 
+    @mcp.tool(description="List project members in a workspace/project, including UUID user ids used for assignee_id.")
+    def list_project_members(
+        workspace_id: str,
+        project_id: str,
+        auth_token: str | None = None,
+        q: str | None = None,
+        role: str | None = None,
+        user_type: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.list_project_members(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            auth_token=auth_token,
+            q=q,
+            role=role,
+            user_type=user_type,
+            limit=limit,
+            offset=offset,
+        )
+
     @mcp.tool(description="List project skills in a workspace/project.")
     def list_project_skills(
         workspace_id: str,
@@ -379,6 +418,23 @@ def create_mcp():
         return service.list_project_skills(
             workspace_id=workspace_id,
             project_id=project_id,
+            auth_token=auth_token,
+            q=q,
+            limit=limit,
+            offset=offset,
+        )
+
+    @mcp.tool(description="List workspace skill catalog entries for a workspace.")
+    def list_workspace_skills(
+        workspace_id: str,
+        auth_token: str | None = None,
+        q: str | None = None,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.list_workspace_skills(
+            workspace_id=workspace_id,
             auth_token=auth_token,
             q=q,
             limit=limit,
@@ -758,6 +814,7 @@ def create_mcp():
         context_pack_evidence_top_k: int | None = None,
         chat_index_mode: str = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE,
         chat_attachment_ingestion_mode: str = MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE,
+        event_storming_enabled: bool = True,
         command_id: str | None = None,
     ) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
@@ -772,6 +829,22 @@ def create_mcp():
             context_pack_evidence_top_k=context_pack_evidence_top_k,
             chat_index_mode=chat_index_mode,
             chat_attachment_ingestion_mode=chat_attachment_ingestion_mode,
+            event_storming_enabled=event_storming_enabled,
+            command_id=command_id,
+        )
+
+    @mcp.tool(description=UPDATE_PROJECT_TOOL_DESCRIPTION)
+    def update_project(
+        project_id: str,
+        patch: dict[str, Any],
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.update_project(
+            project_id=project_id,
+            patch=patch,
+            auth_token=auth_token,
             command_id=command_id,
         )
 
@@ -861,6 +934,40 @@ def create_mcp():
             command_id=command_id,
         )
 
+    @mcp.tool(description=VERIFY_TEAM_MODE_WORKFLOW_TOOL_DESCRIPTION)
+    def verify_team_mode_workflow(
+        project_id: str,
+        workspace_id: str | None = None,
+        auth_token: str | None = None,
+        expected_event_storming_enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.verify_team_mode_workflow(
+            project_id=project_id,
+            workspace_id=workspace_id,
+            auth_token=auth_token,
+            expected_event_storming_enabled=expected_event_storming_enabled,
+        )
+
+    @mcp.tool(description=ENSURE_TEAM_MODE_PROJECT_TOOL_DESCRIPTION)
+    def ensure_team_mode_project(
+        project_id: str | None = None,
+        project_ref: str | None = None,
+        workspace_id: str | None = None,
+        auth_token: str | None = None,
+        expected_event_storming_enabled: bool | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.ensure_team_mode_project(
+            project_id=project_id,
+            project_ref=project_ref,
+            workspace_id=workspace_id,
+            auth_token=auth_token,
+            expected_event_storming_enabled=expected_event_storming_enabled,
+            command_id=command_id,
+        )
+
     @mcp.tool(description="Create a project rule in a workspace/project.")
     def create_project_rule(
         title: str,
@@ -914,6 +1021,23 @@ def create_mcp():
         auth_token = auth_token or default_tool_token
         return service.apply_project_skill(
             skill_id=skill_id,
+            auth_token=auth_token,
+            command_id=command_id,
+        )
+
+    @mcp.tool(description="Attach a workspace catalog skill to a project.")
+    def attach_workspace_skill_to_project(
+        workspace_skill_id: str,
+        workspace_id: str,
+        project_id: str,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.attach_workspace_skill_to_project(
+            workspace_skill_id=workspace_skill_id,
+            workspace_id=workspace_id,
+            project_id=project_id,
             auth_token=auth_token,
             command_id=command_id,
         )

@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 
 from shared.core import (
     AggregateEventRepository,
-    Project,
     ProjectRuleCreate,
     ProjectRulePatch,
     User,
@@ -15,6 +14,7 @@ from shared.core import (
     ensure_project_access,
     allocate_id,
     ensure_role,
+    load_project_command_state,
     load_project_rule_command_state,
     load_project_rule_view,
 )
@@ -22,13 +22,26 @@ from shared.core import (
 from .domain import ProjectRuleAggregate
 
 
-def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> Project:
-    project = db.get(Project, project_id)
+def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> None:
+    project = load_project_command_state(db, project_id)
     if not project or project.is_deleted:
         raise HTTPException(status_code=404, detail="Project not found")
     if project.workspace_id != workspace_id:
         raise HTTPException(status_code=400, detail="Project does not belong to workspace")
-    return project
+
+
+def _project_rule_view_from_aggregate(*, rule_id: str, aggregate: ProjectRuleAggregate) -> dict:
+    return {
+        "id": rule_id,
+        "workspace_id": getattr(aggregate, "workspace_id", None),
+        "project_id": getattr(aggregate, "project_id", None),
+        "title": getattr(aggregate, "title", "") or "",
+        "body": getattr(aggregate, "body", "") or "",
+        "created_by": getattr(aggregate, "created_by", "") or "",
+        "updated_by": getattr(aggregate, "updated_by", "") or "",
+        "created_at": None,
+        "updated_at": None,
+    }
 
 
 def require_project_rule_command_state(db: Session, user: User, rule_id: str, *, allowed: set[str]) -> tuple[str, str]:
@@ -84,9 +97,9 @@ class CreateProjectRuleHandler:
         )
         self.ctx.db.commit()
         view = load_project_rule_view(self.ctx.db, rid)
-        if view is None:
-            raise HTTPException(status_code=404, detail="Project rule not found after create")
-        return view
+        if view is not None:
+            return view
+        return _project_rule_view_from_aggregate(rule_id=rid, aggregate=aggregate)
 
 
 @dataclass(frozen=True, slots=True)

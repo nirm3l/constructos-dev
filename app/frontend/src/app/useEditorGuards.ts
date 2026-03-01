@@ -1,7 +1,6 @@
 import React from 'react'
 import { parseCommaTags, parseProjectStatusesText, stableJson, toLocalDateTimeInput } from '../utils/ui'
 import {
-  buildExecutionTriggersFromEditor,
   deriveInstruction,
   extractEnabledScheduleTrigger,
   extractEnabledStatusTrigger,
@@ -140,6 +139,7 @@ export function useEditorGuards(c: any) {
 
   const taskIsDirty = React.useMemo(() => {
     if (!c.selectedTask) return false
+    if (String(c.taskEditorHydratedTaskId || '') !== String(c.selectedTask.id || '')) return false
     const selectedTaskScheduleTimezone = String(c.selectedTask.schedule_timezone || '').trim()
     const fallbackScheduleTimezone = String(c.currentUserTimezone || 'UTC').trim() || 'UTC'
     const editScheduleTimezoneRaw = String(c.editScheduleTimezone || '').trim()
@@ -156,25 +156,7 @@ export function useEditorGuards(c: any) {
       c.editTaskType === 'scheduled_instruction' && c.editScheduledAtUtc
         ? normalizeUtcIsoToMinute(new Date(c.editScheduledAtUtc).toISOString())
         : ''
-    const currentExecutionTriggers = buildExecutionTriggersFromEditor({
-      taskType: c.editTaskType,
-      scheduledAtUtc: scheduleTriggerIsoForDirty,
-      scheduleTimezone: scheduleTimezoneForDirty,
-      scheduleRunOnStatuses: c.editScheduleRunOnStatuses,
-      recurringEvery: c.editRecurringEvery,
-      recurringUnit: c.editRecurringUnit,
-      selfEnabled: Boolean(c.editStatusTriggerSelfEnabled),
-      selfFromStatusesText: c.editStatusTriggerSelfFromStatusesText,
-      selfToStatusesText: c.editStatusTriggerSelfToStatusesText,
-      externalEnabled: Boolean(c.editStatusTriggerExternalEnabled),
-      externalMatchMode: c.editStatusTriggerExternalMatchMode === 'all' ? 'all' : 'any',
-      externalTaskIdsText: c.editStatusTriggerExternalTaskIdsText,
-      externalFromStatusesText: c.editStatusTriggerExternalFromStatusesText,
-      externalToStatusesText: c.editStatusTriggerExternalToStatusesText,
-    })
-
     const originalExecutionTriggers = normalizeExecutionTriggersForDirtyCheck(c.selectedTask.execution_triggers)
-    const normalizedCurrentExecutionTriggers = normalizeExecutionTriggersForDirtyCheck(currentExecutionTriggers)
     const originalScheduleTrigger = extractEnabledScheduleTrigger(originalExecutionTriggers)
     const originalSelfTrigger = extractEnabledStatusTrigger(originalExecutionTriggers, 'self')
     const originalExternalTrigger = extractEnabledStatusTrigger(originalExecutionTriggers, 'external')
@@ -186,6 +168,7 @@ export function useEditorGuards(c: any) {
       priority: c.editPriority,
       project_id: c.editProjectId || c.selectedTask.project_id,
       task_group_id: c.editTaskGroupId || null,
+      assignee_id: c.editAssigneeId || null,
       labels: c.editTaskTags,
       due_date: c.editDueDate || '',
       task_type: c.editTaskType,
@@ -206,7 +189,6 @@ export function useEditorGuards(c: any) {
       status_trigger_external_task_ids: c.editStatusTriggerExternalTaskIdsText,
       status_trigger_external_from: c.editStatusTriggerExternalFromStatusesText,
       status_trigger_external_to: c.editStatusTriggerExternalToStatusesText,
-      execution_triggers: normalizedCurrentExecutionTriggers,
       external_refs: c.parseExternalRefsText(c.editTaskExternalRefsText),
       attachment_refs: c.parseAttachmentRefsText(c.editTaskAttachmentRefsText),
     }
@@ -217,6 +199,7 @@ export function useEditorGuards(c: any) {
       priority: c.selectedTask.priority ?? 'Med',
       project_id: c.selectedTask.project_id ?? '',
       task_group_id: c.selectedTask.task_group_id ?? null,
+      assignee_id: c.selectedTask.assignee_id ?? null,
       labels: c.selectedTask.labels ?? [],
       due_date: toLocalDateTimeInput(c.selectedTask.due_date),
       task_type: c.selectedTask.task_type ?? 'manual',
@@ -229,7 +212,7 @@ export function useEditorGuards(c: any) {
         (c.selectedTask.task_type ?? 'manual') === 'scheduled_instruction'
           ? normalizeScheduleRunOnStatuses(originalScheduleTrigger?.run_on_statuses)
           : [],
-      instruction: deriveInstruction(c.selectedTask),
+      instruction: deriveInstruction(c.selectedTask).trim(),
       recurring_rule:
         (c.selectedTask.task_type ?? 'manual') === 'scheduled_instruction' ? String(c.selectedTask.recurring_rule ?? '') : '',
       status_trigger_self_enabled: Boolean(originalSelfTrigger),
@@ -240,7 +223,6 @@ export function useEditorGuards(c: any) {
       status_trigger_external_task_ids: listToCsv(originalExternalTrigger?.selector?.task_ids),
       status_trigger_external_from: listToCsv(originalExternalTrigger?.from_statuses),
       status_trigger_external_to: listToCsv(originalExternalTrigger?.to_statuses),
-      execution_triggers: originalExecutionTriggers,
       external_refs: c.selectedTask.external_refs ?? [],
       attachment_refs: c.selectedTask.attachment_refs ?? [],
     }
@@ -251,6 +233,7 @@ export function useEditorGuards(c: any) {
     c.editPriority,
     c.editProjectId,
     c.editTaskGroupId,
+    c.editAssigneeId,
     c.editRecurringEvery,
     c.editRecurringUnit,
     c.editScheduledAtUtc,
@@ -274,6 +257,7 @@ export function useEditorGuards(c: any) {
     c.currentUserTimezone,
     c.parseAttachmentRefsText,
     c.parseExternalRefsText,
+    c.taskEditorHydratedTaskId,
     c.selectedTask,
   ])
 

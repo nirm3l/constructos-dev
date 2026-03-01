@@ -72,6 +72,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           toggleSearchTag={state.toggleSearchTag}
           clearSearchTags={state.clearSearchTags}
           boardData={state.tab === 'inbox' ? undefined : state.board.data}
+          actorNames={state.actorNames}
           onOpenTaskEditor={state.openTaskEditor}
           onOpenSpecification={state.openSpecification}
           specificationNames={state.specificationNameMap}

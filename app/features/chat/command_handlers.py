@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session
 from shared.aggregates import AggregateEventRepository, coerce_originator_id
 from shared.deps import ensure_project_access, ensure_role
 from shared.eventing_rebuild import rebuild_state
-from shared.models import Project, User
+from shared.models import User
+from shared.serializers import load_project_command_state
 
 from .domain import ChatSessionAggregate
 
@@ -145,8 +146,8 @@ def _ensure_project_scope(db: Session, user: User, *, workspace_id: str, project
     normalized = _normalized_project_id(project_id)
     if not normalized:
         return None
-    project = db.get(Project, normalized)
-    if not project or bool(project.is_deleted):
+    project = load_project_command_state(db, normalized)
+    if project is None or bool(project.is_deleted):
         raise HTTPException(status_code=404, detail="Project not found")
     if project.workspace_id != workspace_id:
         raise HTTPException(status_code=400, detail="Project does not belong to workspace")

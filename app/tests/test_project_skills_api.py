@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from importlib import reload
 from pathlib import Path
@@ -477,6 +478,7 @@ def test_workspace_skill_catalog_seed_and_attach_to_project(tmp_path: Path):
     items = catalog.json()["items"]
     assert any(item["skill_key"] == "github_delivery" for item in items)
     assert any(item["skill_key"] == "jira_execution" for item in items)
+    assert any(item["skill_key"] == "team_mode" for item in items)
 
     github_skill = next(item for item in items if item["skill_key"] == "github_delivery")
     assert github_skill["source_locator"] == "seed://workspace-skills/github-delivery"
@@ -490,6 +492,14 @@ def test_workspace_skill_catalog_seed_and_attach_to_project(tmp_path: Path):
     jira_content = str(jira_skill["manifest"].get("source_content", ""))
     assert "create one Jira snapshot issue per app task" in jira_content
 
+    team_mode_skill = next(item for item in items if item["skill_key"] == "team_mode")
+    assert team_mode_skill["source_locator"] == "seed://workspace-skills/team-mode"
+    assert team_mode_skill["is_seeded"] is True
+    assert team_mode_skill["mode"] == "enforced"
+    team_mode_content = str(team_mode_skill["manifest"].get("source_content", ""))
+    assert "M0rph3u5" in team_mode_content
+    assert "0r4cl3" in team_mode_content
+
     attached = client.post(
         f"/api/workspace-skills/{github_skill['id']}/attach",
         json={"workspace_id": workspace_id, "project_id": project_id},
@@ -500,6 +510,129 @@ def test_workspace_skill_catalog_seed_and_attach_to_project(tmp_path: Path):
     assert attached_payload["skill_key"] == "github_delivery"
     assert attached_payload["generated_rule_id"] is None
     assert attached_payload["attached_from_workspace_skill_id"] == github_skill["id"]
+
+
+def test_apply_team_mode_skill_ensures_agent_users_and_project_roles(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    workspace_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={workspace_id}")
+    assert catalog.status_code == 200
+    team_mode_skill = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode_skill['id']}/attach",
+        json={"workspace_id": workspace_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+    attached_payload = attached.json()
+    assert attached_payload["skill_key"] == "team_mode"
+
+    applied = client.post(f"/api/project-skills/{attached_payload['id']}/apply")
+    assert applied.status_code == 200
+    applied_payload = applied.json()
+    assert isinstance(applied_payload["generated_rule_id"], str) and applied_payload["generated_rule_id"]
+    assert applied_payload["team_mode_contract_complete"] is True
+    roster = applied_payload["team_mode_roster"]
+    assert isinstance(roster, list) and len(roster) == 4
+    roster_by_username = {str(item["username"]): item for item in roster}
+    assert roster_by_username["agent.m0rph3u5"]["project_member_role"] == "TeamLeadAgent"
+    assert roster_by_username["agent.tr1n1ty"]["project_member_role"] == "DeveloperAgent"
+    assert roster_by_username["agent.n30"]["project_member_role"] == "DeveloperAgent"
+    assert roster_by_username["agent.0r4cl3"]["project_member_role"] == "QAAgent"
+    assert all(bool(item.get("user_id")) for item in roster)
+
+    members = client.get(f"/api/projects/{project_id}/members")
+    assert members.status_code == 200
+    items = members.json()["items"]
+    by_username = {str(item["user"]["username"]): item for item in items}
+
+    expected = {
+        "agent.m0rph3u5": "TeamLeadAgent",
+        "agent.tr1n1ty": "DeveloperAgent",
+        "agent.n30": "DeveloperAgent",
+        "agent.0r4cl3": "QAAgent",
+    }
+    for username, expected_role in expected.items():
+        assert username in by_username
+        assert by_username[username]["role"] == expected_role
+        assert by_username[username]["user"]["user_type"] == "agent"
+
+    applied_again = client.post(f"/api/project-skills/{attached_payload['id']}/apply")
+    assert applied_again.status_code == 200
+
+    members_again = client.get(f"/api/projects/{project_id}/members")
+    assert members_again.status_code == 200
+    items_again = members_again.json()["items"]
+    for username, expected_role in expected.items():
+        matches = [item for item in items_again if str(item["user"]["username"]) == username]
+        assert len(matches) == 1
+        assert matches[0]["role"] == expected_role
+
+
+def test_team_mode_runner_attributes_automation_events_to_assigned_agent(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    workspace_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={workspace_id}")
+    assert catalog.status_code == 200
+    team_mode_skill = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode_skill['id']}/attach",
+        json={"workspace_id": workspace_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+    skill_id = attached.json()["id"]
+    applied = client.post(f"/api/project-skills/{skill_id}/apply")
+    assert applied.status_code == 200
+
+    members = client.get(f"/api/projects/{project_id}/members")
+    assert members.status_code == 200
+    assignee = next(item for item in members.json()["items"] if item["user"]["username"] == "agent.tr1n1ty")
+    assignee_id = str(assignee["user_id"])
+
+    created = client.post(
+        "/api/tasks",
+        json={
+            "title": "Team mode actor attribution",
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "assignee_id": assignee_id,
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()["id"]
+
+    queued = client.post(f"/api/tasks/{task_id}/automation/run", json={"instruction": "Leave a progress comment"})
+    assert queued.status_code == 200
+
+    from features.agents.runner import run_queued_automation_once
+    from features.tasks.domain import EVENT_AUTOMATION_COMPLETED
+    from shared.models import SessionLocal, StoredEvent
+    from sqlalchemy import select
+
+    processed = run_queued_automation_once(limit=5)
+    assert processed >= 1
+
+    with SessionLocal() as db:
+        completion_event = db.execute(
+            select(StoredEvent)
+            .where(
+                StoredEvent.aggregate_type == "Task",
+                StoredEvent.aggregate_id == task_id,
+                StoredEvent.event_type == EVENT_AUTOMATION_COMPLETED,
+            )
+            .order_by(StoredEvent.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        assert completion_event is not None
+        meta = json.loads(completion_event.meta or "{}")
+        assert meta.get("actor_id") == assignee_id
 
 
 def test_workspace_skill_patch_updates_content(tmp_path: Path):
@@ -610,6 +743,10 @@ def test_agent_task_service_supports_project_skill_lifecycle(tmp_path: Path, mon
     )
     assert updated["mode"] == "enforced"
     assert updated["trust_level"] == "verified"
+
+    members = service.list_project_members(workspace_id=workspace_id, project_id=project_id, limit=200)
+    assert isinstance(members.get("items"), list)
+    assert int(members.get("total", 0)) >= 1
 
     deleted = service.delete_project_skill(skill_id=imported["id"])
     assert deleted["ok"] is True

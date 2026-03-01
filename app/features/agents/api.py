@@ -19,7 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from shared.core import AgentChatRun, User, ensure_project_access, ensure_role, get_command_id, get_current_user, get_db
-from shared.models import ActivityLog, ChatMessage, ChatSession
+from shared.models import ActivityLog, ChatMessage, ChatSession, CommandExecution, Note, Project
 from shared.settings import (
     ATTACHMENTS_DIR,
     AGENT_CHAT_HISTORY_COMPACT_THRESHOLD,
@@ -939,6 +939,209 @@ def _parse_compact_command(instruction: str) -> tuple[bool, str]:
     return True, remainder
 
 
+_EXECUTION_INTENT_MANDATE = (
+    "Execution intent detected for this project.\n"
+    "Required behavior:\n"
+    "- Treat this as implementation execution kickoff/resume, not Team Mode setup.\n"
+    "- Do not create/recreate project and do not re-attach/re-apply skills if already configured.\n"
+    "- First read current tasks and run verify_team_mode_workflow.\n"
+    "- If verification passes, execute existing workflow tasks and persist progress.\n"
+    "- Only patch missing prerequisites when verification fails.\n"
+    "- Completion contract for execution kickoff:\n"
+    "  1) Implement the planned scope for active Dev tasks.\n"
+    "  2) Run tests/validation and include concrete results.\n"
+    "  3) Update task statuses based on real outcomes.\n"
+    "  4) Provide artifact evidence per task (patch/commit/log/link).\n"
+    "- If any item cannot be completed, return BLOCKED with concrete missing prerequisite(s).\n"
+    "- Report concrete mutations and final persisted task state."
+)
+
+
+def _is_execution_intent_instruction(instruction: str) -> bool:
+    text = str(instruction or "").strip().lower()
+    if not text:
+        return False
+    compact = " ".join(text.split())
+    implementation_tokens = (
+        "implementation",
+        "implement",
+        "implementing",
+        "impleentation",
+        "implementacij",
+    )
+    kickoff_tokens = (
+        "begin",
+        "start",
+        "continue",
+        "resume",
+        "kreni",
+        "pokreni",
+        "nastavi",
+    )
+    has_implementation = any(token in compact for token in implementation_tokens)
+    has_kickoff = any(token in compact for token in kickoff_tokens)
+    if not (has_implementation and has_kickoff):
+        return False
+    if "create project" in compact or "kreiraj projekat" in compact:
+        return False
+    return True
+
+
+def _is_project_creation_intent_instruction(instruction: str) -> bool:
+    text = str(instruction or "").strip().lower()
+    if not text:
+        return False
+    compact = " ".join(text.split())
+    creation_markers = (
+        "create project",
+        "new project",
+        "setup project",
+        "set up project",
+        "kreiraj projek",
+        "napravi projek",
+    )
+    return any(marker in compact for marker in creation_markers)
+
+
+def _resolve_effective_chat_project_id(
+    *,
+    db: Session,
+    workspace_id: str,
+    project_id: str | None,
+    instruction: str,
+) -> str | None:
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_project_id:
+        return None
+    exists = db.execute(
+        select(Project.id).where(
+            Project.id == normalized_project_id,
+            Project.workspace_id == workspace_id,
+            Project.is_deleted == False,  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    if exists is not None:
+        return normalized_project_id
+    if _is_project_creation_intent_instruction(instruction):
+        return None
+    raise HTTPException(status_code=404, detail="Project not found")
+
+
+def _collect_execution_evidence_violations(
+    *,
+    db: Session,
+    user_id: str,
+    project_id: str,
+    run_started_at: datetime,
+) -> list[dict[str, str]]:
+    rows = db.execute(
+        select(CommandExecution.response_json)
+        .where(
+            CommandExecution.user_id == str(user_id),
+            CommandExecution.command_name.in_(("Task.Patch", "Task.Create")),
+            CommandExecution.created_at >= run_started_at,
+        )
+        .order_by(CommandExecution.created_at.asc())
+    ).all()
+    latest_by_task: dict[str, dict[str, object]] = {}
+    for (response_json,) in rows:
+        try:
+            payload = json.loads(str(response_json or "{}"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("project_id") or "").strip() != str(project_id):
+            continue
+        task_id = str(payload.get("id") or "").strip()
+        if not task_id:
+            continue
+        latest_by_task[task_id] = payload
+
+    violations: list[dict[str, str]] = []
+    task_ids = list(latest_by_task.keys())
+    note_task_ids: set[str] = set()
+    if task_ids:
+        note_rows = db.execute(
+            select(Note.task_id).where(
+                Note.task_id.in_(task_ids),
+                Note.is_deleted == False,  # noqa: E712
+            )
+        ).all()
+        note_task_ids = {
+            str(task_id).strip()
+            for (task_id,) in note_rows
+            if str(task_id or "").strip()
+        }
+
+    def _has_valid_external_ref(external_refs: object) -> bool:
+        if not isinstance(external_refs, list):
+            return False
+        for item in external_refs:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip().lower()
+            if url.startswith("http://") or url.startswith("https://"):
+                return True
+        return False
+
+    for task_id, payload in latest_by_task.items():
+        status = str(payload.get("status") or "").strip()
+        if status not in {"QA", "Lead", "Done"}:
+            continue
+        external_refs = payload.get("external_refs") or []
+        has_note_evidence = task_id in note_task_ids
+        has_external_evidence = _has_valid_external_ref(external_refs)
+        if has_note_evidence or has_external_evidence:
+            continue
+        violations.append(
+            {
+                "task_id": task_id,
+                "title": str(payload.get("title") or "").strip() or task_id,
+                "status": status,
+            }
+        )
+    return violations
+
+
+def _apply_execution_evidence_contract(
+    *,
+    db: Session,
+    user_id: str,
+    project_id: str | None,
+    instruction: str,
+    allow_mutations: bool,
+    run_started_at: datetime,
+    summary: str,
+    comment: str | None,
+) -> tuple[bool, str, str | None]:
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_project_id or not allow_mutations:
+        return True, summary, comment
+    if not _is_execution_intent_instruction(instruction):
+        return True, summary, comment
+    violations = _collect_execution_evidence_violations(
+        db=db,
+        user_id=user_id,
+        project_id=normalized_project_id,
+        run_started_at=run_started_at,
+    )
+    if not violations:
+        return True, summary, comment
+    details = "\n".join(
+        f"- {item['title']} ({item['task_id']}) -> status `{item['status']}` has no external links"
+        for item in violations
+    )
+    contract_summary = "Execution incomplete: task evidence is missing."
+    contract_comment = (
+        (str(comment or "").strip() + "\n\n" if str(comment or "").strip() else "")
+        + "Execution evidence contract violation.\n"
+        + "Add linked note evidence and/or valid external URLs in `external_refs` before/with execution status transitions.\n"
+        + details
+    )
+    return False, contract_summary, contract_comment
+
+
 def _compact_history_with_codex(
     *,
     history: list[dict[str, str]],
@@ -1078,6 +1281,12 @@ def _prepare_chat_instruction(
     instruction_with_context = instruction
     if attachment_context:
         instruction_with_context = f"{instruction}\n\n{attachment_context}"
+    if (
+        payload.allow_mutations
+        and str(payload.project_id or "").strip()
+        and _is_execution_intent_instruction(instruction)
+    ):
+        instruction_with_context = f"{instruction_with_context}\n\n{_EXECUTION_INTENT_MANDATE}"
     if resume_active:
         # For resumed Codex threads, avoid resending stitched history on every turn.
         # Instead, inject only small fresh deltas from other project chat sessions so stale
@@ -1108,6 +1317,12 @@ def agent_chat(
     command_id: str | None = Depends(get_command_id),
 ):
     ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    effective_project_id = _resolve_effective_chat_project_id(
+        db=db,
+        workspace_id=payload.workspace_id,
+        project_id=payload.project_id,
+        instruction=payload.instruction,
+    )
     model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
     mcp_servers = _normalize_chat_mcp_servers(payload.mcp_servers)
     session_id = _resolve_chat_session_id(payload.session_id)
@@ -1116,7 +1331,7 @@ def agent_chat(
         workspace_id=payload.workspace_id,
         session_id=session_id,
     )
-    payload_with_session = payload.model_copy(update={"session_id": session_id})
+    payload_with_session = payload.model_copy(update={"session_id": session_id, "project_id": effective_project_id})
     (
         effective_instruction,
         _,
@@ -1143,7 +1358,7 @@ def agent_chat(
     ).append_user_message(
         AppendUserMessagePayload(
             workspace_id=payload.workspace_id,
-            project_id=payload.project_id,
+            project_id=effective_project_id,
             session_id=session_id,
             message_id=None,
             content=(payload.instruction or "").strip(),
@@ -1159,7 +1374,7 @@ def agent_chat(
             user=user,
             command_id=command_id,
             workspace_id=payload.workspace_id,
-            project_id=payload.project_id,
+            project_id=effective_project_id,
             session_id=session_id,
             mcp_servers=mcp_servers,
             content=effective_instruction,
@@ -1179,7 +1394,7 @@ def agent_chat(
             "resume_fallback_used": False,
         }
 
-    description = f"General Codex chat context. workspace_id={payload.workspace_id}; project_id={payload.project_id or ''}"
+    description = f"General Codex chat context. workspace_id={payload.workspace_id}; project_id={effective_project_id or ''}"
     run_started_at = datetime.now(timezone.utc)
     try:
         outcome = execute_task_automation(
@@ -1189,7 +1404,7 @@ def agent_chat(
             status="To do",
             instruction=effective_instruction,
             workspace_id=payload.workspace_id,
-            project_id=payload.project_id,
+            project_id=effective_project_id,
             chat_session_id=session_id,
             codex_session_id=existing_codex_session_id,
             actor_user_id=user.id,
@@ -1199,24 +1414,34 @@ def agent_chat(
             reasoning_effort=reasoning_effort,
             timeout_seconds=0,
         )
+        ok_by_contract, final_summary, final_comment = _apply_execution_evidence_contract(
+            db=db,
+            user_id=user.id,
+            project_id=effective_project_id,
+            instruction=payload.instruction,
+            allow_mutations=bool(payload.allow_mutations),
+            run_started_at=run_started_at,
+            summary=outcome.summary,
+            comment=outcome.comment,
+        )
         _persist_assistant_message_with_links(
             db=db,
             user=user,
             command_id=command_id,
             workspace_id=payload.workspace_id,
-            project_id=payload.project_id,
+            project_id=effective_project_id,
             session_id=session_id,
             mcp_servers=mcp_servers,
-            content=_assistant_text(outcome.summary, outcome.comment),
+            content=_assistant_text(final_summary, final_comment),
             usage=_build_usage_with_resume_metadata(outcome),
             codex_session_id=outcome.codex_session_id,
             run_started_at=run_started_at,
         )
         return {
-            "ok": True,
+            "ok": bool(ok_by_contract),
             "action": outcome.action,
-            "summary": outcome.summary,
-            "comment": outcome.comment,
+            "summary": final_summary,
+            "comment": final_comment,
             "session_id": session_id,
             "codex_session_id": outcome.codex_session_id,
             "usage": outcome.usage,
@@ -1232,7 +1457,7 @@ def agent_chat(
             user=user,
             command_id=command_id,
             workspace_id=payload.workspace_id,
-            project_id=payload.project_id,
+            project_id=effective_project_id,
             session_id=session_id,
             mcp_servers=mcp_servers,
             content=_assistant_text(timeout_summary, timeout_comment),
@@ -1262,7 +1487,7 @@ def agent_chat(
             user=user,
             command_id=command_id,
             workspace_id=payload.workspace_id,
-            project_id=payload.project_id,
+            project_id=effective_project_id,
             session_id=session_id,
             mcp_servers=mcp_servers,
             content=_assistant_text(error_summary, error_comment),
@@ -1292,6 +1517,12 @@ def agent_chat_stream(
     command_id: str | None = Depends(get_command_id),
 ):
     ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    effective_project_id = _resolve_effective_chat_project_id(
+        db=db,
+        workspace_id=payload.workspace_id,
+        project_id=payload.project_id,
+        instruction=payload.instruction,
+    )
     model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
     mcp_servers = _normalize_chat_mcp_servers(payload.mcp_servers)
     session_id = _resolve_chat_session_id(payload.session_id)
@@ -1300,7 +1531,7 @@ def agent_chat_stream(
         workspace_id=payload.workspace_id,
         session_id=session_id,
     )
-    payload_with_session = payload.model_copy(update={"session_id": session_id})
+    payload_with_session = payload.model_copy(update={"session_id": session_id, "project_id": effective_project_id})
     (
         effective_instruction,
         _,
@@ -1327,7 +1558,7 @@ def agent_chat_stream(
     ).append_user_message(
         AppendUserMessagePayload(
             workspace_id=payload.workspace_id,
-            project_id=payload.project_id,
+            project_id=effective_project_id,
             session_id=session_id,
             message_id=None,
             content=(payload.instruction or "").strip(),
@@ -1337,13 +1568,19 @@ def agent_chat_stream(
         )
     )
 
+    stream_headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    }
+
     if compact_only:
         _persist_assistant_message_with_links(
             db=db,
             user=user,
             command_id=command_id,
             workspace_id=payload.workspace_id,
-            project_id=payload.project_id,
+            project_id=effective_project_id,
             session_id=session_id,
             mcp_servers=mcp_servers,
             content=effective_instruction,
@@ -1366,9 +1603,9 @@ def agent_chat_stream(
         def _compact_stream():
             yield json.dumps({"type": "final", "response": compact_response}, ensure_ascii=True) + "\n"
 
-        return StreamingResponse(_compact_stream(), media_type="application/x-ndjson")
+        return StreamingResponse(_compact_stream(), media_type="application/x-ndjson", headers=stream_headers)
 
-    description = f"General Codex chat context. workspace_id={payload.workspace_id}; project_id={payload.project_id or ''}"
+    description = f"General Codex chat context. workspace_id={payload.workspace_id}; project_id={effective_project_id or ''}"
     run_started_at = datetime.now(timezone.utc)
 
     def _stream() -> object:
@@ -1386,7 +1623,7 @@ def agent_chat_stream(
                     status="To do",
                     instruction=effective_instruction,
                     workspace_id=payload.workspace_id,
-                    project_id=payload.project_id,
+                    project_id=effective_project_id,
                     chat_session_id=session_id,
                     codex_session_id=existing_codex_session_id,
                     actor_user_id=user.id,
@@ -1455,18 +1692,31 @@ def agent_chat_stream(
             if item_type == "final":
                 response = item.get("response")
                 if isinstance(response, dict):
+                    ok_by_contract, final_summary, final_comment = _apply_execution_evidence_contract(
+                        db=db,
+                        user_id=user.id,
+                        project_id=effective_project_id,
+                        instruction=payload.instruction,
+                        allow_mutations=bool(payload.allow_mutations),
+                        run_started_at=run_started_at,
+                        summary=str(response.get("summary") or ""),
+                        comment=str(response.get("comment") or "") or None,
+                    )
+                    response["ok"] = bool(ok_by_contract) and bool(response.get("ok"))
+                    response["summary"] = final_summary
+                    response["comment"] = final_comment
                     assistant_content = "".join(streamed_assistant_text_parts).strip()
                     if not assistant_content:
                         assistant_content = _assistant_text(
-                            str(response.get("summary") or ""),
-                            str(response.get("comment") or ""),
+                            final_summary,
+                            str(final_comment or ""),
                         )
                     _persist_assistant_message_with_links(
                         db=db,
                         user=user,
                         command_id=command_id,
                         workspace_id=payload.workspace_id,
-                        project_id=payload.project_id,
+                        project_id=effective_project_id,
                         session_id=session_id,
                         mcp_servers=mcp_servers,
                         content=assistant_content,
@@ -1483,4 +1733,4 @@ def agent_chat_stream(
                     )
             yield json.dumps(item, ensure_ascii=True) + "\n"
 
-    return StreamingResponse(_stream(), media_type="application/x-ndjson")
+    return StreamingResponse(_stream(), media_type="application/x-ndjson", headers=stream_headers)

@@ -258,11 +258,11 @@ export function useMiscMutations(c: any) {
       let thinkingFrameIndex = 0
       let thinkingTimer: ReturnType<typeof globalThis.setInterval> | null = null
       let hasAssistantDelta = false
-      const setAssistantTurnContent = (content: string) => {
+      const setAssistantTurnContent = (content: string, lastStreamChunk = '', streamShimmerChunk = '') => {
         setChatTurnsForSession(sessionId, (prev: any[]) =>
           prev.map((turn: any) =>
             turn.id === assistantTurnId
-              ? { ...turn, content }
+              ? { ...turn, content, lastStreamChunk, streamShimmerChunk }
               : turn
           )
         )
@@ -275,7 +275,7 @@ export function useMiscMutations(c: any) {
       const startThinkingAnimation = () => {
         thinkingTimer = globalThis.setInterval(() => {
           if (hasAssistantDelta) return
-          setAssistantTurnContent(thinkingFrames[thinkingFrameIndex] || 'Thinking...')
+          setAssistantTurnContent(thinkingFrames[thinkingFrameIndex] || 'Thinking...', '', '')
           thinkingFrameIndex = (thinkingFrameIndex + 1) % thinkingFrames.length
         }, 320)
       }
@@ -285,6 +285,8 @@ export function useMiscMutations(c: any) {
           id: assistantTurnId,
           role: 'assistant',
           content: 'Thinking...',
+          lastStreamChunk: '',
+          streamShimmerChunk: '',
           createdAt: assistantCreatedAt,
         },
       ])
@@ -294,6 +296,8 @@ export function useMiscMutations(c: any) {
       let pendingStreamDelta = ''
       let streamFlushTimer: ReturnType<typeof globalThis.setTimeout> | null = null
       let streamDrainResolver: (() => void) | null = null
+      let shimmerWindowStartIndex = 0
+      let shimmerWindowLastIncomingAt = 0
 
       const resolveStreamDrainIfIdle = () => {
         if (!pendingStreamDelta && streamFlushTimer === null && streamDrainResolver) {
@@ -312,7 +316,9 @@ export function useMiscMutations(c: any) {
         const nextChunk = pendingStreamDelta.slice(0, 48)
         pendingStreamDelta = pendingStreamDelta.slice(nextChunk.length)
         streamedReply += nextChunk
-        setAssistantTurnContent(streamedReply)
+        const shimmerStart = Math.max(0, Math.min(shimmerWindowStartIndex, streamedReply.length))
+        const shimmerChunk = streamedReply.slice(shimmerStart)
+        setAssistantTurnContent(streamedReply, nextChunk, shimmerChunk)
         streamFlushTimer = globalThis.setTimeout(flushStreamDeltaStep, 16)
       }
 
@@ -322,6 +328,15 @@ export function useMiscMutations(c: any) {
           hasAssistantDelta = true
           stopThinkingAnimation()
         }
+        const nowMs = Date.now()
+        const bufferedLength = streamedReply.length + pendingStreamDelta.length
+        if (nowMs - shimmerWindowLastIncomingAt <= 500) {
+          // Keep current shimmer window start while deltas belong to the same short burst.
+        } else {
+          // Start a new shimmer window at the beginning of this new burst.
+          shimmerWindowStartIndex = Math.max(0, bufferedLength)
+        }
+        shimmerWindowLastIncomingAt = nowMs
         pendingStreamDelta += delta
         if (streamFlushTimer !== null) return
         flushStreamDeltaStep()
@@ -385,7 +400,7 @@ export function useMiscMutations(c: any) {
           setChatTurnsForSession(sessionId, (prev: any[]) =>
             prev.map((turn: any) =>
               turn.id === assistantTurnId
-                ? { ...turn, content: stoppedContent }
+                ? { ...turn, content: stoppedContent, lastStreamChunk: '', streamShimmerChunk: '' }
                 : turn
             )
           )
@@ -395,7 +410,7 @@ export function useMiscMutations(c: any) {
         setChatTurnsForSession(sessionId, (prev: any[]) =>
           prev.map((turn: any) =>
             turn.id === assistantTurnId
-              ? { ...turn, content: `Error: ${msg}` }
+              ? { ...turn, content: `Error: ${msg}`, lastStreamChunk: '', streamShimmerChunk: '' }
               : turn
           )
         )
@@ -426,7 +441,7 @@ export function useMiscMutations(c: any) {
         const next = prev.map((turn: any) => {
           if (turn.id !== assistantTurnId) return turn
           found = true
-          return { ...turn, content: reply }
+          return { ...turn, content: reply, lastStreamChunk: '', streamShimmerChunk: '' }
         })
         if (found) return next
         return [
@@ -435,6 +450,8 @@ export function useMiscMutations(c: any) {
             id: assistantTurnId,
             role: 'assistant',
             content: reply,
+            lastStreamChunk: '',
+            streamShimmerChunk: '',
             createdAt: assistantCreatedAt,
           },
         ]

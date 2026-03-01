@@ -11,7 +11,6 @@ from shared.core import (
     AggregateEventRepository,
     DEFAULT_STATUSES,
     Note,
-    Project,
     ProjectCreate,
     ProjectMember,
     ProjectPatch,
@@ -24,6 +23,7 @@ from shared.core import (
     coerce_originator_id,
     ensure_project_access,
     ensure_role,
+    load_project_command_state,
     load_project_view,
 )
 from shared.settings import ALLOWED_EMBEDDING_MODELS, DEFAULT_EMBEDDING_MODEL
@@ -117,6 +117,33 @@ def _normalize_project_name(value: str) -> str:
     return " ".join(str(value or "").split())
 
 
+def _project_view_from_aggregate(aggregate: ProjectAggregate, *, created_by: str | None = None) -> dict:
+    return {
+        "id": aggregate.id,
+        "workspace_id": aggregate.workspace_id,
+        "name": aggregate.name,
+        "description": aggregate.description,
+        "status": aggregate.status,
+        "custom_statuses": list(aggregate.custom_statuses or []),
+        "external_refs": list(aggregate.external_refs or []),
+        "attachment_refs": list(aggregate.attachment_refs or []),
+        "embedding_enabled": bool(aggregate.embedding_enabled),
+        "embedding_model": aggregate.embedding_model,
+        "context_pack_evidence_top_k": aggregate.context_pack_evidence_top_k,
+        "chat_index_mode": str(aggregate.chat_index_mode or "OFF"),
+        "chat_attachment_ingestion_mode": str(aggregate.chat_attachment_ingestion_mode or "METADATA_ONLY"),
+        "event_storming_enabled": bool(getattr(aggregate, "event_storming_enabled", True)),
+        "embedding_index_status": "not_indexed",
+        "embedding_index_progress_pct": None,
+        "embedding_indexed_entities": 0,
+        "embedding_index_expected_entities": 0,
+        "embedding_indexed_chunks": 0,
+        "created_by": created_by,
+        "created_at": None,
+        "updated_at": None,
+    }
+
+
 def _project_name_key(value: str) -> str:
     return _normalize_project_name(value).casefold()
 
@@ -198,7 +225,7 @@ class CreateProjectHandler:
         if not name:
             raise HTTPException(status_code=422, detail="name cannot be empty")
         pid = _project_aggregate_id(self.payload.workspace_id, name)
-        existing_project = self.ctx.db.get(Project, pid)
+        existing_project = load_project_command_state(self.ctx.db, pid)
         if existing_project and not existing_project.is_deleted:
             existing_view = load_project_view(self.ctx.db, pid)
             if existing_view is None:
@@ -258,9 +285,9 @@ class CreateProjectHandler:
         )
         self.ctx.db.commit()
         project_view = load_project_view(self.ctx.db, pid)
-        if project_view is None:
-            raise HTTPException(status_code=404, detail="Project not found after create")
-        return project_view
+        if project_view is not None:
+            return project_view
+        return _project_view_from_aggregate(aggregate, created_by=self.ctx.user.id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,10 +296,16 @@ class DeleteProjectHandler:
     project_id: str
 
     def __call__(self) -> dict:
-        project = self.ctx.db.get(Project, self.project_id)
-        if not project or project.is_deleted:
+        project_state = load_project_command_state(self.ctx.db, self.project_id)
+        if project_state is None or project_state.is_deleted:
             raise HTTPException(status_code=404, detail="Project not found")
-        ensure_project_access(self.ctx.db, project.workspace_id, self.project_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
+        ensure_project_access(
+            self.ctx.db,
+            project_state.workspace_id,
+            self.project_id,
+            self.ctx.user.id,
+            {"Owner", "Admin", "Member"},
+        )
 
         repo = AggregateEventRepository(self.ctx.db)
         tasks = self.ctx.db.execute(select(Task).where(Task.project_id == self.project_id, Task.is_deleted == False)).scalars().all()
@@ -287,7 +320,7 @@ class DeleteProjectHandler:
                 task_aggregate,
                 base_metadata={
                     "actor_id": self.ctx.user.id,
-                    "workspace_id": project.workspace_id,
+                    "workspace_id": project_state.workspace_id,
                     "task_id": t.id,
                     "project_id": self.project_id,
                 },
@@ -304,7 +337,7 @@ class DeleteProjectHandler:
                 note_aggregate,
                 base_metadata={
                     "actor_id": self.ctx.user.id,
-                    "workspace_id": project.workspace_id,
+                    "workspace_id": project_state.workspace_id,
                     "task_id": n.task_id,
                     "project_id": self.project_id,
                     "note_id": n.id,
@@ -322,7 +355,7 @@ class DeleteProjectHandler:
                 rule_aggregate,
                 base_metadata={
                     "actor_id": self.ctx.user.id,
-                    "workspace_id": project.workspace_id,
+                    "workspace_id": project_state.workspace_id,
                     "project_id": self.project_id,
                     "project_rule_id": r.id,
                 },
@@ -341,7 +374,7 @@ class DeleteProjectHandler:
                 specification_aggregate,
                 base_metadata={
                     "actor_id": self.ctx.user.id,
-                    "workspace_id": project.workspace_id,
+                    "workspace_id": project_state.workspace_id,
                     "project_id": self.project_id,
                     "specification_id": specification.id,
                 },
@@ -362,7 +395,7 @@ class DeleteProjectHandler:
             aggregate,
             base_metadata={
                 "actor_id": self.ctx.user.id,
-                "workspace_id": project.workspace_id,
+                "workspace_id": project_state.workspace_id,
                 "project_id": self.project_id,
             },
         )
@@ -377,10 +410,23 @@ class PatchProjectHandler:
     payload: ProjectPatch
 
     def __call__(self) -> dict:
-        project = self.ctx.db.get(Project, self.project_id)
-        if not project or project.is_deleted:
+        project_state = load_project_command_state(self.ctx.db, self.project_id)
+        if project_state is None or project_state.is_deleted:
             raise HTTPException(status_code=404, detail="Project not found")
-        ensure_project_access(self.ctx.db, project.workspace_id, self.project_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
+        ensure_project_access(
+            self.ctx.db,
+            project_state.workspace_id,
+            self.project_id,
+            self.ctx.user.id,
+            {"Owner", "Admin", "Member"},
+        )
+
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = repo.load_with_class(
+            aggregate_type="Project",
+            aggregate_id=self.project_id,
+            aggregate_cls=ProjectAggregate,
+        )
 
         data = self.payload.model_dump(exclude_unset=True)
         event_payload: dict = {}
@@ -403,8 +449,8 @@ class PatchProjectHandler:
             raise HTTPException(status_code=422, detail="event_storming_enabled cannot be null")
 
         if "embedding_enabled" in data or "embedding_model" in data:
-            next_enabled = bool(data.get("embedding_enabled", project.embedding_enabled))
-            next_model = data.get("embedding_model", project.embedding_model)
+            next_enabled = bool(data.get("embedding_enabled", aggregate.embedding_enabled))
+            next_model = data.get("embedding_model", aggregate.embedding_model)
             resolved_enabled, resolved_model = _resolve_project_embedding_config(
                 embedding_enabled=next_enabled,
                 embedding_model=next_model,
@@ -427,30 +473,24 @@ class PatchProjectHandler:
 
         if not event_payload:
             view = load_project_view(self.ctx.db, self.project_id)
-            if view is None:
-                raise HTTPException(status_code=404, detail="Project not found")
-            return view
+            if view is not None:
+                return view
+            return _project_view_from_aggregate(aggregate)
 
-        repo = AggregateEventRepository(self.ctx.db)
-        aggregate = repo.load_with_class(
-            aggregate_type="Project",
-            aggregate_id=self.project_id,
-            aggregate_cls=ProjectAggregate,
-        )
         aggregate.update(**event_payload)
         repo.persist(
             aggregate,
             base_metadata={
                 "actor_id": self.ctx.user.id,
-                "workspace_id": project.workspace_id,
+                "workspace_id": project_state.workspace_id,
                 "project_id": self.project_id,
             },
         )
         self.ctx.db.commit()
         view = load_project_view(self.ctx.db, self.project_id)
-        if view is None:
-            raise HTTPException(status_code=404, detail="Project not found")
-        return view
+        if view is not None:
+            return view
+        return _project_view_from_aggregate(aggregate)
 
 
 @dataclass(frozen=True, slots=True)
@@ -461,13 +501,19 @@ class AddProjectMemberHandler:
     role: str = "Contributor"
 
     def __call__(self) -> dict:
-        project = self.ctx.db.get(Project, self.project_id)
-        if not project or project.is_deleted:
+        project_state = load_project_command_state(self.ctx.db, self.project_id)
+        if project_state is None or project_state.is_deleted:
             raise HTTPException(status_code=404, detail="Project not found")
-        ensure_project_access(self.ctx.db, project.workspace_id, self.project_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
+        ensure_project_access(
+            self.ctx.db,
+            project_state.workspace_id,
+            self.project_id,
+            self.ctx.user.id,
+            {"Owner", "Admin", "Member"},
+        )
         member_exists = self.ctx.db.execute(
             select(WorkspaceMember).where(
-                WorkspaceMember.workspace_id == project.workspace_id,
+                WorkspaceMember.workspace_id == project_state.workspace_id,
                 WorkspaceMember.user_id == self.user_id,
             )
         ).scalar_one_or_none()
@@ -494,7 +540,7 @@ class AddProjectMemberHandler:
             aggregate,
             base_metadata={
                 "actor_id": self.ctx.user.id,
-                "workspace_id": project.workspace_id,
+                "workspace_id": project_state.workspace_id,
                 "project_id": self.project_id,
             },
         )
@@ -509,10 +555,16 @@ class RemoveProjectMemberHandler:
     user_id: str
 
     def __call__(self) -> dict:
-        project = self.ctx.db.get(Project, self.project_id)
-        if not project or project.is_deleted:
+        project_state = load_project_command_state(self.ctx.db, self.project_id)
+        if project_state is None or project_state.is_deleted:
             raise HTTPException(status_code=404, detail="Project not found")
-        ensure_project_access(self.ctx.db, project.workspace_id, self.project_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
+        ensure_project_access(
+            self.ctx.db,
+            project_state.workspace_id,
+            self.project_id,
+            self.ctx.user.id,
+            {"Owner", "Admin", "Member"},
+        )
         project_member = self.ctx.db.execute(
             select(ProjectMember).where(
                 ProjectMember.project_id == self.project_id,
@@ -532,7 +584,7 @@ class RemoveProjectMemberHandler:
             aggregate,
             base_metadata={
                 "actor_id": self.ctx.user.id,
-                "workspace_id": project.workspace_id,
+                "workspace_id": project_state.workspace_id,
                 "project_id": self.project_id,
             },
         )

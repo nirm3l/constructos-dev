@@ -301,6 +301,37 @@ def ensure_workspace_skill_catalog_seed(db: Session, *, workspace_id: str, actor
             if not str(existing.manifest_json or "").strip():
                 existing.manifest_json = json.dumps(manifest, ensure_ascii=True, sort_keys=True)
             changed = True
+            continue
+
+        # Keep seeded catalog entries in sync with current seed files.
+        desired_name = str(default_skill["name"])
+        desired_summary = str(default_skill["summary"])
+        desired_source_locator = str(default_skill["source_locator"])
+        desired_mode = str(default_skill["mode"])
+        desired_trust = str(default_skill["trust_level"])
+        desired_manifest_json = json.dumps(manifest, ensure_ascii=True, sort_keys=True)
+        if (
+            str(existing.name or "") != desired_name
+            or str(existing.summary or "") != desired_summary
+            or str(existing.source_type or "") != "seed"
+            or str(existing.source_locator or "") != desired_source_locator
+            or str(existing.mode or "") != desired_mode
+            or str(existing.trust_level or "") != desired_trust
+            or str(existing.manifest_json or "") != desired_manifest_json
+            or not bool(existing.is_seeded)
+            or bool(existing.is_deleted)
+        ):
+            existing.name = desired_name
+            existing.summary = desired_summary
+            existing.source_type = "seed"
+            existing.source_locator = desired_source_locator
+            existing.mode = desired_mode
+            existing.trust_level = desired_trust
+            existing.manifest_json = desired_manifest_json
+            existing.is_seeded = True
+            existing.is_deleted = False
+            existing.updated_by = actor_user_id
+            changed = True
     if changed:
         db.commit()
 

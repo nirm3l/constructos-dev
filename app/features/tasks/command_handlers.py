@@ -16,7 +16,7 @@ from shared.core import (
     BulkAction,
     CommentCreate,
     DEFAULT_STATUSES,
-    Project,
+    ProjectCommandState,
     Specification,
     ReorderPayload,
     Task,
@@ -32,7 +32,10 @@ from shared.core import (
     ensure_role,
     get_kurrent_client,
     get_user_zoneinfo,
+    load_project_command_state,
+    load_specification_command_state,
     load_task_command_state,
+    load_task_group_command_state,
     load_task_view,
     normalize_datetime_to_utc,
     rebuild_state,
@@ -56,6 +59,10 @@ from .domain import TaskAggregate
 
 MENTION_PATTERN = re.compile(r"@([A-Za-z0-9_\-]+)")
 _UNSET = object()
+_UUID_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
 
 def _normalize_tags(values: list[str] | None) -> list[str]:
@@ -121,6 +128,21 @@ def _normalize_task_title(value: str) -> str:
     return " ".join(str(value or "").split())
 
 
+def _validate_assignee_id(db: Session, assignee_id: str | None) -> str | None:
+    normalized = str(assignee_id or "").strip() or None
+    if not normalized:
+        return None
+    if not _UUID_PATTERN.match(normalized):
+        raise HTTPException(
+            status_code=422,
+            detail="assignee_id must be a user_id UUID (not username/full name)",
+        )
+    assignee = db.get(User, normalized)
+    if assignee is None:
+        raise HTTPException(status_code=422, detail="assignee_id does not reference an existing user")
+    return normalized
+
+
 def _task_title_key(value: str) -> str:
     return _normalize_task_title(value).casefold()
 
@@ -183,8 +205,8 @@ def _emit_mention_notifications(
         )
 
 
-def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> Project:
-    project = db.get(Project, project_id)
+def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> ProjectCommandState:
+    project = load_project_command_state(db, project_id)
     if not project or project.is_deleted:
         raise HTTPException(status_code=404, detail="Project not found")
     if project.workspace_id != workspace_id:
@@ -193,7 +215,7 @@ def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -
 
 
 def _require_specification_scope(db: Session, *, workspace_id: str, project_id: str, specification_id: str) -> Specification:
-    specification = db.get(Specification, specification_id)
+    specification = load_specification_command_state(db, specification_id)
     if not specification or specification.is_deleted:
         raise HTTPException(status_code=404, detail="Specification not found")
     if specification.workspace_id != workspace_id:
@@ -206,7 +228,7 @@ def _require_specification_scope(db: Session, *, workspace_id: str, project_id: 
 
 
 def _require_task_group_scope(db: Session, *, workspace_id: str, project_id: str, task_group_id: str) -> TaskGroup:
-    task_group = db.get(TaskGroup, task_group_id)
+    task_group = load_task_group_command_state(db, task_group_id)
     if not task_group or task_group.is_deleted:
         raise HTTPException(status_code=404, detail="Task group not found")
     if task_group.workspace_id != workspace_id:
@@ -408,6 +430,57 @@ def _persist_task_aggregate(
     )
 
 
+def _task_view_from_aggregate(*, task_id: str, aggregate: TaskAggregate, created_by: str) -> dict:
+    instruction = _normalize_instruction(getattr(aggregate, "instruction", None) or getattr(aggregate, "scheduled_instruction", None))
+    execution_triggers = normalize_execution_triggers(getattr(aggregate, "execution_triggers", []) or [])
+    if not execution_triggers:
+        legacy_trigger = build_legacy_schedule_trigger(
+            scheduled_at_utc=getattr(aggregate, "scheduled_at_utc", None),
+            schedule_timezone=getattr(aggregate, "schedule_timezone", None),
+            recurring_rule=getattr(aggregate, "recurring_rule", None),
+        )
+        if legacy_trigger is not None:
+            execution_triggers = [legacy_trigger]
+    legacy_schedule = derive_legacy_schedule_fields(
+        instruction=instruction,
+        execution_triggers=execution_triggers,
+    )
+    return {
+        "id": task_id,
+        "workspace_id": getattr(aggregate, "workspace_id", None),
+        "project_id": getattr(aggregate, "project_id", None),
+        "task_group_id": getattr(aggregate, "task_group_id", None),
+        "specification_id": getattr(aggregate, "specification_id", None),
+        "title": getattr(aggregate, "title", ""),
+        "description": getattr(aggregate, "description", ""),
+        "status": getattr(aggregate, "status", "To do"),
+        "priority": getattr(aggregate, "priority", "Med"),
+        "due_date": getattr(aggregate, "due_date", None),
+        "assignee_id": getattr(aggregate, "assignee_id", None),
+        "labels": getattr(aggregate, "labels", []) or [],
+        "subtasks": getattr(aggregate, "subtasks", []) or [],
+        "attachments": getattr(aggregate, "attachments", []) or [],
+        "external_refs": getattr(aggregate, "external_refs", []) or [],
+        "attachment_refs": getattr(aggregate, "attachment_refs", getattr(aggregate, "attachments", [])) or [],
+        "instruction": instruction,
+        "execution_triggers": execution_triggers,
+        "recurring_rule": legacy_schedule.get("recurring_rule") or getattr(aggregate, "recurring_rule", None),
+        "task_type": str(legacy_schedule.get("task_type") or getattr(aggregate, "task_type", "manual") or "manual"),
+        "scheduled_instruction": legacy_schedule.get("scheduled_instruction"),
+        "scheduled_at_utc": legacy_schedule.get("scheduled_at_utc"),
+        "schedule_timezone": legacy_schedule.get("schedule_timezone"),
+        "schedule_state": getattr(aggregate, "schedule_state", "idle") or "idle",
+        "last_schedule_run_at": getattr(aggregate, "last_schedule_run_at", None),
+        "last_schedule_error": getattr(aggregate, "last_schedule_error", None),
+        "archived": bool(getattr(aggregate, "archived", False)),
+        "completed_at": getattr(aggregate, "completed_at", None),
+        "created_at": None,
+        "updated_at": None,
+        "created_by": created_by,
+        "order_index": int(getattr(aggregate, "order_index", 0) or 0),
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class CommandContext:
     db: Session
@@ -447,7 +520,7 @@ class CreateTaskHandler:
 
         specification_id = (self.payload.specification_id or "").strip() or None
         task_group_id = (self.payload.task_group_id or "").strip() or None
-        assignee_id = (self.payload.assignee_id or "").strip() or None
+        assignee_id = _validate_assignee_id(self.ctx.db, self.payload.assignee_id)
 
         if specification_id:
             _require_specification_scope(
@@ -463,10 +536,7 @@ class CreateTaskHandler:
                 project_id=self.payload.project_id,
                 task_group_id=task_group_id,
             )
-        try:
-            statuses = json.loads(project.custom_statuses or "[]")
-        except Exception:
-            statuses = DEFAULT_STATUSES
+        statuses = list(project.custom_statuses or [])
         initial_status = (statuses[0] if statuses else DEFAULT_STATUSES[0]) or DEFAULT_STATUSES[0]
         requested_status = str(self.payload.status or "").strip()
         if requested_status:
@@ -551,9 +621,9 @@ class CreateTaskHandler:
             if "unique constraint failed" not in message or "tasks.id" not in message:
                 raise
         task_view = load_task_view(self.ctx.db, tid)
-        if task_view is None:
-            raise HTTPException(status_code=404, detail="Task not found after create")
-        return task_view
+        if task_view is not None:
+            return task_view
+        return _task_view_from_aggregate(task_id=tid, aggregate=aggregate, created_by=self.ctx.user.id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -579,6 +649,8 @@ class PatchTaskHandler:
             )
         if "labels" in data and data["labels"] is not None:
             data["labels"] = _normalize_tags(data["labels"])
+        if "assignee_id" in data:
+            data["assignee_id"] = _validate_assignee_id(self.ctx.db, data.get("assignee_id"))
         if "external_refs" in data and data["external_refs"] is not None:
             data["external_refs"] = _normalize_external_refs(data["external_refs"])
         if "attachment_refs" in data and data["attachment_refs"] is not None:
@@ -758,7 +830,10 @@ class CompleteTaskHandler:
     def __call__(self) -> dict:
         workspace_id, project_id, status, _ = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member"})
         if status == "Done":
-            raise HTTPException(status_code=409, detail="Task already completed")
+            task_view = load_task_view(self.ctx.db, self.task_id)
+            if task_view is None:
+                raise HTTPException(status_code=404, detail="Task not found")
+            return task_view
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, self.task_id)
         aggregate.complete(completed_at=to_iso_utc(datetime.now(timezone.utc)))
@@ -785,15 +860,15 @@ class ReopenTaskHandler:
     def __call__(self) -> dict:
         workspace_id, project_id, status, _ = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member"})
         if status != "Done":
-            raise HTTPException(status_code=409, detail="Task is not completed")
+            task_view = load_task_view(self.ctx.db, self.task_id)
+            if task_view is None:
+                raise HTTPException(status_code=404, detail="Task not found")
+            return task_view
         reopen_status = "To do"
         if project_id:
-            project = self.ctx.db.get(Project, project_id)
-            if project and not project.is_deleted:
-                try:
-                    statuses = json.loads(project.custom_statuses or "[]")
-                except Exception:
-                    statuses = DEFAULT_STATUSES
+            project = load_project_command_state(self.ctx.db, project_id)
+            if project is not None and not project.is_deleted:
+                statuses = list(project.custom_statuses or [])
                 reopen_status = (statuses[0] if statuses else DEFAULT_STATUSES[0]) or DEFAULT_STATUSES[0]
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, self.task_id)
@@ -821,7 +896,7 @@ class ArchiveTaskHandler:
     def __call__(self) -> dict:
         workspace_id, project_id, _, archived = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member"})
         if archived:
-            raise HTTPException(status_code=409, detail="Task already archived")
+            return {"ok": True}
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, self.task_id)
         aggregate.archive()
@@ -845,7 +920,7 @@ class RestoreTaskHandler:
     def __call__(self) -> dict:
         workspace_id, project_id, _, archived = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member"})
         if not archived:
-            raise HTTPException(status_code=409, detail="Task is not archived")
+            return {"ok": True}
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, self.task_id)
         aggregate.restore()

@@ -129,22 +129,24 @@ class SpecificationApplicationService:
         if not normalized_title:
             raise HTTPException(status_code=422, detail="title cannot be empty")
         payload = TaskCreate(
-            workspace_id=workspace_id,
-            project_id=project_id,
-            specification_id=specification_id,
-            title=normalized_title,
-            description=description or "",
-            priority=priority or "Med",
-            due_date=due_date,
-            assignee_id=assignee_id,
-            labels=labels or [],
-            external_refs=external_refs or [],
-            attachment_refs=attachment_refs or [],
-            recurring_rule=recurring_rule,
-            task_type=task_type,
-            scheduled_instruction=scheduled_instruction,
-            scheduled_at_utc=scheduled_at_utc,
-            schedule_timezone=schedule_timezone,
+            **{
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "specification_id": specification_id,
+                "title": normalized_title,
+                "description": description or "",
+                "priority": priority or "Med",
+                "due_date": due_date,
+                "assignee_id": assignee_id,
+                "labels": labels or [],
+                "external_refs": external_refs or [],
+                "attachment_refs": attachment_refs or [],
+                **({"recurring_rule": recurring_rule} if recurring_rule is not None else {}),
+                **({"task_type": task_type} if str(task_type or "").strip().lower() != "manual" else {}),
+                **({"scheduled_instruction": scheduled_instruction} if scheduled_instruction is not None else {}),
+                **({"scheduled_at_utc": scheduled_at_utc} if scheduled_at_utc is not None else {}),
+                **({"schedule_timezone": schedule_timezone} if schedule_timezone is not None else {}),
+            }
         )
         return TaskApplicationService(self.db, self.user, command_id=self.command_id).create_task(payload)
 

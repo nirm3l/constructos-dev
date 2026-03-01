@@ -23,7 +23,7 @@ from features.tasks.domain import (
 )
 from shared.contracts import ConcurrencyConflictError
 from shared.eventing import append_event, rebuild_state
-from shared.models import SessionLocal, Task
+from shared.models import ProjectMember, SessionLocal, Task, User as UserModel
 from shared.serializers import to_iso_utc
 from shared.settings import (
     AGENT_EXECUTOR_TIMEOUT_SECONDS,
@@ -42,6 +42,7 @@ from shared.task_automation import (
 _runner_stop_event = threading.Event()
 _runner_wakeup_event = threading.Event()
 _runner_thread: threading.Thread | None = None
+_TEAM_MODE_AGENT_PROJECT_ROLES = {"TeamLeadAgent", "DeveloperAgent", "QAAgent"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +60,7 @@ class QueuedAutomationRun:
     trigger_from_status: str | None
     trigger_to_status: str | None
     triggered_at: str | None
+    actor_user_id: str
 
 
 def _normalize_nonnegative_int(value) -> int:
@@ -69,12 +71,57 @@ def _normalize_nonnegative_int(value) -> int:
     return max(0, parsed)
 
 
+def _resolve_task_actor_user_id(
+    *,
+    db,
+    task_id: str,
+    state: dict | None = None,
+    fallback_actor_user_id: str | None = None,
+) -> str:
+    source_state = dict(state or {})
+    assignee_id = str(source_state.get("assignee_id") or "").strip()
+    workspace_id = str(source_state.get("workspace_id") or "").strip()
+    project_id = str(source_state.get("project_id") or "").strip()
+    if not assignee_id:
+        task_row = db.get(Task, task_id)
+        if task_row is not None:
+            assignee_id = str(task_row.assignee_id or "").strip()
+            if not workspace_id:
+                workspace_id = str(task_row.workspace_id or "").strip()
+            if not project_id:
+                project_id = str(task_row.project_id or "").strip()
+    if not assignee_id:
+        return str(fallback_actor_user_id or "").strip() or AGENT_SYSTEM_USER_ID
+
+    user_row = db.get(UserModel, assignee_id)
+    if user_row is None or not bool(user_row.is_active):
+        return str(fallback_actor_user_id or "").strip() or AGENT_SYSTEM_USER_ID
+    if str(user_row.user_type or "").strip().lower() != "agent":
+        return str(fallback_actor_user_id or "").strip() or AGENT_SYSTEM_USER_ID
+
+    if project_id:
+        membership = db.execute(
+            select(ProjectMember).where(
+                ProjectMember.workspace_id == workspace_id,
+                ProjectMember.project_id == project_id,
+                ProjectMember.user_id == assignee_id,
+            )
+        ).scalar_one_or_none()
+        if membership is None:
+            return str(fallback_actor_user_id or "").strip() or AGENT_SYSTEM_USER_ID
+        project_role = str(membership.role or "").strip()
+        if project_role not in _TEAM_MODE_AGENT_PROJECT_ROLES:
+            return str(fallback_actor_user_id or "").strip() or AGENT_SYSTEM_USER_ID
+    return assignee_id
+
+
 def _append_schedule_rearm_update(
     *,
     db,
     task_id: str,
     workspace_id: str,
     project_id: str | None,
+    actor_user_id: str,
     execution_triggers,
     now_utc: datetime,
 ) -> None:
@@ -95,7 +142,7 @@ def _append_schedule_rearm_update(
             "schedule_state": "idle",
         },
         metadata={
-            "actor_id": AGENT_SYSTEM_USER_ID,
+            "actor_id": actor_user_id,
             "workspace_id": workspace_id,
             "project_id": project_id,
             "task_id": task_id,
@@ -110,6 +157,7 @@ def _requeue_pending_status_change_request(
     state: dict,
     workspace_id: str,
     project_id: str | None,
+    actor_user_id: str,
     requested_at_iso: str,
 ) -> None:
     pending_requests = _normalize_nonnegative_int(state.get("automation_pending_requests"))
@@ -122,7 +170,7 @@ def _requeue_pending_status_change_request(
         event_type=TASK_EVENT_UPDATED,
         payload={"automation_pending_requests": pending_requests - 1},
         metadata={
-            "actor_id": AGENT_SYSTEM_USER_ID,
+            "actor_id": actor_user_id,
             "workspace_id": workspace_id,
             "project_id": project_id,
             "task_id": run.task_id,
@@ -150,7 +198,7 @@ def _requeue_pending_status_change_request(
             "triggered_at": triggered_at,
         },
         metadata={
-            "actor_id": AGENT_SYSTEM_USER_ID,
+            "actor_id": actor_user_id,
             "workspace_id": workspace_id,
             "project_id": project_id,
             "task_id": run.task_id,
@@ -178,6 +226,7 @@ def _claim_queued_task(task_id: str) -> QueuedAutomationRun | None:
         triggered_at = str(state.get("last_requested_triggered_at") or "").strip() or None
         is_scheduled_run = request_source == "schedule"
         schedule_state = str(state.get("schedule_state", "idle")).strip().lower()
+        actor_user_id = _resolve_task_actor_user_id(db=db, task_id=task_id, state=state)
         now_iso = to_iso_utc(datetime.now(timezone.utc))
         try:
             append_event(
@@ -187,7 +236,7 @@ def _claim_queued_task(task_id: str) -> QueuedAutomationRun | None:
                 event_type=EVENT_AUTOMATION_STARTED,
                 payload={"started_at": now_iso},
                 metadata={
-                    "actor_id": AGENT_SYSTEM_USER_ID,
+                    "actor_id": actor_user_id,
                     "workspace_id": workspace_id,
                     "project_id": project_id,
                     "task_id": task_id,
@@ -202,7 +251,7 @@ def _claim_queued_task(task_id: str) -> QueuedAutomationRun | None:
                     event_type=EVENT_SCHEDULE_STARTED,
                     payload={"started_at": now_iso},
                     metadata={
-                        "actor_id": AGENT_SYSTEM_USER_ID,
+                        "actor_id": actor_user_id,
                         "workspace_id": workspace_id,
                         "project_id": project_id,
                         "task_id": task_id,
@@ -231,6 +280,7 @@ def _claim_queued_task(task_id: str) -> QueuedAutomationRun | None:
         trigger_from_status=trigger_from_status,
         trigger_to_status=trigger_to_status,
         triggered_at=triggered_at,
+        actor_user_id=actor_user_id,
     )
 
 
@@ -243,6 +293,12 @@ def _record_automation_success(run: QueuedAutomationRun, *, summary: str, action
         if not workspace_id:
             return
         project_id = str(state.get("project_id") or run.project_id or "").strip() or None
+        actor_user_id = _resolve_task_actor_user_id(
+            db=db,
+            task_id=run.task_id,
+            state=state,
+            fallback_actor_user_id=run.actor_user_id,
+        )
 
         if AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS:
             if action == "complete" and state.get("status") != "Done":
@@ -253,7 +309,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, summary: str, action
                     event_type=TASK_EVENT_COMPLETED,
                     payload={"completed_at": completed_at},
                     metadata={
-                        "actor_id": AGENT_SYSTEM_USER_ID,
+                        "actor_id": actor_user_id,
                         "workspace_id": workspace_id,
                         "project_id": project_id,
                         "task_id": run.task_id,
@@ -265,9 +321,9 @@ def _record_automation_success(run: QueuedAutomationRun, *, summary: str, action
                     aggregate_type="Task",
                     aggregate_id=run.task_id,
                     event_type=EVENT_COMMENT_ADDED,
-                    payload={"task_id": run.task_id, "user_id": AGENT_SYSTEM_USER_ID, "body": comment},
+                    payload={"task_id": run.task_id, "user_id": actor_user_id, "body": comment},
                     metadata={
-                        "actor_id": AGENT_SYSTEM_USER_ID,
+                        "actor_id": actor_user_id,
                         "workspace_id": workspace_id,
                         "project_id": project_id,
                         "task_id": run.task_id,
@@ -281,7 +337,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, summary: str, action
             event_type=EVENT_AUTOMATION_COMPLETED,
             payload={"completed_at": completed_at, "summary": summary, "source_event": EVENT_AUTOMATION_REQUESTED},
             metadata={
-                "actor_id": AGENT_SYSTEM_USER_ID,
+                "actor_id": actor_user_id,
                 "workspace_id": workspace_id,
                 "project_id": project_id,
                 "task_id": run.task_id,
@@ -295,7 +351,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, summary: str, action
                 event_type=EVENT_SCHEDULE_COMPLETED,
                 payload={"completed_at": completed_at, "summary": summary},
                 metadata={
-                    "actor_id": AGENT_SYSTEM_USER_ID,
+                    "actor_id": actor_user_id,
                     "workspace_id": workspace_id,
                     "project_id": project_id,
                     "task_id": run.task_id,
@@ -306,6 +362,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, summary: str, action
                 task_id=run.task_id,
                 workspace_id=workspace_id,
                 project_id=project_id,
+                actor_user_id=actor_user_id,
                 execution_triggers=state.get("execution_triggers"),
                 now_utc=now_utc,
             )
@@ -315,6 +372,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, summary: str, action
             state=state,
             workspace_id=workspace_id,
             project_id=project_id,
+            actor_user_id=actor_user_id,
             requested_at_iso=completed_at,
         )
         db.commit()
@@ -329,6 +387,12 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
         if not workspace_id:
             return
         project_id = str(state.get("project_id") or run.project_id or "").strip() or None
+        actor_user_id = _resolve_task_actor_user_id(
+            db=db,
+            task_id=run.task_id,
+            state=state,
+            fallback_actor_user_id=run.actor_user_id,
+        )
         append_event(
             db,
             aggregate_type="Task",
@@ -336,7 +400,7 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             event_type=EVENT_AUTOMATION_FAILED,
             payload={"failed_at": failed_at, "error": str(error), "summary": "Automation runner failed."},
             metadata={
-                "actor_id": AGENT_SYSTEM_USER_ID,
+                "actor_id": actor_user_id,
                 "workspace_id": workspace_id,
                 "project_id": project_id,
                 "task_id": run.task_id,
@@ -351,7 +415,7 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 event_type=EVENT_SCHEDULE_FAILED,
                 payload={"failed_at": failed_at, "error": str(error)},
                 metadata={
-                    "actor_id": AGENT_SYSTEM_USER_ID,
+                    "actor_id": actor_user_id,
                     "workspace_id": workspace_id,
                     "project_id": project_id,
                     "task_id": run.task_id,
@@ -362,6 +426,7 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 task_id=run.task_id,
                 workspace_id=workspace_id,
                 project_id=project_id,
+                actor_user_id=actor_user_id,
                 execution_triggers=state.get("execution_triggers"),
                 now_utc=now_utc,
             )
@@ -371,6 +436,7 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             state=state,
             workspace_id=workspace_id,
             project_id=project_id,
+            actor_user_id=actor_user_id,
             requested_at_iso=failed_at,
         )
         db.commit()
@@ -388,6 +454,7 @@ def _execute_claimed_automation(run: QueuedAutomationRun) -> None:
             instruction=run.instruction,
             workspace_id=run.workspace_id,
             project_id=run.project_id,
+            actor_user_id=run.actor_user_id,
             trigger_task_id=run.trigger_task_id,
             trigger_from_status=run.trigger_from_status,
             trigger_to_status=run.trigger_to_status,
@@ -489,6 +556,7 @@ def recover_stale_running_automation_once(limit: int = 20) -> int:
             if not workspace_id:
                 continue
             project_id = state.get("project_id")
+            actor_user_id = _resolve_task_actor_user_id(db=db, task_id=task_id, state=state)
             failed_at = to_iso_utc(now)
             error = f"Automation run exceeded stale threshold ({int(stale_after_seconds)}s) and was recovered."
             append_event(
@@ -497,7 +565,7 @@ def recover_stale_running_automation_once(limit: int = 20) -> int:
                 aggregate_id=task_id,
                 event_type=EVENT_AUTOMATION_FAILED,
                 payload={"failed_at": failed_at, "error": error, "summary": "Automation runner recovered stale running task."},
-                metadata={"actor_id": AGENT_SYSTEM_USER_ID, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id},
+                metadata={"actor_id": actor_user_id, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id},
             )
             request_source = str(state.get("last_requested_source") or "").strip().lower()
             schedule_state = str(state.get("schedule_state") or "").strip().lower()
@@ -508,7 +576,7 @@ def recover_stale_running_automation_once(limit: int = 20) -> int:
                     aggregate_id=task_id,
                     event_type=EVENT_SCHEDULE_FAILED,
                     payload={"failed_at": failed_at, "error": error},
-                        metadata={"actor_id": AGENT_SYSTEM_USER_ID, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id},
+                        metadata={"actor_id": actor_user_id, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id},
                 )
                 updated_triggers, next_due = rearm_first_schedule_trigger(
                     execution_triggers=state.get("execution_triggers"),
@@ -526,7 +594,7 @@ def recover_stale_running_automation_once(limit: int = 20) -> int:
                             "schedule_state": "idle",
                         },
                         metadata={
-                            "actor_id": AGENT_SYSTEM_USER_ID,
+                            "actor_id": actor_user_id,
                             "workspace_id": workspace_id,
                             "project_id": project_id,
                             "task_id": task_id,
@@ -572,6 +640,7 @@ def queue_due_scheduled_tasks_once(limit: int = 20) -> int:
             if not workspace_id:
                 continue
             project_id = state.get("project_id")
+            actor_user_id = _resolve_task_actor_user_id(db=db, task_id=task.id, state=state)
             instruction = (
                 (state.get("instruction") or "").strip()
                 or (state.get("scheduled_instruction") or "").strip()
@@ -589,7 +658,7 @@ def queue_due_scheduled_tasks_once(limit: int = 20) -> int:
                 event_type=EVENT_SCHEDULE_QUEUED,
                 payload={"queued_at": now_iso},
                 metadata={
-                    "actor_id": AGENT_SYSTEM_USER_ID,
+                    "actor_id": actor_user_id,
                     "workspace_id": workspace_id,
                     "project_id": project_id,
                     "task_id": task.id,
@@ -602,7 +671,7 @@ def queue_due_scheduled_tasks_once(limit: int = 20) -> int:
                 event_type=EVENT_AUTOMATION_REQUESTED,
                 payload={"requested_at": now_iso, "instruction": instruction, "source": "schedule"},
                 metadata={
-                    "actor_id": AGENT_SYSTEM_USER_ID,
+                    "actor_id": actor_user_id,
                     "workspace_id": workspace_id,
                     "project_id": project_id,
                     "task_id": task.id,

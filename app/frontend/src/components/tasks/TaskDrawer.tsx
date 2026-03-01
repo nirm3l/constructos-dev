@@ -377,6 +377,50 @@ export function TaskDrawer({ state }: { state: any }) {
   })()
 
   const groupSelectValue = selectedTaskGroupId || '__none__'
+  const assigneeSelectOptions = (() => {
+    const out: TaskSelectOption[] = [{ value: '__none__', label: 'Unassigned' }]
+    const users: any[] = Array.isArray(state.workspaceUsers) ? state.workspaceUsers : []
+    const userById = new Map<string, any>(users.map((user) => [String(user?.id || '').trim(), user]))
+    const projectMemberIds: string[] = Array.from(
+      new Set<string>(
+        (Array.isArray(state.projectMembers) ? state.projectMembers : [])
+          .filter((member: any) => String(member?.project_id || '').trim() === String(state.selectedTask.project_id || '').trim())
+          .map((member: any) => String(member?.user_id || '').trim())
+          .filter(Boolean)
+      )
+    )
+    const sourceUsers: any[] =
+      projectMemberIds.length > 0
+        ? projectMemberIds.map((userId) => userById.get(userId)).filter(Boolean)
+        : users
+    const selectedAssigneeId = String(state.editAssigneeId || '').trim()
+    if (selectedAssigneeId && !sourceUsers.some((user: any) => String(user?.id || '').trim() === selectedAssigneeId)) {
+      out.push({
+        value: selectedAssigneeId,
+        label: `Missing user (${selectedAssigneeId.slice(0, 8)})`,
+      })
+    }
+    const normalizedUsers = sourceUsers
+      .map((user: any) => {
+        const userId = String(user?.id || '').trim()
+        if (!userId) return null
+        const fullName = String(user?.full_name || '').trim()
+        const username = String(user?.username || '').trim()
+        const label = username && username !== fullName
+          ? `${fullName || username} (${username})`
+          : (fullName || username || userId)
+        return { value: userId, label }
+      })
+      .filter(Boolean) as TaskSelectOption[]
+    normalizedUsers.sort((a, b) => a.label.localeCompare(b.label))
+    out.push(...normalizedUsers)
+    return out
+  })()
+  const assigneeSelectValue = (() => {
+    const current = String(state.editAssigneeId || '').trim()
+    if (!current) return '__none__'
+    return assigneeSelectOptions.some((option) => option.value === current) ? current : '__none__'
+  })()
   const statusSelectValue = String(state.editStatus || '').trim() || statusSelectOptions[0]?.value || 'To do'
   const prioritySelectValue = (() => {
     const normalized = String(state.editPriority || '').trim()
@@ -681,6 +725,16 @@ export function TaskDrawer({ state }: { state: any }) {
               placeholder="Priority"
               ariaLabel="Task priority"
               options={TASK_PRIORITY_OPTIONS}
+            />
+          </label>
+          <label className="field-control task-field-half">
+            <span className="field-label">Assignee</span>
+            <TaskDrawerSelect
+              value={assigneeSelectValue}
+              onValueChange={(value) => state.setEditAssigneeId(value === '__none__' ? '' : value)}
+              placeholder="Unassigned"
+              ariaLabel="Task assignee"
+              options={assigneeSelectOptions}
             />
           </label>
           <label className="field-control task-field-full">

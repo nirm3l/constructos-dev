@@ -9,13 +9,13 @@ from sqlalchemy.orm import Session
 from shared.core import (
     AggregateEventRepository,
     Project,
-    Specification,
     SpecificationCreate,
     SpecificationPatch,
     User,
     coerce_originator_id,
     ensure_project_access,
     ensure_role,
+    load_project_command_state,
     load_specification_command_state,
     load_specification_view,
 )
@@ -127,7 +127,7 @@ def _normalize_status(value: str | None) -> str:
 
 
 def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> Project:
-    project = db.get(Project, project_id)
+    project = load_project_command_state(db, project_id)
     if not project or project.is_deleted:
         raise HTTPException(status_code=404, detail="Project not found")
     if project.workspace_id != workspace_id:
@@ -143,6 +143,25 @@ def require_specification_command_state(
         raise HTTPException(status_code=404, detail="Specification not found")
     ensure_project_access(db, state.workspace_id, state.project_id, user.id, allowed)
     return state.workspace_id, state.project_id, state.status, bool(state.archived)
+
+
+def _specification_view_from_aggregate(*, specification_id: str, aggregate: SpecificationAggregate) -> dict:
+    return {
+        "id": specification_id,
+        "workspace_id": getattr(aggregate, "workspace_id", None),
+        "project_id": getattr(aggregate, "project_id", None),
+        "title": getattr(aggregate, "title", "") or "",
+        "body": getattr(aggregate, "body", "") or "",
+        "status": getattr(aggregate, "status", "Draft") or "Draft",
+        "tags": getattr(aggregate, "tags", []) or [],
+        "external_refs": getattr(aggregate, "external_refs", []) or [],
+        "attachment_refs": getattr(aggregate, "attachment_refs", []) or [],
+        "archived": bool(getattr(aggregate, "archived", False)),
+        "created_by": getattr(aggregate, "created_by", "") or "",
+        "updated_by": getattr(aggregate, "updated_by", "") or "",
+        "created_at": None,
+        "updated_at": None,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,13 +192,13 @@ class CreateSpecificationHandler:
 
         status = _normalize_status(self.payload.status)
         sid = str(uuid.uuid4()) if bool(self.payload.force_new) else _specification_aggregate_id(self.payload.project_id, title)
-        existing_specification = self.ctx.db.get(Specification, sid)
-        if existing_specification and not existing_specification.is_deleted:
+        existing_specification_state = load_specification_command_state(self.ctx.db, sid)
+        if existing_specification_state and not existing_specification_state.is_deleted:
             view = load_specification_view(self.ctx.db, sid)
             if view is None:
                 raise HTTPException(status_code=404, detail="Specification not found")
             return view
-        if existing_specification and existing_specification.is_deleted:
+        if existing_specification_state and existing_specification_state.is_deleted:
             raise HTTPException(
                 status_code=409,
                 detail="Specification with this title already exists in deleted state; restore is not supported",
@@ -209,9 +228,9 @@ class CreateSpecificationHandler:
         )
         self.ctx.db.commit()
         view = load_specification_view(self.ctx.db, sid)
-        if view is None:
-            raise HTTPException(status_code=404, detail="Specification not found after create")
-        return view
+        if view is not None:
+            return view
+        return _specification_view_from_aggregate(specification_id=sid, aggregate=aggregate)
 
 
 @dataclass(frozen=True, slots=True)

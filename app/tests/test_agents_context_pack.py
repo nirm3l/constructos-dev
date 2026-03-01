@@ -8,6 +8,8 @@ import uuid
 from importlib import reload
 from pathlib import Path
 
+from shared.models import ProjectMember, SessionLocal, User as UserModel
+
 
 def build_client(tmp_path: Path):
     import os
@@ -51,7 +53,6 @@ def test_execute_task_automation_includes_project_description_in_context(tmp_pat
 
     monkeypatch.setattr(executor_module, "AGENT_EXECUTOR_MODE", "command")
     monkeypatch.setattr(executor_module, "AGENT_CODEX_COMMAND", "dummy-exec")
-    monkeypatch.setattr(executor_module, "build_graph_context_markdown", lambda **_: "## Graph\nTask -> Specification")
 
     captured: dict = {}
 
@@ -87,7 +88,9 @@ def test_execute_task_automation_includes_project_description_in_context(tmp_pat
     assert captured["project_rules"][0]["title"] == "Definition of done"
     assert captured["project_rules"][0]["body"] == "Always add or update tests."
     assert captured["actor_user_id"] == bootstrap["current_user"]["id"]
-    assert captured["graph_context_markdown"] == "## Graph\nTask -> Specification"
+    assert captured["actor_project_role"] == "Owner"
+    assert isinstance(captured["graph_context_markdown"], str)
+    assert captured["graph_context_markdown"]
 
 
 def test_execute_task_automation_includes_project_skills_in_context(tmp_path, monkeypatch):
@@ -129,7 +132,6 @@ def test_execute_task_automation_includes_project_skills_in_context(tmp_path, mo
 
     monkeypatch.setattr(executor_module, "AGENT_EXECUTOR_MODE", "command")
     monkeypatch.setattr(executor_module, "AGENT_CODEX_COMMAND", "dummy-exec")
-    monkeypatch.setattr(executor_module, "build_graph_context_markdown", lambda **_: "## Graph\nTask -> Specification")
 
     captured: dict = {}
 
@@ -174,7 +176,6 @@ def test_execute_task_automation_includes_chat_and_codex_session_ids(tmp_path, m
 
     monkeypatch.setattr(executor_module, "AGENT_EXECUTOR_MODE", "command")
     monkeypatch.setattr(executor_module, "AGENT_CODEX_COMMAND", "dummy-exec")
-    monkeypatch.setattr(executor_module, "build_graph_context_markdown", lambda **_: "## Graph\nTask -> Specification")
 
     captured: dict = {}
 
@@ -210,6 +211,76 @@ def test_execute_task_automation_includes_chat_and_codex_session_ids(tmp_path, m
     assert captured["codex_session_id"] == "thread-001"
 
 
+def test_execute_task_automation_includes_team_mode_actor_role_in_context(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+    actor_user_id = str(uuid.uuid4())
+
+    with SessionLocal() as db:
+        db.add(
+            UserModel(
+                id=actor_user_id,
+                username="agent.qa.ctx",
+                full_name="Quality Assurance Agent Context",
+                user_type="agent",
+                password_hash=None,
+                must_change_password=False,
+                password_changed_at=None,
+                is_active=True,
+                theme="dark",
+                timezone="UTC",
+                notifications_enabled=True,
+                agent_chat_model="",
+                agent_chat_reasoning_effort="medium",
+            )
+        )
+        db.add(
+            ProjectMember(
+                workspace_id=ws_id,
+                project_id=project_id,
+                user_id=actor_user_id,
+                role="QAAgent",
+            )
+        )
+        db.commit()
+
+    from features.agents import executor as executor_module
+
+    monkeypatch.setattr(executor_module, "AGENT_EXECUTOR_MODE", "command")
+    monkeypatch.setattr(executor_module, "AGENT_CODEX_COMMAND", "dummy-exec")
+
+    captured: dict = {}
+
+    class DummyProcess:
+        returncode = 0
+        stdout = '{"action":"comment","summary":"ok","comment":null}'
+        stderr = ""
+
+    def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
+        _ = (command, text, capture_output, timeout, check, cwd)
+        captured.update(json.loads(input))
+        return DummyProcess()
+
+    monkeypatch.setattr(executor_module.subprocess, "run", fake_run)
+
+    outcome = executor_module.execute_task_automation(
+        task_id="task-ctx-role",
+        title="Role context check",
+        description="ctx",
+        status="To do",
+        instruction="Summarize role-specific policy",
+        workspace_id=ws_id,
+        project_id=project_id,
+        actor_user_id=actor_user_id,
+        allow_mutations=True,
+    )
+    assert outcome.summary == "ok"
+    assert captured["actor_user_id"] == actor_user_id
+    assert captured["actor_project_role"] == "QAAgent"
+
+
 def test_codex_prompt_includes_soul_md_section():
     from features.agents.codex_mcp_adapter import _build_prompt
 
@@ -223,6 +294,7 @@ def test_codex_prompt_includes_soul_md_section():
             "workspace_id": "ws-1",
             "project_id": "pr-1",
             "actor_user_id": "user-1",
+            "actor_project_role": "DeveloperAgent",
             "project_name": "Alpha",
             "project_description": "## Soul\nUse strict acceptance criteria.",
             "project_rules": [{"title": "Quality", "body": "Do not skip tests."}],
@@ -236,6 +308,7 @@ def test_codex_prompt_includes_soul_md_section():
     assert "File: ProjectRules.md (source: project_rules)" in prompt
     assert "Quality: Do not skip tests." in prompt
     assert "Current User ID: user-1" in prompt
+    assert "Current User Project Role: DeveloperAgent" in prompt
     assert "File: GraphContext.md (source: knowledge_graph)" in prompt
     assert "Task A IMPLEMENTS Spec B" in prompt
     assert "Read each MCP tool description and follow its payload contract and operational guidance." in prompt
@@ -253,6 +326,7 @@ def test_codex_resume_prompt_is_compact_and_turn_focused():
         "workspace_id": "ws-1",
         "project_id": "pr-1",
         "actor_user_id": "user-1",
+        "actor_project_role": "TeamLeadAgent",
         "project_name": "Alpha",
         "project_description": "## Soul\nUse strict acceptance criteria.",
         "project_rules": [{"title": "Quality", "body": "Do not skip tests."}],
@@ -266,7 +340,9 @@ def test_codex_resume_prompt_is_compact_and_turn_focused():
     assert "Context Pack:" not in resume_prompt
     assert "File: Soul.md" not in resume_prompt
     assert "Instruction: Plan this feature" in resume_prompt
+    assert "Current User Project Role: TeamLeadAgent" in resume_prompt
     assert "Fresh Cross-Session Memory Snapshot" in resume_prompt
+    assert "If Team Mode is requested, you MUST execute this setup order" in resume_prompt
     assert "Read each MCP tool description and follow its payload contract and operational guidance." in resume_prompt
     assert len(resume_prompt) < len(full_prompt)
 
@@ -363,6 +439,10 @@ def test_codex_prompt_includes_interactive_project_creation_guidance():
     )
 
     assert "Read each MCP tool description and follow its payload contract and operational guidance." in prompt
+    assert "Dev -> QA -> Lead -> Done" in prompt
+    assert "at least one recurring scheduled Team Lead oversight task" in prompt
+    assert "If Team Mode is requested, you MUST execute this setup order" in prompt
+    assert "If the user requests an exact task count, keep that exact count" in prompt
 
 
 def test_mcp_tool_descriptions_include_operation_specific_guidance():
@@ -493,6 +573,9 @@ def test_message_delta_method_recognizes_assistant_event_names():
 
     assert _is_message_delta_method("item/assistantMessage/delta")
     assert _is_message_delta_method("item/agentMessage/delta")
+    assert _is_message_delta_method("item/assistant-message/delta")
+    assert _is_message_delta_method("item.assistantMessage.delta")
+    assert _is_message_delta_method("item.delta")
     assert not _is_message_delta_method("item/userMessage/delta")
     assert not _is_message_delta_method("item/systemMessage/delta")
     assert not _is_message_delta_method("item/toolCall/delta")
@@ -503,6 +586,7 @@ def test_assistant_message_item_type_filter():
 
     assert _is_assistant_message_item_type("assistant_message")
     assert _is_assistant_message_item_type("agent_message")
+    assert _is_assistant_message_item_type("message")
     assert _is_assistant_message_item_type("assistant-message")
     assert not _is_assistant_message_item_type("user_message")
     assert not _is_assistant_message_item_type("system_message")

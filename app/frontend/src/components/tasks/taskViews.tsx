@@ -108,6 +108,7 @@ export function TaskListItem({
   showProject = false,
   projectName,
   specificationName,
+  assigneeLabel,
 }: {
   task: Task
   onOpen: (taskId: string) => void
@@ -120,6 +121,7 @@ export function TaskListItem({
   showProject?: boolean
   projectName?: string
   specificationName?: string
+  assigneeLabel?: string
 }) {
   const descriptionPreviewText = taskDescriptionPreview(task.description)
   const isScheduled = task.task_type === 'scheduled_instruction'
@@ -198,6 +200,12 @@ export function TaskListItem({
           {task.status} | {task.due_date ? new Date(task.due_date).toLocaleString() : 'No due date'}
           {showProject && <> | Project: {projectName || task.project_id}</>}
         </span>
+        {assigneeLabel && (
+          <div className="task-assignee-compact" title={`Assigned to ${assigneeLabel}`}>
+            <Icon path="M20 21a8 8 0 0 0-16 0M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8" />
+            <span>{assigneeLabel}</span>
+          </div>
+        )}
         {(task.labels ?? []).length > 0 && (
           <div className="task-tags">
             {(task.labels ?? []).map((t) => (

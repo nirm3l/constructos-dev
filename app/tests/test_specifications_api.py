@@ -103,6 +103,34 @@ def test_create_specification_is_case_insensitive_idempotent_by_title(tmp_path: 
     assert len([item for item in listed.json()["items"] if item["title"].strip().lower() == "fk sarajevo spec"]) == 1
 
 
+def test_create_specification_returns_aggregate_fallback_when_view_unavailable(tmp_path: Path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+
+    import features.specifications.command_handlers as specification_handlers
+
+    monkeypatch.setattr(specification_handlers, "load_specification_view", lambda db, specification_id: None)
+
+    created = client.post(
+        "/api/specifications",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Fallback spec response",
+            "body": "text",
+            "status": "Draft",
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    assert payload["title"] == "Fallback spec response"
+    assert payload["workspace_id"] == ws_id
+    assert payload["project_id"] == project_id
+    assert payload["status"] == "Draft"
+
+
 def test_create_specification_force_new_creates_new_instance(tmp_path: Path):
     client = build_client(tmp_path)
     bootstrap = client.get("/api/bootstrap").json()

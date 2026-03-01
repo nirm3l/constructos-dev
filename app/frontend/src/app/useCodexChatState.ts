@@ -14,6 +14,8 @@ export type ChatTurn = {
   content: string
   createdAt: number
   attachmentRefs: AttachmentRef[]
+  lastStreamChunk?: string
+  streamShimmerChunk?: string
 }
 
 export type ChatSession = {
@@ -192,12 +194,16 @@ function normalizeTurns(value: unknown): ChatTurn[] {
     if (!role) continue
     const content = typeof turn.content === 'string' ? turn.content : ''
     const createdAtRaw = Number(turn.createdAt)
+    const lastStreamChunk = typeof turn.lastStreamChunk === 'string' ? turn.lastStreamChunk : ''
+    const streamShimmerChunk = typeof turn.streamShimmerChunk === 'string' ? turn.streamShimmerChunk : ''
     out.push({
       id: typeof turn.id === 'string' && turn.id.trim() ? turn.id : makeId('turn'),
       role,
       content,
       createdAt: Number.isFinite(createdAtRaw) && createdAtRaw > 0 ? Math.floor(createdAtRaw) : Date.now(),
       attachmentRefs: normalizeAttachmentRefs(turn.attachmentRefs ?? turn.attachment_refs),
+      lastStreamChunk,
+      streamShimmerChunk,
     })
   }
   return out.slice(-MAX_TURNS_PER_SESSION)

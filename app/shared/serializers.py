@@ -18,6 +18,7 @@ from .contracts import (
     NoteGroupCommandState,
     NoteGroupDTO,
     NotificationDTO,
+    ProjectCommandState,
     ProjectRuleCommandState,
     ProjectRuleDTO,
     SpecificationCommandState,
@@ -612,6 +613,39 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
         "created_at": None,
         "updated_at": None,
     }
+
+
+def load_project_command_state(db: Session, project_id: str) -> ProjectCommandState | None:
+    from .eventing import get_kurrent_client, rebuild_state
+
+    if get_kurrent_client() is None:
+        project = db.get(Project, project_id)
+        if not project:
+            return None
+        try:
+            custom_statuses = json.loads(project.custom_statuses or "[]")
+        except Exception:
+            custom_statuses = []
+        return ProjectCommandState(
+            id=project.id,
+            workspace_id=project.workspace_id,
+            is_deleted=bool(project.is_deleted),
+            custom_statuses=[str(status) for status in custom_statuses if str(status).strip()],
+        )
+
+    state, _ = rebuild_state(db, "Project", project_id)
+    if not state:
+        return None
+    return ProjectCommandState(
+        id=project_id,
+        workspace_id=state.get("workspace_id", ""),
+        is_deleted=bool(state.get("is_deleted", False)),
+        custom_statuses=[
+            str(status)
+            for status in (state.get("custom_statuses") or [])
+            if str(status).strip()
+        ],
+    )
 
 
 def load_saved_view(db: Session, saved_view_id: str) -> dict[str, Any] | None:

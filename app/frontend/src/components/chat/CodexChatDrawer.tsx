@@ -1017,8 +1017,24 @@ export function CodexChatDrawer({ state }: { state: any }) {
           {state.codexChatTurns.length === 0 && (
             <div className="meta">Chat is empty. Send your first instruction.</div>
           )}
-          {state.codexChatTurns.map((turn: any) => (
-            <div key={turn.id} className={`codex-chat-bubble ${turn.role}`}>
+          {state.codexChatTurns.map((turn: any) => {
+            const isStreamingAssistantTurn = Boolean(
+              turn.role === 'assistant' && state.isCodexChatRunning && turn.id === lastTurnId
+            )
+            const turnContent = String(turn?.content || '')
+            const lastStreamChunk = isStreamingAssistantTurn ? String(turn?.lastStreamChunk || '') : ''
+            const streamShimmerChunk = isStreamingAssistantTurn ? String(turn?.streamShimmerChunk || '') : ''
+            const fallbackChunkLength = Math.min(32, Math.max(12, Math.floor(turnContent.length * 0.35)))
+            const shimmerChunk = streamShimmerChunk || lastStreamChunk || turnContent.slice(-fallbackChunkLength)
+            const hasShimmerChunk = Boolean(shimmerChunk)
+            const streamLeadContent = hasShimmerChunk
+              ? turnContent.slice(0, Math.max(0, turnContent.length - shimmerChunk.length))
+              : turnContent
+            return (
+            <div
+              key={turn.id}
+              className={`codex-chat-bubble ${turn.role} ${isStreamingAssistantTurn ? 'is-streaming' : ''}`.trim()}
+            >
               <div className="codex-chat-role">
                 <span className="codex-chat-role-meta">
                   {turn.role === 'user' ? 'You' : 'Assistant'}
@@ -1049,10 +1065,22 @@ export function CodexChatDrawer({ state }: { state: any }) {
                 </ChatTooltip>
               </div>
               {turn.role === 'assistant' ? (
-                <MarkdownView
-                  value={turn.content}
-                  disableMermaid={Boolean(state.isCodexChatRunning && turn.id === lastTurnId)}
-                />
+                isStreamingAssistantTurn ? (
+                  <div className="codex-chat-streaming-text" aria-live="polite">
+                    {streamLeadContent}
+                    {hasShimmerChunk && (
+                      <span className="codex-chat-stream-last-chunk">
+                        {shimmerChunk}
+                      </span>
+                    )}
+                    <span className="codex-chat-stream-caret" aria-hidden="true" />
+                  </div>
+                ) : (
+                  <MarkdownView
+                    value={turn.content}
+                    disableMermaid={Boolean(state.isCodexChatRunning && turn.id === lastTurnId)}
+                  />
+                )
               ) : (
                 <div>{turn.content}</div>
               )}
@@ -1069,7 +1097,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
                 </div>
               )}
             </div>
-          ))}
+          )})}
           {hasMessages && codexResumeCommand && (
             <div className="codex-chat-history-resume-row">
               <ChatTooltip content="Continue this conversation in COS CLI. Click to copy the resume command.">

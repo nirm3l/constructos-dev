@@ -13,14 +13,19 @@ import {
 
 export function useTaskNoteEditorEffects(c: any) {
   React.useEffect(() => {
-    if (!c.selectedTask) return
+    if (!c.selectedTask) {
+      c.setTaskEditorHydratedTaskId(null)
+      return
+    }
+    c.setTaskEditorHydratedTaskId(null)
     c.setEditTitle(c.selectedTask.title ?? '')
-    c.setEditStatus(c.selectedTask.status)
-    c.setEditDescription(c.selectedTask.description)
-    c.setEditPriority(c.selectedTask.priority)
+    c.setEditStatus(c.selectedTask.status ?? 'To do')
+    c.setEditDescription(c.selectedTask.description ?? '')
+    c.setEditPriority(c.selectedTask.priority ?? 'Med')
     c.setEditDueDate(toLocalDateTimeInput(c.selectedTask.due_date))
-    c.setEditProjectId(c.selectedTask.project_id)
+    c.setEditProjectId(c.selectedTask.project_id ?? '')
     c.setEditTaskGroupId(c.selectedTask.task_group_id ?? '')
+    c.setEditAssigneeId(c.selectedTask.assignee_id ?? '')
     c.setEditTaskTags(c.selectedTask.labels ?? [])
     c.setEditTaskExternalRefsText(externalRefsToText(c.selectedTask.external_refs))
     c.setEditTaskAttachmentRefsText(attachmentRefsToText(c.selectedTask.attachment_refs))
@@ -56,6 +61,7 @@ export function useTaskNoteEditorEffects(c: any) {
     c.setCommentBody('')
     c.setExpandedCommentIds(new Set())
     c.setTaskEditorError(null)
+    c.setTaskEditorHydratedTaskId(c.selectedTask.id ?? null)
   }, [c.selectedTask?.id, c.currentUserTimezone])
 
   React.useEffect(() => {

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 
 from shared.context_frames import build_project_context_frame
-from shared.models import Project, ProjectRule, ProjectSkill, SessionLocal
+from shared.models import Project, ProjectMember, ProjectRule, ProjectSkill, SessionLocal
 from shared.settings import AGENT_CODEX_COMMAND, AGENT_EXECUTOR_MODE, AGENT_EXECUTOR_TIMEOUT_SECONDS
 
 _TIMEOUT_UNSET = object()
@@ -149,6 +149,22 @@ def _load_project_context(
         for item in skills
     ]
     return str(row[0] or "").strip() or None, str(row[1] or ""), normalized_rules, normalized_skills
+
+
+def _resolve_actor_project_role(*, actor_user_id: str | None, project_id: str | None) -> str | None:
+    normalized_actor_user_id = str(actor_user_id or "").strip()
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_actor_user_id or not normalized_project_id:
+        return None
+    with SessionLocal() as db:
+        membership = db.execute(
+            select(ProjectMember.role).where(
+                ProjectMember.project_id == normalized_project_id,
+                ProjectMember.user_id == normalized_actor_user_id,
+            )
+        ).scalar_one_or_none()
+    normalized_role = str(membership or "").strip()
+    return normalized_role or None
 
 
 def _placeholder_outcome(*, instruction: str, current_status: str) -> AutomationOutcome:
@@ -349,6 +365,7 @@ def execute_task_automation(
 
     command = shlex.split(AGENT_CODEX_COMMAND)
     project_name, project_description, project_rules, project_skills = _load_project_context(project_id)
+    actor_project_role = _resolve_actor_project_role(actor_user_id=actor_user_id, project_id=project_id)
     context_scope_type = "chat_session" if str(chat_session_id or "").strip() else "task_automation"
     context_scope_id = str(chat_session_id or "").strip() or str(task_id or "").strip() or "general"
     context_frame = build_project_context_frame(
@@ -383,6 +400,7 @@ def execute_task_automation(
         "chat_session_id": chat_session_id,
         "codex_session_id": codex_session_id,
         "actor_user_id": actor_user_id,
+        "actor_project_role": actor_project_role,
         "project_name": project_name,
         "project_description": project_description,
         "project_rules": project_rules,
@@ -458,6 +476,7 @@ def execute_task_automation_stream(
 
     command = shlex.split(AGENT_CODEX_COMMAND)
     project_name, project_description, project_rules, project_skills = _load_project_context(project_id)
+    actor_project_role = _resolve_actor_project_role(actor_user_id=actor_user_id, project_id=project_id)
     context_scope_type = "chat_session" if str(chat_session_id or "").strip() else "task_automation"
     context_scope_id = str(chat_session_id or "").strip() or str(task_id or "").strip() or "general"
     context_frame = build_project_context_frame(
@@ -492,6 +511,7 @@ def execute_task_automation_stream(
         "chat_session_id": chat_session_id,
         "codex_session_id": codex_session_id,
         "actor_user_id": actor_user_id,
+        "actor_project_role": actor_project_role,
         "project_name": project_name,
         "project_description": project_description,
         "project_rules": project_rules,

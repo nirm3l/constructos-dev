@@ -45,6 +45,7 @@ from shared.core import (
     NotePatch,
     Project,
     ProjectCreate,
+    ProjectPatch,
     ProjectRule,
     ProjectRuleCreate,
     ProjectRulePatch,
@@ -57,6 +58,7 @@ from shared.core import (
     TaskPatch,
     User,
     UserPreferencesPatch,
+    ensure_project_access,
     load_note_command_state,
     load_note_group_command_state,
     load_note_view,
@@ -83,7 +85,7 @@ from shared.knowledge_graph import (
     require_graph_available,
     search_project_knowledge as search_project_knowledge_query,
 )
-from shared.models import ProjectSkill, WorkspaceSkill, User as UserModel
+from shared.models import ProjectMember, ProjectSkill, WorkspaceSkill, User as UserModel
 from shared.settings import (
     DEFAULT_USER_ID,
     MCP_ACTOR_USER_ID,
@@ -100,6 +102,7 @@ _READ_ONLY_MCP_METHODS = frozenset(
         "list_task_groups",
         "list_note_groups",
         "list_project_rules",
+        "list_project_members",
         "list_project_skills",
         "list_workspace_skills",
         "list_specifications",
@@ -120,6 +123,7 @@ _READ_ONLY_MCP_METHODS = frozenset(
         "graph_get_dependency_path",
         "graph_context_pack",
         "search_project_knowledge",
+        "verify_team_mode_workflow",
         "list_project_templates",
         "get_project_template",
         "preview_project_from_template",
@@ -813,6 +817,76 @@ class AgentTaskService:
                 ),
             )
 
+    def list_project_members(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        auth_token: str | None = None,
+        q: str | None = None,
+        role: str | None = None,
+        user_type: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict:
+        self._require_token(auth_token)
+        self._assert_workspace_allowed(workspace_id)
+        if not project_id:
+            raise HTTPException(status_code=400, detail="project_id is required")
+        self._assert_project_allowed(project_id)
+        user = self._resolve_actor_user()
+        safe_limit = max(1, min(int(limit or 100), 500))
+        safe_offset = max(0, int(offset or 0))
+        with SessionLocal() as db:
+            project = self._load_project_scope(db=db, project_id=project_id)
+            if str(project.workspace_id) != str(workspace_id):
+                raise HTTPException(status_code=400, detail="Project does not belong to workspace")
+            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            stmt = (
+                select(ProjectMember, UserModel)
+                .join(UserModel, UserModel.id == ProjectMember.user_id)
+                .where(ProjectMember.project_id == project_id)
+            )
+            normalized_role = str(role or "").strip()
+            if normalized_role:
+                stmt = stmt.where(ProjectMember.role == normalized_role)
+            normalized_user_type = str(user_type or "").strip().lower()
+            if normalized_user_type:
+                stmt = stmt.where(func.lower(UserModel.user_type) == normalized_user_type)
+            normalized_q = str(q or "").strip()
+            if normalized_q:
+                like = f"%{normalized_q}%"
+                stmt = stmt.where(
+                    ProjectMember.role.ilike(like)
+                    | UserModel.username.ilike(like)
+                    | UserModel.full_name.ilike(like)
+                )
+            total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0
+            rows = db.execute(
+                stmt.order_by(UserModel.full_name.asc(), UserModel.username.asc()).limit(safe_limit).offset(safe_offset)
+            ).all()
+            return {
+                "project_id": str(project_id),
+                "workspace_id": str(workspace_id),
+                "items": [
+                    {
+                        "project_id": str(pm.project_id),
+                        "user_id": str(pm.user_id),
+                        "role": str(pm.role or ""),
+                        "user": {
+                            "id": str(u.id),
+                            "username": str(u.username or ""),
+                            "full_name": str(u.full_name or ""),
+                            "user_type": str(u.user_type or ""),
+                        },
+                    }
+                    for pm, u in rows
+                ],
+                "total": int(total),
+                "limit": int(safe_limit),
+                "offset": int(safe_offset),
+            }
+
     def list_project_skills(
         self,
         *,
@@ -1467,6 +1541,284 @@ class AgentTaskService:
         except Exception as exc:
             raise HTTPException(status_code=503, detail=f"Project knowledge search failed: {exc}") from exc
 
+    def verify_team_mode_workflow(
+        self,
+        *,
+        project_id: str,
+        auth_token: str | None = None,
+        workspace_id: str | None = None,
+        expected_event_storming_enabled: bool | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            project = self._load_project_scope(db=db, project_id=project_id)
+            if workspace_id and str(project.workspace_id) != str(workspace_id):
+                raise HTTPException(status_code=400, detail="Project does not belong to workspace")
+            ensure_role(db, project.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            members = db.execute(
+                select(ProjectMember, UserModel)
+                .join(UserModel, UserModel.id == ProjectMember.user_id)
+                .where(ProjectMember.project_id == project_id)
+            ).all()
+            member_role_by_user_id = {
+                str(pm.user_id): str(pm.role or "").strip()
+                for pm, _ in members
+            }
+            tasks_payload = list_tasks_read_model(
+                db,
+                user,
+                TaskListQuery(
+                    workspace_id=str(project.workspace_id),
+                    project_id=project_id,
+                    limit=500,
+                    offset=0,
+                    archived=False,
+                ),
+            )
+        tasks = list(tasks_payload.get("items") or [])
+
+        def _has_status_trigger(
+            trigger: dict[str, Any],
+            *,
+            scope: str,
+            to_status: str,
+        ) -> bool:
+            if str(trigger.get("kind") or "").strip() != "status_change":
+                return False
+            if str(trigger.get("scope") or "").strip() != scope:
+                return False
+            to_statuses = [str(item or "").strip() for item in (trigger.get("to_statuses") or [])]
+            return to_status in to_statuses
+
+        dev_tasks = [t for t in tasks if member_role_by_user_id.get(str(t.get("assignee_id") or "")) == "DeveloperAgent"]
+        qa_tasks = [t for t in tasks if member_role_by_user_id.get(str(t.get("assignee_id") or "")) == "QAAgent"]
+        lead_tasks = [t for t in tasks if member_role_by_user_id.get(str(t.get("assignee_id") or "")) == "TeamLeadAgent"]
+        deploy_tasks = [
+            t
+            for t in lead_tasks
+            if "deploy" in str(t.get("title") or "").lower() or "docker compose" in str(t.get("title") or "").lower()
+        ]
+
+        dev_ids = {str(t.get("id")) for t in dev_tasks}
+        qa_ids = {str(t.get("id")) for t in qa_tasks}
+        lead_ids = {str(t.get("id")) for t in lead_tasks}
+
+        dev_self_ok = bool(dev_tasks) and all(
+            any(
+                _has_status_trigger(trigger, scope="self", to_status="QA")
+                for trigger in (task.get("execution_triggers") or [])
+                if isinstance(trigger, dict)
+            )
+            for task in dev_tasks
+        )
+
+        qa_external_from_dev_ok = any(
+            any(
+                _has_status_trigger(trigger, scope="external", to_status="QA")
+                and dev_ids.issubset(
+                    {
+                        str(task_id)
+                        for task_id in ((trigger.get("selector") or {}).get("task_ids") or [])
+                    }
+                )
+                for trigger in (task.get("execution_triggers") or [])
+                if isinstance(trigger, dict)
+            )
+            for task in qa_tasks
+        )
+
+        lead_external_from_qa_ok = any(
+            any(
+                _has_status_trigger(trigger, scope="external", to_status="Done")
+                and bool(
+                    qa_ids.intersection(
+                        {
+                            str(task_id)
+                            for task_id in ((trigger.get("selector") or {}).get("task_ids") or [])
+                        }
+                    )
+                )
+                for trigger in (task.get("execution_triggers") or [])
+                if isinstance(trigger, dict)
+            )
+            for task in lead_tasks
+        )
+
+        deploy_external_from_lead_ok = any(
+            any(
+                _has_status_trigger(trigger, scope="external", to_status="Done")
+                and bool(
+                    lead_ids.intersection(
+                        {
+                            str(task_id)
+                            for task_id in ((trigger.get("selector") or {}).get("task_ids") or [])
+                        }
+                    )
+                )
+                for trigger in (task.get("execution_triggers") or [])
+                if isinstance(trigger, dict)
+            )
+            for task in deploy_tasks
+        )
+
+        lead_recurring_on_lead_ok = any(
+            any(
+                str(trigger.get("kind") or "").strip() == "schedule"
+                and bool(str(trigger.get("recurring_rule") or "").strip())
+                and "Lead" in [str(item or "").strip() for item in (trigger.get("run_on_statuses") or [])]
+                for trigger in (task.get("execution_triggers") or [])
+                if isinstance(trigger, dict)
+            )
+            for task in lead_tasks
+        )
+
+        role_coverage_ok = bool(dev_tasks) and bool(qa_tasks) and bool(lead_tasks)
+        required_triggers_ok = (
+            dev_self_ok
+            and qa_external_from_dev_ok
+            and lead_external_from_qa_ok
+            and deploy_external_from_lead_ok
+            and lead_recurring_on_lead_ok
+        )
+        event_storming_ok = (
+            True
+            if expected_event_storming_enabled is None
+            else bool(getattr(project, "event_storming_enabled", True)) is bool(expected_event_storming_enabled)
+        )
+        return {
+            "project_id": str(project_id),
+            "workspace_id": str(project.workspace_id),
+            "checks": {
+                "role_coverage_present": role_coverage_ok,
+                "dev_self_triggers_to_qa": dev_self_ok,
+                "qa_external_trigger_from_dev": qa_external_from_dev_ok,
+                "lead_external_trigger_from_qa": lead_external_from_qa_ok,
+                "deploy_external_trigger_from_lead": deploy_external_from_lead_ok,
+                "lead_recurring_schedule_on_lead": lead_recurring_on_lead_ok,
+                "required_triggers_present": required_triggers_ok,
+                "event_storming_matches_expectation": event_storming_ok,
+            },
+            "counts": {
+                "tasks_total": len(tasks),
+                "developer_tasks": len(dev_tasks),
+                "qa_tasks": len(qa_tasks),
+                "lead_tasks": len(lead_tasks),
+                "deploy_tasks": len(deploy_tasks),
+            },
+            "event_storming_enabled": bool(getattr(project, "event_storming_enabled", True)),
+            "expected_event_storming_enabled": expected_event_storming_enabled,
+            "ok": bool(role_coverage_ok and required_triggers_ok and event_storming_ok),
+        }
+
+    def ensure_team_mode_project(
+        self,
+        *,
+        project_id: str | None = None,
+        project_ref: str | None = None,
+        workspace_id: str | None = None,
+        auth_token: str | None = None,
+        expected_event_storming_enabled: bool | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        resolved_ref = str(project_id or project_ref or "").strip()
+        if not resolved_ref:
+            raise HTTPException(status_code=400, detail="project_id or project_ref is required")
+        with SessionLocal() as db:
+            project, _ = self._resolve_project_for_chat_context(
+                db=db,
+                user=user,
+                project_ref=resolved_ref,
+                workspace_id=workspace_id,
+            )
+            if workspace_id and str(project.workspace_id) != str(workspace_id):
+                raise HTTPException(status_code=400, detail="Project does not belong to workspace")
+            ensure_role(db, project.workspace_id, user.id, {"Owner", "Admin", "Member"})
+            ensure_project_access(db, project.workspace_id, str(project.id), user.id, {"Owner", "Admin", "Member"})
+
+            ws_skill = db.execute(
+                select(WorkspaceSkill).where(
+                    WorkspaceSkill.workspace_id == str(project.workspace_id),
+                    WorkspaceSkill.skill_key == "team_mode",
+                    WorkspaceSkill.is_deleted == False,
+                )
+            ).scalar_one_or_none()
+            if ws_skill is None:
+                raise HTTPException(status_code=404, detail="Workspace Team Mode skill not found")
+
+            project_skill = db.execute(
+                select(ProjectSkill).where(
+                    ProjectSkill.workspace_id == str(project.workspace_id),
+                    ProjectSkill.project_id == str(project.id),
+                    ProjectSkill.skill_key == "team_mode",
+                    ProjectSkill.is_deleted == False,
+                )
+            ).scalar_one_or_none()
+
+            attached = False
+            if project_skill is None:
+                attach_command_id = command_id or self._fallback_command_id(
+                    prefix="mcp-ensure-team-mode-attach",
+                    payload={
+                        "workspace_id": str(project.workspace_id),
+                        "project_ref": str(project.id),
+                        "workspace_skill_id": str(ws_skill.id),
+                    },
+                )
+                attached_view = ProjectSkillApplicationService(
+                    db,
+                    user,
+                    command_id=attach_command_id,
+                ).attach_workspace_skill_to_project(
+                    workspace_skill_id=str(ws_skill.id),
+                    workspace_id=str(project.workspace_id),
+                    project_id=str(project.id),
+                )
+                attached = True
+                attached_skill_id = str(attached_view.get("id") or "").strip()
+                project_skill = db.get(ProjectSkill, attached_skill_id) if attached_skill_id else None
+                if project_skill is None:
+                    raise HTTPException(status_code=500, detail="Failed to attach Team Mode skill to project")
+
+            apply_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-ensure-team-mode-apply",
+                payload={"project_ref": str(project.id), "project_skill_id": str(project_skill.id)},
+            )
+            applied_view = ProjectSkillApplicationService(
+                db,
+                user,
+                command_id=apply_command_id,
+            ).apply_project_skill(str(project_skill.id))
+
+        verification = self.verify_team_mode_workflow(
+            project_id=str(project.id),
+            workspace_id=workspace_id,
+            auth_token=auth_token,
+            expected_event_storming_enabled=expected_event_storming_enabled,
+        )
+        members = self.list_project_members(
+            workspace_id=workspace_id or verification["workspace_id"],
+            project_id=str(project.id),
+            auth_token=auth_token,
+            limit=200,
+            offset=0,
+        )
+        return {
+            "project_id": str(project.id),
+            "workspace_id": verification["workspace_id"],
+            "attached": attached,
+            "project_skill_id": str(applied_view.get("id") or "").strip(),
+            "generated_rule_id": str(applied_view.get("generated_rule_id") or "").strip() or None,
+            "team_mode_contract_complete": bool(applied_view.get("team_mode_contract_complete")),
+            "team_mode_roster": list(applied_view.get("team_mode_roster") or []),
+            "members": members,
+            "verification": verification,
+            "ok": bool(verification.get("ok"))
+            and bool(applied_view.get("team_mode_contract_complete")),
+        }
+
     def list_project_templates(
         self,
         *,
@@ -1795,10 +2147,14 @@ class AgentTaskService:
             state = self._assert_task_group_allowed(db=db, task_group_id=group_id)
             assert state is not None
             payload = TaskGroupPatch(**patch)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-task-group-patch",
+                payload={"group_id": group_id, "patch": patch or {}},
+            )
             return TaskGroupApplicationService(
                 db,
                 user,
-                command_id=command_id or f"mcp-task-group-patch-{uuid.uuid4()}",
+                command_id=effective_command_id,
             ).patch_task_group(group_id, payload)
 
     def delete_task_group(self, *, group_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict:
@@ -1807,10 +2163,14 @@ class AgentTaskService:
         with SessionLocal() as db:
             state = self._assert_task_group_allowed(db=db, task_group_id=group_id)
             assert state is not None
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-task-group-delete",
+                payload={"group_id": group_id},
+            )
             return TaskGroupApplicationService(
                 db,
                 user,
-                command_id=command_id or f"mcp-task-group-delete-{uuid.uuid4()}",
+                command_id=effective_command_id,
             ).delete_task_group(group_id)
 
     def reorder_task_groups(
@@ -1895,10 +2255,14 @@ class AgentTaskService:
             state = self._assert_note_group_allowed(db=db, note_group_id=group_id)
             assert state is not None
             payload = NoteGroupPatch(**patch)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-note-group-patch",
+                payload={"group_id": group_id, "patch": patch or {}},
+            )
             return NoteGroupApplicationService(
                 db,
                 user,
-                command_id=command_id or f"mcp-note-group-patch-{uuid.uuid4()}",
+                command_id=effective_command_id,
             ).patch_note_group(group_id, payload)
 
     def delete_note_group(self, *, group_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict:
@@ -1907,10 +2271,14 @@ class AgentTaskService:
         with SessionLocal() as db:
             state = self._assert_note_group_allowed(db=db, note_group_id=group_id)
             assert state is not None
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-note-group-delete",
+                payload={"group_id": group_id},
+            )
             return NoteGroupApplicationService(
                 db,
                 user,
-                command_id=command_id or f"mcp-note-group-delete-{uuid.uuid4()}",
+                command_id=effective_command_id,
             ).delete_note_group(group_id)
 
     def reorder_note_groups(
@@ -1993,6 +2361,35 @@ class AgentTaskService:
                 member_user_ids=member_user_ids or [],
             )
             return ProjectApplicationService(db, user, command_id=effective_command_id).create_project(payload)
+
+    def update_project(
+        self,
+        *,
+        project_id: str,
+        patch: dict[str, Any],
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        if not project_id:
+            raise HTTPException(status_code=400, detail="project_id is required")
+        patch_payload = dict(patch or {})
+        if not patch_payload:
+            raise HTTPException(status_code=400, detail="patch must include at least one field")
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            project = self._load_project_scope(db=db, project_id=project_id)
+            ensure_role(db, project.workspace_id, user.id, {"Owner", "Admin", "Member"})
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-project-patch",
+                payload={"project_id": project_id, "patch": patch_payload},
+            )
+            payload = ProjectPatch(**patch_payload)
+            return ProjectApplicationService(
+                db,
+                user,
+                command_id=effective_command_id,
+            ).patch_project(project_id, payload)
 
     def create_project_rule(
         self,
@@ -2139,7 +2536,10 @@ class AgentTaskService:
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             self._assert_project_skill_allowed(db=db, skill_id=skill_id)
-            effective_command_id = command_id or f"mcp-project-skill-apply-{uuid.uuid4()}"
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-project-skill-apply",
+                payload={"skill_id": skill_id},
+            )
             return ProjectSkillApplicationService(
                 db, user, command_id=effective_command_id
             ).apply_project_skill(skill_id)
@@ -2411,10 +2811,14 @@ class AgentTaskService:
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             self._assert_specification_allowed(db=db, specification_id=specification_id)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-spec-task-link",
+                payload={"specification_id": specification_id, "task_id": task_id},
+            )
             return SpecificationApplicationService(
                 db,
                 user,
-                command_id=command_id or f"mcp-spec-task-link-{uuid.uuid4()}",
+                command_id=effective_command_id,
             ).link_task_to_specification(specification_id, task_id)
 
     def unlink_task_from_spec(
@@ -2429,10 +2833,14 @@ class AgentTaskService:
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             self._assert_specification_allowed(db=db, specification_id=specification_id)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-spec-task-unlink",
+                payload={"specification_id": specification_id, "task_id": task_id},
+            )
             return SpecificationApplicationService(
                 db,
                 user,
-                command_id=command_id or f"mcp-spec-task-unlink-{uuid.uuid4()}",
+                command_id=effective_command_id,
             ).unlink_task_from_specification(specification_id, task_id)
 
     def link_note_to_spec(
@@ -2447,10 +2855,14 @@ class AgentTaskService:
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             self._assert_specification_allowed(db=db, specification_id=specification_id)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-spec-note-link",
+                payload={"specification_id": specification_id, "note_id": note_id},
+            )
             return SpecificationApplicationService(
                 db,
                 user,
-                command_id=command_id or f"mcp-spec-note-link-{uuid.uuid4()}",
+                command_id=effective_command_id,
             ).link_note_to_specification(specification_id, note_id)
 
     def unlink_note_from_spec(
@@ -2465,10 +2877,14 @@ class AgentTaskService:
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             self._assert_specification_allowed(db=db, specification_id=specification_id)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-spec-note-unlink",
+                payload={"specification_id": specification_id, "note_id": note_id},
+            )
             return SpecificationApplicationService(
                 db,
                 user,
-                command_id=command_id or f"mcp-spec-note-unlink-{uuid.uuid4()}",
+                command_id=effective_command_id,
             ).unlink_note_from_specification(specification_id, note_id)
 
     def update_project_rule(self, *, rule_id: str, patch: dict, auth_token: str | None = None, command_id: str | None = None) -> dict:
@@ -2477,8 +2893,12 @@ class AgentTaskService:
         with SessionLocal() as db:
             self._assert_project_rule_allowed(db=db, rule_id=rule_id)
             payload = ProjectRulePatch(**patch)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-project-rule-patch",
+                payload={"rule_id": rule_id, "patch": patch or {}},
+            )
             return ProjectRuleApplicationService(
-                db, user, command_id=command_id or f"mcp-project-rule-patch-{uuid.uuid4()}"
+                db, user, command_id=effective_command_id
             ).patch_project_rule(rule_id, payload)
 
     def delete_project_rule(self, *, rule_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict:
@@ -2486,8 +2906,12 @@ class AgentTaskService:
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             self._assert_project_rule_allowed(db=db, rule_id=rule_id)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-project-rule-delete",
+                payload={"rule_id": rule_id},
+            )
             return ProjectRuleApplicationService(
-                db, user, command_id=command_id or f"mcp-project-rule-delete-{uuid.uuid4()}"
+                db, user, command_id=effective_command_id
             ).delete_project_rule(rule_id)
 
     def update_project_skill(
@@ -2547,8 +2971,12 @@ class AgentTaskService:
         with SessionLocal() as db:
             self._assert_specification_allowed(db=db, specification_id=specification_id)
             payload = SpecificationPatch(**patch)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-specification-patch",
+                payload={"specification_id": specification_id, "patch": patch or {}},
+            )
             return SpecificationApplicationService(
-                db, user, command_id=command_id or f"mcp-specification-patch-{uuid.uuid4()}"
+                db, user, command_id=effective_command_id
             ).patch_specification(specification_id, payload)
 
     def archive_specification(
@@ -2558,8 +2986,12 @@ class AgentTaskService:
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             self._assert_specification_allowed(db=db, specification_id=specification_id)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-specification-archive",
+                payload={"specification_id": specification_id},
+            )
             return SpecificationApplicationService(
-                db, user, command_id=command_id or f"mcp-specification-archive-{uuid.uuid4()}"
+                db, user, command_id=effective_command_id
             ).archive_specification(specification_id)
 
     def restore_specification(
@@ -2569,8 +3001,12 @@ class AgentTaskService:
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             self._assert_specification_allowed(db=db, specification_id=specification_id)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-specification-restore",
+                payload={"specification_id": specification_id},
+            )
             return SpecificationApplicationService(
-                db, user, command_id=command_id or f"mcp-specification-restore-{uuid.uuid4()}"
+                db, user, command_id=effective_command_id
             ).restore_specification(specification_id)
 
     def delete_specification(
@@ -2580,8 +3016,12 @@ class AgentTaskService:
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             self._assert_specification_allowed(db=db, specification_id=specification_id)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-specification-delete",
+                payload={"specification_id": specification_id},
+            )
             return SpecificationApplicationService(
-                db, user, command_id=command_id or f"mcp-specification-delete-{uuid.uuid4()}"
+                db, user, command_id=effective_command_id
             ).delete_specification(specification_id)
 
     def update_note(self, *, note_id: str, patch: dict, auth_token: str | None = None, command_id: str | None = None) -> dict:
@@ -2594,7 +3034,11 @@ class AgentTaskService:
             self._assert_workspace_allowed(state.workspace_id)
             self._assert_project_allowed(state.project_id)
             payload = NotePatch(**patch)
-            return NoteApplicationService(db, user, command_id=command_id or f"mcp-note-patch-{uuid.uuid4()}").patch_note(note_id, payload)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-note-patch",
+                payload={"note_id": note_id, "patch": patch or {}},
+            )
+            return NoteApplicationService(db, user, command_id=effective_command_id).patch_note(note_id, payload)
 
     def archive_note(self, *, note_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict:
         self._require_token(auth_token)
@@ -2605,7 +3049,11 @@ class AgentTaskService:
                 raise HTTPException(status_code=404, detail="Note not found")
             self._assert_workspace_allowed(state.workspace_id)
             self._assert_project_allowed(state.project_id)
-            return NoteApplicationService(db, user, command_id=command_id or f"mcp-note-archive-{uuid.uuid4()}").archive_note(note_id)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-note-archive",
+                payload={"note_id": note_id},
+            )
+            return NoteApplicationService(db, user, command_id=effective_command_id).archive_note(note_id)
 
     def restore_note(self, *, note_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict:
         self._require_token(auth_token)
@@ -2616,7 +3064,11 @@ class AgentTaskService:
                 raise HTTPException(status_code=404, detail="Note not found")
             self._assert_workspace_allowed(state.workspace_id)
             self._assert_project_allowed(state.project_id)
-            return NoteApplicationService(db, user, command_id=command_id or f"mcp-note-restore-{uuid.uuid4()}").restore_note(note_id)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-note-restore",
+                payload={"note_id": note_id},
+            )
+            return NoteApplicationService(db, user, command_id=effective_command_id).restore_note(note_id)
 
     def pin_note(self, *, note_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict:
         self._require_token(auth_token)
@@ -2627,7 +3079,11 @@ class AgentTaskService:
                 raise HTTPException(status_code=404, detail="Note not found")
             self._assert_workspace_allowed(state.workspace_id)
             self._assert_project_allowed(state.project_id)
-            return NoteApplicationService(db, user, command_id=command_id or f"mcp-note-pin-{uuid.uuid4()}").pin_note(note_id)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-note-pin",
+                payload={"note_id": note_id},
+            )
+            return NoteApplicationService(db, user, command_id=effective_command_id).pin_note(note_id)
 
     def unpin_note(self, *, note_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict:
         self._require_token(auth_token)
@@ -2638,7 +3094,11 @@ class AgentTaskService:
                 raise HTTPException(status_code=404, detail="Note not found")
             self._assert_workspace_allowed(state.workspace_id)
             self._assert_project_allowed(state.project_id)
-            return NoteApplicationService(db, user, command_id=command_id or f"mcp-note-unpin-{uuid.uuid4()}").unpin_note(note_id)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-note-unpin",
+                payload={"note_id": note_id},
+            )
+            return NoteApplicationService(db, user, command_id=effective_command_id).unpin_note(note_id)
 
     def delete_note(self, *, note_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict:
         self._require_token(auth_token)
@@ -2649,7 +3109,11 @@ class AgentTaskService:
                 raise HTTPException(status_code=404, detail="Note not found")
             self._assert_workspace_allowed(state.workspace_id)
             self._assert_project_allowed(state.project_id)
-            return NoteApplicationService(db, user, command_id=command_id or f"mcp-note-delete-{uuid.uuid4()}").delete_note(note_id)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-note-delete",
+                payload={"note_id": note_id},
+            )
+            return NoteApplicationService(db, user, command_id=effective_command_id).delete_note(note_id)
 
     def update_task(self, *, task_id: str, patch: Any, auth_token: str | None = None, command_id: str | None = None) -> dict:
         self._require_token(auth_token)
@@ -2662,7 +3126,11 @@ class AgentTaskService:
             self._assert_project_allowed(state.project_id)
             normalized_patch = self._normalize_task_patch_input(patch)
             payload = TaskPatch(**normalized_patch)
-            return TaskApplicationService(db, user, command_id=command_id or f"mcp-patch-{uuid.uuid4()}").patch_task(task_id, payload)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-task-patch",
+                payload={"task_id": task_id, "patch": normalized_patch},
+            )
+            return TaskApplicationService(db, user, command_id=effective_command_id).patch_task(task_id, payload)
 
     def complete_task(self, *, task_id: str, auth_token: str | None = None, command_id: str | None = None) -> dict:
         self._require_token(auth_token)
@@ -2673,7 +3141,11 @@ class AgentTaskService:
                 raise HTTPException(status_code=404, detail="Task not found")
             self._assert_workspace_allowed(state.workspace_id)
             self._assert_project_allowed(state.project_id)
-            return TaskApplicationService(db, user, command_id=command_id or f"mcp-complete-{uuid.uuid4()}").complete_task(task_id)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-task-complete",
+                payload={"task_id": task_id},
+            )
+            return TaskApplicationService(db, user, command_id=effective_command_id).complete_task(task_id)
 
     def add_task_comment(
         self,
@@ -2692,7 +3164,11 @@ class AgentTaskService:
             self._assert_workspace_allowed(state.workspace_id)
             self._assert_project_allowed(state.project_id)
             payload = CommentCreate(body=body)
-            return TaskApplicationService(db, user, command_id=command_id or f"mcp-comment-{uuid.uuid4()}").add_comment(task_id, payload)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-task-comment",
+                payload={"task_id": task_id, "body": body},
+            )
+            return TaskApplicationService(db, user, command_id=effective_command_id).add_comment(task_id, payload)
 
     def request_task_automation_run(
         self,
@@ -2711,7 +3187,11 @@ class AgentTaskService:
             self._assert_workspace_allowed(state.workspace_id)
             self._assert_project_allowed(state.project_id)
             payload = TaskAutomationRun(instruction=instruction)
-            return TaskApplicationService(db, user, command_id=command_id or f"mcp-run-{uuid.uuid4()}").request_automation_run(task_id, payload)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-task-run",
+                payload={"task_id": task_id, "instruction": instruction},
+            )
+            return TaskApplicationService(db, user, command_id=effective_command_id).request_automation_run(task_id, payload)
 
     def bulk_task_action(
         self,
@@ -2740,7 +3220,11 @@ class AgentTaskService:
             if not cleaned:
                 return {"updated": 0}
             bulk = BulkAction(task_ids=cleaned, action=str(action), payload=payload)
-            return TaskApplicationService(db, user, command_id=command_id or f"mcp-bulk-{uuid.uuid4()}").bulk_action(bulk)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-task-bulk",
+                payload={"task_ids": cleaned, "action": str(action), "payload": payload},
+            )
+            return TaskApplicationService(db, user, command_id=effective_command_id).bulk_action(bulk)
 
     def archive_all_tasks(
         self,
@@ -2776,7 +3260,16 @@ class AgentTaskService:
             if not ids:
                 return {"updated": 0}
             bulk = BulkAction(task_ids=ids, action="archive", payload={})
-            return TaskApplicationService(db, user, command_id=command_id or f"mcp-archive-all-{uuid.uuid4()}").bulk_action(bulk)
+            effective_command_id = command_id or self._fallback_command_id(
+                prefix="mcp-task-archive-all",
+                payload={
+                    "workspace_id": workspace_id,
+                    "project_id": project_id,
+                    "q": q,
+                    "ids": ids,
+                },
+            )
+            return TaskApplicationService(db, user, command_id=effective_command_id).bulk_action(bulk)
 
     def archive_all_notes(
         self,

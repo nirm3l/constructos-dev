@@ -147,6 +147,12 @@ export function MarkdownModeToggle({
   const rootRef = React.useRef<HTMLDivElement | null>(null)
   const [isFullscreen, setIsFullscreen] = React.useState(false)
 
+  const isNativeFullscreenSurface = React.useCallback((surface: HTMLElement | null): boolean => {
+    if (!surface) return false
+    const doc = document as Document & { webkitFullscreenElement?: Element | null }
+    return document.fullscreenElement === surface || doc.webkitFullscreenElement === surface
+  }, [])
+
   const getEditorSurface = React.useCallback((): HTMLElement | null => {
     if (!rootRef.current) return null
     return rootRef.current.closest('.md-editor-surface') as HTMLElement | null
@@ -154,8 +160,22 @@ export function MarkdownModeToggle({
 
   const syncFullscreenState = React.useCallback(() => {
     const surface = getEditorSurface()
-    setIsFullscreen(Boolean(surface?.classList.contains('md-editor-fullscreen')))
-  }, [getEditorSurface])
+    const classFullscreen = Boolean(surface?.classList.contains('md-editor-fullscreen'))
+    const nativeFullscreen = isNativeFullscreenSurface(surface)
+    setIsFullscreen(classFullscreen || nativeFullscreen)
+  }, [getEditorSurface, isNativeFullscreenSurface])
+
+  const ensureBodyFullscreenClass = React.useCallback(() => {
+    const doc = document as Document & { webkitFullscreenElement?: Element | null }
+    const hasAnyFullscreenSurface = Boolean(document.querySelector('.md-editor-surface.md-editor-fullscreen'))
+      || Boolean(document.fullscreenElement)
+      || Boolean(doc.webkitFullscreenElement)
+    if (hasAnyFullscreenSurface) {
+      document.body.classList.add('md-fullscreen-open')
+    } else {
+      document.body.classList.remove('md-fullscreen-open')
+    }
+  }, [])
 
   const broadcastFullscreenChange = React.useCallback(() => {
     window.dispatchEvent(new Event('md-fullscreen-change'))
@@ -169,51 +189,110 @@ export function MarkdownModeToggle({
       const surface = getEditorSurface()
       if (!surface || !surface.classList.contains('md-editor-fullscreen')) return
       surface.classList.remove('md-editor-fullscreen')
-      if (!document.querySelector('.md-editor-surface.md-editor-fullscreen')) {
-        document.body.classList.remove('md-fullscreen-open')
-      }
+      ensureBodyFullscreenClass()
       broadcastFullscreenChange()
     }
 
-    const onFullscreenChange = () => syncFullscreenState()
+    const onFullscreenChange = () => {
+      const surface = getEditorSurface()
+      if (!surface) return
+      if (isNativeFullscreenSurface(surface)) {
+        surface.classList.add('md-editor-fullscreen')
+      } else {
+        surface.classList.remove('md-editor-fullscreen')
+      }
+      ensureBodyFullscreenClass()
+      syncFullscreenState()
+    }
 
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('md-fullscreen-change', onFullscreenChange)
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+    document.addEventListener('webkitfullscreenchange', onFullscreenChange as EventListener)
     return () => {
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('md-fullscreen-change', onFullscreenChange)
+      document.removeEventListener('fullscreenchange', onFullscreenChange)
+      document.removeEventListener('webkitfullscreenchange', onFullscreenChange as EventListener)
       const surface = getEditorSurface()
       if (surface && surface.classList.contains('md-editor-fullscreen')) {
         surface.classList.remove('md-editor-fullscreen')
-        if (!document.querySelector('.md-editor-surface.md-editor-fullscreen')) {
-          document.body.classList.remove('md-fullscreen-open')
-        }
+        ensureBodyFullscreenClass()
         broadcastFullscreenChange()
       }
     }
-  }, [broadcastFullscreenChange, getEditorSurface, syncFullscreenState])
+  }, [broadcastFullscreenChange, ensureBodyFullscreenClass, getEditorSurface, isNativeFullscreenSurface, syncFullscreenState])
 
-  const toggleFullscreen = React.useCallback(() => {
+  const toggleFullscreen = React.useCallback(async () => {
     const surface = getEditorSurface()
     if (!surface) return
 
-    const activeSurface = document.querySelector('.md-editor-surface.md-editor-fullscreen') as HTMLElement | null
+    const doc = document as Document & {
+      webkitExitFullscreen?: () => Promise<void> | void
+      webkitFullscreenElement?: Element | null
+    }
+    const activeSurface = (
+      document.querySelector('.md-editor-surface.md-editor-fullscreen') as HTMLElement | null
+    ) || (
+      (document.fullscreenElement || doc.webkitFullscreenElement) as HTMLElement | null
+    )
+
     if (activeSurface && activeSurface !== surface) {
+      if (document.fullscreenElement || doc.webkitFullscreenElement) {
+        try {
+          if (document.exitFullscreen) {
+            await document.exitFullscreen()
+          } else if (doc.webkitExitFullscreen) {
+            await doc.webkitExitFullscreen()
+          }
+        } catch {
+          // Continue with class fallback cleanup below.
+        }
+      }
       activeSurface.classList.remove('md-editor-fullscreen')
     }
 
-    const nextFullscreen = !surface.classList.contains('md-editor-fullscreen')
-    surface.classList.toggle('md-editor-fullscreen', nextFullscreen)
+    const currentlyNativeFullscreen = isNativeFullscreenSurface(surface)
+    const currentlyClassFullscreen = surface.classList.contains('md-editor-fullscreen')
+    const nextFullscreen = !(currentlyNativeFullscreen || currentlyClassFullscreen)
 
-    if (nextFullscreen || document.querySelector('.md-editor-surface.md-editor-fullscreen')) {
-      document.body.classList.add('md-fullscreen-open')
+    if (nextFullscreen) {
+      const element = surface as HTMLElement & {
+        webkitRequestFullscreen?: () => Promise<void> | void
+      }
+      let nativeEntered = false
+      if (typeof element.requestFullscreen === 'function' || typeof element.webkitRequestFullscreen === 'function') {
+        try {
+          if (typeof element.requestFullscreen === 'function') {
+            await element.requestFullscreen()
+          } else if (typeof element.webkitRequestFullscreen === 'function') {
+            await element.webkitRequestFullscreen()
+          }
+          nativeEntered = true
+        } catch {
+          nativeEntered = false
+        }
+      }
+      surface.classList.toggle('md-editor-fullscreen', nativeEntered || nextFullscreen)
     } else {
-      document.body.classList.remove('md-fullscreen-open')
+      if (currentlyNativeFullscreen && document.fullscreenElement === surface) {
+        try {
+          if (document.exitFullscreen) {
+            await document.exitFullscreen()
+          } else if (doc.webkitExitFullscreen) {
+            await doc.webkitExitFullscreen()
+          }
+        } catch {
+          // Ignore and still apply class cleanup.
+        }
+      }
+      surface.classList.remove('md-editor-fullscreen')
     }
 
+    ensureBodyFullscreenClass()
     setIsFullscreen(nextFullscreen)
     broadcastFullscreenChange()
-  }, [broadcastFullscreenChange, getEditorSurface])
+  }, [broadcastFullscreenChange, ensureBodyFullscreenClass, getEditorSurface, isNativeFullscreenSurface])
 
   const onViewValueChange = React.useCallback((nextValue: string) => {
     if (nextValue === 'write' || nextValue === 'preview' || nextValue === 'split') {

@@ -275,6 +275,7 @@ type TasksPanelProps = {
   toggleSearchTag: (tag: string) => void
   clearSearchTags: () => void
   boardData: ProjectBoard | undefined
+  actorNames: Record<string, string>
   onOpenTaskEditor: (taskId: string) => void
   onOpenSpecification: (specificationId: string, projectId: string) => void
   specificationNames: Record<string, string>
@@ -305,6 +306,7 @@ export function TasksPanel({
   toggleSearchTag,
   clearSearchTags,
   boardData,
+  actorNames,
   onOpenTaskEditor,
   onOpenSpecification,
   specificationNames,
@@ -317,6 +319,12 @@ export function TasksPanel({
   onCompleteTask,
   onNewTask,
 }: TasksPanelProps) {
+  const getAssigneeLabel = React.useCallback((task: Task): string => {
+    const assigneeId = String(task.assignee_id || '').trim()
+    if (!assigneeId) return ''
+    return String(actorNames?.[assigneeId] || assigneeId).trim()
+  }, [actorNames])
+
   const selectedGroupFilter = ''
 
   React.useEffect(() => {
@@ -893,6 +901,7 @@ export function TasksPanel({
                   >
                     <TaskListItem
                       task={task}
+                      assigneeLabel={getAssigneeLabel(task)}
                       onOpen={onOpenTaskEditor}
                       onOpenSpecification={onOpenSpecification}
                       onTagClick={toggleSearchTag}
@@ -911,6 +920,7 @@ export function TasksPanel({
                   <TaskListItem
                     key={task.id}
                     task={task}
+                    assigneeLabel={getAssigneeLabel(task)}
                     onOpen={onOpenTaskEditor}
                     onOpenSpecification={onOpenSpecification}
                     onTagClick={toggleSearchTag}
@@ -1017,6 +1027,7 @@ export function TasksPanel({
                             >
                               <TaskListItem
                                 task={task}
+                                assigneeLabel={getAssigneeLabel(task)}
                                 onOpen={onOpenTaskEditor}
                                 onOpenSpecification={onOpenSpecification}
                                 onTagClick={toggleSearchTag}

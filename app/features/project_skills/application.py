@@ -9,13 +9,13 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from features.rules.application import ProjectRuleApplicationService
 from shared.core import Project, ProjectRuleCreate, ProjectRulePatch, User, ensure_project_access, ensure_role
-from shared.models import ProjectRule, ProjectSkill, WorkspaceSkill
+from shared.models import ProjectMember, ProjectRule, ProjectSkill, User as UserModel, WorkspaceMember, WorkspaceSkill
 
 from .read_models import load_project_skill_view, load_workspace_skill_view
 
@@ -25,6 +25,30 @@ _MAX_SOURCE_BYTES = 1024 * 1024
 _KEY_SANITIZER_RE = re.compile(r"[^a-z0-9]+")
 _FILE_NAME_SANITIZER_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _FRONTMATTER_FIELD_RE = re.compile(r"^([A-Za-z0-9_-]+)\s*:\s*(.*)$")
+_TEAM_MODE_SKILL_KEY = "team_mode"
+_TEAM_MODE_WORKSPACE_ROLE = "Admin"
+_TEAM_MODE_AGENT_SPECS: tuple[dict[str, str], ...] = (
+    {
+        "username": "agent.m0rph3u5",
+        "full_name": "M0rph3u5",
+        "project_role": "TeamLeadAgent",
+    },
+    {
+        "username": "agent.tr1n1ty",
+        "full_name": "Tr1n1ty",
+        "project_role": "DeveloperAgent",
+    },
+    {
+        "username": "agent.n30",
+        "full_name": "N30",
+        "project_role": "DeveloperAgent",
+    },
+    {
+        "username": "agent.0r4cl3",
+        "full_name": "0r4cl3",
+        "project_role": "QAAgent",
+    },
+)
 
 
 def _normalize_mode(raw: str) -> str:
@@ -432,6 +456,152 @@ class ProjectSkillApplicationService:
         if not created_rule_id:
             raise HTTPException(status_code=500, detail="Skill rule creation failed")
         return created_rule_id
+
+    def _ensure_team_mode_workspace_agent(
+        self,
+        *,
+        workspace_id: str,
+        username: str,
+        full_name: str,
+    ) -> UserModel:
+        normalized_username = str(username or "").strip().lower()
+        normalized_full_name = str(full_name or "").strip() or normalized_username
+        user_row = self.db.execute(
+            select(UserModel).where(func.lower(UserModel.username) == normalized_username)
+        ).scalar_one_or_none()
+        if user_row is not None:
+            if str(user_row.user_type or "").strip().lower() != "agent":
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f'Team Mode requires username "{normalized_username}" to be an agent user. '
+                        "Found a non-agent user with the same username."
+                    ),
+                )
+            user_row.full_name = normalized_full_name
+            user_row.password_hash = None
+            user_row.must_change_password = False
+            user_row.password_changed_at = None
+            user_row.is_active = True
+            user_row.user_type = "agent"
+        else:
+            user_row = UserModel(
+                username=normalized_username,
+                full_name=normalized_full_name,
+                user_type="agent",
+                password_hash=None,
+                must_change_password=False,
+                password_changed_at=None,
+                is_active=True,
+                theme="dark",
+                timezone="UTC",
+                notifications_enabled=True,
+                agent_chat_model="",
+                agent_chat_reasoning_effort="medium",
+            )
+            self.db.add(user_row)
+            self.db.flush()
+
+        workspace_member = self.db.execute(
+            select(WorkspaceMember).where(
+                WorkspaceMember.workspace_id == workspace_id,
+                WorkspaceMember.user_id == user_row.id,
+            )
+        ).scalar_one_or_none()
+        if workspace_member is None:
+            self.db.add(
+                WorkspaceMember(
+                    workspace_id=workspace_id,
+                    user_id=user_row.id,
+                    role=_TEAM_MODE_WORKSPACE_ROLE,
+                )
+            )
+        elif str(workspace_member.role or "").strip() != _TEAM_MODE_WORKSPACE_ROLE:
+            workspace_member.role = _TEAM_MODE_WORKSPACE_ROLE
+        return user_row
+
+    def _ensure_team_mode_project_membership(self, *, project: Project) -> None:
+        for spec in _TEAM_MODE_AGENT_SPECS:
+            user_row = self._ensure_team_mode_workspace_agent(
+                workspace_id=project.workspace_id,
+                username=spec["username"],
+                full_name=spec["full_name"],
+            )
+            expected_project_role = str(spec["project_role"])
+            project_member = self.db.execute(
+                select(ProjectMember).where(
+                    ProjectMember.workspace_id == project.workspace_id,
+                    ProjectMember.project_id == project.id,
+                    ProjectMember.user_id == user_row.id,
+                )
+            ).scalar_one_or_none()
+            if project_member is None:
+                self.db.add(
+                    ProjectMember(
+                        workspace_id=project.workspace_id,
+                        project_id=project.id,
+                        user_id=user_row.id,
+                        role=expected_project_role,
+                    )
+                )
+                continue
+            if str(project_member.role or "").strip() != expected_project_role:
+                project_member.role = expected_project_role
+
+    def _apply_team_mode_contract_if_needed(self, *, skill: ProjectSkill) -> None:
+        if str(skill.skill_key or "").strip().lower() != _TEAM_MODE_SKILL_KEY:
+            return
+        ensure_role(self.db, skill.workspace_id, self.user.id, {"Owner", "Admin"})
+        project = _require_project_scope(
+            self.db,
+            workspace_id=skill.workspace_id,
+            project_id=skill.project_id,
+        )
+        self._ensure_team_mode_project_membership(project=project)
+        self.db.flush()
+
+    def _build_team_mode_roster_snapshot(self, *, project: Project) -> list[dict[str, Any]]:
+        roster: list[dict[str, Any]] = []
+        for spec in _TEAM_MODE_AGENT_SPECS:
+            normalized_username = str(spec["username"]).strip().lower()
+            user_row = self.db.execute(
+                select(UserModel).where(func.lower(UserModel.username) == normalized_username)
+            ).scalar_one_or_none()
+            user_id = str(user_row.id) if user_row is not None else ""
+            workspace_member = None
+            project_member = None
+            if user_row is not None:
+                workspace_member = self.db.execute(
+                    select(WorkspaceMember).where(
+                        WorkspaceMember.workspace_id == project.workspace_id,
+                        WorkspaceMember.user_id == user_row.id,
+                    )
+                ).scalar_one_or_none()
+                project_member = self.db.execute(
+                    select(ProjectMember).where(
+                        ProjectMember.workspace_id == project.workspace_id,
+                        ProjectMember.project_id == project.id,
+                        ProjectMember.user_id == user_row.id,
+                    )
+                ).scalar_one_or_none()
+            roster.append(
+                {
+                    "username": str(spec["username"]),
+                    "full_name": str(spec["full_name"]),
+                    "expected_project_role": str(spec["project_role"]),
+                    "user_id": user_id or None,
+                    "user_type": (str(user_row.user_type or "").strip() if user_row is not None else None),
+                    "workspace_member_role": (
+                        str(workspace_member.role or "").strip() if workspace_member is not None else None
+                    ),
+                    "project_member_role": (
+                        str(project_member.role or "").strip() if project_member is not None else None
+                    ),
+                    "workspace_member_present": workspace_member is not None,
+                    "project_member_present": project_member is not None,
+                }
+            )
+        return roster
 
     def _import_skill_document(
         self,
@@ -896,6 +1066,7 @@ class ProjectSkillApplicationService:
             source_content=source_content,
             create_if_missing=True,
         )
+        self._apply_team_mode_contract_if_needed(skill=skill)
         skill.generated_rule_id = generated_rule_id
         skill.updated_by = self.user.id
         self.db.commit()
@@ -903,6 +1074,21 @@ class ProjectSkillApplicationService:
         view = load_project_skill_view(self.db, skill_id)
         if view is None:
             raise HTTPException(status_code=404, detail="Project skill not found")
+        if str(skill.skill_key or "").strip().lower() == _TEAM_MODE_SKILL_KEY:
+            project = _require_project_scope(
+                self.db,
+                workspace_id=skill.workspace_id,
+                project_id=skill.project_id,
+            )
+            roster = self._build_team_mode_roster_snapshot(project=project)
+            view["team_mode_roster"] = roster
+            view["team_mode_contract_complete"] = all(
+                bool(item.get("user_id"))
+                and bool(item.get("workspace_member_present"))
+                and bool(item.get("project_member_present"))
+                and str(item.get("project_member_role") or "").strip() == str(item.get("expected_project_role") or "").strip()
+                for item in roster
+            )
         return view
 
     def patch_project_skill(self, skill_id: str, patch: dict[str, Any]) -> dict[str, Any]:

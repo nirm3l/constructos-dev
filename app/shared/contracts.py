@@ -452,3 +452,11 @@ class NoteGroupCommandState:
     workspace_id: str
     project_id: str
     is_deleted: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectCommandState:
+    id: str
+    workspace_id: str
+    is_deleted: bool
+    custom_statuses: list[str] | None = None
