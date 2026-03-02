@@ -587,6 +587,20 @@ export type GraphProjectSubgraph = {
   edges: GraphSubgraphEdge[]
 }
 
+export type GraphLayoutPosition = {
+  entity_id: string
+  x: number
+  y: number
+}
+
+export type GraphAiLayoutResult = {
+  project_id: string
+  project_name: string
+  graph_signature: string
+  strategy: string
+  positions: GraphLayoutPosition[]
+}
+
 export type EventStormingOverview = {
   project_id: string
   project_name: string

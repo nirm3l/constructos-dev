@@ -9,6 +9,7 @@ import {
   getProjectEventStormingEntityLinks,
   patchProject,
   patchProjectEventStormingLinkReview,
+  postProjectGraphAiLayout,
 } from '../../api'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import type {
@@ -38,6 +39,60 @@ function toErrorMessage(err: unknown): string {
   if (err instanceof Error && err.message.trim()) return err.message.trim()
   if (typeof err === 'string' && err.trim()) return err.trim()
   return 'Unable to load knowledge graph data.'
+}
+
+function hashLayoutFingerprint(value: string): string {
+  let hash = 2166136261
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0')
+}
+
+type StoredGraphLayout = {
+  positions: Array<{ entity_id: string; x: number; y: number }>
+  updated_at: string
+}
+
+function readStoredGraphLayout(storageKey: string): Map<string, { x: number; y: number }> {
+  if (typeof window === 'undefined') return new Map()
+  try {
+    const raw = window.localStorage.getItem(storageKey)
+    if (!raw) return new Map()
+    const parsed = JSON.parse(raw) as StoredGraphLayout
+    const rows = Array.isArray(parsed?.positions) ? parsed.positions : []
+    const out = new Map<string, { x: number; y: number }>()
+    for (const row of rows) {
+      const entityId = String(row?.entity_id || '').trim()
+      if (!entityId) continue
+      const x = Number(row?.x)
+      const y = Number(row?.y)
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+      out.set(entityId, { x, y })
+    }
+    return out
+  } catch {
+    return new Map()
+  }
+}
+
+function writeStoredGraphLayout(storageKey: string, nodes: FlowNode<ReactFlowNodeData>[]): void {
+  if (typeof window === 'undefined') return
+  try {
+    const positions = nodes.map((node) => ({
+      entity_id: String(node.id || ''),
+      x: Number(node.position?.x || 0),
+      y: Number(node.position?.y || 0),
+    }))
+    const payload: StoredGraphLayout = {
+      positions,
+      updated_at: new Date().toISOString(),
+    }
+    window.localStorage.setItem(storageKey, JSON.stringify(payload))
+  } catch {
+    // Ignore storage failures and keep in-memory layout only.
+  }
 }
 
 type VizNode = {
@@ -564,6 +619,7 @@ export function ProjectKnowledgeGraphPanel({
   const graphRef = React.useRef<any>(null)
   const graphShellRef = React.useRef<HTMLDivElement | null>(null)
   const graphAltShellRef = React.useRef<HTMLDivElement | null>(null)
+  const graphAltLayoutSignatureRef = React.useRef<string>('')
   const graphCanvasRef = React.useRef<HTMLDivElement | null>(null)
   const eventStormingShellRef = React.useRef<HTMLDivElement | null>(null)
   const graphAltFlowRef = React.useRef<ReactFlowInstance<FlowNode<ReactFlowNodeData>, FlowEdge> | null>(null)
@@ -760,6 +816,37 @@ export function ProjectKnowledgeGraphPanel({
         queryClient.invalidateQueries({ queryKey: ['project-event-storming-overview', userId, projectId] }),
         queryClient.invalidateQueries({ queryKey: ['project-event-storming-subgraph', userId, projectId] }),
       ])
+    },
+  })
+
+  const graphAiLayoutMutation = useMutation({
+    mutationFn: async () => {
+      const visibleNodeIds = new Set(
+        graphAltVisibleNodes.map((node) => String(node.entity_id || '').trim()).filter(Boolean)
+      )
+      const nodes = graphAltVisibleNodes.map((node) => ({
+        entity_id: String(node.entity_id || ''),
+        entity_type: String(node.entity_type || 'Entity'),
+        title: String(node.title || node.entity_id || ''),
+        degree: Number(node.degree || 0),
+      }))
+      const edges = filteredGraph.edges
+        .filter((edge) => {
+          const source = String(edge.source_entity_id || '').trim()
+          const target = String(edge.target_entity_id || '').trim()
+          return Boolean(source && target && visibleNodeIds.has(source) && visibleNodeIds.has(target))
+        })
+        .map((edge) => ({
+          source_entity_id: String(edge.source_entity_id || ''),
+          target_entity_id: String(edge.target_entity_id || ''),
+          relationship: String(edge.relationship || 'RELATED'),
+        }))
+      return postProjectGraphAiLayout(userId, projectId, {
+        nodes,
+        edges,
+        node_width: 220,
+        node_height: 74,
+      })
     },
   })
   const evidenceById = React.useMemo(
@@ -1126,6 +1213,27 @@ export function ProjectKnowledgeGraphPanel({
       }),
     [filteredGraph.nodes, graphAltScopeNodeIdSet]
   )
+
+  const graphAltLayoutSignature = React.useMemo(() => {
+    const nodeRows = graphAltVisibleNodes
+      .map((node) => `${String(node.entity_id || '').trim()}|${String(node.entity_type || '').trim()}|${String(node.title || '').trim()}`)
+      .filter(Boolean)
+      .sort()
+    const visibleNodeIds = new Set(
+      graphAltVisibleNodes.map((node) => String(node.entity_id || '').trim()).filter(Boolean)
+    )
+    const edgeRows = filteredGraph.edges
+      .map((edge) => ({
+        source: String(edge.source_entity_id || '').trim(),
+        target: String(edge.target_entity_id || '').trim(),
+        relationship: String(edge.relationship || 'RELATED').trim().toUpperCase(),
+      }))
+      .filter((edge) => edge.source && edge.target && visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target))
+      .map((edge) => `${edge.source}>${edge.target}>${edge.relationship}`)
+      .sort()
+    const digest = hashLayoutFingerprint(`${nodeRows.join('||')}::${edgeRows.join('||')}`)
+    return `kg-alt:${projectId}:${digest}`
+  }, [filteredGraph.edges, graphAltVisibleNodes, projectId])
 
   const graphAltDependencyContext = React.useMemo(() => {
     const taskNodes = graphAltVisibleNodes.filter((node) => normalizeGraphEntityTypeKey(node.entity_type || '') === 'task')
@@ -1567,12 +1675,34 @@ export function ProjectKnowledgeGraphPanel({
   }, [filteredGraph.edges, graphAltCanvasNodes, graphAltDependencyContext, graphAltFlowNodes])
 
   React.useEffect(() => {
-    setGraphAltCanvasNodes(graphAltFlowNodes)
-  }, [graphAltFlowNodes])
+    const stored = readStoredGraphLayout(graphAltLayoutSignature)
+    setGraphAltCanvasNodes((current) => {
+      const keepCurrentPositions = graphAltLayoutSignatureRef.current === graphAltLayoutSignature
+      const currentById = new Map(
+        keepCurrentPositions
+          ? current.map((node) => [String(node.id || ''), { x: Number(node.position?.x || 0), y: Number(node.position?.y || 0) }])
+          : []
+      )
+      return graphAltFlowNodes.map((node) => {
+        const nodeId = String(node.id || '')
+        const persisted = stored.get(nodeId)
+        const carried = currentById.get(nodeId)
+        const position = persisted || carried
+        if (!position) return node
+        return { ...node, position }
+      })
+    })
+    graphAltLayoutSignatureRef.current = graphAltLayoutSignature
+  }, [graphAltFlowNodes, graphAltLayoutSignature])
 
   const onGraphAltNodesChange = React.useCallback((changes: NodeChange<FlowNode<ReactFlowNodeData>>[]) => {
-    setGraphAltCanvasNodes((current) => applyNodeChanges(changes, current))
-  }, [])
+    const hasPositionChange = changes.some((change) => change.type === 'position')
+    setGraphAltCanvasNodes((current) => {
+      const next = applyNodeChanges(changes, current)
+      if (hasPositionChange) writeStoredGraphLayout(graphAltLayoutSignature, next)
+      return next
+    })
+  }, [graphAltLayoutSignature])
 
   const eventStormingFlowNodes = React.useMemo(() => {
     if (!eventStormingNodes.length) return [] as FlowNode<ReactFlowNodeData>[]
@@ -2343,6 +2473,25 @@ export function ProjectKnowledgeGraphPanel({
     },
     [graphAltFlowNodes.length, isGraphAltFullscreen]
   )
+
+  const applyGraphAiLayout = React.useCallback(async () => {
+    setActionError(null)
+    const result = await graphAiLayoutMutation.mutateAsync()
+    const positionById = new Map(
+      (result.positions || []).map((row) => [String(row.entity_id || ''), { x: Number(row.x || 0), y: Number(row.y || 0) }])
+    )
+    setGraphAltCanvasNodes((current) => {
+      const next = current.map((node) => {
+        const nextPosition = positionById.get(String(node.id || ''))
+        if (!nextPosition) return node
+        return { ...node, position: nextPosition }
+      })
+      writeStoredGraphLayout(graphAltLayoutSignature, next)
+      return next
+    })
+    window.setTimeout(() => fitGraphAltViewport(260), 0)
+  }, [fitGraphAltViewport, graphAiLayoutMutation, graphAltLayoutSignature])
+
   const eventStormingHeaderStyle = React.useMemo(() => {
     const zoom = Math.max(0.35, Number(eventStormingViewportTransform.zoom || 1))
     const laneWidth = EVENT_STORMING_LANE_WIDTH * zoom
@@ -2850,6 +2999,16 @@ export function ProjectKnowledgeGraphPanel({
                                       }}
                                     >
                                       Reset focus
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="graph-alt-scope-reset"
+                                      disabled={graphAiLayoutMutation.isPending || graphAltCanvasNodes.length === 0}
+                                      onClick={() => {
+                                        void runAction('graph-ai-layout', applyGraphAiLayout)
+                                      }}
+                                    >
+                                      {graphAiLayoutMutation.isPending ? 'Applying AI layout...' : 'Apply AI layout'}
                                     </button>
                                   </section>
 

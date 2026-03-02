@@ -20,6 +20,7 @@ import type {
   EventStormingComponentLinks,
   EventStormingLinkReviewResult,
   EventStormingSubgraph,
+  GraphAiLayoutResult,
   GraphContextPack,
   ProjectKnowledgeSearchResult,
   GraphProjectOverview,
@@ -763,6 +764,21 @@ export const getProjectGraphSubgraph = (
     })}`,
     userId
   )
+
+export const postProjectGraphAiLayout = (
+  userId: string,
+  projectId: string,
+  payload: {
+    nodes: Array<{ entity_id: string; entity_type: string; title: string; degree: number }>
+    edges: Array<{ source_entity_id: string; target_entity_id: string; relationship: string }>
+    node_width?: number
+    node_height?: number
+  }
+) =>
+  api<GraphAiLayoutResult>(`/api/projects/${projectId}/knowledge-graph/layout`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
 
 export const searchProjectKnowledge = (
   userId: string,

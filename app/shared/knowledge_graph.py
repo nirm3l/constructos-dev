@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import threading
 from time import perf_counter
@@ -12,7 +13,10 @@ import httpx
 
 from .json_utils import parse_json_object
 from .observability import incr, observe, set_value
+from features.agents.codex_mcp_adapter import run_structured_codex_prompt_with_usage
 from .settings import (
+    AGENT_CODEX_MODEL,
+    AGENT_CODEX_REASONING_EFFORT,
     CONTEXT_PACK_EVIDENCE_TOP_K,
     GRAPH_CONTEXT_MAX_HOPS,
     GRAPH_CONTEXT_MAX_TOKENS,
@@ -784,6 +788,345 @@ def graph_get_project_subgraph(
         "edge_count": len(edges),
         "nodes": nodes,
         "edges": edges,
+    }
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _normalize_layout_input(
+    *,
+    nodes: Iterable[dict[str, Any]],
+    edges: Iterable[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    normalized_nodes: list[dict[str, Any]] = []
+    seen_node_ids: set[str] = set()
+    for row in nodes:
+        node_id = str(row.get("entity_id") or "").strip()
+        if not node_id or node_id in seen_node_ids:
+            continue
+        seen_node_ids.add(node_id)
+        normalized_nodes.append(
+            {
+                "entity_id": node_id,
+                "entity_type": str(row.get("entity_type") or "Entity").strip() or "Entity",
+                "title": str(row.get("title") or node_id).strip() or node_id,
+                "degree": max(0, _safe_int(row.get("degree"), 0)),
+            }
+        )
+
+    normalized_edges: list[dict[str, Any]] = []
+    seen_edges: set[tuple[str, str, str]] = set()
+    for row in edges:
+        source = str(row.get("source_entity_id") or "").strip()
+        target = str(row.get("target_entity_id") or "").strip()
+        if not source or not target or source == target:
+            continue
+        if source not in seen_node_ids or target not in seen_node_ids:
+            continue
+        relationship = str(row.get("relationship") or "RELATED").strip().upper() or "RELATED"
+        key = (source, target, relationship)
+        if key in seen_edges:
+            continue
+        seen_edges.add(key)
+        normalized_edges.append(
+            {
+                "source_entity_id": source,
+                "target_entity_id": target,
+                "relationship": relationship,
+            }
+        )
+
+    return normalized_nodes, normalized_edges
+
+
+def _build_graph_layout_signature(*, nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> str:
+    payload = {
+        "nodes": sorted(
+            [
+                {
+                    "entity_id": str(item.get("entity_id") or ""),
+                    "entity_type": str(item.get("entity_type") or ""),
+                    "title": str(item.get("title") or ""),
+                }
+                for item in nodes
+            ],
+            key=lambda item: str(item.get("entity_id") or ""),
+        ),
+        "edges": sorted(
+            [
+                {
+                    "source_entity_id": str(item.get("source_entity_id") or ""),
+                    "target_entity_id": str(item.get("target_entity_id") or ""),
+                    "relationship": str(item.get("relationship") or ""),
+                }
+                for item in edges
+            ],
+            key=lambda item: (
+                str(item.get("source_entity_id") or ""),
+                str(item.get("target_entity_id") or ""),
+                str(item.get("relationship") or ""),
+            ),
+        ),
+    }
+    blob = json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()
+
+
+def _heuristic_graph_layout_positions(
+    *,
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    node_width: int,
+    node_height: int,
+) -> dict[str, dict[str, int]]:
+    if not nodes:
+        return {}
+
+    node_ids = [str(row.get("entity_id") or "") for row in nodes if str(row.get("entity_id") or "")]
+    node_meta = {str(row.get("entity_id") or ""): row for row in nodes}
+    outgoing = {node_id: set() for node_id in node_ids}
+    incoming = {node_id: set() for node_id in node_ids}
+    indegree = {node_id: 0 for node_id in node_ids}
+
+    for row in edges:
+        source = str(row.get("source_entity_id") or "")
+        target = str(row.get("target_entity_id") or "")
+        if source not in outgoing or target not in outgoing or source == target:
+            continue
+        if target in outgoing[source]:
+            continue
+        outgoing[source].add(target)
+        incoming[target].add(source)
+        indegree[target] = int(indegree.get(target, 0)) + 1
+
+    def _node_sort_key(node_id: str) -> tuple[int, int, str]:
+        meta = node_meta.get(node_id) or {}
+        title = str(meta.get("title") or node_id).lower()
+        degree = max(0, _safe_int(meta.get("degree"), 0))
+        return (-degree, len(title), title)
+
+    depth: dict[str, int] = {}
+    queue = sorted([node_id for node_id, value in indegree.items() if value == 0], key=_node_sort_key)
+    for node_id in queue:
+        depth[node_id] = 0
+    seen = set(queue)
+
+    while queue:
+        current = queue.pop(0)
+        current_depth = int(depth.get(current, 0))
+        for child in sorted(outgoing.get(current) or [], key=_node_sort_key):
+            next_depth = current_depth + 1
+            if child not in depth or next_depth > depth[child]:
+                depth[child] = next_depth
+            indegree[child] = max(0, int(indegree.get(child, 0)) - 1)
+            if indegree[child] == 0 and child not in seen:
+                queue.append(child)
+                seen.add(child)
+
+    unresolved = sorted([node_id for node_id in node_ids if node_id not in depth], key=_node_sort_key)
+    max_depth = max(depth.values()) if depth else 0
+    for idx, node_id in enumerate(unresolved):
+        depth[node_id] = max_depth + 1 + idx
+
+    by_depth: dict[int, list[str]] = {}
+    for node_id in node_ids:
+        layer = int(depth.get(node_id, 0))
+        by_depth.setdefault(layer, []).append(node_id)
+    for layer in by_depth.values():
+        layer.sort(key=_node_sort_key)
+
+    ordered_depths = sorted(by_depth.keys())
+
+    def _reorder_layer(layer_ids: list[str], neighbor_layer: list[str], neighbor_getter: dict[str, set[str]]) -> list[str]:
+        if not layer_ids or not neighbor_layer:
+            return layer_ids
+        neighbor_index = {node_id: idx for idx, node_id in enumerate(neighbor_layer)}
+
+        def _barycenter(node_id: str) -> float:
+            indices = [neighbor_index[nid] for nid in (neighbor_getter.get(node_id) or set()) if nid in neighbor_index]
+            if not indices:
+                return float("inf")
+            return float(sum(indices)) / float(len(indices))
+
+        return sorted(layer_ids, key=lambda node_id: (_barycenter(node_id), *_node_sort_key(node_id)))
+
+    for _ in range(4):
+        for idx in range(1, len(ordered_depths)):
+            current_depth = ordered_depths[idx]
+            prev_depth = ordered_depths[idx - 1]
+            by_depth[current_depth] = _reorder_layer(by_depth[current_depth], by_depth[prev_depth], incoming)
+        for idx in range(len(ordered_depths) - 2, -1, -1):
+            current_depth = ordered_depths[idx]
+            next_depth = ordered_depths[idx + 1]
+            by_depth[current_depth] = _reorder_layer(by_depth[current_depth], by_depth[next_depth], outgoing)
+
+    x_pitch = max(140, int(node_width) + 54)
+    y_pitch = max(80, int(node_height) + 16)
+    positions: dict[str, dict[str, int]] = {}
+    for layer in ordered_depths:
+        rows = by_depth.get(layer) or []
+        for row_idx, node_id in enumerate(rows):
+            positions[node_id] = {
+                "x": max(0, 18 + int(layer) * x_pitch),
+                "y": max(0, 18 + int(row_idx) * y_pitch),
+            }
+    return positions
+
+
+def _llm_graph_layout_positions(
+    *,
+    project_name: str,
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    node_width: int,
+    node_height: int,
+    fallback_positions: dict[str, dict[str, int]],
+) -> tuple[dict[str, dict[str, int]], str]:
+    model = str(AGENT_CODEX_MODEL or "").strip()
+    if not model:
+        raise RuntimeError("Graph layout model is not configured")
+    if not nodes:
+        return {}, "codex"
+
+    output_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "positions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "entity_id": {"type": "string", "minLength": 1},
+                        "x": {"type": "number"},
+                        "y": {"type": "number"},
+                    },
+                    "required": ["entity_id", "x", "y"],
+                },
+            }
+        },
+        "required": ["positions"],
+    }
+
+    graph_payload = {
+        "project_name": str(project_name or "").strip(),
+        "node_width": int(node_width),
+        "node_height": int(node_height),
+        "nodes": [
+            {
+                "entity_id": str(row.get("entity_id") or ""),
+                "entity_type": str(row.get("entity_type") or "Entity"),
+                "title": str(row.get("title") or ""),
+                "degree": int(row.get("degree") or 0),
+            }
+            for row in nodes
+        ],
+        "edges": [
+            {
+                "source_entity_id": str(row.get("source_entity_id") or ""),
+                "target_entity_id": str(row.get("target_entity_id") or ""),
+                "relationship": str(row.get("relationship") or "RELATED"),
+            }
+            for row in edges
+        ],
+    }
+    prompt = (
+        "Compute a graph layout and return JSON that matches the schema.\n"
+        "Use only the graph payload below as context.\n"
+        "Goal: reduce edge crossings and keep dependency flow readable.\n"
+        "Rules:\n"
+        "- include every node exactly once in positions\n"
+        "- non-negative integer coordinates\n"
+        "- prefer left-to-right direction for dependency chains\n"
+        "- avoid overlapping nodes\n\n"
+        "Graph payload:\n"
+        f"{json.dumps(graph_payload, ensure_ascii=True)}\n"
+    )
+    parsed_payload, _ = run_structured_codex_prompt_with_usage(
+        prompt=prompt,
+        output_schema=output_schema,
+        workspace_id=None,
+        session_key=f"knowledge-graph-layout-{project_name or 'project'}",
+        model=model,
+        reasoning_effort=str(AGENT_CODEX_REASONING_EFFORT or "").strip() or None,
+        mcp_servers=[],
+    )
+
+    rows = parsed_payload.get("positions") if isinstance(parsed_payload, dict) else None
+    if not isinstance(rows, list):
+        raise RuntimeError("Layout response does not include positions array")
+
+    out: dict[str, dict[str, int]] = {}
+    known_ids = {str(item.get("entity_id") or "") for item in nodes}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        entity_id = str(row.get("entity_id") or "").strip()
+        if not entity_id or entity_id not in known_ids:
+            continue
+        try:
+            x = int(float(row.get("x")))
+            y = int(float(row.get("y")))
+        except Exception:
+            continue
+        out[entity_id] = {"x": max(0, x), "y": max(0, y)}
+
+    if len(out) != len(known_ids):
+        raise RuntimeError("Layout response must provide coordinates for every graph node")
+    return out, "codex"
+
+
+def graph_generate_layout(
+    *,
+    project_id: str,
+    project_name: str,
+    nodes: Iterable[dict[str, Any]],
+    edges: Iterable[dict[str, Any]],
+    node_width: int = 220,
+    node_height: int = 74,
+) -> dict[str, Any]:
+    normalized_nodes, normalized_edges = _normalize_layout_input(nodes=nodes, edges=edges)
+    signature = _build_graph_layout_signature(nodes=normalized_nodes, edges=normalized_edges)
+    if not normalized_nodes:
+        return {
+            "project_id": project_id,
+            "project_name": project_name,
+            "graph_signature": signature,
+            "strategy": "empty",
+            "positions": [],
+        }
+
+    width = max(120, min(int(node_width or 220), 420))
+    height = max(48, min(int(node_height or 74), 280))
+    positions, strategy = _llm_graph_layout_positions(
+        project_name=project_name,
+        nodes=normalized_nodes,
+        edges=normalized_edges,
+        node_width=width,
+        node_height=height,
+        fallback_positions={},
+    )
+
+    ordered = sorted(normalized_nodes, key=lambda item: str(item.get("entity_id") or ""))
+    return {
+        "project_id": project_id,
+        "project_name": project_name,
+        "graph_signature": signature,
+        "strategy": strategy,
+        "positions": [
+            {
+                "entity_id": str(item.get("entity_id") or ""),
+                "x": int((positions.get(str(item.get("entity_id") or "")) or {}).get("x") or 0),
+                "y": int((positions.get(str(item.get("entity_id") or "")) or {}).get("y") or 0),
+            }
+            for item in ordered
+        ],
     }
 
 

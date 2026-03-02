@@ -19,6 +19,7 @@ from shared.knowledge_graph import (
     event_storming_get_entity_links,
     event_storming_get_project_overview,
     event_storming_get_project_subgraph,
+    graph_generate_layout,
     graph_context_pack,
     graph_get_project_overview,
     graph_get_project_subgraph,
@@ -47,6 +48,26 @@ class EventStormingLinkReviewPatch(BaseModel):
 
 class EventStormingBulkLinkReviewPatch(BaseModel):
     items: list[EventStormingLinkReviewPatch] = Field(default_factory=list)
+
+
+class GraphLayoutNodeIn(BaseModel):
+    entity_id: str = Field(min_length=1)
+    entity_type: str = Field(default="Entity")
+    title: str = Field(default="")
+    degree: int = Field(default=0)
+
+
+class GraphLayoutEdgeIn(BaseModel):
+    source_entity_id: str = Field(min_length=1)
+    target_entity_id: str = Field(min_length=1)
+    relationship: str = Field(default="RELATED")
+
+
+class GraphAiLayoutRequest(BaseModel):
+    nodes: list[GraphLayoutNodeIn] = Field(default_factory=list)
+    edges: list[GraphLayoutEdgeIn] = Field(default_factory=list)
+    node_width: int = Field(default=220, ge=120, le=420)
+    node_height: int = Field(default=74, ge=48, le=280)
 
 
 def _load_project_with_access(db: Session, user, project_id: str) -> Project:
@@ -184,6 +205,27 @@ def project_knowledge_graph_subgraph(
         )
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Knowledge graph is unavailable: {exc}") from exc
+
+
+@router.post("/api/projects/{project_id}/knowledge-graph/layout")
+def project_knowledge_graph_layout(
+    project_id: str,
+    payload: GraphAiLayoutRequest,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    project = _load_project_with_access(db, user, project_id)
+    try:
+        return graph_generate_layout(
+            project_id=project.id,
+            project_name=str(project.name or project.id),
+            nodes=[row.model_dump() for row in payload.nodes],
+            edges=[row.model_dump() for row in payload.edges],
+            node_width=payload.node_width,
+            node_height=payload.node_height,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"AI layout is unavailable: {exc}") from exc
 
 
 @router.get("/api/projects/{project_id}/knowledge/search")
