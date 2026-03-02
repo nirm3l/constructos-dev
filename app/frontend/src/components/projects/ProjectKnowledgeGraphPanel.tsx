@@ -2975,15 +2975,6 @@ export function ProjectKnowledgeGraphPanel({
                       <div className="meta">
                         Visual graph ({graphAltCanvasNodes.length} nodes, {graphAltFlowEdges.length} edges, task dependencies {graphAltTaskDependencyCount})
                       </div>
-                      <button
-                        className="action-icon"
-                        type="button"
-                        title={isGraphAltFullscreen ? 'Exit full screen' : 'Open full screen graph'}
-                        aria-label={isGraphAltFullscreen ? 'Exit full screen' : 'Open full screen graph'}
-                        onClick={() => void toggleGraphAltFullscreen()}
-                      >
-                        <Icon path={isGraphAltFullscreen ? 'M9 9H3V3h6v2H5v4h4v2zm12 0h-6V7h4V3h2v6zM9 21H3v-6h2v4h4v2zm12 0h-6v-2h4v-4h2v6z' : 'M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6'} />
-                      </button>
                     </div>
                     {!subgraph ? (
                       <div className="meta">Loading visual graph...</div>
@@ -2999,6 +2990,17 @@ export function ProjectKnowledgeGraphPanel({
                           ].join(' ').trim()}
                           ref={graphAltShellRef}
                         >
+                            {!isGraphAltFullscreen ? (
+                              <button
+                                className="action-icon graph-viz-enter-button"
+                                type="button"
+                                title="Open full screen graph"
+                                aria-label="Open full screen graph"
+                                onClick={() => void toggleGraphAltFullscreen()}
+                              >
+                                <Icon path="M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6" />
+                              </button>
+                            ) : null}
                             {isGraphAltFullscreen ? (
                               <button
                                 className="action-icon graph-viz-exit-button"
