@@ -6,6 +6,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import httpx
 from fastapi import HTTPException
@@ -28,6 +29,44 @@ _FRONTMATTER_FIELD_RE = re.compile(r"^([A-Za-z0-9_-]+)\s*:\s*(.*)$")
 _TEAM_MODE_SKILL_KEY = "team_mode"
 _GIT_DELIVERY_SKILL_KEY = "git_delivery"
 _GITHUB_DELIVERY_SKILL_KEY = "github_delivery"
+_GATE_POLICY_RULE_TITLE = "Gate Policy"
+_GATE_POLICY_RULE_TITLES = ("gate policy", "delivery gates", "workflow gates")
+_GATE_POLICY_RELEVANT_SKILL_KEYS = {
+    _TEAM_MODE_SKILL_KEY,
+    _GIT_DELIVERY_SKILL_KEY,
+    _GITHUB_DELIVERY_SKILL_KEY,
+}
+_DEFAULT_GATE_POLICY: dict[str, Any] = {
+    "version": 1,
+    "mode": "execution",
+    "required_checks": {
+        "team_mode": [
+            "role_coverage_present",
+            "dev_self_triggers_to_qa",
+            "qa_external_trigger_from_dev",
+            "lead_external_trigger_from_qa",
+            "lead_recurring_schedule_on_lead",
+            "required_triggers_present",
+            "event_storming_matches_expectation",
+            "deploy_target_declared",
+        ],
+        "delivery": [
+            "repo_context_present",
+            "git_contract_ok",
+            "dev_tasks_have_commit_evidence",
+            "dev_tasks_have_unique_commit_evidence",
+            "qa_has_verifiable_artifacts",
+            "deploy_execution_evidence_present",
+        ],
+    },
+    "runtime_deploy_health": {
+        "required": False,
+        "stack": "constructos-ws-default",
+        "port": None,
+        "health_path": "/health",
+        "require_http_200": True,
+    },
+}
 _SKILL_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     _GITHUB_DELIVERY_SKILL_KEY: (_GIT_DELIVERY_SKILL_KEY,),
     _TEAM_MODE_SKILL_KEY: (_GIT_DELIVERY_SKILL_KEY,),
@@ -419,6 +458,47 @@ class ProjectSkillApplicationService:
         derived = f"{base}:{normalized_suffix}"
         return derived[:64]
 
+    def _find_gate_policy_rule_id(self, *, workspace_id: str, project_id: str) -> str | None:
+        rules = self.db.execute(
+            select(ProjectRule).where(
+                ProjectRule.workspace_id == workspace_id,
+                ProjectRule.project_id == project_id,
+                ProjectRule.is_deleted == False,  # noqa: E712
+            )
+        ).scalars()
+        for rule in rules:
+            title = str(getattr(rule, "title", "") or "").strip().lower()
+            if any(marker in title for marker in _GATE_POLICY_RULE_TITLES):
+                return str(rule.id)
+        return None
+
+    def _ensure_gate_policy_rule_if_needed(
+        self,
+        *,
+        skill: ProjectSkill,
+        dependencies: list[dict[str, Any]],
+    ) -> str | None:
+        relevant_skill_keys = {str(skill.skill_key or "").strip().lower()}
+        relevant_skill_keys.update(str(item.get("skill_key") or "").strip().lower() for item in (dependencies or []))
+        if not relevant_skill_keys.intersection(_GATE_POLICY_RELEVANT_SKILL_KEYS):
+            return None
+        existing_rule_id = self._find_gate_policy_rule_id(workspace_id=skill.workspace_id, project_id=skill.project_id)
+        if existing_rule_id:
+            return existing_rule_id
+        rule_command_id = self._derive_command_id("gate-policy") or f"project-gate-policy-{uuid4().hex[:12]}"
+        created_rule = ProjectRuleApplicationService(self.db, self.user, command_id=rule_command_id).create_project_rule(
+            ProjectRuleCreate(
+                workspace_id=skill.workspace_id,
+                project_id=skill.project_id,
+                title=_GATE_POLICY_RULE_TITLE,
+                body=json.dumps(_DEFAULT_GATE_POLICY, ensure_ascii=True),
+            )
+        )
+        created_rule_id = str(created_rule.get("id") or "").strip()
+        if not created_rule_id:
+            raise HTTPException(status_code=500, detail="Gate policy rule creation failed")
+        return created_rule_id
+
     def _get_workspace_skill_by_key(self, *, workspace_id: str, skill_key: str) -> WorkspaceSkill | None:
         normalized_key = str(skill_key or "").strip().lower()
         if not normalized_key:
@@ -598,14 +678,8 @@ class ProjectSkillApplicationService:
         if self.command_id:
             rule_command_id = self._derive_command_id(f"rule-{skill.skill_key}") or self.command_id
         else:
-            refresh_marker = datetime.now(timezone.utc).isoformat()
-            refresh_payload = (
-                f"{skill.workspace_id}|{skill.project_id}|{skill.skill_key}|{skill.source_locator}|apply|{refresh_marker}".encode(
-                    "utf-8"
-                )
-            )
-            refresh_digest = hashlib.sha256(refresh_payload).hexdigest()[:24]
-            rule_command_id = f"project-skill-rule-apply-{refresh_digest}"
+            # No explicit command id: use a unique nonce to avoid replaying stale command executions.
+            rule_command_id = f"project-skill-rule-apply-{uuid4().hex}"
         created_rule = ProjectRuleApplicationService(self.db, self.user, command_id=rule_command_id).create_project_rule(
             ProjectRuleCreate(
                 workspace_id=skill.workspace_id,
@@ -1248,10 +1322,13 @@ class ProjectSkillApplicationService:
         self._assert_generated_rule_id_uniqueness(skill=skill)
         skill.updated_by = self.user.id
         self.db.commit()
+        gate_policy_rule_id = self._ensure_gate_policy_rule_if_needed(skill=skill, dependencies=dependencies)
 
         view = load_project_skill_view(self.db, skill_id)
         if view is None:
             raise HTTPException(status_code=404, detail="Project skill not found")
+        if gate_policy_rule_id:
+            view["gate_policy_rule_id"] = gate_policy_rule_id
         if str(skill.skill_key or "").strip().lower() == _TEAM_MODE_SKILL_KEY:
             project = _require_project_scope(
                 self.db,
@@ -1344,6 +1421,7 @@ class ProjectSkillApplicationService:
                 if exc.status_code != 404:
                     raise
 
+        skill.generated_rule_id = None
         skill.is_deleted = True
         skill.updated_by = self.user.id
         self.db.commit()

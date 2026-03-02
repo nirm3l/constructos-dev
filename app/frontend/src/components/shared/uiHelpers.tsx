@@ -188,9 +188,25 @@ export function MarkdownModeToggle({
       if (event.key !== 'Escape') return
       const surface = getEditorSurface()
       if (!surface || !surface.classList.contains('md-editor-fullscreen')) return
-      surface.classList.remove('md-editor-fullscreen')
-      ensureBodyFullscreenClass()
-      broadcastFullscreenChange()
+      const doc = document as Document & { webkitExitFullscreen?: () => Promise<void> | void; webkitFullscreenElement?: Element | null }
+      const inNativeFullscreen = document.fullscreenElement === surface || doc.webkitFullscreenElement === surface
+      const exitNative = async () => {
+        if (!inNativeFullscreen) return
+        try {
+          if (document.exitFullscreen) {
+            await document.exitFullscreen()
+          } else if (doc.webkitExitFullscreen) {
+            await doc.webkitExitFullscreen()
+          }
+        } catch {
+          // Fallback to class-mode cleanup below.
+        }
+      }
+      void exitNative().finally(() => {
+        surface.classList.remove('md-editor-fullscreen')
+        ensureBodyFullscreenClass()
+        broadcastFullscreenChange()
+      })
     }
 
     const onFullscreenChange = () => {

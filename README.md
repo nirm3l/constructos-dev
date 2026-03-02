@@ -191,17 +191,20 @@ export AGENT_CODEX_WORKSPACE_MOUNT="$PWD/codex-workspace"
 - After deploy, files created by Codex in `/home/app/workspace` are visible in `./codex-workspace` on host.
 
 Docker access from `task-app` (safe proxy path)
-- `task-app` uses `DOCKER_HOST=tcp://docker-socket-proxy:2375` by default.
+- `task-app` does not export `DOCKER_HOST` globally to the agent process.
+- Docker CLI wrapper uses `AGENT_DOCKER_PROXY_URL=tcp://docker-socket-proxy:2375` and injects `DOCKER_HOST` only when executing allowed Docker commands.
 - Direct Docker socket is mounted only in `docker-socket-proxy`, not in `task-app`.
 - This keeps Docker daemon exposure narrower than mounting `/var/run/docker.sock` directly into `task-app`.
 - Soft isolation is enabled by default inside `task-app` Docker CLI wrapper:
   - `AGENT_DOCKER_SOFT_ISOLATION=true`
   - `AGENT_DOCKER_PROJECT_NAME=constructos-ws-default`
   - `AGENT_DOCKER_ALLOWED_PROJECT_PREFIX=constructos-ws-`
+- Runtime hardening rewires `/usr/bin/docker` and `/usr/bin/docker-compose` to wrapper entrypoints so absolute-path CLI bypass is blocked.
 - With soft isolation enabled, allowed commands are limited to:
   - `docker compose` (forced to the configured project)
   - `docker ps` and `docker container ls` (auto-filtered to the configured project)
   - `docker info|version|context`
+- Important: this is still an application-level guardrail, not a full network security boundary. Any process with raw TCP access to the proxy endpoint can still attempt direct Docker API calls.
 
 ## Optional: Jira MCP (Separate Compose)
 1. Create local env file:

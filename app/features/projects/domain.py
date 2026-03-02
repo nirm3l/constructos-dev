@@ -63,7 +63,11 @@ class ProjectAggregate(Aggregate):
         chat_index_mode: str | None = None,
         chat_attachment_ingestion_mode: str | None = None,
         event_storming_enabled: bool | None = None,
+        updated_fields: list[str] | None = None,
     ) -> None:
+        # Keep an explicit mutation list in event payload so read-model projectors
+        # can distinguish intentional null updates from omitted parameters.
+        _ = updated_fields
         if name is not None:
             self.name = name
         if description is not None:

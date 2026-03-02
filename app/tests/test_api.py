@@ -891,6 +891,80 @@ def test_project_custom_statuses_can_be_configured_and_patched(tmp_path):
     assert board_after.json()['statuses'] == ['Backlog', 'In progress', 'Ready for QA', 'Done']
 
 
+def test_project_status_patch_does_not_reset_embedding_or_description(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    created = client.post(
+        '/api/projects',
+        json={
+            'workspace_id': ws_id,
+            'name': 'No reset patch project',
+            'description': 'keep-me',
+            'embedding_enabled': True,
+            'chat_index_mode': 'KG_AND_VECTOR',
+            'embedding_model': 'nomic-embed-text',
+            'custom_statuses': ['To do', 'In progress', 'Done'],
+        },
+    )
+    assert created.status_code == 200
+    project = created.json()
+    assert project['description'] == 'keep-me'
+    assert project['embedding_enabled'] is True
+    assert project['chat_index_mode'] == 'KG_AND_VECTOR'
+    assert project['embedding_model'] == 'nomic-embed-text'
+
+    patched = client.patch(
+        f"/api/projects/{project['id']}",
+        json={'custom_statuses': ['To do', 'Dev', 'QA', 'Lead', 'Done', 'Blocked']},
+    )
+    assert patched.status_code == 200
+    payload = patched.json()
+    assert payload['custom_statuses'] == ['To do', 'Dev', 'QA', 'Lead', 'Done', 'Blocked']
+    assert payload['description'] == 'keep-me'
+    assert payload['embedding_enabled'] is True
+    assert payload['chat_index_mode'] == 'KG_AND_VECTOR'
+    assert payload['embedding_model'] == 'nomic-embed-text'
+
+    refreshed = client.get('/api/bootstrap').json()
+    refreshed_project = next(p for p in refreshed['projects'] if p['id'] == project['id'])
+    assert refreshed_project['description'] == 'keep-me'
+    assert refreshed_project['embedding_enabled'] is True
+    assert refreshed_project['chat_index_mode'] == 'KG_AND_VECTOR'
+    assert refreshed_project['embedding_model'] == 'nomic-embed-text'
+
+
+def test_project_patch_can_explicitly_clear_nullable_field(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    created = client.post(
+        '/api/projects',
+        json={
+            'workspace_id': ws_id,
+            'name': 'Nullable clear project',
+            'context_pack_evidence_top_k': 12,
+        },
+    )
+    assert created.status_code == 200
+    project = created.json()
+    assert project['context_pack_evidence_top_k'] == 12
+
+    cleared = client.patch(
+        f"/api/projects/{project['id']}",
+        json={'context_pack_evidence_top_k': None},
+    )
+    assert cleared.status_code == 200
+    payload = cleared.json()
+    assert payload['context_pack_evidence_top_k'] is None
+
+    refreshed = client.get('/api/bootstrap').json()
+    refreshed_project = next(p for p in refreshed['projects'] if p['id'] == project['id'])
+    assert refreshed_project['context_pack_evidence_top_k'] is None
+
+
 def test_project_board_supports_tag_filtering(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -3791,7 +3865,7 @@ def test_agent_service_verify_team_mode_workflow_detects_missing_dev_triggers_an
             "title": "Prepare Docker Compose deploy",
             "status": "Lead",
             "assignee_id": lead,
-            "instruction": "Prepare deploy",
+            "instruction": "Prepare deploy for stack constructos-ws-default on port 6768 and verify /health.",
             "execution_triggers": [
                 {
                     "kind": "status_change",
@@ -3827,8 +3901,130 @@ def test_agent_service_verify_team_mode_workflow_detects_missing_dev_triggers_an
         workspace_id=ws_id,
     )
     assert passed["checks"]["dev_self_triggers_to_qa"] is True
+    assert passed["checks"]["deploy_target_declared"] is True
     assert passed["checks"]["required_triggers_present"] is True
     assert passed["ok"] is True
+
+
+def test_agent_service_verify_team_mode_workflow_single_lead_deploy_task_does_not_require_lead_to_lead_external(
+    tmp_path, monkeypatch
+):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={ws_id}")
+    assert catalog.status_code == 200
+    team_mode = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode['id']}/attach",
+        json={"workspace_id": ws_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+    applied = client.post(f"/api/project-skills/{attached.json()['id']}/apply")
+    assert applied.status_code == 200
+
+    members = client.get(f"/api/projects/{project_id}/members")
+    assert members.status_code == 200
+    items = members.json()["items"]
+    dev1 = next(item for item in items if item["user"]["username"] == "agent.tr1n1ty")["user_id"]
+    dev2 = next(item for item in items if item["user"]["username"] == "agent.n30")["user_id"]
+    qa = next(item for item in items if item["user"]["username"] == "agent.0r4cl3")["user_id"]
+    lead = next(item for item in items if item["user"]["username"] == "agent.m0rph3u5")["user_id"]
+
+    d1 = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Dev A",
+            "status": "Dev",
+            "assignee_id": dev1,
+            "instruction": "Implement and hand off to QA",
+            "execution_triggers": [{"kind": "status_change", "scope": "self", "to_statuses": ["QA"]}],
+        },
+    )
+    assert d1.status_code == 200
+    d2 = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Dev B",
+            "status": "Dev",
+            "assignee_id": dev2,
+            "instruction": "Implement and hand off to QA",
+            "execution_triggers": [{"kind": "status_change", "scope": "self", "to_statuses": ["QA"]}],
+        },
+    )
+    assert d2.status_code == 200
+
+    qa_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "QA task",
+            "status": "QA",
+            "assignee_id": qa,
+            "instruction": "Run QA validation",
+            "execution_triggers": [
+                {
+                    "kind": "status_change",
+                    "scope": "external",
+                    "to_statuses": ["QA"],
+                    "selector": {"task_ids": [d1.json()["id"], d2.json()["id"]]},
+                }
+            ],
+        },
+    )
+    assert qa_task.status_code == 200
+
+    lead_deploy = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Lead deploy readiness",
+            "status": "Lead",
+            "assignee_id": lead,
+            "instruction": "Lead review and deploy readiness cadence for constructos-ws-default on port 6768.",
+            "execution_triggers": [
+                {
+                    "kind": "status_change",
+                    "scope": "external",
+                    "to_statuses": ["Done"],
+                    "selector": {"task_ids": [qa_task.json()["id"]]},
+                },
+                {
+                    "kind": "schedule",
+                    "scheduled_at_utc": "2026-03-02T00:00:00Z",
+                    "recurring_rule": "every:1d",
+                    "run_on_statuses": ["Lead"],
+                },
+            ],
+        },
+    )
+    assert lead_deploy.status_code == 200
+
+    service = AgentTaskService()
+    verification = service.verify_team_mode_workflow(
+        project_id=project_id,
+        workspace_id=ws_id,
+    )
+    assert verification["checks"]["deploy_external_trigger_from_lead_required"] is False
+    assert verification["checks"]["deploy_target_declared"] is True
+    assert verification["checks"]["required_triggers_present"] is True
+    assert verification["ok"] is True
 
 
 def test_agent_service_verify_delivery_workflow_requires_commit_and_qa_evidence(tmp_path, monkeypatch):
@@ -3869,6 +4065,7 @@ def test_agent_service_verify_delivery_workflow_requires_commit_and_qa_evidence(
     items = members.json()["items"]
     dev = next(item for item in items if item["user"]["username"] == "agent.tr1n1ty")["user_id"]
     qa = next(item for item in items if item["user"]["username"] == "agent.0r4cl3")["user_id"]
+    lead = next(item for item in items if item["user"]["username"] == "agent.m0rph3u5")["user_id"]
 
     dev_task = client.post(
         "/api/tasks",
@@ -3892,12 +4089,26 @@ def test_agent_service_verify_delivery_workflow_requires_commit_and_qa_evidence(
         },
     )
     assert qa_task.status_code == 200
+    deploy_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Deploy app with Docker Compose",
+            "status": "Lead",
+            "assignee_id": lead,
+        },
+    )
+    assert deploy_task.status_code == 200
 
     service = AgentTaskService()
     failed = service.verify_delivery_workflow(project_id=project_id, workspace_id=ws_id)
     assert failed["checks"]["repo_context_present"] is True
     assert failed["checks"]["dev_tasks_have_commit_evidence"] is False
+    assert failed["checks"]["dev_tasks_have_unique_commit_evidence"] is True
     assert failed["checks"]["qa_has_verifiable_artifacts"] is False
+    assert failed["checks"]["deploy_execution_evidence_required"] is True
+    assert failed["checks"]["deploy_execution_evidence_present"] is False
     assert failed["ok"] is False
 
     dev_note = client.post(
@@ -3922,13 +4133,490 @@ def test_agent_service_verify_delivery_workflow_requires_commit_and_qa_evidence(
         },
     )
     assert qa_note.status_code == 200
+    deploy_note = client.post(
+        "/api/notes",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "task_id": deploy_task.json()["id"],
+            "title": "Deploy execution",
+            "body": "Ran docker compose up -d and verified http://localhost:6768/health status 200. Service is running.",
+        },
+    )
+    assert deploy_note.status_code == 200
 
     passed = service.verify_delivery_workflow(project_id=project_id, workspace_id=ws_id)
     assert passed["checks"]["repo_context_present"] is True
     assert passed["checks"]["git_contract_ok"] is True
     assert passed["checks"]["dev_tasks_have_commit_evidence"] is True
+    assert passed["checks"]["dev_tasks_have_unique_commit_evidence"] is True
     assert passed["checks"]["qa_has_verifiable_artifacts"] is True
+    assert passed["checks"]["deploy_execution_evidence_required"] is True
+    assert passed["checks"]["deploy_execution_evidence_present"] is True
     assert passed["ok"] is True
+
+
+def test_agent_service_verify_delivery_workflow_rejects_duplicate_commit_evidence_across_dev_tasks(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+
+    patched_project = client.patch(
+        f"/api/projects/{project_id}",
+        json={
+            "external_refs": [{"url": "https://github.com/example/delivery-demo", "title": "Repo"}],
+        },
+    )
+    assert patched_project.status_code == 200
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={ws_id}")
+    team_mode = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode['id']}/attach",
+        json={"workspace_id": ws_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+    applied = client.post(f"/api/project-skills/{attached.json()['id']}/apply")
+    assert applied.status_code == 200
+
+    members = client.get(f"/api/projects/{project_id}/members")
+    items = members.json()["items"]
+    dev1 = next(item for item in items if item["user"]["username"] == "agent.tr1n1ty")["user_id"]
+    dev2 = next(item for item in items if item["user"]["username"] == "agent.n30")["user_id"]
+    qa = next(item for item in items if item["user"]["username"] == "agent.0r4cl3")["user_id"]
+    lead = next(item for item in items if item["user"]["username"] == "agent.m0rph3u5")["user_id"]
+
+    dev_task_1 = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Dev task 1",
+            "status": "Dev",
+            "assignee_id": dev1,
+            "external_refs": [{"url": "commit:abc1234"}],
+        },
+    )
+    assert dev_task_1.status_code == 200
+    dev_task_2 = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Dev task 2",
+            "status": "Dev",
+            "assignee_id": dev2,
+            "external_refs": [{"url": "commit:abc1234"}],
+        },
+    )
+    assert dev_task_2.status_code == 200
+    qa_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "QA task",
+            "status": "QA",
+            "assignee_id": qa,
+        },
+    )
+    assert qa_task.status_code == 200
+    deploy_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Deploy app with Docker Compose",
+            "status": "Lead",
+            "assignee_id": lead,
+        },
+    )
+    assert deploy_task.status_code == 200
+
+    qa_note = client.post(
+        "/api/notes",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "task_id": qa_task.json()["id"],
+            "title": "QA report",
+            "body": "Pytest run passed with smoke log attached.",
+        },
+    )
+    assert qa_note.status_code == 200
+    deploy_note = client.post(
+        "/api/notes",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "task_id": deploy_task.json()["id"],
+            "title": "Deploy execution",
+            "body": "Deploy completed via docker compose and /health returned status 200.",
+        },
+    )
+    assert deploy_note.status_code == 200
+
+    service = AgentTaskService()
+    verification = service.verify_delivery_workflow(project_id=project_id, workspace_id=ws_id)
+    assert verification["checks"]["dev_tasks_have_commit_evidence"] is True
+    assert verification["checks"]["dev_tasks_have_unique_commit_evidence"] is False
+    assert verification["checks"]["qa_has_verifiable_artifacts"] is True
+    assert verification["checks"]["deploy_execution_evidence_present"] is True
+    assert "abc1234" in verification["missing"]["dev_duplicated_commit_shas"]
+    assert verification["ok"] is False
+
+
+def test_gate_verification_inactive_by_default_without_skills(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+
+    service = AgentTaskService()
+    team = service.verify_team_mode_workflow(project_id=project_id, workspace_id=ws_id)
+    delivery = service.verify_delivery_workflow(project_id=project_id, workspace_id=ws_id)
+
+    assert team["active"] is False
+    assert team["required_checks"] == []
+    assert team["ok"] is True
+    assert delivery["active"] is False
+    assert delivery["required_checks"] == []
+    assert delivery["ok"] is True
+
+
+def test_agent_service_verify_delivery_workflow_respects_gate_policy_runtime_deploy_health(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+
+    patched_project = client.patch(
+        f"/api/projects/{project_id}",
+        json={"external_refs": [{"url": "https://github.com/example/delivery-demo", "title": "Repo"}]},
+    )
+    assert patched_project.status_code == 200
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={ws_id}")
+    team_mode = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode['id']}/attach",
+        json={"workspace_id": ws_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+    applied = client.post(f"/api/project-skills/{attached.json()['id']}/apply")
+    assert applied.status_code == 200
+
+    members = client.get(f"/api/projects/{project_id}/members")
+    items = members.json()["items"]
+    dev = next(item for item in items if item["user"]["username"] == "agent.tr1n1ty")["user_id"]
+    qa = next(item for item in items if item["user"]["username"] == "agent.0r4cl3")["user_id"]
+    lead = next(item for item in items if item["user"]["username"] == "agent.m0rph3u5")["user_id"]
+
+    dev_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Dev implementation",
+            "status": "Dev",
+            "assignee_id": dev,
+            "external_refs": [{"url": "commit:abc1234"}],
+        },
+    )
+    assert dev_task.status_code == 200
+    qa_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "QA validation",
+            "status": "QA",
+            "assignee_id": qa,
+        },
+    )
+    assert qa_task.status_code == 200
+    deploy_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Deploy app",
+            "status": "Lead",
+            "assignee_id": lead,
+            "description": "Deploy to stack constructos-ws-default on port 6768",
+        },
+    )
+    assert deploy_task.status_code == 200
+
+    qa_note = client.post(
+        "/api/notes",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "task_id": qa_task.json()["id"],
+            "title": "QA report",
+            "body": "Pytest run passed and smoke test passed.",
+        },
+    )
+    assert qa_note.status_code == 200
+    deploy_note = client.post(
+        "/api/notes",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "task_id": deploy_task.json()["id"],
+            "title": "Deploy note",
+            "body": "docker compose up -d done; service healthy and running.",
+        },
+    )
+    assert deploy_note.status_code == 200
+
+    gate_rule = client.post(
+        "/api/project-rules",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Gate Policy",
+            "body": json.dumps(
+                {
+                    "required_checks": {
+                        "delivery": [
+                            "repo_context_present",
+                            "git_contract_ok",
+                            "dev_tasks_have_commit_evidence",
+                            "dev_tasks_have_unique_commit_evidence",
+                            "qa_has_verifiable_artifacts",
+                            "deploy_execution_evidence_present",
+                            "runtime_deploy_health_ok",
+                        ]
+                    },
+                    "runtime_deploy_health": {
+                        "required": True,
+                        "stack": "constructos-ws-default",
+                        "port": 6768,
+                        "health_path": "/health",
+                        "require_http_200": False,
+                    },
+                }
+            ),
+        },
+    )
+    assert gate_rule.status_code == 200
+
+    monkeypatch.setattr(
+        AgentTaskService,
+        "_run_runtime_deploy_health_check",
+        staticmethod(
+            lambda **_: {
+                "stack": "constructos-ws-default",
+                "port": 6768,
+                "health_path": "/health",
+                "stack_running": False,
+                "port_mapped": False,
+                "http_200": False,
+                "ok": False,
+                "error": "simulated",
+            }
+        ),
+    )
+    service = AgentTaskService()
+    failed = service.verify_delivery_workflow(project_id=project_id, workspace_id=ws_id)
+    assert failed["checks"]["runtime_deploy_health_required"] is True
+    assert failed["checks"]["runtime_deploy_health_ok"] is False
+    assert "runtime_deploy_health_ok" in failed["required_failed_checks"]
+    assert failed["ok"] is False
+
+    monkeypatch.setattr(
+        AgentTaskService,
+        "_run_runtime_deploy_health_check",
+        staticmethod(
+            lambda **_: {
+                "stack": "constructos-ws-default",
+                "port": 6768,
+                "health_path": "/health",
+                "stack_running": True,
+                "port_mapped": True,
+                "http_200": True,
+                "ok": True,
+                "error": None,
+            }
+        ),
+    )
+    passed = service.verify_delivery_workflow(project_id=project_id, workspace_id=ws_id)
+    assert passed["checks"]["runtime_deploy_health_required"] is True
+    assert passed["checks"]["runtime_deploy_health_ok"] is True
+    assert passed["required_failed_checks"] == []
+    assert passed["ok"] is True
+
+
+def test_runtime_deploy_health_check_uses_host_docker_internal_in_container(monkeypatch):
+    from types import SimpleNamespace
+    import urllib.request
+
+    from features.agents.service import AgentTaskService
+
+    def fake_subprocess_run(*_args, **_kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "State": "running",
+                        "Publishers": [{"PublishedPort": 6768}],
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+    class FakeResponse:
+        def __init__(self, status: int):
+            self.status = status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(url, timeout=3):  # noqa: ARG001
+        if str(url).startswith("http://host.docker.internal:6768/health"):
+            return FakeResponse(status=200)
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("features.agents.gates.subprocess.run", fake_subprocess_run)
+    monkeypatch.setattr("features.agents.gates.os.path.exists", lambda path: path == "/.dockerenv")
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = AgentTaskService._run_runtime_deploy_health_check(
+        stack="constructos-ws-default",
+        port=6768,
+        health_path="/health",
+        require_http_200=True,
+    )
+    assert result["stack_running"] is True
+    assert result["port_mapped"] is True
+    assert result["http_200"] is True
+    assert result["ok"] is True
+    assert result["http_url"] == "http://host.docker.internal:6768/health"
+
+
+def test_runtime_deploy_health_check_uses_linux_gateway_fallback(monkeypatch):
+    from types import SimpleNamespace
+    import urllib.request
+
+    from features.agents.service import AgentTaskService
+
+    def fake_subprocess_run(*_args, **_kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "State": "running",
+                        "Publishers": [{"PublishedPort": 6768}],
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+    class FakeResponse:
+        def __init__(self, status: int):
+            self.status = status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(url, timeout=3):  # noqa: ARG001
+        if str(url).startswith("http://172.17.0.1:6768/health"):
+            return FakeResponse(status=200)
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("features.agents.gates.subprocess.run", fake_subprocess_run)
+    monkeypatch.setattr("features.agents.gates.os.path.exists", lambda path: path == "/.dockerenv")
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = AgentTaskService._run_runtime_deploy_health_check(
+        stack="constructos-ws-default",
+        port=6768,
+        health_path="/health",
+        require_http_200=True,
+    )
+    assert result["stack_running"] is True
+    assert result["port_mapped"] is True
+    assert result["http_200"] is True
+    assert result["ok"] is True
+    assert result["http_url"] == "http://172.17.0.1:6768/health"
+
+
+def test_team_lead_done_transition_is_blocked_when_project_gates_fail(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={ws_id}")
+    team_mode = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode['id']}/attach",
+        json={"workspace_id": ws_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+    applied = client.post(f"/api/project-skills/{attached.json()['id']}/apply")
+    assert applied.status_code == 200
+
+    members = client.get(f"/api/projects/{project_id}/members")
+    items = members.json()["items"]
+    lead = next(item for item in items if item["user"]["username"] == "agent.m0rph3u5")["user_id"]
+
+    lead_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Lead finalization",
+            "status": "Lead",
+            "assignee_id": lead,
+            "description": "Deploy to constructos-ws-default on port 6768.",
+        },
+    )
+    assert lead_task.status_code == 200
+
+    blocked = client.patch(
+        f"/api/tasks/{lead_task.json()['id']}",
+        json={"status": "Done"},
+    )
+    assert blocked.status_code == 409
+    assert "Done transition blocked by project gates" in str(blocked.text)
 
 
 def test_agent_service_ensure_team_mode_project_sets_up_skill_and_roster(tmp_path, monkeypatch):
@@ -6461,6 +7149,42 @@ def test_status_change_trigger_scope_other_with_source_task_ids_queues_target(tm
     assert payload['last_requested_instruction'] == 'React to source completion via alias'
 
 
+def test_task_patch_rejects_external_status_trigger_self_reference(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Self external guard task',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Initial instruction',
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()['id']
+
+    patched = client.patch(
+        f'/api/tasks/{task_id}',
+        json={
+            'instruction': 'Should fail due to self external selector',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'scope': 'external',
+                    'to_statuses': ['Done'],
+                    'selector': {'task_ids': [task_id]},
+                }
+            ],
+        },
+    )
+    assert patched.status_code == 422
+    assert 'cannot include the same task id' in str(patched.json().get('detail') or '')
+
+
 def test_status_change_trigger_external_all_waits_for_all_selected_tasks(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -6805,6 +7529,29 @@ def test_create_project_rule_returns_aggregate_fallback_when_view_unavailable(tm
     assert payload['title'] == 'Fallback Rule'
     assert payload['workspace_id'] == ws_id
     assert payload['project_id'] == project_id
+
+
+def test_create_project_rule_gate_policy_body_is_prettified_json_markdown(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created = client.post(
+        '/api/project-rules',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'title': 'Gate Policy',
+            'body': '{"required_checks":{"delivery":["git_contract_ok"]},"runtime_deploy_health":{"required":false}}',
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    assert payload['title'] == 'Gate Policy'
+    assert payload['body'].startswith('```json\n{')
+    assert '"required_checks"' in payload['body']
+    assert payload['body'].rstrip().endswith('```')
 
 
 def test_task_tags_are_normalized_and_filterable(tmp_path):

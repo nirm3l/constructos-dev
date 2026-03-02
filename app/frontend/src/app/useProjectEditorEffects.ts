@@ -64,7 +64,9 @@ export function useProjectEditorEffects(c: any) {
   React.useEffect(() => {
     if (!c.showProjectCreateForm) return
     c.setProjectDescriptionView('split')
-    c.setProjectEventStormingEnabled(true)
+    if (typeof c.setProjectEventStormingEnabled === 'function') {
+      c.setProjectEventStormingEnabled(true)
+    }
   }, [c.showProjectCreateForm])
 
   React.useEffect(() => {

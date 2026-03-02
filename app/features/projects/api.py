@@ -158,6 +158,23 @@ def project_members(project_id: str, db: Session = Depends(get_db), user=Depends
     return get_project_members_read_model(db, user, project_id)
 
 
+@router.get("/api/projects/{project_id}/gates/verify")
+def project_gates_verify(
+    project_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    team_mode = gateway.verify_team_mode_workflow(project_id=project_id)
+    delivery = gateway.verify_delivery_workflow(project_id=project_id)
+    return {
+        "project_id": project_id,
+        "team_mode": team_mode,
+        "delivery": delivery,
+        "ok": bool(team_mode.get("ok")) and bool(delivery.get("ok")),
+    }
+
+
 @router.get("/api/projects/{project_id}/knowledge-graph/overview")
 def project_knowledge_graph_overview(
     project_id: str,

@@ -69,6 +69,11 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
           setProjectTemplateParametersText={state.setProjectTemplateParametersText}
           workspaceUsers={state.workspaceUsers}
           createProjectMemberIds={state.createProjectMemberIds}
+          createProjectWorkspaceSkillIds={state.createProjectWorkspaceSkillIds}
+          setCreateProjectWorkspaceSkillIds={state.setCreateProjectWorkspaceSkillIds}
+          workspaceSkills={state.workspaceSkills.data?.items ?? []}
+          workspaceSkillsLoading={Boolean(state.workspaceSkills.isLoading || state.workspaceSkills.isFetching)}
+          toggleCreateProjectWorkspaceSkill={state.toggleCreateProjectWorkspaceSkill}
           toggleCreateProjectMember={state.toggleCreateProjectMember}
         />
       )}

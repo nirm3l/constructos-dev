@@ -530,6 +530,21 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
 def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, Any]:
     s = dict(state)
     p = event.payload
+
+    updated_fields_raw = p.get("updated_fields")
+    updated_fields: set[str] | None = None
+    if isinstance(updated_fields_raw, (list, tuple, set)):
+        normalized = {str(item).strip() for item in updated_fields_raw if str(item).strip()}
+        if normalized:
+            updated_fields = normalized
+
+    def touched(field: str) -> bool:
+        if updated_fields is not None:
+            return field in updated_fields
+        # Legacy fallback: if no explicit updated_fields marker exists, ignore nulls
+        # so omitted event args from the serializer do not wipe read-model values.
+        return field in p and p.get(field) is not None
+
     if event.event_type == PROJECT_EVENT_CREATED:
         s = {
             "id": event.aggregate_id,
@@ -553,30 +568,30 @@ def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str
     elif event.event_type == PROJECT_EVENT_DELETED:
         s["is_deleted"] = True
     elif event.event_type == PROJECT_EVENT_UPDATED:
-        if "name" in p:
+        if touched("name"):
             s["name"] = p.get("name")
-        if "description" in p:
+        if touched("description"):
             s["description"] = p.get("description", "")
-        if "custom_statuses" in p:
+        if touched("custom_statuses"):
             statuses = p.get("custom_statuses")
             s["custom_statuses"] = statuses if statuses else DEFAULT_STATUSES
-        if "external_refs" in p:
+        if touched("external_refs"):
             s["external_refs"] = p.get("external_refs", [])
-        if "attachment_refs" in p:
+        if touched("attachment_refs"):
             s["attachment_refs"] = p.get("attachment_refs", [])
-        if "embedding_enabled" in p:
+        if touched("embedding_enabled"):
             s["embedding_enabled"] = bool(p.get("embedding_enabled", False))
-        if "embedding_model" in p:
+        if touched("embedding_model"):
             s["embedding_model"] = p.get("embedding_model")
-        if "context_pack_evidence_top_k" in p:
+        if touched("context_pack_evidence_top_k"):
             s["context_pack_evidence_top_k"] = p.get("context_pack_evidence_top_k")
-        if "chat_index_mode" in p:
+        if touched("chat_index_mode"):
             s["chat_index_mode"] = str(p.get("chat_index_mode") or "OFF")
-        if "chat_attachment_ingestion_mode" in p:
+        if touched("chat_attachment_ingestion_mode"):
             s["chat_attachment_ingestion_mode"] = str(
                 p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
             )
-        if "event_storming_enabled" in p:
+        if touched("event_storming_enabled"):
             s["event_storming_enabled"] = bool(p.get("event_storming_enabled", True))
     return s
 
@@ -957,6 +972,20 @@ def maybe_snapshot(db: Session, aggregate_type: str, aggregate_id: str, version:
 def project_event(db: Session, ev: EventEnvelope):
     p, m = upcast_event(ev.event_type, ev.payload, ev.metadata)
 
+    updated_fields_raw = p.get("updated_fields")
+    updated_fields: set[str] | None = None
+    if isinstance(updated_fields_raw, (list, tuple, set)):
+        normalized = {str(item).strip() for item in updated_fields_raw if str(item).strip()}
+        if normalized:
+            updated_fields = normalized
+
+    def touched(field: str) -> bool:
+        if updated_fields is not None:
+            return field in updated_fields
+        # Legacy fallback: if no explicit updated_fields marker exists, ignore nulls
+        # so omitted event args from the serializer do not wipe read-model values.
+        return field in p and p.get(field) is not None
+
     if ev.event_type == PROJECT_EVENT_CREATED:
         project = db.get(Project, ev.aggregate_id)
         if project is None:
@@ -987,29 +1016,29 @@ def project_event(db: Session, ev: EventEnvelope):
     elif ev.event_type == PROJECT_EVENT_UPDATED:
         project = db.get(Project, ev.aggregate_id)
         if project:
-            if "name" in p:
+            if touched("name"):
                 project.name = p.get("name") or project.name
-            if "description" in p:
+            if touched("description"):
                 project.description = p.get("description", "") or ""
-            if "custom_statuses" in p:
+            if touched("custom_statuses"):
                 project.custom_statuses = json.dumps(p.get("custom_statuses", DEFAULT_STATUSES) or DEFAULT_STATUSES)
-            if "external_refs" in p:
+            if touched("external_refs"):
                 project.external_refs = json.dumps(p.get("external_refs", []))
-            if "attachment_refs" in p:
+            if touched("attachment_refs"):
                 project.attachment_refs = json.dumps(p.get("attachment_refs", []))
-            if "embedding_enabled" in p:
+            if touched("embedding_enabled"):
                 project.embedding_enabled = bool(p.get("embedding_enabled", False))
-            if "embedding_model" in p:
+            if touched("embedding_model"):
                 project.embedding_model = p.get("embedding_model")
-            if "context_pack_evidence_top_k" in p:
+            if touched("context_pack_evidence_top_k"):
                 project.context_pack_evidence_top_k = p.get("context_pack_evidence_top_k")
-            if "chat_index_mode" in p:
+            if touched("chat_index_mode"):
                 project.chat_index_mode = str(p.get("chat_index_mode") or "OFF")
-            if "chat_attachment_ingestion_mode" in p:
+            if touched("chat_attachment_ingestion_mode"):
                 project.chat_attachment_ingestion_mode = str(
                     p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
                 )
-            if "event_storming_enabled" in p:
+            if touched("event_storming_enabled"):
                 project.event_storming_enabled = bool(p.get("event_storming_enabled", True))
     elif ev.event_type == PROJECT_EVENT_MEMBER_UPSERTED:
         project_id = p.get("project_id") or ev.aggregate_id

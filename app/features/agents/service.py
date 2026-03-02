@@ -77,6 +77,14 @@ from shared.core import (
     load_specification_view,
 )
 from features.project_templates.schemas import ProjectFromTemplateCreate, ProjectFromTemplatePreview
+from features.agents.gates import (
+    evaluate_delivery_gates,
+    evaluate_required_checks as evaluate_required_gate_checks,
+    evaluate_team_mode_gates,
+    parse_gate_policy_rule,
+    policy_required_checks,
+    run_runtime_deploy_health_check,
+)
 from shared.deps import ensure_role
 from shared.knowledge_graph import (
     build_graph_context_pack,
@@ -1581,6 +1589,22 @@ class AgentTaskService:
         indicators = ("commit", "changeset", "sha", "git rev", "hash")
         return any(token in normalized for token in indicators)
 
+    @staticmethod
+    def _extract_commit_shas_from_text(text: str) -> set[str]:
+        normalized = str(text or "").strip().lower()
+        if not normalized:
+            return set()
+        return {match.group(0).lower() for match in _COMMIT_SHA_RE.finditer(normalized)}
+
+    @classmethod
+    def _extract_commit_shas_from_refs(cls, refs: Any) -> set[str]:
+        shas: set[str] = set()
+        for item in cls._parse_json_list(refs):
+            url = str(item.get("url") or "").strip()
+            title = str(item.get("title") or "").strip()
+            shas.update(cls._extract_commit_shas_from_text(f"{url} {title}"))
+        return shas
+
     @classmethod
     def _external_refs_have_commit_evidence(cls, refs: Any) -> bool:
         for item in cls._parse_json_list(refs):
@@ -1612,7 +1636,7 @@ class AgentTaskService:
         normalized = str(text or "").strip().lower()
         if not normalized:
             return False
-        keywords = (
+        tooling_keywords = (
             "test",
             "qa",
             "artifact",
@@ -1625,7 +1649,177 @@ class AgentTaskService:
             "reproduc",
             "screenshot",
         )
-        return any(token in normalized for token in keywords)
+        result_keywords = (
+            "pass",
+            "passed",
+            "fail",
+            "failed",
+            "green",
+            "red",
+            "ok",
+            "success",
+            "error",
+            "regression",
+        )
+        return any(token in normalized for token in tooling_keywords) and any(
+            token in normalized for token in result_keywords
+        )
+
+    @staticmethod
+    def _has_deploy_artifact_text(text: str) -> bool:
+        normalized = str(text or "").strip().lower()
+        if not normalized:
+            return False
+        action_keywords = (
+            "deploy",
+            "docker compose up",
+            "docker compose",
+            "release",
+            "rolled out",
+            "rollout",
+            "kubectl",
+            "helm",
+        )
+        verification_keywords = (
+            "healthy",
+            "running",
+            "up",
+            "http://",
+            "https://",
+            "/health",
+            "smoke",
+            "status 200",
+            "ready",
+        )
+        return any(token in normalized for token in action_keywords) and any(
+            token in normalized for token in verification_keywords
+        )
+
+    @staticmethod
+    def _extract_deploy_ports(text: str) -> set[str]:
+        normalized = str(text or "").strip().lower()
+        if not normalized:
+            return set()
+        ports: set[str] = set()
+        for match in re.finditer(r"\bport\s*[:=]?\s*(\d{2,5})\b", normalized):
+            candidate = str(match.group(1) or "").strip()
+            if candidate:
+                ports.add(candidate)
+        for match in re.finditer(r"localhost:(\d{2,5})\b", normalized):
+            candidate = str(match.group(1) or "").strip()
+            if candidate:
+                ports.add(candidate)
+        for match in re.finditer(r"0\.0\.0\.0:(\d{2,5})\b", normalized):
+            candidate = str(match.group(1) or "").strip()
+            if candidate:
+                ports.add(candidate)
+        return ports
+
+    @staticmethod
+    def _has_deploy_stack_marker(text: str) -> bool:
+        normalized = str(text or "").strip().lower()
+        if not normalized:
+            return False
+        return (
+            "constructos-ws-default" in normalized
+            or "docker compose -p" in normalized
+            or "stack" in normalized
+        )
+
+    @staticmethod
+    def _extract_deploy_stack(text: str) -> str | None:
+        normalized = str(text or "").strip().lower()
+        if not normalized:
+            return None
+        explicit = re.search(r"docker\s+compose\s+-p\s+([a-z0-9][a-z0-9_-]*)", normalized)
+        if explicit:
+            candidate = str(explicit.group(1) or "").strip()
+            if candidate:
+                return candidate
+        fallback = re.search(r"\b(constructos-[a-z0-9_-]+)\b", normalized)
+        if fallback:
+            candidate = str(fallback.group(1) or "").strip()
+            if candidate:
+                return candidate
+        return None
+
+    @classmethod
+    def _parse_gate_policy_rule(
+        cls,
+        *,
+        project_rules: list[ProjectRuleModel],
+    ) -> tuple[dict[str, Any], str]:
+        return parse_gate_policy_rule(project_rules=project_rules)
+
+    @staticmethod
+    def _policy_required_checks(policy: dict[str, Any], scope: str, default_checks: list[str]) -> list[str]:
+        return policy_required_checks(policy, scope, default_checks)
+
+    @staticmethod
+    def _evaluate_required_checks(checks: dict[str, Any], required_checks: list[str]) -> tuple[bool, list[str]]:
+        return evaluate_required_gate_checks(checks, required_checks)
+
+    @classmethod
+    def _resolve_deploy_target_from_artifacts(
+        cls,
+        *,
+        deploy_tasks: list[dict[str, Any]],
+        notes_by_task: dict[str, list[Note]],
+        comments_by_task: dict[str, list[TaskComment]],
+        runtime_policy: dict[str, Any],
+    ) -> tuple[str, int | None, str]:
+        stack = str(runtime_policy.get("stack") or "").strip() or "constructos-ws-default"
+        port_value = runtime_policy.get("port")
+        port: int | None = None
+        if isinstance(port_value, int):
+            port = port_value if 1 <= int(port_value) <= 65535 else None
+        elif isinstance(port_value, str) and port_value.strip().isdigit():
+            parsed_port = int(port_value.strip())
+            port = parsed_port if 1 <= parsed_port <= 65535 else None
+        health_path = str(runtime_policy.get("health_path") or "/health").strip() or "/health"
+        if not health_path.startswith("/"):
+            health_path = f"/{health_path}"
+
+        for task in deploy_tasks:
+            task_id = str(task.get("id") or "").strip()
+            corpus = "\n".join(
+                [
+                    str(task.get("title") or ""),
+                    str(task.get("description") or ""),
+                    str(task.get("instruction") or ""),
+                ]
+            )
+            for note in notes_by_task.get(task_id, []):
+                corpus = f"{corpus}\n{note.title or ''}\n{note.body or ''}"
+            for comment in comments_by_task.get(task_id, []):
+                corpus = f"{corpus}\n{comment.body or ''}"
+            if not stack:
+                extracted_stack = cls._extract_deploy_stack(corpus)
+                if extracted_stack:
+                    stack = extracted_stack
+            if port is None:
+                extracted_ports = cls._extract_deploy_ports(corpus)
+                if extracted_ports:
+                    try:
+                        port = int(sorted(extracted_ports)[0])
+                    except Exception:
+                        port = None
+        return stack or "constructos-ws-default", port, health_path
+
+    @staticmethod
+    def _run_runtime_deploy_health_check(
+        *,
+        stack: str,
+        port: int | None,
+        health_path: str,
+        require_http_200: bool,
+    ) -> dict[str, Any]:
+        return run_runtime_deploy_health_check(
+            stack=stack,
+            port=port,
+            health_path=health_path,
+            require_http_200=require_http_200,
+        )
 
     @classmethod
     def _project_has_github_context(
@@ -1682,140 +1876,70 @@ class AgentTaskService:
                     archived=False,
                 ),
             )
+            notes = db.execute(
+                select(Note).where(
+                    Note.project_id == project_id,
+                    Note.is_deleted == False,  # noqa: E712
+                )
+            ).scalars().all()
+            comments = db.execute(
+                select(TaskComment).join(Task, Task.id == TaskComment.task_id).where(
+                    Task.project_id == project_id,
+                    Task.is_deleted == False,  # noqa: E712
+                )
+            ).scalars().all()
+            project_rules = db.execute(
+                select(ProjectRuleModel).where(
+                    ProjectRuleModel.project_id == project_id,
+                    ProjectRuleModel.is_deleted == False,  # noqa: E712
+                )
+            ).scalars().all()
+            project_skills = db.execute(
+                select(ProjectSkill).where(
+                    ProjectSkill.project_id == project_id,
+                    ProjectSkill.is_deleted == False,  # noqa: E712
+                )
+            ).scalars().all()
         tasks = list(tasks_payload.get("items") or [])
-
-        def _has_status_trigger(
-            trigger: dict[str, Any],
-            *,
-            scope: str,
-            to_status: str,
-        ) -> bool:
-            if str(trigger.get("kind") or "").strip() != "status_change":
-                return False
-            if str(trigger.get("scope") or "").strip() != scope:
-                return False
-            to_statuses = [str(item or "").strip() for item in (trigger.get("to_statuses") or [])]
-            return to_status in to_statuses
-
-        dev_tasks = [t for t in tasks if member_role_by_user_id.get(str(t.get("assignee_id") or "")) == "DeveloperAgent"]
-        qa_tasks = [t for t in tasks if member_role_by_user_id.get(str(t.get("assignee_id") or "")) == "QAAgent"]
-        lead_tasks = [t for t in tasks if member_role_by_user_id.get(str(t.get("assignee_id") or "")) == "TeamLeadAgent"]
-        deploy_tasks = [
-            t
-            for t in lead_tasks
-            if "deploy" in str(t.get("title") or "").lower() or "docker compose" in str(t.get("title") or "").lower()
-        ]
-
-        dev_ids = {str(t.get("id")) for t in dev_tasks}
-        qa_ids = {str(t.get("id")) for t in qa_tasks}
-        lead_ids = {str(t.get("id")) for t in lead_tasks}
-
-        dev_self_ok = bool(dev_tasks) and all(
-            any(
-                _has_status_trigger(trigger, scope="self", to_status="QA")
-                for trigger in (task.get("execution_triggers") or [])
-                if isinstance(trigger, dict)
-            )
-            for task in dev_tasks
+        gate_policy, gate_policy_source = self._parse_gate_policy_rule(project_rules=project_rules)
+        team_mode_enabled = any(
+            str(getattr(skill, "skill_key", "") or "").strip() == "team_mode"
+            for skill in project_skills
         )
-
-        qa_external_from_dev_ok = any(
-            any(
-                _has_status_trigger(trigger, scope="external", to_status="QA")
-                and dev_ids.issubset(
-                    {
-                        str(task_id)
-                        for task_id in ((trigger.get("selector") or {}).get("task_ids") or [])
-                    }
-                )
-                for trigger in (task.get("execution_triggers") or [])
-                if isinstance(trigger, dict)
-            )
-            for task in qa_tasks
+        team_mode_active = bool(team_mode_enabled or gate_policy_source != "default")
+        if not team_mode_active:
+            required_checks = dict((gate_policy.get("required_checks") or {})) if isinstance(gate_policy, dict) else {}
+            required_checks["team_mode"] = []
+            gate_policy = dict(gate_policy) if isinstance(gate_policy, dict) else {}
+            gate_policy["required_checks"] = required_checks
+        notes_by_task: dict[str, list[Note]] = {}
+        for note in notes:
+            task_id = str(note.task_id or "").strip()
+            if task_id:
+                notes_by_task.setdefault(task_id, []).append(note)
+        comments_by_task: dict[str, list[TaskComment]] = {}
+        for comment in comments:
+            task_id = str(comment.task_id or "").strip()
+            if task_id:
+                comments_by_task.setdefault(task_id, []).append(comment)
+        verification = evaluate_team_mode_gates(
+            project_id=str(project_id),
+            workspace_id=str(project.workspace_id),
+            event_storming_enabled=bool(getattr(project, "event_storming_enabled", True)),
+            expected_event_storming_enabled=expected_event_storming_enabled,
+            gate_policy=gate_policy,
+            gate_policy_source=gate_policy_source,
+            tasks=tasks,
+            member_role_by_user_id=member_role_by_user_id,
+            notes_by_task=notes_by_task,
+            comments_by_task=comments_by_task,
+            extract_deploy_ports=self._extract_deploy_ports,
+            has_deploy_stack_marker=self._has_deploy_stack_marker,
         )
-
-        lead_external_from_qa_ok = any(
-            any(
-                _has_status_trigger(trigger, scope="external", to_status="Done")
-                and bool(
-                    qa_ids.intersection(
-                        {
-                            str(task_id)
-                            for task_id in ((trigger.get("selector") or {}).get("task_ids") or [])
-                        }
-                    )
-                )
-                for trigger in (task.get("execution_triggers") or [])
-                if isinstance(trigger, dict)
-            )
-            for task in lead_tasks
-        )
-
-        deploy_external_from_lead_ok = any(
-            any(
-                _has_status_trigger(trigger, scope="external", to_status="Done")
-                and bool(
-                    lead_ids.intersection(
-                        {
-                            str(task_id)
-                            for task_id in ((trigger.get("selector") or {}).get("task_ids") or [])
-                        }
-                    )
-                )
-                for trigger in (task.get("execution_triggers") or [])
-                if isinstance(trigger, dict)
-            )
-            for task in deploy_tasks
-        )
-
-        lead_recurring_on_lead_ok = any(
-            any(
-                str(trigger.get("kind") or "").strip() == "schedule"
-                and bool(str(trigger.get("recurring_rule") or "").strip())
-                and "Lead" in [str(item or "").strip() for item in (trigger.get("run_on_statuses") or [])]
-                for trigger in (task.get("execution_triggers") or [])
-                if isinstance(trigger, dict)
-            )
-            for task in lead_tasks
-        )
-
-        role_coverage_ok = bool(dev_tasks) and bool(qa_tasks) and bool(lead_tasks)
-        required_triggers_ok = (
-            dev_self_ok
-            and qa_external_from_dev_ok
-            and lead_external_from_qa_ok
-            and deploy_external_from_lead_ok
-            and lead_recurring_on_lead_ok
-        )
-        event_storming_ok = (
-            True
-            if expected_event_storming_enabled is None
-            else bool(getattr(project, "event_storming_enabled", True)) is bool(expected_event_storming_enabled)
-        )
-        return {
-            "project_id": str(project_id),
-            "workspace_id": str(project.workspace_id),
-            "checks": {
-                "role_coverage_present": role_coverage_ok,
-                "dev_self_triggers_to_qa": dev_self_ok,
-                "qa_external_trigger_from_dev": qa_external_from_dev_ok,
-                "lead_external_trigger_from_qa": lead_external_from_qa_ok,
-                "deploy_external_trigger_from_lead": deploy_external_from_lead_ok,
-                "lead_recurring_schedule_on_lead": lead_recurring_on_lead_ok,
-                "required_triggers_present": required_triggers_ok,
-                "event_storming_matches_expectation": event_storming_ok,
-            },
-            "counts": {
-                "tasks_total": len(tasks),
-                "developer_tasks": len(dev_tasks),
-                "qa_tasks": len(qa_tasks),
-                "lead_tasks": len(lead_tasks),
-                "deploy_tasks": len(deploy_tasks),
-            },
-            "event_storming_enabled": bool(getattr(project, "event_storming_enabled", True)),
-            "expected_event_storming_enabled": expected_event_storming_enabled,
-            "ok": bool(role_coverage_ok and required_triggers_ok and event_storming_ok),
-        }
+        verification["active"] = team_mode_active
+        verification["checks"] = dict(verification.get("checks") or {})
+        verification["checks"]["team_mode_skill_enabled"] = bool(team_mode_enabled)
+        return verification
 
     def verify_delivery_workflow(
         self,
@@ -1866,106 +1990,60 @@ class AgentTaskService:
                     Task.is_deleted == False,  # noqa: E712
                 )
             ).scalars().all()
+            project_skills = db.execute(
+                select(ProjectSkill).where(
+                    ProjectSkill.project_id == project_id,
+                    ProjectSkill.is_deleted == False,  # noqa: E712
+                )
+            ).scalars().all()
 
         tasks = list(tasks_payload.get("items") or [])
-        role_dev_tasks = [t for t in tasks if member_role_by_user_id.get(str(t.get("assignee_id") or "")) == "DeveloperAgent"]
-        role_qa_tasks = [t for t in tasks if member_role_by_user_id.get(str(t.get("assignee_id") or "")) == "QAAgent"]
-        dev_tasks = role_dev_tasks or [t for t in tasks if str(t.get("status") or "").strip() == "Dev"]
-        qa_tasks = role_qa_tasks or [t for t in tasks if str(t.get("status") or "").strip() == "QA"]
-
         notes_by_task: dict[str, list[Note]] = {}
         for note in notes:
             task_id = str(note.task_id or "").strip()
-            if not task_id:
-                continue
-            notes_by_task.setdefault(task_id, []).append(note)
+            if task_id:
+                notes_by_task.setdefault(task_id, []).append(note)
         comments_by_task: dict[str, list[TaskComment]] = {}
         for comment in comments:
             task_id = str(comment.task_id or "").strip()
-            if not task_id:
-                continue
-            comments_by_task.setdefault(task_id, []).append(comment)
-
-        def _task_has_commit_evidence(task: dict[str, Any]) -> bool:
-            task_id = str(task.get("id") or "").strip()
-            if not task_id:
-                return False
-            if self._external_refs_have_commit_evidence(task.get("external_refs")):
-                return True
-            for note in notes_by_task.get(task_id, []):
-                if self._contains_commit_evidence(f"{note.title or ''}\n{note.body or ''}"):
-                    return True
-                if self._external_refs_have_commit_evidence(note.external_refs):
-                    return True
-            for comment in comments_by_task.get(task_id, []):
-                if self._contains_commit_evidence(comment.body):
-                    return True
-            return False
-
-        def _task_has_qa_artifacts(task: dict[str, Any]) -> bool:
-            task_id = str(task.get("id") or "").strip()
-            if not task_id:
-                return False
-            if self._has_http_external_ref(task.get("external_refs")):
-                return True
-            for note in notes_by_task.get(task_id, []):
-                if self._has_qa_artifact_text(f"{note.title or ''}\n{note.body or ''}"):
-                    return True
-                if self._has_http_external_ref(self._parse_json_list(note.external_refs)):
-                    return True
-            for comment in comments_by_task.get(task_id, []):
-                if self._has_qa_artifact_text(comment.body):
-                    return True
-            return False
-
-        dev_missing = [
-            {
-                "task_id": str(task.get("id") or "").strip(),
-                "title": str(task.get("title") or "").strip() or str(task.get("id") or "").strip(),
-            }
-            for task in dev_tasks
-            if not _task_has_commit_evidence(task)
-        ]
-        qa_missing = [
-            {
-                "task_id": str(task.get("id") or "").strip(),
-                "title": str(task.get("title") or "").strip() or str(task.get("id") or "").strip(),
-            }
-            for task in qa_tasks
-            if not _task_has_qa_artifacts(task)
-        ]
-
-        repo_context_present = self._project_has_github_context(
+            if task_id:
+                comments_by_task.setdefault(task_id, []).append(comment)
+        gate_policy, gate_policy_source = self._parse_gate_policy_rule(project_rules=project_rules)
+        skill_keys = {str(getattr(skill, "skill_key", "") or "").strip() for skill in project_skills}
+        delivery_skill_enabled = bool({"git_delivery", "team_mode", "github_delivery"} & skill_keys)
+        delivery_active = bool(delivery_skill_enabled or gate_policy_source != "default")
+        if not delivery_active:
+            required_checks = dict((gate_policy.get("required_checks") or {})) if isinstance(gate_policy, dict) else {}
+            required_checks["delivery"] = []
+            gate_policy = dict(gate_policy) if isinstance(gate_policy, dict) else {}
+            gate_policy["required_checks"] = required_checks
+        verification = evaluate_delivery_gates(
+            project_id=str(project_id),
+            workspace_id=str(project.workspace_id),
+            gate_policy=gate_policy,
+            gate_policy_source=gate_policy_source,
+            tasks=tasks,
+            member_role_by_user_id=member_role_by_user_id,
+            notes_by_task=notes_by_task,
+            comments_by_task=comments_by_task,
+            project_rules=project_rules,
+            project_skills=project_skills,
             project_description=str(getattr(project, "description", "") or ""),
             project_external_refs=getattr(project, "external_refs", "[]"),
-            project_rules=project_rules,
+            extract_commit_shas_from_refs=self._extract_commit_shas_from_refs,
+            extract_commit_shas_from_text=self._extract_commit_shas_from_text,
+            parse_json_list=self._parse_json_list,
+            has_http_external_ref=self._has_http_external_ref,
+            has_qa_artifact_text=self._has_qa_artifact_text,
+            has_deploy_artifact_text=self._has_deploy_artifact_text,
+            resolve_deploy_target_from_artifacts=self._resolve_deploy_target_from_artifacts,
+            run_runtime_deploy_health_check_fn=self._run_runtime_deploy_health_check,
+            project_has_github_context=self._project_has_github_context,
         )
-        dev_commit_evidence_ok = bool(dev_tasks) and not dev_missing
-        qa_artifacts_ok = bool(qa_tasks) and not qa_missing
-        git_contract_ok = bool(repo_context_present and dev_commit_evidence_ok)
-
-        return {
-            "project_id": str(project_id),
-            "workspace_id": str(project.workspace_id),
-            "checks": {
-                "repo_context_present": repo_context_present,
-                "git_contract_ok": git_contract_ok,
-                "dev_tasks_have_commit_evidence": dev_commit_evidence_ok,
-                "qa_has_verifiable_artifacts": qa_artifacts_ok,
-            },
-            "counts": {
-                "tasks_total": len(tasks),
-                "developer_tasks": len(dev_tasks),
-                "qa_tasks": len(qa_tasks),
-                "dev_missing_commit_evidence": len(dev_missing),
-                "qa_missing_artifacts": len(qa_missing),
-            },
-            "missing": {
-                "dev_tasks_missing_commit_evidence": dev_missing,
-                "qa_tasks_missing_artifacts": qa_missing,
-            },
-            "ok": bool(git_contract_ok and dev_commit_evidence_ok and qa_artifacts_ok),
-        }
+        verification["active"] = delivery_active
+        verification["checks"] = dict(verification.get("checks") or {})
+        verification["checks"]["delivery_skill_enabled"] = bool(delivery_skill_enabled)
+        return verification
 
     def ensure_team_mode_project(
         self,
@@ -2868,9 +2946,17 @@ class AgentTaskService:
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             self._assert_project_skill_allowed(db=db, skill_id=skill_id)
+            skill_row = db.get(ProjectSkill, skill_id)
+            if skill_row is None or bool(getattr(skill_row, "is_deleted", False)):
+                raise HTTPException(status_code=404, detail="Project skill not found")
+            updated_at = getattr(skill_row, "updated_at", None)
             effective_command_id = command_id or self._fallback_command_id(
                 prefix="mcp-project-skill-apply",
-                payload={"skill_id": skill_id},
+                payload={
+                    "skill_id": skill_id,
+                    "skill_updated_at": updated_at.isoformat() if updated_at is not None else "",
+                    "generated_rule_id": str(getattr(skill_row, "generated_rule_id", "") or ""),
+                },
             )
             return ProjectSkillApplicationService(
                 db, user, command_id=effective_command_id
@@ -3457,6 +3543,48 @@ class AgentTaskService:
             self._assert_workspace_allowed(state.workspace_id)
             self._assert_project_allowed(state.project_id)
             normalized_patch = self._normalize_task_patch_input(patch)
+            requested_status = str(normalized_patch.get("status") or "").strip()
+            if requested_status == "Done":
+                current_task_row = db.get(Task, task_id)
+                effective_assignee_id = str(
+                    normalized_patch.get("assignee_id")
+                    or (getattr(current_task_row, "assignee_id", None) if current_task_row is not None else None)
+                    or getattr(state, "assignee_id", None)
+                    or ""
+                ).strip()
+                assignee_role = ""
+                if effective_assignee_id:
+                    member = db.execute(
+                        select(ProjectMember).where(
+                            ProjectMember.project_id == str(state.project_id),
+                            ProjectMember.user_id == effective_assignee_id,
+                        )
+                    ).scalar_one_or_none()
+                    assignee_role = str(getattr(member, "role", "") or "").strip()
+                if assignee_role == "TeamLeadAgent":
+                    team_mode_verification = self.verify_team_mode_workflow(
+                        project_id=str(state.project_id),
+                        workspace_id=str(state.workspace_id),
+                        auth_token=auth_token,
+                    )
+                    delivery_verification = self.verify_delivery_workflow(
+                        project_id=str(state.project_id),
+                        workspace_id=str(state.workspace_id),
+                        auth_token=auth_token,
+                    )
+                    if not bool(team_mode_verification.get("ok")) or not bool(delivery_verification.get("ok")):
+                        team_mode_failed = ", ".join(team_mode_verification.get("required_failed_checks") or [])
+                        delivery_failed = ", ".join(delivery_verification.get("required_failed_checks") or [])
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                "Done transition blocked by project gates. "
+                                f"team_mode_ok={bool(team_mode_verification.get('ok'))}"
+                                + (f"; team_mode_failed=[{team_mode_failed}]" if team_mode_failed else "")
+                                + f"; delivery_ok={bool(delivery_verification.get('ok'))}"
+                                + (f"; delivery_failed=[{delivery_failed}]" if delivery_failed else "")
+                            ),
+                        )
             payload = TaskPatch(**normalized_patch)
             effective_command_id = command_id or self._fallback_command_id(
                 prefix="mcp-task-patch",
@@ -3473,6 +3601,45 @@ class AgentTaskService:
                 raise HTTPException(status_code=404, detail="Task not found")
             self._assert_workspace_allowed(state.workspace_id)
             self._assert_project_allowed(state.project_id)
+            assignee_role = ""
+            current_task_row = db.get(Task, task_id)
+            effective_assignee_id = str(
+                (getattr(current_task_row, "assignee_id", None) if current_task_row is not None else None)
+                or getattr(state, "assignee_id", None)
+                or ""
+            ).strip()
+            if effective_assignee_id:
+                member = db.execute(
+                    select(ProjectMember).where(
+                        ProjectMember.project_id == str(state.project_id),
+                        ProjectMember.user_id == effective_assignee_id,
+                    )
+                ).scalar_one_or_none()
+                assignee_role = str(getattr(member, "role", "") or "").strip()
+            if assignee_role == "TeamLeadAgent":
+                team_mode_verification = self.verify_team_mode_workflow(
+                    project_id=str(state.project_id),
+                    workspace_id=str(state.workspace_id),
+                    auth_token=auth_token,
+                )
+                delivery_verification = self.verify_delivery_workflow(
+                    project_id=str(state.project_id),
+                    workspace_id=str(state.workspace_id),
+                    auth_token=auth_token,
+                )
+                if not bool(team_mode_verification.get("ok")) or not bool(delivery_verification.get("ok")):
+                    team_mode_failed = ", ".join(team_mode_verification.get("required_failed_checks") or [])
+                    delivery_failed = ", ".join(delivery_verification.get("required_failed_checks") or [])
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Done transition blocked by project gates. "
+                            f"team_mode_ok={bool(team_mode_verification.get('ok'))}"
+                            + (f"; team_mode_failed=[{team_mode_failed}]" if team_mode_failed else "")
+                            + f"; delivery_ok={bool(delivery_verification.get('ok'))}"
+                            + (f"; delivery_failed=[{delivery_failed}]" if delivery_failed else "")
+                        ),
+                    )
             effective_command_id = command_id or self._fallback_command_id(
                 prefix="mcp-task-complete",
                 payload={"task_id": task_id},

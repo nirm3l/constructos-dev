@@ -49,8 +49,14 @@ COPY . /app
 COPY --from=frontend-builder /frontend/dist /app/static
 COPY scripts/runtime_entrypoint.sh /usr/local/bin/constructos-entrypoint.sh
 COPY scripts/docker_wrapper.sh /usr/local/bin/docker
+COPY scripts/docker_compose_wrapper.sh /usr/local/bin/docker-compose
 
 RUN chmod 0755 /usr/local/bin/constructos-entrypoint.sh /usr/local/bin/docker \
+    /usr/local/bin/docker-compose \
+    && mv /usr/bin/docker /usr/bin/docker-real \
+    && if [ -x /usr/bin/docker-compose ]; then mv /usr/bin/docker-compose /usr/bin/docker-compose-real; fi \
+    && ln -sf /usr/local/bin/docker /usr/bin/docker \
+    && ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose \
     && if [ "${APP_BUNDLE_ENCRYPT}" = "true" ]; then \
         if [ -z "${APP_BUNDLE_PASSWORD}" ]; then \
           echo "APP_BUNDLE_PASSWORD is required when APP_BUNDLE_ENCRYPT=true" >&2; \

@@ -1,11 +1,12 @@
 import React from 'react'
+import { createPortal } from 'react-dom'
 import { useQuery } from '@tanstack/react-query'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as AlertDialog from '@radix-ui/react-alert-dialog'
 import * as Select from '@radix-ui/react-select'
 import * as Accordion from '@radix-ui/react-accordion'
 import * as Tabs from '@radix-ui/react-tabs'
-import { getProjectEventStormingOverview } from '../../api'
+import { getProjectEventStormingOverview, getProjectGatesVerification } from '../../api'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import type {
   AgentChatUsage,
@@ -14,6 +15,7 @@ import type {
   GraphContextPack,
   GraphProjectOverview,
   Project,
+  ProjectGatesVerifyResponse,
   ProjectRule,
   ProjectRulesPage,
   ProjectSkill,
@@ -286,6 +288,31 @@ export function ProjectsInlineEditor({
     enabled: Boolean(userId && project.id && selectedProject?.id === project.id),
   })
   const eventStormingOverview = inlineEventStormingOverviewQuery.data ?? projectEventStormingOverview?.data
+  const gateSkillKeys = React.useMemo(
+    () =>
+      new Set(
+        (projectSkills.data?.items ?? [])
+          .map((item) => String(item.skill_key || '').trim())
+          .filter(Boolean)
+      ),
+    [projectSkills.data?.items]
+  )
+  const hasGateRelevantSkills = gateSkillKeys.has('team_mode') || gateSkillKeys.has('git_delivery') || gateSkillKeys.has('github_delivery')
+  const hasGatePolicyRule = React.useMemo(
+    () =>
+      (projectRules.data?.items ?? []).some((rule) => {
+        const title = String(rule.title || '').trim().toLowerCase()
+        return title.includes('gate policy') || title.includes('delivery gates') || title.includes('workflow gates')
+      }),
+    [projectRules.data?.items]
+  )
+  const shouldShowProjectGates = hasGateRelevantSkills || hasGatePolicyRule
+  const projectGatesQuery = useQuery<ProjectGatesVerifyResponse>({
+    queryKey: ['project-gates-verify', userId, project.id],
+    queryFn: () => getProjectGatesVerification(userId, project.id),
+    enabled: Boolean(userId && project.id && selectedProject?.id === project.id && shouldShowProjectGates),
+    refetchInterval: 20_000,
+  })
   const eventStormingFrameModeRaw = String(eventStormingOverview?.context_frame?.mode || '').trim().toLowerCase()
   const eventStormingFrameMode = eventStormingFrameModeRaw === 'full' || eventStormingFrameModeRaw === 'delta'
     ? eventStormingFrameModeRaw.toUpperCase()
@@ -327,6 +354,20 @@ export function ProjectsInlineEditor({
       { key: 'ReadModel', label: 'Read Model', color: '#64748b', count: Number(counts.ReadModel || 0) },
     ]
   }, [eventStormingOverview?.component_counts])
+  const projectGatesSnapshot = projectGatesQuery.data
+  const teamFailedChecks = projectGatesSnapshot?.team_mode?.required_failed_checks ?? []
+  const deliveryFailedChecks = projectGatesSnapshot?.delivery?.required_failed_checks ?? []
+  const teamRequiredChecks = projectGatesSnapshot?.team_mode?.required_checks ?? []
+  const deliveryRequiredChecks = projectGatesSnapshot?.delivery?.required_checks ?? []
+  const gatePolicySource = String(
+    projectGatesSnapshot?.delivery?.gate_policy_source ||
+      projectGatesSnapshot?.team_mode?.gate_policy_source ||
+      'default'
+  )
+  const gatePolicyRuleId = React.useMemo(() => {
+    const match = /^project_rule:([a-f0-9-]{36})$/i.exec(gatePolicySource)
+    return match?.[1] ?? null
+  }, [gatePolicySource])
   const effectiveEventStormingEnabled = Boolean(editProjectEventStormingEnabled ?? true)
   const projectExternalRefs = React.useMemo(
     () => parseExternalRefsText(editProjectExternalRefsText),
@@ -341,7 +382,7 @@ export function ProjectsInlineEditor({
   const [skillImportSourceUrl, setSkillImportSourceUrl] = React.useState('')
   const skillImportFileInputRef = React.useRef<HTMLInputElement | null>(null)
   const [projectEditorTab, setProjectEditorTab] = React.useState<
-    'overview' | 'rules' | 'skills' | 'resources' | 'context'
+    'overview' | 'gates' | 'rules' | 'skills' | 'resources' | 'context'
   >('overview')
   const [skillImportKey, setSkillImportKey] = React.useState('')
   const [skillImportMode, setSkillImportMode] = React.useState<'advisory' | 'enforced'>('advisory')
@@ -507,6 +548,12 @@ export function ProjectsInlineEditor({
     setProjectEditorTab('overview')
   }, [project.id])
 
+  React.useEffect(() => {
+    if (projectEditorTab === 'gates' && !shouldShowProjectGates) {
+      setProjectEditorTab('overview')
+    }
+  }, [projectEditorTab, shouldShowProjectGates])
+
   return (
     <div className="project-inline-editor" style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
       <div className="row wrap" style={{ marginBottom: 10 }}>
@@ -559,6 +606,7 @@ export function ProjectsInlineEditor({
         onValueChange={(next) => {
           if (
             next === 'overview' ||
+            next === 'gates' ||
             next === 'rules' ||
             next === 'skills' ||
             next === 'resources' ||
@@ -570,6 +618,12 @@ export function ProjectsInlineEditor({
       >
         <Tabs.List className="project-editor-tabs-list" aria-label="Project editor sections">
           <Tabs.Trigger className="project-editor-tab-trigger" value="overview">Overview</Tabs.Trigger>
+          {shouldShowProjectGates && (
+            <Tabs.Trigger className="project-editor-tab-trigger" value="gates">
+              <span>Gates</span>
+              <span className="project-editor-tab-count">{projectGatesQuery.data?.ok ? 'OK' : '!!'}</span>
+            </Tabs.Trigger>
+          )}
           <Tabs.Trigger className="project-editor-tab-trigger" value="rules">
             <span>Rules</span>
             <span className="project-editor-tab-count">{projectRuleCount}</span>
@@ -886,6 +940,88 @@ export function ProjectsInlineEditor({
         </div>
       </div>
         </Tabs.Content>
+        {shouldShowProjectGates && (
+          <Tabs.Content value="gates" className="project-editor-tab-content">
+            <div className="gates-panel">
+              <div className="gates-panel-head">
+                <div className="gates-panel-title-row">
+                  <h3 style={{ margin: 0 }}>Delivery Gates</h3>
+                  <span className={`badge ${projectGatesSnapshot?.ok ? 'status-done' : 'status-blocked'}`}>
+                    {projectGatesSnapshot?.ok ? 'PASS' : 'FAIL'}
+                  </span>
+                </div>
+                <div className="gates-panel-summary">
+                  <span className="badge">Team failed: {teamFailedChecks.length}</span>
+                  <span className="badge">Delivery failed: {deliveryFailedChecks.length}</span>
+                  <span className="badge">Team required: {teamRequiredChecks.length}</span>
+                  <span className="badge">Delivery required: {deliveryRequiredChecks.length}</span>
+                </div>
+              </div>
+              {projectGatesQuery.isLoading ? (
+                <div className="meta">Loading gate verification...</div>
+              ) : projectGatesQuery.isError ? (
+                <div className="notice">Gate verification unavailable.</div>
+              ) : projectGatesSnapshot ? (
+                <>
+                  <div className="gates-scope-grid">
+                    <section className="gates-scope-card">
+                      <div className="gates-scope-head">
+                        <strong>Team Mode</strong>
+                        <span className={`badge ${teamFailedChecks.length === 0 ? 'status-done' : 'status-blocked'}`}>
+                          {teamFailedChecks.length === 0 ? 'Ready' : `${teamFailedChecks.length} failed`}
+                        </span>
+                      </div>
+                      {teamFailedChecks.length === 0 ? (
+                        <div className="meta">All required Team Mode checks passed.</div>
+                      ) : (
+                        <div className="gates-failed-tags">
+                          {teamFailedChecks.map((item) => (
+                            <span key={`team-failed-${item}`} className="gates-failed-tag">{item}</span>
+                          ))}
+                        </div>
+                      )}
+                    </section>
+                    <section className="gates-scope-card">
+                      <div className="gates-scope-head">
+                        <strong>Delivery</strong>
+                        <span className={`badge ${deliveryFailedChecks.length === 0 ? 'status-done' : 'status-blocked'}`}>
+                          {deliveryFailedChecks.length === 0 ? 'Ready' : `${deliveryFailedChecks.length} failed`}
+                        </span>
+                      </div>
+                      {deliveryFailedChecks.length === 0 ? (
+                        <div className="meta">All required Delivery checks passed.</div>
+                      ) : (
+                        <div className="gates-failed-tags">
+                          {deliveryFailedChecks.map((item) => (
+                            <span key={`delivery-failed-${item}`} className="gates-failed-tag">{item}</span>
+                          ))}
+                        </div>
+                      )}
+                    </section>
+                  </div>
+                  <div className="gates-policy-row">
+                    <span className="badge">Policy source</span>
+                    <code>{gatePolicySource}</code>
+                    {gatePolicyRuleId ? (
+                      <button
+                        className="status-chip"
+                        type="button"
+                        onClick={() => openLinkedRule(gatePolicyRuleId)}
+                      >
+                        Open gate policy
+                      </button>
+                    ) : null}
+                  </div>
+                </>
+              ) : (
+                <div className="notice">No gate verification payload.</div>
+              )}
+              <div className="meta" style={{ marginTop: 4 }}>
+                Gate behavior is driven by the <strong>Gate Policy</strong> project rule JSON.
+              </div>
+            </div>
+          </Tabs.Content>
+        )}
         <Tabs.Content value="rules" className="project-editor-tab-content">
       <div
         className="rules-studio"
@@ -916,48 +1052,12 @@ export function ProjectsInlineEditor({
                     role="button"
                   >
                     <div className="task-main">
-                      <div className="task-title">
-                        <div className="row" style={{ gap: 6, minWidth: 0 }}>
+                      <div className="task-title rule-item-head">
+                        <div className="row rule-item-head-main">
                           {linkedSkill && <span className="rule-kind-chip">[SKILL]</span>}
                           <strong>{rule.title || 'Untitled rule'}</strong>
                         </div>
-                        <div className="row" style={{ gap: 6 }}>
-                          {isSelected && <span className="badge">Editing</span>}
-                          <DropdownMenu.Root>
-                            <DropdownMenu.Trigger asChild>
-                              <button
-                                className="action-icon task-item-actions-trigger"
-                                type="button"
-                                onClick={(e) => e.stopPropagation()}
-                                title="Rule actions"
-                                aria-label="Rule actions"
-                              >
-                                <Icon path="M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0" />
-                              </button>
-                            </DropdownMenu.Trigger>
-                            <DropdownMenu.Portal>
-                              <DropdownMenu.Content
-                                className="task-group-menu-content note-row-menu-content"
-                                sideOffset={8}
-                                align="end"
-                              >
-                                <DropdownMenu.Item
-                                  className="task-group-menu-item task-group-menu-item-danger"
-                                  disabled={deleteProjectRuleMutation.isPending}
-                                  onSelect={() => {
-                                    setDeleteRulePrompt({
-                                      id: rule.id,
-                                      title: rule.title || 'Untitled rule',
-                                    })
-                                  }}
-                                >
-                                  <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
-                                  <span>Delete rule</span>
-                                </DropdownMenu.Item>
-                              </DropdownMenu.Content>
-                            </DropdownMenu.Portal>
-                          </DropdownMenu.Root>
-                        </div>
+                        {isSelected && <span className="badge">Editing</span>}
                       </div>
                       <div className="meta">{(rule.body || '').replace(/\s+/g, ' ').slice(0, 120) || '(empty)'}</div>
                       {linkedSkill ? (
@@ -966,6 +1066,42 @@ export function ProjectsInlineEditor({
                         </div>
                       ) : null}
                       <div className="meta">Updated: {toUserDateTime(rule.updated_at, userTimezone)}</div>
+                    </div>
+                    <div className="task-item-actions">
+                      <DropdownMenu.Root>
+                        <DropdownMenu.Trigger asChild>
+                          <button
+                            className="action-icon task-item-actions-trigger"
+                            type="button"
+                            onClick={(e) => e.stopPropagation()}
+                            title="Rule actions"
+                            aria-label="Rule actions"
+                          >
+                            <Icon path="M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0" />
+                          </button>
+                        </DropdownMenu.Trigger>
+                        <DropdownMenu.Portal>
+                          <DropdownMenu.Content
+                            className="task-group-menu-content note-row-menu-content"
+                            sideOffset={8}
+                            align="end"
+                          >
+                            <DropdownMenu.Item
+                              className="task-group-menu-item task-group-menu-item-danger"
+                              disabled={deleteProjectRuleMutation.isPending}
+                              onSelect={() => {
+                                setDeleteRulePrompt({
+                                  id: rule.id,
+                                  title: rule.title || 'Untitled rule',
+                                })
+                              }}
+                            >
+                              <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                              <span>Delete rule</span>
+                            </DropdownMenu.Item>
+                          </DropdownMenu.Content>
+                        </DropdownMenu.Portal>
+                      </DropdownMenu.Root>
                     </div>
                   </div>
                 )
@@ -1039,7 +1175,7 @@ export function ProjectsInlineEditor({
                     value={projectRuleBody}
                     onChange={(e) => setProjectRuleBody(e.target.value)}
                     placeholder="Rule details (Markdown)"
-                    style={{ width: '100%', minHeight: 140 }}
+                    style={{ width: '100%' }}
                   />
                 ) : projectRuleView === 'split' ? (
                   <MarkdownSplitPane
@@ -1049,14 +1185,14 @@ export function ProjectsInlineEditor({
                         value={projectRuleBody}
                         onChange={(e) => setProjectRuleBody(e.target.value)}
                         placeholder="Rule details (Markdown)"
-                        style={{ width: '100%', minHeight: 140 }}
+                        style={{ width: '100%' }}
                       />
                     )}
-                    right={<MarkdownView value={projectRuleBody} />}
+                    right={<MarkdownView value={projectRuleBody} onPrettifyJson={setProjectRuleBody} />}
                     ariaLabel="Resize project rule editor and preview panels"
                   />
                 ) : (
-                  <MarkdownView value={projectRuleBody} />
+                  <MarkdownView value={projectRuleBody} onPrettifyJson={setProjectRuleBody} />
                 )}
               </div>
             </div>
@@ -1279,9 +1415,9 @@ export function ProjectsInlineEditor({
                   aria-expanded={isExpanded}
                 >
                   <div className="task-main">
-                    <div className="task-title">
+                    <div className="task-title rule-item-head">
                         <strong>{skill.name || skill.skill_key || 'Untitled skill'}</strong>
-                        <div className="row" style={{ gap: 6 }}>
+                        <div className="row rule-item-head-actions">
                           <DropdownMenu.Root>
                             <DropdownMenu.Trigger asChild>
                               <button
@@ -1532,9 +1668,10 @@ export function ProjectsInlineEditor({
         </div>
       </div>
         </Tabs.Content>
-      {showCatalogPicker ? (
-        <div className="drawer open" onClick={() => setShowCatalogPicker(false)}>
-          <div className="drawer-body project-skill-catalog-drawer" onClick={(e) => e.stopPropagation()}>
+      {showCatalogPicker && typeof document !== 'undefined'
+        ? createPortal(
+          <div className="drawer open" onClick={() => setShowCatalogPicker(false)}>
+            <div className="drawer-body project-skill-catalog-drawer" onClick={(e) => e.stopPropagation()}>
             <div className="drawer-header">
               <div>
                 <h3 className="drawer-title" style={{ marginBottom: 4 }}>Workspace Skill Catalog</h3>
@@ -1566,16 +1703,28 @@ export function ProjectsInlineEditor({
               ) : (
                 filteredWorkspaceSkillItems.map((skill: WorkspaceSkill) => {
                   const alreadyAttached = projectSkillKeys.has(String(skill.skill_key || '').trim())
+                  const skillLabel = skill.name || skill.skill_key || 'Untitled catalog skill'
                   return (
-                    <div key={skill.id} className="task-item rule-item">
+                    <div key={skill.id} className="task-item rule-item project-create-skill-item catalog-skill-item">
                       <div className="task-main">
-                        <div className="task-title">
-                          <div className="row" style={{ gap: 6, minWidth: 0 }}>
+                        <div className="task-title catalog-skill-item-header">
+                          <div className="row catalog-skill-item-title-wrap" style={{ gap: 6, minWidth: 0 }}>
                             {skill.is_seeded ? <span className="rule-kind-chip">[SEEDED]</span> : null}
-                            <strong>{skill.name || skill.skill_key || 'Untitled catalog skill'}</strong>
+                            <strong>{skillLabel}</strong>
                           </div>
+                        </div>
+                        <div className="row wrap catalog-skill-item-meta" style={{ gap: 6 }}>
+                          <span className="status-chip">key: {skill.skill_key || '-'}</span>
+                          <span className="status-chip">mode: {skill.mode || '-'}</span>
+                          <span className="status-chip">trust: {skill.trust_level || '-'}</span>
+                        </div>
+                        <div className="meta catalog-skill-item-summary">
+                          {(skill.summary || '').replace(/\s+/g, ' ').slice(0, 200) || '(no summary)'}
+                        </div>
+                        <div className="row wrap catalog-skill-item-footer" style={{ justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
+                          <div className="meta">source: {skill.source_locator || '(none)'}</div>
                           <button
-                            className="status-chip"
+                            className={`status-chip ${alreadyAttached ? 'on' : ''}`.trim()}
                             type="button"
                             disabled={alreadyAttached || attachWorkspaceSkillToProjectMutation.isPending}
                             onClick={() => {
@@ -1592,22 +1741,17 @@ export function ProjectsInlineEditor({
                             {alreadyAttached ? 'Attached' : 'Attach'}
                           </button>
                         </div>
-                        <div className="meta">
-                          key: {skill.skill_key || '-'} | mode: {skill.mode || '-'} | trust: {skill.trust_level || '-'}
-                        </div>
-                        <div className="meta">
-                          {(skill.summary || '').replace(/\s+/g, ' ').slice(0, 200) || '(no summary)'}
-                        </div>
-                        <div className="meta">source: {skill.source_locator || '(none)'}</div>
                       </div>
                     </div>
                   )
                 })
               )}
             </div>
-          </div>
-        </div>
-      ) : null}
+            </div>
+          </div>,
+          document.body
+        )
+        : null}
         <Tabs.Content value="resources" className="project-editor-tab-content">
       <Accordion.Root
         className="taskdrawer-sections note-resource-stack"

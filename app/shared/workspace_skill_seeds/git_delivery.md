@@ -17,14 +17,18 @@ Use this skill whenever implementation is expected to run against a Git reposito
 ## Branching And Commits
 - Developers implement on feature branches named `task/<task-id>-<slug>`.
 - Each Dev task requires at least one commit before handoff.
+- Each Dev task must reference a unique commit SHA (do not reuse the same commit evidence across multiple Dev tasks).
 - Keep commits scoped to task intent and include task id in commit message.
+- Do not close multiple Dev tasks with a single aggregate commit unless the user explicitly authorizes that exception.
 
 ## Evidence Contract
 - Internal implementation evidence must be linked through task notes.
 - `external_refs` should prefer real external URLs (for example Git remote links, CI links, review links).
 - If remote URL is unavailable, store local commit hash evidence in a linked task note and task comment, and add a commit reference in `external_refs` (for example `commit:<sha>`).
+- Commit evidence must include an actual SHA token (`[0-9a-f]{7,40}`) so automated verification can resolve it.
 - QA must have verifiable artifacts (test logs, reports, traces, or equivalent evidence) before final acceptance.
 
 ## Handoff Rules
 - Dev task cannot move beyond `QA` without commit evidence.
 - QA must verify reproducible artifacts (test output, logs, or commit trace) before final acceptance.
+- Lead deploy tasks require deployment execution evidence against the workspace stack `constructos-ws-default` by default (unless user overrides target stack).

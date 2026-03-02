@@ -632,6 +632,27 @@ export type EventStormingSubgraph = {
   edges: GraphSubgraphEdge[]
 }
 
+export type ProjectGateVerificationResult = {
+  project_id: string
+  active?: boolean
+  checks: Record<string, boolean | string | number | null>
+  required_checks?: string[]
+  required_failed_checks?: string[]
+  gate_policy?: Record<string, unknown>
+  gate_policy_source?: string
+  counts?: Record<string, number>
+  ok: boolean
+}
+
+export type ProjectGatesVerifyResponse = {
+  project_id: string
+  team_mode: ProjectGateVerificationResult
+  delivery: ProjectGateVerificationResult & {
+    runtime_deploy_health?: Record<string, unknown>
+  }
+  ok: boolean
+}
+
 export type EventStormingLinkReviewResult = {
   project_id: string
   entity_type: string

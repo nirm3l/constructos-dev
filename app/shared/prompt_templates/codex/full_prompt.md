@@ -59,7 +59,11 @@ Guidance:
   4) provide artifact evidence per task:
      - internal artifacts must be stored as linked task notes,
      - `external_refs` should use real external URLs when available; if no remote exists, include a commit id reference (for example `commit:<sha>`), never internal `?tab=...` links.
+     - each Dev task must carry unique commit evidence (do not reuse one SHA across multiple Dev tasks).
+     - QA evidence must include explicit outcome markers (pass/fail) and at least one verifiable artifact signal.
+     - when a Lead deploy task exists, include deployment execution evidence (command + health/status result) before claiming delivery complete.
 - If any item cannot be completed, return `BLOCKED` with concrete missing prerequisite(s).
+- If Team Mode is requested, you MUST execute this setup order.
 - Team Mode required flow (strict order):
   1) `list_workspace_skills` -> locate `team_mode`
   2) `attach_workspace_skill_to_project`
@@ -68,9 +72,16 @@ Guidance:
   5) `list_project_members` -> resolve agent UUIDs and verify required roles (TeamLeadAgent, 2x DeveloperAgent, QAAgent)
   6) create/patch workflow and tasks to satisfy request
 - Honor explicit user constraints first: exact task count, required artifacts (specifications/notes/tasks), and flags like `event_storming_enabled=false`.
+- If the user requests an exact task count, keep that exact count.
 - If a required project flag is not satisfied at create time, call `update_project` immediately and verify the final project state before reporting success.
-- Team Mode defaults (unless user overrides): statuses `To do, Dev, QA, Lead, Done, Blocked`; Dev->QA->Lead->Done automation path; recurring Lead oversight; QA validation task.
+- Team Mode defaults (unless user overrides): statuses `To do, Dev, QA, Lead, Done, Blocked`; Dev -> QA -> Lead -> Done automation path; recurring Lead oversight; QA validation task.
+- Ensure at least one recurring scheduled Team Lead oversight task is configured.
 - Initial Team Mode task statuses must be explicit (unless user overrides): Dev tasks in `Dev`, QA validation task in `QA`, Lead oversight/deploy tasks in `Lead`.
+- Keep a project rule titled `Gate Policy` (JSON) updated so verification gates are explicit and editable from the UI Rules panel.
+- For setup-only requests set `runtime_deploy_health.required=false` in Gate Policy; for execution requests that include deploy completion set `runtime_deploy_health.required=true`.
+- Trigger wiring guardrails:
+  - Never create a `status_change` trigger with `scope=external` that references the same task id in `selector.task_ids`.
+  - If there is only one Lead task that also represents deploy readiness, do not add synthetic Lead->Lead external trigger just to satisfy checks; keep QA->Lead plus Lead recurring schedule.
 - Assignments: always use `assignee_id` as project-member `user_id` UUID from `list_project_members`.
 - Never use username/display name as `assignee_id`; never silently fallback to random/human assignees.
 - If UUID assignment, membership, or trigger wiring fails, treat as incomplete and continue remediation.
@@ -79,6 +90,11 @@ Guidance:
 - For Team Mode setup completion, call `verify_team_mode_workflow` and do not report success while any required check is `FAIL`.
 - If the user requests deploy execution, do not claim deploy succeeded unless you actually executed deployment commands.
 - If the user asks for deployment as part of planning/setup, create explicit deployment tasks/specs/notes; only execute deployment commands when the user explicitly asks to run deploy now.
+- For setup-only requests, record deployment intent in a note/task artifact with explicit stack + port + health path and mark `Execution state: Not started`.
+- When deploy execution is requested and no explicit stack is provided, deploy with Docker Compose project `constructos-ws-default`.
+- Use `docker compose` (wrapper-enforced project) or explicit `docker compose -p constructos-ws-default ...` for deployment commands unless user overrides stack.
+- Treat delivery as incomplete if post-deploy QA is missing. Required loop: Lead deploy -> QA post-deploy validation -> if fail create/link bug task(s) -> Dev fix with new commit evidence -> Lead re-deploy -> QA re-check evidence.
+- If QA fails, run explicit bug loop: create/link bug task(s), implement fix with new commit evidence, then re-run QA and record re-check artifacts.
 - For implementation work, create/use the project repository under `/home/app/workspace/<project-slug>` by default.
 - If `/home/app/workspace` is not writable/available and runtime falls back to another workspace path, continue there and explicitly report the effective fallback path in the response.
 - You may call task-management MCP tools relevant to the request.
@@ -102,5 +118,6 @@ Guidance:
   - required triggers present
   - required role coverage present
   - user-required flags/artifacts satisfied (for example `event_storming_enabled=false`, specs/notes present when requested)
+- For setup-only requests, include a final line `Execution state: Not started` plus `Deploy target recorded: <stack>:<port>`.
 {mutation_policy}
 {response_tail}

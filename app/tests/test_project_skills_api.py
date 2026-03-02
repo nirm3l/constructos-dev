@@ -553,6 +553,7 @@ def test_apply_team_mode_skill_ensures_agent_users_and_project_roles(tmp_path: P
     assert applied.status_code == 200
     applied_payload = applied.json()
     assert isinstance(applied_payload["generated_rule_id"], str) and applied_payload["generated_rule_id"]
+    assert isinstance(applied_payload.get("gate_policy_rule_id"), str) and applied_payload["gate_policy_rule_id"]
     assert applied_payload["team_mode_contract_complete"] is True
     team_dependencies = applied_payload.get("resolved_dependencies") or []
     git_dependency = next((item for item in team_dependencies if item.get("skill_key") == "git_delivery"), None)
@@ -597,6 +598,18 @@ def test_apply_team_mode_skill_ensures_agent_users_and_project_roles(tmp_path: P
     assert team_rule_id
     assert git_rule_id
     assert team_rule_id != git_rule_id
+    project_rules = client.get(f"/api/project-rules?workspace_id={workspace_id}&project_id={project_id}")
+    assert project_rules.status_code == 200
+    gate_rules = [
+        item
+        for item in project_rules.json()["items"]
+        if "gate policy" in str(item.get("title") or "").strip().lower()
+    ]
+    assert len(gate_rules) == 1
+    gate_rule = gate_rules[0]
+    assert str(gate_rule.get("id") or "").strip() == str(applied_payload.get("gate_policy_rule_id") or "").strip()
+    assert "```json" in str(gate_rule.get("body") or "")
+    assert "required_checks" in str(gate_rule.get("body") or "")
 
     members_again = client.get(f"/api/projects/{project_id}/members")
     assert members_again.status_code == 200

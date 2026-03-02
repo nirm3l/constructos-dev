@@ -162,6 +162,58 @@ export function useProjectMutations(c: any) {
           c.setUiError(toErrorMessage(err, 'Project created, but some rules failed to save'))
         }
       }
+      const selectedWorkspaceSkillIds = Array.from(
+        new Set<string>(
+          ((c.createProjectWorkspaceSkillIds ?? []) as unknown[])
+            .map((value) => String(value || '').trim())
+            .filter(Boolean)
+        )
+      )
+      if (selectedWorkspaceSkillIds.length > 0) {
+        const workspaceSkillById = new Map(
+          ((c.workspaceSkills?.data?.items ?? []) as Array<Record<string, unknown>>).map((item) => [
+            String(item.id || '').trim(),
+            item,
+          ])
+        )
+        const resolveWorkspaceSkillKey = (workspaceSkillId: string): string =>
+          String(workspaceSkillById.get(workspaceSkillId)?.skill_key || '').trim()
+        const orderedSkillIds = [...selectedWorkspaceSkillIds].sort((left, right) => {
+          const leftTeamMode = resolveWorkspaceSkillKey(left) === 'team_mode' ? 0 : 1
+          const rightTeamMode = resolveWorkspaceSkillKey(right) === 'team_mode' ? 0 : 1
+          return leftTeamMode - rightTeamMode
+        })
+        const attachedSkillKeys = new Set<string>()
+        const appliedProjectSkillIds = new Set<string>()
+        try {
+          for (const workspaceSkillId of orderedSkillIds) {
+            const workspaceSkill = workspaceSkillById.get(workspaceSkillId) || null
+            const workspaceSkillKey = String(workspaceSkill?.skill_key || '').trim()
+            if (workspaceSkillKey && attachedSkillKeys.has(workspaceSkillKey)) continue
+            const attached = await attachWorkspaceSkillToProject(c.userId, workspaceSkillId, {
+              workspace_id: c.workspaceId,
+              project_id: createdProject.id,
+            })
+            const attachedSkillId = String(attached?.id || '').trim()
+            const attachedSkillKey = String(attached?.skill_key || workspaceSkillKey || '').trim()
+            if (attachedSkillKey) attachedSkillKeys.add(attachedSkillKey)
+            if (!attachedSkillId || appliedProjectSkillIds.has(attachedSkillId)) continue
+            const applied = await applyProjectSkill(c.userId, attachedSkillId)
+            appliedProjectSkillIds.add(attachedSkillId)
+            const resolvedDependencies = Array.isArray((applied as any)?.resolved_dependencies)
+              ? ((applied as any).resolved_dependencies as Array<Record<string, unknown>>)
+              : []
+            for (const dependency of resolvedDependencies) {
+              const dependencySkillKey = String(dependency.skill_key || '').trim()
+              if (dependencySkillKey) attachedSkillKeys.add(dependencySkillKey)
+              const dependencyProjectSkillId = String(dependency.project_skill_id || '').trim()
+              if (dependencyProjectSkillId) appliedProjectSkillIds.add(dependencyProjectSkillId)
+            }
+          }
+        } catch (err) {
+          c.setUiError(toErrorMessage(err, 'Project created, but selected skills failed to attach/apply'))
+        }
+      }
       c.setProjectName('')
       c.setProjectTemplateKey('')
       c.setProjectDescription('')
@@ -177,6 +229,7 @@ export function useProjectMutations(c: any) {
       c.setProjectTemplateParametersText('')
       c.setProjectDescriptionView('write')
       c.setCreateProjectMemberIds([])
+      c.setCreateProjectWorkspaceSkillIds([])
       c.setDraftProjectRules([])
       c.setSelectedDraftProjectRuleId(null)
       c.setDraftProjectRuleTitle('')

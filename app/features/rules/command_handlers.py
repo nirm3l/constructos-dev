@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import re
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -20,6 +22,38 @@ from shared.core import (
 )
 
 from .domain import ProjectRuleAggregate
+
+_GATE_POLICY_RULE_TITLES = ("gate policy", "delivery gates", "workflow gates")
+
+
+def _should_prettify_rule_body(title: str) -> bool:
+    normalized_title = str(title or "").strip().lower()
+    return any(marker in normalized_title for marker in _GATE_POLICY_RULE_TITLES)
+
+
+def _extract_json_candidate(body: str) -> str:
+    raw = str(body or "").strip()
+    if not raw:
+        return raw
+    fenced_match = re.search(r"```(?:json)?\s*(\{[\s\S]*\}|\[[\s\S]*\])\s*```", raw, flags=re.IGNORECASE)
+    if fenced_match:
+        return str(fenced_match.group(1) or "").strip()
+    return raw
+
+
+def _prettify_gate_policy_body_if_needed(*, title: str, body: str) -> str:
+    raw_body = str(body or "")
+    if not _should_prettify_rule_body(title):
+        return raw_body
+    candidate = _extract_json_candidate(raw_body)
+    if not candidate:
+        return raw_body
+    try:
+        parsed = json.loads(candidate)
+    except Exception:
+        return raw_body
+    pretty = json.dumps(parsed, indent=2, ensure_ascii=False)
+    return f"```json\n{pretty}\n```"
 
 
 def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> None:
@@ -77,12 +111,16 @@ class CreateProjectRuleHandler:
         title = self.payload.title.strip()
         if not title:
             raise HTTPException(status_code=422, detail="title cannot be empty")
+        body = _prettify_gate_policy_body_if_needed(
+            title=title,
+            body=self.payload.body or "",
+        )
         aggregate = ProjectRuleAggregate(
             id=coerce_originator_id(rid),
             workspace_id=self.payload.workspace_id,
             project_id=self.payload.project_id,
             title=title,
-            body=self.payload.body or "",
+            body=body,
             created_by=self.ctx.user.id,
         )
         AggregateEventRepository(self.ctx.db).persist(
@@ -132,7 +170,11 @@ class PatchProjectRuleHandler:
                 raise HTTPException(status_code=422, detail="title cannot be empty")
             event_payload["title"] = title
         if "body" in data and data["body"] is not None:
-            event_payload["body"] = str(data["body"])
+            effective_title = event_payload.get("title", str(getattr(aggregate, "title", "") or ""))
+            event_payload["body"] = _prettify_gate_policy_body_if_needed(
+                title=effective_title,
+                body=str(data["body"]),
+            )
         if not event_payload:
             view = load_project_rule_view(self.ctx.db, self.rule_id)
             if view is None:

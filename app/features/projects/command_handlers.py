@@ -477,7 +477,8 @@ class PatchProjectHandler:
                 return view
             return _project_view_from_aggregate(aggregate)
 
-        aggregate.update(**event_payload)
+        updated_fields = list(event_payload.keys())
+        aggregate.update(updated_fields=updated_fields, **event_payload)
         repo.persist(
             aggregate,
             base_metadata={

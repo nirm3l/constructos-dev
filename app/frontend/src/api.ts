@@ -38,6 +38,7 @@ import type {
   ProjectMembersPage,
   ProjectFromTemplatePreviewResponse,
   ProjectFromTemplateResponse,
+  ProjectGatesVerifyResponse,
   ProjectRule,
   ProjectRulesPage,
   ProjectSkill,
@@ -802,6 +803,9 @@ export const searchProjectKnowledge = (
 
 export const getProjectEventStormingOverview = (userId: string, projectId: string) =>
   api<EventStormingOverview>(`/api/projects/${projectId}/event-storming/overview`, userId)
+
+export const getProjectGatesVerification = (userId: string, projectId: string) =>
+  api<ProjectGatesVerifyResponse>(`/api/projects/${projectId}/gates/verify`, userId)
 
 export const getProjectEventStormingSubgraph = (
   userId: string,

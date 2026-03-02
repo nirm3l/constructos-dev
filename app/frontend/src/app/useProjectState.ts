@@ -39,6 +39,7 @@ export function useProjectState() {
   >('METADATA_ONLY')
   const [editProjectEventStormingEnabled, setEditProjectEventStormingEnabled] = React.useState(true)
   const [createProjectMemberIds, setCreateProjectMemberIds] = React.useState<string[]>([])
+  const [createProjectWorkspaceSkillIds, setCreateProjectWorkspaceSkillIds] = React.useState<string[]>([])
   const [editProjectMemberIds, setEditProjectMemberIds] = React.useState<string[]>([])
   const [editProjectDescriptionView, setEditProjectDescriptionView] = React.useState<'write' | 'preview' | 'split'>('split')
   const [selectedProjectRuleId, setSelectedProjectRuleId] = React.useState<string | null>(null)
@@ -60,6 +61,15 @@ export function useProjectState() {
   const [projectsMode, setProjectsMode] = React.useState<'board' | 'list'>(() =>
     parseStoredProjectsMode(localStorage.getItem('ui_projects_mode'))
   )
+  const toggleCreateProjectWorkspaceSkill = React.useCallback((skillIdToToggle: string) => {
+    const normalized = String(skillIdToToggle || '').trim()
+    if (!normalized) return
+    setCreateProjectWorkspaceSkillIds((prev) => {
+      const normalizedPrev = prev.map((item) => String(item || '').trim()).filter(Boolean)
+      if (normalizedPrev.includes(normalized)) return normalizedPrev.filter((item) => item !== normalized)
+      return [...normalizedPrev, normalized]
+    })
+  }, [])
 
   return {
     projectName,
@@ -118,6 +128,9 @@ export function useProjectState() {
     setEditProjectEventStormingEnabled,
     createProjectMemberIds,
     setCreateProjectMemberIds,
+    createProjectWorkspaceSkillIds,
+    setCreateProjectWorkspaceSkillIds,
+    toggleCreateProjectWorkspaceSkill,
     editProjectMemberIds,
     setEditProjectMemberIds,
     editProjectDescriptionView,

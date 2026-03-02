@@ -363,7 +363,12 @@ def _with_legacy_schedule_overrides(
     return effective_instruction, normalize_execution_triggers(effective_triggers)
 
 
-def _validate_automation_fields(*, instruction: str | None, execution_triggers: list[dict]) -> None:
+def _validate_automation_fields(
+    *,
+    instruction: str | None,
+    execution_triggers: list[dict],
+    source_task_id: str | None = None,
+) -> None:
     normalized_instruction = _normalize_instruction(instruction)
     normalized_triggers = normalize_execution_triggers(execution_triggers)
     has_non_manual = any(str(trigger.get("kind") or "") != "manual" for trigger in normalized_triggers)
@@ -387,6 +392,17 @@ def _validate_automation_fields(*, instruction: str | None, execution_triggers: 
         to_statuses = trigger.get("to_statuses")
         if not isinstance(to_statuses, list) or not any(str(item or "").strip() for item in to_statuses):
             raise HTTPException(status_code=422, detail="status_change trigger requires at least one to_statuses value")
+        if scope == STATUS_SCOPE_EXTERNAL and source_task_id:
+            selector_task_ids = [
+                str(item or "").strip()
+                for item in (((trigger.get("selector") or {}).get("task_ids")) or [])
+                if str(item or "").strip()
+            ]
+            if str(source_task_id).strip() in selector_task_ids:
+                raise HTTPException(
+                    status_code=422,
+                    detail="status_change external trigger selector.task_ids cannot include the same task id",
+                )
 
 
 def require_task_command_state(db: Session, user: User, task_id: str, *, allowed: set[str]) -> tuple[str, str | None, str, bool]:
@@ -569,6 +585,7 @@ class CreateTaskHandler:
         _validate_automation_fields(
             instruction=normalized_instruction,
             execution_triggers=normalized_triggers,
+            source_task_id=tid,
         )
         legacy_schedule = derive_legacy_schedule_fields(
             instruction=normalized_instruction,
@@ -772,6 +789,7 @@ class PatchTaskHandler:
         _validate_automation_fields(
             instruction=normalized_instruction,
             execution_triggers=normalized_triggers,
+            source_task_id=self.task_id,
         )
         legacy_schedule = derive_legacy_schedule_fields(
             instruction=normalized_instruction,

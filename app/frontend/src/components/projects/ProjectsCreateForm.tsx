@@ -5,7 +5,7 @@ import * as Select from '@radix-ui/react-select'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import { ExternalRefEditor, Icon, MarkdownModeToggle, MarkdownSplitPane } from '../shared/uiHelpers'
 import { externalRefsToText, parseExternalRefsText, removeExternalRefByIndex } from '../../utils/ui'
-import type { ProjectFromTemplatePreviewResponse, ProjectTemplate } from '../../types'
+import type { ProjectFromTemplatePreviewResponse, ProjectTemplate, WorkspaceSkill } from '../../types'
 
 export type DraftProjectRule = { id: string; title: string; body: string }
 
@@ -118,6 +118,11 @@ export function ProjectsCreateForm({
   setProjectExternalRefsText,
   workspaceUsers,
   createProjectMemberIds,
+  createProjectWorkspaceSkillIds,
+  setCreateProjectWorkspaceSkillIds,
+  workspaceSkills,
+  workspaceSkillsLoading,
+  toggleCreateProjectWorkspaceSkill,
   toggleCreateProjectMember,
 }: {
   projectName: string
@@ -174,6 +179,11 @@ export function ProjectsCreateForm({
   setProjectExternalRefsText: React.Dispatch<React.SetStateAction<string>>
   workspaceUsers: WorkspaceUser[]
   createProjectMemberIds: string[]
+  createProjectWorkspaceSkillIds: string[]
+  setCreateProjectWorkspaceSkillIds: React.Dispatch<React.SetStateAction<string[]>>
+  workspaceSkills: WorkspaceSkill[]
+  workspaceSkillsLoading: boolean
+  toggleCreateProjectWorkspaceSkill: (workspaceSkillIdToToggle: string) => void
   toggleCreateProjectMember: (userIdToToggle: string) => void
 }) {
   const modelOptions = React.useMemo(
@@ -308,6 +318,21 @@ export function ProjectsCreateForm({
     () => workspaceUsers.filter((user) => selectedMemberSet.has(String(user.id || '').trim())),
     [selectedMemberSet, workspaceUsers]
   )
+  const selectedWorkspaceSkillSet = React.useMemo(
+    () => new Set(createProjectWorkspaceSkillIds.map((value) => String(value || '').trim()).filter(Boolean)),
+    [createProjectWorkspaceSkillIds]
+  )
+  const orderedWorkspaceSkills = React.useMemo(() => {
+    const items = [...workspaceSkills]
+    items.sort((a, b) => {
+      const left = String(a.name || a.skill_key || '').toLowerCase()
+      const right = String(b.name || b.skill_key || '').toLowerCase()
+      if (left < right) return -1
+      if (left > right) return 1
+      return 0
+    })
+    return items
+  }, [workspaceSkills])
   const canSelectAllMembers = workspaceUsers.some((user) => !selectedMemberSet.has(String(user.id || '').trim()))
   const canClearMembers = selectedMemberSet.size > 0
   const sectionMetaSetup = templateMode
@@ -316,7 +341,7 @@ export function ProjectsCreateForm({
   const sectionMetaRetrieval = projectEmbeddingEnabled
     ? `Embeddings on · Chat ${effectiveProjectChatIndexMode}`
     : 'Embeddings off · Chat OFF'
-  const sectionMetaResources = `${selectedWorkspaceUsers.length} member${selectedWorkspaceUsers.length === 1 ? '' : 's'} selected`
+  const sectionMetaResources = `${selectedWorkspaceUsers.length} member${selectedWorkspaceUsers.length === 1 ? '' : 's'}, ${selectedWorkspaceSkillSet.size} skill${selectedWorkspaceSkillSet.size === 1 ? '' : 's'}`
   const sectionMetaRules = `${draftProjectRules.length} draft rule${draftProjectRules.length === 1 ? '' : 's'}`
 
   const runTemplatePreview = React.useCallback(() => {
@@ -358,6 +383,21 @@ export function ProjectsCreateForm({
       toggleCreateProjectMember(userId)
     }
   }, [selectedMemberSet, toggleCreateProjectMember, workspaceUsers])
+  const applyAgentModePreset = React.useCallback(() => {
+    const presetSkillKeys = new Set(['team_mode', 'git_delivery'])
+    const presetIds = orderedWorkspaceSkills
+      .filter((skill) => presetSkillKeys.has(String(skill.skill_key || '').trim()))
+      .map((skill) => String(skill.id || '').trim())
+      .filter(Boolean)
+    if (presetIds.length === 0) return
+    setCreateProjectWorkspaceSkillIds((prev) => {
+      const merged = new Set([...prev.map((item) => String(item || '').trim()).filter(Boolean), ...presetIds])
+      return Array.from(merged)
+    })
+  }, [orderedWorkspaceSkills, setCreateProjectWorkspaceSkillIds])
+  const clearSkillSelection = React.useCallback(() => {
+    setCreateProjectWorkspaceSkillIds([])
+  }, [setCreateProjectWorkspaceSkillIds])
 
   const resetTemplatePreview = previewProjectFromTemplateMutation.reset
   React.useEffect(() => {
@@ -687,7 +727,10 @@ export function ProjectsCreateForm({
                   <input
                     type="checkbox"
                     checked={projectEventStormingEnabled ?? true}
-                    onChange={(e) => setProjectEventStormingEnabled(Boolean(e.target.checked))}
+                    onChange={(e) => {
+                      if (typeof setProjectEventStormingEnabled !== 'function') return
+                      setProjectEventStormingEnabled(Boolean(e.target.checked))
+                    }}
                   />
                   <span>Enable processing</span>
                 </label>
@@ -1023,6 +1066,75 @@ export function ProjectsCreateForm({
                       <Icon path="M6 6l12 12M18 6 6 18" />
                     </button>
                   ))}
+                </div>
+              )}
+            </div>
+
+            <div className="project-create-members-block project-create-skills-block">
+              <div className="project-create-members-head project-create-skills-head">
+                <div>
+                  <span className="field-label">Skills at project creation</span>
+                  <div className="meta">Selected skills are attached and applied automatically right after create.</div>
+                </div>
+                <div className="row wrap project-create-skills-head-actions">
+                  <button
+                    type="button"
+                    className="status-chip"
+                    onClick={applyAgentModePreset}
+                    disabled={!orderedWorkspaceSkills.some((skill) => String(skill.skill_key || '').trim() === 'team_mode')}
+                    title="Select Team Mode + Git Delivery for agent-driven setup"
+                    aria-label="Select Team Mode and Git Delivery"
+                  >
+                    Agent mode preset
+                  </button>
+                  <button
+                    type="button"
+                    className="status-chip"
+                    onClick={clearSkillSelection}
+                    disabled={selectedWorkspaceSkillSet.size === 0}
+                    title="Clear selected skills"
+                    aria-label="Clear selected skills"
+                  >
+                    Clear
+                  </button>
+                  <span className="status-chip">{selectedWorkspaceSkillSet.size} selected</span>
+                </div>
+              </div>
+              {workspaceSkillsLoading ? (
+                <div className="notice">Loading workspace skills...</div>
+              ) : orderedWorkspaceSkills.length === 0 ? (
+                <div className="notice">No workspace skills available.</div>
+              ) : (
+                <div className="project-create-skill-list">
+                  {orderedWorkspaceSkills.map((skill) => {
+                    const skillId = String(skill.id || '').trim()
+                    const selected = selectedWorkspaceSkillSet.has(skillId)
+                    const summary = (skill.summary || '').replace(/\s+/g, ' ').trim()
+                    return (
+                      <button
+                        key={`create-project-skill-${skillId}`}
+                        type="button"
+                        className={`task-item rule-item project-create-skill-item ${selected ? 'selected' : ''}`}
+                        onClick={() => toggleCreateProjectWorkspaceSkill(skillId)}
+                        aria-pressed={selected}
+                        title={selected ? 'Remove skill from auto-apply' : 'Select skill for auto-apply'}
+                      >
+                        <span className="task-main">
+                          <span className="task-title">
+                            <span className="row wrap" style={{ gap: 6, minWidth: 0 }}>
+                              {skill.is_seeded ? <span className="rule-kind-chip">seeded</span> : null}
+                              <strong>{skill.name || skill.skill_key || 'Untitled skill'}</strong>
+                            </span>
+                          </span>
+                          <span className="meta">
+                            key: {skill.skill_key || '-'} | mode: {skill.mode || '-'} | trust: {skill.trust_level || '-'}
+                          </span>
+                          <span className="meta">{summary || '(no summary)'}</span>
+                        </span>
+                        <span className={`status-chip ${selected ? 'on' : ''}`}>{selected ? 'Selected' : 'Select'}</span>
+                      </button>
+                    )
+                  })}
                 </div>
               )}
             </div>

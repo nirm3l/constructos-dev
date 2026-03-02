@@ -141,7 +141,10 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             projectChatAttachmentIngestionMode: state.projectChatAttachmentIngestionMode,
             setProjectChatAttachmentIngestionMode: state.setProjectChatAttachmentIngestionMode,
             projectEventStormingEnabled: state.projectEventStormingEnabled,
-            setProjectEventStormingEnabled: state.setProjectEventStormingEnabled,
+            setProjectEventStormingEnabled:
+              typeof state.setProjectEventStormingEnabled === 'function'
+                ? state.setProjectEventStormingEnabled
+                : (() => undefined),
             embeddingAllowedModels: state.embeddingAllowedModels,
             embeddingDefaultModel: state.embeddingDefaultModel,
             vectorStoreEnabled: state.vectorStoreEnabled,
@@ -151,6 +154,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             setProjectTemplateParametersText: state.setProjectTemplateParametersText,
             workspaceUsers: state.workspaceUsers,
             createProjectMemberIds: state.createProjectMemberIds,
+            createProjectWorkspaceSkillIds: state.createProjectWorkspaceSkillIds,
+            toggleCreateProjectWorkspaceSkill: state.toggleCreateProjectWorkspaceSkill,
             toggleCreateProjectMember: state.toggleCreateProjectMember,
             selectedProjectId: state.selectedProjectId,
             selectedProject: state.selectedProject,
