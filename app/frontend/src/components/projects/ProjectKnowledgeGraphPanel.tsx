@@ -1207,13 +1207,49 @@ export function ProjectKnowledgeGraphPanel({
     }
   }, [filteredGraph.edges, graphAltVisibleNodes, selectedGraphAltNodeId])
 
-  const graphAltAllVisibleRelationItems = React.useMemo(() => {
-    const counts = new Map<string, number>()
-    for (const edge of filteredGraph.edges) {
+  const graphAltReducedEdges = React.useMemo(() => {
+    const scopedEdges = filteredGraph.edges.filter((edge) => {
+      const source = String(edge.source_entity_id || '').trim()
+      const target = String(edge.target_entity_id || '').trim()
+      if (!source || !target) return false
+      return graphAltBaseVisibleNodeIds.has(source) && graphAltBaseVisibleNodeIds.has(target)
+    })
+    if (scopedEdges.length <= 2) return scopedEdges
+
+    const nonReducibleRelations = new Set(['DEPENDS_ON_TASK_STATUS', 'COMMENT_ACTIVITY', 'IN_PROJECT'])
+    const adjacency = new Map<string, Set<string>>()
+    for (const edge of scopedEdges) {
       const source = String(edge.source_entity_id || '').trim()
       const target = String(edge.target_entity_id || '').trim()
       if (!source || !target) continue
-      if (!graphAltBaseVisibleNodeIds.has(source) || !graphAltBaseVisibleNodeIds.has(target)) continue
+      const neighbors = adjacency.get(source) ?? new Set<string>()
+      neighbors.add(target)
+      adjacency.set(source, neighbors)
+    }
+
+    return scopedEdges.filter((edge) => {
+      const source = String(edge.source_entity_id || '').trim()
+      const target = String(edge.target_entity_id || '').trim()
+      const relation = String(edge.relationship || 'RELATED').trim().toUpperCase()
+      if (!source || !target || source === target) return true
+      if (nonReducibleRelations.has(relation)) return true
+      const firstHop = adjacency.get(source)
+      if (!firstHop || firstHop.size === 0) return true
+      for (const mid of firstHop) {
+        if (!mid || mid === source || mid === target) continue
+        const secondHop = adjacency.get(mid)
+        if (secondHop?.has(target)) return false
+      }
+      return true
+    })
+  }, [filteredGraph.edges, graphAltBaseVisibleNodeIds])
+
+  const graphAltAllVisibleRelationItems = React.useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const edge of graphAltReducedEdges) {
+      const source = String(edge.source_entity_id || '').trim()
+      const target = String(edge.target_entity_id || '').trim()
+      if (!source || !target) continue
       const relation = String(edge.relationship || 'RELATED').trim().toUpperCase()
       if (!relation) continue
       counts.set(relation, Number(counts.get(relation) || 0) + 1)
@@ -1226,7 +1262,7 @@ export function ProjectKnowledgeGraphPanel({
         color: graphAltRelationColor(relationship),
       }))
       .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label))
-  }, [filteredGraph.edges, graphAltBaseVisibleNodeIds])
+  }, [graphAltReducedEdges])
 
   const graphAltFlowNodes = React.useMemo(() => {
     const visibleNodes = graphAltVisibleNodes
@@ -1485,14 +1521,14 @@ export function ProjectKnowledgeGraphPanel({
 
   const graphAltFlowEdges = React.useMemo(() => {
     const positionedNodes = graphAltCanvasNodes.length ? graphAltCanvasNodes : graphAltFlowNodes
-    if (!filteredGraph.edges.length || positionedNodes.length === 0) return [] as FlowEdge[]
+    if (!graphAltReducedEdges.length || positionedNodes.length === 0) return [] as FlowEdge[]
     const nodeIdSet = new Set(positionedNodes.map((node) => String(node.id || '')))
     const nodePositionById = new Map(
       positionedNodes.map((node) => [String(node.id || ''), { x: Number(node.position?.x || 0), y: Number(node.position?.y || 0) }])
     )
     const selectedTaskId = String(graphAltDependencyContext.selectedTaskId || '')
     const hasTaskChain = Boolean(selectedTaskId)
-    return filteredGraph.edges
+    return graphAltReducedEdges
       .map((edge, idx) => {
         const source = String(edge.source_entity_id || '')
         const target = String(edge.target_entity_id || '')
@@ -1564,7 +1600,7 @@ export function ProjectKnowledgeGraphPanel({
         } as FlowEdge
       })
       .filter((edge): edge is FlowEdge => Boolean(edge))
-  }, [filteredGraph.edges, graphAltCanvasNodes, graphAltDependencyContext, graphAltFlowNodes])
+  }, [graphAltCanvasNodes, graphAltDependencyContext, graphAltFlowNodes, graphAltReducedEdges])
 
   React.useEffect(() => {
     setGraphAltCanvasNodes(graphAltFlowNodes)
