@@ -139,6 +139,12 @@ function graphAltRelationColor(relationship: string): string {
 
 function graphEntityTypeVisualMeta(entityType: unknown): { sticky: string; text: string; border: string } {
   const key = normalizeGraphEntityTypeKey(entityType)
+  if (key === 'boundedcontext') return { sticky: EVENT_STORMING_TYPE_META.boundedcontext.sticky, text: EVENT_STORMING_TYPE_META.boundedcontext.text, border: EVENT_STORMING_TYPE_META.boundedcontext.border }
+  if (key === 'aggregate') return { sticky: EVENT_STORMING_TYPE_META.aggregate.sticky, text: EVENT_STORMING_TYPE_META.aggregate.text, border: EVENT_STORMING_TYPE_META.aggregate.border }
+  if (key === 'command') return { sticky: EVENT_STORMING_TYPE_META.command.sticky, text: EVENT_STORMING_TYPE_META.command.text, border: EVENT_STORMING_TYPE_META.command.border }
+  if (key === 'domainevent') return { sticky: EVENT_STORMING_TYPE_META.domainevent.sticky, text: EVENT_STORMING_TYPE_META.domainevent.text, border: EVENT_STORMING_TYPE_META.domainevent.border }
+  if (key === 'policy') return { sticky: EVENT_STORMING_TYPE_META.policy.sticky, text: EVENT_STORMING_TYPE_META.policy.text, border: EVENT_STORMING_TYPE_META.policy.border }
+  if (key === 'readmodel') return { sticky: EVENT_STORMING_TYPE_META.readmodel.sticky, text: EVENT_STORMING_TYPE_META.readmodel.text, border: EVENT_STORMING_TYPE_META.readmodel.border }
   if (key === 'task') return { sticky: '#dbeafe', text: '#1e3a8a', border: '#2563eb' }
   if (key === 'specification') return { sticky: '#ccfbf1', text: '#134e4a', border: '#0d9488' }
   if (key === 'note') return { sticky: '#f3e8ff', text: '#581c87', border: '#9333ea' }
@@ -1560,81 +1566,13 @@ export function ProjectKnowledgeGraphPanel({
       .filter((edge): edge is FlowEdge => Boolean(edge))
   }, [filteredGraph.edges, graphAltCanvasNodes, graphAltDependencyContext, graphAltFlowNodes])
 
-  const graphAltNeighborMap = React.useMemo(() => {
-    const neighborMap = new Map<string, Set<string>>()
-    for (const edge of filteredGraph.edges) {
-      const source = String(edge.source_entity_id || '').trim()
-      const target = String(edge.target_entity_id || '').trim()
-      if (!source || !target) continue
-      const sourceNeighbors = neighborMap.get(source) ?? new Set<string>()
-      sourceNeighbors.add(target)
-      neighborMap.set(source, sourceNeighbors)
-      const targetNeighbors = neighborMap.get(target) ?? new Set<string>()
-      targetNeighbors.add(source)
-      neighborMap.set(target, targetNeighbors)
-    }
-    return neighborMap
-  }, [filteredGraph.edges])
-
   React.useEffect(() => {
     setGraphAltCanvasNodes(graphAltFlowNodes)
   }, [graphAltFlowNodes])
 
   const onGraphAltNodesChange = React.useCallback((changes: NodeChange<FlowNode<ReactFlowNodeData>>[]) => {
-    const connectionAlignThreshold = 20
-    setGraphAltCanvasNodes((current) => {
-      const next = applyNodeChanges(changes, current)
-      const nodeById = new Map(next.map((node) => [String(node.id || ''), node]))
-      const overrides = new Map<string, { x: number; y: number }>()
-
-      for (const change of changes) {
-        if (change.type !== 'position' || !change.position) continue
-        const nodeId = String(change.id || '').trim()
-        if (!nodeId) continue
-        const movingNode = nodeById.get(nodeId)
-        if (!movingNode) continue
-        const currentPos = {
-          x: Number(movingNode.position?.x || 0),
-          y: Number(movingNode.position?.y || 0),
-        }
-        const neighbors = graphAltNeighborMap.get(nodeId)
-        if (!neighbors || neighbors.size === 0) continue
-
-        let bestX = currentPos.x
-        let bestY = currentPos.y
-        let bestDx = Number.POSITIVE_INFINITY
-        let bestDy = Number.POSITIVE_INFINITY
-
-        for (const neighborId of neighbors) {
-          const neighborNode = nodeById.get(neighborId)
-          if (!neighborNode) continue
-          const neighborPosX = Number(neighborNode.position?.x || 0)
-          const neighborPosY = Number(neighborNode.position?.y || 0)
-          const dx = Math.abs(neighborPosX - currentPos.x)
-          const dy = Math.abs(neighborPosY - currentPos.y)
-          if (dx <= connectionAlignThreshold && dx < bestDx) {
-            bestDx = dx
-            bestX = neighborPosX
-          }
-          if (dy <= connectionAlignThreshold && dy < bestDy) {
-            bestDy = dy
-            bestY = neighborPosY
-          }
-        }
-
-        if (bestX !== currentPos.x || bestY !== currentPos.y) {
-          overrides.set(nodeId, { x: bestX, y: bestY })
-        }
-      }
-
-      if (overrides.size === 0) return next
-      return next.map((node) => {
-        const override = overrides.get(String(node.id || '').trim())
-        if (!override) return node
-        return { ...node, position: override }
-      })
-    })
-  }, [graphAltNeighborMap])
+    setGraphAltCanvasNodes((current) => applyNodeChanges(changes, current))
+  }, [])
 
   const eventStormingFlowNodes = React.useMemo(() => {
     if (!eventStormingNodes.length) return [] as FlowNode<ReactFlowNodeData>[]
@@ -2855,8 +2793,6 @@ export function ProjectKnowledgeGraphPanel({
                                       nodeTypes={graphAltNodeTypes}
                                       fitView
                                       fitViewOptions={{ padding: 0.16, maxZoom: 1.15 }}
-                                      snapToGrid
-                                      snapGrid={[24, 24]}
                                       nodesDraggable
                                       nodesConnectable={false}
                                       elementsSelectable
