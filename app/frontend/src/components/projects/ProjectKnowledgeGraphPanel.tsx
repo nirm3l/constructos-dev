@@ -67,14 +67,20 @@ function KnowledgeGraphAltNode(props: any) {
   const data = (props?.data || {}) as ReactFlowNodeData
   return (
     <div className="kg-alt-node-card">
-      <Handle type="target" position={Position.Left} className="kg-alt-node-handle" />
+      <Handle id="l-in" type="target" position={Position.Left} className="kg-alt-node-handle" />
+      <Handle id="l-out" type="source" position={Position.Left} className="kg-alt-node-handle" />
+      <Handle id="r-in" type="target" position={Position.Right} className="kg-alt-node-handle" />
+      <Handle id="r-out" type="source" position={Position.Right} className="kg-alt-node-handle" />
+      <Handle id="t-in" type="target" position={Position.Top} className="kg-alt-node-handle" />
+      <Handle id="t-out" type="source" position={Position.Top} className="kg-alt-node-handle" />
+      <Handle id="b-in" type="target" position={Position.Bottom} className="kg-alt-node-handle" />
+      <Handle id="b-out" type="source" position={Position.Bottom} className="kg-alt-node-handle" />
       <div className="kg-alt-node-title" title={data?.label || ''}>{data?.label || ''}</div>
       <div className="kg-alt-node-meta-row">
         <span className="status-chip">{data?.entityType || 'Entity'}</span>
         {data?.statusLabel ? <span className="status-chip">{data.statusLabel}</span> : null}
       </div>
       {data?.dependencyMeta ? <div className="kg-alt-node-submeta">{data.dependencyMeta}</div> : null}
-      <Handle type="source" position={Position.Right} className="kg-alt-node-handle" />
     </div>
   )
 }
@@ -1474,6 +1480,9 @@ export function ProjectKnowledgeGraphPanel({
   const graphAltFlowEdges = React.useMemo(() => {
     if (!filteredGraph.edges.length || graphAltFlowNodes.length === 0) return [] as FlowEdge[]
     const nodeIdSet = new Set(graphAltFlowNodes.map((node) => String(node.id || '')))
+    const nodePositionById = new Map(
+      graphAltFlowNodes.map((node) => [String(node.id || ''), { x: Number(node.position?.x || 0), y: Number(node.position?.y || 0) }])
+    )
     const selectedTaskId = String(graphAltDependencyContext.selectedTaskId || '')
     const hasTaskChain = Boolean(selectedTaskId)
     return filteredGraph.edges
@@ -1511,12 +1520,25 @@ export function ProjectKnowledgeGraphPanel({
             ? 1.6
             : 1.2
         const dash = isInProject ? '5 4' : undefined
+        const sourcePos = nodePositionById.get(source)
+        const targetPos = nodePositionById.get(target)
+        const dx = Number((targetPos?.x || 0) - (sourcePos?.x || 0))
+        const dy = Number((targetPos?.y || 0) - (sourcePos?.y || 0))
+        const horizontalBias = Math.abs(dx) >= Math.abs(dy)
+        const sourceHandle = horizontalBias
+          ? dx >= 0 ? 'r-out' : 'l-out'
+          : dy >= 0 ? 'b-out' : 't-out'
+        const targetHandle = horizontalBias
+          ? dx >= 0 ? 'l-in' : 'r-in'
+          : dy >= 0 ? 't-in' : 'b-in'
         const flowType = isTaskDependency ? 'step' : 'smoothstep'
 
         return {
           id: `kg-alt-edge-${idx}-${source}-${target}-${relationship}`,
           source,
           target,
+          sourceHandle,
+          targetHandle,
           data: { relationship },
           type: flowType,
           label: isTaskDependency ? 'depends on' : undefined,
