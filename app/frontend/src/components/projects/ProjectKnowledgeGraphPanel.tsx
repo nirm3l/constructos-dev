@@ -1532,7 +1532,7 @@ export function ProjectKnowledgeGraphPanel({
         const targetHandle = horizontalBias
           ? dx >= 0 ? 'l-in' : 'r-in'
           : dy >= 0 ? 't-in' : 'b-in'
-        const flowType = isTaskDependency ? 'step' : 'smoothstep'
+        const flowType = 'step'
 
         return {
           id: `kg-alt-edge-${idx}-${source}-${target}-${relationship}`,
@@ -1560,13 +1560,81 @@ export function ProjectKnowledgeGraphPanel({
       .filter((edge): edge is FlowEdge => Boolean(edge))
   }, [filteredGraph.edges, graphAltCanvasNodes, graphAltDependencyContext, graphAltFlowNodes])
 
+  const graphAltNeighborMap = React.useMemo(() => {
+    const neighborMap = new Map<string, Set<string>>()
+    for (const edge of filteredGraph.edges) {
+      const source = String(edge.source_entity_id || '').trim()
+      const target = String(edge.target_entity_id || '').trim()
+      if (!source || !target) continue
+      const sourceNeighbors = neighborMap.get(source) ?? new Set<string>()
+      sourceNeighbors.add(target)
+      neighborMap.set(source, sourceNeighbors)
+      const targetNeighbors = neighborMap.get(target) ?? new Set<string>()
+      targetNeighbors.add(source)
+      neighborMap.set(target, targetNeighbors)
+    }
+    return neighborMap
+  }, [filteredGraph.edges])
+
   React.useEffect(() => {
     setGraphAltCanvasNodes(graphAltFlowNodes)
   }, [graphAltFlowNodes])
 
   const onGraphAltNodesChange = React.useCallback((changes: NodeChange<FlowNode<ReactFlowNodeData>>[]) => {
-    setGraphAltCanvasNodes((current) => applyNodeChanges(changes, current))
-  }, [])
+    const connectionAlignThreshold = 20
+    setGraphAltCanvasNodes((current) => {
+      const next = applyNodeChanges(changes, current)
+      const nodeById = new Map(next.map((node) => [String(node.id || ''), node]))
+      const overrides = new Map<string, { x: number; y: number }>()
+
+      for (const change of changes) {
+        if (change.type !== 'position' || !change.position) continue
+        const nodeId = String(change.id || '').trim()
+        if (!nodeId) continue
+        const movingNode = nodeById.get(nodeId)
+        if (!movingNode) continue
+        const currentPos = {
+          x: Number(movingNode.position?.x || 0),
+          y: Number(movingNode.position?.y || 0),
+        }
+        const neighbors = graphAltNeighborMap.get(nodeId)
+        if (!neighbors || neighbors.size === 0) continue
+
+        let bestX = currentPos.x
+        let bestY = currentPos.y
+        let bestDx = Number.POSITIVE_INFINITY
+        let bestDy = Number.POSITIVE_INFINITY
+
+        for (const neighborId of neighbors) {
+          const neighborNode = nodeById.get(neighborId)
+          if (!neighborNode) continue
+          const neighborPosX = Number(neighborNode.position?.x || 0)
+          const neighborPosY = Number(neighborNode.position?.y || 0)
+          const dx = Math.abs(neighborPosX - currentPos.x)
+          const dy = Math.abs(neighborPosY - currentPos.y)
+          if (dx <= connectionAlignThreshold && dx < bestDx) {
+            bestDx = dx
+            bestX = neighborPosX
+          }
+          if (dy <= connectionAlignThreshold && dy < bestDy) {
+            bestDy = dy
+            bestY = neighborPosY
+          }
+        }
+
+        if (bestX !== currentPos.x || bestY !== currentPos.y) {
+          overrides.set(nodeId, { x: bestX, y: bestY })
+        }
+      }
+
+      if (overrides.size === 0) return next
+      return next.map((node) => {
+        const override = overrides.get(String(node.id || '').trim())
+        if (!override) return node
+        return { ...node, position: override }
+      })
+    })
+  }, [graphAltNeighborMap])
 
   const eventStormingFlowNodes = React.useMemo(() => {
     if (!eventStormingNodes.length) return [] as FlowNode<ReactFlowNodeData>[]
