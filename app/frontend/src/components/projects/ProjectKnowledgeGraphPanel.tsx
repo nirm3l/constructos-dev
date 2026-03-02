@@ -2787,6 +2787,8 @@ export function ProjectKnowledgeGraphPanel({
                                       nodeTypes={graphAltNodeTypes}
                                       fitView
                                       fitViewOptions={{ padding: 0.16, maxZoom: 1.15 }}
+                                      snapToGrid
+                                      snapGrid={[24, 24]}
                                       nodesDraggable
                                       nodesConnectable={false}
                                       elementsSelectable
