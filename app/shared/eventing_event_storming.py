@@ -49,10 +49,8 @@ from .models import (
 )
 from .settings import (
     EVENT_STORMING_ANALYSIS_BATCH_SIZE,
+    EVENT_STORMING_CODEX_REASONING_EFFORT,
     EVENT_STORMING_ANALYSIS_STALE_AFTER_SECONDS,
-    EVENT_STORMING_AI_MODEL,
-    EVENT_STORMING_AI_PROVIDER,
-    EVENT_STORMING_AI_LOCAL_PROVIDER,
     EVENT_STORMING_ANALYSIS_POLL_SECONDS,
     EVENT_STORMING_ANALYSIS_WORKER_ENABLED,
     EVENT_STORMING_ENABLED,
@@ -114,6 +112,53 @@ _ES_COMPONENT_LABELS = {
     "domain_event": "DomainEvent",
     "policy": "Policy",
     "read_model": "ReadModel",
+}
+
+_EVENT_STORMING_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "components": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "component_type": {"type": "string"},
+                    "name": {"type": "string"},
+                    "confidence": {"type": "number"},
+                    "evidence": {"type": "string"},
+                },
+                "required": ["component_type", "name", "confidence", "evidence"],
+                "additionalProperties": False,
+            },
+        },
+        "relations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "source_component_type": {"type": "string"},
+                    "source_name": {"type": "string"},
+                    "relation": {"type": "string"},
+                    "target_component_type": {"type": "string"},
+                    "target_name": {"type": "string"},
+                    "confidence": {"type": "number"},
+                    "evidence": {"type": "string"},
+                },
+                "required": [
+                    "source_component_type",
+                    "source_name",
+                    "relation",
+                    "target_component_type",
+                    "target_name",
+                    "confidence",
+                    "evidence",
+                ],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["components", "relations"],
+    "additionalProperties": False,
 }
 
 
@@ -587,7 +632,9 @@ def _extract_with_codex_agent(
     context_frame_mode: str,
     context_frame_markdown: str,
 ) -> dict[str, Any]:
-    model = str(EVENT_STORMING_AI_MODEL or AGENT_CODEX_MODEL or "").strip() or None
+    model = str(AGENT_CODEX_MODEL or "").strip() or None
+    if not model:
+        raise RuntimeError("Event storming model is not configured")
     prompt = _event_storming_ai_prompt(
         entity_type=entity_type,
         title=title,
@@ -598,52 +645,7 @@ def _extract_with_codex_agent(
         context_frame_mode=context_frame_mode,
         context_frame_markdown=context_frame_markdown,
     )
-    schema = {
-        "type": "object",
-        "properties": {
-            "components": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "component_type": {"type": "string"},
-                        "name": {"type": "string"},
-                        "confidence": {"type": "number"},
-                        "evidence": {"type": "string"},
-                    },
-                    "required": ["component_type", "name", "confidence", "evidence"],
-                    "additionalProperties": False,
-                },
-            },
-            "relations": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "source_component_type": {"type": "string"},
-                        "source_name": {"type": "string"},
-                        "relation": {"type": "string"},
-                        "target_component_type": {"type": "string"},
-                        "target_name": {"type": "string"},
-                        "confidence": {"type": "number"},
-                        "evidence": {"type": "string"},
-                    },
-                    "required": [
-                        "source_component_type",
-                        "source_name",
-                        "relation",
-                        "target_component_type",
-                        "target_name",
-                        "confidence",
-                        "evidence",
-                    ],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        "required": ["components", "relations"],
-        "additionalProperties": False,
-    }
+    schema = _EVENT_STORMING_OUTPUT_SCHEMA
     # Reuse one Codex session per project so artifact runs share cached context.
     chat_session_id = f"event-storming-{project_id}"
     parsed_payload, usage_payload = run_structured_codex_prompt_with_usage(
@@ -652,9 +654,11 @@ def _extract_with_codex_agent(
         workspace_id=workspace_id,
         session_key=chat_session_id,
         model=model,
-        reasoning_effort=str(AGENT_CODEX_REASONING_EFFORT or "").strip() or None,
-        model_provider=str(EVENT_STORMING_AI_PROVIDER or "").strip() or None,
-        local_provider=str(EVENT_STORMING_AI_LOCAL_PROVIDER or "").strip() or None,
+        reasoning_effort=(
+            str(EVENT_STORMING_CODEX_REASONING_EFFORT or "").strip()
+            or str(AGENT_CODEX_REASONING_EFFORT or "").strip()
+            or None
+        ),
         mcp_servers=None,
     )
     return {

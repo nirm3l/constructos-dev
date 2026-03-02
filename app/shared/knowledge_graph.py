@@ -28,6 +28,7 @@ from .settings import (
     NEO4J_USERNAME,
     logger,
 )
+from .task_automation import normalize_execution_triggers
 from .vector_store import resolve_project_embedding_runtime, search_project_chunks
 
 try:  # pragma: no cover - exercised in integration only
@@ -300,7 +301,7 @@ def graph_get_project_overview(project_id: str, *, top_limit: int = 8) -> dict[s
     project_rows = run_graph_query(
         """
         MATCH (p:Project {id:$project_id})
-        RETURN p.id AS project_id, coalesce(p.name, '') AS project_name
+        RETURN p.id AS project_id, coalesce(p.name, p.title, '') AS project_name
         LIMIT 1
         """,
         {"project_id": project_id},
@@ -437,6 +438,14 @@ def graph_get_project_subgraph(
         }
 
     project_name = str(project_rows[0].get("project_name") or "").strip()
+    if not project_name:
+        # Fallback to SQL source-of-truth when the graph node exists but lacks a display name.
+        from .models import Project, SessionLocal
+
+        with SessionLocal() as db:
+            project_row = db.get(Project, project_id)
+            if project_row is not None and not bool(project_row.is_deleted):
+                project_name = str(project_row.name or "").strip()
     resource_rows = run_graph_query(
         """
         MATCH (p:Project {id:$project_id})
@@ -528,75 +537,132 @@ def graph_get_project_subgraph(
     synthetic_edges: list[dict[str, str]] = []
     task_ids = [str(node.get("entity_id") or "") for node in nodes if str(node.get("entity_type") or "").lower() == "task"]
     remaining_node_slots = max(0, safe_nodes - len(nodes))
-    if task_ids and remaining_node_slots:
-        from .models import SessionLocal, TaskComment
+    if task_ids:
+        from .models import SessionLocal, Task, TaskComment
 
-        thread_previews: dict[str, str] = {}
+        if remaining_node_slots:
+            thread_previews: dict[str, str] = {}
+            with SessionLocal() as db:
+                comment_rows_sql = (
+                    db.query(TaskComment.task_id, TaskComment.user_id, TaskComment.body)
+                    .filter(TaskComment.task_id.in_(task_ids))
+                    .order_by(TaskComment.created_at.desc(), TaskComment.id.desc())
+                    .limit(2000)
+                    .all()
+                )
+                for task_id_raw, user_id_raw, body_raw in comment_rows_sql:
+                    task_id_text = str(task_id_raw or "").strip()
+                    user_id_text = str(user_id_raw or "").strip()
+                    if not task_id_text or not user_id_text:
+                        continue
+                    thread_key = f"{task_id_text}:{user_id_text}"
+                    if thread_key in thread_previews:
+                        continue
+                    preview = _truncate_snippet(str(body_raw or ""), max_chars=72)
+                    if preview:
+                        thread_previews[thread_key] = preview
+
+            comment_rows = run_graph_query(
+                """
+                MATCH (t:Task)-[r:COMMENTED_BY]->(u:User)
+                WHERE t.id IN $task_ids
+                  AND coalesce(t.is_deleted, false) = false
+                RETURN
+                  t.id AS task_id,
+                  u.id AS user_id,
+                  coalesce(u.username, u.name, u.id) AS author_label,
+                  coalesce(r.count, 1) AS comment_count
+                ORDER BY comment_count DESC, author_label ASC
+                LIMIT $limit
+                """,
+                {"task_ids": task_ids, "limit": min(remaining_node_slots, safe_edges, 80)},
+            )
+            for row in comment_rows:
+                if len(nodes) >= safe_nodes:
+                    break
+                task_id = str(row.get("task_id") or "").strip()
+                user_id = str(row.get("user_id") or "").strip()
+                if not task_id or not user_id:
+                    continue
+                comment_id = f"comment-thread:{task_id}:{user_id}"
+                if comment_id in seen_ids:
+                    continue
+                count = max(1, int(row.get("comment_count") or 1))
+                author = str(row.get("author_label") or user_id).strip() or user_id
+                label = thread_previews.get(f"{task_id}:{user_id}") or f"{author} · {count} comment{'s' if count != 1 else ''}"
+                seen_ids.add(comment_id)
+                nodes.append(
+                    {
+                        "entity_type": "Comment",
+                        "entity_id": comment_id,
+                        "title": label,
+                        "degree": 0,
+                    }
+                )
+                synthetic_edges.append(
+                    {
+                        "source_entity_id": comment_id,
+                        "target_entity_id": task_id,
+                        "relationship": "COMMENT_ACTIVITY",
+                    }
+                )
+            remaining_node_slots = max(0, safe_nodes - len(nodes))
+
+        task_id_set = {tid for tid in task_ids if tid}
+        task_dependency_keys: set[tuple[str, str, str]] = set()
         with SessionLocal() as db:
-            comment_rows_sql = (
-                db.query(TaskComment.task_id, TaskComment.user_id, TaskComment.body)
-                .filter(TaskComment.task_id.in_(task_ids))
-                .order_by(TaskComment.created_at.desc(), TaskComment.id.desc())
-                .limit(2000)
+            task_rows_sql = (
+                db.query(Task.id, Task.execution_triggers)
+                .filter(Task.id.in_(task_ids))
+                .filter(Task.project_id == project_id)
+                .filter(Task.is_deleted.is_(False))
                 .all()
             )
-            for task_id_raw, user_id_raw, body_raw in comment_rows_sql:
-                task_id_text = str(task_id_raw or "").strip()
-                user_id_text = str(user_id_raw or "").strip()
-                if not task_id_text or not user_id_text:
-                    continue
-                thread_key = f"{task_id_text}:{user_id_text}"
-                if thread_key in thread_previews:
-                    continue
-                preview = _truncate_snippet(str(body_raw or ""), max_chars=72)
-                if preview:
-                    thread_previews[thread_key] = preview
 
-        comment_rows = run_graph_query(
-            """
-            MATCH (t:Task)-[r:COMMENTED_BY]->(u:User)
-            WHERE t.id IN $task_ids
-              AND coalesce(t.is_deleted, false) = false
-            RETURN
-              t.id AS task_id,
-              u.id AS user_id,
-              coalesce(u.username, u.name, u.id) AS author_label,
-              coalesce(r.count, 1) AS comment_count
-            ORDER BY comment_count DESC, author_label ASC
-            LIMIT $limit
-            """,
-            {"task_ids": task_ids, "limit": min(remaining_node_slots, safe_edges, 80)},
-        )
-        for row in comment_rows:
-            if len(nodes) >= safe_nodes:
-                break
-            task_id = str(row.get("task_id") or "").strip()
-            user_id = str(row.get("user_id") or "").strip()
-            if not task_id or not user_id:
+        for dependent_task_raw, execution_triggers_raw in task_rows_sql:
+            dependent_task_id = str(dependent_task_raw or "").strip()
+            if not dependent_task_id:
                 continue
-            comment_id = f"comment-thread:{task_id}:{user_id}"
-            if comment_id in seen_ids:
-                continue
-            count = max(1, int(row.get("comment_count") or 1))
-            author = str(row.get("author_label") or user_id).strip() or user_id
-            label = thread_previews.get(f"{task_id}:{user_id}") or f"{author} · {count} comment{'s' if count != 1 else ''}"
-            seen_ids.add(comment_id)
-            nodes.append(
-                {
-                    "entity_type": "Comment",
-                    "entity_id": comment_id,
-                    "title": label,
-                    "degree": 0,
-                }
-            )
-            synthetic_edges.append(
-                {
-                    "source_entity_id": comment_id,
-                    "target_entity_id": task_id,
-                    "relationship": "COMMENT_ACTIVITY",
-                }
-            )
-        remaining_node_slots = max(0, safe_nodes - len(nodes))
+            triggers = normalize_execution_triggers(execution_triggers_raw)
+            for trigger in triggers:
+                if not isinstance(trigger, dict):
+                    continue
+                if str(trigger.get("kind") or "").strip().lower() != "status_change":
+                    continue
+                if not bool(trigger.get("enabled", True)):
+                    continue
+                if str(trigger.get("scope") or "").strip().lower() != "external":
+                    continue
+                selector_raw = trigger.get("selector")
+                selector = selector_raw if isinstance(selector_raw, dict) else {}
+                source_ids_raw = [
+                    *(selector.get("task_ids") or []),
+                    *(trigger.get("source_task_ids") or []),
+                ]
+                source_ids = []
+                seen_source_ids: set[str] = set()
+                for source_raw in source_ids_raw:
+                    source_id = str(source_raw or "").strip()
+                    if not source_id or source_id in seen_source_ids:
+                        continue
+                    seen_source_ids.add(source_id)
+                    if source_id == dependent_task_id:
+                        continue
+                    if source_id not in task_id_set:
+                        continue
+                    source_ids.append(source_id)
+                for source_id in source_ids:
+                    dep_key = (source_id, dependent_task_id, "DEPENDS_ON_TASK_STATUS")
+                    if dep_key in task_dependency_keys:
+                        continue
+                    task_dependency_keys.add(dep_key)
+                    synthetic_edges.append(
+                        {
+                            "source_entity_id": source_id,
+                            "target_entity_id": dependent_task_id,
+                            "relationship": "DEPENDS_ON_TASK_STATUS",
+                        }
+                    )
 
     if remaining_node_slots and any(buckets.get(key) for key in ordered_types):
         while remaining_node_slots > 0 and any(buckets.get(key) for key in ordered_types):
@@ -651,15 +717,21 @@ def graph_get_project_subgraph(
     dedup: set[tuple[str, str, str]] = set()
     edges: list[dict[str, str]] = []
     degree_map: dict[str, int] = {node_id: 0 for node_id in node_ids}
+    directional_relationships = {"DEPENDS_ON_TASK_STATUS"}
+
     for row in edge_rows:
         source = str(row.get("source_entity_id") or "").strip()
         target = str(row.get("target_entity_id") or "").strip()
         relationship = str(row.get("relationship") or "RELATED").strip() or "RELATED"
         if not source or not target or source == target:
             continue
-        if source > target:
+        if relationship not in directional_relationships and source > target:
             source, target = target, source
-        key = (source, target, relationship)
+        if relationship in directional_relationships:
+            key = (source, target, relationship)
+        else:
+            lhs, rhs = (source, target) if source <= target else (target, source)
+            key = (lhs, rhs, relationship)
         if key in dedup:
             continue
         dedup.add(key)
@@ -683,8 +755,11 @@ def graph_get_project_subgraph(
         relationship = str(edge.get("relationship") or "RELATED").strip() or "RELATED"
         if not source or not target or source == target:
             continue
-        lhs, rhs = (source, target) if source <= target else (target, source)
-        key = (lhs, rhs, relationship)
+        if relationship in directional_relationships:
+            key = (source, target, relationship)
+        else:
+            lhs, rhs = (source, target) if source <= target else (target, source)
+            key = (lhs, rhs, relationship)
         if key in dedup:
             continue
         dedup.add(key)

@@ -1,4 +1,5 @@
-from shared.eventing_event_storming import _normalize_ai_extraction
+import shared.eventing_event_storming as event_storming_module
+from shared.eventing_event_storming import _event_storming_ai_prompt, _normalize_ai_extraction
 
 
 def test_normalize_ai_extraction_builds_components_and_relations():
@@ -51,3 +52,33 @@ def test_normalize_ai_extraction_dedupes_components_by_type_and_name():
     assert components[0]["component_type"] == "policy"
     assert components[0]["confidence"] == 0.88
     assert relations == []
+
+
+def test_event_storming_prompt_applies_text_and_context_caps(monkeypatch):
+    monkeypatch.setattr(event_storming_module, "EVENT_STORMING_PROMPT_SOURCE_MAX_CHARS", 30)
+    monkeypatch.setattr(event_storming_module, "EVENT_STORMING_PROMPT_FRAME_MAX_CHARS", 20)
+    monkeypatch.setattr(event_storming_module, "EVENT_STORMING_PROMPT_ENTITY_CONTEXT_MAX_ITEMS", 2)
+
+    prompt = _event_storming_ai_prompt(
+        entity_type="task",
+        title="Example task",
+        tags=["ddd"],
+        text="X" * 120,
+        entity_graph_context=[
+            {"relation": "LINKED_TO", "neighbor_type": "Task", "neighbor_id": "1", "neighbor_title": "First"},
+            {"relation": "LINKED_TO", "neighbor_type": "Task", "neighbor_id": "2", "neighbor_title": "Second"},
+            {"relation": "LINKED_TO", "neighbor_type": "Task", "neighbor_id": "3", "neighbor_title": "Third"},
+        ],
+        project_component_snapshot={
+            "components": [
+                {"component_type": "aggregate", "component_title": "Orders"},
+                {"component_type": "command", "component_title": "CreateOrder"},
+            ]
+        },
+        context_frame_mode="full",
+        context_frame_markdown="Y" * 80,
+    )
+
+    assert "X" * 31 not in prompt
+    assert "Y" * 21 not in prompt
+    assert "Third" not in prompt

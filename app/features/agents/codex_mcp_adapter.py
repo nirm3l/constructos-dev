@@ -29,8 +29,6 @@ _DEFAULT_CODEX_HOME_RETENTION_DAYS = 14
 _DEFAULT_CODEX_HOME_CLEANUP_INTERVAL_SECONDS = 3600
 _PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "shared" / "prompt_templates" / "codex"
 _ALLOWED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
-_ALLOWED_MODEL_PROVIDERS = {"openai", "oss"}
-_ALLOWED_LOCAL_PROVIDERS = {"ollama", "lmstudio"}
 
 
 def _strip_mcp_server_tables(config_text: str) -> str:
@@ -52,20 +50,6 @@ def _strip_mcp_server_tables(config_text: str) -> str:
             continue
         out.append(line)
     return "\n".join(out).strip()
-
-
-def _normalize_model_provider(value: object) -> str | None:
-    normalized = str(value or "").strip().lower()
-    if not normalized:
-        return None
-    return normalized if normalized in _ALLOWED_MODEL_PROVIDERS else None
-
-
-def _normalize_local_provider(value: object) -> str | None:
-    normalized = str(value or "").strip().lower()
-    if not normalized:
-        return None
-    return normalized if normalized in _ALLOWED_LOCAL_PROVIDERS else None
 
 
 @lru_cache(maxsize=16)
@@ -316,7 +300,12 @@ def run_codex_home_cleanup_if_due(*, now_unix_seconds: float | None = None) -> d
     return {"ran": True, "removed": removed, "failures": failures}
 
 
-def _prepare_codex_home(home_path: Path, *, mcp_config_text: str, runtime_config_text: str = "") -> None:
+def _prepare_codex_home(
+    home_path: Path,
+    *,
+    mcp_config_text: str,
+    runtime_config_text: str = "",
+) -> None:
     codex_dir = home_path / ".codex"
     codex_dir.mkdir(parents=True, exist_ok=True)
     config_path = codex_dir / "config.toml"
@@ -884,20 +873,12 @@ def _run_codex_app_server_with_optional_stream(
     stream_events: bool,
     model: str | None = None,
     reasoning_effort: str | None = None,
-    model_provider: str | None = None,
-    local_provider: str | None = None,
     output_schema: dict | None = None,
     preferred_thread_id: str | None = None,
     env: dict[str, str] | None = None,
 ) -> tuple[str, dict[str, int] | None, str | None, bool, bool]:
     run_cwd = _resolve_codex_workdir()
     cmd = ["codex"]
-    normalized_model_provider = _normalize_model_provider(model_provider)
-    normalized_local_provider = _normalize_local_provider(local_provider)
-    if normalized_model_provider == "oss":
-        cmd.append("--oss")
-        if normalized_local_provider:
-            cmd.extend(["--local-provider", normalized_local_provider])
     cmd.extend(
         [
             "app-server",
@@ -1313,8 +1294,6 @@ def run_structured_codex_prompt(
     session_key: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
-    model_provider: str | None = None,
-    local_provider: str | None = None,
     timeout_seconds: float | None = None,
     mcp_servers: list[str] | None = None,
     preferred_thread_id: str | None = None,
@@ -1326,8 +1305,6 @@ def run_structured_codex_prompt(
         session_key=session_key,
         model=model,
         reasoning_effort=reasoning_effort,
-        model_provider=model_provider,
-        local_provider=local_provider,
         timeout_seconds=timeout_seconds,
         mcp_servers=mcp_servers,
         preferred_thread_id=preferred_thread_id,
@@ -1343,8 +1320,6 @@ def run_structured_codex_prompt_with_usage(
     session_key: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
-    model_provider: str | None = None,
-    local_provider: str | None = None,
     timeout_seconds: float | None = None,
     mcp_servers: list[str] | None = None,
     preferred_thread_id: str | None = None,
@@ -1360,8 +1335,6 @@ def run_structured_codex_prompt_with_usage(
     preferred_reasoning_effort = _normalize_reasoning_effort(reasoning_effort) or _normalize_reasoning_effort(
         AGENT_CODEX_REASONING_EFFORT
     )
-    scoped_model_provider = _normalize_model_provider(model_provider)
-    scoped_local_provider = _normalize_local_provider(local_provider)
     runtime_timeout_seconds = _effective_timeout_seconds(
         timeout_seconds,
         fallback_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
@@ -1385,8 +1358,6 @@ def run_structured_codex_prompt_with_usage(
                 stream_events=False,
                 model=preferred_model,
                 reasoning_effort=preferred_reasoning_effort,
-                model_provider=scoped_model_provider,
-                local_provider=scoped_local_provider,
                 output_schema=output_schema,
                 preferred_thread_id=str(preferred_thread_id or "").strip() or None,
                 env=codex_env,

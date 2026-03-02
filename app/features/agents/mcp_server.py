@@ -112,6 +112,12 @@ ENSURE_TEAM_MODE_PROJECT_TOOL_DESCRIPTION = (
     "Accepts project id or exact project name via project_ref."
 )
 
+SEND_IN_APP_NOTIFICATION_TOOL_DESCRIPTION = (
+    "Create an in-app notification for a target user. "
+    "Use this when the user asks to send a direct in-app notification message. "
+    "Provide optional scope references (workspace/project/task/note/specification) to deep-link context."
+)
+
 
 def create_mcp():
     try:
@@ -1284,6 +1290,41 @@ def create_mcp():
     def add_task_comment(task_id: str, body: str, auth_token: str | None = None, command_id: str | None = None) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
         return service.add_task_comment(task_id=task_id, body=body, auth_token=auth_token, command_id=command_id)
+
+    @mcp.tool(description=SEND_IN_APP_NOTIFICATION_TOOL_DESCRIPTION)
+    def send_in_app_notification(
+        user_id: str,
+        message: str,
+        auth_token: str | None = None,
+        workspace_id: str | None = None,
+        project_id: str | None = None,
+        task_id: str | None = None,
+        note_id: str | None = None,
+        specification_id: str | None = None,
+        notification_type: str | None = "ManualMessage",
+        severity: str | None = "info",
+        dedupe_key: str | None = None,
+        payload: dict[str, Any] | str | None = None,
+        source_event: str | None = "mcp.manual_notification",
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.send_in_app_notification(
+            user_id=user_id,
+            message=message,
+            auth_token=auth_token,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=task_id,
+            note_id=note_id,
+            specification_id=specification_id,
+            notification_type=notification_type,
+            severity=severity,
+            dedupe_key=dedupe_key,
+            payload=payload,
+            source_event=source_event,
+            command_id=command_id,
+        )
 
     @mcp.tool(description="Queue Codex automation run for a task.")
     def run_task_with_codex(

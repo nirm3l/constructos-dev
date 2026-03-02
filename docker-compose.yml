@@ -85,10 +85,8 @@ services:
       AGENT_CODEX_COMMAND: "python -m features.agents.codex_mcp_adapter"
       AGENT_CODEX_MCP_URL: "http://mcp-tools:8091/mcp"
       AGENT_CODEX_MODEL: "${AGENT_CODEX_MODEL:-}"
-      EVENT_STORMING_AI_MODEL: "${EVENT_STORMING_AI_MODEL:-}"
-      EVENT_STORMING_AI_PROVIDER: "${EVENT_STORMING_AI_PROVIDER:-}"
-      EVENT_STORMING_AI_LOCAL_PROVIDER: "${EVENT_STORMING_AI_LOCAL_PROVIDER:-}"
       AGENT_CODEX_REASONING_EFFORT: "${AGENT_CODEX_REASONING_EFFORT:-}"
+      EVENT_STORMING_CODEX_REASONING_EFFORT: "${EVENT_STORMING_CODEX_REASONING_EFFORT:-}"
       GITHUB_PAT: "${GITHUB_PAT:-}"
       DOCKER_HOST: "${DOCKER_HOST-tcp://docker-socket-proxy:2375}"
       DOCKER_BUILDKIT: "${DOCKER_BUILDKIT:-0}"
@@ -101,6 +99,8 @@ services:
       KNOWLEDGE_GRAPH_ENABLED: "true"
       EVENT_STORMING_ENABLED: "true"
       EVENT_STORMING_ANALYSIS_WORKER_ENABLED: "true"
+      EVENT_STORMING_ANALYSIS_BATCH_SIZE: "${EVENT_STORMING_ANALYSIS_BATCH_SIZE:-12}"
+      EVENT_STORMING_ANALYSIS_POLL_SECONDS: "${EVENT_STORMING_ANALYSIS_POLL_SECONDS:-8}"
       NEO4J_URI: "${NEO4J_URI:-bolt://neo4j:7687}"
       NEO4J_USERNAME: "${NEO4J_USERNAME:-neo4j}"
       NEO4J_PASSWORD: "${NEO4J_PASSWORD:-task-management-neo4j}"
@@ -125,7 +125,7 @@ services:
       - ${CODEX_CONFIG_FILE}:/home/app/.codex/config.toml:ro
       - ${CODEX_AUTH_FILE}:/home/app/.codex/auth.json:ro
       - codex-home-data:/home/app/codex-home
-      - ${AGENT_CODEX_WORKSPACE_MOUNT:-/workspace}:/home/app/workspace
+      - ${AGENT_CODEX_WORKSPACE_MOUNT:-./data/workspace}:/home/app/workspace
     ports:
       - "1102:8000"
     security_opt:
@@ -159,6 +159,7 @@ services:
       AGENT_CODEX_WORKDIR: "${AGENT_CODEX_WORKDIR:-/home/app/workspace}"
       AGENT_CODEX_MODEL: "${AGENT_CODEX_MODEL:-}"
       AGENT_CODEX_REASONING_EFFORT: "${AGENT_CODEX_REASONING_EFFORT:-}"
+      EVENT_STORMING_CODEX_REASONING_EFFORT: "${EVENT_STORMING_CODEX_REASONING_EFFORT:-}"
       MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:-dev-mcp-token}"
       MCP_TOOL_AUTH_TOKEN: "${MCP_TOOL_AUTH_TOKEN:-dev-mcp-token}"
       MCP_ACTOR_USER_ID: "00000000-0000-0000-0000-000000000099"
@@ -188,7 +189,7 @@ services:
     ports:
       - "8091:8091"
     volumes:
-      - ${AGENT_CODEX_WORKSPACE_MOUNT:-/workspace}:/home/app/workspace
+      - ${AGENT_CODEX_WORKSPACE_MOUNT:-./data/workspace}:/home/app/workspace
     security_opt:
       - no-new-privileges:true
     cap_drop:

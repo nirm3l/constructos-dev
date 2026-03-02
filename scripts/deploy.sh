@@ -88,7 +88,7 @@ resolve_codex_workspace_mount() {
     printf '%s' "$configured"
     return 0
   fi
-  printf '%s' "/workspace"
+  printf '%s' "${ROOT_DIR}/data/workspace"
 }
 
 TARGET_RESOLVED="$(resolve_deploy_target)"
@@ -113,6 +113,14 @@ if [[ "$AGENT_CODEX_WORKSPACE_MOUNT" == /* ]]; then
   AGENT_CODEX_WORKSPACE_MOUNT_MODE="host-bind"
 else
   AGENT_CODEX_WORKSPACE_MOUNT_MODE="named-volume"
+fi
+
+if [[ "$AGENT_CODEX_WORKSPACE_MOUNT_MODE" == "host-bind" ]]; then
+  if [[ -e "$AGENT_CODEX_WORKSPACE_MOUNT" && ! -w "$AGENT_CODEX_WORKSPACE_MOUNT" ]]; then
+    echo "Configured AGENT_CODEX_WORKSPACE_MOUNT is not writable: ${AGENT_CODEX_WORKSPACE_MOUNT}"
+    AGENT_CODEX_WORKSPACE_MOUNT="${ROOT_DIR}/data/workspace"
+    AGENT_CODEX_WORKSPACE_MOUNT_MODE="host-bind"
+  fi
 fi
 
 case "$TARGET_RESOLVED" in
@@ -181,25 +189,29 @@ if [[ -n "$LICENSE_SERVER_TOKEN_VALUE" ]]; then
 fi
 
 AGENT_CODEX_MODEL_VALUE="$(resolve_compose_env_value "AGENT_CODEX_MODEL" || true)"
-EVENT_STORMING_AI_MODEL_VALUE="$(resolve_compose_env_value "EVENT_STORMING_AI_MODEL" || true)"
-EVENT_STORMING_AI_PROVIDER_VALUE="$(resolve_compose_env_value "EVENT_STORMING_AI_PROVIDER" || true)"
-EVENT_STORMING_AI_LOCAL_PROVIDER_VALUE="$(resolve_compose_env_value "EVENT_STORMING_AI_LOCAL_PROVIDER" || true)"
 AGENT_CODEX_REASONING_EFFORT_VALUE="$(resolve_compose_env_value "AGENT_CODEX_REASONING_EFFORT" || true)"
+EVENT_STORMING_CODEX_REASONING_EFFORT_VALUE="$(resolve_compose_env_value "EVENT_STORMING_CODEX_REASONING_EFFORT" || true)"
+EVENT_STORMING_ANALYSIS_BATCH_SIZE_VALUE="$(resolve_compose_env_value "EVENT_STORMING_ANALYSIS_BATCH_SIZE" || true)"
+EVENT_STORMING_ANALYSIS_POLL_SECONDS_VALUE="$(resolve_compose_env_value "EVENT_STORMING_ANALYSIS_POLL_SECONDS" || true)"
+OLLAMA_EMBED_GPU_ENABLED_VALUE="$(resolve_compose_env_value "OLLAMA_EMBED_GPU_ENABLED" || true)"
 
 if [[ -n "$AGENT_CODEX_MODEL_VALUE" ]]; then
   printf 'AGENT_CODEX_MODEL=%s\n' "$AGENT_CODEX_MODEL_VALUE" >> .deploy.env
 fi
-if [[ -n "$EVENT_STORMING_AI_MODEL_VALUE" ]]; then
-  printf 'EVENT_STORMING_AI_MODEL=%s\n' "$EVENT_STORMING_AI_MODEL_VALUE" >> .deploy.env
-fi
-if [[ -n "$EVENT_STORMING_AI_PROVIDER_VALUE" ]]; then
-  printf 'EVENT_STORMING_AI_PROVIDER=%s\n' "$EVENT_STORMING_AI_PROVIDER_VALUE" >> .deploy.env
-fi
-if [[ -n "$EVENT_STORMING_AI_LOCAL_PROVIDER_VALUE" ]]; then
-  printf 'EVENT_STORMING_AI_LOCAL_PROVIDER=%s\n' "$EVENT_STORMING_AI_LOCAL_PROVIDER_VALUE" >> .deploy.env
-fi
 if [[ -n "$AGENT_CODEX_REASONING_EFFORT_VALUE" ]]; then
   printf 'AGENT_CODEX_REASONING_EFFORT=%s\n' "$AGENT_CODEX_REASONING_EFFORT_VALUE" >> .deploy.env
+fi
+if [[ -n "$EVENT_STORMING_CODEX_REASONING_EFFORT_VALUE" ]]; then
+  printf 'EVENT_STORMING_CODEX_REASONING_EFFORT=%s\n' "$EVENT_STORMING_CODEX_REASONING_EFFORT_VALUE" >> .deploy.env
+fi
+if [[ -n "$EVENT_STORMING_ANALYSIS_BATCH_SIZE_VALUE" ]]; then
+  printf 'EVENT_STORMING_ANALYSIS_BATCH_SIZE=%s\n' "$EVENT_STORMING_ANALYSIS_BATCH_SIZE_VALUE" >> .deploy.env
+fi
+if [[ -n "$EVENT_STORMING_ANALYSIS_POLL_SECONDS_VALUE" ]]; then
+  printf 'EVENT_STORMING_ANALYSIS_POLL_SECONDS=%s\n' "$EVENT_STORMING_ANALYSIS_POLL_SECONDS_VALUE" >> .deploy.env
+fi
+if [[ -n "$OLLAMA_EMBED_GPU_ENABLED_VALUE" ]]; then
+  printf 'OLLAMA_EMBED_GPU_ENABLED=%s\n' "$OLLAMA_EMBED_GPU_ENABLED_VALUE" >> .deploy.env
 fi
 
 if [[ "$CODEX_AUTH_FILE" != /* ]]; then
@@ -235,8 +247,10 @@ export CODEX_CONFIG_FILE
 if [[ "$AGENT_CODEX_WORKSPACE_MOUNT" == /* ]]; then
   mkdir -p "$AGENT_CODEX_WORKSPACE_MOUNT"
   if ! chmod 0777 "$AGENT_CODEX_WORKSPACE_MOUNT" 2>/dev/null; then
-    echo "Warning: unable to set write permissions on ${AGENT_CODEX_WORKSPACE_MOUNT}"
-    echo "Automation may fall back to /tmp/constructos-workspace if /home/app/workspace is not writable."
+    if [[ ! -w "$AGENT_CODEX_WORKSPACE_MOUNT" ]]; then
+      echo "Warning: workspace mount remains non-writable: ${AGENT_CODEX_WORKSPACE_MOUNT}"
+      echo "Automation may fall back to /tmp/constructos-workspace if /home/app/workspace is not writable."
+    fi
   fi
 fi
 

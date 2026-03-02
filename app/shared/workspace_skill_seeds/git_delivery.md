@@ -21,8 +21,8 @@ Use this skill whenever implementation is expected to run against a Git reposito
 
 ## Evidence Contract
 - Internal implementation evidence must be linked through task notes.
-- `external_refs` are only for real external URLs (for example Git remote links, CI links, review links).
-- If remote URL is unavailable, store local commit hash evidence in a linked task note and task comment.
+- `external_refs` should prefer real external URLs (for example Git remote links, CI links, review links).
+- If remote URL is unavailable, store local commit hash evidence in a linked task note and task comment, and add a commit reference in `external_refs` (for example `commit:<sha>`).
 - QA must have verifiable artifacts (test logs, reports, traces, or equivalent evidence) before final acceptance.
 
 ## Handoff Rules

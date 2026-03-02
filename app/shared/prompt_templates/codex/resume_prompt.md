@@ -33,7 +33,7 @@ Guidance:
   3) update task statuses from real outcomes,
   4) provide artifact evidence per task:
      - internal artifacts must be stored as linked task notes,
-     - `external_refs` are only for real external URLs (GitHub/Jira/CI, etc.), not internal `?tab=...` links.
+     - `external_refs` should use real external URLs when available; if no remote exists, include a commit id reference (for example `commit:<sha>`), never internal `?tab=...` links.
 - If any item cannot be completed, return `BLOCKED` with concrete missing prerequisite(s).
 - Team Mode required flow (strict order):
   1) `list_workspace_skills` -> locate `team_mode`

@@ -7,7 +7,7 @@ COPY frontend /frontend
 RUN npm run build
 
 FROM node:22-bookworm-slim AS codex-builder
-RUN npm install -g --include=optional @openai/codex \
+RUN npm install -g --include=optional "@openai/codex@latest" \
     && npm cache clean --force
 
 FROM python:3.12-slim

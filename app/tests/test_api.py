@@ -3454,6 +3454,67 @@ def test_agent_service_set_my_theme_does_not_replay_stale_llm_command_id(tmp_pat
     assert refreshed['theme'] == 'dark'
 
 
+def test_agent_service_send_in_app_notification_creates_notification(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    sent = service.send_in_app_notification(
+        user_id=user_id,
+        message='Manual MCP notification',
+        workspace_id=ws_id,
+        project_id=project_id,
+        notification_type='ManualMessage',
+        severity='warning',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+
+    assert sent['ok'] is True
+    assert sent['created'] is True
+    assert sent['notification']['message'] == 'Manual MCP notification'
+    assert sent['notification']['notification_type'] == 'ManualMessage'
+    assert sent['notification']['severity'] == 'warning'
+    assert sent['notification']['workspace_id'] == ws_id
+    assert sent['notification']['project_id'] == project_id
+
+
+def test_agent_service_send_in_app_notification_is_idempotent_with_command_id(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    user_id = bootstrap['current_user']['id']
+    ws_id = bootstrap['workspaces'][0]['id']
+    command_id = 'test-send-notification-idempotent'
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    first = service.send_in_app_notification(
+        user_id=user_id,
+        message='Idempotent notification',
+        workspace_id=ws_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+        command_id=command_id,
+    )
+    second = service.send_in_app_notification(
+        user_id=user_id,
+        message='Idempotent notification',
+        workspace_id=ws_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+        command_id=command_id,
+    )
+
+    assert first['created'] is True
+    assert second['created'] is False
+    assert first['notification']['id'] == second['notification']['id']
+
+
 def test_agent_service_task_note_group_lifecycle_and_filters(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()

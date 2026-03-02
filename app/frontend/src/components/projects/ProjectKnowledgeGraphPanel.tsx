@@ -1,9 +1,8 @@
 import React from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import ForceGraph2D from 'react-force-graph-2d'
 import * as Accordion from '@radix-ui/react-accordion'
 import * as Tabs from '@radix-ui/react-tabs'
-import { Background, MarkerType, MiniMap, Position, ReactFlow, type Edge as FlowEdge, type Node as FlowNode, type ReactFlowInstance } from '@xyflow/react'
+import { applyNodeChanges, Background, Handle, MarkerType, MiniMap, Position, ReactFlow, type Edge as FlowEdge, type Node as FlowNode, type NodeChange, type ReactFlowInstance } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import {
   getProjectEventStormingComponentLinks,
@@ -33,7 +32,7 @@ type QueryLike<T> = {
   refetch?: () => void
 }
 
-type KnowledgeGraphTab = 'overview' | 'explore' | 'pack'
+type KnowledgeGraphTab = 'overview' | 'explore' | 'insights' | 'pack'
 
 function toErrorMessage(err: unknown): string {
   if (err instanceof Error && err.message.trim()) return err.message.trim()
@@ -60,6 +59,145 @@ type ReactFlowNodeData = {
   label: string
   entityType: string
   contextLabel?: string
+  statusLabel?: string
+  dependencyMeta?: string
+}
+
+function KnowledgeGraphAltNode(props: any) {
+  const data = (props?.data || {}) as ReactFlowNodeData
+  return (
+    <div className="kg-alt-node-card">
+      <Handle type="target" position={Position.Left} className="kg-alt-node-handle" />
+      <div className="kg-alt-node-title" title={data?.label || ''}>{data?.label || ''}</div>
+      <div className="kg-alt-node-meta-row">
+        <span className="status-chip">{data?.entityType || 'Entity'}</span>
+        {data?.statusLabel ? <span className="status-chip">{data.statusLabel}</span> : null}
+      </div>
+      {data?.dependencyMeta ? <div className="kg-alt-node-submeta">{data.dependencyMeta}</div> : null}
+      <Handle type="source" position={Position.Right} className="kg-alt-node-handle" />
+    </div>
+  )
+}
+
+type GraphEntityTypeOption = {
+  key: string
+  label: string
+  count: number
+}
+
+const GRAPH_ENTITY_TYPE_PREFERRED_ORDER = [
+  'project',
+  'task',
+  'specification',
+  'note',
+  'comment',
+  'projectrule',
+  'tag',
+  'user',
+  'workspace',
+]
+
+const GRAPH_RELATION_DISPLAY_LABELS: Record<string, string> = {
+  IN_PROJECT: 'in project',
+  LINKS_TO: 'links to',
+  RELATES_TO: 'relates to',
+  COMMENT_ACTIVITY: 'comment activity',
+  DEPENDS_ON_TASK_STATUS: 'depends on task status',
+}
+
+function normalizeGraphEntityTypeKey(entityType: unknown): string {
+  return String(entityType || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '')
+}
+
+function formatGraphRelationshipLabel(relationship: unknown): string {
+  const normalized = String(relationship || 'RELATED').trim().toUpperCase()
+  if (GRAPH_RELATION_DISPLAY_LABELS[normalized]) return GRAPH_RELATION_DISPLAY_LABELS[normalized]
+  return normalized
+    .replace(/[_\s]+/g, ' ')
+    .toLowerCase()
+}
+
+function graphAltRelationColor(relationship: string): string {
+  const relation = String(relationship || '').trim().toUpperCase()
+  if (relation === 'DEPENDS_ON_TASK_STATUS') return '#dc2626'
+  if (relation === 'COMMENT_ACTIVITY') return '#16a34a'
+  if (relation === 'IN_PROJECT') return '#64748b'
+  const palette = ['#2563eb', '#7c3aed', '#0d9488', '#ea580c', '#0284c7', '#4f46e5', '#ca8a04']
+  let hash = 0
+  for (let i = 0; i < relation.length; i += 1) hash = (hash * 31 + relation.charCodeAt(i)) >>> 0
+  return palette[hash % palette.length] || '#2563eb'
+}
+
+function graphEntityTypeVisualMeta(entityType: unknown): { sticky: string; text: string; border: string } {
+  const key = normalizeGraphEntityTypeKey(entityType)
+  if (key === 'task') return { sticky: '#dbeafe', text: '#1e3a8a', border: '#2563eb' }
+  if (key === 'specification') return { sticky: '#ccfbf1', text: '#134e4a', border: '#0d9488' }
+  if (key === 'note') return { sticky: '#f3e8ff', text: '#581c87', border: '#9333ea' }
+  if (key === 'comment') return { sticky: '#dcfce7', text: '#14532d', border: '#16a34a' }
+  if (key === 'projectrule') return { sticky: '#ffedd5', text: '#9a3412', border: '#ea580c' }
+  if (key === 'tag') return { sticky: '#fef3c7', text: '#78350f', border: '#ca8a04' }
+  if (key === 'user') return { sticky: '#e0e7ff', text: '#312e81', border: '#4f46e5' }
+  if (key === 'workspace') return { sticky: '#e5e7eb', text: '#111827', border: '#6b7280' }
+  return { sticky: '#e2e8f0', text: '#0f172a', border: '#64748b' }
+}
+
+function buildAppEntityUrl(args: {
+  entityType: string
+  entityId: string
+  projectId: string
+}): string {
+  const { entityType, entityId, projectId } = args
+  const url = new URL(
+    typeof window !== 'undefined' ? window.location.href : 'http://localhost/'
+  )
+  const typeKey = normalizeGraphEntityTypeKey(entityType)
+  const effectiveProjectId = String(projectId || '').trim()
+  const effectiveEntityId = String(entityId || '').trim()
+
+  const setBase = (tab: 'projects' | 'tasks' | 'specifications' | 'notes') => {
+    url.searchParams.set('tab', tab)
+    if (effectiveProjectId) url.searchParams.set('project', effectiveProjectId)
+    else url.searchParams.delete('project')
+    url.searchParams.delete('task')
+    url.searchParams.delete('note')
+    url.searchParams.delete('specification')
+  }
+
+  if (typeKey === 'project') {
+    setBase('projects')
+    if (effectiveEntityId) url.searchParams.set('project', effectiveEntityId)
+    return `${url.pathname}${url.search}`
+  }
+  if (typeKey === 'task') {
+    setBase('tasks')
+    if (effectiveEntityId) url.searchParams.set('task', effectiveEntityId)
+    return `${url.pathname}${url.search}`
+  }
+  if (typeKey === 'specification') {
+    setBase('specifications')
+    if (effectiveEntityId) url.searchParams.set('specification', effectiveEntityId)
+    return `${url.pathname}${url.search}`
+  }
+  if (typeKey === 'note') {
+    setBase('notes')
+    if (effectiveEntityId) url.searchParams.set('note', effectiveEntityId)
+    return `${url.pathname}${url.search}`
+  }
+
+  setBase('projects')
+  return `${url.pathname}${url.search}`
+}
+
+function navigateAppEntityUrl(href: string): void {
+  if (typeof window === 'undefined') return
+  const target = new URL(href, window.location.href)
+  const next = `${target.pathname}${target.search}`
+  if (`${window.location.pathname}${window.location.search}` === next) return
+  window.history.pushState(null, '', next)
+  window.dispatchEvent(new PopStateEvent('popstate'))
 }
 
 type EventStormingTypeKey =
@@ -387,8 +525,12 @@ export function ProjectKnowledgeGraphPanel({
   onLinkFocusTaskToSpecification?: (taskId: string, specificationId: string) => Promise<void> | void
 }) {
   const [selectedNodeId, setSelectedNodeId] = React.useState<string | null>(null)
+  const [selectedGraphAltNodeId, setSelectedGraphAltNodeId] = React.useState<string | null>(null)
   const [hoveredNodeId, setHoveredNodeId] = React.useState<string | null>(null)
   const [isGraphFullscreen, setIsGraphFullscreen] = React.useState(false)
+  const [isGraphAltFullscreen, setIsGraphAltFullscreen] = React.useState(false)
+  const [graphAltHiddenTypeKeys, setGraphAltHiddenTypeKeys] = React.useState<string[]>([])
+  const [graphAltFocusScope, setGraphAltFocusScope] = React.useState<'all' | '1' | '2'>('all')
   const [isEventStormingFullscreen, setIsEventStormingFullscreen] = React.useState(false)
   const [selectedEventStormingNodeId, setSelectedEventStormingNodeId] = React.useState<string | null>(null)
   const [showEventStormingArtifactsOnDiagram, setShowEventStormingArtifactsOnDiagram] = React.useState(false)
@@ -404,11 +546,15 @@ export function ProjectKnowledgeGraphPanel({
   const [selectedPackSourceKey, setSelectedPackSourceKey] = React.useState<string | null>(null)
   const [actionBusy, setActionBusy] = React.useState<string | null>(null)
   const [actionError, setActionError] = React.useState<string | null>(null)
+  const graphAltNodeTypes = React.useMemo(() => ({ kgAltNode: KnowledgeGraphAltNode }), [])
+  const [graphAltCanvasNodes, setGraphAltCanvasNodes] = React.useState<FlowNode<ReactFlowNodeData>[]>([])
 
   const graphRef = React.useRef<any>(null)
   const graphShellRef = React.useRef<HTMLDivElement | null>(null)
+  const graphAltShellRef = React.useRef<HTMLDivElement | null>(null)
   const graphCanvasRef = React.useRef<HTMLDivElement | null>(null)
   const eventStormingShellRef = React.useRef<HTMLDivElement | null>(null)
+  const graphAltFlowRef = React.useRef<ReactFlowInstance<FlowNode<ReactFlowNodeData>, FlowEdge> | null>(null)
   const eventStormingFlowRef = React.useRef<ReactFlowInstance<FlowNode<ReactFlowNodeData>, FlowEdge> | null>(null)
   const [canvasSize, setCanvasSize] = React.useState<{ width: number; height: number }>({
     width: 640,
@@ -794,6 +940,17 @@ export function ProjectKnowledgeGraphPanel({
   }, [filteredGraph.nodes, selectedNodeId])
 
   React.useEffect(() => {
+    const nodes = filteredGraph.nodes
+    if (!nodes.length) {
+      setSelectedGraphAltNodeId(null)
+      return
+    }
+    if (!selectedGraphAltNodeId) return
+    if (nodes.some((node) => node.entity_id === selectedGraphAltNodeId)) return
+    setSelectedGraphAltNodeId(null)
+  }, [filteredGraph.nodes, selectedGraphAltNodeId])
+
+  React.useEffect(() => {
     if (!eventStormingNodes.length) {
       setSelectedEventStormingNodeId(null)
       return
@@ -810,6 +967,12 @@ export function ProjectKnowledgeGraphPanel({
     if (selectedEvidenceId && evidenceItems.some((item) => item.evidence_id === selectedEvidenceId)) return
     setSelectedEvidenceId(evidenceItems[0]?.evidence_id ?? null)
   }, [evidenceItems, selectedEvidenceId])
+
+  React.useEffect(() => {
+    setGraphAltHiddenTypeKeys([])
+    setSelectedGraphAltNodeId(null)
+    setGraphAltFocusScope('all')
+  }, [projectId])
 
   const nodeColor = React.useCallback((entityType: string) => {
     const key = String(entityType || '').toLowerCase()
@@ -852,6 +1015,535 @@ export function ProjectKnowledgeGraphPanel({
     }))
     return { nodes, links }
   }, [filteredGraph.nodes, filteredGraph.edges, nodeColor])
+
+  const graphEntityTypeOptions = React.useMemo(() => {
+    const byKey = new Map<string, GraphEntityTypeOption>()
+    for (const node of filteredGraph.nodes) {
+      const rawType = String(node.entity_type || 'Entity').trim() || 'Entity'
+      const key = normalizeGraphEntityTypeKey(rawType)
+      const current = byKey.get(key)
+      if (!current) {
+        byKey.set(key, { key, label: rawType, count: 1 })
+      } else {
+        current.count += 1
+      }
+    }
+    return Array.from(byKey.values()).sort((a, b) => {
+      const idxA = GRAPH_ENTITY_TYPE_PREFERRED_ORDER.indexOf(a.key)
+      const idxB = GRAPH_ENTITY_TYPE_PREFERRED_ORDER.indexOf(b.key)
+      const orderA = idxA >= 0 ? idxA : 999
+      const orderB = idxB >= 0 ? idxB : 999
+      if (orderA !== orderB) return orderA - orderB
+      return a.label.localeCompare(b.label)
+    }).filter((item) => item.key !== 'project' && item.key !== 'projectrule')
+  }, [filteredGraph.nodes])
+
+  const graphAltVisibleTypeSet = React.useMemo(() => {
+    const hidden = new Set(graphAltHiddenTypeKeys)
+    return new Set(
+      graphEntityTypeOptions
+        .filter((item) => !hidden.has(item.key))
+        .map((item) => item.key)
+    )
+  }, [graphAltHiddenTypeKeys, graphEntityTypeOptions])
+
+  const graphAltBaseVisibleNodeIds = React.useMemo(() => {
+    const set = new Set<string>()
+    for (const node of filteredGraph.nodes) {
+      const typeKey = normalizeGraphEntityTypeKey(node.entity_type || '')
+      if (typeKey === 'project' || typeKey === 'projectrule') continue
+      if (!graphAltVisibleTypeSet.has(typeKey)) continue
+      const nodeId = String(node.entity_id || '').trim()
+      if (!nodeId) continue
+      set.add(nodeId)
+    }
+    return set
+  }, [filteredGraph.nodes, graphAltVisibleTypeSet])
+
+  const graphAltScopeNodeIdSet = React.useMemo(() => {
+    if (graphAltFocusScope === 'all') return graphAltBaseVisibleNodeIds
+    const selectedId = String(selectedGraphAltNodeId || '').trim()
+    if (!selectedId || !graphAltBaseVisibleNodeIds.has(selectedId)) return graphAltBaseVisibleNodeIds
+    const hopLimit = Number(graphAltFocusScope)
+    if (!Number.isFinite(hopLimit) || hopLimit <= 0) return graphAltBaseVisibleNodeIds
+
+    const adjacency = new Map<string, Set<string>>()
+    for (const edge of filteredGraph.edges) {
+      const source = String(edge.source_entity_id || '').trim()
+      const target = String(edge.target_entity_id || '').trim()
+      if (!source || !target || source === target) continue
+      if (!graphAltBaseVisibleNodeIds.has(source) || !graphAltBaseVisibleNodeIds.has(target)) continue
+      const sourceNeighbors = adjacency.get(source) ?? new Set<string>()
+      sourceNeighbors.add(target)
+      adjacency.set(source, sourceNeighbors)
+      const targetNeighbors = adjacency.get(target) ?? new Set<string>()
+      targetNeighbors.add(source)
+      adjacency.set(target, targetNeighbors)
+    }
+
+    const visited = new Set<string>([selectedId])
+    let frontier = new Set<string>([selectedId])
+    for (let depth = 0; depth < hopLimit; depth += 1) {
+      const next = new Set<string>()
+      for (const nodeId of frontier) {
+        const neighbors = adjacency.get(nodeId) ?? new Set<string>()
+        for (const neighbor of neighbors) {
+          if (visited.has(neighbor)) continue
+          visited.add(neighbor)
+          next.add(neighbor)
+        }
+      }
+      if (next.size === 0) break
+      frontier = next
+    }
+    return visited
+  }, [filteredGraph.edges, graphAltBaseVisibleNodeIds, graphAltFocusScope, selectedGraphAltNodeId])
+
+  React.useEffect(() => {
+    if (!selectedGraphAltNodeId) return
+    if (graphAltScopeNodeIdSet.has(selectedGraphAltNodeId)) return
+    setSelectedGraphAltNodeId(null)
+  }, [graphAltScopeNodeIdSet, selectedGraphAltNodeId])
+
+  const graphAltVisibleNodes = React.useMemo(
+    () =>
+      filteredGraph.nodes.filter((node) => {
+        const nodeId = String(node.entity_id || '').trim()
+        if (!nodeId) return false
+        return graphAltScopeNodeIdSet.has(nodeId)
+      }),
+    [filteredGraph.nodes, graphAltScopeNodeIdSet]
+  )
+
+  const graphAltDependencyContext = React.useMemo(() => {
+    const taskNodes = graphAltVisibleNodes.filter((node) => normalizeGraphEntityTypeKey(node.entity_type || '') === 'task')
+    const taskIdSet = new Set(taskNodes.map((node) => String(node.entity_id || '')))
+    const incomingByTask = new Map<string, number>()
+    const outgoingByTask = new Map<string, number>()
+    const downstreamAdjacency = new Map<string, Set<string>>()
+    const upstreamAdjacency = new Map<string, Set<string>>()
+    for (const node of taskNodes) {
+      const taskId = String(node.entity_id || '')
+      incomingByTask.set(taskId, 0)
+      outgoingByTask.set(taskId, 0)
+      downstreamAdjacency.set(taskId, new Set<string>())
+      upstreamAdjacency.set(taskId, new Set<string>())
+    }
+
+    for (const edge of filteredGraph.edges) {
+      const source = String(edge.source_entity_id || '')
+      const target = String(edge.target_entity_id || '')
+      const relationship = String(edge.relationship || '').trim().toUpperCase()
+      if (relationship !== 'DEPENDS_ON_TASK_STATUS') continue
+      if (!taskIdSet.has(source) || !taskIdSet.has(target)) continue
+      if (!source || !target || source === target) continue
+      incomingByTask.set(target, Number(incomingByTask.get(target) || 0) + 1)
+      outgoingByTask.set(source, Number(outgoingByTask.get(source) || 0) + 1)
+      const children = downstreamAdjacency.get(source) ?? new Set<string>()
+      children.add(target)
+      downstreamAdjacency.set(source, children)
+      const parents = upstreamAdjacency.get(target) ?? new Set<string>()
+      parents.add(source)
+      upstreamAdjacency.set(target, parents)
+    }
+
+    const selectedId = String(selectedGraphAltNodeId || '').trim()
+    const selectedTask = taskIdSet.has(selectedId) ? selectedId : ''
+    const upstreamTaskIds = new Set<string>()
+    const downstreamTaskIds = new Set<string>()
+    const highlightedDependencyEdgeKeys = new Set<string>()
+
+    if (selectedTask) {
+      const upstreamQueue = [selectedTask]
+      const upstreamSeen = new Set<string>([selectedTask])
+      while (upstreamQueue.length > 0) {
+        const current = upstreamQueue.shift()
+        if (!current) break
+        const parents = upstreamAdjacency.get(current) ?? new Set<string>()
+        for (const parent of parents) {
+          highlightedDependencyEdgeKeys.add(`${parent}->${current}`)
+          if (upstreamSeen.has(parent)) continue
+          upstreamSeen.add(parent)
+          upstreamTaskIds.add(parent)
+          upstreamQueue.push(parent)
+        }
+      }
+
+      const downstreamQueue = [selectedTask]
+      const downstreamSeen = new Set<string>([selectedTask])
+      while (downstreamQueue.length > 0) {
+        const current = downstreamQueue.shift()
+        if (!current) break
+        const children = downstreamAdjacency.get(current) ?? new Set<string>()
+        for (const child of children) {
+          highlightedDependencyEdgeKeys.add(`${current}->${child}`)
+          if (downstreamSeen.has(child)) continue
+          downstreamSeen.add(child)
+          downstreamTaskIds.add(child)
+          downstreamQueue.push(child)
+        }
+      }
+    }
+
+    return {
+      selectedTaskId: selectedTask,
+      incomingByTask,
+      outgoingByTask,
+      upstreamTaskIds,
+      downstreamTaskIds,
+      highlightedDependencyEdgeKeys,
+    }
+  }, [filteredGraph.edges, graphAltVisibleNodes, selectedGraphAltNodeId])
+
+  const graphAltAllVisibleRelationItems = React.useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const edge of filteredGraph.edges) {
+      const source = String(edge.source_entity_id || '').trim()
+      const target = String(edge.target_entity_id || '').trim()
+      if (!source || !target) continue
+      if (!graphAltBaseVisibleNodeIds.has(source) || !graphAltBaseVisibleNodeIds.has(target)) continue
+      const relation = String(edge.relationship || 'RELATED').trim().toUpperCase()
+      if (!relation) continue
+      counts.set(relation, Number(counts.get(relation) || 0) + 1)
+    }
+    return Array.from(counts.entries())
+      .map(([relationship, count]) => ({
+        relationship,
+        count,
+        label: formatGraphRelationshipLabel(relationship),
+        color: graphAltRelationColor(relationship),
+      }))
+      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label))
+  }, [filteredGraph.edges, graphAltBaseVisibleNodeIds])
+
+  const graphAltFlowNodes = React.useMemo(() => {
+    const visibleNodes = graphAltVisibleNodes
+    if (!visibleNodes.length) return [] as FlowNode<ReactFlowNodeData>[]
+
+    const visibleNodeById = new Map(
+      visibleNodes.map((node) => [String(node.entity_id || ''), node] as const)
+    )
+    const visibleTaskNodes = visibleNodes.filter(
+      (node) => normalizeGraphEntityTypeKey(node.entity_type || '') === 'task'
+    )
+    const visibleTaskIdSet = new Set(visibleTaskNodes.map((node) => String(node.entity_id || '')))
+
+    const taskDependencyEdges = filteredGraph.edges.filter((edge) => {
+      const source = String(edge.source_entity_id || '')
+      const target = String(edge.target_entity_id || '')
+      const relation = String(edge.relationship || '').trim().toUpperCase()
+      if (relation !== 'DEPENDS_ON_TASK_STATUS') return false
+      return visibleTaskIdSet.has(source) && visibleTaskIdSet.has(target)
+    })
+
+    const taskAdjacency = new Map<string, Set<string>>()
+    const taskIndegree = new Map<string, number>()
+    for (const task of visibleTaskNodes) {
+      const taskId = String(task.entity_id || '')
+      taskAdjacency.set(taskId, new Set<string>())
+      taskIndegree.set(taskId, 0)
+    }
+    for (const edge of taskDependencyEdges) {
+      const source = String(edge.source_entity_id || '')
+      const target = String(edge.target_entity_id || '')
+      if (!source || !target || source === target) continue
+      const neighbors = taskAdjacency.get(source) ?? new Set<string>()
+      if (neighbors.has(target)) continue
+      neighbors.add(target)
+      taskAdjacency.set(source, neighbors)
+      taskIndegree.set(target, Number(taskIndegree.get(target) || 0) + 1)
+    }
+
+    const taskSort = (lhsId: string, rhsId: string) => {
+      const lhs = visibleNodeById.get(lhsId)
+      const rhs = visibleNodeById.get(rhsId)
+      const degreeDiff = Number(rhs?.degree || 0) - Number(lhs?.degree || 0)
+      if (degreeDiff !== 0) return degreeDiff
+      const titleL = String(lhs?.title || lhs?.entity_id || '').toLowerCase()
+      const titleR = String(rhs?.title || rhs?.entity_id || '').toLowerCase()
+      if (titleL !== titleR) return titleL.localeCompare(titleR)
+      return lhsId.localeCompare(rhsId)
+    }
+
+    const taskDepth = new Map<string, number>()
+    const queue = Array.from(taskIndegree.entries())
+      .filter(([, indegree]) => indegree === 0)
+      .map(([taskId]) => taskId)
+      .sort(taskSort)
+    for (const taskId of queue) taskDepth.set(taskId, 0)
+    const seenFromQueue = new Set(queue)
+
+    while (queue.length > 0) {
+      const currentId = queue.shift()
+      if (!currentId) break
+      const currentDepth = Number(taskDepth.get(currentId) || 0)
+      const children = Array.from(taskAdjacency.get(currentId) ?? []).sort(taskSort)
+      for (const childId of children) {
+        const nextDepth = currentDepth + 1
+        const bestDepth = Number(taskDepth.get(childId) || 0)
+        if (!taskDepth.has(childId) || nextDepth > bestDepth) {
+          taskDepth.set(childId, nextDepth)
+        }
+        const nextIn = Math.max(0, Number(taskIndegree.get(childId) || 0) - 1)
+        taskIndegree.set(childId, nextIn)
+        if (nextIn === 0 && !seenFromQueue.has(childId)) {
+          queue.push(childId)
+          seenFromQueue.add(childId)
+        }
+      }
+    }
+
+    const unresolvedTaskIds = visibleTaskNodes
+      .map((node) => String(node.entity_id || ''))
+      .filter((taskId) => !taskDepth.has(taskId))
+      .sort(taskSort)
+    const maxResolvedDepth = Math.max(0, ...Array.from(taskDepth.values()))
+    unresolvedTaskIds.forEach((taskId, idx) => taskDepth.set(taskId, maxResolvedDepth + 1 + idx))
+
+    const tasksByDepth = new Map<number, string[]>()
+    for (const taskId of visibleTaskIdSet) {
+      const depth = Number(taskDepth.get(taskId) || 0)
+      const bucket = tasksByDepth.get(depth) ?? []
+      bucket.push(taskId)
+      tasksByDepth.set(depth, bucket)
+    }
+    for (const bucket of tasksByDepth.values()) bucket.sort(taskSort)
+
+    const maxTaskDepth = tasksByDepth.size > 0 ? Math.max(...Array.from(tasksByDepth.keys())) : 0
+    const xStep = 272
+    const yStep = 92
+    const startX = 18
+    const startY = 18
+    const maxTaskRows = tasksByDepth.size > 0 ? Math.max(...Array.from(tasksByDepth.values()).map((bucket) => bucket.length)) : 0
+    const taskAreaHeight = maxTaskRows > 0 ? Math.max(120, 48 + maxTaskRows * yStep) : 0
+    const secondaryStartY = startY + taskAreaHeight + 52
+    const out: FlowNode<ReactFlowNodeData>[] = []
+
+    for (const [depth, taskIds] of Array.from(tasksByDepth.entries()).sort((a, b) => a[0] - b[0])) {
+      for (let row = 0; row < taskIds.length; row += 1) {
+        const taskId = taskIds[row]
+        if (!taskId) continue
+        const item = visibleNodeById.get(taskId)
+        if (!item) continue
+        const selected = String(item.entity_id || '') === String(selectedGraphAltNodeId || '')
+        const visualMeta = graphEntityTypeVisualMeta(item.entity_type || 'Entity')
+        const taskEntityId = String(item.entity_id || '')
+        const incomingCount = Number(graphAltDependencyContext.incomingByTask.get(taskEntityId) || 0)
+        const outgoingCount = Number(graphAltDependencyContext.outgoingByTask.get(taskEntityId) || 0)
+        const statusLabel = incomingCount > 0 ? 'Blocked' : 'Ready'
+        const dependencyMeta = `Depends on ${incomingCount} · Unblocks ${outgoingCount}`
+        out.push({
+          id: String(item.entity_id || ''),
+          type: 'kgAltNode',
+          position: {
+            x: startX + depth * xStep,
+            y: startY + row * yStep,
+          },
+          data: {
+            label: String(item.title || item.entity_id || ''),
+            entityType: String(item.entity_type || 'Entity'),
+            statusLabel,
+            dependencyMeta,
+          },
+          style: {
+            width: 230,
+            minHeight: 60,
+            borderRadius: 10,
+            border: `2px solid ${visualMeta.border}`,
+            background: visualMeta.sticky,
+            color: visualMeta.text,
+            padding: '8px 10px',
+            fontSize: 12,
+            fontWeight: 700,
+            lineHeight: 1.3,
+            opacity: 1,
+            boxShadow: selected ? '0 0 0 2px rgba(34,197,94,0.22), 0 4px 10px rgba(15,23,42,0.12)' : '0 2px 8px rgba(15,23,42,0.08)',
+          },
+          sourcePosition: Position.Right,
+          targetPosition: Position.Left,
+        })
+      }
+    }
+
+    const nonTaskNodes = visibleNodes.filter(
+      (node) => normalizeGraphEntityTypeKey(node.entity_type || '') !== 'task'
+    )
+    const nonTaskGrouped = new Map<string, typeof nonTaskNodes>()
+    for (const node of nonTaskNodes) {
+      const typeKey = normalizeGraphEntityTypeKey(node.entity_type || '')
+      const bucket = nonTaskGrouped.get(typeKey) ?? []
+      bucket.push(node)
+      nonTaskGrouped.set(typeKey, bucket)
+    }
+    const nonTaskOrderedTypes = Array.from(nonTaskGrouped.keys()).sort((a, b) => {
+      const idxA = GRAPH_ENTITY_TYPE_PREFERRED_ORDER.indexOf(a)
+      const idxB = GRAPH_ENTITY_TYPE_PREFERRED_ORDER.indexOf(b)
+      const orderA = idxA >= 0 ? idxA : 999
+      const orderB = idxB >= 0 ? idxB : 999
+      if (orderA !== orderB) return orderA - orderB
+      const labelA = nonTaskGrouped.get(a)?.[0]?.entity_type || a
+      const labelB = nonTaskGrouped.get(b)?.[0]?.entity_type || b
+      return String(labelA).localeCompare(String(labelB))
+    })
+
+    const edgeAdjacency = new Map<string, string[]>()
+    for (const edge of filteredGraph.edges) {
+      const source = String(edge.source_entity_id || '')
+      const target = String(edge.target_entity_id || '')
+      if (!visibleNodeById.has(source) || !visibleNodeById.has(target)) continue
+      const srcNeighbors = edgeAdjacency.get(source) ?? []
+      srcNeighbors.push(target)
+      edgeAdjacency.set(source, srcNeighbors)
+      const dstNeighbors = edgeAdjacency.get(target) ?? []
+      dstNeighbors.push(source)
+      edgeAdjacency.set(target, dstNeighbors)
+    }
+
+    let laneCursorY = secondaryStartY
+    for (const typeKey of nonTaskOrderedTypes) {
+      const laneItems = [...(nonTaskGrouped.get(typeKey) ?? [])]
+      if (!laneItems.length) continue
+      const byDepth = new Map<number, typeof laneItems>()
+      for (const item of laneItems) {
+        const itemId = String(item.entity_id || '')
+        const neighbors = edgeAdjacency.get(itemId) ?? []
+        const neighborTaskDepths = neighbors
+          .filter((neighborId) => visibleTaskIdSet.has(neighborId))
+          .map((neighborId) => Number(taskDepth.get(neighborId) || 0))
+        const depthHint =
+          neighborTaskDepths.length > 0
+            ? Math.round(neighborTaskDepths.reduce((sum, value) => sum + value, 0) / neighborTaskDepths.length)
+            : maxTaskDepth + 1
+        const normalizedDepth = Math.max(0, Math.min(depthHint, Math.max(maxTaskDepth + 1, 1)))
+        const bucket = byDepth.get(normalizedDepth) ?? []
+        bucket.push(item)
+        byDepth.set(normalizedDepth, bucket)
+      }
+      for (const bucket of byDepth.values()) {
+        bucket.sort((a, b) => {
+          const degreeDiff = Number(b.degree || 0) - Number(a.degree || 0)
+          if (degreeDiff !== 0) return degreeDiff
+          return String(a.title || a.entity_id || '').localeCompare(String(b.title || b.entity_id || ''))
+        })
+      }
+      const maxDepthRows = byDepth.size > 0 ? Math.max(...Array.from(byDepth.values()).map((bucket) => bucket.length)) : 1
+      const laneHeight = Math.max(90, 32 + maxDepthRows * 74)
+
+      for (const [depth, bucket] of Array.from(byDepth.entries()).sort((a, b) => a[0] - b[0])) {
+        for (let row = 0; row < bucket.length; row += 1) {
+          const item = bucket[row]
+        if (!item) continue
+        const selected = String(item.entity_id || '') === String(selectedGraphAltNodeId || '')
+        const visualMeta = graphEntityTypeVisualMeta(item.entity_type || 'Entity')
+        out.push({
+          id: String(item.entity_id || ''),
+          type: 'kgAltNode',
+          position: {
+            x: startX + depth * xStep + 12,
+            y: laneCursorY + row * 74,
+          },
+          data: {
+            label: String(item.title || item.entity_id || ''),
+            entityType: String(item.entity_type || 'Entity'),
+          },
+          style: {
+            width: 214,
+            minHeight: 58,
+            borderRadius: 10,
+            border: `2px solid ${visualMeta.border}`,
+            background: visualMeta.sticky,
+            color: visualMeta.text,
+            padding: '8px 10px',
+            fontSize: 12,
+            fontWeight: 650,
+            lineHeight: 1.3,
+            opacity: 1,
+            boxShadow: selected ? '0 0 0 2px rgba(34,197,94,0.22), 0 4px 10px rgba(15,23,42,0.12)' : '0 2px 8px rgba(15,23,42,0.08)',
+          },
+          sourcePosition: Position.Right,
+          targetPosition: Position.Left,
+        })
+      }
+      }
+      laneCursorY += laneHeight + 22
+    }
+
+    return out
+  }, [filteredGraph.edges, graphAltDependencyContext, graphAltVisibleNodes, selectedGraphAltNodeId])
+
+  const graphAltFlowEdges = React.useMemo(() => {
+    if (!filteredGraph.edges.length || graphAltFlowNodes.length === 0) return [] as FlowEdge[]
+    const nodeIdSet = new Set(graphAltFlowNodes.map((node) => String(node.id || '')))
+    const selectedTaskId = String(graphAltDependencyContext.selectedTaskId || '')
+    const hasTaskChain = Boolean(selectedTaskId)
+    return filteredGraph.edges
+      .map((edge, idx) => {
+        const source = String(edge.source_entity_id || '')
+        const target = String(edge.target_entity_id || '')
+        const relationship = String(edge.relationship || 'RELATED').trim().toUpperCase()
+        if (!source || !target) return null
+        if (!nodeIdSet.has(source) || !nodeIdSet.has(target)) return null
+
+        const isTaskDependency = relationship === 'DEPENDS_ON_TASK_STATUS'
+        const isCommentActivity = relationship === 'COMMENT_ACTIVITY'
+        const isInProject = relationship === 'IN_PROJECT'
+        const dependencyEdgeKey = `${source}->${target}`
+        const isHighlightedDependency = graphAltDependencyContext.highlightedDependencyEdgeKeys.has(dependencyEdgeKey)
+        const isConnectedDependency = isTaskDependency && (source === selectedTaskId || target === selectedTaskId)
+        const stroke = isTaskDependency
+          ? isHighlightedDependency
+            ? '#b91c1c'
+            : isConnectedDependency
+              ? '#ef4444'
+              : '#f87171'
+          : isCommentActivity
+            ? '#16a34a'
+            : isInProject
+              ? '#64748b'
+              : '#2563eb'
+        const width = isTaskDependency
+          ? isHighlightedDependency
+            ? 3.6
+            : isConnectedDependency
+              ? 2.8
+              : 2.0
+          : isCommentActivity
+            ? 1.6
+            : 1.2
+        const dash = isInProject ? '5 4' : undefined
+        const flowType = isTaskDependency ? 'step' : 'smoothstep'
+
+        return {
+          id: `kg-alt-edge-${idx}-${source}-${target}-${relationship}`,
+          source,
+          target,
+          data: { relationship },
+          type: flowType,
+          label: isTaskDependency ? 'depends on' : undefined,
+          labelStyle: { fontSize: 10, fill: '#334155', fontWeight: 700 },
+          labelBgStyle: isTaskDependency ? { fill: 'rgba(248,250,252,0.86)', fillOpacity: 0.9 } : undefined,
+          labelBgPadding: [4, 2],
+          labelBgBorderRadius: 4,
+          markerEnd: { type: MarkerType.ArrowClosed, color: stroke },
+          style: {
+            stroke,
+            strokeWidth: width,
+            strokeDasharray: dash,
+            opacity: isTaskDependency ? 1 : hasTaskChain ? 0.5 : 0.7,
+          },
+          animated: isTaskDependency && (isHighlightedDependency || isConnectedDependency),
+        } as FlowEdge
+      })
+      .filter((edge): edge is FlowEdge => Boolean(edge))
+  }, [filteredGraph.edges, graphAltDependencyContext, graphAltFlowNodes])
+
+  React.useEffect(() => {
+    setGraphAltCanvasNodes(graphAltFlowNodes)
+  }, [graphAltFlowNodes])
+
+  const onGraphAltNodesChange = React.useCallback((changes: NodeChange<FlowNode<ReactFlowNodeData>>[]) => {
+    setGraphAltCanvasNodes((current) => applyNodeChanges(changes, current))
+  }, [])
 
   const eventStormingFlowNodes = React.useMemo(() => {
     if (!eventStormingNodes.length) return [] as FlowNode<ReactFlowNodeData>[]
@@ -1224,6 +1916,96 @@ export function ProjectKnowledgeGraphPanel({
   const connectedSelectedEdges = selectedNode
     ? graphData.links.filter((edge) => String(edge.source) === selectedNode.id || String(edge.target) === selectedNode.id)
     : []
+  const graphAltTaskDependencyCount = React.useMemo(
+    () =>
+      graphAltFlowEdges.filter(
+        (edge) => String((edge.data as { relationship?: unknown } | undefined)?.relationship || '').trim().toUpperCase() === 'DEPENDS_ON_TASK_STATUS'
+      ).length,
+    [graphAltFlowEdges]
+  )
+  const selectedGraphAltNodeRaw = React.useMemo(
+    () => filteredGraph.nodes.find((node) => String(node.entity_id || '') === String(selectedGraphAltNodeId || '')) ?? null,
+    [filteredGraph.nodes, selectedGraphAltNodeId]
+  )
+  const graphAltLinkedEntityLinks = React.useMemo(() => {
+    const selectedId = String(selectedGraphAltNodeId || '').trim()
+    if (!selectedId) return [] as Array<{ key: string; label: string; href: string }>
+    const neighborIds = new Set<string>()
+    for (const edge of filteredGraph.edges) {
+      const source = String(edge.source_entity_id || '').trim()
+      const target = String(edge.target_entity_id || '').trim()
+      if (!source || !target) continue
+      if (source === selectedId && target !== selectedId) neighborIds.add(target)
+      if (target === selectedId && source !== selectedId) neighborIds.add(source)
+    }
+    const nodeById = new Map(filteredGraph.nodes.map((node) => [String(node.entity_id || ''), node]))
+    const typed = Array.from(neighborIds)
+      .map((id) => nodeById.get(id))
+      .filter((item): item is typeof filteredGraph.nodes[number] => Boolean(item))
+      .filter((item) => {
+        const typeKey = normalizeGraphEntityTypeKey(item.entity_type || '')
+        return typeKey !== 'project' && typeKey !== 'projectrule'
+      })
+      .sort((a, b) => {
+        const degreeDiff = Number(b.degree || 0) - Number(a.degree || 0)
+        if (degreeDiff !== 0) return degreeDiff
+        return String(a.title || a.entity_id || '').localeCompare(String(b.title || b.entity_id || ''))
+      })
+      .slice(0, 12)
+
+    return typed.map((item) => {
+      const type = String(item.entity_type || 'Entity')
+      const entityId = String(item.entity_id || '')
+      const label = `${type}: ${String(item.title || entityId)}`
+      return {
+        key: `${type}-${entityId}`,
+        label,
+        href: buildAppEntityUrl({ entityType: type, entityId, projectId }),
+      }
+    })
+  }, [filteredGraph.edges, filteredGraph.nodes, projectId, selectedGraphAltNodeId])
+  const selectedGraphAltTaskDependencies = React.useMemo(() => {
+    const selectedId = String(selectedGraphAltNodeId || '').trim()
+    if (!selectedId) return { dependsOn: [] as Array<{ key: string; label: string; href: string }>, unblocks: [] as Array<{ key: string; label: string; href: string }> }
+    const selectedNode = filteredGraph.nodes.find((node) => String(node.entity_id || '') === selectedId)
+    if (!selectedNode || normalizeGraphEntityTypeKey(selectedNode.entity_type || '') !== 'task') {
+      return { dependsOn: [] as Array<{ key: string; label: string; href: string }>, unblocks: [] as Array<{ key: string; label: string; href: string }> }
+    }
+    const nodeById = new Map(filteredGraph.nodes.map((node) => [String(node.entity_id || ''), node]))
+    const dependsOnIds: string[] = []
+    const unblocksIds: string[] = []
+    for (const edge of filteredGraph.edges) {
+      const relation = String(edge.relationship || '').trim().toUpperCase()
+      if (relation !== 'DEPENDS_ON_TASK_STATUS') continue
+      const source = String(edge.source_entity_id || '').trim()
+      const target = String(edge.target_entity_id || '').trim()
+      if (!source || !target || source === target) continue
+      if (target === selectedId) dependsOnIds.push(source)
+      if (source === selectedId) unblocksIds.push(target)
+    }
+    const toLinks = (ids: string[]) =>
+      Array.from(new Set(ids))
+        .map((taskId) => nodeById.get(taskId))
+        .filter((item): item is typeof filteredGraph.nodes[number] => Boolean(item))
+        .sort((a, b) => String(a.title || a.entity_id || '').localeCompare(String(b.title || b.entity_id || '')))
+        .map((item) => {
+          const entityId = String(item.entity_id || '')
+          const label = String(item.title || entityId)
+          return {
+            key: `task-${entityId}`,
+            label,
+            href: buildAppEntityUrl({ entityType: 'task', entityId, projectId }),
+          }
+        })
+    return { dependsOn: toLinks(dependsOnIds), unblocks: toLinks(unblocksIds) }
+  }, [filteredGraph.edges, filteredGraph.nodes, projectId, selectedGraphAltNodeId])
+  const toggleGraphAltType = React.useCallback((typeKey: string) => {
+    setGraphAltHiddenTypeKeys((prev) => {
+      const has = prev.includes(typeKey)
+      if (has) return prev.filter((item) => item !== typeKey)
+      return [...prev, typeKey]
+    })
+  }, [])
   const normalizedKnowledgeSearchQuery = String(knowledgeSearchQuery || '').trim()
   const knowledgeSearchActive = normalizedKnowledgeSearchQuery.length >= 2
   const knowledgeSearchItems = knowledgeSearchResultsQuery.data?.items ?? []
@@ -1297,8 +2079,12 @@ export function ProjectKnowledgeGraphPanel({
   }, [graphPackSnapshot.sources, selectedPackSourceKey])
 
   React.useEffect(() => {
-    if (knowledgeSearchActive) setActiveTab('explore')
+    if (knowledgeSearchActive) setActiveTab('insights')
   }, [knowledgeSearchActive])
+
+  React.useEffect(() => {
+    setActiveTab('explore')
+  }, [projectId])
 
   const focusNodeOnCanvas = React.useCallback((nodeId: string, zoomTarget = 2.2) => {
     setSelectedNodeId(nodeId)
@@ -1361,8 +2147,10 @@ export function ProjectKnowledgeGraphPanel({
   React.useEffect(() => {
     const onFullscreenChange = () => {
       const shell = graphShellRef.current
+      const altShell = graphAltShellRef.current
       const eventStormingShell = eventStormingShellRef.current
       setIsGraphFullscreen(Boolean(shell && document.fullscreenElement === shell))
+      setIsGraphAltFullscreen(Boolean(altShell && document.fullscreenElement === altShell))
       setIsEventStormingFullscreen(Boolean(eventStormingShell && document.fullscreenElement === eventStormingShell))
       window.setTimeout(() => {
         recalcCanvasSize()
@@ -1400,6 +2188,35 @@ export function ProjectKnowledgeGraphPanel({
 
   const exitGraphFullscreen = React.useCallback(async () => {
     const shell = graphShellRef.current
+    if (!shell) return
+    try {
+      if (document.fullscreenElement === shell) {
+        await document.exitFullscreen()
+      }
+    } catch {
+      // no-op
+    }
+  }, [])
+
+  const toggleGraphAltFullscreen = React.useCallback(async () => {
+    const shell = graphAltShellRef.current
+    if (!shell) return
+    try {
+      if (document.fullscreenElement === shell) {
+        await document.exitFullscreen()
+        return
+      }
+      if (document.fullscreenElement) {
+        await document.exitFullscreen()
+      }
+      await shell.requestFullscreen()
+    } catch {
+      // no-op
+    }
+  }, [])
+
+  const exitGraphAltFullscreen = React.useCallback(async () => {
+    const shell = graphAltShellRef.current
     if (!shell) return
     try {
       if (document.fullscreenElement === shell) {
@@ -1479,6 +2296,24 @@ export function ProjectKnowledgeGraphPanel({
       return { x: nextX, zoom: nextZoom }
     })
   }, [])
+
+  const fitGraphAltViewport = React.useCallback(
+    (duration = 320) => {
+      if (!graphAltFlowNodes.length) return
+      const instance = graphAltFlowRef.current
+      if (!instance) return
+      try {
+        instance.fitView({
+          padding: isGraphAltFullscreen ? 0.08 : 0.16,
+          duration,
+          maxZoom: 1.15,
+        })
+      } catch {
+        // no-op
+      }
+    },
+    [graphAltFlowNodes.length, isGraphAltFullscreen]
+  )
   const eventStormingHeaderStyle = React.useMemo(() => {
     const zoom = Math.max(0.35, Number(eventStormingViewportTransform.zoom || 1))
     const laneWidth = EVENT_STORMING_LANE_WIDTH * zoom
@@ -1502,6 +2337,24 @@ export function ProjectKnowledgeGraphPanel({
     }, 60)
     return () => window.clearTimeout(timer)
   }, [graphData.nodes.length, graphData.links.length, canvasSize.width, canvasSize.height, zoomReset])
+
+  React.useEffect(() => {
+    if (!graphAltFlowNodes.length) return
+    const timer = window.setTimeout(() => {
+      fitGraphAltViewport(360)
+    }, 90)
+    return () => window.clearTimeout(timer)
+  }, [graphAltFlowNodes.length, graphAltFlowEdges.length, isGraphAltFullscreen, fitGraphAltViewport])
+
+  React.useEffect(() => {
+    if (!graphAltFlowNodes.length) return
+    const timerFast = window.setTimeout(() => fitGraphAltViewport(280), 120)
+    const timerLate = window.setTimeout(() => fitGraphAltViewport(0), 420)
+    return () => {
+      window.clearTimeout(timerFast)
+      window.clearTimeout(timerLate)
+    }
+  }, [isGraphAltFullscreen, graphAltFlowNodes.length, fitGraphAltViewport])
 
   React.useEffect(() => {
     if (!eventStormingFlowNodes.length) return
@@ -1545,6 +2398,8 @@ export function ProjectKnowledgeGraphPanel({
       ? eventStormingComponentLinksQuery.error
       : null
   const noVisibleNodes = Boolean(subgraph) && graphData.nodes.length === 0
+  const noVisibleAltNodes = Boolean(subgraph) && graphAltCanvasNodes.length === 0
+  const selectedGraphAltNode = graphData.nodes.find((node) => node.id === selectedGraphAltNodeId) ?? null
 
   return (
     <section className="graph-insights" aria-live="polite">
@@ -1600,6 +2455,10 @@ export function ProjectKnowledgeGraphPanel({
               <Tabs.Trigger className="kg-insights-tab-trigger" value="explore">
                 <span>Explore</span>
                 <span className="kg-insights-tab-count">{graphData.nodes.length}</span>
+              </Tabs.Trigger>
+              <Tabs.Trigger className="kg-insights-tab-trigger" value="insights">
+                <span>Insights</span>
+                <span className="kg-insights-tab-count">{evidenceItems.length}</span>
               </Tabs.Trigger>
               <Tabs.Trigger className="kg-insights-tab-trigger" value="pack">
                 <span>Pack</span>
@@ -1856,263 +2715,230 @@ export function ProjectKnowledgeGraphPanel({
             </Tabs.Content>
 
             <Tabs.Content className="kg-insights-tab-content" value="explore">
-              <div className="kg-explore-layout">
+              <div className="kg-explore-layout kg-explore-layout-diagrams">
                 <div className="kg-explore-main">
-                  <div className="field-control" style={{ marginBottom: 10 }}>
-                    <span className="field-label">Knowledge search</span>
-                    <div className="row wrap" style={{ gap: 8, alignItems: 'center' }}>
-                      <input
-                        value={knowledgeSearchQuery}
-                        onChange={(e) => setKnowledgeSearchQuery(e.target.value)}
-                        placeholder="Search entities, events, commands, readiness, metrics..."
-                      />
-                      {knowledgeSearchResultsQuery.isFetching ? <span className="badge">Searching</span> : null}
-                      {knowledgeSearchActive ? <span className="badge">Mode: {knowledgeSearchMode}</span> : null}
-                    </div>
-                    <div className="meta" style={{ marginTop: 6 }}>
-                      Type at least 2 characters. Click a result to focus its node in the graph.
-                    </div>
-                  </div>
-
-                  {knowledgeSearchActive ? (
-                    <div className="graph-connected-block">
-                      <div className="meta">Knowledge search results</div>
-                      {knowledgeSearchResultsQuery.isError ? (
-                        <div className="notice notice-error" style={{ marginTop: 8 }}>
-                          {toErrorMessage(knowledgeSearchResultsQuery.error)}
-                        </div>
-                      ) : knowledgeSearchItems.length === 0 ? (
-                        <div className="meta" style={{ marginTop: 8 }}>No matches for this query.</div>
-                      ) : (
-                        <div className="graph-evidence-list">
-                          {knowledgeSearchItems.slice(0, 10).map((item) => {
-                            const graphPath = (item.graph_path ?? []).filter(Boolean).join(' -> ')
-                            return (
-                              <button
-                                key={`kg-search-${item.rank}-${item.entity_type}-${item.entity_id}`}
-                                type="button"
-                                className="graph-evidence-item"
-                                onClick={() => focusNodeOnCanvas(item.entity_id, 2.2)}
-                              >
-                                <div className="graph-evidence-head">
-                                  <div className="graph-evidence-badges">
-                                    <span className="graph-evidence-id">#{item.rank}</span>
-                                    <span className="status-chip">{item.entity_type}</span>
-                                    <span className="status-chip">{item.source_type}</span>
-                                  </div>
-                                  <span className="graph-evidence-score graph-evidence-score-pill">Final {item.final_score.toFixed(3)}</span>
-                                </div>
-                                <div className="graph-evidence-entity">{item.entity_id}</div>
-                                <div className="graph-evidence-snippet">{item.snippet}</div>
-                                <div className="graph-evidence-score-grid">
-                                  <div className="graph-evidence-score-row">
-                                    <span className="meta">Final</span>
-                                    <span className="graph-evidence-score-value">{item.final_score.toFixed(3)}</span>
-                                    <span className="graph-evidence-score-track">
-                                      <span
-                                        className="graph-evidence-score-fill graph-evidence-score-fill-final"
-                                        style={{ width: `${normalizeScorePercent(item.final_score)}%` }}
-                                      />
-                                    </span>
-                                  </div>
-                                  <div className="graph-evidence-score-row">
-                                    <span className="meta">Graph</span>
-                                    <span className="graph-evidence-score-value">{item.graph_score.toFixed(3)}</span>
-                                    <span className="graph-evidence-score-track">
-                                      <span
-                                        className="graph-evidence-score-fill graph-evidence-score-fill-graph"
-                                        style={{ width: `${normalizeScorePercent(item.graph_score)}%` }}
-                                      />
-                                    </span>
-                                  </div>
-                                  <div className="graph-evidence-score-row">
-                                    <span className="meta">Vector</span>
-                                    <span className="graph-evidence-score-value">
-                                      {item.vector_similarity === null ? 'n/a' : item.vector_similarity.toFixed(3)}
-                                    </span>
-                                    <span className="graph-evidence-score-track">
-                                      <span
-                                        className="graph-evidence-score-fill graph-evidence-score-fill-vector"
-                                        style={{ width: `${normalizeScorePercent(item.vector_similarity)}%` }}
-                                      />
-                                    </span>
-                                  </div>
-                                  {typeof item.template_alignment === 'number' ? (
-                                    <div className="graph-evidence-score-row">
-                                      <span className="meta">Template</span>
-                                      <span className="graph-evidence-score-value">{item.template_alignment.toFixed(3)}</span>
-                                      <span className="graph-evidence-score-track">
-                                        <span
-                                          className="graph-evidence-score-fill graph-evidence-score-fill-template"
-                                          style={{ width: `${normalizeScorePercent(item.template_alignment)}%` }}
-                                        />
-                                      </span>
-                                    </div>
-                                  ) : null}
-                                </div>
-                                <div className="graph-evidence-meta">
-                                  <span className="meta">Mode {knowledgeSearchMode}</span>
-                                  <span className="meta">Updated {formatEvidenceUpdated(item.updated_at)}</span>
-                                </div>
-                                {graphPath ? <div className="graph-evidence-path">Path {graphPath}</div> : null}
-                                {item.why_selected ? <div className="graph-evidence-why">{item.why_selected}</div> : null}
-                              </button>
-                            )
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  ) : null}
-
-                  <div className="graph-viz-block">
+                  <div className="graph-viz-block graph-reactflow-block">
                     <div className="row wrap graph-viz-head">
                       <div className="meta">
-                        Visual graph ({graphData.nodes.length}/{subgraph?.node_count ?? graphNodes.length} nodes, {graphData.links.length}/{subgraph?.edge_count ?? graphEdges.length} edges)
+                        Visual graph ({graphAltCanvasNodes.length} nodes, {graphAltFlowEdges.length} edges, task dependencies {graphAltTaskDependencyCount})
                       </div>
                       <button
                         className="action-icon"
                         type="button"
-                        title={isGraphFullscreen ? 'Exit full screen' : 'Open full screen graph'}
-                        aria-label={isGraphFullscreen ? 'Exit full screen' : 'Open full screen graph'}
-                        onClick={() => void toggleGraphFullscreen()}
+                        title={isGraphAltFullscreen ? 'Exit full screen' : 'Open full screen graph'}
+                        aria-label={isGraphAltFullscreen ? 'Exit full screen' : 'Open full screen graph'}
+                        onClick={() => void toggleGraphAltFullscreen()}
                       >
-                        <Icon path={isGraphFullscreen ? 'M9 9H3V3h6v2H5v4h4v2zm12 0h-6V7h4V3h2v6zM9 21H3v-6h2v4h4v2zm12 0h-6v-2h4v-4h2v6z' : 'M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6'} />
+                        <Icon path={isGraphAltFullscreen ? 'M9 9H3V3h6v2H5v4h4v2zm12 0h-6V7h4V3h2v6zM9 21H3v-6h2v4h4v2zm12 0h-6v-2h4v-4h2v6z' : 'M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6'} />
                       </button>
                     </div>
-
                     {!subgraph ? (
-                      <div className="meta">Loading graph visualization...</div>
+                      <div className="meta">Loading visual graph...</div>
                     ) : graphNodes.length <= 1 || graphEdges.length === 0 ? (
-                      <div className="meta">Not enough connected entities yet for a visual graph.</div>
+                      <div className="meta">Not enough connected entities yet for alternative graph rendering.</div>
                     ) : (
                       <>
-                        {noVisibleNodes ? (
-                          <div className="meta">No nodes available for visualization.</div>
-                        ) : (
-                          <div className="graph-viz-shell" ref={graphShellRef}>
-                            {isGraphFullscreen ? (
+                        <div className="graph-reactflow-shell graph-reactflow-shell-alt" ref={graphAltShellRef}>
+                            {isGraphAltFullscreen ? (
                               <button
                                 className="action-icon graph-viz-exit-button"
                                 type="button"
                                 title="Exit full screen"
                                 aria-label="Exit full screen"
-                                onClick={() => void exitGraphFullscreen()}
+                                onClick={() => void exitGraphAltFullscreen()}
                               >
                                 <Icon path="M9 9H3V3h6v2H5v4h4v2zm12 0h-6V7h4V3h2v6zM9 21H3v-6h2v4h4v2zm12 0h-6v-2h4v-4h2v6z" />
                               </button>
                             ) : null}
-                            <div className="graph-viz-canvas" ref={graphCanvasRef}>
-                              <ForceGraph2D
-                                ref={graphRef}
-                                width={canvasSize.width}
-                                height={canvasSize.height}
-                                graphData={graphData}
-                                backgroundColor="rgba(0,0,0,0)"
-                                cooldownTicks={120}
-                                d3VelocityDecay={0.28}
-                                linkColor={(link) => {
-                                  const source = getLinkNodeId((link as { source?: unknown }).source)
-                                  const target = getLinkNodeId((link as { target?: unknown }).target)
-                                  if (!selectedNodeId || source === selectedNodeId || target === selectedNodeId) {
-                                    return 'rgba(59,130,246,0.72)'
-                                  }
-                                  return 'rgba(100,116,139,0.30)'
-                                }}
-                                linkWidth={(link) => {
-                                  const source = getLinkNodeId((link as { source?: unknown }).source)
-                                  const target = getLinkNodeId((link as { target?: unknown }).target)
-                                  return !selectedNodeId || source === selectedNodeId || target === selectedNodeId ? 1.9 : 1.0
-                                }}
-                                nodeLabel={(node) => {
-                                  const n = node as VizNode
-                                  return `${n.entity_type}: ${n.name} (degree ${n.degree})`
-                                }}
-                                onNodeClick={(node) => {
-                                  const n = node as { id?: unknown }
-                                  if (!n.id) return
-                                  focusNodeOnCanvas(String(n.id), 2.3)
-                                }}
-                                onNodeHover={(node) => {
-                                  const n = node as { id?: unknown } | null
-                                  if (!n?.id) {
-                                    setHoveredNodeId(null)
-                                    return
-                                  }
-                                  setHoveredNodeId(String(n.id))
-                                }}
-                                nodeCanvasObject={(node, ctx, globalScale) => {
-                                  const n = node as VizNode & { x?: number; y?: number }
-                                  const x = Number(n.x || 0)
-                                  const y = Number(n.y || 0)
-                                  const selected = String(n.id) === String(selectedNodeId || '')
-                                  const hovered = String(n.id) === String(hoveredNodeId || '')
-                                  const radius = selected ? 10.4 : hovered ? 7.2 : Number(n.val || 5.2)
-                                  const isDark = typeof document !== 'undefined' && document.documentElement?.dataset?.theme === 'dark'
-                                  ctx.beginPath()
-                                  ctx.arc(x, y, radius, 0, 2 * Math.PI, false)
-                                  ctx.fillStyle = n.color || '#334155'
-                                  ctx.fill()
-                                  ctx.lineWidth = selected ? 3.2 : hovered ? 2.0 : 1.2
-                                  ctx.strokeStyle = selected ? '#22c55e' : isDark ? 'rgba(203,213,225,0.72)' : 'rgba(241,245,249,0.9)'
-                                  ctx.stroke()
-
-                                  const label = String(n.name || n.id || '').slice(0, 34)
-                                  if (!label) return
-                                  const baseFontSize = Math.max(1.5, 1.9 / globalScale)
-                                  const hoverFontSize = Math.max(1.8, 2.2 / globalScale)
-                                  const selectedFontSize = Math.max(2.5, 3.1 / globalScale)
-                                  const fontSize = selected ? selectedFontSize : hovered ? hoverFontSize : baseFontSize
-                                  ctx.font = `${selected ? 700 : hovered ? 600 : 400} ${fontSize}px ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial`
-                                  ctx.fillStyle = selected
-                                    ? isDark
-                                      ? 'rgba(248,250,252,0.98)'
-                                      : 'rgba(2,6,23,0.96)'
-                                    : hovered
-                                      ? isDark
-                                        ? 'rgba(226,232,240,0.90)'
-                                        : 'rgba(15,23,42,0.80)'
-                                      : isDark
-                                        ? 'rgba(203,213,225,0.54)'
-                                        : 'rgba(15,23,42,0.44)'
-                                  ctx.fillText(label, x + radius + 2, y + fontSize / 3)
-                                }}
-                              />
-                            </div>
-                            <aside className="graph-viz-side">
-                              <div className="meta">Legend</div>
-                              <div className="graph-viz-legend">
-                                {Array.from(new Set(graphData.nodes.map((n) => String(n.entity_type || 'Entity')))).map((type) => (
-                                  <div key={`legend-${type}`} className="graph-viz-legend-item">
-                                    <span className="graph-viz-dot" style={{ backgroundColor: nodeColor(type) }} />
-                                    <span>{type}</span>
-                                  </div>
-                                ))}
-                              </div>
-                              {selectedNode ? (
-                                <div className="graph-viz-selected">
-                                  <div className="graph-viz-selected-head">
-                                    <span className="meta">Selected</span>
-                                    <span className="status-chip">{selectedNode.entity_type}</span>
-                                  </div>
-                                  <div className="graph-viz-selected-title">{selectedNode.name}</div>
-                                  <div className="graph-viz-selected-id" title={selectedNode.id}>
-                                    {selectedNode.id}
-                                  </div>
-                                  <div className="graph-viz-selected-stats">
-                                    <span className="graph-viz-selected-stat">
-                                      <span className="meta">Degree</span>
-                                      <strong>{selectedNode.degree}</strong>
-                                    </span>
-                                    <span className="graph-viz-selected-stat">
-                                      <span className="meta">Connected edges</span>
-                                      <strong>{connectedSelectedEdges.length}</strong>
-                                    </span>
-                                  </div>
+                            <div className="graph-viz-composite">
+                              <div className="graph-viz-main-event-storming">
+                                <div className="graph-reactflow-canvas graph-alt-reactflow-canvas">
+                                  {noVisibleAltNodes ? (
+                                    <div className="meta" style={{ padding: '12px 8px' }}>
+                                      No nodes are currently visible. Enable at least one resource type.
+                                    </div>
+                                  ) : (
+                                    <ReactFlow
+                                      nodes={graphAltCanvasNodes}
+                                      edges={graphAltFlowEdges}
+                                      nodeTypes={graphAltNodeTypes}
+                                      fitView
+                                      fitViewOptions={{ padding: 0.16, maxZoom: 1.15 }}
+                                      nodesDraggable
+                                      nodesConnectable={false}
+                                      elementsSelectable
+                                      onNodesChange={onGraphAltNodesChange}
+                                      onNodeClick={(_, node) => {
+                                        const nodeId = String(node.id || '').trim()
+                                        if (!nodeId) return
+                                        setSelectedGraphAltNodeId(nodeId)
+                                        const nodeEntityType = normalizeGraphEntityTypeKey(
+                                          String((node.data as ReactFlowNodeData | undefined)?.entityType || '')
+                                        )
+                                        if (nodeEntityType === 'task') setGraphAltFocusScope('2')
+                                      }}
+                                      minZoom={0.2}
+                                      maxZoom={1.6}
+                                      proOptions={{ hideAttribution: true }}
+                                      onInit={(instance) => {
+                                        graphAltFlowRef.current = instance
+                                        window.setTimeout(() => fitGraphAltViewport(280), 0)
+                                      }}
+                                    >
+                                      <MiniMap pannable zoomable nodeStrokeWidth={2} nodeColor={(node) => nodeColor(String((node.data as ReactFlowNodeData | undefined)?.entityType || 'Entity'))} />
+                                      <Background gap={18} size={1} color="rgba(148,163,184,0.30)" />
+                                    </ReactFlow>
+                                  )}
                                 </div>
-                              ) : null}
-                            </aside>
+                              </div>
+                              <aside className="graph-viz-side graph-viz-side-alt">
+                                <div className="graph-alt-inspector-static">
+                                  <section className="graph-alt-panel-section">
+                                    <div className="graph-alt-panel-title">Focus scope</div>
+                                    <div className="graph-alt-scope-segment">
+                                      {([
+                                        { key: 'all', label: 'All' },
+                                        { key: '1', label: '1-hop' },
+                                        { key: '2', label: '2-hop' },
+                                      ] as const).map((item) => (
+                                        <button
+                                          key={`kg-scope-${item.key}`}
+                                          type="button"
+                                          className={`graph-alt-scope-btn ${graphAltFocusScope === item.key ? 'active' : ''}`.trim()}
+                                          onClick={() => setGraphAltFocusScope(item.key)}
+                                        >
+                                          {item.label}
+                                        </button>
+                                      ))}
+                                    </div>
+                                    <button
+                                      type="button"
+                                      className="graph-alt-scope-reset"
+                                      onClick={() => {
+                                        setSelectedGraphAltNodeId(null)
+                                        setGraphAltFocusScope('all')
+                                        fitGraphAltViewport(260)
+                                      }}
+                                    >
+                                      Reset focus
+                                    </button>
+                                  </section>
+
+                                  <section className="graph-alt-panel-section">
+                                    <div className="graph-alt-panel-title">Resource visibility</div>
+                                      <div className="graph-alt-visibility-chip-grid">
+                                        {graphEntityTypeOptions.map((item) => {
+                                          const checked = graphAltVisibleTypeSet.has(item.key)
+                                          return (
+                                            <button
+                                              key={`kg-alt-type-${item.key}`}
+                                              type="button"
+                                              className={`graph-alt-visibility-chip ${checked ? 'is-on' : 'is-off'}`.trim()}
+                                              aria-pressed={checked}
+                                              onClick={() => toggleGraphAltType(item.key)}
+                                              title={checked ? `Hide ${item.label}` : `Show ${item.label}`}
+                                            >
+                                              <span className="graph-alt-visibility-chip-dot" style={{ backgroundColor: graphEntityTypeVisualMeta(item.label).border }} />
+                                              <span className="graph-alt-visibility-chip-label">{item.label}</span>
+                                              <span className="graph-alt-visibility-chip-count">{item.count}</span>
+                                            </button>
+                                          )
+                                        })}
+                                      </div>
+                                  </section>
+
+                                  <section className="graph-alt-panel-section">
+                                    <div className="graph-alt-panel-title">Relations ({graphAltAllVisibleRelationItems.length})</div>
+                                      <div className="graph-alt-relation-list">
+                                        {graphAltAllVisibleRelationItems.map((item) => (
+                                          <div key={`kg-rel-${item.relationship}`} className="graph-alt-relation-item">
+                                            <span className="graph-viz-dot" style={{ backgroundColor: item.color }} />
+                                            <span className="graph-alt-relation-label">{item.label}</span>
+                                            <span className="status-chip">{item.count}</span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                      {graphAltFocusScope !== 'all' ? (
+                                        <div className="meta">Focus scope is active, so some relation lines may be outside current view.</div>
+                                      ) : null}
+                                  </section>
+
+                                  {selectedGraphAltNode ? (
+                                    <section className="graph-alt-panel-section">
+                                      <div className="graph-alt-panel-title">Open in app</div>
+                                        <div className="graph-viz-selected graph-viz-selected-compact">
+                                          <div className="graph-viz-selected-head">
+                                            <span className="meta">Selected</span>
+                                            <span className="status-chip">{selectedGraphAltNode.entity_type}</span>
+                                          </div>
+                                          <div className="graph-viz-selected-title">{selectedGraphAltNode.name}</div>
+                                          {normalizeGraphEntityTypeKey(selectedGraphAltNode.entity_type || '') === 'task' ? (
+                                            <div className="graph-alt-task-dependency-summary">
+                                              <span className="status-chip">Depends on {selectedGraphAltTaskDependencies.dependsOn.length}</span>
+                                              <span className="status-chip">Unblocks {selectedGraphAltTaskDependencies.unblocks.length}</span>
+                                            </div>
+                                          ) : null}
+                                          <div className="graph-alt-link-list">
+                                            <button
+                                              type="button"
+                                              className="graph-alt-link graph-alt-link-button"
+                                              onClick={() =>
+                                                navigateAppEntityUrl(
+                                                  buildAppEntityUrl({
+                                                    entityType: selectedGraphAltNodeRaw?.entity_type || selectedGraphAltNode.entity_type,
+                                                    entityId: selectedGraphAltNode.id,
+                                                    projectId,
+                                                  })
+                                                )
+                                              }
+                                            >
+                                              Open selected node
+                                            </button>
+                                            {graphAltLinkedEntityLinks.map((item) => (
+                                              <button
+                                                key={item.key}
+                                                type="button"
+                                                className="graph-alt-link graph-alt-link-button"
+                                                title={item.label}
+                                                onClick={() => navigateAppEntityUrl(item.href)}
+                                              >
+                                                {item.label}
+                                              </button>
+                                            ))}
+                                            {normalizeGraphEntityTypeKey(selectedGraphAltNode.entity_type || '') === 'task'
+                                              ? selectedGraphAltTaskDependencies.dependsOn.map((item) => (
+                                                  <button
+                                                    key={`depends-${item.key}`}
+                                                    type="button"
+                                                    className="graph-alt-link graph-alt-link-button"
+                                                    title={`Depends on: ${item.label}`}
+                                                    onClick={() => navigateAppEntityUrl(item.href)}
+                                                  >
+                                                    Depends on: {item.label}
+                                                  </button>
+                                                ))
+                                              : null}
+                                            {normalizeGraphEntityTypeKey(selectedGraphAltNode.entity_type || '') === 'task'
+                                              ? selectedGraphAltTaskDependencies.unblocks.map((item) => (
+                                                  <button
+                                                    key={`unblocks-${item.key}`}
+                                                    type="button"
+                                                    className="graph-alt-link graph-alt-link-button"
+                                                    title={`Unblocks: ${item.label}`}
+                                                    onClick={() => navigateAppEntityUrl(item.href)}
+                                                  >
+                                                    Unblocks: {item.label}
+                                                  </button>
+                                                ))
+                                              : null}
+                                          </div>
+                                        </div>
+                                    </section>
+                                  ) : null}
+                                </div>
+                              </aside>
+                            </div>
                           </div>
-                        )}
                       </>
                     )}
                   </div>
@@ -2475,6 +3301,121 @@ export function ProjectKnowledgeGraphPanel({
                       </>
                     )}
                   </div>
+                </div>
+
+              </div>
+            </Tabs.Content>
+
+            <Tabs.Content className="kg-insights-tab-content" value="insights">
+              <div className="kg-explore-layout kg-explore-layout-insights">
+                <div className="kg-explore-main">
+                  <div className="field-control" style={{ marginBottom: 10 }}>
+                    <span className="field-label">Knowledge search</span>
+                    <div className="row wrap" style={{ gap: 8, alignItems: 'center' }}>
+                      <input
+                        value={knowledgeSearchQuery}
+                        onChange={(e) => setKnowledgeSearchQuery(e.target.value)}
+                        placeholder="Search entities, events, commands, readiness, metrics..."
+                      />
+                      {knowledgeSearchResultsQuery.isFetching ? <span className="badge">Searching</span> : null}
+                      {knowledgeSearchActive ? <span className="badge">Mode: {knowledgeSearchMode}</span> : null}
+                    </div>
+                    <div className="meta" style={{ marginTop: 6 }}>
+                      Type at least 2 characters. Click a result to focus its node in the graph.
+                    </div>
+                  </div>
+
+                  {knowledgeSearchActive ? (
+                    <div className="graph-connected-block">
+                      <div className="meta">Knowledge search results</div>
+                      {knowledgeSearchResultsQuery.isError ? (
+                        <div className="notice notice-error" style={{ marginTop: 8 }}>
+                          {toErrorMessage(knowledgeSearchResultsQuery.error)}
+                        </div>
+                      ) : knowledgeSearchItems.length === 0 ? (
+                        <div className="meta" style={{ marginTop: 8 }}>No matches for this query.</div>
+                      ) : (
+                        <div className="graph-evidence-list">
+                          {knowledgeSearchItems.slice(0, 10).map((item) => {
+                            const graphPath = (item.graph_path ?? []).filter(Boolean).join(' -> ')
+                            return (
+                              <button
+                                key={`kg-search-${item.rank}-${item.entity_type}-${item.entity_id}`}
+                                type="button"
+                                className="graph-evidence-item"
+                                onClick={() => focusNodeOnCanvas(item.entity_id, 2.2)}
+                              >
+                                <div className="graph-evidence-head">
+                                  <div className="graph-evidence-badges">
+                                    <span className="graph-evidence-id">#{item.rank}</span>
+                                    <span className="status-chip">{item.entity_type}</span>
+                                    <span className="status-chip">{item.source_type}</span>
+                                  </div>
+                                  <span className="graph-evidence-score graph-evidence-score-pill">Final {item.final_score.toFixed(3)}</span>
+                                </div>
+                                <div className="graph-evidence-entity">{item.entity_id}</div>
+                                <div className="graph-evidence-snippet">{item.snippet}</div>
+                                <div className="graph-evidence-score-grid">
+                                  <div className="graph-evidence-score-row">
+                                    <span className="meta">Final</span>
+                                    <span className="graph-evidence-score-value">{item.final_score.toFixed(3)}</span>
+                                    <span className="graph-evidence-score-track">
+                                      <span
+                                        className="graph-evidence-score-fill graph-evidence-score-fill-final"
+                                        style={{ width: `${normalizeScorePercent(item.final_score)}%` }}
+                                      />
+                                    </span>
+                                  </div>
+                                  <div className="graph-evidence-score-row">
+                                    <span className="meta">Graph</span>
+                                    <span className="graph-evidence-score-value">{item.graph_score.toFixed(3)}</span>
+                                    <span className="graph-evidence-score-track">
+                                      <span
+                                        className="graph-evidence-score-fill graph-evidence-score-fill-graph"
+                                        style={{ width: `${normalizeScorePercent(item.graph_score)}%` }}
+                                      />
+                                    </span>
+                                  </div>
+                                  <div className="graph-evidence-score-row">
+                                    <span className="meta">Vector</span>
+                                    <span className="graph-evidence-score-value">
+                                      {item.vector_similarity === null ? 'n/a' : item.vector_similarity.toFixed(3)}
+                                    </span>
+                                    <span className="graph-evidence-score-track">
+                                      <span
+                                        className="graph-evidence-score-fill graph-evidence-score-fill-vector"
+                                        style={{ width: `${normalizeScorePercent(item.vector_similarity)}%` }}
+                                      />
+                                    </span>
+                                  </div>
+                                  {typeof item.template_alignment === 'number' ? (
+                                    <div className="graph-evidence-score-row">
+                                      <span className="meta">Template</span>
+                                      <span className="graph-evidence-score-value">{item.template_alignment.toFixed(3)}</span>
+                                      <span className="graph-evidence-score-track">
+                                        <span
+                                          className="graph-evidence-score-fill graph-evidence-score-fill-template"
+                                          style={{ width: `${normalizeScorePercent(item.template_alignment)}%` }}
+                                        />
+                                      </span>
+                                    </div>
+                                  ) : null}
+                                </div>
+                                <div className="graph-evidence-meta">
+                                  <span className="meta">Mode {knowledgeSearchMode}</span>
+                                  <span className="meta">Updated {formatEvidenceUpdated(item.updated_at)}</span>
+                                </div>
+                                {graphPath ? <div className="graph-evidence-path">Path {graphPath}</div> : null}
+                                {item.why_selected ? <div className="graph-evidence-why">{item.why_selected}</div> : null}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="meta">Search is available in this tab. Enter at least 2 characters to start.</div>
+                  )}
                 </div>
 
                 <div className="kg-explore-side">

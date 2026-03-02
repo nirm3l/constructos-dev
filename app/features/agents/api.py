@@ -6,6 +6,7 @@ import logging
 import mimetypes
 import os
 import queue
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import threading
@@ -51,6 +52,7 @@ _TEXT_MIME_TYPES = {
 }
 _PDF_MIME_TYPES = {"application/pdf"}
 _DOCX_MIME_TYPES = {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+_COMMIT_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
 _TEXT_EXTENSIONS = {
     ".txt",
     ".md",
@@ -1080,8 +1082,13 @@ def _collect_execution_evidence_violations(
         for item in external_refs:
             if not isinstance(item, dict):
                 continue
-            url = str(item.get("url") or "").strip().lower()
-            if url.startswith("http://") or url.startswith("https://"):
+            url = str(item.get("url") or "").strip()
+            title = str(item.get("title") or "").strip()
+            lower_url = url.lower()
+            if lower_url.startswith("http://") or lower_url.startswith("https://"):
+                return True
+            text_blob = f"{url} {title}".strip()
+            if _COMMIT_SHA_RE.search(text_blob):
                 return True
         return False
 
@@ -1136,7 +1143,7 @@ def _apply_execution_evidence_contract(
     contract_comment = (
         (str(comment or "").strip() + "\n\n" if str(comment or "").strip() else "")
         + "Execution evidence contract violation.\n"
-        + "Add linked note evidence and/or valid external URLs in `external_refs` before/with execution status transitions.\n"
+        + "Add linked note evidence and/or external evidence in `external_refs` (URL or commit id) before/with execution status transitions.\n"
         + details
     )
     return False, contract_summary, contract_comment

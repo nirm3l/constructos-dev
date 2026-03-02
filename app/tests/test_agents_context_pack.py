@@ -464,6 +464,7 @@ def test_mcp_tool_descriptions_include_operation_specific_guidance():
     assert "chat default profile" in mcp_server.PREVIEW_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION.lower()
     assert "chat default profile" in mcp_server.CREATE_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION.lower()
     assert "preview_project_from_template" in mcp_server.CREATE_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION
+    assert "in-app notification" in mcp_server.SEND_IN_APP_NOTIFICATION_TOOL_DESCRIPTION.lower()
     source = inspect.getsource(mcp_server)
     assert "embedding_enabled: bool = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED" in source
     assert "chat_index_mode: str = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE" in source
@@ -471,6 +472,7 @@ def test_mcp_tool_descriptions_include_operation_specific_guidance():
     assert "embedding_enabled: bool | None = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED" in source
     assert "chat_index_mode: str | None = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE" in source
     assert "chat_attachment_ingestion_mode: str | None = MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE" in source
+    assert "def send_in_app_notification(" in source
 
 
 def test_codex_usage_extraction_from_json_stream():
@@ -771,8 +773,8 @@ def test_strip_mcp_server_tables_preserves_non_mcp_config():
     from features.agents.codex_mcp_adapter import _strip_mcp_server_tables
 
     input_config = """
-model_provider = "oss"
-model = "qwen2.5-coder:14b"
+model_provider = "openai"
+model = "gpt-5.3-codex-spark"
 
 [mcp_servers.task-management-tools]
 url = "http://mcp-tools:8091/mcp"
@@ -785,8 +787,8 @@ bearer_token_env_var = "GITHUB_PAT"
 approval_policy = "never"
 """.strip()
     stripped = _strip_mcp_server_tables(input_config)
-    assert 'model_provider = "oss"' in stripped
-    assert 'model = "qwen2.5-coder:14b"' in stripped
+    assert 'model_provider = "openai"' in stripped
+    assert 'model = "gpt-5.3-codex-spark"' in stripped
     assert "[profiles.default]" in stripped
     assert "[mcp_servers.task-management-tools]" not in stripped
     assert "[mcp_servers.github]" not in stripped
@@ -800,8 +802,8 @@ def test_prepare_codex_home_merges_base_config_with_selected_mcp_servers(monkeyp
     source_codex_dir.mkdir(parents=True, exist_ok=True)
     (source_codex_dir / "config.toml").write_text(
         """
-model_provider = "oss"
-model = "qwen2.5-coder:14b"
+model_provider = "openai"
+model = "gpt-5.3-codex-spark"
 
 [mcp_servers.old]
 url = "http://old.example/mcp"
@@ -819,8 +821,8 @@ url = "http://mcp-tools:8091/mcp"
     _prepare_codex_home(target_home, mcp_config_text=selected_mcp_text)
     output = (target_home / ".codex" / "config.toml").read_text(encoding="utf-8")
 
-    assert 'model_provider = "oss"' in output
-    assert 'model = "qwen2.5-coder:14b"' in output
+    assert 'model_provider = "openai"' in output
+    assert 'model = "gpt-5.3-codex-spark"' in output
     assert "[mcp_servers.old]" not in output
     assert "[mcp_servers.task-management-tools]" in output
 
@@ -845,10 +847,9 @@ model = "gpt-5.3-codex-spark"
     _prepare_codex_home(
         target_home,
         mcp_config_text="",
-        runtime_config_text='model_provider = "oss"\nlocal_provider = "ollama"\n',
+        runtime_config_text='model_provider = "openai"\nreasoning_effort = "medium"\n',
     )
     output = (target_home / ".codex" / "config.toml").read_text(encoding="utf-8")
 
-    assert output.count('model_provider = "openai"') == 1
-    assert output.count('model_provider = "oss"') == 1
-    assert 'local_provider = "ollama"' in output
+    assert output.count('model_provider = "openai"') >= 1
+    assert 'reasoning_effort = "medium"' in output

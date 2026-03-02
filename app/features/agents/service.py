@@ -59,6 +59,7 @@ from shared.core import (
     TaskPatch,
     User,
     UserPreferencesPatch,
+    append_event,
     ensure_project_access,
     load_note_command_state,
     load_note_group_command_state,
@@ -66,6 +67,7 @@ from shared.core import (
     load_task_command_state,
     load_task_group_command_state,
     load_task_view,
+    serialize_notification,
 )
 from shared.core import load_project_rule_command_state, load_project_rule_view
 from shared.core import (
@@ -87,6 +89,7 @@ from shared.knowledge_graph import (
     search_project_knowledge as search_project_knowledge_query,
 )
 from shared.models import (
+    Notification,
     Note,
     ProjectMember,
     ProjectRule as ProjectRuleModel,
@@ -104,6 +107,7 @@ from shared.settings import (
     MCP_ALLOWED_WORKSPACE_IDS,
     MCP_AUTH_TOKEN,
 )
+from shared.typed_notifications import append_notification_created_event
 
 _READ_ONLY_MCP_METHODS = frozenset(
     {
@@ -1588,6 +1592,8 @@ class AgentTaskService:
                     return True
                 if cls._contains_commit_evidence(f"{url} {title}"):
                     return True
+            if cls._contains_commit_evidence(f"{url} {title}"):
+                return True
         return False
 
     @staticmethod
@@ -3649,3 +3655,148 @@ class AgentTaskService:
                 NoteApplicationService(db, user, command_id=note_command_id).archive_note(note_id)
                 updated += 1
             return {"updated": updated}
+
+    def send_in_app_notification(
+        self,
+        *,
+        user_id: str,
+        message: str,
+        auth_token: str | None = None,
+        workspace_id: str | None = None,
+        project_id: str | None = None,
+        task_id: str | None = None,
+        note_id: str | None = None,
+        specification_id: str | None = None,
+        notification_type: str | None = "ManualMessage",
+        severity: str | None = "info",
+        dedupe_key: str | None = None,
+        payload: dict[str, Any] | str | None = None,
+        source_event: str | None = "mcp.manual_notification",
+        command_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        target_user_id = str(user_id or "").strip()
+        clean_message = str(message or "").strip()
+        if not target_user_id:
+            raise HTTPException(status_code=422, detail="user_id is required")
+        if not clean_message:
+            raise HTTPException(status_code=422, detail="message is required")
+
+        payload_dict: dict[str, Any] | None
+        if payload is None:
+            payload_dict = None
+        elif isinstance(payload, str):
+            parsed = self._parse_json_string(payload, field_name="payload")
+            if parsed is not None and not isinstance(parsed, dict):
+                raise HTTPException(status_code=422, detail="payload must be a JSON object")
+            payload_dict = parsed
+        elif isinstance(payload, dict):
+            payload_dict = dict(payload)
+        else:
+            raise HTTPException(status_code=422, detail="payload must be an object or JSON object string")
+
+        actor = self._resolve_actor_user()
+        with SessionLocal() as db:
+            target_user = db.get(UserModel, target_user_id)
+            if target_user is None or not bool(target_user.is_active):
+                raise HTTPException(status_code=404, detail="Target user not found")
+
+            resolved_workspace_id = str(workspace_id or "").strip() or None
+            resolved_project_id = str(project_id or "").strip() or None
+            resolved_task_id = str(task_id or "").strip() or None
+            resolved_note_id = str(note_id or "").strip() or None
+            resolved_specification_id = str(specification_id or "").strip() or None
+
+            if resolved_project_id:
+                project = self._load_project_scope(db=db, project_id=resolved_project_id)
+                if resolved_workspace_id and resolved_workspace_id != str(project.workspace_id):
+                    raise HTTPException(status_code=400, detail="project_id does not belong to workspace_id")
+                resolved_workspace_id = str(project.workspace_id)
+
+            if resolved_task_id:
+                task_state = self._assert_task_allowed(db=db, task_id=resolved_task_id)
+                assert task_state is not None
+                if resolved_workspace_id and resolved_workspace_id != task_state.workspace_id:
+                    raise HTTPException(status_code=400, detail="task_id does not belong to workspace_id")
+                if resolved_project_id and resolved_project_id != task_state.project_id:
+                    raise HTTPException(status_code=400, detail="task_id does not belong to project_id")
+                resolved_workspace_id = task_state.workspace_id
+                resolved_project_id = task_state.project_id
+
+            if resolved_note_id:
+                note_state = load_note_command_state(db, resolved_note_id)
+                if not note_state or note_state.is_deleted:
+                    raise HTTPException(status_code=404, detail="Note not found")
+                self._assert_workspace_allowed(note_state.workspace_id)
+                self._assert_project_allowed(note_state.project_id)
+                if resolved_workspace_id and resolved_workspace_id != note_state.workspace_id:
+                    raise HTTPException(status_code=400, detail="note_id does not belong to workspace_id")
+                if resolved_project_id and resolved_project_id != note_state.project_id:
+                    raise HTTPException(status_code=400, detail="note_id does not belong to project_id")
+                resolved_workspace_id = note_state.workspace_id
+                resolved_project_id = note_state.project_id
+
+            if resolved_specification_id:
+                specification_state = self._assert_specification_allowed(db=db, specification_id=resolved_specification_id)
+                assert specification_state is not None
+                if resolved_workspace_id and resolved_workspace_id != specification_state.workspace_id:
+                    raise HTTPException(status_code=400, detail="specification_id does not belong to workspace_id")
+                if resolved_project_id and resolved_project_id != specification_state.project_id:
+                    raise HTTPException(status_code=400, detail="specification_id does not belong to project_id")
+                resolved_workspace_id = specification_state.workspace_id
+                resolved_project_id = specification_state.project_id
+
+            if resolved_workspace_id:
+                self._assert_workspace_allowed(resolved_workspace_id)
+            elif self._default_workspace_id:
+                resolved_workspace_id = self._default_workspace_id
+                self._assert_workspace_allowed(resolved_workspace_id)
+            elif len(self._allowed_workspace_ids) == 1:
+                resolved_workspace_id = next(iter(self._allowed_workspace_ids))
+
+            effective_dedupe_key = str(dedupe_key or "").strip() or None
+            if effective_dedupe_key is None and command_id:
+                effective_dedupe_key = f"mcp-command:{command_id}"
+
+            created = append_notification_created_event(
+                db,
+                append_event_fn=append_event,
+                user_id=target_user_id,
+                message=clean_message,
+                actor_id=actor.id,
+                workspace_id=resolved_workspace_id,
+                project_id=resolved_project_id,
+                task_id=resolved_task_id,
+                note_id=resolved_note_id,
+                specification_id=resolved_specification_id,
+                notification_type=notification_type,
+                severity=severity,
+                dedupe_key=effective_dedupe_key,
+                payload=payload_dict,
+                source_event=source_event,
+            )
+            db.commit()
+
+            notification = None
+            if effective_dedupe_key:
+                notification = db.execute(
+                    select(Notification).where(
+                        Notification.user_id == target_user_id,
+                        Notification.dedupe_key == effective_dedupe_key,
+                    ).order_by(Notification.created_at.desc())
+                ).scalars().first()
+            if notification is None:
+                notification = db.execute(
+                    select(Notification).where(
+                        Notification.user_id == target_user_id,
+                        Notification.message == clean_message,
+                    ).order_by(Notification.created_at.desc())
+                ).scalars().first()
+            if notification is None:
+                raise HTTPException(status_code=500, detail="Notification was not created")
+
+            return {
+                "ok": True,
+                "created": bool(created),
+                "notification": serialize_notification(notification),
+            }
