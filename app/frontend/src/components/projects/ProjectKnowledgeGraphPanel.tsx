@@ -1478,10 +1478,11 @@ export function ProjectKnowledgeGraphPanel({
   }, [filteredGraph.edges, graphAltDependencyContext, graphAltVisibleNodes, selectedGraphAltNodeId])
 
   const graphAltFlowEdges = React.useMemo(() => {
-    if (!filteredGraph.edges.length || graphAltFlowNodes.length === 0) return [] as FlowEdge[]
-    const nodeIdSet = new Set(graphAltFlowNodes.map((node) => String(node.id || '')))
+    const positionedNodes = graphAltCanvasNodes.length ? graphAltCanvasNodes : graphAltFlowNodes
+    if (!filteredGraph.edges.length || positionedNodes.length === 0) return [] as FlowEdge[]
+    const nodeIdSet = new Set(positionedNodes.map((node) => String(node.id || '')))
     const nodePositionById = new Map(
-      graphAltFlowNodes.map((node) => [String(node.id || ''), { x: Number(node.position?.x || 0), y: Number(node.position?.y || 0) }])
+      positionedNodes.map((node) => [String(node.id || ''), { x: Number(node.position?.x || 0), y: Number(node.position?.y || 0) }])
     )
     const selectedTaskId = String(graphAltDependencyContext.selectedTaskId || '')
     const hasTaskChain = Boolean(selectedTaskId)
@@ -1557,7 +1558,7 @@ export function ProjectKnowledgeGraphPanel({
         } as FlowEdge
       })
       .filter((edge): edge is FlowEdge => Boolean(edge))
-  }, [filteredGraph.edges, graphAltDependencyContext, graphAltFlowNodes])
+  }, [filteredGraph.edges, graphAltCanvasNodes, graphAltDependencyContext, graphAltFlowNodes])
 
   React.useEffect(() => {
     setGraphAltCanvasNodes(graphAltFlowNodes)
