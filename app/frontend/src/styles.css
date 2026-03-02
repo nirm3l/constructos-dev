@@ -10409,26 +10409,24 @@ textarea {
 
   .kg-insights-tab-trigger {
     min-height: 32px;
-    padding: 5px 8px;
-    font-size: 11px;
+    padding: 5px 6px;
+    font-size: 10px;
     width: 100%;
     min-width: 0;
     justify-content: center;
+    gap: 4px;
   }
 
   .kg-insights-tab-count {
-    min-width: 16px;
-    height: 16px;
-    padding: 0 4px;
-    font-size: 9px;
+    display: none;
   }
 
   .kg-insights-tabs-list {
     padding: 3px;
-    gap: 5px;
+    gap: 4px;
     overflow-x: hidden;
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
   .graph-context-metrics {
