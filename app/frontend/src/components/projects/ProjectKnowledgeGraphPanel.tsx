@@ -140,6 +140,23 @@ function KnowledgeGraphAltNode(props: any) {
   )
 }
 
+function EventStormingDiagramNode(props: any) {
+  const data = (props?.data || {}) as ReactFlowNodeData
+  return (
+    <div className="event-storming-node-card">
+      <Handle id="l-in" type="target" position={Position.Left} className="kg-alt-node-handle" />
+      <Handle id="l-out" type="source" position={Position.Left} className="kg-alt-node-handle" />
+      <Handle id="r-in" type="target" position={Position.Right} className="kg-alt-node-handle" />
+      <Handle id="r-out" type="source" position={Position.Right} className="kg-alt-node-handle" />
+      <Handle id="t-in" type="target" position={Position.Top} className="kg-alt-node-handle" />
+      <Handle id="t-out" type="source" position={Position.Top} className="kg-alt-node-handle" />
+      <Handle id="b-in" type="target" position={Position.Bottom} className="kg-alt-node-handle" />
+      <Handle id="b-out" type="source" position={Position.Bottom} className="kg-alt-node-handle" />
+      <div className="event-storming-node-title" title={data?.label || ''}>{data?.label || ''}</div>
+    </div>
+  )
+}
+
 type GraphEntityTypeOption = {
   key: string
   label: string
@@ -614,6 +631,7 @@ export function ProjectKnowledgeGraphPanel({
   const [actionBusy, setActionBusy] = React.useState<string | null>(null)
   const [actionError, setActionError] = React.useState<string | null>(null)
   const graphAltNodeTypes = React.useMemo(() => ({ kgAltNode: KnowledgeGraphAltNode }), [])
+  const eventStormingNodeTypes = React.useMemo(() => ({ eventStormingNode: EventStormingDiagramNode }), [])
   const [graphAltCanvasNodes, setGraphAltCanvasNodes] = React.useState<FlowNode<ReactFlowNodeData>[]>([])
 
   const graphRef = React.useRef<any>(null)
@@ -1215,13 +1233,15 @@ export function ProjectKnowledgeGraphPanel({
   )
 
   const graphAltLayoutSignature = React.useMemo(() => {
-    const nodeRows = graphAltVisibleNodes
+    const nodeRows = filteredGraph.nodes
+      .filter((node) => {
+        const nodeId = String(node.entity_id || '').trim()
+        return Boolean(nodeId && graphAltBaseVisibleNodeIds.has(nodeId))
+      })
       .map((node) => `${String(node.entity_id || '').trim()}|${String(node.entity_type || '').trim()}|${String(node.title || '').trim()}`)
       .filter(Boolean)
       .sort()
-    const visibleNodeIds = new Set(
-      graphAltVisibleNodes.map((node) => String(node.entity_id || '').trim()).filter(Boolean)
-    )
+    const visibleNodeIds = graphAltBaseVisibleNodeIds
     const edgeRows = filteredGraph.edges
       .map((edge) => ({
         source: String(edge.source_entity_id || '').trim(),
@@ -1233,7 +1253,7 @@ export function ProjectKnowledgeGraphPanel({
       .sort()
     const digest = hashLayoutFingerprint(`${nodeRows.join('||')}::${edgeRows.join('||')}`)
     return `kg-alt:${projectId}:${digest}`
-  }, [filteredGraph.edges, graphAltVisibleNodes, projectId])
+  }, [filteredGraph.edges, filteredGraph.nodes, graphAltBaseVisibleNodeIds, projectId])
 
   const graphAltDependencyContext = React.useMemo(() => {
     const taskNodes = graphAltVisibleNodes.filter((node) => normalizeGraphEntityTypeKey(node.entity_type || '') === 'task')
@@ -1339,6 +1359,18 @@ export function ProjectKnowledgeGraphPanel({
   const graphAltFlowNodes = React.useMemo(() => {
     const visibleNodes = graphAltVisibleNodes
     if (!visibleNodes.length) return [] as FlowNode<ReactFlowNodeData>[]
+    const uniformNodeWidth = 236
+    const uniformNodeMinHeight = (() => {
+      const availableTextWidth = Math.max(120, uniformNodeWidth - 28)
+      const charsPerLine = Math.max(14, Math.floor(availableTextWidth / 7))
+      let maxLines = 1
+      for (const node of visibleNodes) {
+        const text = String(node.title || node.entity_id || '').trim()
+        const lineCount = Math.max(1, Math.min(5, Math.ceil(text.length / charsPerLine)))
+        if (lineCount > maxLines) maxLines = lineCount
+      }
+      return 60 + (maxLines - 1) * 14
+    })()
 
     const visibleNodeById = new Map(
       visibleNodes.map((node) => [String(node.entity_id || ''), node] as const)
@@ -1430,13 +1462,13 @@ export function ProjectKnowledgeGraphPanel({
     for (const bucket of tasksByDepth.values()) bucket.sort(taskSort)
 
     const maxTaskDepth = tasksByDepth.size > 0 ? Math.max(...Array.from(tasksByDepth.keys())) : 0
-    const xStep = 272
-    const yStep = 92
+    const xStep = uniformNodeWidth + 30
+    const yStep = uniformNodeMinHeight + 12
     const startX = 18
     const startY = 18
     const maxTaskRows = tasksByDepth.size > 0 ? Math.max(...Array.from(tasksByDepth.values()).map((bucket) => bucket.length)) : 0
-    const taskAreaHeight = maxTaskRows > 0 ? Math.max(120, 48 + maxTaskRows * yStep) : 0
-    const secondaryStartY = startY + taskAreaHeight + 52
+    const taskAreaHeight = maxTaskRows > 0 ? Math.max(112, 36 + maxTaskRows * yStep) : 0
+    const secondaryStartY = startY + taskAreaHeight + 30
     const out: FlowNode<ReactFlowNodeData>[] = []
 
     for (const [depth, taskIds] of Array.from(tasksByDepth.entries()).sort((a, b) => a[0] - b[0])) {
@@ -1466,8 +1498,8 @@ export function ProjectKnowledgeGraphPanel({
             dependencyMeta,
           },
           style: {
-            width: 230,
-            minHeight: 60,
+            width: uniformNodeWidth,
+            minHeight: uniformNodeMinHeight,
             borderRadius: 10,
             border: `2px solid ${visualMeta.border}`,
             background: visualMeta.sticky,
@@ -1547,7 +1579,7 @@ export function ProjectKnowledgeGraphPanel({
         })
       }
       const maxDepthRows = byDepth.size > 0 ? Math.max(...Array.from(byDepth.values()).map((bucket) => bucket.length)) : 1
-      const laneHeight = Math.max(90, 32 + maxDepthRows * 74)
+      const laneHeight = Math.max(82, 24 + maxDepthRows * (uniformNodeMinHeight + 8))
 
       for (const [depth, bucket] of Array.from(byDepth.entries()).sort((a, b) => a[0] - b[0])) {
         for (let row = 0; row < bucket.length; row += 1) {
@@ -1559,16 +1591,16 @@ export function ProjectKnowledgeGraphPanel({
           id: String(item.entity_id || ''),
           type: 'kgAltNode',
           position: {
-            x: startX + depth * xStep + 12,
-            y: laneCursorY + row * 74,
+            x: startX + depth * xStep + 8,
+            y: laneCursorY + row * (uniformNodeMinHeight + 8),
           },
           data: {
             label: String(item.title || item.entity_id || ''),
             entityType: String(item.entity_type || 'Entity'),
           },
           style: {
-            width: 214,
-            minHeight: 58,
+            width: uniformNodeWidth,
+            minHeight: uniformNodeMinHeight,
             borderRadius: 10,
             border: `2px solid ${visualMeta.border}`,
             background: visualMeta.sticky,
@@ -1585,7 +1617,7 @@ export function ProjectKnowledgeGraphPanel({
         })
       }
       }
-      laneCursorY += laneHeight + 22
+      laneCursorY += laneHeight + 12
     }
 
     return out
@@ -1646,7 +1678,7 @@ export function ProjectKnowledgeGraphPanel({
         const targetHandle = horizontalBias
           ? dx >= 0 ? 'l-in' : 'r-in'
           : dy >= 0 ? 't-in' : 'b-in'
-        const flowType = 'step'
+        const flowType = 'straight'
 
         return {
           id: `kg-alt-edge-${idx}-${source}-${target}-${relationship}`,
@@ -1677,11 +1709,8 @@ export function ProjectKnowledgeGraphPanel({
   React.useEffect(() => {
     const stored = readStoredGraphLayout(graphAltLayoutSignature)
     setGraphAltCanvasNodes((current) => {
-      const keepCurrentPositions = graphAltLayoutSignatureRef.current === graphAltLayoutSignature
       const currentById = new Map(
-        keepCurrentPositions
-          ? current.map((node) => [String(node.id || ''), { x: Number(node.position?.x || 0), y: Number(node.position?.y || 0) }])
-          : []
+        current.map((node) => [String(node.id || ''), { x: Number(node.position?.x || 0), y: Number(node.position?.y || 0) }])
       )
       return graphAltFlowNodes.map((node) => {
         const nodeId = String(node.id || '')
@@ -1914,22 +1943,26 @@ export function ProjectKnowledgeGraphPanel({
           const selected = itemId === String(selectedEventStormingNodeId || '')
           out.push({
             id: itemId,
+            type: 'eventStormingNode',
             position: { x: stageX[stageKey], y: rowTop + 66 + idx * 82 },
             data: {
               label: String(item.title || itemId),
               entityType: String(item.entity_type || 'Entity'),
               contextLabel,
             },
-            style: {
-              border: selected ? '2px solid #22c55e' : `1px solid ${meta.border}`,
-              borderRadius: 8,
-              width: stageKey === 'task' ? 216 : 204,
-              minHeight: 60,
-              padding: '8px 10px',
-              color: meta.text,
-              background: meta.sticky,
-              boxShadow: selected ? '0 0 0 2px rgba(34,197,94,0.14), 0 4px 10px rgba(15,23,42,0.12)' : '0 2px 8px rgba(15,23,42,0.10)',
-              fontSize: 12,
+          style: {
+            border: selected ? '2px solid #22c55e' : `1px solid ${meta.border}`,
+            borderRadius: 8,
+            width: stageKey === 'task' ? 216 : 204,
+            minHeight: 60,
+            padding: '0 10px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: meta.text,
+            background: meta.sticky,
+            boxShadow: selected ? '0 0 0 2px rgba(34,197,94,0.14), 0 4px 10px rgba(15,23,42,0.12)' : '0 2px 8px rgba(15,23,42,0.10)',
+            fontSize: 12,
               fontWeight: 700,
               lineHeight: 1.3,
             },
@@ -1948,6 +1981,7 @@ export function ProjectKnowledgeGraphPanel({
         const contextMeta = EVENT_STORMING_TYPE_META.boundedcontext
         out.push({
           id: contextId,
+          type: 'eventStormingNode',
           position: { x: stageX.boundedcontext, y: rowTop + 62 },
           data: {
             label: String(contextItem?.title || contextLabel),
@@ -1959,7 +1993,10 @@ export function ProjectKnowledgeGraphPanel({
             borderRadius: 10,
             width: 212,
             minHeight: 64,
-            padding: '8px 10px',
+            padding: '0 10px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
             color: contextMeta.text,
             background: contextMeta.sticky,
             boxShadow: selected ? '0 0 0 2px rgba(34,197,94,0.14), 0 4px 10px rgba(15,23,42,0.12)' : '0 2px 8px rgba(15,23,42,0.10)',
@@ -1987,6 +2024,9 @@ export function ProjectKnowledgeGraphPanel({
   const eventStormingFlowEdges = React.useMemo(
     () => {
       const flowNodeIdSet = new Set(eventStormingFlowNodes.map((node) => String(node.id || '')))
+      const nodePositionById = new Map(
+        eventStormingFlowNodes.map((node) => [String(node.id || ''), { x: Number(node.position?.x || 0), y: Number(node.position?.y || 0) }])
+      )
       const edgeMeta: Record<
         string,
         { color: string; width: number; dash?: string; label: string }
@@ -2021,11 +2061,24 @@ export function ProjectKnowledgeGraphPanel({
               meta = { color: '#f59e0b', width: 1.5, dash: '4 3', label: 'candidate link' }
             }
           }
+          const sourcePos = nodePositionById.get(source)
+          const targetPos = nodePositionById.get(target)
+          const dx = Number((targetPos?.x || 0) - (sourcePos?.x || 0))
+          const dy = Number((targetPos?.y || 0) - (sourcePos?.y || 0))
+          const horizontalBias = Math.abs(dx) >= Math.abs(dy)
+          const sourceHandle = horizontalBias
+            ? dx >= 0 ? 'r-out' : 'l-out'
+            : dy >= 0 ? 'b-out' : 't-out'
+          const targetHandle = horizontalBias
+            ? dx >= 0 ? 'l-in' : 'r-in'
+            : dy >= 0 ? 't-in' : 'b-in'
           return {
             id: `es-edge-${idx}-${source}-${target}`,
             source,
             target,
-            type: 'smoothstep',
+            sourceHandle,
+            targetHandle,
+            type: 'straight',
             label: meta.label,
             labelStyle: { fontSize: 10, fill: '#334155', fontWeight: 700 },
             labelBgStyle: { fill: 'rgba(248,250,252,0.9)', fillOpacity: 0.92 },
@@ -3276,6 +3329,7 @@ export function ProjectKnowledgeGraphPanel({
                                   <ReactFlow
                                     nodes={eventStormingFlowNodes}
                                     edges={eventStormingFlowEdges}
+                                    nodeTypes={eventStormingNodeTypes}
                                     fitView
                                     fitViewOptions={{ padding: 0.12, maxZoom: 1.0 }}
                                     nodesDraggable={false}

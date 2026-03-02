@@ -1044,7 +1044,10 @@ def _llm_graph_layout_positions(
         "- include every node exactly once in positions\n"
         "- non-negative integer coordinates\n"
         "- prefer left-to-right direction for dependency chains\n"
-        "- avoid overlapping nodes\n\n"
+        "- avoid overlapping nodes\n"
+        f"- minimum horizontal gap between node boxes: {int(node_width) + 36}\n"
+        f"- minimum vertical gap between node boxes: {int(node_height) + 14}\n"
+        f"- for task-to-task nodes, prefer larger vertical gap: at least {int(node_height) + 24}\n\n"
         "Graph payload:\n"
         f"{json.dumps(graph_payload, ensure_ascii=True)}\n"
     )
@@ -1079,7 +1082,104 @@ def _llm_graph_layout_positions(
 
     if len(out) != len(known_ids):
         raise RuntimeError("Layout response must provide coordinates for every graph node")
-    return out, "codex"
+    return _postprocess_codex_layout_positions(
+        nodes=nodes,
+        positions=out,
+        node_width=node_width,
+        node_height=node_height,
+    ), "codex"
+
+
+def _postprocess_codex_layout_positions(
+    *,
+    nodes: list[dict[str, Any]],
+    positions: dict[str, dict[str, int]],
+    node_width: int,
+    node_height: int,
+) -> dict[str, dict[str, int]]:
+    node_ids = [str(row.get("entity_id") or "") for row in nodes if str(row.get("entity_id") or "")]
+    type_by_id = {str(row.get("entity_id") or ""): str(row.get("entity_type") or "Entity").strip().lower() for row in nodes}
+    title_by_id = {str(row.get("entity_id") or ""): str(row.get("title") or "").strip() for row in nodes}
+    out = {
+        node_id: {
+            "x": max(0, int((positions.get(node_id) or {}).get("x") or 0)),
+            "y": max(0, int((positions.get(node_id) or {}).get("y") or 0)),
+        }
+        for node_id in node_ids
+    }
+    if not out:
+        return out
+
+    # The AI model uses approximate node dimensions. In practice labels wrap and
+    # rendered node height can be larger, so we add a conservative per-node estimate.
+    avg_char_width = 7
+    text_room = max(120, int(node_width) - 24)
+    chars_per_line = max(14, text_room // avg_char_width)
+
+    def _estimated_box_height(node_id: str) -> int:
+        title = title_by_id.get(node_id, "")
+        title_len = len(title)
+        lines = max(1, min(5, (title_len + chars_per_line - 1) // chars_per_line))
+        return int(node_height) + (lines - 1) * 14
+
+    box_height_by_id = {node_id: _estimated_box_height(node_id) for node_id in node_ids}
+    horizontal_gap = max(34, int(node_width) + 34)
+    vertical_padding = max(8, int(node_height * 0.14))
+    vertical_padding_task = max(vertical_padding + 4, int(node_height * 0.25))
+
+    def _required_vertical(upper_id: str, lower_id: str) -> int:
+        base = box_height_by_id.get(upper_id, int(node_height))
+        pad = vertical_padding_task if type_by_id.get(upper_id) == "task" and type_by_id.get(lower_id) == "task" else vertical_padding
+        return base + pad
+
+    # Pass 1: spread nodes inside approximate columns.
+    column_pitch = max(80, horizontal_gap // 2)
+    columns: dict[int, list[str]] = {}
+    for node_id in node_ids:
+        col = int(round(out[node_id]["x"] / float(column_pitch)))
+        columns.setdefault(col, []).append(node_id)
+    for col in sorted(columns.keys()):
+        col_ids = sorted(columns[col], key=lambda nid: (out[nid]["y"], out[nid]["x"], nid))
+        prev_id: str | None = None
+        prev_y = 0
+        for nid in col_ids:
+            current_y = out[nid]["y"]
+            if prev_id is not None:
+                min_y = prev_y + _required_vertical(prev_id, nid)
+                if current_y < min_y:
+                    current_y = min_y
+                    out[nid]["y"] = current_y
+            prev_id = nid
+            prev_y = current_y
+
+    # Pass 2: resolve remaining pair overlaps.
+    for _ in range(16):
+        moved = False
+        for i in range(len(node_ids)):
+            lhs = node_ids[i]
+            lhs_pos = out[lhs]
+            for j in range(i + 1, len(node_ids)):
+                rhs = node_ids[j]
+                rhs_pos = out[rhs]
+                dx = abs(rhs_pos["x"] - lhs_pos["x"])
+                if dx >= horizontal_gap:
+                    continue
+                if lhs_pos["y"] <= rhs_pos["y"]:
+                    upper, lower = lhs, rhs
+                else:
+                    upper, lower = rhs, lhs
+                upper_pos = out[upper]
+                lower_pos = out[lower]
+                current_delta = lower_pos["y"] - upper_pos["y"]
+                required_delta = _required_vertical(upper, lower)
+                if current_delta >= required_delta:
+                    continue
+                lower_pos["y"] += required_delta - current_delta
+                moved = True
+        if not moved:
+            break
+
+    return out
 
 
 def graph_generate_layout(
