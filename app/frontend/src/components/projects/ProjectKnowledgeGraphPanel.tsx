@@ -613,6 +613,8 @@ export function ProjectKnowledgeGraphPanel({
   const [hoveredNodeId, setHoveredNodeId] = React.useState<string | null>(null)
   const [isGraphFullscreen, setIsGraphFullscreen] = React.useState(false)
   const [isGraphAltFullscreen, setIsGraphAltFullscreen] = React.useState(false)
+  const [isGraphAltPortraitMobile, setIsGraphAltPortraitMobile] = React.useState(false)
+  const [isGraphAltInspectorOpen, setIsGraphAltInspectorOpen] = React.useState(true)
   const [graphAltHiddenTypeKeys, setGraphAltHiddenTypeKeys] = React.useState<string[]>([])
   const [graphAltFocusScope, setGraphAltFocusScope] = React.useState<'all' | '1' | '2'>('all')
   const [isEventStormingFullscreen, setIsEventStormingFullscreen] = React.useState(false)
@@ -748,6 +750,26 @@ export function ProjectKnowledgeGraphPanel({
     () => eventStormingNodes.find((node) => String(node.entity_id || '') === String(selectedEventStormingNodeId || '')) ?? null,
     [eventStormingNodes, selectedEventStormingNodeId]
   )
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return
+    const update = () => {
+      const portrait = window.matchMedia('(max-width: 900px) and (orientation: portrait)').matches
+      setIsGraphAltPortraitMobile(portrait)
+      setIsGraphAltInspectorOpen(!portrait)
+    }
+    update()
+    window.addEventListener('resize', update)
+    window.addEventListener('orientationchange', update)
+    return () => {
+      window.removeEventListener('resize', update)
+      window.removeEventListener('orientationchange', update)
+    }
+  }, [])
+  React.useEffect(() => {
+    if (!isGraphAltPortraitMobile || !isGraphAltFullscreen) return
+    if (!selectedGraphAltNodeId) return
+    setIsGraphAltInspectorOpen(true)
+  }, [isGraphAltPortraitMobile, isGraphAltFullscreen, selectedGraphAltNodeId])
   React.useEffect(() => {
     if (typeof window === 'undefined') return
     const update = () => {
@@ -2969,7 +2991,14 @@ export function ProjectKnowledgeGraphPanel({
                       <div className="meta">Not enough connected entities yet for alternative graph rendering.</div>
                     ) : (
                       <>
-                        <div className="graph-reactflow-shell graph-reactflow-shell-alt" ref={graphAltShellRef}>
+                        <div
+                          className={[
+                            'graph-reactflow-shell',
+                            'graph-reactflow-shell-alt',
+                            isGraphAltPortraitMobile ? 'is-mobile-portrait-graph-alt' : '',
+                          ].join(' ').trim()}
+                          ref={graphAltShellRef}
+                        >
                             {isGraphAltFullscreen ? (
                               <button
                                 className="action-icon graph-viz-exit-button"
@@ -3022,7 +3051,34 @@ export function ProjectKnowledgeGraphPanel({
                                   )}
                                 </div>
                               </div>
-                              <aside className="graph-viz-side graph-viz-side-alt">
+                            {isGraphAltPortraitMobile && isGraphAltFullscreen && (
+                              <button
+                                type="button"
+                                className={`graph-alt-inspector-side-toggle ${isGraphAltInspectorOpen ? 'is-open' : ''}`.trim()}
+                                onClick={() => setIsGraphAltInspectorOpen((prev) => !prev)}
+                                aria-expanded={isGraphAltInspectorOpen}
+                                aria-label={isGraphAltInspectorOpen ? 'Hide details panel' : 'Show details panel'}
+                              >
+                                {isGraphAltInspectorOpen ? 'Hide' : 'Details'}
+                              </button>
+                            )}
+                            {isGraphAltPortraitMobile && isGraphAltFullscreen && isGraphAltInspectorOpen && (
+                              <button
+                                type="button"
+                                className="graph-alt-inspector-backdrop"
+                                aria-label="Close details panel"
+                                onClick={() => setIsGraphAltInspectorOpen(false)}
+                              />
+                            )}
+                            {(!isGraphAltPortraitMobile || isGraphAltFullscreen) && (
+                              <aside
+                                className={[
+                                  'graph-viz-side',
+                                  'graph-viz-side-alt',
+                                  isGraphAltInspectorOpen ? 'is-open' : 'is-collapsed',
+                                  isGraphAltPortraitMobile ? 'is-mobile-portrait' : '',
+                                ].join(' ')}
+                              >
                                 <div className="graph-alt-inspector-static">
                                   <section className="graph-alt-panel-section">
                                     <div className="graph-alt-panel-title">Focus scope</div>
@@ -3178,6 +3234,7 @@ export function ProjectKnowledgeGraphPanel({
                                   ) : null}
                                 </div>
                               </aside>
+                            )}
                             </div>
                           </div>
                       </>

@@ -10535,6 +10535,100 @@ textarea {
     overflow: hidden;
   }
 
+  .graph-viz-side-alt.is-mobile-portrait {
+    position: absolute;
+    top: 0;
+    right: 0;
+    z-index: 14;
+    width: min(84vw, 340px);
+    height: 100%;
+    max-height: none;
+    padding-top: 8px;
+    border-radius: 10px 0 0 10px;
+    background: color-mix(in srgb, var(--surface), var(--surface-alt) 26%);
+    box-shadow: -14px 0 26px color-mix(in srgb, #000, transparent 80%);
+    transform: translateX(0);
+    transition: transform 0.22s ease;
+  }
+
+  .graph-viz-side-alt.is-mobile-portrait.is-collapsed {
+    transform: translateX(calc(100% + 10px));
+    pointer-events: none;
+  }
+
+  .graph-alt-inspector-side-toggle {
+    display: inline-flex;
+    position: absolute;
+    top: 50%;
+    right: 0;
+    transform: translate(0, -50%);
+    z-index: 15;
+    min-width: 38px;
+    min-height: 78px;
+    padding: 8px 6px;
+    border: 1px solid color-mix(in srgb, var(--line), var(--brand) 20%);
+    border-right: none;
+    border-radius: 10px 0 0 10px;
+    background: color-mix(in srgb, var(--surface), var(--surface-alt) 22%);
+    color: color-mix(in srgb, var(--text), var(--brand-strong) 10%);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.01em;
+    text-transform: uppercase;
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    cursor: pointer;
+    box-shadow: -6px 6px 16px color-mix(in srgb, #000, transparent 86%);
+  }
+
+  .graph-alt-inspector-side-toggle.is-open {
+    right: min(84vw, 340px);
+  }
+
+  .graph-alt-inspector-backdrop {
+    display: block;
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: min(84vw, 340px);
+    bottom: 0;
+    z-index: 13;
+    border: none;
+    background: transparent;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+  }
+
+  .graph-reactflow-shell.is-mobile-portrait-graph-alt:fullscreen .graph-viz-composite,
+  .graph-reactflow-shell.is-mobile-portrait-graph-alt:-webkit-full-screen .graph-viz-composite {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .graph-reactflow-shell.is-mobile-portrait-graph-alt:fullscreen .graph-viz-side-alt.is-mobile-portrait,
+  .graph-reactflow-shell.is-mobile-portrait-graph-alt:-webkit-full-screen .graph-viz-side-alt.is-mobile-portrait {
+    position: absolute;
+    top: 0;
+    right: 0;
+    z-index: 14;
+    width: min(84vw, 340px);
+    height: 100%;
+    max-height: none;
+    padding-top: 8px;
+    border-radius: 10px 0 0 10px;
+    transform: translateX(0);
+  }
+
+  .graph-reactflow-shell.is-mobile-portrait-graph-alt:fullscreen .graph-viz-side-alt.is-mobile-portrait.is-collapsed,
+  .graph-reactflow-shell.is-mobile-portrait-graph-alt:-webkit-full-screen .graph-viz-side-alt.is-mobile-portrait.is-collapsed {
+    transform: translateX(calc(100% + 10px));
+    pointer-events: none;
+  }
+
   .graph-viz-side-event-storming.is-mobile-portrait {
     position: absolute;
     top: 0;
