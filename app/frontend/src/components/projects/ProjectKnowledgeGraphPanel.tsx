@@ -560,7 +560,6 @@ export function ProjectKnowledgeGraphPanel({
   const [actionError, setActionError] = React.useState<string | null>(null)
   const graphAltNodeTypes = React.useMemo(() => ({ kgAltNode: KnowledgeGraphAltNode }), [])
   const [graphAltCanvasNodes, setGraphAltCanvasNodes] = React.useState<FlowNode<ReactFlowNodeData>[]>([])
-  const [eventStormingCanvasNodes, setEventStormingCanvasNodes] = React.useState<FlowNode<ReactFlowNodeData>[]>([])
 
   const graphRef = React.useRef<any>(null)
   const graphShellRef = React.useRef<HTMLDivElement | null>(null)
@@ -1806,6 +1805,7 @@ export function ProjectKnowledgeGraphPanel({
             },
             sourcePosition: Position.Right,
             targetPosition: Position.Left,
+            draggable: false,
           })
         }
       }
@@ -1839,6 +1839,7 @@ export function ProjectKnowledgeGraphPanel({
           },
           sourcePosition: Position.Right,
           targetPosition: Position.Left,
+          draggable: false,
         })
       }
 
@@ -1853,18 +1854,9 @@ export function ProjectKnowledgeGraphPanel({
     showEventStormingArtifactsOnDiagram,
   ])
 
-  React.useEffect(() => {
-    setEventStormingCanvasNodes(eventStormingFlowNodes)
-  }, [eventStormingFlowNodes])
-
-  const onEventStormingNodesChange = React.useCallback((changes: NodeChange<FlowNode<ReactFlowNodeData>>[]) => {
-    setEventStormingCanvasNodes((current) => applyNodeChanges(changes, current))
-  }, [])
-
   const eventStormingFlowEdges = React.useMemo(
     () => {
-      const positionedNodes = eventStormingCanvasNodes.length ? eventStormingCanvasNodes : eventStormingFlowNodes
-      const flowNodeIdSet = new Set(positionedNodes.map((node) => String(node.id || '')))
+      const flowNodeIdSet = new Set(eventStormingFlowNodes.map((node) => String(node.id || '')))
       const edgeMeta: Record<
         string,
         { color: string; width: number; dash?: string; label: string }
@@ -1914,7 +1906,7 @@ export function ProjectKnowledgeGraphPanel({
         })
         .filter((edge): edge is FlowEdge => Boolean(edge))
     },
-    [eventStormingCanvasNodes, eventStormingEdges, eventStormingFlowNodes, showRejectedEventStormingLinks]
+    [eventStormingEdges, eventStormingFlowNodes, showRejectedEventStormingLinks]
   )
   const eventStormingLaneLegend = React.useMemo(
     () => [
@@ -3123,14 +3115,13 @@ export function ProjectKnowledgeGraphPanel({
                                 </div>
                                 <div className="graph-reactflow-canvas event-storming-canvas">
                                   <ReactFlow
-                                    nodes={eventStormingCanvasNodes}
+                                    nodes={eventStormingFlowNodes}
                                     edges={eventStormingFlowEdges}
                                     fitView
                                     fitViewOptions={{ padding: 0.12, maxZoom: 1.0 }}
-                                    nodesDraggable
+                                    nodesDraggable={false}
                                     nodesConnectable={false}
                                     elementsSelectable
-                                    onNodesChange={onEventStormingNodesChange}
                                     onNodeClick={(_, node) => {
                                       const nodeId = String(node.id || '').trim()
                                       if (!nodeId) return
