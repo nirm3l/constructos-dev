@@ -80,7 +80,24 @@ function KnowledgeGraphAltNode(props: any) {
         <span className="status-chip">{data?.entityType || 'Entity'}</span>
         {data?.statusLabel ? <span className="status-chip">{data.statusLabel}</span> : null}
       </div>
-      {data?.dependencyMeta ? <div className="kg-alt-node-submeta">{data.dependencyMeta}</div> : null}
+      <div className="kg-alt-node-submeta">{data?.dependencyMeta || '\u00A0'}</div>
+    </div>
+  )
+}
+
+function EventStormingMultiHandleNode(props: any) {
+  const data = (props?.data || {}) as ReactFlowNodeData
+  return (
+    <div>
+      <Handle id="l-in" type="target" position={Position.Left} className="kg-alt-node-handle" />
+      <Handle id="l-out" type="source" position={Position.Left} className="kg-alt-node-handle" />
+      <Handle id="r-in" type="target" position={Position.Right} className="kg-alt-node-handle" />
+      <Handle id="r-out" type="source" position={Position.Right} className="kg-alt-node-handle" />
+      <Handle id="t-in" type="target" position={Position.Top} className="kg-alt-node-handle" />
+      <Handle id="t-out" type="source" position={Position.Top} className="kg-alt-node-handle" />
+      <Handle id="b-in" type="target" position={Position.Bottom} className="kg-alt-node-handle" />
+      <Handle id="b-out" type="source" position={Position.Bottom} className="kg-alt-node-handle" />
+      <div style={{ fontSize: 12, fontWeight: 700, lineHeight: 1.3 }} title={data?.label || ''}>{data?.label || ''}</div>
     </div>
   )
 }
@@ -559,6 +576,7 @@ export function ProjectKnowledgeGraphPanel({
   const [actionBusy, setActionBusy] = React.useState<string | null>(null)
   const [actionError, setActionError] = React.useState<string | null>(null)
   const graphAltNodeTypes = React.useMemo(() => ({ kgAltNode: KnowledgeGraphAltNode }), [])
+  const eventStormingNodeTypes = React.useMemo(() => ({ esNode: EventStormingMultiHandleNode }), [])
   const [graphAltCanvasNodes, setGraphAltCanvasNodes] = React.useState<FlowNode<ReactFlowNodeData>[]>([])
 
   const graphRef = React.useRef<any>(null)
@@ -1358,8 +1376,9 @@ export function ProjectKnowledgeGraphPanel({
             dependencyMeta,
           },
           style: {
-            width: 230,
-            minHeight: 60,
+            width: 220,
+            minHeight: 74,
+            height: 74,
             borderRadius: 10,
             border: `2px solid ${visualMeta.border}`,
             background: visualMeta.sticky,
@@ -1459,8 +1478,9 @@ export function ProjectKnowledgeGraphPanel({
             entityType: String(item.entity_type || 'Entity'),
           },
           style: {
-            width: 214,
-            minHeight: 58,
+            width: 220,
+            minHeight: 74,
+            height: 74,
             borderRadius: 10,
             border: `2px solid ${visualMeta.border}`,
             background: visualMeta.sticky,
@@ -1784,6 +1804,7 @@ export function ProjectKnowledgeGraphPanel({
           const selected = itemId === String(selectedEventStormingNodeId || '')
           out.push({
             id: itemId,
+            type: 'esNode',
             position: { x: stageX[stageKey], y: rowTop + 66 + idx * 82 },
             data: {
               label: String(item.title || itemId),
@@ -1818,6 +1839,7 @@ export function ProjectKnowledgeGraphPanel({
         const contextMeta = EVENT_STORMING_TYPE_META.boundedcontext
         out.push({
           id: contextId,
+          type: 'esNode',
           position: { x: stageX.boundedcontext, y: rowTop + 62 },
           data: {
             label: String(contextItem?.title || contextLabel),
@@ -1857,6 +1879,12 @@ export function ProjectKnowledgeGraphPanel({
   const eventStormingFlowEdges = React.useMemo(
     () => {
       const flowNodeIdSet = new Set(eventStormingFlowNodes.map((node) => String(node.id || '')))
+      const nodePositionById = new Map(
+        eventStormingFlowNodes.map((node) => [
+          String(node.id || ''),
+          { x: Number(node.position?.x || 0), y: Number(node.position?.y || 0) },
+        ])
+      )
       const edgeMeta: Record<
         string,
         { color: string; width: number; dash?: string; label: string }
@@ -1891,10 +1919,23 @@ export function ProjectKnowledgeGraphPanel({
               meta = { color: '#f59e0b', width: 1.5, dash: '4 3', label: 'candidate link' }
             }
           }
+          const sourcePos = nodePositionById.get(source)
+          const targetPos = nodePositionById.get(target)
+          const dx = Number((targetPos?.x || 0) - (sourcePos?.x || 0))
+          const dy = Number((targetPos?.y || 0) - (sourcePos?.y || 0))
+          const horizontalBias = Math.abs(dx) >= Math.abs(dy)
+          const sourceHandle = horizontalBias
+            ? dx >= 0 ? 'r-out' : 'l-out'
+            : dy >= 0 ? 'b-out' : 't-out'
+          const targetHandle = horizontalBias
+            ? dx >= 0 ? 'l-in' : 'r-in'
+            : dy >= 0 ? 't-in' : 'b-in'
           return {
             id: `es-edge-${idx}-${source}-${target}`,
             source,
             target,
+            sourceHandle,
+            targetHandle,
             type: 'smoothstep',
             label: meta.label,
             labelStyle: { fontSize: 10, fill: '#334155', fontWeight: 700 },
@@ -3117,6 +3158,7 @@ export function ProjectKnowledgeGraphPanel({
                                   <ReactFlow
                                     nodes={eventStormingFlowNodes}
                                     edges={eventStormingFlowEdges}
+                                    nodeTypes={eventStormingNodeTypes}
                                     fitView
                                     fitViewOptions={{ padding: 0.12, maxZoom: 1.0 }}
                                     nodesDraggable={false}
