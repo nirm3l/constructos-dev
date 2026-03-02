@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from features.agents.gates import gate_check_catalog_by_scope
 from features.agents.gateway import build_ui_gateway
 from shared.core import (
     Project,
@@ -171,6 +172,7 @@ def project_gates_verify(
         "project_id": project_id,
         "team_mode": team_mode,
         "delivery": delivery,
+        "catalog": gate_check_catalog_by_scope(),
         "ok": bool(team_mode.get("ok")) and bool(delivery.get("ok")),
     }
 

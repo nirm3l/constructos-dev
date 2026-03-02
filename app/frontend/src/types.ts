@@ -636,6 +636,8 @@ export type ProjectGateVerificationResult = {
   project_id: string
   active?: boolean
   checks: Record<string, boolean | string | number | null>
+  available_checks?: string[]
+  check_descriptions?: Record<string, string>
   required_checks?: string[]
   required_failed_checks?: string[]
   gate_policy?: Record<string, unknown>
@@ -644,11 +646,22 @@ export type ProjectGateVerificationResult = {
   ok: boolean
 }
 
+export type ProjectGateCatalogItem = {
+  id: string
+  label?: string
+  description?: string
+  default_required?: boolean
+}
+
 export type ProjectGatesVerifyResponse = {
   project_id: string
   team_mode: ProjectGateVerificationResult
   delivery: ProjectGateVerificationResult & {
     runtime_deploy_health?: Record<string, unknown>
+  }
+  catalog?: {
+    team_mode?: ProjectGateCatalogItem[]
+    delivery?: ProjectGateCatalogItem[]
   }
   ok: boolean
 }

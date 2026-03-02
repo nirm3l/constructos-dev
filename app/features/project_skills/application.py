@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
@@ -15,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from features.rules.application import ProjectRuleApplicationService
+from features.agents.gates import DEFAULT_GATE_POLICY as _DEFAULT_AGENT_GATE_POLICY
 from shared.core import Project, ProjectRuleCreate, ProjectRulePatch, User, ensure_project_access, ensure_role
 from shared.models import ProjectMember, ProjectRule, ProjectSkill, User as UserModel, WorkspaceMember, WorkspaceSkill
 
@@ -36,37 +38,7 @@ _GATE_POLICY_RELEVANT_SKILL_KEYS = {
     _GIT_DELIVERY_SKILL_KEY,
     _GITHUB_DELIVERY_SKILL_KEY,
 }
-_DEFAULT_GATE_POLICY: dict[str, Any] = {
-    "version": 1,
-    "mode": "execution",
-    "required_checks": {
-        "team_mode": [
-            "role_coverage_present",
-            "dev_self_triggers_to_qa",
-            "qa_external_trigger_from_dev",
-            "lead_external_trigger_from_qa",
-            "lead_recurring_schedule_on_lead",
-            "required_triggers_present",
-            "event_storming_matches_expectation",
-            "deploy_target_declared",
-        ],
-        "delivery": [
-            "repo_context_present",
-            "git_contract_ok",
-            "dev_tasks_have_commit_evidence",
-            "dev_tasks_have_unique_commit_evidence",
-            "qa_has_verifiable_artifacts",
-            "deploy_execution_evidence_present",
-        ],
-    },
-    "runtime_deploy_health": {
-        "required": False,
-        "stack": "constructos-ws-default",
-        "port": None,
-        "health_path": "/health",
-        "require_http_200": True,
-    },
-}
+_DEFAULT_GATE_POLICY: dict[str, Any] = deepcopy(_DEFAULT_AGENT_GATE_POLICY)
 _SKILL_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     _GITHUB_DELIVERY_SKILL_KEY: (_GIT_DELIVERY_SKILL_KEY,),
     _TEAM_MODE_SKILL_KEY: (_GIT_DELIVERY_SKILL_KEY,),

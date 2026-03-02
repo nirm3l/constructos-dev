@@ -359,6 +359,59 @@ export function ProjectsInlineEditor({
   const deliveryFailedChecks = projectGatesSnapshot?.delivery?.required_failed_checks ?? []
   const teamRequiredChecks = projectGatesSnapshot?.team_mode?.required_checks ?? []
   const deliveryRequiredChecks = projectGatesSnapshot?.delivery?.required_checks ?? []
+  const teamChecks = projectGatesSnapshot?.team_mode?.checks ?? {}
+  const deliveryChecks = projectGatesSnapshot?.delivery?.checks ?? {}
+  const gatePolicyPayload = (projectGatesSnapshot?.delivery?.gate_policy || projectGatesSnapshot?.team_mode?.gate_policy) as
+    | Record<string, unknown>
+    | undefined
+  const gatePolicyAvailableChecks = React.useMemo(() => {
+    const available = gatePolicyPayload?.available_checks
+    if (!available || typeof available !== 'object') return { team_mode: {}, delivery: {} } as Record<string, Record<string, string>>
+    const scopeMap = available as Record<string, unknown>
+    const teamMode = scopeMap.team_mode
+    const delivery = scopeMap.delivery
+    const toDescriptionMap = (value: unknown) => {
+      if (!value || typeof value !== 'object') return {} as Record<string, string>
+      const mapped = value as Record<string, unknown>
+      const out: Record<string, string> = {}
+      for (const [key, raw] of Object.entries(mapped)) {
+        const normalizedKey = String(key || '').trim()
+        if (!normalizedKey) continue
+        const normalizedDescription = String(raw || '').trim()
+        if (!normalizedDescription) continue
+        out[normalizedKey] = normalizedDescription
+      }
+      return out
+    }
+    return {
+      team_mode: toDescriptionMap(teamMode),
+      delivery: toDescriptionMap(delivery),
+    }
+  }, [gatePolicyPayload])
+  const teamCheckDescriptions = React.useMemo(
+    () => ({
+      ...(projectGatesSnapshot?.team_mode?.check_descriptions ?? {}),
+      ...(gatePolicyAvailableChecks.team_mode ?? {}),
+    }),
+    [projectGatesSnapshot?.team_mode?.check_descriptions, gatePolicyAvailableChecks.team_mode]
+  )
+  const deliveryCheckDescriptions = React.useMemo(
+    () => ({
+      ...(projectGatesSnapshot?.delivery?.check_descriptions ?? {}),
+      ...(gatePolicyAvailableChecks.delivery ?? {}),
+    }),
+    [projectGatesSnapshot?.delivery?.check_descriptions, gatePolicyAvailableChecks.delivery]
+  )
+  const teamAvailableChecks = React.useMemo<Array<{ id: string; description?: string }>>(() => {
+    const fromCatalog = projectGatesSnapshot?.catalog?.team_mode ?? []
+    if (fromCatalog.length > 0) return fromCatalog
+    return (projectGatesSnapshot?.team_mode?.available_checks ?? []).map((id) => ({ id }))
+  }, [projectGatesSnapshot?.catalog?.team_mode, projectGatesSnapshot?.team_mode?.available_checks])
+  const deliveryAvailableChecks = React.useMemo<Array<{ id: string; description?: string }>>(() => {
+    const fromCatalog = projectGatesSnapshot?.catalog?.delivery ?? []
+    if (fromCatalog.length > 0) return fromCatalog
+    return (projectGatesSnapshot?.delivery?.available_checks ?? []).map((id) => ({ id }))
+  }, [projectGatesSnapshot?.catalog?.delivery, projectGatesSnapshot?.delivery?.available_checks])
   const gatePolicySource = String(
     projectGatesSnapshot?.delivery?.gate_policy_source ||
       projectGatesSnapshot?.team_mode?.gate_policy_source ||
@@ -971,15 +1024,36 @@ export function ProjectsInlineEditor({
                           {teamFailedChecks.length === 0 ? 'Ready' : `${teamFailedChecks.length} failed`}
                         </span>
                       </div>
-                      {teamFailedChecks.length === 0 ? (
-                        <div className="meta">All required Team Mode checks passed.</div>
-                      ) : (
-                        <div className="gates-failed-tags">
-                          {teamFailedChecks.map((item) => (
-                            <span key={`team-failed-${item}`} className="gates-failed-tag">{item}</span>
-                          ))}
-                        </div>
-                      )}
+                      <div className="gates-check-list">
+                        {(teamRequiredChecks.length === 0 ? Object.keys(teamChecks) : teamRequiredChecks).map((item) => {
+                          const failed = teamFailedChecks.includes(item)
+                          const description = String(teamCheckDescriptions[item] || '').trim()
+                          return (
+                            <div key={`team-check-${item}`} className="gates-check-row">
+                              <div className="gates-check-copy">
+                                <code>{item}</code>
+                                {description ? <span className="meta">{description}</span> : null}
+                              </div>
+                              <span className={`badge ${failed ? 'status-blocked' : 'status-done'}`}>
+                                {failed ? 'FAIL' : 'PASS'}
+                              </span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                      <div className="meta">Available checks ({teamAvailableChecks.length})</div>
+                      <div className="gates-available-tags">
+                        {teamAvailableChecks.map((item) => {
+                          const checkId = String(item.id || '').trim()
+                          if (!checkId) return null
+                          const description = String(teamCheckDescriptions[checkId] || item.description || '').trim()
+                          return (
+                            <span key={`team-available-${checkId}`} className="gates-available-tag" title={description || undefined}>
+                              {checkId}
+                            </span>
+                          )
+                        })}
+                      </div>
                     </section>
                     <section className="gates-scope-card">
                       <div className="gates-scope-head">
@@ -988,15 +1062,36 @@ export function ProjectsInlineEditor({
                           {deliveryFailedChecks.length === 0 ? 'Ready' : `${deliveryFailedChecks.length} failed`}
                         </span>
                       </div>
-                      {deliveryFailedChecks.length === 0 ? (
-                        <div className="meta">All required Delivery checks passed.</div>
-                      ) : (
-                        <div className="gates-failed-tags">
-                          {deliveryFailedChecks.map((item) => (
-                            <span key={`delivery-failed-${item}`} className="gates-failed-tag">{item}</span>
-                          ))}
-                        </div>
-                      )}
+                      <div className="gates-check-list">
+                        {(deliveryRequiredChecks.length === 0 ? Object.keys(deliveryChecks) : deliveryRequiredChecks).map((item) => {
+                          const failed = deliveryFailedChecks.includes(item)
+                          const description = String(deliveryCheckDescriptions[item] || '').trim()
+                          return (
+                            <div key={`delivery-check-${item}`} className="gates-check-row">
+                              <div className="gates-check-copy">
+                                <code>{item}</code>
+                                {description ? <span className="meta">{description}</span> : null}
+                              </div>
+                              <span className={`badge ${failed ? 'status-blocked' : 'status-done'}`}>
+                                {failed ? 'FAIL' : 'PASS'}
+                              </span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                      <div className="meta">Available checks ({deliveryAvailableChecks.length})</div>
+                      <div className="gates-available-tags">
+                        {deliveryAvailableChecks.map((item) => {
+                          const checkId = String(item.id || '').trim()
+                          if (!checkId) return null
+                          const description = String(deliveryCheckDescriptions[checkId] || item.description || '').trim()
+                          return (
+                            <span key={`delivery-available-${checkId}`} className="gates-available-tag" title={description || undefined}>
+                              {checkId}
+                            </span>
+                          )
+                        })}
+                      </div>
                     </section>
                   </div>
                   <div className="gates-policy-row">

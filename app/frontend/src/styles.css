@@ -10333,6 +10333,52 @@ textarea {
   padding: 4px 8px;
 }
 
+.gates-check-list {
+  display: grid;
+  gap: 7px;
+}
+
+.gates-check-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  padding: 7px 8px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 14%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 10%);
+}
+
+.gates-check-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.gates-check-copy code {
+  width: fit-content;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.gates-available-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.gates-available-tag {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 30%);
+  background: color-mix(in srgb, var(--brand), var(--surface) 92%);
+  color: color-mix(in srgb, var(--text), var(--brand-strong) 16%);
+  font-size: 11px;
+  line-height: 1.2;
+  padding: 3px 8px;
+}
+
 .gates-policy-row {
   display: flex;
   align-items: center;

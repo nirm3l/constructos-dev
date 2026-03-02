@@ -4,32 +4,99 @@ import json
 import os
 import re
 import subprocess
+from copy import deepcopy
 from typing import Any, Callable
 
 COMMIT_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
 GATE_POLICY_RULE_TITLES = ("gate policy", "delivery gates", "workflow gates")
-DEFAULT_GATE_POLICY: dict[str, Any] = {
+DEFAULT_REQUIRED_TEAM_MODE_CHECKS: list[str] = [
+    "role_coverage_present",
+    "dev_self_triggers_to_qa",
+    "qa_external_trigger_from_dev",
+    "lead_external_trigger_from_qa",
+    "lead_recurring_schedule_on_lead",
+    "required_triggers_present",
+    "event_storming_matches_expectation",
+    "deploy_target_declared",
+]
+DEFAULT_REQUIRED_DELIVERY_CHECKS: list[str] = [
+    "repo_context_present",
+    "git_contract_ok",
+    "dev_tasks_have_commit_evidence",
+    "dev_tasks_have_unique_commit_evidence",
+    "qa_has_verifiable_artifacts",
+    "deploy_execution_evidence_present",
+]
+TEAM_MODE_CHECK_DESCRIPTIONS: dict[str, str] = {
+    "role_coverage_present": "Project has Developer, QA, and Team Lead role coverage.",
+    "dev_self_triggers_to_qa": "Each Dev task has self status trigger into QA.",
+    "qa_external_trigger_from_dev": "QA task has external trigger sourced from Dev task IDs.",
+    "lead_external_trigger_from_qa": "Lead task has external trigger sourced from QA completion.",
+    "deploy_external_trigger_from_lead": "Deploy task has external trigger sourced from another Lead task.",
+    "deploy_external_trigger_from_lead_required": "Deploy-from-Lead trigger is required only when multiple Lead tasks exist.",
+    "lead_recurring_schedule_on_lead": "Lead has recurring schedule configured to run on Lead status.",
+    "deploy_target_declared": "Deploy task artifacts declare a deploy target port.",
+    "deploy_stack_declared": "Deploy task artifacts declare a deploy stack/project name.",
+    "deploy_task_has_evidence": "Deploy task contains deploy intent or evidence artifacts.",
+    "handoff_direction_clean": "No contradictory handoff triggers were detected.",
+    "dev_external_trigger_to_qa_conflict": "Conflict flag when Dev tasks incorrectly use external trigger to QA.",
+    "qa_external_trigger_to_done_conflict": "Conflict flag when QA tasks incorrectly use external trigger to Done.",
+    "required_triggers_present": "Core Team Mode trigger chain is fully present.",
+    "event_storming_matches_expectation": "Project event-storming flag matches expected state.",
+}
+DELIVERY_CHECK_DESCRIPTIONS: dict[str, str] = {
+    "repo_context_present": "Repository context is discoverable from project metadata/rules/refs.",
+    "git_contract_ok": "Git delivery contract is satisfied end-to-end.",
+    "dev_tasks_have_commit_evidence": "Each Dev task includes commit evidence.",
+    "dev_tasks_have_unique_commit_evidence": "Dev tasks use distinct commit evidence (no shared SHA across Dev tasks).",
+    "qa_has_verifiable_artifacts": "QA tasks include verifiable artifacts (logs, links, evidence notes).",
+    "deploy_execution_evidence_required": "Deploy evidence is required when Team Mode has deploy tasks.",
+    "deploy_execution_evidence_present": "Deploy execution evidence exists for Lead deploy tasks.",
+    "runtime_deploy_health_required": "Runtime health probe is required by gate policy.",
+    "runtime_deploy_health_ok": "Runtime deploy stack is up, mapped, and healthy when required.",
+}
+
+
+def _build_gate_check_catalog() -> dict[str, list[dict[str, Any]]]:
+    team_mode_required = set(DEFAULT_REQUIRED_TEAM_MODE_CHECKS)
+    delivery_required = set(DEFAULT_REQUIRED_DELIVERY_CHECKS)
+    return {
+        "team_mode": [
+            {
+                "id": check_id,
+                "label": check_id.replace("_", " "),
+                "description": TEAM_MODE_CHECK_DESCRIPTIONS.get(check_id, ""),
+                "default_required": check_id in team_mode_required,
+            }
+            for check_id in TEAM_MODE_CHECK_EVALUATORS
+        ],
+        "delivery": [
+            {
+                "id": check_id,
+                "label": check_id.replace("_", " "),
+                "description": DELIVERY_CHECK_DESCRIPTIONS.get(check_id, ""),
+                "default_required": check_id in delivery_required,
+            }
+            for check_id in DELIVERY_CHECK_EVALUATORS
+        ],
+    }
+
+
+def gate_check_catalog_by_scope() -> dict[str, list[dict[str, Any]]]:
+    return deepcopy(_build_gate_check_catalog())
+
+
+def _build_default_gate_policy() -> dict[str, Any]:
+    return {
     "version": 1,
     "mode": "execution",
     "required_checks": {
-        "team_mode": [
-            "role_coverage_present",
-            "dev_self_triggers_to_qa",
-            "qa_external_trigger_from_dev",
-            "lead_external_trigger_from_qa",
-            "lead_recurring_schedule_on_lead",
-            "required_triggers_present",
-            "event_storming_matches_expectation",
-            "deploy_target_declared",
-        ],
-        "delivery": [
-            "repo_context_present",
-            "git_contract_ok",
-            "dev_tasks_have_commit_evidence",
-            "dev_tasks_have_unique_commit_evidence",
-            "qa_has_verifiable_artifacts",
-            "deploy_execution_evidence_present",
-        ],
+        "team_mode": list(DEFAULT_REQUIRED_TEAM_MODE_CHECKS),
+        "delivery": list(DEFAULT_REQUIRED_DELIVERY_CHECKS),
+    },
+    "available_checks": {
+        "team_mode": TEAM_MODE_CHECK_DESCRIPTIONS,
+        "delivery": DELIVERY_CHECK_DESCRIPTIONS,
     },
     "runtime_deploy_health": {
         "required": False,
@@ -39,6 +106,7 @@ DEFAULT_GATE_POLICY: dict[str, Any] = {
         "require_http_200": True,
     },
 }
+DEFAULT_GATE_POLICY: dict[str, Any] = _build_default_gate_policy()
 
 
 def merge_gate_policy_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -54,7 +122,7 @@ def merge_gate_policy_dict(base: dict[str, Any], override: dict[str, Any]) -> di
 def parse_gate_policy_rule(*, project_rules: list[Any]) -> tuple[dict[str, Any], str]:
     policy = dict(DEFAULT_GATE_POLICY)
     source = "default"
-    for rule in project_rules:
+    for rule in reversed(list(project_rules)):
         title = str(getattr(rule, "title", "") or "").strip().lower()
         if not any(marker in title for marker in GATE_POLICY_RULE_TITLES):
             continue
@@ -439,6 +507,8 @@ def evaluate_team_mode_gates(
         "project_id": str(project_id),
         "workspace_id": str(workspace_id),
         "checks": checks,
+        "available_checks": list(TEAM_MODE_CHECK_EVALUATORS.keys()),
+        "check_descriptions": dict(TEAM_MODE_CHECK_DESCRIPTIONS),
         "required_checks": required_checks,
         "required_failed_checks": required_failed,
         "gate_policy": gate_policy,
@@ -636,6 +706,8 @@ def evaluate_delivery_gates(
         "project_id": str(project_id),
         "workspace_id": str(workspace_id),
         "checks": checks,
+        "available_checks": list(DELIVERY_CHECK_EVALUATORS.keys()),
+        "check_descriptions": dict(DELIVERY_CHECK_DESCRIPTIONS),
         "required_checks": required_checks,
         "required_failed_checks": required_failed,
         "gate_policy": gate_policy,
