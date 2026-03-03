@@ -25,7 +25,8 @@ Use this skill when a project should be executed by a structured multi-agent del
 - Treat Team Mode project setup as incomplete until all of the following are true:
   - Team Mode board statuses are configured (`To do`, `Dev`, `QA`, `Lead`, `Done`, `Blocked`) unless the user explicitly overrides.
   - Implementation tasks are assigned to Team Mode agents and start in `Dev`.
-  - QA flow and Lead oversight automation are represented by task triggers and/or schedule.
+  - Every Dev, QA, and Lead task has explicit automation instruction content (`instruction` or `scheduled_instruction`).
+  - QA flow and Lead oversight automation are represented by status-change triggers and schedule (not status-only bookkeeping).
   - A deploy task exists with Docker Compose execution instructions scoped to app services on the workspace stack project `constructos-ws-default` (or explicit user override).
   - Deployment intent is recorded as a setup artifact (for example a pinned note or deploy-task note) with target port and stack.
   - Team Lead recurring schedule triggers set `run_on_statuses` explicitly to Team Mode statuses (default `["Lead"]`).
@@ -38,7 +39,8 @@ Use this skill when a project should be executed by a structured multi-agent del
 - Move tasks across board statuses exactly as defined by the project workflow.
 
 ## Team Lead Responsibilities
-- Run recurring oversight using scheduled task automation.
+- Run event-driven oversight when Dev/QA handoff status changes occur (`Done` and `Blocked`).
+- Run recurring oversight using scheduled task automation as fallback (`every:5m` default cadence unless user overrides).
 - Monitor blocked, failed, and stale tasks and coordinate resolution.
 - Deploy the app stack using project-defined Docker Compose instructions scoped to app services.
 - Default deployment stack for chat-driven delivery is `constructos-ws-default` unless the user explicitly requests a different project name.
@@ -46,6 +48,7 @@ Use this skill when a project should be executed by a structured multi-agent del
 - During setup-only requests, record deployment intent (`stack`, `port`, `health path`) and mark execution state as `not_started`.
 - Keep `Gate Policy` updated for setup/execution mode transitions (for example runtime deploy health not required in setup-only mode, required in execution mode).
 - If a blocker cannot be resolved, assign the task to a human member and move it to escalation status.
+- If a blocker cannot be resolved, assign the task to a human member and send an in-app notification (`send_in_app_notification`) with blocker summary, affected task, and expected next action.
 
 ## QA Responsibilities
 - Trigger QA after implementation status transitions (for example when work enters review/testing).
@@ -64,5 +67,6 @@ Use this skill when a project should be executed by a structured multi-agent del
 - Prefer explicit Team Mode trigger transitions:
   - Dev tasks self-trigger on `to_statuses=["QA"]`
   - QA task external-trigger from Dev task ids on `to_statuses=["QA"]`
-  - Lead oversight external-trigger from QA task ids on `to_statuses=["Done"]`
+  - Lead oversight external-trigger from QA task ids on `to_statuses=["Done", "Blocked"]`
+  - Lead oversight external-trigger from Dev and QA task ids on `to_statuses=["Blocked"]`
   - Deploy external-trigger from Lead task ids on `to_statuses=["Done"]`

@@ -4,8 +4,64 @@ import * as Tabs from '@radix-ui/react-tabs'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import { Icon } from '../shared/uiHelpers'
 
+type AutomationTimelineEntry = {
+  id: string
+  action: 'requested' | 'started' | 'completed' | 'failed'
+  title: string
+  body: string
+  createdAt: string | null
+}
+
 export function TaskDrawerInsights({ state }: { state: any }) {
   const [confirmDeleteCommentId, setConfirmDeleteCommentId] = React.useState<number | null>(null)
+  const automationTimeline = React.useMemo<AutomationTimelineEntry[]>(() => {
+    const events = Array.isArray(state.activity.data) ? state.activity.data : []
+    const entries: AutomationTimelineEntry[] = []
+    for (const event of events) {
+      const action = String(event?.action || '')
+      const details = (event?.details && typeof event.details === 'object' ? event.details : {}) as Record<string, unknown>
+      if (action === 'TaskAutomationRequested') {
+        entries.push({
+          id: `${event.id}-requested`,
+          action: 'requested',
+          title: 'Run requested',
+          body: String(details.instruction || '(no instruction)'),
+          createdAt: typeof event.created_at === 'string' ? event.created_at : null,
+        })
+        continue
+      }
+      if (action === 'TaskAutomationStarted') {
+        entries.push({
+          id: `${event.id}-started`,
+          action: 'started',
+          title: 'Run started',
+          body: String(details.started_at ? `Started at: ${String(details.started_at)}` : 'Execution started.'),
+          createdAt: typeof event.created_at === 'string' ? event.created_at : null,
+        })
+        continue
+      }
+      if (action === 'TaskAutomationCompleted') {
+        entries.push({
+          id: `${event.id}-completed`,
+          action: 'completed',
+          title: 'Run completed',
+          body: String(details.summary || 'Completed'),
+          createdAt: typeof event.created_at === 'string' ? event.created_at : null,
+        })
+        continue
+      }
+      if (action === 'TaskAutomationFailed') {
+        entries.push({
+          id: `${event.id}-failed`,
+          action: 'failed',
+          title: 'Run failed',
+          body: String(details.error || details.summary || 'Unknown error'),
+          createdAt: typeof event.created_at === 'string' ? event.created_at : null,
+        })
+      }
+    }
+    return entries
+  }, [state.activity.data])
 
   return (
     <>
@@ -135,7 +191,36 @@ export function TaskDrawerInsights({ state }: { state: any }) {
                 <span className="meta">Last run: {new Date(state.automationStatus.data.last_agent_run_at).toLocaleString()}</span>
               )}
             </div>
-            {state.automationStatus.data?.last_agent_comment && <div className="note">{state.automationStatus.data.last_agent_comment}</div>}
+            {automationTimeline.length > 0 ? (
+              <div className="automation-history" aria-live="polite">
+                {automationTimeline.map((entry) => (
+                  <div key={entry.id} className={`automation-history-item ${entry.action}`}>
+                    <div className="automation-history-head">
+                      <strong>{entry.title}</strong>
+                      {entry.createdAt && (
+                        <span className="meta">{new Date(entry.createdAt).toLocaleString()}</span>
+                      )}
+                    </div>
+                    <div className="automation-history-body">
+                      <MarkdownView value={entry.body} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : state.automationStatus.data?.last_agent_comment ? (
+              <div className="automation-history">
+                <div className="automation-history-item completed">
+                  <div className="automation-history-head">
+                    <strong>Last response</strong>
+                  </div>
+                  <div className="automation-history-body">
+                    <MarkdownView value={state.automationStatus.data.last_agent_comment} />
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="meta">No automation responses yet.</div>
+            )}
             {state.automationStatus.data?.last_agent_error && <div className="notice notice-error">Runner error: {state.automationStatus.data.last_agent_error}</div>}
             <div className="row wrap" style={{ marginTop: 8 }}>
               <textarea

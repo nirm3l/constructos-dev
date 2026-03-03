@@ -77,6 +77,7 @@ from shared.core import (
     load_specification_view,
 )
 from features.project_templates.schemas import ProjectFromTemplateCreate, ProjectFromTemplatePreview
+from features.agents.codex_mcp_adapter import run_structured_codex_prompt
 from features.agents.gates import (
     evaluate_delivery_gates,
     evaluate_required_checks as evaluate_required_gate_checks,
@@ -116,6 +117,7 @@ from shared.settings import (
     MCP_AUTH_TOKEN,
 )
 from shared.typed_notifications import append_notification_created_event
+from shared.eventing_rebuild import rebuild_state
 
 _READ_ONLY_MCP_METHODS = frozenset(
     {
@@ -154,6 +156,9 @@ _READ_ONLY_MCP_METHODS = frozenset(
 )
 _LICENSE_WRITE_BLOCKED_MESSAGE = "License expired. Write access is disabled until subscription is reactivated."
 _COMMIT_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
+_COMMIT_SHA_EXPLICIT_RE = re.compile(
+    r"(?i)(?:\b(?:commit|sha|changeset|hash)\s*[:=#]?\s*|/commit/)([0-9a-f]{7,40})\b"
+)
 _GITHUB_HOST_TOKENS = ("github.com", "www.github.com")
 
 
@@ -1594,7 +1599,7 @@ class AgentTaskService:
         normalized = str(text or "").strip().lower()
         if not normalized:
             return set()
-        return {match.group(0).lower() for match in _COMMIT_SHA_RE.finditer(normalized)}
+        return {str(match.group(1) or "").lower() for match in _COMMIT_SHA_EXPLICIT_RE.finditer(normalized)}
 
     @classmethod
     def _extract_commit_shas_from_refs(cls, refs: Any) -> set[str]:
@@ -1821,6 +1826,36 @@ class AgentTaskService:
             require_http_200=require_http_200,
         )
 
+    @staticmethod
+    def _enrich_tasks_with_automation_state(
+        *,
+        db,
+        tasks: list[dict[str, Any]],
+    ) -> None:
+        if not tasks:
+            return
+        for task in tasks:
+            task_id = str(task.get("id") or "").strip()
+            if not task_id:
+                continue
+            try:
+                state, _ = rebuild_state(db, "Task", task_id)
+            except Exception:
+                continue
+            if not isinstance(state, dict) or not state:
+                continue
+            task["automation_state"] = state.get("automation_state", task.get("automation_state", "idle"))
+            task["last_agent_run_at"] = state.get("last_agent_run_at")
+            task["last_requested_source"] = state.get("last_requested_source")
+            task["last_requested_triggered_at"] = state.get("last_requested_triggered_at")
+            if not str(task.get("instruction") or "").strip():
+                instruction = str(state.get("instruction") or state.get("scheduled_instruction") or "").strip()
+                if instruction:
+                    task["instruction"] = instruction
+            scheduled_instruction = str(state.get("scheduled_instruction") or "").strip()
+            if scheduled_instruction and not str(task.get("scheduled_instruction") or "").strip():
+                task["scheduled_instruction"] = scheduled_instruction
+
     @classmethod
     def _project_has_github_context(
         cls,
@@ -1829,17 +1864,295 @@ class AgentTaskService:
         project_external_refs: Any,
         project_rules: list[ProjectRuleModel],
     ) -> bool:
+        parsed_refs = cls._parse_json_list(project_external_refs)
+        normalized_refs = sorted(
+            (
+                {
+                    "url": str(ref.get("url") or "").strip(),
+                    "title": str(ref.get("title") or "").strip(),
+                }
+                for ref in parsed_refs
+                if isinstance(ref, dict)
+            ),
+            key=lambda item: (item.get("url", "").lower(), item.get("title", "").lower()),
+        )
+        normalized_rules = sorted(
+            (
+                {
+                    "title": str(rule.title or "").strip(),
+                    "body": str(rule.body or "").strip(),
+                }
+                for rule in project_rules
+            ),
+            key=lambda item: (item.get("title", "").lower(), item.get("body", "").lower()),
+        )
+        # Explicit host/domain marker is a deterministic signal (not heuristic inference).
         if any(token in str(project_description or "").lower() for token in _GITHUB_HOST_TOKENS):
             return True
-        for ref in cls._parse_json_list(project_external_refs):
+        for ref in normalized_refs:
             url = str(ref.get("url") or "").strip().lower()
             if any(token in url for token in _GITHUB_HOST_TOKENS):
                 return True
-        for rule in project_rules:
-            blob = f"{rule.title or ''} {rule.body or ''}".lower()
-            if "github.com" in blob or "github " in blob or blob.endswith("github"):
+        for rule in normalized_rules:
+            blob = f"{rule.get('title') or ''} {rule.get('body') or ''}".lower()
+            if any(token in blob for token in _GITHUB_HOST_TOKENS):
                 return True
-        return False
+
+        # If there is no GitHub mention at all, skip LLM classification entirely.
+        # LLM is used only for ambiguous textual mentions where explicit host markers are absent.
+        has_generic_github_mention = "github" in str(project_description or "").lower()
+        if not has_generic_github_mention:
+            for ref in normalized_refs:
+                ref_blob = f"{ref.get('url') or ''} {ref.get('title') or ''}".lower()
+                if "github" in ref_blob:
+                    has_generic_github_mention = True
+                    break
+        if not has_generic_github_mention:
+            for rule in normalized_rules:
+                blob = f"{rule.get('title') or ''} {rule.get('body') or ''}".lower()
+                if "github" in blob:
+                    has_generic_github_mention = True
+                    break
+        if not has_generic_github_mention:
+            return False
+
+        llm_payload = {
+            "project_description": str(project_description or ""),
+            "project_external_refs": normalized_refs[:40],
+            "project_rules": [
+                {
+                    "title": str(rule.get("title") or ""),
+                    "body": str(rule.get("body") or "")[:6000],
+                }
+                for rule in normalized_rules[:40]
+            ],
+            "decision_policy": {
+                "true_only_when": [
+                    "explicit GitHub host/domain references are present (github.com/www.github.com)",
+                    "or explicit GitHub repository/PR/issue URL-like markers are present in project-owned content",
+                ],
+                "false_when": [
+                    "generic mentions like 'GitHub', 'GitHub/Jira', or skill documentation references without explicit repo context",
+                ],
+            },
+        }
+        output_schema: dict[str, Any] = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "has_github_context": {"type": "boolean"},
+                "reason": {"type": "string"},
+            },
+            "required": ["has_github_context", "reason"],
+        }
+        prompt = (
+            "Classify whether this project has explicit GitHub repository context.\n"
+            "Return JSON matching schema.\n"
+            "Set has_github_context=true only for explicit GitHub repository/domain references.\n"
+            "Do not treat generic mentions of GitHub in skill docs as context.\n\n"
+            f"Input:\n{json.dumps(llm_payload, ensure_ascii=True)}\n"
+        )
+        try:
+            parsed = run_structured_codex_prompt(
+                prompt=prompt,
+                output_schema=output_schema,
+                workspace_id=None,
+                session_key="project-github-context-classifier",
+                mcp_servers=[],
+            )
+            return bool(parsed.get("has_github_context"))
+        except Exception:
+            return False
+
+    @classmethod
+    def _project_has_repo_context(
+        cls,
+        *,
+        project_description: str,
+        project_external_refs: Any,
+        project_rules: list[ProjectRuleModel],
+    ) -> bool:
+        parsed_refs = cls._parse_json_list(project_external_refs)
+        normalized_refs = sorted(
+            (
+                {
+                    "url": str(ref.get("url") or "").strip(),
+                    "title": str(ref.get("title") or "").strip(),
+                }
+                for ref in parsed_refs
+                if isinstance(ref, dict)
+            ),
+            key=lambda item: (item.get("url", "").lower(), item.get("title", "").lower()),
+        )
+        normalized_rules = sorted(
+            (
+                {
+                    "title": str(rule.title or "").strip(),
+                    "body": str(rule.body or "").strip(),
+                }
+                for rule in project_rules
+            ),
+            key=lambda item: (item.get("title", "").lower(), item.get("body", "").lower()),
+        )
+
+        description_blob = str(project_description or "").strip()
+        rules_blob = "\n".join(f"{item.get('title') or ''}\n{item.get('body') or ''}" for item in normalized_rules).strip()
+        refs_blob = "\n".join(f"{item.get('url') or ''} {item.get('title') or ''}" for item in normalized_refs).strip()
+        combined_blob = f"{description_blob}\n{rules_blob}\n{refs_blob}".strip().lower()
+        for ref in normalized_refs:
+            url = str(ref.get("url") or "").strip().lower()
+            if not url:
+                continue
+            if any(host in url for host in ("github.com", "gitlab.com", "bitbucket.org")):
+                return True
+            if "/home/app/workspace/" in url or url.startswith("file://"):
+                return True
+            if url.endswith(".git") and "://" in url:
+                return True
+        if "/home/app/workspace/" in combined_blob:
+            return True
+        if not any(token in combined_blob for token in ("repo", "repository", "git", "branch", "commit", "workspace")):
+            return False
+
+        llm_payload = {
+            "project_description": description_blob,
+            "project_external_refs": normalized_refs[:40],
+            "project_rules": [
+                {
+                    "title": str(rule.get("title") or ""),
+                    "body": str(rule.get("body") or "")[:8000],
+                }
+                for rule in normalized_rules[:40]
+            ],
+            "decision_policy": {
+                "true_only_when": [
+                    "explicit repository context exists (local repo path, remote URL, repository identifier, or concrete branch/commit metadata tied to a repository)",
+                ],
+                "false_when": [
+                    "generic process mentions of git/github/repository without concrete project-owned repository context",
+                ],
+            },
+        }
+        output_schema: dict[str, Any] = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "has_repo_context": {"type": "boolean"},
+                "reason": {"type": "string"},
+            },
+            "required": ["has_repo_context", "reason"],
+        }
+        payload_hash = hashlib.sha256(json.dumps(llm_payload, ensure_ascii=True, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        prompt = (
+            "Classify whether this project has explicit repository context for delivery verification.\n"
+            "Return JSON matching schema.\n"
+            "Set has_repo_context=true only when concrete repository metadata exists in project-owned content.\n\n"
+            f"Input:\n{json.dumps(llm_payload, ensure_ascii=True)}\n"
+        )
+        try:
+            parsed = run_structured_codex_prompt(
+                prompt=prompt,
+                output_schema=output_schema,
+                workspace_id=None,
+                session_key=f"project-repo-context-classifier:{payload_hash}",
+                mcp_servers=[],
+                use_cache=True,
+            )
+            return bool(parsed.get("has_repo_context"))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _project_has_team_mode_enabled(*, db, workspace_id: str, project_id: str) -> bool:
+        row = db.execute(
+            select(ProjectSkill.id).where(
+                ProjectSkill.workspace_id == workspace_id,
+                ProjectSkill.project_id == project_id,
+                ProjectSkill.skill_key == "team_mode",
+                ProjectSkill.enabled == True,  # noqa: E712
+                ProjectSkill.is_deleted == False,  # noqa: E712
+            )
+        ).scalar_one_or_none()
+        return row is not None
+
+    @staticmethod
+    def _open_developer_tasks(*, db, project_id: str) -> list[dict[str, str]]:
+        rows = db.execute(
+            select(Task.id, Task.title, Task.status)
+            .join(
+                ProjectMember,
+                (ProjectMember.workspace_id == Task.workspace_id)
+                & (ProjectMember.project_id == Task.project_id)
+                & (ProjectMember.user_id == Task.assignee_id),
+            )
+            .where(
+                Task.project_id == project_id,
+                Task.is_deleted == False,  # noqa: E712
+                Task.archived == False,  # noqa: E712
+                Task.status != "Done",
+                ProjectMember.role == "DeveloperAgent",
+            )
+            .order_by(Task.created_at.asc())
+        ).all()
+        return [
+            {
+                "task_id": str(task_id or "").strip(),
+                "title": str(title or "").strip(),
+                "status": str(status or "").strip(),
+            }
+            for task_id, title, status in rows
+            if str(task_id or "").strip()
+        ]
+
+    def _enforce_team_mode_done_transition(
+        self,
+        *,
+        db,
+        state,
+        assignee_role: str,
+        auth_token: str | None,
+    ) -> None:
+        project_id = str(state.project_id or "").strip()
+        workspace_id = str(state.workspace_id or "").strip()
+        if not project_id or not workspace_id:
+            return
+        if not self._project_has_team_mode_enabled(db=db, workspace_id=workspace_id, project_id=project_id):
+            return
+        open_dev_tasks = self._open_developer_tasks(db=db, project_id=project_id)
+        if assignee_role == "QAAgent":
+            delivery = self.verify_delivery_workflow(
+                project_id=project_id,
+                workspace_id=workspace_id,
+                auth_token=auth_token,
+            )
+            required_checks = [
+                "repo_context_present",
+                "git_contract_ok",
+                "dev_tasks_have_commit_evidence",
+                "dev_tasks_have_unique_commit_evidence",
+                "qa_has_verifiable_artifacts",
+            ]
+            failing = [check for check in required_checks if not bool((delivery.get("checks") or {}).get(check))]
+            if open_dev_tasks:
+                failing.append("dev_tasks_all_done")
+            if failing:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "QA Done transition blocked by Team Mode closeout guards. "
+                        f"failed_checks={failing}; "
+                        f"open_dev_tasks={[item['task_id'] for item in open_dev_tasks]}"
+                    ),
+                )
+            return
+        if assignee_role == "TeamLeadAgent" and open_dev_tasks:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Lead Done transition blocked: open Dev tasks remain. "
+                    f"open_dev_tasks={[item['task_id'] for item in open_dev_tasks]}"
+                ),
+            )
 
     def verify_team_mode_workflow(
         self,
@@ -1900,7 +2213,8 @@ class AgentTaskService:
                     ProjectSkill.is_deleted == False,  # noqa: E712
                 )
             ).scalars().all()
-        tasks = list(tasks_payload.get("items") or [])
+            tasks = list(tasks_payload.get("items") or [])
+            self._enrich_tasks_with_automation_state(db=db, tasks=tasks)
         gate_policy, gate_policy_source = self._parse_gate_policy_rule(project_rules=project_rules)
         team_mode_enabled = any(
             str(getattr(skill, "skill_key", "") or "").strip() == "team_mode"
@@ -1996,8 +2310,8 @@ class AgentTaskService:
                     ProjectSkill.is_deleted == False,  # noqa: E712
                 )
             ).scalars().all()
-
-        tasks = list(tasks_payload.get("items") or [])
+            tasks = list(tasks_payload.get("items") or [])
+            self._enrich_tasks_with_automation_state(db=db, tasks=tasks)
         notes_by_task: dict[str, list[Note]] = {}
         for note in notes:
             task_id = str(note.task_id or "").strip()
@@ -2038,7 +2352,7 @@ class AgentTaskService:
             has_deploy_artifact_text=self._has_deploy_artifact_text,
             resolve_deploy_target_from_artifacts=self._resolve_deploy_target_from_artifacts,
             run_runtime_deploy_health_check_fn=self._run_runtime_deploy_health_check,
-            project_has_github_context=self._project_has_github_context,
+            project_has_repo_context=self._project_has_repo_context,
         )
         verification["active"] = delivery_active
         verification["checks"] = dict(verification.get("checks") or {})
@@ -3561,6 +3875,12 @@ class AgentTaskService:
                         )
                     ).scalar_one_or_none()
                     assignee_role = str(getattr(member, "role", "") or "").strip()
+                self._enforce_team_mode_done_transition(
+                    db=db,
+                    state=state,
+                    assignee_role=assignee_role,
+                    auth_token=auth_token,
+                )
                 if assignee_role == "TeamLeadAgent":
                     team_mode_verification = self.verify_team_mode_workflow(
                         project_id=str(state.project_id),
@@ -3616,6 +3936,12 @@ class AgentTaskService:
                     )
                 ).scalar_one_or_none()
                 assignee_role = str(getattr(member, "role", "") or "").strip()
+            self._enforce_team_mode_done_transition(
+                db=db,
+                state=state,
+                assignee_role=assignee_role,
+                auth_token=auth_token,
+            )
             if assignee_role == "TeamLeadAgent":
                 team_mode_verification = self.verify_team_mode_workflow(
                     project_id=str(state.project_id),

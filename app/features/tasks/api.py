@@ -296,11 +296,21 @@ def task_activity(task_id: str, db: Session = Depends(get_db), user: User = Depe
     ensure_project_access(db, task.workspace_id, task.project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     logs = db.execute(select(ActivityLog).where(ActivityLog.task_id == task_id).order_by(ActivityLog.created_at.desc()).limit(200)).scalars().all()
     out = []
+    seen_activity_keys: set[str] = set()
     for l in logs:
         details = json.loads(l.details or "{}")
+        details_map = details if isinstance(details, dict) else {}
+        event_key = str(details_map.get("_event_key") or "").strip()
+        created_at_iso = to_iso_utc(l.created_at)
+        dedupe_key = event_key or (
+            f"{l.action}|{json.dumps(details_map, sort_keys=True, ensure_ascii=True)}|{created_at_iso}"
+        )
+        if dedupe_key in seen_activity_keys:
+            continue
+        seen_activity_keys.add(dedupe_key)
         if isinstance(details, dict):
             details.pop("_event_key", None)
-        out.append({"id": l.id, "action": l.action, "actor_id": l.actor_id, "details": details, "created_at": to_iso_utc(l.created_at)})
+        out.append({"id": l.id, "action": l.action, "actor_id": l.actor_id, "details": details, "created_at": created_at_iso})
     return out
 
 

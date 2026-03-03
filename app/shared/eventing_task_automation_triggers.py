@@ -235,10 +235,6 @@ def emit_task_automation_triggers_for_event(
     if env.aggregate_type != "Task" or env.event_type not in _STATUS_TRANSITION_EVENTS:
         return
 
-    actor_id = _normalize_optional_id((env.metadata or {}).get("actor_id"))
-    if actor_id == AGENT_SYSTEM_USER_ID:
-        return
-
     source_task_id = _normalize_optional_id(env.aggregate_id)
     if not source_task_id:
         return

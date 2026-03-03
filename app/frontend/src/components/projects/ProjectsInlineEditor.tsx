@@ -355,67 +355,197 @@ export function ProjectsInlineEditor({
     ]
   }, [eventStormingOverview?.component_counts])
   const projectGatesSnapshot = projectGatesQuery.data
-  const teamFailedChecks = projectGatesSnapshot?.team_mode?.required_failed_checks ?? []
-  const deliveryFailedChecks = projectGatesSnapshot?.delivery?.required_failed_checks ?? []
-  const teamRequiredChecks = projectGatesSnapshot?.team_mode?.required_checks ?? []
-  const deliveryRequiredChecks = projectGatesSnapshot?.delivery?.required_checks ?? []
-  const teamChecks = projectGatesSnapshot?.team_mode?.checks ?? {}
-  const deliveryChecks = projectGatesSnapshot?.delivery?.checks ?? {}
-  const gatePolicyPayload = (projectGatesSnapshot?.delivery?.gate_policy || projectGatesSnapshot?.team_mode?.gate_policy) as
-    | Record<string, unknown>
-    | undefined
-  const gatePolicyAvailableChecks = React.useMemo(() => {
-    const available = gatePolicyPayload?.available_checks
-    if (!available || typeof available !== 'object') return { team_mode: {}, delivery: {} } as Record<string, Record<string, string>>
-    const scopeMap = available as Record<string, unknown>
-    const teamMode = scopeMap.team_mode
-    const delivery = scopeMap.delivery
-    const toDescriptionMap = (value: unknown) => {
-      if (!value || typeof value !== 'object') return {} as Record<string, string>
-      const mapped = value as Record<string, unknown>
-      const out: Record<string, string> = {}
-      for (const [key, raw] of Object.entries(mapped)) {
-        const normalizedKey = String(key || '').trim()
-        if (!normalizedKey) continue
-        const normalizedDescription = String(raw || '').trim()
-        if (!normalizedDescription) continue
-        out[normalizedKey] = normalizedDescription
+  const gateScopeEntries = React.useMemo<
+    Array<{
+      scopeKey: string
+      scopeTitle: string
+      checks: Record<string, boolean | string | number | null>
+      requiredChecks: string[]
+      failedChecks: string[]
+      checkDescriptions: Record<string, string>
+      availableChecks: Array<{ id: string; description?: string }>
+      gatePolicySource: string
+      gatePolicy?: Record<string, unknown>
+    }>
+  >(() => {
+    if (!projectGatesSnapshot || typeof projectGatesSnapshot !== 'object') return []
+    const payload = projectGatesSnapshot as Record<string, unknown>
+    const catalogRaw =
+      payload.catalog && typeof payload.catalog === 'object'
+        ? (payload.catalog as Record<string, unknown>)
+        : ({} as Record<string, unknown>)
+
+    const scopeKeys = Object.keys(payload).filter(
+      (key) => !['project_id', 'catalog', 'ok'].includes(String(key || '').trim().toLowerCase())
+    )
+    return scopeKeys
+      .map((scopeKey) => {
+        const scopeRaw = payload[scopeKey]
+        if (!scopeRaw || typeof scopeRaw !== 'object') return null
+        const scope = scopeRaw as Record<string, unknown>
+        const checksRaw = scope.checks
+        const checks =
+          checksRaw && typeof checksRaw === 'object'
+            ? (checksRaw as Record<string, boolean | string | number | null>)
+            : ({} as Record<string, boolean | string | number | null>)
+        if (Object.keys(checks).length === 0) return null
+
+        const requiredChecks = Array.isArray(scope.required_checks)
+          ? scope.required_checks.map((item) => String(item || '').trim()).filter(Boolean)
+          : []
+        const failedChecks = Array.isArray(scope.required_failed_checks)
+          ? scope.required_failed_checks.map((item) => String(item || '').trim()).filter(Boolean)
+          : []
+        const baseDescriptions =
+          scope.check_descriptions && typeof scope.check_descriptions === 'object'
+            ? (scope.check_descriptions as Record<string, string>)
+            : {}
+
+        const policyRaw = scope.gate_policy
+        const policy =
+          policyRaw && typeof policyRaw === 'object'
+            ? (policyRaw as Record<string, unknown>)
+            : undefined
+        const policyAvailableRaw =
+          policy?.available_checks && typeof policy.available_checks === 'object'
+            ? (policy.available_checks as Record<string, unknown>)
+            : {}
+        const policyScopeDescriptionsRaw = policyAvailableRaw[scopeKey]
+        const policyScopeDescriptions =
+          policyScopeDescriptionsRaw && typeof policyScopeDescriptionsRaw === 'object'
+            ? (policyScopeDescriptionsRaw as Record<string, unknown>)
+            : {}
+        const policyDescriptions: Record<string, string> = {}
+        for (const [key, value] of Object.entries(policyScopeDescriptions)) {
+          const id = String(key || '').trim()
+          const description = String(value || '').trim()
+          if (!id || !description) continue
+          policyDescriptions[id] = description
+        }
+        const checkDescriptions = {
+          ...baseDescriptions,
+          ...policyDescriptions,
+        }
+
+        const catalogForScopeRaw = catalogRaw[scopeKey]
+        const catalogForScope = Array.isArray(catalogForScopeRaw)
+          ? (catalogForScopeRaw as Array<{ id: string; description?: string }>)
+          : []
+        const availableChecks = catalogForScope.length
+          ? catalogForScope
+          : (Array.isArray(scope.available_checks) ? scope.available_checks : [])
+              .map((id) => ({ id: String(id || '').trim() }))
+              .filter((item) => Boolean(item.id))
+
+        const scopeTitle = scopeKey
+          .split('_')
+          .map((token) => (token ? token.charAt(0).toUpperCase() + token.slice(1) : token))
+          .join(' ')
+
+        return {
+          scopeKey,
+          scopeTitle,
+          checks,
+          requiredChecks,
+          failedChecks,
+          checkDescriptions,
+          availableChecks,
+          gatePolicySource: String(scope.gate_policy_source || '').trim() || 'default',
+          gatePolicy: policy,
+        }
+      })
+      .filter((item): item is NonNullable<typeof item> => Boolean(item))
+  }, [projectGatesSnapshot])
+  const gatePolicyPayload = React.useMemo(() => {
+    for (const scope of gateScopeEntries) {
+      if (scope.gatePolicy && Object.keys(scope.gatePolicy).length > 0) return scope.gatePolicy
+    }
+    return undefined
+  }, [gateScopeEntries])
+  const runtimeScopeMap = React.useMemo(() => {
+    const map = new Map<string, (typeof gateScopeEntries)[number]>()
+    for (const scope of gateScopeEntries) map.set(scope.scopeKey, scope)
+    return map
+  }, [gateScopeEntries])
+  const gateConfigScopes = React.useMemo<
+    Array<{
+      scopeKey: string
+      scopeTitle: string
+      requiredChecks: string[]
+      availableDescriptions: Record<string, string>
+      runtimeScope?: (typeof gateScopeEntries)[number]
+    }>
+  >(() => {
+    const toTitle = (scopeKey: string) =>
+      scopeKey
+        .split('_')
+        .map((token) => (token ? token.charAt(0).toUpperCase() + token.slice(1) : token))
+        .join(' ')
+
+    const requiredChecksRaw =
+      gatePolicyPayload &&
+      typeof gatePolicyPayload.required_checks === 'object' &&
+      gatePolicyPayload.required_checks !== null
+        ? (gatePolicyPayload.required_checks as Record<string, unknown>)
+        : {}
+    const availableChecksRaw =
+      gatePolicyPayload &&
+      typeof gatePolicyPayload.available_checks === 'object' &&
+      gatePolicyPayload.available_checks !== null
+        ? (gatePolicyPayload.available_checks as Record<string, unknown>)
+        : {}
+    const scopeKeys = Object.keys(requiredChecksRaw)
+    if (scopeKeys.length === 0) {
+      return gateScopeEntries.map((scope) => ({
+        scopeKey: scope.scopeKey,
+        scopeTitle: scope.scopeTitle,
+        requiredChecks: scope.requiredChecks,
+        availableDescriptions: scope.checkDescriptions,
+        runtimeScope: scope,
+      }))
+    }
+    return scopeKeys.map((scopeKey) => {
+      const requiredChecks = Array.isArray(requiredChecksRaw[scopeKey])
+        ? (requiredChecksRaw[scopeKey] as unknown[])
+            .map((item) => String(item || '').trim())
+            .filter(Boolean)
+        : []
+      const availableScopeRaw = availableChecksRaw[scopeKey]
+      const availableDescriptions: Record<string, string> = {}
+      if (availableScopeRaw && typeof availableScopeRaw === 'object') {
+        for (const [checkId, descriptionRaw] of Object.entries(availableScopeRaw as Record<string, unknown>)) {
+          const normalizedId = String(checkId || '').trim()
+          const normalizedDescription = String(descriptionRaw || '').trim()
+          if (!normalizedId || !normalizedDescription) continue
+          availableDescriptions[normalizedId] = normalizedDescription
+        }
       }
-      return out
-    }
-    return {
-      team_mode: toDescriptionMap(teamMode),
-      delivery: toDescriptionMap(delivery),
-    }
-  }, [gatePolicyPayload])
-  const teamCheckDescriptions = React.useMemo(
-    () => ({
-      ...(projectGatesSnapshot?.team_mode?.check_descriptions ?? {}),
-      ...(gatePolicyAvailableChecks.team_mode ?? {}),
-    }),
-    [projectGatesSnapshot?.team_mode?.check_descriptions, gatePolicyAvailableChecks.team_mode]
-  )
-  const deliveryCheckDescriptions = React.useMemo(
-    () => ({
-      ...(projectGatesSnapshot?.delivery?.check_descriptions ?? {}),
-      ...(gatePolicyAvailableChecks.delivery ?? {}),
-    }),
-    [projectGatesSnapshot?.delivery?.check_descriptions, gatePolicyAvailableChecks.delivery]
-  )
-  const teamAvailableChecks = React.useMemo<Array<{ id: string; description?: string }>>(() => {
-    const fromCatalog = projectGatesSnapshot?.catalog?.team_mode ?? []
-    if (fromCatalog.length > 0) return fromCatalog
-    return (projectGatesSnapshot?.team_mode?.available_checks ?? []).map((id) => ({ id }))
-  }, [projectGatesSnapshot?.catalog?.team_mode, projectGatesSnapshot?.team_mode?.available_checks])
-  const deliveryAvailableChecks = React.useMemo<Array<{ id: string; description?: string }>>(() => {
-    const fromCatalog = projectGatesSnapshot?.catalog?.delivery ?? []
-    if (fromCatalog.length > 0) return fromCatalog
-    return (projectGatesSnapshot?.delivery?.available_checks ?? []).map((id) => ({ id }))
-  }, [projectGatesSnapshot?.catalog?.delivery, projectGatesSnapshot?.delivery?.available_checks])
-  const gatePolicySource = String(
-    projectGatesSnapshot?.delivery?.gate_policy_source ||
-      projectGatesSnapshot?.team_mode?.gate_policy_source ||
-      'default'
+      return {
+        scopeKey,
+        scopeTitle: toTitle(scopeKey),
+        requiredChecks,
+        availableDescriptions,
+        runtimeScope: runtimeScopeMap.get(scopeKey),
+      }
+    })
+  }, [gatePolicyPayload, gateScopeEntries, runtimeScopeMap])
+  const gateSummary = React.useMemo(() => {
+    return gateConfigScopes.reduce(
+      (acc, scope) => {
+        const runtimeFailed = new Set(scope.runtimeScope?.failedChecks ?? [])
+        for (const checkId of scope.requiredChecks) {
+          if (runtimeFailed.has(checkId)) acc.failed += 1
+        }
+        if (!scope.runtimeScope) acc.unknown += scope.requiredChecks.length
+        acc.required += scope.requiredChecks.length
+        return acc
+      },
+      { failed: 0, required: 0, unknown: 0 }
+    )
+  }, [gateConfigScopes])
+  const gatePolicySource = React.useMemo(
+    () => gateScopeEntries.find((scope) => scope.gatePolicySource !== 'default')?.gatePolicySource || 'default',
+    [gateScopeEntries]
   )
   const gatePolicyRuleId = React.useMemo(() => {
     const match = /^project_rule:([a-f0-9-]{36})$/i.exec(gatePolicySource)
@@ -1004,10 +1134,10 @@ export function ProjectsInlineEditor({
                   </span>
                 </div>
                 <div className="gates-panel-summary">
-                  <span className="badge">Team failed: {teamFailedChecks.length}</span>
-                  <span className="badge">Delivery failed: {deliveryFailedChecks.length}</span>
-                  <span className="badge">Team required: {teamRequiredChecks.length}</span>
-                  <span className="badge">Delivery required: {deliveryRequiredChecks.length}</span>
+                  <span className="badge">Scopes: {gateConfigScopes.length}</span>
+                  <span className="badge">Failed required: {gateSummary.failed}</span>
+                  <span className="badge">Required checks: {gateSummary.required}</span>
+                  {gateSummary.unknown > 0 ? <span className="badge">Unknown: {gateSummary.unknown}</span> : null}
                 </div>
               </div>
               {projectGatesQuery.isLoading ? (
@@ -1016,83 +1146,85 @@ export function ProjectsInlineEditor({
                 <div className="notice">Gate verification unavailable.</div>
               ) : projectGatesSnapshot ? (
                 <>
+                  {gatePolicyPayload ? (
+                    <div className="gates-scope-grid" style={{ marginBottom: 10 }}>
+                      <section className="gates-scope-card">
+                        <div className="gates-scope-head">
+                          <strong>Policy Configuration</strong>
+                        </div>
+                        <div className="gates-check-list">
+                          {Object.entries(gatePolicyPayload)
+                            .filter(([key]) => !['required_checks', 'available_checks'].includes(String(key || '').trim().toLowerCase()))
+                            .map(([key, value]) => (
+                              <div key={`policy-config-${key}`} className="gates-check-row">
+                                <div className="gates-check-copy">
+                                  <code>{String(key)}</code>
+                                  <span className="meta">{typeof value === 'string' ? value : JSON.stringify(value, null, 2)}</span>
+                                </div>
+                              </div>
+                            ))}
+                        </div>
+                      </section>
+                    </div>
+                  ) : null}
                   <div className="gates-scope-grid">
-                    <section className="gates-scope-card">
-                      <div className="gates-scope-head">
-                        <strong>Team Mode</strong>
-                        <span className={`badge ${teamFailedChecks.length === 0 ? 'status-done' : 'status-blocked'}`}>
-                          {teamFailedChecks.length === 0 ? 'Ready' : `${teamFailedChecks.length} failed`}
-                        </span>
-                      </div>
-                      <div className="gates-check-list">
-                        {(teamRequiredChecks.length === 0 ? Object.keys(teamChecks) : teamRequiredChecks).map((item) => {
-                          const failed = teamFailedChecks.includes(item)
-                          const description = String(teamCheckDescriptions[item] || '').trim()
-                          return (
-                            <div key={`team-check-${item}`} className="gates-check-row">
-                              <div className="gates-check-copy">
-                                <code>{item}</code>
-                                {description ? <span className="meta">{description}</span> : null}
-                              </div>
-                              <span className={`badge ${failed ? 'status-blocked' : 'status-done'}`}>
-                                {failed ? 'FAIL' : 'PASS'}
-                              </span>
-                            </div>
-                          )
-                        })}
-                      </div>
-                      <div className="meta">Available checks ({teamAvailableChecks.length})</div>
-                      <div className="gates-available-tags">
-                        {teamAvailableChecks.map((item) => {
-                          const checkId = String(item.id || '').trim()
-                          if (!checkId) return null
-                          const description = String(teamCheckDescriptions[checkId] || item.description || '').trim()
-                          return (
-                            <span key={`team-available-${checkId}`} className="gates-available-tag" title={description || undefined}>
-                              {checkId}
+                    {gateConfigScopes.map((scope) => (
+                      <section key={`scope-card-${scope.scopeKey}`} className="gates-scope-card">
+                        <div className="gates-scope-head">
+                          <strong>{scope.scopeTitle}</strong>
+                          {scope.runtimeScope ? (
+                            <span className={`badge ${scope.runtimeScope.failedChecks.length === 0 ? 'status-done' : 'status-blocked'}`}>
+                              {scope.runtimeScope.failedChecks.length === 0
+                                ? 'Ready'
+                                : `${scope.runtimeScope.failedChecks.length} failed`}
                             </span>
-                          )
-                        })}
-                      </div>
-                    </section>
-                    <section className="gates-scope-card">
-                      <div className="gates-scope-head">
-                        <strong>Delivery</strong>
-                        <span className={`badge ${deliveryFailedChecks.length === 0 ? 'status-done' : 'status-blocked'}`}>
-                          {deliveryFailedChecks.length === 0 ? 'Ready' : `${deliveryFailedChecks.length} failed`}
-                        </span>
-                      </div>
-                      <div className="gates-check-list">
-                        {(deliveryRequiredChecks.length === 0 ? Object.keys(deliveryChecks) : deliveryRequiredChecks).map((item) => {
-                          const failed = deliveryFailedChecks.includes(item)
-                          const description = String(deliveryCheckDescriptions[item] || '').trim()
-                          return (
-                            <div key={`delivery-check-${item}`} className="gates-check-row">
-                              <div className="gates-check-copy">
-                                <code>{item}</code>
-                                {description ? <span className="meta">{description}</span> : null}
+                          ) : (
+                            <span className="badge">Not evaluated</span>
+                          )}
+                        </div>
+                        <div className="gates-check-list">
+                          {scope.requiredChecks.map((checkId) => {
+                            const runtimeFailed = scope.runtimeScope?.failedChecks ?? []
+                            const failed = runtimeFailed.includes(checkId)
+                            const description = String(
+                              scope.runtimeScope?.checkDescriptions[checkId] ||
+                                scope.availableDescriptions[checkId] ||
+                                ''
+                            ).trim()
+                            const hasRuntimeResult = Boolean(scope.runtimeScope)
+                            return (
+                              <div key={`${scope.scopeKey}-check-${checkId}`} className="gates-check-row">
+                                <div className="gates-check-copy">
+                                  <code>{checkId}</code>
+                                  {description ? <span className="meta">{description}</span> : null}
+                                </div>
+                                {hasRuntimeResult ? (
+                                  <span className={`badge ${failed ? 'status-blocked' : 'status-done'}`}>
+                                    {failed ? 'FAIL' : 'PASS'}
+                                  </span>
+                                ) : (
+                                  <span className="badge">N/A</span>
+                                )}
                               </div>
-                              <span className={`badge ${failed ? 'status-blocked' : 'status-done'}`}>
-                                {failed ? 'FAIL' : 'PASS'}
+                            )
+                          })}
+                        </div>
+                        <div className="meta">Available checks ({Object.keys(scope.availableDescriptions).length})</div>
+                        <div className="gates-available-tags">
+                          {Object.keys(scope.availableDescriptions).map((checkId) => {
+                            if (!checkId) return null
+                            const description = String(
+                              scope.runtimeScope?.checkDescriptions[checkId] || scope.availableDescriptions[checkId] || ''
+                            ).trim()
+                            return (
+                              <span key={`${scope.scopeKey}-available-${checkId}`} className="gates-available-tag" title={description || undefined}>
+                                {checkId}
                               </span>
-                            </div>
-                          )
-                        })}
-                      </div>
-                      <div className="meta">Available checks ({deliveryAvailableChecks.length})</div>
-                      <div className="gates-available-tags">
-                        {deliveryAvailableChecks.map((item) => {
-                          const checkId = String(item.id || '').trim()
-                          if (!checkId) return null
-                          const description = String(deliveryCheckDescriptions[checkId] || item.description || '').trim()
-                          return (
-                            <span key={`delivery-available-${checkId}`} className="gates-available-tag" title={description || undefined}>
-                              {checkId}
-                            </span>
-                          )
-                        })}
-                      </div>
-                    </section>
+                            )
+                          })}
+                        </div>
+                      </section>
+                    ))}
                   </div>
                   <div className="gates-policy-row">
                     <span className="badge">Policy source</span>

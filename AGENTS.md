@@ -21,3 +21,8 @@
 - For app-stack resets/redeploys, operate only on app compose files and scope commands with `-p constructos-app`.
 - Never run unscoped compose cleanup commands that could target both stacks.
 - If a command would impact protected control-plane services, stop and ask for explicit confirmation first.
+
+## Decision Policy (No Heuristic Fallback)
+- For ambiguous product/workflow classification decisions (for example capability/context inference), do not use keyword heuristics as a fallback path.
+- Prefer LLM-based structured classification with explicit output schema.
+- If LLM classification is unavailable or fails, return a safe negative/unknown outcome instead of guessing.

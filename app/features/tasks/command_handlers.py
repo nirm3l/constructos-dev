@@ -1146,4 +1146,11 @@ class RequestAutomationRunHandler:
             task_id=self.task_id,
         )
         self.ctx.db.commit()
+        try:
+            from features.agents.runner import wake_automation_runner
+
+            wake_automation_runner()
+        except Exception:
+            # Wake-up is best-effort; polling loop remains fallback.
+            pass
         return {"ok": True, "task_id": self.task_id, "automation_state": "queued", "requested_at": requested_at}

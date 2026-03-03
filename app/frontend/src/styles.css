@@ -7349,6 +7349,46 @@ textarea:disabled {
   background: color-mix(in srgb, var(--surface), var(--surface-alt) 24%);
 }
 
+.automation-history {
+  display: grid;
+  gap: 8px;
+  max-height: 280px;
+  overflow: auto;
+  margin-bottom: 8px;
+}
+
+.automation-history-item {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 14%);
+  padding: 8px 10px;
+}
+
+.automation-history-item.completed {
+  border-color: color-mix(in srgb, #2e8b57 55%, var(--line));
+}
+
+.automation-history-item.failed {
+  border-color: color-mix(in srgb, #b22222 55%, var(--line));
+}
+
+.automation-history-item.requested,
+.automation-history-item.started {
+  border-color: color-mix(in srgb, #c28b2c 45%, var(--line));
+}
+
+.automation-history-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.automation-history-body .markdown {
+  margin: 0;
+}
+
 .codex-progress {
   font-weight: 600;
   animation: codex-pulse 1s ease-in-out infinite;

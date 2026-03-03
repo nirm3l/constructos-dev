@@ -22,6 +22,7 @@ from shared.core import (
 )
 
 from .domain import ProjectRuleAggregate
+from features.agents.gates import DEFAULT_GATE_POLICY, merge_gate_policy_dict
 
 _GATE_POLICY_RULE_TITLES = ("gate policy", "delivery gates", "workflow gates")
 
@@ -52,8 +53,37 @@ def _prettify_gate_policy_body_if_needed(*, title: str, body: str) -> str:
         parsed = json.loads(candidate)
     except Exception:
         return raw_body
+    if not _validate_gate_policy_shape(parsed):
+        raise HTTPException(
+            status_code=422,
+            detail="Gate Policy JSON is invalid: required_checks must be an object with team_mode/delivery arrays when provided.",
+        )
+    parsed = _normalize_gate_policy(parsed)
     pretty = json.dumps(parsed, indent=2, ensure_ascii=False)
     return f"```json\n{pretty}\n```"
+
+
+def _validate_gate_policy_shape(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    required_checks = value.get("required_checks")
+    if required_checks is None:
+        return True
+    if not isinstance(required_checks, dict):
+        return False
+    for scope_name, scope_checks in required_checks.items():
+        if str(scope_name or "").strip() == "":
+            return False
+        if not isinstance(scope_checks, list):
+            return False
+        for check_name in scope_checks:
+            if str(check_name or "").strip() == "":
+                return False
+    return True
+
+
+def _normalize_gate_policy(policy: dict) -> dict:
+    return merge_gate_policy_dict(dict(DEFAULT_GATE_POLICY), dict(policy or {}))
 
 
 def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> None:

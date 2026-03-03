@@ -655,16 +655,13 @@ export type ProjectGateCatalogItem = {
 
 export type ProjectGatesVerifyResponse = {
   project_id: string
-  team_mode: ProjectGateVerificationResult
-  delivery: ProjectGateVerificationResult & {
+  team_mode?: ProjectGateVerificationResult
+  delivery?: ProjectGateVerificationResult & {
     runtime_deploy_health?: Record<string, unknown>
   }
-  catalog?: {
-    team_mode?: ProjectGateCatalogItem[]
-    delivery?: ProjectGateCatalogItem[]
-  }
+  catalog?: Record<string, ProjectGateCatalogItem[] | undefined>
   ok: boolean
-}
+} & Record<string, unknown>
 
 export type EventStormingLinkReviewResult = {
   project_id: string

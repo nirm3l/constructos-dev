@@ -7,6 +7,8 @@ import mimetypes
 import os
 import queue
 import re
+from copy import deepcopy
+from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import threading
@@ -19,21 +21,51 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from shared.core import AgentChatRun, User, ensure_project_access, ensure_role, get_command_id, get_current_user, get_db
-from shared.models import ActivityLog, ChatMessage, ChatSession, CommandExecution, Note, Project
+from shared.core import (
+    AgentChatRun,
+    ProjectRuleCreate,
+    User,
+    ensure_project_access,
+    ensure_role,
+    get_command_id,
+    get_current_user,
+    get_db,
+)
+from shared.core import TaskAutomationRun, append_event
+from shared.models import (
+    ActivityLog,
+    ChatMessage,
+    ChatSession,
+    CommandExecution,
+    Note,
+    Project,
+    ProjectMember,
+    ProjectRule,
+    ProjectSkill,
+    Task,
+)
 from shared.settings import (
     ATTACHMENTS_DIR,
     AGENT_CHAT_HISTORY_COMPACT_THRESHOLD,
     AGENT_CHAT_HISTORY_RECENT_TAIL,
 )
+from shared.typed_notifications import append_notification_created_event
 
 from .executor import AutomationOutcome, execute_task_automation, execute_task_automation_stream
+from .codex_mcp_adapter import run_structured_codex_prompt
 from .mcp_registry import normalize_chat_mcp_servers as normalize_chat_mcp_servers_registry
 from features.chat.application import ChatApplicationService
+from features.tasks.application import TaskApplicationService
+from features.rules.application import ProjectRuleApplicationService
 from features.chat.command_handlers import (
     AppendAssistantMessagePayload,
     AppendUserMessagePayload,
     LinkMessageResourcePayload,
+)
+from features.agents.gates import (
+    DEFAULT_GATE_POLICY,
+    DEFAULT_REQUIRED_DELIVERY_CHECKS,
+    parse_gate_policy_rule,
 )
 
 router = APIRouter()
@@ -87,12 +119,32 @@ _MAX_CHAT_ATTACHMENT_CHARS_TOTAL = 36_000
 _MAX_CROSS_SESSION_DELTA_MESSAGES = 8
 _MAX_CROSS_SESSION_DELTA_CHARS_PER_MESSAGE = 220
 _ALLOWED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+_PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "shared" / "prompt_templates" / "codex"
 _CREATED_RESOURCE_ACTIONS: dict[str, str] = {
     "TaskCreated": "task",
     "NoteCreated": "note",
     "SpecificationCreated": "specification",
     "ProjectRuleCreated": "project_rule",
 }
+
+
+@lru_cache(maxsize=16)
+def _load_prompt_template(name: str) -> str:
+    template_path = _PROMPT_TEMPLATES_DIR / name
+    try:
+        return template_path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Prompt template file not found: {template_path}") from exc
+
+
+def _render_prompt_template(name: str, values: dict[str, object]) -> str:
+    rendered_values = {key: str(value) for key, value in values.items()}
+    template = _load_prompt_template(name)
+    try:
+        return template.format(**rendered_values)
+    except KeyError as exc:
+        missing_key = str(exc).strip("'")
+        raise RuntimeError(f"Missing prompt template value '{missing_key}' for {name}") from exc
 
 
 def _normalize_reasoning_effort(value: object) -> str | None:
@@ -941,78 +993,334 @@ def _parse_compact_command(instruction: str) -> tuple[bool, str]:
     return True, remainder
 
 
-_EXECUTION_INTENT_MANDATE = (
-    "Execution intent detected for this project.\n"
-    "Required behavior:\n"
-    "- Treat this as implementation execution kickoff/resume, not Team Mode setup.\n"
-    "- Do not create/recreate project and do not re-attach/re-apply skills if already configured.\n"
-    "- First read current tasks and run verify_team_mode_workflow + verify_delivery_workflow.\n"
-    "- If verification passes, execute existing workflow tasks and persist progress.\n"
-    "- Only patch missing prerequisites when verification fails.\n"
-    "- Completion contract for execution kickoff:\n"
-    "  1) Implement the planned scope for active Dev tasks.\n"
-    "  2) Run tests/validation and include concrete results.\n"
-    "  3) Update task statuses based on real outcomes.\n"
-    "  4) Provide artifact evidence per task (patch/commit/log/link).\n"
-    "- If any item cannot be completed, return BLOCKED with concrete missing prerequisite(s).\n"
-    "- Report concrete mutations and final persisted task state."
-)
-
-
-def _is_execution_intent_instruction(instruction: str) -> bool:
-    text = str(instruction or "").strip().lower()
-    if not text:
-        return False
-    compact = " ".join(text.split())
-    implementation_tokens = (
-        "implementation",
-        "implement",
-        "implementing",
-        "impleentation",
-        "implementacij",
+def _classify_chat_instruction_intents(
+    *,
+    instruction: str,
+    workspace_id: str,
+    project_id: str | None,
+    session_id: str | None,
+) -> dict[str, bool]:
+    normalized_instruction = str(instruction or "").strip()
+    if not normalized_instruction:
+        return {
+            "execution_intent": False,
+            "execution_kickoff_intent": False,
+            "project_creation_intent": False,
+        }
+    payload = {
+        "instruction": normalized_instruction,
+        "workspace_id": str(workspace_id or "").strip() or None,
+        "project_id": str(project_id or "").strip() or None,
+    }
+    output_schema: dict[str, object] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "execution_intent": {"type": "boolean"},
+            "execution_kickoff_intent": {"type": "boolean"},
+            "project_creation_intent": {"type": "boolean"},
+            "reason": {"type": "string"},
+        },
+        "required": [
+            "execution_intent",
+            "execution_kickoff_intent",
+            "project_creation_intent",
+            "reason",
+        ],
+    }
+    classifier_prompt = _render_prompt_template(
+        "chat_intent_classifier.md",
+        {
+            "payload_json": json.dumps(payload, ensure_ascii=True),
+        },
     )
-    kickoff_tokens = (
-        "begin",
-        "start",
-        "continue",
-        "resume",
-        "kreni",
-        "pokreni",
-        "nastavi",
-    )
-    has_implementation = any(token in compact for token in implementation_tokens)
-    has_kickoff = any(token in compact for token in kickoff_tokens)
-    if not (has_implementation and has_kickoff):
-        return False
-    if "create project" in compact or "kreiraj projekat" in compact:
-        return False
-    return True
+    try:
+        parsed = run_structured_codex_prompt(
+            prompt=classifier_prompt,
+            output_schema=output_schema,
+            workspace_id=str(workspace_id or "").strip() or None,
+            session_key=(
+                f"chat-intent-classifier:{str(workspace_id or '').strip()}:{str(project_id or '').strip()}:{hashlib.sha256(normalized_instruction.encode('utf-8')).hexdigest()[:16]}"
+            ),
+            mcp_servers=[],
+            use_cache=True,
+        )
+    except Exception:
+        return {
+            "execution_intent": False,
+            "execution_kickoff_intent": False,
+            "project_creation_intent": False,
+        }
+    return {
+        "execution_intent": bool(parsed.get("execution_intent")),
+        "execution_kickoff_intent": bool(parsed.get("execution_kickoff_intent")),
+        "project_creation_intent": bool(parsed.get("project_creation_intent")),
+    }
 
 
-def _is_project_creation_intent_instruction(instruction: str) -> bool:
-    text = str(instruction or "").strip().lower()
-    if not text:
-        return False
-    compact = " ".join(text.split())
-    creation_markers = (
-        "create project",
-        "new project",
-        "setup project",
-        "set up project",
-        "kreiraj projek",
-        "napravi projek",
+def _build_execution_intent_mandate() -> str:
+    return _render_prompt_template("chat_execution_intent_mandate.md", {})
+
+
+def _build_chat_history_compaction_instruction(*, history_lines: str) -> str:
+    return _render_prompt_template(
+        "chat_history_compaction_instruction.md",
+        {"history_lines": history_lines},
     )
-    return any(marker in compact for marker in creation_markers)
+
+
+def _build_chat_history_compaction_description(*, workspace_id: str, project_id: str | None) -> str:
+    return _render_prompt_template(
+        "chat_history_compaction_description.md",
+        {
+            "workspace_id": workspace_id,
+            "project_id": project_id or "",
+        },
+    )
+
+
+def _build_execution_evidence_contract_comment(*, existing_comment: str | None, details: str) -> str:
+    existing = str(existing_comment or "").strip()
+    body = _render_prompt_template(
+        "chat_execution_evidence_contract_comment.md",
+        {"details": details},
+    )
+    if existing:
+        return f"{existing}\n\n{body}"
+    return body
+
+
+def _build_chat_timeout_comment() -> str:
+    return _render_prompt_template("chat_timeout_comment.md", {}).strip()
+
+
+def _build_chat_error_summary() -> str:
+    return _render_prompt_template("chat_error_summary.md", {}).strip()
+
+
+def _build_team_lead_kickoff_instruction(*, project_id: str, requester_user_id: str) -> str:
+    return _render_prompt_template(
+        "team_mode_kickoff_instruction.md",
+        {
+            "project_id": project_id,
+            "requester_user_id": requester_user_id,
+        },
+    )
+
+
+def _promote_gate_policy_to_execution_mode_if_needed(
+    *,
+    db: Session,
+    user: User,
+    workspace_id: str,
+    project_id: str,
+    command_id: str | None,
+) -> None:
+    project_rules = db.execute(
+        select(ProjectRule).where(
+            ProjectRule.workspace_id == workspace_id,
+            ProjectRule.project_id == project_id,
+            ProjectRule.is_deleted == False,  # noqa: E712
+        )
+    ).scalars().all()
+    gate_policy, _source = parse_gate_policy_rule(project_rules=project_rules)
+    if not isinstance(gate_policy, dict):
+        gate_policy = deepcopy(DEFAULT_GATE_POLICY)
+    required_checks_raw = gate_policy.get("required_checks")
+    if not isinstance(required_checks_raw, dict):
+        required_checks_raw = {}
+    delivery_required = required_checks_raw.get("delivery")
+    delivery_checks = (
+        [str(item or "").strip() for item in delivery_required if str(item or "").strip()]
+        if isinstance(delivery_required, list)
+        else []
+    )
+    mode_value = str(gate_policy.get("mode") or "").strip().lower()
+    needs_update = mode_value != "execution" or not delivery_checks
+    if not needs_update:
+        return
+
+    updated_policy = deepcopy(gate_policy)
+    updated_policy["mode"] = "execution"
+    updated_required_checks = updated_policy.get("required_checks")
+    if not isinstance(updated_required_checks, dict):
+        updated_required_checks = {}
+    if not delivery_checks:
+        updated_required_checks["delivery"] = list(DEFAULT_REQUIRED_DELIVERY_CHECKS)
+    updated_policy["required_checks"] = updated_required_checks
+    body = json.dumps(updated_policy, ensure_ascii=False, indent=2)
+
+    ProjectRuleApplicationService(
+        db,
+        user,
+        command_id=_command_id_with_suffix(command_id, "gate-policy-execution"),
+    ).create_project_rule(
+        ProjectRuleCreate(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            title="Gate Policy",
+            body=body,
+        )
+    )
+
+
+def _maybe_dispatch_team_mode_kickoff(
+    *,
+    db: Session,
+    user: User,
+    workspace_id: str,
+    project_id: str | None,
+    intent_flags: dict[str, bool] | None,
+    allow_mutations: bool,
+    command_id: str | None,
+) -> dict[str, object] | None:
+    normalized_project_id = str(project_id or "").strip()
+    if not allow_mutations or not normalized_project_id:
+        return None
+    flags = intent_flags or {}
+    kickoff_intent = bool(flags.get("execution_kickoff_intent"))
+    execution_intent = bool(flags.get("execution_intent"))
+    project_creation_intent = bool(flags.get("project_creation_intent"))
+    # Team Mode execution should route through Team Lead orchestration.
+    # We still avoid kickoff during project-creation requests.
+    should_dispatch_kickoff = kickoff_intent or (execution_intent and not project_creation_intent)
+    if not should_dispatch_kickoff:
+        return None
+
+    team_mode_skill = db.execute(
+        select(ProjectSkill.id).where(
+            ProjectSkill.workspace_id == workspace_id,
+            ProjectSkill.project_id == normalized_project_id,
+            ProjectSkill.skill_key == "team_mode",
+            ProjectSkill.is_deleted == False,  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    if team_mode_skill is None:
+        return None
+
+    _promote_gate_policy_to_execution_mode_if_needed(
+        db=db,
+        user=user,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        command_id=command_id,
+    )
+
+    lead_tasks = db.execute(
+        select(Task)
+        .join(
+            ProjectMember,
+            (ProjectMember.workspace_id == Task.workspace_id)
+            & (ProjectMember.project_id == Task.project_id)
+            & (ProjectMember.user_id == Task.assignee_id),
+        )
+        .where(
+            Task.workspace_id == workspace_id,
+            Task.project_id == normalized_project_id,
+            Task.is_deleted == False,  # noqa: E712
+            Task.archived == False,  # noqa: E712
+            Task.status != "Done",
+            ProjectMember.role == "TeamLeadAgent",
+        )
+        .order_by(Task.created_at.asc())
+    ).scalars().all()
+
+    kickoff_instruction = _build_team_lead_kickoff_instruction(
+        project_id=normalized_project_id,
+        requester_user_id=str(user.id),
+    )
+    queued_task_ids: list[str] = []
+    failed: list[dict[str, str]] = []
+    for task in lead_tasks:
+        task_id = str(task.id or "").strip()
+        if not task_id:
+            continue
+        task_command_id = _command_id_with_suffix(command_id, f"kickoff-{task_id[:8]}")
+        try:
+            TaskApplicationService(db, user, command_id=task_command_id).request_automation_run(
+                task_id,
+                TaskAutomationRun(instruction=kickoff_instruction),
+            )
+            queued_task_ids.append(task_id)
+        except HTTPException as exc:
+            failed.append({"task_id": task_id, "error": str(exc.detail or "").strip() or f"HTTP {exc.status_code}"})
+        except Exception as exc:  # pragma: no cover - defensive safety
+            failed.append({"task_id": task_id, "error": str(exc)[:200]})
+
+    message = (
+        f"Team Mode kickoff dispatched for project {normalized_project_id}: "
+        f"{len(queued_task_ids)} lead task(s) queued."
+    )
+    if failed:
+        message += f" {len(failed)} queue attempt(s) failed."
+    dedupe_key = _command_id_with_suffix(command_id, "team-mode-kickoff-notify")
+    append_notification_created_event(
+        db,
+        append_event_fn=append_event,
+        user_id=str(user.id),
+        message=message,
+        actor_id=str(user.id),
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        notification_type="ManualMessage",
+        severity="warning" if failed else "info",
+        dedupe_key=dedupe_key,
+        payload={
+            "kind": "team_mode_kickoff",
+            "queued_task_ids": queued_task_ids,
+            "failed": failed,
+        },
+        source_event="agents.chat.kickoff_dispatch",
+    )
+    db.commit()
+
+    if not lead_tasks:
+        return {
+            "ok": False,
+            "action": "comment",
+            "summary": "Team Mode kickoff blocked: no active Team Lead tasks found.",
+            "comment": "Create/assign at least one active Lead task and retry kickoff.",
+            "kickoff_dispatched": False,
+            "queued_task_ids": [],
+            "failed": [],
+        }
+    summary = "Team Mode kickoff dispatched to Team Lead automation."
+    comment = f"Queued lead tasks: {len(queued_task_ids)}."
+    if failed:
+        comment = f"{comment} Failed queues: {len(failed)}."
+    return {
+        "ok": len(queued_task_ids) > 0 and not failed,
+        "action": "comment",
+        "summary": summary,
+        "comment": comment,
+        "kickoff_dispatched": True,
+        "queued_task_ids": queued_task_ids,
+        "failed": failed,
+    }
 
 
 def _resolve_effective_chat_project_id(
     *,
     db: Session,
     workspace_id: str,
+    user_id: str,
     project_id: str | None,
+    session_id: str | None,
     instruction: str,
 ) -> str | None:
     normalized_project_id = str(project_id or "").strip()
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_project_id and normalized_session_id:
+        session = db.execute(
+            select(ChatSession).where(
+                ChatSession.workspace_id == workspace_id,
+                ChatSession.session_key == normalized_session_id,
+                ChatSession.created_by == str(user_id),
+            )
+        ).scalar_one_or_none()
+        session_project_id = str(getattr(session, "project_id", "") or "").strip()
+        if session_project_id:
+            normalized_project_id = session_project_id
     if not normalized_project_id:
         return None
     exists = db.execute(
@@ -1024,7 +1332,13 @@ def _resolve_effective_chat_project_id(
     ).scalar_one_or_none()
     if exists is not None:
         return normalized_project_id
-    if _is_project_creation_intent_instruction(instruction):
+    intent_flags = _classify_chat_instruction_intents(
+        instruction=instruction,
+        workspace_id=workspace_id,
+        project_id=None,
+        session_id=None,
+    )
+    if bool(intent_flags.get("project_creation_intent")):
         return None
     raise HTTPException(status_code=404, detail="Project not found")
 
@@ -1116,7 +1430,7 @@ def _apply_execution_evidence_contract(
     db: Session,
     user_id: str,
     project_id: str | None,
-    instruction: str,
+    execution_intent: bool,
     allow_mutations: bool,
     run_started_at: datetime,
     summary: str,
@@ -1125,7 +1439,7 @@ def _apply_execution_evidence_contract(
     normalized_project_id = str(project_id or "").strip()
     if not normalized_project_id or not allow_mutations:
         return True, summary, comment
-    if not _is_execution_intent_instruction(instruction):
+    if not bool(execution_intent):
         return True, summary, comment
     violations = _collect_execution_evidence_violations(
         db=db,
@@ -1140,11 +1454,9 @@ def _apply_execution_evidence_contract(
         for item in violations
     )
     contract_summary = "Execution incomplete: task evidence is missing."
-    contract_comment = (
-        (str(comment or "").strip() + "\n\n" if str(comment or "").strip() else "")
-        + "Execution evidence contract violation.\n"
-        + "Add linked note evidence and/or external evidence in `external_refs` (URL or commit id) before/with execution status transitions.\n"
-        + details
+    contract_comment = _build_execution_evidence_contract_comment(
+        existing_comment=comment,
+        details=details,
     )
     return False, contract_summary, contract_comment
 
@@ -1159,18 +1471,16 @@ def _compact_history_with_codex(
     if not history:
         return None
     lines = [f"{item['role'].upper()}: {item['content']}" for item in history[-80:]]
-    compact_instruction = (
-        "Compact this conversation history for continuation in one concise summary.\n"
-        "Include: current goals, decisions made, constraints, and open items.\n"
-        "Do not call tools and do not mutate any data.\n"
-        "Write plain text summary only."
-        "\n\nConversation history:\n"
-        + "\n".join(lines)
+    compact_instruction = _build_chat_history_compaction_instruction(
+        history_lines="\n".join(lines),
     )
     outcome = execute_task_automation(
         task_id="",
         title="General Codex Chat History Compaction",
-        description=f"Compacting chat context. workspace_id={workspace_id}; project_id={project_id or ''}",
+        description=_build_chat_history_compaction_description(
+            workspace_id=workspace_id,
+            project_id=project_id,
+        ),
         status="To do",
         instruction=compact_instruction,
         workspace_id=workspace_id,
@@ -1227,7 +1537,7 @@ def _prepare_chat_instruction(
     user: User,
     resume_codex_session_id: str | None = None,
     resume_last_succeeded: bool | None = None,
-) -> tuple[str, list[dict[str, str]], bool, list[dict[str, object]], list[dict[str, object]]]:
+) -> tuple[str, list[dict[str, str]], bool, list[dict[str, object]], list[dict[str, object]], dict[str, bool]]:
     raw_instruction = (payload.instruction or "").strip()
     force_compact, instruction = _parse_compact_command(raw_instruction)
     if not raw_instruction:
@@ -1276,7 +1586,11 @@ def _prepare_chat_instruction(
             summary = "Chat history compacted."
         else:
             summary = "Chat history compaction skipped."
-        return summary, compacted_history, True, [], []
+        return summary, compacted_history, True, [], [], {
+            "execution_intent": False,
+            "execution_kickoff_intent": False,
+            "project_creation_intent": False,
+        }
     if not instruction:
         raise HTTPException(status_code=400, detail="instruction is required")
 
@@ -1288,12 +1602,23 @@ def _prepare_chat_instruction(
     instruction_with_context = instruction
     if attachment_context:
         instruction_with_context = f"{instruction}\n\n{attachment_context}"
+    intent_flags = {
+        "execution_intent": False,
+        "execution_kickoff_intent": False,
+        "project_creation_intent": False,
+    }
     if (
         payload.allow_mutations
         and str(payload.project_id or "").strip()
-        and _is_execution_intent_instruction(instruction)
     ):
-        instruction_with_context = f"{instruction_with_context}\n\n{_EXECUTION_INTENT_MANDATE}"
+        intent_flags = _classify_chat_instruction_intents(
+            instruction=instruction,
+            workspace_id=payload.workspace_id,
+            project_id=payload.project_id,
+            session_id=payload.session_id,
+        )
+        if bool(intent_flags.get("execution_intent")):
+            instruction_with_context = f"{instruction_with_context}\n\n{_build_execution_intent_mandate()}"
     if resume_active:
         # For resumed Codex threads, avoid resending stitched history on every turn.
         # Instead, inject only small fresh deltas from other project chat sessions so stale
@@ -1313,7 +1638,14 @@ def _prepare_chat_instruction(
         )
     else:
         effective_instruction = _compose_chat_instruction(instruction_with_context, compacted_history)
-    return effective_instruction, compacted_history, False, prepared_attachment_refs, prepared_session_attachment_refs
+    return (
+        effective_instruction,
+        compacted_history,
+        False,
+        prepared_attachment_refs,
+        prepared_session_attachment_refs,
+        intent_flags,
+    )
 
 
 @router.post("/api/agents/chat")
@@ -1324,15 +1656,17 @@ def agent_chat(
     command_id: str | None = Depends(get_command_id),
 ):
     ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    session_id = _resolve_chat_session_id(payload.session_id)
     effective_project_id = _resolve_effective_chat_project_id(
         db=db,
         workspace_id=payload.workspace_id,
+        user_id=user.id,
         project_id=payload.project_id,
+        session_id=session_id,
         instruction=payload.instruction,
     )
     model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
     mcp_servers = _normalize_chat_mcp_servers(payload.mcp_servers)
-    session_id = _resolve_chat_session_id(payload.session_id)
     existing_codex_session_id, resume_last_succeeded = _load_chat_session_codex_state(
         db=db,
         workspace_id=payload.workspace_id,
@@ -1345,6 +1679,7 @@ def agent_chat(
         compact_only,
         prepared_attachment_refs,
         prepared_session_attachment_refs,
+        intent_flags,
     ) = _prepare_chat_instruction(
         payload=payload_with_session,
         db=db,
@@ -1401,6 +1736,43 @@ def agent_chat(
             "resume_fallback_used": False,
         }
 
+    kickoff_result = _maybe_dispatch_team_mode_kickoff(
+        db=db,
+        user=user,
+        workspace_id=payload.workspace_id,
+        project_id=effective_project_id,
+        intent_flags=intent_flags,
+        allow_mutations=bool(payload.allow_mutations),
+        command_id=command_id,
+    )
+    if kickoff_result is not None:
+        summary = str(kickoff_result.get("summary") or "").strip() or "Team Mode kickoff dispatched."
+        comment = str(kickoff_result.get("comment") or "").strip() or None
+        _persist_assistant_message_with_links(
+            db=db,
+            user=user,
+            command_id=command_id,
+            workspace_id=payload.workspace_id,
+            project_id=effective_project_id,
+            session_id=session_id,
+            mcp_servers=mcp_servers,
+            content=_assistant_text(summary, comment),
+            usage={},
+            codex_session_id=None,
+        )
+        return {
+            "ok": bool(kickoff_result.get("ok")),
+            "action": "comment",
+            "summary": summary,
+            "comment": comment,
+            "session_id": session_id,
+            "codex_session_id": None,
+            "usage": None,
+            "resume_attempted": False,
+            "resume_succeeded": False,
+            "resume_fallback_used": False,
+        }
+
     description = f"General Codex chat context. workspace_id={payload.workspace_id}; project_id={effective_project_id or ''}"
     run_started_at = datetime.now(timezone.utc)
     try:
@@ -1425,7 +1797,7 @@ def agent_chat(
             db=db,
             user_id=user.id,
             project_id=effective_project_id,
-            instruction=payload.instruction,
+            execution_intent=bool(intent_flags.get("execution_intent")),
             allow_mutations=bool(payload.allow_mutations),
             run_started_at=run_started_at,
             summary=outcome.summary,
@@ -1458,7 +1830,7 @@ def agent_chat(
         }
     except TimeoutError:
         timeout_summary = _chat_timeout_summary()
-        timeout_comment = "Try a narrower request (e.g. one project at a time) or run again."
+        timeout_comment = _build_chat_timeout_comment()
         _persist_assistant_message_with_links(
             db=db,
             user=user,
@@ -1487,7 +1859,7 @@ def agent_chat(
     except Exception as exc:
         # Avoid bubbling internal exceptions to the client as 500 errors.
         msg = str(exc)
-        error_summary = "Codex failed to complete the request."
+        error_summary = _build_chat_error_summary()
         error_comment = msg[:500]
         _persist_assistant_message_with_links(
             db=db,
@@ -1524,15 +1896,17 @@ def agent_chat_stream(
     command_id: str | None = Depends(get_command_id),
 ):
     ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    session_id = _resolve_chat_session_id(payload.session_id)
     effective_project_id = _resolve_effective_chat_project_id(
         db=db,
         workspace_id=payload.workspace_id,
+        user_id=user.id,
         project_id=payload.project_id,
+        session_id=session_id,
         instruction=payload.instruction,
     )
     model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
     mcp_servers = _normalize_chat_mcp_servers(payload.mcp_servers)
-    session_id = _resolve_chat_session_id(payload.session_id)
     existing_codex_session_id, resume_last_succeeded = _load_chat_session_codex_state(
         db=db,
         workspace_id=payload.workspace_id,
@@ -1545,6 +1919,7 @@ def agent_chat_stream(
         compact_only,
         prepared_attachment_refs,
         prepared_session_attachment_refs,
+        intent_flags,
     ) = _prepare_chat_instruction(
         payload=payload_with_session,
         db=db,
@@ -1612,6 +1987,48 @@ def agent_chat_stream(
 
         return StreamingResponse(_compact_stream(), media_type="application/x-ndjson", headers=stream_headers)
 
+    kickoff_result = _maybe_dispatch_team_mode_kickoff(
+        db=db,
+        user=user,
+        workspace_id=payload.workspace_id,
+        project_id=effective_project_id,
+        intent_flags=intent_flags,
+        allow_mutations=bool(payload.allow_mutations),
+        command_id=command_id,
+    )
+    if kickoff_result is not None:
+        summary = str(kickoff_result.get("summary") or "").strip() or "Team Mode kickoff dispatched."
+        comment = str(kickoff_result.get("comment") or "").strip() or None
+        _persist_assistant_message_with_links(
+            db=db,
+            user=user,
+            command_id=command_id,
+            workspace_id=payload.workspace_id,
+            project_id=effective_project_id,
+            session_id=session_id,
+            mcp_servers=mcp_servers,
+            content=_assistant_text(summary, comment),
+            usage={},
+            codex_session_id=None,
+        )
+        kickoff_response = {
+            "ok": bool(kickoff_result.get("ok")),
+            "action": "comment",
+            "summary": summary,
+            "comment": comment,
+            "session_id": session_id,
+            "codex_session_id": None,
+            "usage": None,
+            "resume_attempted": False,
+            "resume_succeeded": False,
+            "resume_fallback_used": False,
+        }
+
+        def _kickoff_stream():
+            yield json.dumps({"type": "final", "response": kickoff_response}, ensure_ascii=True) + "\n"
+
+        return StreamingResponse(_kickoff_stream(), media_type="application/x-ndjson", headers=stream_headers)
+
     description = f"General Codex chat context. workspace_id={payload.workspace_id}; project_id={effective_project_id or ''}"
     run_started_at = datetime.now(timezone.utc)
 
@@ -1659,7 +2076,7 @@ def agent_chat_stream(
                     "ok": False,
                     "action": "comment",
                     "summary": _chat_timeout_summary(),
-                    "comment": "Try a narrower request (e.g. one project at a time) or run again.",
+                    "comment": _build_chat_timeout_comment(),
                     "session_id": session_id,
                     "codex_session_id": None,
                     "usage": None,
@@ -1669,11 +2086,15 @@ def agent_chat_stream(
                 }
                 event_queue.put({"type": "final", "response": timeout_payload})
             except Exception as exc:
+                logger.exception("Agent chat stream worker failed.")
+                error_detail = str(exc).strip()
+                if not error_detail:
+                    error_detail = type(exc).__name__
                 error_payload = {
                     "ok": False,
                     "action": "comment",
-                    "summary": "Codex failed to complete the request.",
-                    "comment": str(exc)[:500],
+                    "summary": _build_chat_error_summary(),
+                    "comment": error_detail[:500],
                     "session_id": session_id,
                     "codex_session_id": None,
                     "usage": None,
@@ -1703,7 +2124,7 @@ def agent_chat_stream(
                         db=db,
                         user_id=user.id,
                         project_id=effective_project_id,
-                        instruction=payload.instruction,
+                        execution_intent=bool(intent_flags.get("execution_intent")),
                         allow_mutations=bool(payload.allow_mutations),
                         run_started_at=run_started_at,
                         summary=str(response.get("summary") or ""),
@@ -1713,7 +2134,13 @@ def agent_chat_stream(
                     response["summary"] = final_summary
                     response["comment"] = final_comment
                     assistant_content = "".join(streamed_assistant_text_parts).strip()
-                    if not assistant_content:
+                    if assistant_content and not bool(response.get("ok")):
+                        # Persist explicit failure context even when partial streamed text exists.
+                        assistant_content = _assistant_text(
+                            assistant_content,
+                            _assistant_text(final_summary, str(final_comment or "")),
+                        )
+                    elif not assistant_content:
                         assistant_content = _assistant_text(
                             final_summary,
                             str(final_comment or ""),

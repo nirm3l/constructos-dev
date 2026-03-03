@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from functools import lru_cache
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import OrderedDict
 
 from features.agents.mcp_registry import build_selected_mcp_config_text, normalize_chat_mcp_servers
 from shared.settings import (
@@ -27,8 +29,11 @@ _DEFAULT_CODEX_HOME_ROOT = "/tmp/codex-home"
 _DEFAULT_CODEX_WORKDIR = "/home/app/workspace"
 _DEFAULT_CODEX_HOME_RETENTION_DAYS = 14
 _DEFAULT_CODEX_HOME_CLEANUP_INTERVAL_SECONDS = 3600
+_DEFAULT_STRUCTURED_PROMPT_CACHE_MAX_ENTRIES = 256
 _PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "shared" / "prompt_templates" / "codex"
 _ALLOWED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+_STRUCTURED_PROMPT_CACHE_LOCK = threading.Lock()
+_STRUCTURED_PROMPT_CACHE: OrderedDict[str, tuple[float, dict[str, object], dict[str, int] | None]] = OrderedDict()
 
 
 def _strip_mcp_server_tables(config_text: str) -> str:
@@ -223,6 +228,71 @@ def _parse_env_int(name: str, default: int, *, minimum: int = 0) -> int:
     return parsed
 
 
+def _stable_json_dumps(value: object) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        return json.dumps(str(value), ensure_ascii=True)
+
+
+def _structured_prompt_cache_max_entries() -> int:
+    return _parse_env_int(
+        "AGENT_STRUCTURED_PROMPT_CACHE_MAX_ENTRIES",
+        _DEFAULT_STRUCTURED_PROMPT_CACHE_MAX_ENTRIES,
+        minimum=1,
+    )
+
+
+def _build_structured_prompt_cache_key(
+    *,
+    prompt: str,
+    output_schema: dict[str, object],
+    model: str | None,
+    reasoning_effort: str | None,
+    workspace_id: str | None,
+    session_key: str | None,
+    mcp_servers: list[str],
+) -> str:
+    material = {
+        "prompt": str(prompt or ""),
+        "output_schema": output_schema,
+        "model": str(model or "").strip() or None,
+        "reasoning_effort": str(reasoning_effort or "").strip() or None,
+        "workspace_id": str(workspace_id or "").strip() or None,
+        "session_key": str(session_key or "").strip() or None,
+        "mcp_servers": list(mcp_servers),
+    }
+    digest = hashlib.sha256(_stable_json_dumps(material).encode("utf-8")).hexdigest()
+    return f"structured:{digest}"
+
+
+def _structured_prompt_cache_get(cache_key: str) -> tuple[dict[str, object], dict[str, int] | None] | None:
+    with _STRUCTURED_PROMPT_CACHE_LOCK:
+        row = _STRUCTURED_PROMPT_CACHE.get(cache_key)
+        if row is None:
+            return None
+        _, payload, usage = row
+        _STRUCTURED_PROMPT_CACHE.move_to_end(cache_key)
+        return dict(payload), dict(usage) if isinstance(usage, dict) else None
+
+
+def _structured_prompt_cache_put(
+    cache_key: str,
+    *,
+    payload: dict[str, object],
+    usage: dict[str, int] | None,
+) -> None:
+    now = time.time()
+    cached_payload = dict(payload)
+    cached_usage = dict(usage) if isinstance(usage, dict) else None
+    max_entries = _structured_prompt_cache_max_entries()
+    with _STRUCTURED_PROMPT_CACHE_LOCK:
+        _STRUCTURED_PROMPT_CACHE[cache_key] = (now, cached_payload, cached_usage)
+        _STRUCTURED_PROMPT_CACHE.move_to_end(cache_key)
+        while len(_STRUCTURED_PROMPT_CACHE) > max_entries:
+            _STRUCTURED_PROMPT_CACHE.popitem(last=False)
+
+
 def _iter_persistent_codex_session_dirs(root: Path) -> list[Path]:
     workspace_root = root / "workspace"
     if not workspace_root.exists() or not workspace_root.is_dir():
@@ -388,6 +458,10 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     project_id = ctx.get("project_id") or ""
     actor_user_id = str(ctx.get("actor_user_id") or "").strip()
     actor_project_role = str(ctx.get("actor_project_role") or "").strip() or "_(not available)_"
+    is_team_mode_kickoff = (
+        actor_project_role == "TeamLeadAgent"
+        and str(instruction or "").strip().casefold().startswith("team mode kickoff for project ")
+    )
     project_name = ctx.get("project_name") or ""
     project_description = str(ctx.get("project_description") or "")
     project_rules = ctx.get("project_rules") or []
@@ -395,6 +469,8 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     graph_context_markdown = str(ctx.get("graph_context_markdown") or "").strip()
     graph_evidence_json = str(ctx.get("graph_evidence_json") or "").strip()
     graph_summary_markdown = str(ctx.get("graph_summary_markdown") or "").strip()
+    gate_policy_json = str(ctx.get("gate_policy_json") or "").strip()
+    gate_policy_required_checks = str(ctx.get("gate_policy_required_checks") or "").strip()
     trigger_task_id = str(ctx.get("trigger_task_id") or "").strip() or "_(not available)_"
     trigger_from_status = str(ctx.get("trigger_from_status") or "").strip() or "_(not available)_"
     trigger_to_status = str(ctx.get("trigger_to_status") or "").strip() or "_(not available)_"
@@ -412,6 +488,8 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     graph_md = graph_context_markdown or "_(knowledge graph unavailable)_"
     graph_evidence = graph_evidence_json or "[]"
     graph_summary = graph_summary_markdown or "_(summary unavailable)_"
+    gate_policy_md = gate_policy_json or "_(Gate Policy unavailable)_"
+    gate_required_checks_md = gate_policy_required_checks or "_(none)_"
     rules_md_lines: list[str] = []
     for item in project_rules:
         if not isinstance(item, dict):
@@ -470,6 +548,11 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         "- Return action=complete only if this task should be completed; otherwise return action=comment.\n"
         "- summary must state what was actually done.\n"
         "- comment should be concise and optional; use null when no extra runner comment is needed.\n"
+        + (
+            "- This is a Team Mode kickoff task: return action=comment only and keep task status unchanged (do not complete).\n"
+            if is_team_mode_kickoff
+            else ""
+        )
         if structured_response
         else "- Respond directly to the user with clear, actionable text.\n"
     )
@@ -491,6 +574,8 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
             "soul_md": soul_md,
             "rules_md": rules_md,
             "skills_md": skills_md,
+            "gate_policy_md": gate_policy_md,
+            "gate_required_checks_md": gate_required_checks_md,
             "graph_md": graph_md,
             "graph_evidence": graph_evidence,
             "graph_summary": graph_summary,
@@ -576,7 +661,13 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     project_id = ctx.get("project_id") or ""
     actor_user_id = str(ctx.get("actor_user_id") or "").strip()
     actor_project_role = str(ctx.get("actor_project_role") or "").strip() or "_(not available)_"
+    is_team_mode_kickoff = (
+        actor_project_role == "TeamLeadAgent"
+        and str(instruction or "").strip().casefold().startswith("team mode kickoff for project ")
+    )
     project_name = ctx.get("project_name") or ""
+    gate_policy_json = str(ctx.get("gate_policy_json") or "").strip()
+    gate_policy_required_checks = str(ctx.get("gate_policy_required_checks") or "").strip()
     trigger_task_id = str(ctx.get("trigger_task_id") or "").strip() or "_(not available)_"
     trigger_from_status = str(ctx.get("trigger_from_status") or "").strip() or "_(not available)_"
     trigger_to_status = str(ctx.get("trigger_to_status") or "").strip() or "_(not available)_"
@@ -611,6 +702,11 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         "- Return action=complete only if this task should be completed; otherwise return action=comment.\n"
         "- summary must state what was actually done.\n"
         "- comment should be concise and optional; use null when no extra runner comment is needed.\n"
+        + (
+            "- This is a Team Mode kickoff task: return action=comment only and keep task status unchanged (do not complete).\n"
+            if is_team_mode_kickoff
+            else ""
+        )
         if structured_response
         else "- Respond directly to the user with clear, actionable text.\n"
     )
@@ -628,6 +724,8 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
             "actor_project_role": actor_project_role,
             "project_name": project_name,
             "instruction": instruction,
+            "gate_policy_md": gate_policy_json or "_(Gate Policy unavailable)_",
+            "gate_required_checks_md": gate_policy_required_checks or "_(none)_",
             "status_change_trigger_context": status_change_trigger_context,
             "fresh_memory_snapshot": fresh_memory_snapshot,
             "task_guidance": task_guidance,
@@ -1297,6 +1395,7 @@ def run_structured_codex_prompt(
     timeout_seconds: float | None = None,
     mcp_servers: list[str] | None = None,
     preferred_thread_id: str | None = None,
+    use_cache: bool = True,
 ) -> dict[str, object]:
     parsed_payload, _ = run_structured_codex_prompt_with_usage(
         prompt=prompt,
@@ -1308,6 +1407,7 @@ def run_structured_codex_prompt(
         timeout_seconds=timeout_seconds,
         mcp_servers=mcp_servers,
         preferred_thread_id=preferred_thread_id,
+        use_cache=use_cache,
     )
     return parsed_payload
 
@@ -1323,6 +1423,7 @@ def run_structured_codex_prompt_with_usage(
     timeout_seconds: float | None = None,
     mcp_servers: list[str] | None = None,
     preferred_thread_id: str | None = None,
+    use_cache: bool = True,
 ) -> tuple[dict[str, object], dict[str, int] | None]:
     normalized_workspace_id = str(workspace_id or "").strip() or None
     normalized_session_key = str(session_key or "").strip() or None
@@ -1335,6 +1436,19 @@ def run_structured_codex_prompt_with_usage(
     preferred_reasoning_effort = _normalize_reasoning_effort(reasoning_effort) or _normalize_reasoning_effort(
         AGENT_CODEX_REASONING_EFFORT
     )
+    cache_key = _build_structured_prompt_cache_key(
+        prompt=prompt,
+        output_schema=output_schema,
+        model=preferred_model,
+        reasoning_effort=preferred_reasoning_effort,
+        workspace_id=normalized_workspace_id,
+        session_key=normalized_session_key,
+        mcp_servers=selected_mcp_servers,
+    )
+    if use_cache:
+        cached = _structured_prompt_cache_get(cache_key)
+        if cached is not None:
+            return cached
     runtime_timeout_seconds = _effective_timeout_seconds(
         timeout_seconds,
         fallback_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
@@ -1372,7 +1486,10 @@ def run_structured_codex_prompt_with_usage(
         snippet = str(final_message or "").strip().replace("\n", " ")[:320]
         detail = f"{exc} | response_snippet={snippet}" if snippet else str(exc)
         raise RuntimeError(detail) from exc
-    return {str(key): value for key, value in parsed_generic.items()}, usage
+    normalized_payload = {str(key): value for key, value in parsed_generic.items()}
+    if use_cache:
+        _structured_prompt_cache_put(cache_key, payload=normalized_payload, usage=usage)
+    return normalized_payload, usage
 
 
 def main() -> int:

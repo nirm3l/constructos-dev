@@ -5,6 +5,7 @@ import json
 import os
 import time
 import uuid
+from contextlib import contextmanager
 from importlib import reload
 from pathlib import Path
 
@@ -853,3 +854,116 @@ model = "gpt-5.3-codex-spark"
 
     assert output.count('model_provider = "openai"') >= 1
     assert 'reasoning_effort = "medium"' in output
+
+
+def test_run_structured_prompt_uses_cache_when_input_unchanged(monkeypatch):
+    from features.agents import codex_mcp_adapter as adapter_module
+
+    adapter_module._STRUCTURED_PROMPT_CACHE.clear()
+
+    @contextmanager
+    def _noop_lock(**kwargs):
+        _ = kwargs
+        yield
+
+    @contextmanager
+    def _noop_home_env(**kwargs):
+        _ = kwargs
+        yield {}
+
+    calls = {"count": 0}
+
+    def _fake_runner(**kwargs):
+        _ = kwargs
+        calls["count"] += 1
+        return ('{"ok": true}', {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}, None, False, False)
+
+    monkeypatch.setattr(adapter_module, "_chat_session_run_lock", _noop_lock)
+    monkeypatch.setattr(adapter_module, "_codex_home_env", _noop_home_env)
+    monkeypatch.setattr(adapter_module, "run_codex_home_cleanup_if_due", lambda **_: {"ran": False, "removed": 0, "failures": 0})
+    monkeypatch.setattr(adapter_module, "_run_codex_app_server_with_optional_stream", _fake_runner)
+
+    payload1, usage1 = adapter_module.run_structured_codex_prompt_with_usage(
+        prompt="classify this",
+        output_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+        },
+        workspace_id="ws-1",
+        session_key="session-1",
+        mcp_servers=[],
+    )
+    payload2, usage2 = adapter_module.run_structured_codex_prompt_with_usage(
+        prompt="classify this",
+        output_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+        },
+        workspace_id="ws-1",
+        session_key="session-1",
+        mcp_servers=[],
+    )
+
+    assert calls["count"] == 1
+    assert payload1 == {"ok": True}
+    assert payload2 == {"ok": True}
+    assert usage1 == usage2
+
+
+def test_run_structured_prompt_recomputes_when_input_changes(monkeypatch):
+    from features.agents import codex_mcp_adapter as adapter_module
+
+    adapter_module._STRUCTURED_PROMPT_CACHE.clear()
+
+    @contextmanager
+    def _noop_lock(**kwargs):
+        _ = kwargs
+        yield
+
+    @contextmanager
+    def _noop_home_env(**kwargs):
+        _ = kwargs
+        yield {}
+
+    calls = {"count": 0}
+
+    def _fake_runner(**kwargs):
+        _ = kwargs
+        calls["count"] += 1
+        return ('{"ok": true}', {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}, None, False, False)
+
+    monkeypatch.setattr(adapter_module, "_chat_session_run_lock", _noop_lock)
+    monkeypatch.setattr(adapter_module, "_codex_home_env", _noop_home_env)
+    monkeypatch.setattr(adapter_module, "run_codex_home_cleanup_if_due", lambda **_: {"ran": False, "removed": 0, "failures": 0})
+    monkeypatch.setattr(adapter_module, "_run_codex_app_server_with_optional_stream", _fake_runner)
+
+    adapter_module.run_structured_codex_prompt_with_usage(
+        prompt="classify this",
+        output_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+        },
+        workspace_id="ws-1",
+        session_key="session-1",
+        mcp_servers=[],
+    )
+    adapter_module.run_structured_codex_prompt_with_usage(
+        prompt="classify this changed",
+        output_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+        },
+        workspace_id="ws-1",
+        session_key="session-1",
+        mcp_servers=[],
+    )
+
+    assert calls["count"] == 2

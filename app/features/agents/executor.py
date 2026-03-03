@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
 import threading
@@ -149,6 +150,45 @@ def _load_project_context(
         for item in skills
     ]
     return str(row[0] or "").strip() or None, str(row[1] or ""), normalized_rules, normalized_skills
+
+
+def _extract_gate_policy_context(project_rules: list[dict[str, str]]) -> tuple[str, str]:
+    gate_rule = next(
+        (
+            item
+            for item in project_rules
+            if str(item.get("title") or "").strip().lower() == "gate policy"
+        ),
+        None,
+    )
+    if not isinstance(gate_rule, dict):
+        return "_(Gate Policy not found)_", "_(none)_"
+    raw_body = str(gate_rule.get("body") or "").strip()
+    if not raw_body:
+        return "_(Gate Policy body is empty)_", "_(none)_"
+    body = raw_body
+    fenced_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw_body, flags=re.DOTALL | re.IGNORECASE)
+    if fenced_match:
+        body = str(fenced_match.group(1) or "").strip()
+    try:
+        parsed = json.loads(body)
+    except Exception:
+        return raw_body, "_(required_checks unavailable)_"
+    if not isinstance(parsed, dict):
+        return raw_body, "_(required_checks unavailable)_"
+    gate_policy_json = json.dumps(parsed, ensure_ascii=False, indent=2)
+    required_checks = parsed.get("required_checks")
+    if not isinstance(required_checks, dict):
+        return gate_policy_json, "_(required_checks unavailable)_"
+    lines: list[str] = []
+    for scope, checks in required_checks.items():
+        scope_name = str(scope or "").strip() or "unknown"
+        check_names = [str(item or "").strip() for item in (checks if isinstance(checks, list) else []) if str(item or "").strip()]
+        if not check_names:
+            lines.append(f"- {scope_name}: _(none)_")
+            continue
+        lines.append(f"- {scope_name}: {', '.join(check_names)}")
+    return gate_policy_json, ("\n".join(lines).strip() or "_(none)_")
 
 
 def _resolve_actor_project_role(*, actor_user_id: str | None, project_id: str | None) -> str | None:
@@ -365,6 +405,7 @@ def execute_task_automation(
 
     command = shlex.split(AGENT_CODEX_COMMAND)
     project_name, project_description, project_rules, project_skills = _load_project_context(project_id)
+    gate_policy_json, gate_policy_required_checks = _extract_gate_policy_context(project_rules)
     actor_project_role = _resolve_actor_project_role(actor_user_id=actor_user_id, project_id=project_id)
     context_scope_type = "chat_session" if str(chat_session_id or "").strip() else "task_automation"
     context_scope_id = str(chat_session_id or "").strip() or str(task_id or "").strip() or "general"
@@ -405,6 +446,8 @@ def execute_task_automation(
         "project_description": project_description,
         "project_rules": project_rules,
         "project_skills": project_skills,
+        "gate_policy_json": gate_policy_json,
+        "gate_policy_required_checks": gate_policy_required_checks,
         "graph_context_markdown": graph_context_markdown,
         "graph_evidence_json": graph_evidence_json,
         "graph_summary_markdown": graph_summary_markdown,
@@ -476,6 +519,7 @@ def execute_task_automation_stream(
 
     command = shlex.split(AGENT_CODEX_COMMAND)
     project_name, project_description, project_rules, project_skills = _load_project_context(project_id)
+    gate_policy_json, gate_policy_required_checks = _extract_gate_policy_context(project_rules)
     actor_project_role = _resolve_actor_project_role(actor_user_id=actor_user_id, project_id=project_id)
     context_scope_type = "chat_session" if str(chat_session_id or "").strip() else "task_automation"
     context_scope_id = str(chat_session_id or "").strip() or str(task_id or "").strip() or "general"
@@ -516,6 +560,8 @@ def execute_task_automation_stream(
         "project_description": project_description,
         "project_rules": project_rules,
         "project_skills": project_skills,
+        "gate_policy_json": gate_policy_json,
+        "gate_policy_required_checks": gate_policy_required_checks,
         "graph_context_markdown": graph_context_markdown,
         "graph_evidence_json": graph_evidence_json,
         "graph_summary_markdown": graph_summary_markdown,
