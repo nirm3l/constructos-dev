@@ -39,6 +39,8 @@ export function useTaskEditorState() {
   const [uiInfo, setUiInfo] = React.useState<string | null>(null)
   const [taskEditorError, setTaskEditorError] = React.useState<string | null>(null)
   const [taskEditorHydratedTaskId, setTaskEditorHydratedTaskId] = React.useState<string | null>(null)
+  const [taskEditorBaselineTask, setTaskEditorBaselineTask] = React.useState<any | null>(null)
+  const [taskEditorTouched, setTaskEditorTouched] = React.useState(false)
 
   return {
     editStatus, setEditStatus, editTitle, setEditTitle, editDescription, setEditDescription, editPriority, setEditPriority,
@@ -61,5 +63,7 @@ export function useTaskEditorState() {
     setActivityExpandedIds, activityShowRawDetails, setActivityShowRawDetails, scrollToNewestComment, setScrollToNewestComment,
     uiError, setUiError, uiInfo, setUiInfo, taskEditorError, setTaskEditorError,
     taskEditorHydratedTaskId, setTaskEditorHydratedTaskId,
+    taskEditorBaselineTask, setTaskEditorBaselineTask,
+    taskEditorTouched, setTaskEditorTouched,
   }
 }

@@ -1,13 +1,58 @@
 name: constructos-app
 
+x-codex-config-volume: &codex_config_volume "${CODEX_CONFIG_FILE}:/home/app/.codex/config.toml:ro"
+x-codex-auth-volume: &codex_auth_volume "${CODEX_AUTH_FILE}:/home/app/.codex/auth.json:ro"
+x-codex-home-volume: &codex_home_volume "codex-home-data:/home/app/codex-home"
+x-codex-workspace-volume: &codex_workspace_volume "${AGENT_CODEX_WORKSPACE_MOUNT:-./data/workspace}:/home/app/workspace"
+
+x-agent-common-fixed-env: &agent_common_fixed_env
+  EVENTSTORE_URI: "esdb://kurrentdb:2113?tls=false"
+  AGENT_CODEX_COMMAND: "python -m features.agents.codex_mcp_adapter"
+  AGENT_DOCKER_PROXY_URL: "tcp://docker-socket-proxy:2375"
+  DOCKER_BUILDKIT: "0"
+  COMPOSE_DOCKER_CLI_BUILD: "0"
+  AGENT_DOCKER_SOFT_ISOLATION: "true"
+  AGENT_DOCKER_ALLOWED_PROJECT_PREFIX: "constructos-ws-"
+  MCP_ALLOWED_WORKSPACE_IDS: "10000000-0000-0000-0000-000000000001"
+  KNOWLEDGE_GRAPH_ENABLED: "true"
+  GRAPH_RAG_ENABLED: "true"
+  VECTOR_STORE_ENABLED: "true"
+  CONTEXT_PACK_EVIDENCE_TOP_K: "12"
+  EMBEDDING_PROVIDER: "ollama"
+
+x-agent-common-config-env: &agent_common_config_env
+  DATABASE_URL: "${DATABASE_URL:-postgresql+psycopg://m4tr1x:m4tr1x@postgres:5432/task_management}"
+  APP_VERSION: "${APP_VERSION:-dev}"
+  APP_BUILD: "${APP_BUILD:-}"
+  APP_DEPLOYED_AT_UTC: "${APP_DEPLOYED_AT_UTC:-}"
+  AGENT_CHAT_CONTEXT_LIMIT_TOKENS: "400000"
+  AGENT_CODEX_HOME_ROOT: "/home/app/codex-home"
+  AGENT_CODEX_WORKDIR: "/home/app/workspace"
+  AGENT_CODEX_MODEL: "${AGENT_CODEX_MODEL:-}"
+  AGENT_CODEX_REASONING_EFFORT: "${AGENT_CODEX_REASONING_EFFORT:-}"
+  AGENT_ENABLED_PLUGINS: "${AGENT_ENABLED_PLUGINS:-team_mode}"
+  EVENT_STORMING_CODEX_REASONING_EFFORT: "low"
+  MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:-dev-mcp-token}"
+  GITHUB_PAT: "${GITHUB_PAT:-}"
+  AGENT_DOCKER_PROJECT_NAME: "${AGENT_DOCKER_PROJECT_NAME:-constructos-ws-default}"
+  NEO4J_URI: "bolt://neo4j:7687"
+  NEO4J_USERNAME: "neo4j"
+  NEO4J_PASSWORD: "task-management-neo4j"
+  NEO4J_DATABASE: "neo4j"
+  OLLAMA_BASE_URL: "http://ollama:11434"
+  DEFAULT_EMBEDDING_MODEL: "nomic-embed-text"
+  ALLOWED_EMBEDDING_MODELS: "nomic-embed-text,mxbai-embed-large,embeddinggemma"
+  OLLAMA_EMBED_GPU_ENABLED: "true"
+  LICENSE_SERVER_TOKEN: "${LICENSE_SERVER_TOKEN:-dev-license-token}"
+
 services:
   postgres:
     image: postgres:16-alpine
     container_name: postgres
     environment:
-      POSTGRES_DB: "${POSTGRES_DB:-task_management}"
-      POSTGRES_USER: "${POSTGRES_USER:-m4tr1x}"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-m4tr1x}"
+      POSTGRES_DB: "task_management"
+      POSTGRES_USER: "m4tr1x"
+      POSTGRES_PASSWORD: "m4tr1x"
     ports:
       - "5432:5432"
     healthcheck:
@@ -38,7 +83,7 @@ services:
     image: neo4j:5.26.0
     container_name: neo4j
     environment:
-      NEO4J_AUTH: "${NEO4J_AUTH:-neo4j/task-management-neo4j}"
+      NEO4J_AUTH: "neo4j/task-management-neo4j"
     ports:
       - "7474:7474"
       - "7687:7687"
@@ -68,64 +113,17 @@ services:
       - neo4j
       - mcp-tools
     environment:
-      DATABASE_URL: "${DATABASE_URL:-postgresql+psycopg://m4tr1x:m4tr1x@postgres:5432/task_management}"
-      EVENTSTORE_URI: esdb://kurrentdb:2113?tls=false
-      APP_VERSION: "${APP_VERSION:-dev}"
-      APP_BUILD: "${APP_BUILD:-}"
-      APP_DEPLOYED_AT_UTC: "${APP_DEPLOYED_AT_UTC:-}"
+      <<: [*agent_common_fixed_env, *agent_common_config_env]
       AGENT_RUNNER_ENABLED: "true"
-      AGENT_RUNNER_INTERVAL_SECONDS: "3"
       AGENT_RUNNER_MAX_CONCURRENCY: "3"
       AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS: "true"
-      AGENT_EXECUTOR_MODE: "command"
-      AGENT_EXECUTOR_TIMEOUT_SECONDS: "900"
-      AGENT_CHAT_CONTEXT_LIMIT_TOKENS: "${AGENT_CHAT_CONTEXT_LIMIT_TOKENS:-400000}"
-      AGENT_CODEX_HOME_ROOT: "${AGENT_CODEX_HOME_ROOT:-/home/app/codex-home}"
-      AGENT_CODEX_WORKDIR: "${AGENT_CODEX_WORKDIR:-/home/app/workspace}"
-      AGENT_CODEX_COMMAND: "python -m features.agents.codex_mcp_adapter"
       AGENT_CODEX_MCP_URL: "http://mcp-tools:8091/mcp"
-      AGENT_CODEX_MODEL: "${AGENT_CODEX_MODEL:-}"
-      AGENT_CODEX_REASONING_EFFORT: "${AGENT_CODEX_REASONING_EFFORT:-}"
-      EVENT_STORMING_CODEX_REASONING_EFFORT: "${EVENT_STORMING_CODEX_REASONING_EFFORT:-}"
-      GITHUB_PAT: "${GITHUB_PAT:-}"
-      AGENT_DOCKER_PROXY_URL: "${AGENT_DOCKER_PROXY_URL:-tcp://docker-socket-proxy:2375}"
-      DOCKER_BUILDKIT: "${DOCKER_BUILDKIT:-0}"
-      COMPOSE_DOCKER_CLI_BUILD: "${COMPOSE_DOCKER_CLI_BUILD:-0}"
-      AGENT_DOCKER_SOFT_ISOLATION: "${AGENT_DOCKER_SOFT_ISOLATION:-true}"
-      AGENT_DOCKER_PROJECT_NAME: "${AGENT_DOCKER_PROJECT_NAME:-constructos-ws-default}"
-      AGENT_DOCKER_ALLOWED_PROJECT_PREFIX: "${AGENT_DOCKER_ALLOWED_PROJECT_PREFIX:-constructos-ws-}"
-      MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:-dev-mcp-token}"
-      MCP_ALLOWED_WORKSPACE_IDS: "10000000-0000-0000-0000-000000000001"
-      KNOWLEDGE_GRAPH_ENABLED: "true"
-      EVENT_STORMING_ENABLED: "true"
       EVENT_STORMING_ANALYSIS_WORKER_ENABLED: "true"
-      EVENT_STORMING_ANALYSIS_BATCH_SIZE: "${EVENT_STORMING_ANALYSIS_BATCH_SIZE:-12}"
-      EVENT_STORMING_ANALYSIS_POLL_SECONDS: "${EVENT_STORMING_ANALYSIS_POLL_SECONDS:-8}"
-      NEO4J_URI: "${NEO4J_URI:-bolt://neo4j:7687}"
-      NEO4J_USERNAME: "${NEO4J_USERNAME:-neo4j}"
-      NEO4J_PASSWORD: "${NEO4J_PASSWORD:-task-management-neo4j}"
-      NEO4J_DATABASE: "${NEO4J_DATABASE:-neo4j}"
-      GRAPH_RAG_ENABLED: "true"
-      GRAPH_RAG_CANARY_WORKSPACE_IDS: "${GRAPH_RAG_CANARY_WORKSPACE_IDS:-}"
-      GRAPH_RAG_CANARY_PROJECT_IDS: "${GRAPH_RAG_CANARY_PROJECT_IDS:-}"
-      GRAPH_RAG_SUMMARY_MODEL: "${GRAPH_RAG_SUMMARY_MODEL:-}"
-      GRAPH_RAG_SLO_CONTEXT_NO_SUMMARY_MS: "${GRAPH_RAG_SLO_CONTEXT_NO_SUMMARY_MS:-1200}"
-      GRAPH_RAG_SLO_CONTEXT_WITH_SUMMARY_MS: "${GRAPH_RAG_SLO_CONTEXT_WITH_SUMMARY_MS:-2500}"
-      GRAPH_RAG_SLO_EMBED_INGEST_P95_MS: "${GRAPH_RAG_SLO_EMBED_INGEST_P95_MS:-800}"
-      GRAPH_RAG_SLO_EMBED_CONTEXT_ERROR_RATE_PCT: "${GRAPH_RAG_SLO_EMBED_CONTEXT_ERROR_RATE_PCT:-0.1}"
-      VECTOR_STORE_ENABLED: "true"
-      CONTEXT_PACK_EVIDENCE_TOP_K: "12"
-      EMBEDDING_PROVIDER: "ollama"
-      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://ollama:11434}"
-      DEFAULT_EMBEDDING_MODEL: "${DEFAULT_EMBEDDING_MODEL:-nomic-embed-text}"
-      ALLOWED_EMBEDDING_MODELS: "${ALLOWED_EMBEDDING_MODELS:-nomic-embed-text,mxbai-embed-large,embeddinggemma}"
-      OLLAMA_EMBED_GPU_ENABLED: "${OLLAMA_EMBED_GPU_ENABLED:-true}"
-      LICENSE_SERVER_TOKEN: "${LICENSE_SERVER_TOKEN:-dev-license-token}"
     volumes:
-      - ${CODEX_CONFIG_FILE}:/home/app/.codex/config.toml:ro
-      - ${CODEX_AUTH_FILE}:/home/app/.codex/auth.json:ro
-      - codex-home-data:/home/app/codex-home
-      - ${AGENT_CODEX_WORKSPACE_MOUNT:-./data/workspace}:/home/app/workspace
+      - *codex_config_volume
+      - *codex_auth_volume
+      - *codex_home_volume
+      - *codex_workspace_volume
     ports:
       - "1102:8000"
     security_opt:
@@ -144,52 +142,14 @@ services:
       - neo4j
     command: ["python", "-m", "features.agents.mcp_server"]
     environment:
-      DATABASE_URL: "${DATABASE_URL:-postgresql+psycopg://m4tr1x:m4tr1x@postgres:5432/task_management}"
-      EVENTSTORE_URI: esdb://kurrentdb:2113?tls=false
-      APP_VERSION: "${APP_VERSION:-dev}"
-      APP_BUILD: "${APP_BUILD:-}"
-      APP_DEPLOYED_AT_UTC: "${APP_DEPLOYED_AT_UTC:-}"
-      MCP_SERVER_TRANSPORT: streamable-http
-      MCP_SERVER_HOST: 0.0.0.0
-      MCP_SERVER_PORT: "8091"
-      MCP_SERVER_PATH: /mcp
-      MCP_SERVER_STATELESS_HTTP: "true"
-      AGENT_EXECUTOR_TIMEOUT_SECONDS: "900"
-      AGENT_CHAT_CONTEXT_LIMIT_TOKENS: "${AGENT_CHAT_CONTEXT_LIMIT_TOKENS:-400000}"
-      AGENT_CODEX_WORKDIR: "${AGENT_CODEX_WORKDIR:-/home/app/workspace}"
-      AGENT_CODEX_MODEL: "${AGENT_CODEX_MODEL:-}"
-      AGENT_CODEX_REASONING_EFFORT: "${AGENT_CODEX_REASONING_EFFORT:-}"
-      EVENT_STORMING_CODEX_REASONING_EFFORT: "${EVENT_STORMING_CODEX_REASONING_EFFORT:-}"
-      MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:-dev-mcp-token}"
-      MCP_TOOL_AUTH_TOKEN: "${MCP_TOOL_AUTH_TOKEN:-dev-mcp-token}"
-      MCP_ACTOR_USER_ID: "00000000-0000-0000-0000-000000000099"
-      MCP_DEFAULT_WORKSPACE_ID: "10000000-0000-0000-0000-000000000001"
-      MCP_ALLOWED_WORKSPACE_IDS: "10000000-0000-0000-0000-000000000001"
-      KNOWLEDGE_GRAPH_ENABLED: "true"
-      NEO4J_URI: "${NEO4J_URI:-bolt://neo4j:7687}"
-      NEO4J_USERNAME: "${NEO4J_USERNAME:-neo4j}"
-      NEO4J_PASSWORD: "${NEO4J_PASSWORD:-task-management-neo4j}"
-      NEO4J_DATABASE: "${NEO4J_DATABASE:-neo4j}"
-      GRAPH_RAG_ENABLED: "true"
-      GRAPH_RAG_CANARY_WORKSPACE_IDS: "${GRAPH_RAG_CANARY_WORKSPACE_IDS:-}"
-      GRAPH_RAG_CANARY_PROJECT_IDS: "${GRAPH_RAG_CANARY_PROJECT_IDS:-}"
-      GRAPH_RAG_SUMMARY_MODEL: "${GRAPH_RAG_SUMMARY_MODEL:-}"
-      GRAPH_RAG_SLO_CONTEXT_NO_SUMMARY_MS: "${GRAPH_RAG_SLO_CONTEXT_NO_SUMMARY_MS:-1200}"
-      GRAPH_RAG_SLO_CONTEXT_WITH_SUMMARY_MS: "${GRAPH_RAG_SLO_CONTEXT_WITH_SUMMARY_MS:-2500}"
-      GRAPH_RAG_SLO_EMBED_INGEST_P95_MS: "${GRAPH_RAG_SLO_EMBED_INGEST_P95_MS:-800}"
-      GRAPH_RAG_SLO_EMBED_CONTEXT_ERROR_RATE_PCT: "${GRAPH_RAG_SLO_EMBED_CONTEXT_ERROR_RATE_PCT:-0.1}"
-      VECTOR_STORE_ENABLED: "true"
-      CONTEXT_PACK_EVIDENCE_TOP_K: "12"
-      EMBEDDING_PROVIDER: "ollama"
-      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://ollama:11434}"
-      DEFAULT_EMBEDDING_MODEL: "${DEFAULT_EMBEDDING_MODEL:-nomic-embed-text}"
-      ALLOWED_EMBEDDING_MODELS: "${ALLOWED_EMBEDDING_MODELS:-nomic-embed-text,mxbai-embed-large,embeddinggemma}"
-      OLLAMA_EMBED_GPU_ENABLED: "${OLLAMA_EMBED_GPU_ENABLED:-true}"
-      LICENSE_SERVER_TOKEN: "${LICENSE_SERVER_TOKEN:-dev-license-token}"
+      <<: [*agent_common_fixed_env, *agent_common_config_env]
     ports:
       - "8091:8091"
     volumes:
-      - ${AGENT_CODEX_WORKSPACE_MOUNT:-./data/workspace}:/home/app/workspace
+      - *codex_config_volume
+      - *codex_auth_volume
+      - *codex_home_volume
+      - *codex_workspace_volume
     security_opt:
       - no-new-privileges:true
     cap_drop:

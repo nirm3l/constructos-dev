@@ -23,3 +23,4 @@ Core Git execution rules are enforced by `git_delivery`.
 - If approvals are required: wait for approval and assign the task to a human team member while waiting.
 - If pull requests are required but approval wait is not required: merge automatically after checks and add the PR link as an external reference.
 - If pull requests are not required: follow merge policy from project rules and still keep GitHub issue/label state aligned.
+

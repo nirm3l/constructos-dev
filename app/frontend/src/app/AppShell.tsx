@@ -243,6 +243,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setActivityExpandedIds, activityShowRawDetails, setActivityShowRawDetails, scrollToNewestComment, setScrollToNewestComment,
     uiError, setUiError, uiInfo, setUiInfo, taskEditorError, setTaskEditorError,
     taskEditorHydratedTaskId, setTaskEditorHydratedTaskId,
+    taskEditorBaselineTask, setTaskEditorBaselineTask,
+    taskEditorTouched, setTaskEditorTouched,
   } = useTaskEditorState()
   const {
     showCodexChat, setShowCodexChat, codexChatSessions, codexChatProjectSessions, codexChatActiveSessionId,
@@ -625,20 +627,17 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   })
 
   const selectedTask = React.useMemo(() => {
-    const fromList = tasks.data?.items.find((t) => t.id === selectedTaskId) ?? null
-    if (fromList) return fromList
+    if (!selectedTaskId) return null
     return selectedTaskQuery.data ?? null
-  }, [selectedTaskId, selectedTaskQuery.data, tasks.data?.items])
+  }, [selectedTaskId, selectedTaskQuery.data])
   const selectedNote = React.useMemo(() => {
     const fromList = notes.data?.items.find((n) => n.id === selectedNoteId) ?? null
-    if (fromList) return fromList
-    return selectedNoteQuery.data ?? null
+    return selectedNoteQuery.data ?? fromList
   }, [notes.data?.items, selectedNoteId, selectedNoteQuery.data])
   const selectedSpecification = React.useMemo(
     () => {
       const fromList = specifications.data?.items.find((s: any) => s.id === selectedSpecificationId) ?? null
-      if (fromList) return fromList
-      return selectedSpecificationQuery.data ?? null
+      return selectedSpecificationQuery.data ?? fromList
     },
     [selectedSpecificationId, selectedSpecificationQuery.data, specifications.data?.items]
   )
@@ -1115,6 +1114,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     editStatusTriggerExternalFromStatusesText,
     editStatusTriggerExternalToStatusesText,
     taskEditorHydratedTaskId,
+    taskEditorBaselineTask,
+    taskEditorTouched,
     editTaskExternalRefsText,
     editTaskAttachmentRefsText,
     setSelectedTaskId,
@@ -1196,6 +1197,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setExpandedCommentIds,
     setTaskEditorError,
     setTaskEditorHydratedTaskId,
+    setTaskEditorBaselineTask,
+    setTaskEditorTouched,
     taskEditorError,
     editTaskType,
     editScheduledInstruction,
@@ -2038,6 +2041,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       editTaskType,
       setEditTaskType,
       taskEditorError,
+      taskEditorTouched,
+      setTaskEditorTouched,
       editScheduledAtUtc,
       setEditScheduledAtUtc,
       editScheduleTimezone,

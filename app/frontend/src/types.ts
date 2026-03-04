@@ -304,6 +304,7 @@ export type Task = {
   scheduled_at_utc: string | null
   schedule_timezone: string | null
   schedule_state: 'idle' | 'queued' | 'running' | 'done' | 'failed'
+  automation_state?: 'idle' | 'queued' | 'running' | 'completed' | 'failed'
   last_schedule_run_at: string | null
   last_schedule_error: string | null
   archived: boolean

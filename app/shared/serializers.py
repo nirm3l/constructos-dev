@@ -107,7 +107,12 @@ def load_created_by_map(db: Session, aggregate_type: str, aggregate_ids: list[st
     return out
 
 
-def serialize_task(task: Task, created_by: str = "", linked_note_count: int = 0) -> dict[str, Any]:
+def serialize_task(
+    task: Task,
+    created_by: str = "",
+    linked_note_count: int = 0,
+    automation_state: str | None = None,
+) -> dict[str, Any]:
     instruction = str(task.instruction or task.scheduled_instruction or "").strip() or None
     execution_triggers = normalize_execution_triggers(task.execution_triggers)
     if not execution_triggers:
@@ -147,6 +152,7 @@ def serialize_task(task: Task, created_by: str = "", linked_note_count: int = 0)
         scheduled_at_utc=legacy_schedule.get("scheduled_at_utc"),
         schedule_timezone=legacy_schedule.get("schedule_timezone"),
         schedule_state=task.schedule_state or "idle",
+        automation_state=str(automation_state or "idle"),
         last_schedule_run_at=to_iso_utc(task.last_schedule_run_at),
         last_schedule_error=task.last_schedule_error,
         archived=task.archived,

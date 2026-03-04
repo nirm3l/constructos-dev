@@ -282,6 +282,113 @@ def test_execute_task_automation_includes_team_mode_actor_role_in_context(tmp_pa
     assert captured["actor_project_role"] == "QAAgent"
 
 
+def test_execute_task_automation_sets_task_worktree_context_for_team_mode_developer(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+    project = client.post(
+        "/api/projects",
+        json={"workspace_id": ws_id, "name": "Team Mode Worktree Context"},
+    ).json()
+    actor_user_id = str(uuid.uuid4())
+
+    from shared.models import ProjectSkill
+
+    with SessionLocal() as db:
+        db.add(
+            UserModel(
+                id=actor_user_id,
+                username="agent.dev.ctx",
+                full_name="Developer Agent Context",
+                user_type="agent",
+                password_hash=None,
+                must_change_password=False,
+                password_changed_at=None,
+                is_active=True,
+                theme="dark",
+                timezone="UTC",
+                notifications_enabled=True,
+                agent_chat_model="",
+                agent_chat_reasoning_effort="medium",
+            )
+        )
+        db.add(
+            ProjectMember(
+                workspace_id=ws_id,
+                project_id=project["id"],
+                user_id=actor_user_id,
+                role="DeveloperAgent",
+            )
+        )
+        db.add(
+            ProjectSkill(
+                id=str(uuid.uuid4()),
+                workspace_id=ws_id,
+                project_id=project["id"],
+                skill_key="team_mode",
+                name="Team Mode Skill",
+                summary="Team orchestration.",
+                source_type="seed",
+                source_locator="seed://team_mode",
+                source_version="1.0.0",
+                trust_level="verified",
+                mode="enforced",
+                generated_rule_id=None,
+                manifest_json="{}",
+                created_by=bootstrap["current_user"]["id"],
+                updated_by=bootstrap["current_user"]["id"],
+                is_deleted=False,
+            )
+        )
+        db.commit()
+
+    from features.agents import executor as executor_module
+
+    monkeypatch.setattr(executor_module, "AGENT_EXECUTOR_MODE", "command")
+    monkeypatch.setattr(executor_module, "AGENT_CODEX_COMMAND", "dummy-exec")
+    monkeypatch.setattr(
+        executor_module,
+        "_ensure_task_worktree",
+        lambda **_kwargs: (
+            Path("/home/app/workspace/team-mode-worktree/.constructos/worktrees/task1234"),
+            "task/task1234-feature",
+            Path("/home/app/workspace/team-mode-worktree"),
+        ),
+    )
+
+    captured: dict = {}
+
+    class DummyProcess:
+        returncode = 0
+        stdout = '{"action":"comment","summary":"ok","comment":null}'
+        stderr = ""
+
+    def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
+        _ = (command, text, capture_output, timeout, check, cwd)
+        captured.update(json.loads(input))
+        return DummyProcess()
+
+    monkeypatch.setattr(executor_module.subprocess, "run", fake_run)
+
+    outcome = executor_module.execute_task_automation(
+        task_id="task-1234-worktree",
+        title="Implement feature",
+        description="ctx",
+        status="Dev",
+        instruction="Implement in isolated worktree",
+        workspace_id=ws_id,
+        project_id=project["id"],
+        actor_user_id=actor_user_id,
+        allow_mutations=True,
+    )
+    assert outcome.summary == "ok"
+    assert captured["actor_project_role"] == "DeveloperAgent"
+    assert captured["team_mode_enabled"] is True
+    assert captured["task_workdir"] == "/home/app/workspace/team-mode-worktree/.constructos/worktrees/task1234"
+    assert captured["task_branch"] == "task/task1234-feature"
+    assert captured["repo_root"] == "/home/app/workspace/team-mode-worktree"
+
+
 def test_codex_prompt_includes_soul_md_section():
     from features.agents.codex_mcp_adapter import _build_prompt
 
@@ -313,6 +420,37 @@ def test_codex_prompt_includes_soul_md_section():
     assert "File: GraphContext.md (source: knowledge_graph)" in prompt
     assert "Task A IMPLEMENTS Spec B" in prompt
     assert "Read each MCP tool description and follow its payload contract and operational guidance." in prompt
+
+
+def test_codex_prompt_includes_task_workspace_context():
+    from features.agents.codex_mcp_adapter import _build_prompt
+
+    prompt = _build_prompt(
+        {
+            "task_id": "task-1",
+            "title": "Implement feature",
+            "description": "worktree-aware run",
+            "status": "Dev",
+            "instruction": "Start implementation",
+            "workspace_id": "ws-1",
+            "project_id": "pr-1",
+            "actor_user_id": "user-1",
+            "actor_project_role": "DeveloperAgent",
+            "project_name": "Alpha",
+            "project_description": "",
+            "project_rules": [],
+            "project_skills": [{"skill_key": "team_mode"}],
+            "task_workdir": "/home/app/workspace/alpha/.constructos/worktrees/task-1",
+            "task_branch": "task/task-1-implement-feature",
+            "repo_root": "/home/app/workspace/alpha",
+            "graph_context_markdown": "",
+        }
+    )
+
+    assert "Task Branch: task/task-1-implement-feature" in prompt
+    assert "Task Workdir: /home/app/workspace/alpha/.constructos/worktrees/task-1" in prompt
+    assert "Repository Root: /home/app/workspace/alpha" in prompt
+    assert "execute implementation from that workdir and commit only on that branch" in prompt
 
 
 def test_codex_resume_prompt_is_compact_and_turn_focused():
@@ -384,6 +522,31 @@ def test_codex_resume_prompt_includes_compact_fresh_evidence_snapshot():
     assert "score=0.992" in prompt
 
 
+def test_codex_resume_prompt_includes_task_workspace_context():
+    from features.agents.codex_mcp_adapter import _build_resume_prompt
+
+    prompt = _build_resume_prompt(
+        {
+            "task_id": "task-1",
+            "title": "Implement feature",
+            "description": "worktree-aware run",
+            "status": "Dev",
+            "instruction": "Resume implementation",
+            "workspace_id": "ws-1",
+            "project_id": "pr-1",
+            "actor_user_id": "user-1",
+            "project_name": "Alpha",
+            "task_workdir": "/home/app/workspace/alpha/.constructos/worktrees/task-1",
+            "task_branch": "task/task-1-implement-feature",
+            "repo_root": "/home/app/workspace/alpha",
+        }
+    )
+
+    assert "Task Branch: task/task-1-implement-feature" in prompt
+    assert "Task Workdir: /home/app/workspace/alpha/.constructos/worktrees/task-1" in prompt
+    assert "Repository Root: /home/app/workspace/alpha" in prompt
+
+
 def test_codex_prompt_includes_project_skills_section():
     from features.agents.codex_mcp_adapter import _build_prompt
 
@@ -440,7 +603,7 @@ def test_codex_prompt_includes_interactive_project_creation_guidance():
     )
 
     assert "Read each MCP tool description and follow its payload contract and operational guidance." in prompt
-    assert "Dev -> QA -> Lead -> Done" in prompt
+    assert "Dev -> Lead -> QA -> Done" in prompt
     assert "at least one recurring scheduled Team Lead oversight task" in prompt
     assert "If Team Mode is requested, you MUST execute this setup order" in prompt
     assert "If the user requests an exact task count, keep that exact count" in prompt

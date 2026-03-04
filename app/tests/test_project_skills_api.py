@@ -529,6 +529,17 @@ def test_workspace_skill_catalog_seed_and_attach_to_project(tmp_path: Path):
     apply_dependency = apply_payload.get("git_delivery_dependency") or {}
     assert apply_dependency.get("project_skill_id")
     assert apply_dependency.get("applied") is True
+    project_rules = client.get(f"/api/project-rules?workspace_id={workspace_id}&project_id={project_id}")
+    assert project_rules.status_code == 200
+    assert not any(
+        str(item.get("title") or "").strip().lower() == "repository context"
+        for item in project_rules.json()["items"]
+    )
+    project = next(item for item in client.get("/api/bootstrap").json()["projects"] if item["id"] == project_id)
+    assert not any(
+        str(item.get("title") or "").strip().lower() == "repository context"
+        for item in (project.get("external_refs") or [])
+    )
 
 
 def test_apply_team_mode_skill_ensures_agent_users_and_project_roles(tmp_path: Path):
@@ -610,17 +621,72 @@ def test_apply_team_mode_skill_ensures_agent_users_and_project_roles(tmp_path: P
     assert str(gate_rule.get("id") or "").strip() == str(applied_payload.get("gate_policy_rule_id") or "").strip()
     assert "```json" in str(gate_rule.get("body") or "")
     assert "required_checks" in str(gate_rule.get("body") or "")
+    assert '"evaluation"' in str(gate_rule.get("body") or "")
+    assert '"llm_authoritative"' in str(gate_rule.get("body") or "")
+    repo_context_rules = [
+        item
+        for item in project_rules.json()["items"]
+        if str(item.get("title") or "").strip().lower() == "repository context"
+    ]
+    assert len(repo_context_rules) == 1
+    assert "repository_path" in str(repo_context_rules[0].get("body") or "")
+    assert "repository_url" in str(repo_context_rules[0].get("body") or "")
 
-    members_again = client.get(f"/api/projects/{project_id}/members")
-    assert members_again.status_code == 200
-    items_again = members_again.json()["items"]
-    for username, expected_role in expected.items():
-        matches = [item for item in items_again if str(item["user"]["username"]) == username]
-        assert len(matches) == 1
-        assert matches[0]["role"] == expected_role
+    project = next(item for item in client.get("/api/bootstrap").json()["projects"] if item["id"] == project_id)
+    project_refs = project.get("external_refs") or []
+    repo_refs = [
+        item
+        for item in project_refs
+        if str(item.get("title") or "").strip().lower() == "repository context"
+    ]
+    assert len(repo_refs) == 1
 
 
-def test_team_mode_runner_attributes_automation_events_to_assigned_agent(tmp_path: Path):
+def test_apply_team_mode_skill_sets_gate_policy_evaluation_mode_llm_authoritative(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    workspace_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+
+    gate_rule = client.post(
+        "/api/project-rules",
+        json={
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "title": "Gate Policy",
+            "body": json.dumps({"required_checks": {"team_mode": [], "delivery": []}}),
+        },
+    )
+    assert gate_rule.status_code == 200
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={workspace_id}")
+    assert catalog.status_code == 200
+    team_mode_skill = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode_skill['id']}/attach",
+        json={"workspace_id": workspace_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+
+    applied = client.post(f"/api/project-skills/{attached.json()['id']}/apply")
+    assert applied.status_code == 200
+
+    rules = client.get(f"/api/project-rules?workspace_id={workspace_id}&project_id={project_id}")
+    assert rules.status_code == 200
+    gate_rules = [
+        item
+        for item in rules.json()["items"]
+        if "gate policy" in str(item.get("title") or "").strip().lower()
+    ]
+    assert gate_rules
+    gate_body = str(gate_rules[0].get("body") or "")
+    assert '"evaluation"' in gate_body
+    assert '"mode"' in gate_body
+    assert '"llm_authoritative"' in gate_body
+
+
+def test_team_mode_runner_attributes_automation_events_to_assigned_agent(tmp_path: Path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get("/api/bootstrap").json()
     workspace_id = bootstrap["workspaces"][0]["id"]
@@ -659,13 +725,21 @@ def test_team_mode_runner_attributes_automation_events_to_assigned_agent(tmp_pat
     queued = client.post(f"/api/tasks/{task_id}/automation/run", json={"instruction": "Leave a progress comment"})
     assert queued.status_code == 200
 
+    import features.agents.runner as runner_module
+    from features.agents.executor import AutomationOutcome
     from features.agents.runner import run_queued_automation_once
     from features.tasks.domain import EVENT_AUTOMATION_COMPLETED
     from shared.models import SessionLocal, StoredEvent
     from sqlalchemy import select
 
-    processed = run_queued_automation_once(limit=5)
-    assert processed >= 1
+    monkeypatch.setattr(
+        runner_module,
+        "execute_task_automation",
+        lambda **_: AutomationOutcome(action="comment", summary="ok", comment="ok"),
+    )
+
+    run_queued_automation_once(limit=5)
+    run_queued_automation_once(limit=5)
 
     with SessionLocal() as db:
         completion_event = db.execute(

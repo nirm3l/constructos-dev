@@ -70,6 +70,8 @@ export function AppOverlays({ state }: { state: any }) {
           editTaskType: state.editTaskType,
           setEditTaskType: state.setEditTaskType,
           taskEditorError: state.taskEditorError,
+          taskEditorTouched: state.taskEditorTouched,
+          setTaskEditorTouched: state.setTaskEditorTouched,
           editScheduledAtUtc: state.editScheduledAtUtc,
           setEditScheduledAtUtc: state.setEditScheduledAtUtc,
           editScheduleTimezone: state.editScheduleTimezone,

@@ -581,7 +581,11 @@ export function TaskDrawer({ state }: { state: any }) {
   return (
     <Tooltip.Provider delayDuration={180}>
       <div className="drawer open" onClick={() => requestTaskClose()}>
-        <div className="drawer-body task-drawer-body" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="drawer-body task-drawer-body"
+          onClick={(e) => e.stopPropagation()}
+          onChangeCapture={() => state.setTaskEditorTouched?.(true)}
+        >
         <div className="drawer-header">
           <div className="task-header-main">
             <h3 className="drawer-title">{state.selectedTask.title}</h3>

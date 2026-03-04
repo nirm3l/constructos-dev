@@ -67,6 +67,30 @@ _SEED_ALLOWED_TRUST_LEVELS = {"reviewed", "untrusted", "verified"}
 _DEFAULT_WORKSPACE_SKILLS_CACHE: tuple[dict[str, str], ...] | None = None
 
 
+def _enabled_plugin_keys() -> set[str]:
+    from plugins.registry import list_workflow_plugins
+
+    keys: set[str] = set()
+    for plugin in list_workflow_plugins():
+        key = str(getattr(plugin, "key", "")).strip().lower()
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _seed_workspace_skill_dirs() -> list[Path]:
+    dirs: list[Path] = []
+    if _SEED_WORKSPACE_SKILLS_DIR.is_dir():
+        dirs.append(_SEED_WORKSPACE_SKILLS_DIR)
+    plugin_keys = _enabled_plugin_keys()
+    plugins_root = Path(__file__).resolve().parents[1] / "plugins"
+    for plugin_key in sorted(plugin_keys):
+        plugin_seed_dir = plugins_root / plugin_key / "workspace_skill_seeds"
+        if plugin_seed_dir.is_dir():
+            dirs.append(plugin_seed_dir)
+    return dirs
+
+
 def _normalize_seed_frontmatter_value(value: str) -> str:
     normalized = str(value or "").strip()
     if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {'"', "'"}:
@@ -138,12 +162,15 @@ def _extract_seed_summary(content: str) -> str:
 
 
 def _load_default_workspace_skills() -> tuple[dict[str, str], ...]:
-    if not _SEED_WORKSPACE_SKILLS_DIR.is_dir():
-        raise RuntimeError(f"Workspace skill seed directory not found: {_SEED_WORKSPACE_SKILLS_DIR}")
+    seed_dirs = _seed_workspace_skill_dirs()
+    if not seed_dirs:
+        raise RuntimeError("No workspace skill seed directories found.")
 
-    seed_files = sorted(_SEED_WORKSPACE_SKILLS_DIR.glob("*.md"))
+    seed_files: list[Path] = []
+    for seed_dir in seed_dirs:
+        seed_files.extend(sorted(seed_dir.glob("*.md")))
     if not seed_files:
-        raise RuntimeError(f"No workspace skill seed files found in {_SEED_WORKSPACE_SKILLS_DIR}")
+        raise RuntimeError("No workspace skill seed files found in configured seed directories.")
 
     loaded: list[dict[str, str]] = []
     seen_keys: set[str] = set()

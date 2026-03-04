@@ -1,20 +1,26 @@
 from __future__ import annotations
 
+import os
 import json
 import re
 import shlex
 import subprocess
 import threading
+from pathlib import Path
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from sqlalchemy import select
 
+from plugins import executor_policy as plugin_executor_policy
 from shared.context_frames import build_project_context_frame
-from shared.models import Project, ProjectMember, ProjectRule, ProjectSkill, SessionLocal
+from shared.models import Project, ProjectMember, ProjectRule, ProjectSkill, SessionLocal, Task
 from shared.settings import AGENT_CODEX_COMMAND, AGENT_EXECUTOR_MODE, AGENT_EXECUTOR_TIMEOUT_SECONDS
 
 _TIMEOUT_UNSET = object()
+_DEFAULT_CODEX_WORKDIR = "/home/app/workspace"
+_DEFAULT_CODEX_HOME_ROOT = "/tmp/codex-home"
+_TASK_AUTOMATION_SESSION_PREFIX = "task-automation:"
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +213,234 @@ def _resolve_actor_project_role(*, actor_user_id: str | None, project_id: str | 
     return normalized_role or None
 
 
+def _resolve_task_assignee_project_role(*, task_id: str | None, project_id: str | None) -> str | None:
+    normalized_task_id = str(task_id or "").strip()
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_task_id or not normalized_project_id:
+        return None
+    with SessionLocal() as db:
+        assignee_id = db.execute(
+            select(Task.assignee_id).where(
+                Task.id == normalized_task_id,
+                Task.project_id == normalized_project_id,
+                Task.is_deleted == False,  # noqa: E712
+            )
+        ).scalar_one_or_none()
+        normalized_assignee_id = str(assignee_id or "").strip()
+        if not normalized_assignee_id:
+            return None
+        membership = db.execute(
+            select(ProjectMember.role).where(
+                ProjectMember.project_id == normalized_project_id,
+                ProjectMember.user_id == normalized_assignee_id,
+            )
+        ).scalar_one_or_none()
+    normalized_role = str(membership or "").strip()
+    return normalized_role or None
+
+
+def _should_prepare_task_worktree(
+    *,
+    team_mode_enabled: bool,
+    git_delivery_enabled: bool,
+    task_status: str,
+    actor_project_role: str | None,
+    assignee_project_role: str | None,
+) -> bool:
+    return plugin_executor_policy.should_prepare_task_worktree(
+        plugin_enabled=team_mode_enabled,
+        git_delivery_enabled=git_delivery_enabled,
+        task_status=task_status,
+        actor_project_role=actor_project_role,
+        assignee_project_role=assignee_project_role,
+    )
+
+
+def _is_task_scoped_team_mode_context_enabled(
+    *,
+    project_team_mode_enabled: bool,
+    assignee_project_role: str | None,
+) -> bool:
+    return plugin_executor_policy.is_task_scoped_context_enabled(
+        project_plugin_enabled=project_team_mode_enabled,
+        assignee_project_role=assignee_project_role,
+    )
+
+
+def _slugify(value: str, *, fallback: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+    return normalized or fallback
+
+
+def _resolve_workspace_root() -> Path:
+    raw = str(os.getenv("AGENT_CODEX_WORKDIR", _DEFAULT_CODEX_WORKDIR)).strip() or _DEFAULT_CODEX_WORKDIR
+    path = Path(raw).expanduser().resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _resolve_effective_chat_session_id(
+    *,
+    chat_session_id: str | None,
+    task_id: str | None,
+) -> str | None:
+    explicit = str(chat_session_id or "").strip()
+    if explicit:
+        return explicit
+    normalized_task_id = str(task_id or "").strip()
+    if not normalized_task_id:
+        return None
+    return f"{_TASK_AUTOMATION_SESSION_PREFIX}{normalized_task_id}"
+
+
+def _normalize_path_component(value: object, *, fallback: str) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return fallback
+    out_chars: list[str] = []
+    for char in raw:
+        if char.isalnum() or char in {"-", "_", "."}:
+            out_chars.append(char)
+        else:
+            out_chars.append("_")
+    normalized = "".join(out_chars).strip("._-")
+    return normalized or fallback
+
+
+def _resolve_codex_home_root() -> Path:
+    root_raw = str(os.getenv("AGENT_CODEX_HOME_ROOT", _DEFAULT_CODEX_HOME_ROOT)).strip() or _DEFAULT_CODEX_HOME_ROOT
+    return Path(root_raw).expanduser().resolve()
+
+
+def _resolve_codex_session_home_path(*, workspace_id: str, chat_session_id: str) -> Path:
+    root = _resolve_codex_home_root()
+    workspace_part = _normalize_path_component(workspace_id, fallback="workspace")
+    session_part = _normalize_path_component(chat_session_id, fallback="session")
+    return root / "workspace" / workspace_part / "chat" / session_part
+
+
+def _is_codex_auth_401_failure(error_text: str) -> bool:
+    hay = str(error_text or "")
+    return (
+        "401 Unauthorized" in hay
+        and "Missing bearer or basic authentication" in hay
+    )
+
+
+def _purge_codex_session_home(
+    *,
+    workspace_id: str | None,
+    chat_session_id: str | None,
+) -> None:
+    normalized_workspace_id = str(workspace_id or "").strip()
+    normalized_chat_session_id = str(chat_session_id or "").strip()
+    if not normalized_workspace_id or not normalized_chat_session_id:
+        return
+    session_home = _resolve_codex_session_home_path(
+        workspace_id=normalized_workspace_id,
+        chat_session_id=normalized_chat_session_id,
+    )
+    if not session_home.exists():
+        return
+    try:
+        import shutil
+
+        shutil.rmtree(session_home, ignore_errors=True)
+    except Exception:
+        return
+
+
+def _run_git(*, cwd: Path, args: list[str]) -> tuple[int, str, str]:
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return proc.returncode, str(proc.stdout or "").strip(), str(proc.stderr or "").strip()
+
+
+def _ensure_git_repo_initialized(*, repo_root: Path) -> None:
+    if not (repo_root / ".git").exists():
+        repo_root.mkdir(parents=True, exist_ok=True)
+        code, _out, err = _run_git(cwd=repo_root, args=["init", "-b", "main"])
+        if code != 0:
+            raise RuntimeError(f"Failed to initialize repository at {repo_root}: {err[:200]}")
+    code_head, _out_head, _err_head = _run_git(cwd=repo_root, args=["rev-parse", "--verify", "HEAD"])
+    if code_head == 0:
+        return
+    _run_git(cwd=repo_root, args=["config", "user.name", "Constructos Automation"])
+    _run_git(cwd=repo_root, args=["config", "user.email", "automation@constructos.local"])
+    readme_path = repo_root / "README.md"
+    if not readme_path.exists():
+        readme_path.write_text("# Project Workspace\n", encoding="utf-8")
+    code_add, _out_add, err_add = _run_git(cwd=repo_root, args=["add", "README.md"])
+    if code_add != 0:
+        raise RuntimeError(f"Failed to stage bootstrap files at {repo_root}: {err_add[:200]}")
+    code_commit, _out_commit, err_commit = _run_git(
+        cwd=repo_root,
+        args=["commit", "-m", "chore: initialize project workspace"],
+    )
+    if code_commit != 0:
+        raise RuntimeError(f"Failed to create bootstrap commit at {repo_root}: {err_commit[:200]}")
+
+
+def _ensure_task_worktree(
+    *,
+    project_name: str | None,
+    task_id: str,
+    title: str,
+) -> tuple[Path, str, Path]:
+    workspace_root = _resolve_workspace_root()
+    project_slug = _slugify(str(project_name or "").strip(), fallback="project")
+    repo_root = workspace_root / project_slug
+    _ensure_git_repo_initialized(repo_root=repo_root)
+
+    task_short = _slugify(task_id[:8], fallback="task")
+    title_slug = _slugify(title, fallback="work")
+    branch_name = f"task/{task_short}-{title_slug[:40]}".rstrip("-")
+    if len(branch_name) > 120:
+        branch_name = branch_name[:120].rstrip("-")
+    worktree_root = repo_root / ".constructos" / "worktrees"
+    worktree_root.mkdir(parents=True, exist_ok=True)
+    task_worktree = worktree_root / task_short
+
+    code, _out, _err = _run_git(cwd=repo_root, args=["show-ref", "--verify", f"refs/heads/{branch_name}"])
+    branch_exists = code == 0
+
+    if not task_worktree.exists():
+        if branch_exists:
+            code, _out, err = _run_git(cwd=repo_root, args=["worktree", "add", str(task_worktree), branch_name])
+        else:
+            base_ref = "main"
+            code_main, _out_main, _err_main = _run_git(cwd=repo_root, args=["show-ref", "--verify", "refs/heads/main"])
+            if code_main != 0:
+                base_ref = "HEAD"
+            code, _out, err = _run_git(
+                cwd=repo_root,
+                args=["worktree", "add", "-b", branch_name, str(task_worktree), base_ref],
+            )
+        if code != 0:
+            raise RuntimeError(f"Failed to prepare worktree for {task_id}: {err[:220]}")
+    else:
+        code, _out, err = _run_git(cwd=task_worktree, args=["checkout", branch_name])
+        if code != 0:
+            if not branch_exists:
+                base_ref = "main"
+                code_main, _out_main, _err_main = _run_git(cwd=repo_root, args=["show-ref", "--verify", "refs/heads/main"])
+                if code_main != 0:
+                    base_ref = "HEAD"
+                code_b, _out_b, err_b = _run_git(cwd=repo_root, args=["branch", branch_name, base_ref])
+                if code_b != 0:
+                    raise RuntimeError(f"Failed to create branch {branch_name}: {err_b[:220]}")
+            code_retry, _out_retry, err_retry = _run_git(cwd=task_worktree, args=["checkout", branch_name])
+            if code_retry != 0:
+                raise RuntimeError(f"Failed to checkout branch {branch_name}: {err_retry[:220]}")
+
+    return task_worktree, branch_name, repo_root
+
+
 def _placeholder_outcome(*, instruction: str, current_status: str) -> AutomationOutcome:
     lower_instruction = instruction.lower()
     should_complete = any(token in lower_instruction for token in ("#complete", "complete task", "mark done"))
@@ -365,7 +599,7 @@ def _run_command_streaming(
         raise TimeoutError(timeout_error_message)
     if return_code != 0:
         err_text = "\n".join(lines).strip()
-        raise RuntimeError(f"Executor failed (exit={return_code}): {err_text[:300]}")
+        raise RuntimeError(f"Executor failed (exit={return_code}): {err_text[:2000]}")
     return "\n".join(lines)
 
 
@@ -401,14 +635,53 @@ def execute_task_automation(
     if AGENT_EXECUTOR_MODE != "command":
         return _placeholder_outcome(instruction=instruction, current_status=status)
     if not AGENT_CODEX_COMMAND:
-        raise RuntimeError("AGENT_EXECUTOR_MODE=command requires AGENT_CODEX_COMMAND")
+        return _placeholder_outcome(instruction=instruction, current_status=status)
 
+    effective_chat_session_id = _resolve_effective_chat_session_id(
+        chat_session_id=chat_session_id,
+        task_id=task_id,
+    )
     command = shlex.split(AGENT_CODEX_COMMAND)
     project_name, project_description, project_rules, project_skills = _load_project_context(project_id)
     gate_policy_json, gate_policy_required_checks = _extract_gate_policy_context(project_rules)
     actor_project_role = _resolve_actor_project_role(actor_user_id=actor_user_id, project_id=project_id)
-    context_scope_type = "chat_session" if str(chat_session_id or "").strip() else "task_automation"
-    context_scope_id = str(chat_session_id or "").strip() or str(task_id or "").strip() or "general"
+    assignee_project_role = (
+        _resolve_task_assignee_project_role(task_id=task_id, project_id=project_id)
+        or actor_project_role
+    )
+    workflow_skill_keys = plugin_executor_policy.workflow_plugin_skill_keys()
+    project_team_mode_enabled = any(
+        str(item.get("skill_key") or "").strip().lower() in workflow_skill_keys for item in project_skills
+    )
+    project_git_delivery_enabled = any(
+        str(item.get("skill_key") or "").strip().lower() == "git_delivery" for item in project_skills
+    ) or any(str(item.get("skill_key") or "").strip().lower() == "team_mode" for item in project_skills)
+    team_mode_enabled = _is_task_scoped_team_mode_context_enabled(
+        project_team_mode_enabled=project_team_mode_enabled,
+        assignee_project_role=assignee_project_role,
+    )
+    git_delivery_enabled = bool(project_git_delivery_enabled and team_mode_enabled)
+    effective_gate_policy_required_checks = gate_policy_required_checks if team_mode_enabled else []
+    task_workdir: str | None = None
+    task_branch: str | None = None
+    repo_root: str | None = None
+    if _should_prepare_task_worktree(
+        team_mode_enabled=team_mode_enabled,
+        git_delivery_enabled=git_delivery_enabled,
+        task_status=status,
+        actor_project_role=actor_project_role,
+        assignee_project_role=assignee_project_role,
+    ) and str(task_id or "").strip():
+        workdir_path, branch_name, repo_root_path = _ensure_task_worktree(
+            project_name=project_name,
+            task_id=str(task_id),
+            title=title,
+        )
+        task_workdir = str(workdir_path)
+        task_branch = branch_name
+        repo_root = str(repo_root_path)
+    context_scope_type = "chat_session" if str(effective_chat_session_id or "").strip() else "task_automation"
+    context_scope_id = str(effective_chat_session_id or "").strip() or str(task_id or "").strip() or "general"
     context_frame = build_project_context_frame(
         workspace_id=workspace_id,
         project_id=project_id,
@@ -438,16 +711,19 @@ def execute_task_automation(
         "trigger_from_status": trigger_from_status,
         "trigger_to_status": trigger_to_status,
         "trigger_timestamp": trigger_timestamp,
-        "chat_session_id": chat_session_id,
+        "chat_session_id": effective_chat_session_id,
         "codex_session_id": codex_session_id,
         "actor_user_id": actor_user_id,
         "actor_project_role": actor_project_role,
+        "assignee_project_role": assignee_project_role,
         "project_name": project_name,
         "project_description": project_description,
         "project_rules": project_rules,
         "project_skills": project_skills,
+        "team_mode_enabled": team_mode_enabled,
+        "git_delivery_enabled": git_delivery_enabled,
         "gate_policy_json": gate_policy_json,
-        "gate_policy_required_checks": gate_policy_required_checks,
+        "gate_policy_required_checks": effective_gate_policy_required_checks,
         "graph_context_markdown": graph_context_markdown,
         "graph_evidence_json": graph_evidence_json,
         "graph_summary_markdown": graph_summary_markdown,
@@ -458,29 +734,48 @@ def execute_task_automation(
         "model": model,
         "reasoning_effort": reasoning_effort,
         "executor_timeout_seconds": raw_timeout,
+        "task_workdir": task_workdir,
+        "task_branch": task_branch,
+        "repo_root": repo_root,
     }
-    try:
-        proc = subprocess.run(
-            command,
-            input=json.dumps(context),
-            text=True,
-            capture_output=True,
-            timeout=run_timeout_seconds,
-            check=False,
+    def _run_once() -> AutomationOutcome:
+        try:
+            proc = subprocess.run(
+                command,
+                input=json.dumps(context),
+                text=True,
+                capture_output=True,
+                timeout=run_timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            if run_timeout_seconds is None:
+                raise TimeoutError("Executor timed out.") from exc
+            raise TimeoutError(f"Executor timed out after {run_timeout_seconds:.1f}s") from exc
+        if proc.returncode != 0:
+            err_text = (proc.stderr or proc.stdout or "").strip()
+            raise RuntimeError(f"Executor failed (exit={proc.returncode}): {err_text[:2000]}")
+        return _attach_context_frame_usage(
+            _parse_command_outcome(proc.stdout),
+            frame_mode=frame_mode,
+            frame_revision=frame_revision,
         )
-    except subprocess.TimeoutExpired as exc:
-        if run_timeout_seconds is None:
-            raise TimeoutError("Executor timed out.") from exc
-        raise TimeoutError(f"Executor timed out after {run_timeout_seconds:.1f}s") from exc
 
-    if proc.returncode != 0:
-        err_text = (proc.stderr or proc.stdout or "").strip()
-        raise RuntimeError(f"Executor failed (exit={proc.returncode}): {err_text[:300]}")
-    return _attach_context_frame_usage(
-        _parse_command_outcome(proc.stdout),
-        frame_mode=frame_mode,
-        frame_revision=frame_revision,
-    )
+    try:
+        return _run_once()
+    except RuntimeError as exc:
+        session_id = str(effective_chat_session_id or "").strip()
+        if (
+            str(task_id or "").strip()
+            and session_id.startswith(_TASK_AUTOMATION_SESSION_PREFIX)
+            and _is_codex_auth_401_failure(str(exc))
+        ):
+            _purge_codex_session_home(
+                workspace_id=workspace_id,
+                chat_session_id=session_id,
+            )
+            return _run_once()
+        raise
 
 
 def execute_task_automation_stream(
@@ -515,14 +810,53 @@ def execute_task_automation_stream(
     if AGENT_EXECUTOR_MODE != "command":
         return _placeholder_outcome(instruction=instruction, current_status=status)
     if not AGENT_CODEX_COMMAND:
-        raise RuntimeError("AGENT_EXECUTOR_MODE=command requires AGENT_CODEX_COMMAND")
+        return _placeholder_outcome(instruction=instruction, current_status=status)
 
+    effective_chat_session_id = _resolve_effective_chat_session_id(
+        chat_session_id=chat_session_id,
+        task_id=task_id,
+    )
     command = shlex.split(AGENT_CODEX_COMMAND)
     project_name, project_description, project_rules, project_skills = _load_project_context(project_id)
     gate_policy_json, gate_policy_required_checks = _extract_gate_policy_context(project_rules)
     actor_project_role = _resolve_actor_project_role(actor_user_id=actor_user_id, project_id=project_id)
-    context_scope_type = "chat_session" if str(chat_session_id or "").strip() else "task_automation"
-    context_scope_id = str(chat_session_id or "").strip() or str(task_id or "").strip() or "general"
+    assignee_project_role = (
+        _resolve_task_assignee_project_role(task_id=task_id, project_id=project_id)
+        or actor_project_role
+    )
+    workflow_skill_keys = plugin_executor_policy.workflow_plugin_skill_keys()
+    project_team_mode_enabled = any(
+        str(item.get("skill_key") or "").strip().lower() in workflow_skill_keys for item in project_skills
+    )
+    project_git_delivery_enabled = any(
+        str(item.get("skill_key") or "").strip().lower() == "git_delivery" for item in project_skills
+    ) or any(str(item.get("skill_key") or "").strip().lower() == "team_mode" for item in project_skills)
+    team_mode_enabled = _is_task_scoped_team_mode_context_enabled(
+        project_team_mode_enabled=project_team_mode_enabled,
+        assignee_project_role=assignee_project_role,
+    )
+    git_delivery_enabled = bool(project_git_delivery_enabled and team_mode_enabled)
+    effective_gate_policy_required_checks = gate_policy_required_checks if team_mode_enabled else []
+    task_workdir: str | None = None
+    task_branch: str | None = None
+    repo_root: str | None = None
+    if _should_prepare_task_worktree(
+        team_mode_enabled=team_mode_enabled,
+        git_delivery_enabled=git_delivery_enabled,
+        task_status=status,
+        actor_project_role=actor_project_role,
+        assignee_project_role=assignee_project_role,
+    ) and str(task_id or "").strip():
+        workdir_path, branch_name, repo_root_path = _ensure_task_worktree(
+            project_name=project_name,
+            task_id=str(task_id),
+            title=title,
+        )
+        task_workdir = str(workdir_path)
+        task_branch = branch_name
+        repo_root = str(repo_root_path)
+    context_scope_type = "chat_session" if str(effective_chat_session_id or "").strip() else "task_automation"
+    context_scope_id = str(effective_chat_session_id or "").strip() or str(task_id or "").strip() or "general"
     context_frame = build_project_context_frame(
         workspace_id=workspace_id,
         project_id=project_id,
@@ -552,16 +886,19 @@ def execute_task_automation_stream(
         "trigger_from_status": trigger_from_status,
         "trigger_to_status": trigger_to_status,
         "trigger_timestamp": trigger_timestamp,
-        "chat_session_id": chat_session_id,
+        "chat_session_id": effective_chat_session_id,
         "codex_session_id": codex_session_id,
         "actor_user_id": actor_user_id,
         "actor_project_role": actor_project_role,
+        "assignee_project_role": assignee_project_role,
         "project_name": project_name,
         "project_description": project_description,
         "project_rules": project_rules,
         "project_skills": project_skills,
+        "team_mode_enabled": team_mode_enabled,
+        "git_delivery_enabled": git_delivery_enabled,
         "gate_policy_json": gate_policy_json,
-        "gate_policy_required_checks": gate_policy_required_checks,
+        "gate_policy_required_checks": effective_gate_policy_required_checks,
         "graph_context_markdown": graph_context_markdown,
         "graph_evidence_json": graph_evidence_json,
         "graph_summary_markdown": graph_summary_markdown,
@@ -572,17 +909,37 @@ def execute_task_automation_stream(
         "model": model,
         "reasoning_effort": reasoning_effort,
         "executor_timeout_seconds": raw_timeout,
+        "task_workdir": task_workdir,
+        "task_branch": task_branch,
+        "repo_root": repo_root,
         "stream_events": True,
         "stream_plain_text": not bool(str(task_id or "").strip()),
     }
-    stdout = _run_command_streaming(
-        command=command,
-        context=context,
-        timeout_seconds=run_timeout_seconds,
-        on_event=on_event,
-    )
-    return _attach_context_frame_usage(
-        _parse_command_outcome(stdout),
-        frame_mode=frame_mode,
-        frame_revision=frame_revision,
-    )
+    def _run_once() -> AutomationOutcome:
+        stdout = _run_command_streaming(
+            command=command,
+            context=context,
+            timeout_seconds=run_timeout_seconds,
+            on_event=on_event,
+        )
+        return _attach_context_frame_usage(
+            _parse_command_outcome(stdout),
+            frame_mode=frame_mode,
+            frame_revision=frame_revision,
+        )
+
+    try:
+        return _run_once()
+    except RuntimeError as exc:
+        session_id = str(effective_chat_session_id or "").strip()
+        if (
+            str(task_id or "").strip()
+            and session_id.startswith(_TASK_AUTOMATION_SESSION_PREFIX)
+            and _is_codex_auth_401_failure(str(exc))
+        ):
+            _purge_codex_session_home(
+                workspace_id=workspace_id,
+                chat_session_id=session_id,
+            )
+            return _run_once()
+        raise

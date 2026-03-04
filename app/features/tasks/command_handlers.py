@@ -1,22 +1,32 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
+import shutil
+import subprocess
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from plugins import task_policy as plugin_task_policy
+from plugins.registry import list_workflow_plugins
 from shared.core import (
     AggregateEventRepository,
     BulkAction,
     CommentCreate,
     DEFAULT_STATUSES,
+    Project,
     ProjectCommandState,
+    ProjectMember,
+    ProjectSkill,
     Specification,
     ReorderPayload,
     Task,
@@ -59,10 +69,107 @@ from .domain import TaskAggregate
 
 MENTION_PATTERN = re.compile(r"@([A-Za-z0-9_\-]+)")
 _UNSET = object()
+_LOG = logging.getLogger(__name__)
 _UUID_PATTERN = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
+
+_DEFAULT_CODEX_WORKDIR = "/home/app/workspace"
+
+
+def _slugify(value: str, *, fallback: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+    return normalized or fallback
+
+
+def _resolve_workspace_root() -> Path:
+    raw = str(os.getenv("AGENT_CODEX_WORKDIR", _DEFAULT_CODEX_WORKDIR)).strip() or _DEFAULT_CODEX_WORKDIR
+    path = Path(raw).expanduser().resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _run_git(*, cwd: Path, args: list[str]) -> tuple[int, str, str]:
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return proc.returncode, str(proc.stdout or "").strip(), str(proc.stderr or "").strip()
+
+
+def _cleanup_task_worktree(*, project_name: str, task_id: str) -> bool:
+    workspace_root = _resolve_workspace_root()
+    project_slug = _slugify(project_name, fallback="project")
+    repo_root = workspace_root / project_slug
+    task_short = _slugify(task_id[:8], fallback="task")
+    task_worktree = repo_root / ".constructos" / "worktrees" / task_short
+    if not task_worktree.exists():
+        return False
+    if repo_root.exists():
+        code, _out, _err = _run_git(cwd=repo_root, args=["worktree", "remove", "--force", str(task_worktree)])
+        if code == 0:
+            _run_git(cwd=repo_root, args=["worktree", "prune"])
+            return True
+    shutil.rmtree(task_worktree, ignore_errors=True)
+    return True
+
+
+def _maybe_cleanup_plugin_worktree(
+    *,
+    db: Session,
+    task_id: str,
+    project_id: str | None,
+    assignee_id: str | None,
+    status: str,
+) -> None:
+    normalized_project_id = str(project_id or "").strip()
+    normalized_assignee_id = str(assignee_id or "").strip()
+    normalized_status = str(status or "").strip()
+    if not normalized_project_id or not normalized_assignee_id:
+        return
+    enabled_plugin_keys = [
+        str(getattr(plugin, "key", "")).strip().lower()
+        for plugin in list_workflow_plugins()
+        if str(getattr(plugin, "key", "")).strip()
+    ]
+    if not enabled_plugin_keys:
+        return
+    has_enabled_workflow_plugin = db.execute(
+        select(ProjectSkill.id).where(
+            ProjectSkill.project_id == normalized_project_id,
+            ProjectSkill.skill_key.in_(enabled_plugin_keys),
+            ProjectSkill.enabled == True,  # noqa: E712
+            ProjectSkill.is_deleted == False,  # noqa: E712
+        )
+    ).first()
+    if not has_enabled_workflow_plugin:
+        return
+    member_role = db.execute(
+        select(ProjectMember.role).where(
+            ProjectMember.project_id == normalized_project_id,
+            ProjectMember.user_id == normalized_assignee_id,
+        )
+    ).scalar_one_or_none()
+    if not plugin_task_policy.should_cleanup_task_worktree(
+        plugin_enabled=True,
+        task_status=normalized_status,
+        assignee_role=member_role,
+    ):
+        return
+    project_name = db.execute(
+        select(Project.name).where(Project.id == normalized_project_id, Project.is_deleted == False)
+    ).scalar_one_or_none()
+    normalized_project_name = str(project_name or "").strip()
+    if not normalized_project_name:
+        return
+    try:
+        _cleanup_task_worktree(project_name=normalized_project_name, task_id=task_id)
+    except Exception as exc:
+        _LOG.warning("Failed to cleanup task worktree for task %s: %s", task_id, exc)
 
 
 def _normalize_tags(values: list[str] | None) -> list[str]:
@@ -128,14 +235,43 @@ def _normalize_task_title(value: str) -> str:
     return " ".join(str(value or "").split())
 
 
-def _validate_assignee_id(db: Session, assignee_id: str | None) -> str | None:
+def _validate_assignee_id(db: Session, assignee_id: str | None, *, project_id: str | None = None) -> str | None:
     normalized = str(assignee_id or "").strip() or None
     if not normalized:
         return None
     if not _UUID_PATTERN.match(normalized):
+        normalized_project_id = str(project_id or "").strip()
+        if not normalized_project_id:
+            raise HTTPException(
+                status_code=422,
+                detail="assignee_id must be a user_id UUID (not username/full name)",
+            )
+        normalized_casefold = normalized.casefold()
+        candidate_keys: set[str] = {normalized_casefold}
+        if not normalized_casefold.startswith("agent.") and "." not in normalized_casefold:
+            candidate_keys.add(f"agent.{normalized_casefold}")
+        members = db.execute(
+            select(ProjectMember.user_id, User.username, User.full_name)
+            .join(User, User.id == ProjectMember.user_id)
+            .where(ProjectMember.project_id == normalized_project_id)
+        ).all()
+        matches: list[str] = []
+        for member_user_id, username, full_name in members:
+            username_key = str(username or "").strip().casefold()
+            full_name_key = str(full_name or "").strip().casefold()
+            if username_key in candidate_keys or full_name_key in candidate_keys:
+                matches.append(str(member_user_id))
+        unique_matches = sorted(set(matches))
+        if len(unique_matches) == 1:
+            return unique_matches[0]
+        if len(unique_matches) > 1:
+            raise HTTPException(
+                status_code=422,
+                detail="assignee_id is ambiguous within this project; provide member user_id UUID",
+            )
         raise HTTPException(
             status_code=422,
-            detail="assignee_id must be a user_id UUID (not username/full name)",
+            detail="assignee_id must be a project-member user_id UUID or resolvable member username/full name",
         )
     assignee = db.get(User, normalized)
     if assignee is None:
@@ -536,7 +672,7 @@ class CreateTaskHandler:
 
         specification_id = (self.payload.specification_id or "").strip() or None
         task_group_id = (self.payload.task_group_id or "").strip() or None
-        assignee_id = _validate_assignee_id(self.ctx.db, self.payload.assignee_id)
+        assignee_id = _validate_assignee_id(self.ctx.db, self.payload.assignee_id, project_id=self.payload.project_id)
 
         if specification_id:
             _require_specification_scope(
@@ -667,7 +803,25 @@ class PatchTaskHandler:
         if "labels" in data and data["labels"] is not None:
             data["labels"] = _normalize_tags(data["labels"])
         if "assignee_id" in data:
-            data["assignee_id"] = _validate_assignee_id(self.ctx.db, data.get("assignee_id"))
+            try:
+                data["assignee_id"] = _validate_assignee_id(
+                    self.ctx.db,
+                    data.get("assignee_id"),
+                    project_id=str(data.get("project_id") or project_id or ""),
+                )
+            except HTTPException as exc:
+                # Agent automation should not hard-fail a run due to bad assignee text;
+                # keep current assignee and continue with the rest of the patch payload.
+                if int(getattr(exc, "status_code", 0) or 0) == 422 and str(self.ctx.user.user_type or "").strip() == "agent":
+                    _LOG.warning(
+                        "Ignoring invalid assignee_id patch from agent user %s on task %s: %s",
+                        str(self.ctx.user.id or "").strip(),
+                        self.task_id,
+                        str(getattr(exc, "detail", "") or "").strip(),
+                    )
+                    data.pop("assignee_id", None)
+                else:
+                    raise
         if "external_refs" in data and data["external_refs"] is not None:
             data["external_refs"] = _normalize_external_refs(data["external_refs"])
         if "attachment_refs" in data and data["attachment_refs"] is not None:
@@ -837,6 +991,13 @@ class PatchTaskHandler:
         task_view = load_task_view(self.ctx.db, self.task_id)
         if task_view is None:
             raise HTTPException(status_code=404, detail="Task not found")
+        _maybe_cleanup_plugin_worktree(
+            db=self.ctx.db,
+            task_id=self.task_id,
+            project_id=str(task_view.get("project_id") or "").strip() or None,
+            assignee_id=str(task_view.get("assignee_id") or "").strip() or None,
+            status=str(task_view.get("status") or "").strip(),
+        )
         return task_view
 
 
@@ -867,6 +1028,13 @@ class CompleteTaskHandler:
         task_view = load_task_view(self.ctx.db, self.task_id)
         if task_view is None:
             raise HTTPException(status_code=404, detail="Task not found")
+        _maybe_cleanup_plugin_worktree(
+            db=self.ctx.db,
+            task_id=self.task_id,
+            project_id=str(task_view.get("project_id") or "").strip() or None,
+            assignee_id=str(task_view.get("assignee_id") or "").strip() or None,
+            status=str(task_view.get("status") or "").strip(),
+        )
         return task_view
 
 
@@ -990,6 +1158,15 @@ class BulkTaskActionHandler:
             task_id=task_id,
         )
         self.ctx.db.commit()
+        task_view = load_task_view(self.ctx.db, task_id)
+        if task_view:
+            _maybe_cleanup_plugin_worktree(
+                db=self.ctx.db,
+                task_id=task_id,
+                project_id=str(task_view.get("project_id") or "").strip() or None,
+                assignee_id=str(task_view.get("assignee_id") or "").strip() or None,
+                status=str(task_view.get("status") or "").strip(),
+            )
         return True
 
 
@@ -1121,6 +1298,7 @@ class RequestAutomationRunHandler:
     ctx: CommandContext
     task_id: str
     instruction: str | None = None
+    wake_runner: bool = True
 
     def __call__(self) -> dict:
         workspace_id, project_id, _, _ = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member"})
@@ -1146,11 +1324,13 @@ class RequestAutomationRunHandler:
             task_id=self.task_id,
         )
         self.ctx.db.commit()
-        try:
-            from features.agents.runner import wake_automation_runner
+        if self.wake_runner:
+            try:
+                from features.agents.runner import start_automation_runner, wake_automation_runner
 
-            wake_automation_runner()
-        except Exception:
-            # Wake-up is best-effort; polling loop remains fallback.
-            pass
+                start_automation_runner()
+                wake_automation_runner()
+            except Exception:
+                # Runner wake-up/start is best-effort; polling loop remains fallback.
+                pass
         return {"ok": True, "task_id": self.task_id, "automation_state": "queued", "requested_at": requested_at}

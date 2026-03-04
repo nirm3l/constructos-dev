@@ -376,7 +376,9 @@ export function useAppActions(c: any) {
       throw new Error('Add automation instruction to save.')
     }
     const { payload } = buildTaskPatchPayload()
-    await patchTask(c.userId, c.selectedTaskId, payload)
+    const savedTask = await patchTask(c.userId, c.selectedTaskId, payload)
+    c.qc.setQueryData(['task', c.userId, c.selectedTaskId], savedTask)
+    await c.qc.invalidateQueries({ queryKey: ['task', c.userId, c.selectedTaskId] })
     await c.qc.invalidateQueries({ queryKey: ['tasks'] })
     await c.qc.invalidateQueries({ queryKey: ['board'] })
   }, [

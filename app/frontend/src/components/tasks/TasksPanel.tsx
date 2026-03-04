@@ -104,6 +104,34 @@ function formatBoardRecurring(recurringRule: string | null | undefined): string 
   return `Repeat: every ${amount}d`
 }
 
+function formatBoardScheduleState(state: Task['schedule_state'] | null | undefined): string {
+  const raw = String(state ?? '').trim()
+  if (!raw) return 'Unknown'
+  return `${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
+}
+
+function formatBoardAutomationState(state: string | null | undefined): string {
+  const raw = String(state ?? '').trim()
+  if (!raw) return 'Idle'
+  if (raw === 'completed') return 'Completed'
+  return `${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
+}
+
+function toBoardExecutionChipClassState(state: string | null | undefined): string {
+  const raw = String(state ?? 'idle').trim().toLowerCase()
+  if (!raw) return 'idle'
+  if (raw === 'completed') return 'done'
+  return raw
+}
+
+function resolveBoardEffectiveExecutionState(task: Task): string {
+  const automation = String(task.automation_state ?? '').trim().toLowerCase()
+  if (automation && automation !== 'idle') return automation
+  const schedule = String(task.schedule_state ?? '').trim().toLowerCase()
+  if (task.task_type === 'scheduled_instruction' && schedule) return schedule
+  return automation || 'idle'
+}
+
 type BoardTaskCardProps = {
   task: Task
   status: string
@@ -128,6 +156,11 @@ function BoardTaskCard({
   onDragEnd,
 }: BoardTaskCardProps) {
   const descriptionPreviewText = taskDescriptionPreview(task.description)
+  const isScheduled = task.task_type === 'scheduled_instruction'
+  const hasAutomationInstruction = Boolean(String(task.instruction || task.scheduled_instruction || '').trim())
+  const effectiveExecutionState = resolveBoardEffectiveExecutionState(task)
+  const executionStateLabel = formatBoardAutomationState(effectiveExecutionState)
+  const executionStateClass = toBoardExecutionChipClassState(effectiveExecutionState)
   const availableStatuses = statuses.filter((candidateStatus) => candidateStatus !== status)
   const currentStatusIndex = statuses.indexOf(status)
   const nextStatus = currentStatusIndex >= 0 && currentStatusIndex < statuses.length - 1
@@ -155,11 +188,21 @@ function BoardTaskCard({
           {descriptionPreviewText}
         </p>
       )}
-      {task.task_type === 'scheduled_instruction' && (
+      {isScheduled && (
         <div className="kanban-schedule-compact">
           <span className="kanban-schedule-chip kanban-schedule-chip-kind">Scheduled</span>
           <span className="kanban-schedule-chip">{formatBoardScheduleTrigger(task.scheduled_at_utc)}</span>
           <span className="kanban-schedule-chip">{formatBoardRecurring(task.recurring_rule)}</span>
+          <span className={`task-schedule-chip task-schedule-state task-schedule-state-${executionStateClass}`}>
+            {executionStateLabel}
+          </span>
+        </div>
+      )}
+      {!isScheduled && hasAutomationInstruction && (
+        <div className="kanban-schedule-compact">
+          <span className={`task-schedule-chip task-schedule-state task-schedule-state-${executionStateClass}`}>
+            {executionStateLabel}
+          </span>
         </div>
       )}
       {(task.labels ?? []).length > 0 && (

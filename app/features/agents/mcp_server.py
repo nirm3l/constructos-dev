@@ -4,6 +4,7 @@ import os
 from typing import Any
 
 from .gateway import build_mcp_gateway
+from shared.settings import MCP_AUTH_TOKEN
 
 MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED = True
 MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE = "KG_AND_VECTOR"
@@ -18,7 +19,7 @@ TASK_CREATE_TOOL_DESCRIPTION = (
     "External without selector.task_ids listens to all source tasks in workspace scope; "
     "add selector.project_id to constrain to one project. "
     "status_change requires at least one to_statuses value. "
-    "For recurring schedules set recurring_rule with canonical format every:<number><m|h|d> (for example every:1m)."
+    'For recurring schedules set recurring_rule with canonical format every:<number><m|h|d> (for example every:1m), and set task_type="scheduled_instruction" with scheduled_instruction and scheduled_at_utc.'
 )
 
 TASK_UPDATE_TOOL_DESCRIPTION = (
@@ -27,8 +28,7 @@ TASK_UPDATE_TOOL_DESCRIPTION = (
     "For status watchers in patch.execution_triggers: "
     "kind='status_change', scope='self'|'external', match_mode='any'|'all', "
     "to_statuses (required), optional selector.task_ids/source_task_ids, and optional selector.project_id. "
-    "For recurring schedules set recurring_rule with canonical format every:<number><m|h|d> (for example every:1m), "
-    "then verify scheduled_at_utc and recurring_rule by reading the task."
+    'For recurring schedules set recurring_rule with canonical format every:<number><m|h|d> (for example every:1m), set patch.task_type="scheduled_instruction", and provide patch.scheduled_instruction plus patch.scheduled_at_utc; then verify scheduled_at_utc and recurring_rule by reading the task.'
 )
 
 THEME_TOGGLE_TOOL_DESCRIPTION = (
@@ -66,12 +66,26 @@ CREATE_PROJECT_TOOL_DESCRIPTION = (
     "Create a project in a workspace for manual/custom setup (no template). "
     "Use when required fields are known and template seeding is not requested. "
     "Chat default profile: embedding_enabled=true, chat_index_mode=KG_AND_VECTOR, "
-    "chat_attachment_ingestion_mode=METADATA_ONLY."
+    "chat_attachment_ingestion_mode=METADATA_ONLY. "
+    "custom_statuses must be an array of strings (for example [\"To do\",\"Dev\",\"QA\",\"Lead\",\"Done\",\"Blocked\"])."
 )
 
 UPDATE_PROJECT_TOOL_DESCRIPTION = (
     "Patch a project in a workspace/project scope. "
     "Use this to update project metadata and flags such as event_storming_enabled."
+)
+
+CREATE_PROJECT_RULE_TOOL_DESCRIPTION = (
+    "Create a project rule in a workspace/project. "
+    "For Gate Policy rules, body must be valid JSON object text (plain JSON or ```json fenced). "
+    "When required_checks is present it must be an object where each scope maps to an array of non-empty check names."
+)
+
+UPDATE_PROJECT_RULE_TOOL_DESCRIPTION = (
+    "Patch a project rule. Patch accepts only title and/or body. "
+    "For Gate Policy rules, provide patch.body as valid JSON object text (plain JSON or ```json fenced); "
+    "if patch.body is sent as an object it will be JSON-serialized. "
+    "When required_checks is present it must be an object where each scope maps to an array of non-empty check names."
 )
 
 LIST_PROJECT_TEMPLATES_TOOL_DESCRIPTION = (
@@ -86,14 +100,16 @@ PREVIEW_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION = (
     "Preview project creation from a template without writing data. "
     "Use after parameters are known to validate what would be created. "
     "Chat default profile: embedding_enabled=true, chat_index_mode=KG_AND_VECTOR, "
-    "chat_attachment_ingestion_mode=METADATA_ONLY."
+    "chat_attachment_ingestion_mode=METADATA_ONLY. "
+    "custom_statuses must be an array of strings when provided."
 )
 
 CREATE_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION = (
     "Create a project and seed specifications/tasks/rules from a project template. "
     "Recommended flow: list_project_templates -> get_project_template -> preview_project_from_template -> create_project_from_template. "
     "Chat default profile: embedding_enabled=true, chat_index_mode=KG_AND_VECTOR, "
-    "chat_attachment_ingestion_mode=METADATA_ONLY."
+    "chat_attachment_ingestion_mode=METADATA_ONLY. "
+    "custom_statuses must be an array of strings when provided."
 )
 
 VERIFY_TEAM_MODE_WORKFLOW_TOOL_DESCRIPTION = (
@@ -127,7 +143,7 @@ def create_mcp():
 
     mcp = FastMCP(name="task-management-mcp")
     service = build_mcp_gateway()
-    default_tool_token = os.getenv("MCP_TOOL_AUTH_TOKEN", "").strip() or None
+    default_tool_token = str(MCP_AUTH_TOKEN or "").strip() or None
 
     @mcp.tool(description="List tasks in a workspace with optional filters.")
     def list_tasks(
@@ -726,6 +742,10 @@ def create_mcp():
         command_id: str | None = None,
     ) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
+        normalized_task_type = str(task_type or "").strip().lower()
+        if normalized_task_type == "scheduled_instruction":
+            if not str(scheduled_instruction or "").strip() and str(instruction or "").strip():
+                scheduled_instruction = instruction
         return service.create_task(
             workspace_id=workspace_id,
             title=title,
@@ -819,7 +839,7 @@ def create_mcp():
         workspace_id: str | None = None,
         auth_token: str | None = None,
         description: str = "",
-        custom_statuses: list[str] | None = None,
+        custom_statuses: list[str] | str | None = None,
         embedding_enabled: bool = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED,
         embedding_model: str | None = None,
         context_pack_evidence_top_k: int | None = None,
@@ -884,7 +904,7 @@ def create_mcp():
         auth_token: str | None = None,
         name: str = "",
         description: str = "",
-        custom_statuses: list[str] | None = None,
+        custom_statuses: list[str] | str | None = None,
         member_user_ids: list[str] | None = None,
         embedding_enabled: bool | None = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED,
         embedding_model: str | None = None,
@@ -917,7 +937,7 @@ def create_mcp():
         workspace_id: str | None = None,
         auth_token: str | None = None,
         description: str = "",
-        custom_statuses: list[str] | None = None,
+        custom_statuses: list[str] | str | None = None,
         member_user_ids: list[str] | None = None,
         embedding_enabled: bool | None = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED,
         embedding_model: str | None = None,
@@ -992,7 +1012,7 @@ def create_mcp():
             command_id=command_id,
         )
 
-    @mcp.tool(description="Create a project rule in a workspace/project.")
+    @mcp.tool(description=CREATE_PROJECT_RULE_TOOL_DESCRIPTION)
     def create_project_rule(
         title: str,
         project_id: str,
@@ -1226,7 +1246,7 @@ def create_mcp():
             command_id=command_id,
         )
 
-    @mcp.tool(description="Patch a project rule. Accepts the same fields as ProjectRulePatch.")
+    @mcp.tool(description=UPDATE_PROJECT_RULE_TOOL_DESCRIPTION)
     def update_project_rule(
         rule_id: str,
         patch: dict[str, Any],
@@ -1287,7 +1307,15 @@ def create_mcp():
         return service.complete_task(task_id=task_id, auth_token=auth_token, command_id=command_id)
 
     @mcp.tool(description="Add a comment to a task.")
-    def add_task_comment(task_id: str, body: str, auth_token: str | None = None, command_id: str | None = None) -> dict[str, Any]:
+    def add_task_comment(
+        task_id: str,
+        body: str,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        # `workspace_id` is accepted for compatibility with model-generated tool calls.
+        _ = workspace_id
         auth_token = auth_token or default_tool_token
         return service.add_task_comment(task_id=task_id, body=body, auth_token=auth_token, command_id=command_id)
 

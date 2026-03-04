@@ -1,3 +1,5 @@
+check_for_update_on_startup = false
+
 [mcp_servers.task-management-tools]
 url = "http://mcp-tools:8091/mcp"
 

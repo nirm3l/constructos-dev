@@ -469,7 +469,6 @@ function normalizeChatIndexMode(mode: unknown): 'OFF' | 'VECTOR_ONLY' | 'KG_AND_
 function normalizeChatAttachmentIngestionMode(mode: unknown): 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT' {
   const normalized = String(mode || '').trim().toUpperCase()
   if (normalized === 'OFF' || normalized === 'FULL_TEXT') return normalized
-  if (normalized === 'FULL_TEXT_OCR') return 'FULL_TEXT'
   return 'METADATA_ONLY'
 }
 

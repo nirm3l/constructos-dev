@@ -56,7 +56,7 @@ def _prettify_gate_policy_body_if_needed(*, title: str, body: str) -> str:
     if not _validate_gate_policy_shape(parsed):
         raise HTTPException(
             status_code=422,
-            detail="Gate Policy JSON is invalid: required_checks must be an object with team_mode/delivery arrays when provided.",
+            detail="Gate Policy JSON is invalid: required_checks must be an object whose values are arrays of non-empty check ids.",
         )
     parsed = _normalize_gate_policy(parsed)
     pretty = json.dumps(parsed, indent=2, ensure_ascii=False)

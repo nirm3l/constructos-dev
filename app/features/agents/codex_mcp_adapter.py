@@ -15,11 +15,13 @@ import time
 from collections import OrderedDict
 
 from features.agents.mcp_registry import build_selected_mcp_config_text, normalize_chat_mcp_servers
+from plugins import runner_policy as plugin_runner_policy
 from shared.settings import (
     AGENT_CHAT_CONTEXT_LIMIT_TOKENS,
     AGENT_CODEX_MCP_URL,
     AGENT_CODEX_MODEL,
     AGENT_CODEX_REASONING_EFFORT,
+    AGENT_ENABLED_PLUGINS,
     AGENT_EXECUTOR_TIMEOUT_SECONDS,
 )
 from shared.json_utils import parse_json_object
@@ -59,11 +61,44 @@ def _strip_mcp_server_tables(config_text: str) -> str:
 
 @lru_cache(maxsize=16)
 def _load_prompt_template(name: str) -> str:
-    template_path = _PROMPT_TEMPLATES_DIR / name
-    try:
-        return template_path.read_text(encoding="utf-8")
-    except FileNotFoundError as exc:
-        raise RuntimeError(f"Prompt template file not found: {template_path}") from exc
+    candidate_paths = [_PROMPT_TEMPLATES_DIR / name]
+    candidate_paths.extend(base / name for base in _plugin_prompt_template_dirs())
+    for template_path in candidate_paths:
+        try:
+            return template_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+    raise RuntimeError(f"Prompt template file not found: {candidate_paths[0]}")
+
+
+@lru_cache(maxsize=1)
+def _plugin_prompt_template_dirs() -> tuple[Path, ...]:
+    plugins_root = Path(__file__).resolve().parents[2] / "plugins"
+    enabled = {str(item or "").strip().lower() for item in (AGENT_ENABLED_PLUGINS or []) if str(item or "").strip()}
+    if not enabled:
+        enabled = {"team_mode"}
+    if enabled.intersection({"none", "off", "disabled"}):
+        return tuple()
+    out: list[Path] = []
+    for key in sorted(enabled):
+        candidate = plugins_root / key / "prompt_templates"
+        if candidate.is_dir():
+            out.append(candidate)
+    return tuple(out)
+
+
+@lru_cache(maxsize=16)
+def _render_plugin_workflow_guidance(template_name: str) -> str:
+    lines: list[str] = []
+    for base in _plugin_prompt_template_dirs():
+        path = base / template_name
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            continue
+        if content:
+            lines.append(content)
+    return ("\n".join(lines)).strip()
 
 
 def _render_prompt_template(name: str, values: dict[str, object]) -> str:
@@ -118,6 +153,19 @@ def _resolve_codex_workdir() -> Path | None:
         return None
     path = Path(raw).expanduser().resolve()
     path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _resolve_task_workdir(workdir_hint: object) -> Path | None:
+    hint = str(workdir_hint or "").strip()
+    if not hint:
+        return None
+    try:
+        path = Path(hint).expanduser().resolve()
+    except Exception:
+        return None
+    if not path.exists() or not path.is_dir():
+        return None
     return path
 
 
@@ -394,15 +442,19 @@ def _prepare_codex_home(
     config_path.write_text(f"{merged_config_text}\n" if merged_config_text else "", encoding="utf-8")
 
     target_auth_path = codex_dir / "auth.json"
-    if target_auth_path.exists():
-        return
     source_auth_path = Path.home() / ".codex" / "auth.json"
     if source_auth_path.exists() and source_auth_path.is_file():
         try:
+            # Keep per-session auth.json in sync with the primary Codex auth source.
             shutil.copy2(source_auth_path, target_auth_path)
-        except Exception:
-            # Authentication can still be resolved by other providers/environment in some setups.
-            pass
+        except Exception as exc:
+            # If OPENAI_API_KEY is present, Codex can still authenticate from env.
+            if str(os.getenv("OPENAI_API_KEY") or "").strip():
+                return
+            raise RuntimeError(
+                "Failed to prepare Codex auth.json for session home. "
+                "No OPENAI_API_KEY fallback is available."
+            ) from exc
 
 
 @contextmanager
@@ -458,9 +510,11 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     project_id = ctx.get("project_id") or ""
     actor_user_id = str(ctx.get("actor_user_id") or "").strip()
     actor_project_role = str(ctx.get("actor_project_role") or "").strip() or "_(not available)_"
-    is_team_mode_kickoff = (
-        actor_project_role == "TeamLeadAgent"
-        and str(instruction or "").strip().casefold().startswith("team mode kickoff for project ")
+    task_workdir = str(ctx.get("task_workdir") or "").strip() or "_(not available)_"
+    task_branch = str(ctx.get("task_branch") or "").strip() or "_(not available)_"
+    repo_root = str(ctx.get("repo_root") or "").strip() or "_(not available)_"
+    is_team_mode_kickoff = plugin_runner_policy.is_lead_role(actor_project_role) and plugin_runner_policy.is_kickoff_instruction(
+        str(instruction or "")
     )
     project_name = ctx.get("project_name") or ""
     project_description = str(ctx.get("project_description") or "")
@@ -570,6 +624,9 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
             "actor_project_role": actor_project_role,
             "project_name": project_name,
             "instruction": instruction,
+            "task_workdir": task_workdir,
+            "task_branch": task_branch,
+            "repo_root": repo_root,
             "status_change_trigger_context": status_change_trigger_context,
             "soul_md": soul_md,
             "rules_md": rules_md,
@@ -580,6 +637,7 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
             "graph_evidence": graph_evidence,
             "graph_summary": graph_summary,
             "context_guidance": context_guidance,
+            "plugin_workflow_guidance": _render_plugin_workflow_guidance("full_prompt_workflow_guidance.md"),
             "enabled_mcp_servers_text": enabled_mcp_servers_text,
             "mutation_policy": mutation_policy,
             "response_tail": response_tail,
@@ -661,9 +719,11 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     project_id = ctx.get("project_id") or ""
     actor_user_id = str(ctx.get("actor_user_id") or "").strip()
     actor_project_role = str(ctx.get("actor_project_role") or "").strip() or "_(not available)_"
-    is_team_mode_kickoff = (
-        actor_project_role == "TeamLeadAgent"
-        and str(instruction or "").strip().casefold().startswith("team mode kickoff for project ")
+    task_workdir = str(ctx.get("task_workdir") or "").strip() or "_(not available)_"
+    task_branch = str(ctx.get("task_branch") or "").strip() or "_(not available)_"
+    repo_root = str(ctx.get("repo_root") or "").strip() or "_(not available)_"
+    is_team_mode_kickoff = plugin_runner_policy.is_lead_role(actor_project_role) and plugin_runner_policy.is_kickoff_instruction(
+        str(instruction or "")
     )
     project_name = ctx.get("project_name") or ""
     gate_policy_json = str(ctx.get("gate_policy_json") or "").strip()
@@ -724,11 +784,15 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
             "actor_project_role": actor_project_role,
             "project_name": project_name,
             "instruction": instruction,
+            "task_workdir": task_workdir,
+            "task_branch": task_branch,
+            "repo_root": repo_root,
             "gate_policy_md": gate_policy_json or "_(Gate Policy unavailable)_",
             "gate_required_checks_md": gate_policy_required_checks or "_(none)_",
             "status_change_trigger_context": status_change_trigger_context,
             "fresh_memory_snapshot": fresh_memory_snapshot,
             "task_guidance": task_guidance,
+            "plugin_workflow_guidance": _render_plugin_workflow_guidance("resume_prompt_workflow_guidance.md"),
             "enabled_mcp_servers_text": enabled_mcp_servers_text,
             "mutation_policy": mutation_policy,
             "response_tail": response_tail,
@@ -974,8 +1038,9 @@ def _run_codex_app_server_with_optional_stream(
     output_schema: dict | None = None,
     preferred_thread_id: str | None = None,
     env: dict[str, str] | None = None,
+    run_cwd: Path | None = None,
 ) -> tuple[str, dict[str, int] | None, str | None, bool, bool]:
-    run_cwd = _resolve_codex_workdir()
+    effective_run_cwd = run_cwd or _resolve_codex_workdir()
     cmd = ["codex"]
     cmd.extend(
         [
@@ -992,7 +1057,7 @@ def _run_codex_app_server_with_optional_stream(
         text=True,
         bufsize=1,
         env=env,
-        cwd=str(run_cwd) if run_cwd is not None else None,
+        cwd=str(effective_run_cwd) if effective_run_cwd is not None else None,
     )
     timed_out = False
     done = threading.Event()
@@ -1522,6 +1587,7 @@ def main() -> int:
         ctx.get("executor_timeout_seconds"),
         fallback_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
     )
+    task_run_cwd = _resolve_task_workdir(ctx.get("task_workdir"))
     structured_response = not (stream_events and stream_plain_text)
     start_prompt = _build_prompt(ctx, structured_response=structured_response)
     resume_prompt = _build_resume_prompt(ctx, structured_response=structured_response)
@@ -1550,16 +1616,21 @@ def main() -> int:
             chat_session_id=chat_session_id,
         ) as codex_env:
             if stream_events:
+                run_kwargs = {
+                    "start_prompt": start_prompt,
+                    "resume_prompt": resume_prompt,
+                    "timeout_seconds": runtime_timeout_seconds,
+                    "stream_events": True,
+                    "model": preferred_model,
+                    "reasoning_effort": preferred_reasoning_effort,
+                    "output_schema": schema if structured_response else None,
+                    "preferred_thread_id": preferred_codex_session_id,
+                    "env": codex_env,
+                }
+                if task_run_cwd is not None:
+                    run_kwargs["run_cwd"] = task_run_cwd
                 final_message, usage, codex_session_id, resume_attempted, resume_succeeded = _run_codex_app_server_with_optional_stream(
-                    start_prompt=start_prompt,
-                    resume_prompt=resume_prompt,
-                    timeout_seconds=runtime_timeout_seconds,
-                    stream_events=True,
-                    model=preferred_model,
-                    reasoning_effort=preferred_reasoning_effort,
-                    output_schema=schema if structured_response else None,
-                    preferred_thread_id=preferred_codex_session_id,
-                    env=codex_env,
+                    **run_kwargs,
                 )
                 if structured_response:
                     parsed_payload = _try_parse_structured_reply_text(final_message)
@@ -1569,16 +1640,21 @@ def main() -> int:
                 else:
                     out = _build_plain_text_result(final_message)
             else:
+                run_kwargs = {
+                    "start_prompt": start_prompt,
+                    "resume_prompt": resume_prompt,
+                    "timeout_seconds": runtime_timeout_seconds,
+                    "stream_events": False,
+                    "model": preferred_model,
+                    "reasoning_effort": preferred_reasoning_effort,
+                    "output_schema": schema,
+                    "preferred_thread_id": preferred_codex_session_id,
+                    "env": codex_env,
+                }
+                if task_run_cwd is not None:
+                    run_kwargs["run_cwd"] = task_run_cwd
                 final_message, usage, codex_session_id, resume_attempted, resume_succeeded = _run_codex_app_server_with_optional_stream(
-                    start_prompt=start_prompt,
-                    resume_prompt=resume_prompt,
-                    timeout_seconds=runtime_timeout_seconds,
-                    stream_events=False,
-                    model=preferred_model,
-                    reasoning_effort=preferred_reasoning_effort,
-                    output_schema=schema,
-                    preferred_thread_id=preferred_codex_session_id,
-                    env=codex_env,
+                    **run_kwargs,
                 )
                 parsed_payload = _try_parse_structured_reply_text(final_message)
                 if parsed_payload is None:

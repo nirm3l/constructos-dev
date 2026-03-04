@@ -21,6 +21,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from plugins import api_policy as plugin_api_policy
 from shared.core import (
     AgentChatRun,
     ProjectRuleCreate,
@@ -31,7 +32,6 @@ from shared.core import (
     get_current_user,
     get_db,
 )
-from shared.core import TaskAutomationRun, append_event
 from shared.models import (
     ActivityLog,
     ChatMessage,
@@ -39,23 +39,21 @@ from shared.models import (
     CommandExecution,
     Note,
     Project,
-    ProjectMember,
     ProjectRule,
-    ProjectSkill,
     Task,
 )
 from shared.settings import (
     ATTACHMENTS_DIR,
     AGENT_CHAT_HISTORY_COMPACT_THRESHOLD,
     AGENT_CHAT_HISTORY_RECENT_TAIL,
+    AGENT_ENABLED_PLUGINS,
+    AGENT_SYSTEM_USER_ID,
 )
-from shared.typed_notifications import append_notification_created_event
 
 from .executor import AutomationOutcome, execute_task_automation, execute_task_automation_stream
 from .codex_mcp_adapter import run_structured_codex_prompt
 from .mcp_registry import normalize_chat_mcp_servers as normalize_chat_mcp_servers_registry
 from features.chat.application import ChatApplicationService
-from features.tasks.application import TaskApplicationService
 from features.rules.application import ProjectRuleApplicationService
 from features.chat.command_handlers import (
     AppendAssistantMessagePayload,
@@ -85,6 +83,11 @@ _TEXT_MIME_TYPES = {
 _PDF_MIME_TYPES = {"application/pdf"}
 _DOCX_MIME_TYPES = {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
 _COMMIT_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
+_DEPLOY_STACK_RE = re.compile(r"\b(constructos-[a-z0-9_-]+)\b", re.IGNORECASE)
+_DOCKER_COMPOSE_STACK_RE = re.compile(r"docker\s+compose\s+-p\s+([a-z0-9][a-z0-9_-]*)", re.IGNORECASE)
+_DEPLOY_PORT_RE = re.compile(r"\bport\s*[:=]?\s*[`\"']?(\d{2,5})", re.IGNORECASE)
+_HOST_PORT_RE = re.compile(r"(?:localhost|0\.0\.0\.0):(\d{2,5})\b", re.IGNORECASE)
+_HEALTH_PATH_RE = re.compile(r"(/health[^\s\"'`]*)", re.IGNORECASE)
 _TEXT_EXTENSIONS = {
     ".txt",
     ".md",
@@ -130,11 +133,30 @@ _CREATED_RESOURCE_ACTIONS: dict[str, str] = {
 
 @lru_cache(maxsize=16)
 def _load_prompt_template(name: str) -> str:
-    template_path = _PROMPT_TEMPLATES_DIR / name
-    try:
-        return template_path.read_text(encoding="utf-8")
-    except FileNotFoundError as exc:
-        raise RuntimeError(f"Prompt template file not found: {template_path}") from exc
+    candidate_paths = [_PROMPT_TEMPLATES_DIR / name]
+    candidate_paths.extend(base / name for base in _plugin_prompt_template_dirs())
+    for template_path in candidate_paths:
+        try:
+            return template_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+    raise RuntimeError(f"Prompt template file not found: {candidate_paths[0]}")
+
+
+@lru_cache(maxsize=1)
+def _plugin_prompt_template_dirs() -> tuple[Path, ...]:
+    plugins_root = Path(__file__).resolve().parents[2] / "plugins"
+    enabled = {str(item or "").strip().lower() for item in (AGENT_ENABLED_PLUGINS or []) if str(item or "").strip()}
+    if not enabled:
+        enabled = {"team_mode"}
+    if enabled.intersection({"none", "off", "disabled"}):
+        return tuple()
+    out: list[Path] = []
+    for key in sorted(enabled):
+        candidate = plugins_root / key / "prompt_templates"
+        if candidate.is_dir():
+            out.append(candidate)
+    return tuple(out)
 
 
 def _render_prompt_template(name: str, values: dict[str, object]) -> str:
@@ -580,12 +602,15 @@ def _collect_created_resources(
         return []
     window_start = started_at - timedelta(seconds=2)
     window_end = ended_at + timedelta(seconds=2)
+    actor_ids = {str(actor_id or "").strip()}
+    actor_ids.add(str(AGENT_SYSTEM_USER_ID or "").strip())
+    normalized_actor_ids = [item for item in actor_ids if item]
     query = (
         select(ActivityLog.action, ActivityLog.details)
         .where(
             ActivityLog.workspace_id == workspace_id,
             ActivityLog.project_id == normalized_project_id,
-            ActivityLog.actor_id == actor_id,
+            ActivityLog.actor_id.in_(tuple(normalized_actor_ids)),
             ActivityLog.action.in_(tuple(_CREATED_RESOURCE_ACTIONS.keys())),
             ActivityLog.created_at >= window_start,
             ActivityLog.created_at <= window_end,
@@ -815,7 +840,9 @@ def _load_cross_session_recent_updates(
     if current_session_db_id:
         query = query.where(ChatMessage.session_id != current_session_db_id)
     if current_last_message_at is not None:
-        query = query.where(message_time > current_last_message_at)
+        # Include same-timestamp messages from other sessions to avoid dropping
+        # user turns when requests are processed nearly simultaneously.
+        query = query.where(message_time >= current_last_message_at)
 
     rows = db.execute(query).all()
     if not rows and current_last_message_at is not None:
@@ -1108,6 +1135,125 @@ def _build_team_lead_kickoff_instruction(*, project_id: str, requester_user_id: 
     )
 
 
+def _extract_runtime_deploy_target_from_text(text: str) -> tuple[str | None, int | None, str | None]:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return None, None, None
+
+    stack_match = _DOCKER_COMPOSE_STACK_RE.search(normalized) or _DEPLOY_STACK_RE.search(normalized)
+    stack = str(stack_match.group(1) or "").strip() if stack_match else None
+
+    port: int | None = None
+    port_match = _DEPLOY_PORT_RE.search(normalized) or _HOST_PORT_RE.search(normalized)
+    if port_match:
+        try:
+            candidate = int(str(port_match.group(1) or "").strip())
+            if 1 <= candidate <= 65535:
+                port = candidate
+        except Exception:
+            port = None
+
+    health_path_match = _HEALTH_PATH_RE.search(normalized)
+    health_path = str(health_path_match.group(1) or "").strip() if health_path_match else None
+    if health_path and not health_path.startswith("/"):
+        health_path = f"/{health_path}"
+    return stack, port, health_path
+
+
+def _resolve_runtime_deploy_target_from_project_artifacts(
+    *,
+    db: Session,
+    workspace_id: str,
+    project_id: str,
+) -> tuple[str | None, int | None, str | None]:
+    tasks = db.execute(
+        select(Task).where(
+            Task.workspace_id == workspace_id,
+            Task.project_id == project_id,
+            Task.is_deleted == False,  # noqa: E712
+        )
+    ).scalars().all()
+    deploy_tasks = [task for task in tasks if "deploy" in str(task.title or "").strip().lower()]
+    if not deploy_tasks:
+        return None, None, None
+
+    task_ids = [str(task.id) for task in deploy_tasks if str(task.id or "").strip()]
+    notes_by_task: dict[str, list[Note]] = {}
+    comments_by_task: dict[str, list[ActivityLog]] = {}
+    if task_ids:
+        notes = db.execute(
+            select(Note).where(
+                Note.workspace_id == workspace_id,
+                Note.project_id == project_id,
+                Note.is_deleted == False,  # noqa: E712
+                Note.task_id.in_(task_ids),
+            )
+        ).scalars().all()
+        for note in notes:
+            key = str(note.task_id or "").strip()
+            if not key:
+                continue
+            notes_by_task.setdefault(key, []).append(note)
+
+        comments = db.execute(
+            select(ActivityLog).where(
+                ActivityLog.workspace_id == workspace_id,
+                ActivityLog.project_id == project_id,
+                ActivityLog.task_id.in_(task_ids),
+            )
+        ).scalars().all()
+        for comment in comments:
+            key = str(comment.task_id or "").strip()
+            if not key:
+                continue
+            comments_by_task.setdefault(key, []).append(comment)
+
+    project_notes = db.execute(
+        select(Note).where(
+            Note.workspace_id == workspace_id,
+            Note.project_id == project_id,
+            Note.is_deleted == False,  # noqa: E712
+        )
+    ).scalars().all()
+
+    resolved_stack: str | None = None
+    resolved_port: int | None = None
+    resolved_health_path: str | None = None
+
+    for task in deploy_tasks:
+        task_id = str(task.id or "").strip()
+        corpus_parts = [str(task.title or ""), str(task.description or ""), str(task.instruction or "")]
+        for note in notes_by_task.get(task_id, []):
+            corpus_parts.extend([str(note.title or ""), str(note.body or "")])
+        for comment in comments_by_task.get(task_id, []):
+            corpus_parts.append(str(comment.details or ""))
+        corpus = "\n".join(corpus_parts)
+        stack, port, health_path = _extract_runtime_deploy_target_from_text(corpus)
+        if not resolved_stack and stack:
+            resolved_stack = stack
+        if resolved_port is None and port is not None:
+            resolved_port = port
+        if not resolved_health_path and health_path:
+            resolved_health_path = health_path
+        if resolved_stack and resolved_port is not None and resolved_health_path:
+            break
+
+    if not (resolved_stack and resolved_port is not None and resolved_health_path):
+        for note in project_notes:
+            corpus = "\n".join([str(note.title or ""), str(note.body or "")])
+            stack, port, health_path = _extract_runtime_deploy_target_from_text(corpus)
+            if not resolved_stack and stack:
+                resolved_stack = stack
+            if resolved_port is None and port is not None:
+                resolved_port = port
+            if not resolved_health_path and health_path:
+                resolved_health_path = health_path
+            if resolved_stack and resolved_port is not None and resolved_health_path:
+                break
+
+    return resolved_stack, resolved_port, resolved_health_path
+
+
 def _promote_gate_policy_to_execution_mode_if_needed(
     *,
     db: Session,
@@ -1117,11 +1263,13 @@ def _promote_gate_policy_to_execution_mode_if_needed(
     command_id: str | None,
 ) -> None:
     project_rules = db.execute(
-        select(ProjectRule).where(
+        select(ProjectRule)
+        .where(
             ProjectRule.workspace_id == workspace_id,
             ProjectRule.project_id == project_id,
             ProjectRule.is_deleted == False,  # noqa: E712
         )
+        .order_by(ProjectRule.updated_at.desc(), ProjectRule.id.desc())
     ).scalars().all()
     gate_policy, _source = parse_gate_policy_rule(project_rules=project_rules)
     if not isinstance(gate_policy, dict):
@@ -1136,7 +1284,32 @@ def _promote_gate_policy_to_execution_mode_if_needed(
         else []
     )
     mode_value = str(gate_policy.get("mode") or "").strip().lower()
-    needs_update = mode_value != "execution" or not delivery_checks
+    runtime_cfg = gate_policy.get("runtime_deploy_health")
+    runtime_policy = dict(runtime_cfg) if isinstance(runtime_cfg, dict) else {}
+    runtime_stack = str(runtime_policy.get("stack") or "").strip() or None
+    runtime_port_raw = runtime_policy.get("port")
+    runtime_port: int | None = None
+    if isinstance(runtime_port_raw, int):
+        runtime_port = runtime_port_raw if 1 <= int(runtime_port_raw) <= 65535 else None
+    elif isinstance(runtime_port_raw, str) and runtime_port_raw.strip().isdigit():
+        parsed_port = int(runtime_port_raw.strip())
+        runtime_port = parsed_port if 1 <= parsed_port <= 65535 else None
+    runtime_health_path = str(runtime_policy.get("health_path") or "").strip() or None
+
+    detected_stack, detected_port, detected_health_path = _resolve_runtime_deploy_target_from_project_artifacts(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
+    runtime_updates: dict[str, object] = {}
+    if not runtime_stack and detected_stack:
+        runtime_updates["stack"] = detected_stack
+    if runtime_port is None and detected_port is not None:
+        runtime_updates["port"] = detected_port
+    if not runtime_health_path and detected_health_path:
+        runtime_updates["health_path"] = detected_health_path
+
+    needs_update = mode_value != "execution" or not delivery_checks or bool(runtime_updates)
     if not needs_update:
         return
 
@@ -1148,6 +1321,12 @@ def _promote_gate_policy_to_execution_mode_if_needed(
     if not delivery_checks:
         updated_required_checks["delivery"] = list(DEFAULT_REQUIRED_DELIVERY_CHECKS)
     updated_policy["required_checks"] = updated_required_checks
+    updated_runtime_cfg = updated_policy.get("runtime_deploy_health")
+    updated_runtime = dict(updated_runtime_cfg) if isinstance(updated_runtime_cfg, dict) else {}
+    if runtime_updates:
+        updated_runtime.update(runtime_updates)
+    if updated_runtime:
+        updated_policy["runtime_deploy_health"] = updated_runtime
     body = json.dumps(updated_policy, ensure_ascii=False, indent=2)
 
     ProjectRuleApplicationService(
@@ -1163,140 +1342,93 @@ def _promote_gate_policy_to_execution_mode_if_needed(
         )
     )
 
+    updated_rules = db.execute(
+        select(ProjectRule)
+        .where(
+            ProjectRule.workspace_id == workspace_id,
+            ProjectRule.project_id == project_id,
+            ProjectRule.is_deleted == False,  # noqa: E712
+        )
+        .order_by(ProjectRule.updated_at.desc(), ProjectRule.id.desc())
+    ).scalars().all()
+    readback_policy, _readback_source = parse_gate_policy_rule(project_rules=updated_rules)
+    readback_mode = str(readback_policy.get("mode") or "").strip().lower()
+    if readback_mode != "execution":
+        logger.warning(
+            "Gate Policy promotion readback mismatch for project %s: mode=%s",
+            project_id,
+            readback_mode,
+        )
 
-def _maybe_dispatch_team_mode_kickoff(
+
+def _sync_gate_policy_runtime_target_if_needed(
     *,
     db: Session,
     user: User,
     workspace_id: str,
-    project_id: str | None,
-    intent_flags: dict[str, bool] | None,
-    allow_mutations: bool,
+    project_id: str,
     command_id: str | None,
-) -> dict[str, object] | None:
-    normalized_project_id = str(project_id or "").strip()
-    if not allow_mutations or not normalized_project_id:
-        return None
-    flags = intent_flags or {}
-    kickoff_intent = bool(flags.get("execution_kickoff_intent"))
-    execution_intent = bool(flags.get("execution_intent"))
-    project_creation_intent = bool(flags.get("project_creation_intent"))
-    # Team Mode execution should route through Team Lead orchestration.
-    # We still avoid kickoff during project-creation requests.
-    should_dispatch_kickoff = kickoff_intent or (execution_intent and not project_creation_intent)
-    if not should_dispatch_kickoff:
-        return None
-
-    team_mode_skill = db.execute(
-        select(ProjectSkill.id).where(
-            ProjectSkill.workspace_id == workspace_id,
-            ProjectSkill.project_id == normalized_project_id,
-            ProjectSkill.skill_key == "team_mode",
-            ProjectSkill.is_deleted == False,  # noqa: E712
-        )
-    ).scalar_one_or_none()
-    if team_mode_skill is None:
-        return None
-
-    _promote_gate_policy_to_execution_mode_if_needed(
-        db=db,
-        user=user,
-        workspace_id=workspace_id,
-        project_id=normalized_project_id,
-        command_id=command_id,
-    )
-
-    lead_tasks = db.execute(
-        select(Task)
-        .join(
-            ProjectMember,
-            (ProjectMember.workspace_id == Task.workspace_id)
-            & (ProjectMember.project_id == Task.project_id)
-            & (ProjectMember.user_id == Task.assignee_id),
-        )
+) -> bool:
+    project_rules = db.execute(
+        select(ProjectRule)
         .where(
-            Task.workspace_id == workspace_id,
-            Task.project_id == normalized_project_id,
-            Task.is_deleted == False,  # noqa: E712
-            Task.archived == False,  # noqa: E712
-            Task.status != "Done",
-            ProjectMember.role == "TeamLeadAgent",
+            ProjectRule.workspace_id == workspace_id,
+            ProjectRule.project_id == project_id,
+            ProjectRule.is_deleted == False,  # noqa: E712
         )
-        .order_by(Task.created_at.asc())
+        .order_by(ProjectRule.updated_at.desc(), ProjectRule.id.desc())
     ).scalars().all()
+    gate_policy, _source = parse_gate_policy_rule(project_rules=project_rules)
+    if not isinstance(gate_policy, dict):
+        gate_policy = deepcopy(DEFAULT_GATE_POLICY)
 
-    kickoff_instruction = _build_team_lead_kickoff_instruction(
-        project_id=normalized_project_id,
-        requester_user_id=str(user.id),
-    )
-    queued_task_ids: list[str] = []
-    failed: list[dict[str, str]] = []
-    for task in lead_tasks:
-        task_id = str(task.id or "").strip()
-        if not task_id:
-            continue
-        task_command_id = _command_id_with_suffix(command_id, f"kickoff-{task_id[:8]}")
-        try:
-            TaskApplicationService(db, user, command_id=task_command_id).request_automation_run(
-                task_id,
-                TaskAutomationRun(instruction=kickoff_instruction),
-            )
-            queued_task_ids.append(task_id)
-        except HTTPException as exc:
-            failed.append({"task_id": task_id, "error": str(exc.detail or "").strip() or f"HTTP {exc.status_code}"})
-        except Exception as exc:  # pragma: no cover - defensive safety
-            failed.append({"task_id": task_id, "error": str(exc)[:200]})
+    runtime_cfg = gate_policy.get("runtime_deploy_health")
+    runtime_policy = dict(runtime_cfg) if isinstance(runtime_cfg, dict) else {}
+    runtime_stack = str(runtime_policy.get("stack") or "").strip() or None
+    runtime_port_raw = runtime_policy.get("port")
+    runtime_port: int | None = None
+    if isinstance(runtime_port_raw, int):
+        runtime_port = runtime_port_raw if 1 <= int(runtime_port_raw) <= 65535 else None
+    elif isinstance(runtime_port_raw, str) and runtime_port_raw.strip().isdigit():
+        parsed_port = int(runtime_port_raw.strip())
+        runtime_port = parsed_port if 1 <= parsed_port <= 65535 else None
+    runtime_health_path = str(runtime_policy.get("health_path") or "").strip() or None
 
-    message = (
-        f"Team Mode kickoff dispatched for project {normalized_project_id}: "
-        f"{len(queued_task_ids)} lead task(s) queued."
-    )
-    if failed:
-        message += f" {len(failed)} queue attempt(s) failed."
-    dedupe_key = _command_id_with_suffix(command_id, "team-mode-kickoff-notify")
-    append_notification_created_event(
-        db,
-        append_event_fn=append_event,
-        user_id=str(user.id),
-        message=message,
-        actor_id=str(user.id),
+    detected_stack, detected_port, detected_health_path = _resolve_runtime_deploy_target_from_project_artifacts(
+        db=db,
         workspace_id=workspace_id,
-        project_id=normalized_project_id,
-        notification_type="ManualMessage",
-        severity="warning" if failed else "info",
-        dedupe_key=dedupe_key,
-        payload={
-            "kind": "team_mode_kickoff",
-            "queued_task_ids": queued_task_ids,
-            "failed": failed,
-        },
-        source_event="agents.chat.kickoff_dispatch",
+        project_id=project_id,
     )
-    db.commit()
+    runtime_updates: dict[str, object] = {}
+    if not runtime_stack and detected_stack:
+        runtime_updates["stack"] = detected_stack
+    if runtime_port is None and detected_port is not None:
+        runtime_updates["port"] = detected_port
+    if not runtime_health_path and detected_health_path:
+        runtime_updates["health_path"] = detected_health_path
+    if not runtime_updates:
+        return False
 
-    if not lead_tasks:
-        return {
-            "ok": False,
-            "action": "comment",
-            "summary": "Team Mode kickoff blocked: no active Team Lead tasks found.",
-            "comment": "Create/assign at least one active Lead task and retry kickoff.",
-            "kickoff_dispatched": False,
-            "queued_task_ids": [],
-            "failed": [],
-        }
-    summary = "Team Mode kickoff dispatched to Team Lead automation."
-    comment = f"Queued lead tasks: {len(queued_task_ids)}."
-    if failed:
-        comment = f"{comment} Failed queues: {len(failed)}."
-    return {
-        "ok": len(queued_task_ids) > 0 and not failed,
-        "action": "comment",
-        "summary": summary,
-        "comment": comment,
-        "kickoff_dispatched": True,
-        "queued_task_ids": queued_task_ids,
-        "failed": failed,
-    }
+    updated_policy = deepcopy(gate_policy)
+    updated_runtime_cfg = updated_policy.get("runtime_deploy_health")
+    updated_runtime = dict(updated_runtime_cfg) if isinstance(updated_runtime_cfg, dict) else {}
+    updated_runtime.update(runtime_updates)
+    updated_policy["runtime_deploy_health"] = updated_runtime
+    body = json.dumps(updated_policy, ensure_ascii=False, indent=2)
+
+    ProjectRuleApplicationService(
+        db,
+        user,
+        command_id=_command_id_with_suffix(command_id, "gate-policy-runtime-sync"),
+    ).create_project_rule(
+        ProjectRuleCreate(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            title="Gate Policy",
+            body=body,
+        )
+    )
+    return True
 
 
 def _resolve_effective_chat_project_id(
@@ -1736,7 +1868,7 @@ def agent_chat(
             "resume_fallback_used": False,
         }
 
-    kickoff_result = _maybe_dispatch_team_mode_kickoff(
+    kickoff_result = plugin_api_policy.maybe_dispatch_execution_kickoff(
         db=db,
         user=user,
         workspace_id=payload.workspace_id,
@@ -1744,7 +1876,21 @@ def agent_chat(
         intent_flags=intent_flags,
         allow_mutations=bool(payload.allow_mutations),
         command_id=command_id,
+        promote_gate_policy_to_execution_mode_if_needed=_promote_gate_policy_to_execution_mode_if_needed,
+        build_team_lead_kickoff_instruction=_build_team_lead_kickoff_instruction,
+        command_id_with_suffix=_command_id_with_suffix,
     )
+    if bool(payload.allow_mutations) and str(effective_project_id or "").strip():
+        try:
+            _sync_gate_policy_runtime_target_if_needed(
+                db=db,
+                user=user,
+                workspace_id=payload.workspace_id,
+                project_id=str(effective_project_id),
+                command_id=command_id,
+            )
+        except Exception:
+            logger.exception("Failed to sync Gate Policy runtime target for project %s", effective_project_id)
     if kickoff_result is not None:
         summary = str(kickoff_result.get("summary") or "").strip() or "Team Mode kickoff dispatched."
         comment = str(kickoff_result.get("comment") or "").strip() or None
@@ -1803,6 +1949,17 @@ def agent_chat(
             summary=outcome.summary,
             comment=outcome.comment,
         )
+        if bool(payload.allow_mutations) and str(effective_project_id or "").strip():
+            try:
+                _sync_gate_policy_runtime_target_if_needed(
+                    db=db,
+                    user=user,
+                    workspace_id=payload.workspace_id,
+                    project_id=str(effective_project_id),
+                    command_id=command_id,
+                )
+            except Exception:
+                logger.exception("Failed to sync Gate Policy runtime target for project %s", effective_project_id)
         _persist_assistant_message_with_links(
             db=db,
             user=user,
@@ -1987,7 +2144,7 @@ def agent_chat_stream(
 
         return StreamingResponse(_compact_stream(), media_type="application/x-ndjson", headers=stream_headers)
 
-    kickoff_result = _maybe_dispatch_team_mode_kickoff(
+    kickoff_result = plugin_api_policy.maybe_dispatch_execution_kickoff(
         db=db,
         user=user,
         workspace_id=payload.workspace_id,
@@ -1995,6 +2152,9 @@ def agent_chat_stream(
         intent_flags=intent_flags,
         allow_mutations=bool(payload.allow_mutations),
         command_id=command_id,
+        promote_gate_policy_to_execution_mode_if_needed=_promote_gate_policy_to_execution_mode_if_needed,
+        build_team_lead_kickoff_instruction=_build_team_lead_kickoff_instruction,
+        command_id_with_suffix=_command_id_with_suffix,
     )
     if kickoff_result is not None:
         summary = str(kickoff_result.get("summary") or "").strip() or "Team Mode kickoff dispatched."

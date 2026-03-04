@@ -2,23 +2,36 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
+import subprocess
 from copy import deepcopy
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from features.rules.application import ProjectRuleApplicationService
-from features.agents.gates import DEFAULT_GATE_POLICY as _DEFAULT_AGENT_GATE_POLICY
+from features.agents.gates import (
+    DEFAULT_GATE_POLICY as _DEFAULT_AGENT_GATE_POLICY,
+    merge_gate_policy_dict,
+)
+from plugins import skill_policy as plugin_skill_policy
+from plugins.team_mode.skill_contract import (
+    TEAM_MODE_SKILL_KEY,
+    build_team_mode_roster_snapshot,
+    ensure_team_mode_project_membership,
+    ensure_team_mode_repository_context,
+)
 from shared.core import Project, ProjectRuleCreate, ProjectRulePatch, User, ensure_project_access, ensure_role
-from shared.models import ProjectMember, ProjectRule, ProjectSkill, User as UserModel, WorkspaceMember, WorkspaceSkill
+from shared.models import ProjectRule, ProjectSkill, WorkspaceSkill
 
 from .read_models import load_project_skill_view, load_workspace_skill_view
 
@@ -28,44 +41,19 @@ _MAX_SOURCE_BYTES = 1024 * 1024
 _KEY_SANITIZER_RE = re.compile(r"[^a-z0-9]+")
 _FILE_NAME_SANITIZER_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _FRONTMATTER_FIELD_RE = re.compile(r"^([A-Za-z0-9_-]+)\s*:\s*(.*)$")
-_TEAM_MODE_SKILL_KEY = "team_mode"
 _GIT_DELIVERY_SKILL_KEY = "git_delivery"
 _GITHUB_DELIVERY_SKILL_KEY = "github_delivery"
 _GATE_POLICY_RULE_TITLE = "Gate Policy"
 _GATE_POLICY_RULE_TITLES = ("gate policy", "delivery gates", "workflow gates")
 _GATE_POLICY_RELEVANT_SKILL_KEYS = {
-    _TEAM_MODE_SKILL_KEY,
+    TEAM_MODE_SKILL_KEY,
     _GIT_DELIVERY_SKILL_KEY,
     _GITHUB_DELIVERY_SKILL_KEY,
 }
 _DEFAULT_GATE_POLICY: dict[str, Any] = deepcopy(_DEFAULT_AGENT_GATE_POLICY)
-_SKILL_DEPENDENCIES: dict[str, tuple[str, ...]] = {
-    _GITHUB_DELIVERY_SKILL_KEY: (_GIT_DELIVERY_SKILL_KEY,),
-    _TEAM_MODE_SKILL_KEY: (_GIT_DELIVERY_SKILL_KEY,),
-}
-_TEAM_MODE_WORKSPACE_ROLE = "Admin"
-_TEAM_MODE_AGENT_SPECS: tuple[dict[str, str], ...] = (
-    {
-        "username": "agent.m0rph3u5",
-        "full_name": "M0rph3u5",
-        "project_role": "TeamLeadAgent",
-    },
-    {
-        "username": "agent.tr1n1ty",
-        "full_name": "Tr1n1ty",
-        "project_role": "DeveloperAgent",
-    },
-    {
-        "username": "agent.n30",
-        "full_name": "N30",
-        "project_role": "DeveloperAgent",
-    },
-    {
-        "username": "agent.0r4cl3",
-        "full_name": "0r4cl3",
-        "project_role": "QAAgent",
-    },
-)
+_REPOSITORY_CONTEXT_RULE_TITLE = "Repository Context"
+_DEFAULT_CODEX_WORKDIR = "/home/app/workspace"
+_LOG = logging.getLogger(__name__)
 
 
 def _normalize_mode(raw: str) -> str:
@@ -149,6 +137,28 @@ def _sanitize_uploaded_filename(raw: str) -> str:
     if not normalized:
         normalized = "imported_skill.md"
     return normalized
+
+
+def _build_gate_policy_for_skill_keys(skill_keys: set[str]) -> dict[str, Any]:
+    policy = deepcopy(_DEFAULT_GATE_POLICY)
+    patch = plugin_skill_policy.build_gate_policy_patch_for_skill_keys(skill_keys)
+    if isinstance(patch, dict) and patch:
+        policy = merge_gate_policy_dict(policy, patch)
+    return policy
+
+
+def _parse_rule_json_body(raw_body: str) -> dict[str, Any] | None:
+    candidate = str(raw_body or "").strip()
+    if not candidate:
+        return None
+    fenced_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", candidate, flags=re.IGNORECASE | re.DOTALL)
+    if fenced_match:
+        candidate = str(fenced_match.group(1) or "").strip()
+    try:
+        parsed = json.loads(candidate)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _extract_markdown_heading(text: str) -> str:
@@ -456,14 +466,36 @@ class ProjectSkillApplicationService:
             return None
         existing_rule_id = self._find_gate_policy_rule_id(workspace_id=skill.workspace_id, project_id=skill.project_id)
         if existing_rule_id:
+            existing_rule = self.db.get(ProjectRule, existing_rule_id)
+            if existing_rule is not None and not bool(existing_rule.is_deleted):
+                desired_policy = _build_gate_policy_for_skill_keys(relevant_skill_keys)
+                parsed_existing = _parse_rule_json_body(str(existing_rule.body or ""))
+                desired_eval_mode = str(((desired_policy.get("evaluation") or {}).get("mode") or "")).strip().lower()
+                existing_eval_mode = str(((parsed_existing or {}).get("evaluation") or {}).get("mode") or "").strip().lower()
+                if desired_eval_mode and existing_eval_mode != desired_eval_mode:
+                    merged_policy = deepcopy(desired_policy)
+                    if isinstance(parsed_existing, dict):
+                        merged_policy = deepcopy(parsed_existing)
+                        evaluation_map = dict(merged_policy.get("evaluation") or {}) if isinstance(merged_policy.get("evaluation"), dict) else {}
+                        evaluation_map["mode"] = desired_eval_mode
+                        merged_policy["evaluation"] = evaluation_map
+                    patch_command_id = self._derive_command_id("gate-policy-evaluation-mode")
+                    ProjectRuleApplicationService(self.db, self.user, command_id=patch_command_id).patch_project_rule(
+                        existing_rule_id,
+                        ProjectRulePatch(
+                            title=_GATE_POLICY_RULE_TITLE,
+                            body=json.dumps(merged_policy, ensure_ascii=True),
+                        ),
+                    )
             return existing_rule_id
         rule_command_id = self._derive_command_id("gate-policy") or f"project-gate-policy-{uuid4().hex[:12]}"
+        gate_policy = _build_gate_policy_for_skill_keys(relevant_skill_keys)
         created_rule = ProjectRuleApplicationService(self.db, self.user, command_id=rule_command_id).create_project_rule(
             ProjectRuleCreate(
                 workspace_id=skill.workspace_id,
                 project_id=skill.project_id,
                 title=_GATE_POLICY_RULE_TITLE,
-                body=json.dumps(_DEFAULT_GATE_POLICY, ensure_ascii=True),
+                body=json.dumps(gate_policy, ensure_ascii=True),
             )
         )
         created_rule_id = str(created_rule.get("id") or "").strip()
@@ -535,6 +567,18 @@ class ProjectSkillApplicationService:
         root_key = str(skill_key or "").strip().lower()
         if not root_key:
             return []
+        dependency_map: dict[str, tuple[str, ...]] = {}
+        for key, deps in plugin_skill_policy.skill_dependencies().items():
+            normalized_key = str(key or "").strip().lower()
+            if not normalized_key:
+                continue
+            normalized_deps = tuple(
+                str(item or "").strip().lower()
+                for item in (deps or ())
+                if str(item or "").strip()
+            )
+            if normalized_deps:
+                dependency_map[normalized_key] = normalized_deps
         ordered: list[str] = []
         visiting: set[str] = set()
         visited: set[str] = set()
@@ -548,7 +592,7 @@ class ProjectSkillApplicationService:
             if normalized in visiting:
                 raise HTTPException(status_code=500, detail=f"Skill dependency cycle detected at: {normalized}")
             visiting.add(normalized)
-            for dependency in _SKILL_DEPENDENCIES.get(normalized, ()):
+            for dependency in dependency_map.get(normalized, ()):
                 dep_key = str(dependency or "").strip().lower()
                 if not dep_key:
                     continue
@@ -665,99 +709,55 @@ class ProjectSkillApplicationService:
             raise HTTPException(status_code=500, detail="Skill rule creation failed")
         return created_rule_id
 
-    def _ensure_team_mode_workspace_agent(
-        self,
-        *,
-        workspace_id: str,
-        username: str,
-        full_name: str,
-    ) -> UserModel:
-        normalized_username = str(username or "").strip().lower()
-        normalized_full_name = str(full_name or "").strip() or normalized_username
-        user_row = self.db.execute(
-            select(UserModel).where(func.lower(UserModel.username) == normalized_username)
-        ).scalar_one_or_none()
-        if user_row is not None:
-            if str(user_row.user_type or "").strip().lower() != "agent":
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f'Team Mode requires username "{normalized_username}" to be an agent user. '
-                        "Found a non-agent user with the same username."
-                    ),
-                )
-            user_row.full_name = normalized_full_name
-            user_row.password_hash = None
-            user_row.must_change_password = False
-            user_row.password_changed_at = None
-            user_row.is_active = True
-            user_row.user_type = "agent"
-        else:
-            user_row = UserModel(
-                username=normalized_username,
-                full_name=normalized_full_name,
-                user_type="agent",
-                password_hash=None,
-                must_change_password=False,
-                password_changed_at=None,
-                is_active=True,
-                theme="dark",
-                timezone="UTC",
-                notifications_enabled=True,
-                agent_chat_model="",
-                agent_chat_reasoning_effort="medium",
-            )
-            self.db.add(user_row)
-            self.db.flush()
+    def _run_git(self, *, cwd: Path, args: list[str]) -> tuple[int, str, str]:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return proc.returncode, str(proc.stdout or "").strip(), str(proc.stderr or "").strip()
 
-        workspace_member = self.db.execute(
-            select(WorkspaceMember).where(
-                WorkspaceMember.workspace_id == workspace_id,
-                WorkspaceMember.user_id == user_row.id,
-            )
-        ).scalar_one_or_none()
-        if workspace_member is None:
-            self.db.add(
-                WorkspaceMember(
-                    workspace_id=workspace_id,
-                    user_id=user_row.id,
-                    role=_TEAM_MODE_WORKSPACE_ROLE,
-                )
-            )
-        elif str(workspace_member.role or "").strip() != _TEAM_MODE_WORKSPACE_ROLE:
-            workspace_member.role = _TEAM_MODE_WORKSPACE_ROLE
-        return user_row
+    def _ensure_local_repository_bootstrap(self, *, repo_path: Path) -> None:
+        try:
+            repo_path.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            _LOG.warning("Failed to create repository path %s: %s", repo_path, exc)
+            return
 
-    def _ensure_team_mode_project_membership(self, *, project: Project) -> None:
-        for spec in _TEAM_MODE_AGENT_SPECS:
-            user_row = self._ensure_team_mode_workspace_agent(
-                workspace_id=project.workspace_id,
-                username=spec["username"],
-                full_name=spec["full_name"],
-            )
-            expected_project_role = str(spec["project_role"])
-            project_member = self.db.execute(
-                select(ProjectMember).where(
-                    ProjectMember.workspace_id == project.workspace_id,
-                    ProjectMember.project_id == project.id,
-                    ProjectMember.user_id == user_row.id,
-                )
-            ).scalar_one_or_none()
-            if project_member is None:
-                self.db.add(
-                    ProjectMember(
-                        workspace_id=project.workspace_id,
-                        project_id=project.id,
-                        user_id=user_row.id,
-                        role=expected_project_role,
-                    )
-                )
-                continue
-            if str(project_member.role or "").strip() != expected_project_role:
-                project_member.role = expected_project_role
+        if not (repo_path / ".git").exists():
+            code_init, _out_init, err_init = self._run_git(cwd=repo_path, args=["init", "-b", "main"])
+            if code_init != 0:
+                _LOG.warning("Failed to initialize git repository at %s: %s", repo_path, err_init[:200])
+                return
+
+        code_head, _out_head, _err_head = self._run_git(cwd=repo_path, args=["rev-parse", "--verify", "HEAD"])
+        if code_head == 0:
+            return
+
+        self._run_git(cwd=repo_path, args=["config", "user.name", "Constructos Automation"])
+        self._run_git(cwd=repo_path, args=["config", "user.email", "automation@constructos.local"])
+        readme_path = repo_path / "README.md"
+        if not readme_path.exists():
+            try:
+                readme_path.write_text("# Project Workspace\n", encoding="utf-8")
+            except Exception as exc:
+                _LOG.warning("Failed to write bootstrap README for %s: %s", repo_path, exc)
+                return
+        code_add, _out_add, err_add = self._run_git(cwd=repo_path, args=["add", "README.md"])
+        if code_add != 0:
+            _LOG.warning("Failed to stage bootstrap files for %s: %s", repo_path, err_add[:200])
+            return
+        code_commit, _out_commit, err_commit = self._run_git(
+            cwd=repo_path,
+            args=["commit", "-m", "chore: initialize project workspace"],
+        )
+        if code_commit != 0:
+            _LOG.warning("Failed to create bootstrap commit for %s: %s", repo_path, err_commit[:200])
 
     def _apply_team_mode_contract_if_needed(self, *, skill: ProjectSkill) -> None:
-        if str(skill.skill_key or "").strip().lower() != _TEAM_MODE_SKILL_KEY:
+        if str(skill.skill_key or "").strip().lower() != TEAM_MODE_SKILL_KEY:
             return
         ensure_role(self.db, skill.workspace_id, self.user.id, {"Owner", "Admin"})
         project = _require_project_scope(
@@ -765,51 +765,28 @@ class ProjectSkillApplicationService:
             workspace_id=skill.workspace_id,
             project_id=skill.project_id,
         )
-        self._ensure_team_mode_project_membership(project=project)
-        self.db.flush()
-
-    def _build_team_mode_roster_snapshot(self, *, project: Project) -> list[dict[str, Any]]:
-        roster: list[dict[str, Any]] = []
-        for spec in _TEAM_MODE_AGENT_SPECS:
-            normalized_username = str(spec["username"]).strip().lower()
-            user_row = self.db.execute(
-                select(UserModel).where(func.lower(UserModel.username) == normalized_username)
-            ).scalar_one_or_none()
-            user_id = str(user_row.id) if user_row is not None else ""
-            workspace_member = None
-            project_member = None
-            if user_row is not None:
-                workspace_member = self.db.execute(
-                    select(WorkspaceMember).where(
-                        WorkspaceMember.workspace_id == project.workspace_id,
-                        WorkspaceMember.user_id == user_row.id,
-                    )
-                ).scalar_one_or_none()
-                project_member = self.db.execute(
-                    select(ProjectMember).where(
-                        ProjectMember.workspace_id == project.workspace_id,
-                        ProjectMember.project_id == project.id,
-                        ProjectMember.user_id == user_row.id,
-                    )
-                ).scalar_one_or_none()
-            roster.append(
-                {
-                    "username": str(spec["username"]),
-                    "full_name": str(spec["full_name"]),
-                    "expected_project_role": str(spec["project_role"]),
-                    "user_id": user_id or None,
-                    "user_type": (str(user_row.user_type or "").strip() if user_row is not None else None),
-                    "workspace_member_role": (
-                        str(workspace_member.role or "").strip() if workspace_member is not None else None
-                    ),
-                    "project_member_role": (
-                        str(project_member.role or "").strip() if project_member is not None else None
-                    ),
-                    "workspace_member_present": workspace_member is not None,
-                    "project_member_present": project_member is not None,
-                }
+        try:
+            ensure_team_mode_project_membership(db=self.db, project=project)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        has_git_delivery = self.db.execute(
+            select(ProjectSkill.id).where(
+                ProjectSkill.workspace_id == skill.workspace_id,
+                ProjectSkill.project_id == skill.project_id,
+                ProjectSkill.skill_key == _GIT_DELIVERY_SKILL_KEY,
+                ProjectSkill.is_deleted == False,  # noqa: E712
             )
-        return roster
+        ).scalar_one_or_none()
+        if has_git_delivery is not None:
+            ensure_team_mode_repository_context(
+                db=self.db,
+                project=project,
+                actor_user_id=self.user.id,
+                default_codex_workdir=_DEFAULT_CODEX_WORKDIR,
+                repository_context_rule_title=_REPOSITORY_CONTEXT_RULE_TITLE,
+                ensure_local_repository_bootstrap_fn=self._ensure_local_repository_bootstrap,
+            )
+        self.db.flush()
 
     def _assert_generated_rule_id_uniqueness(self, *, skill: ProjectSkill) -> None:
         generated_rule_id = str(skill.generated_rule_id or "").strip()
@@ -1301,13 +1278,13 @@ class ProjectSkillApplicationService:
             raise HTTPException(status_code=404, detail="Project skill not found")
         if gate_policy_rule_id:
             view["gate_policy_rule_id"] = gate_policy_rule_id
-        if str(skill.skill_key or "").strip().lower() == _TEAM_MODE_SKILL_KEY:
+        if str(skill.skill_key or "").strip().lower() == TEAM_MODE_SKILL_KEY:
             project = _require_project_scope(
                 self.db,
                 workspace_id=skill.workspace_id,
                 project_id=skill.project_id,
             )
-            roster = self._build_team_mode_roster_snapshot(project=project)
+            roster = build_team_mode_roster_snapshot(db=self.db, project=project)
             view["team_mode_roster"] = roster
             view["team_mode_contract_complete"] = all(
                 bool(item.get("user_id"))

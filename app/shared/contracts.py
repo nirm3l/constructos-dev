@@ -84,7 +84,7 @@ class CommentCreate(BaseModel):
 
 
 class TaskAutomationRun(BaseModel):
-    instruction: str | None = Field(default=None, max_length=2000)
+    instruction: str | None = None
 
 
 class AgentChatRun(BaseModel):
@@ -284,6 +284,7 @@ class TaskDTO:
     scheduled_at_utc: str | None
     schedule_timezone: str | None
     schedule_state: str
+    automation_state: str
     last_schedule_run_at: str | None
     last_schedule_error: str | None
     archived: bool

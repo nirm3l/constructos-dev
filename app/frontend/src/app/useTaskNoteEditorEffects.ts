@@ -15,6 +15,8 @@ export function useTaskNoteEditorEffects(c: any) {
   React.useEffect(() => {
     if (!c.selectedTask) {
       c.setTaskEditorHydratedTaskId(null)
+      c.setTaskEditorBaselineTask(null)
+      c.setTaskEditorTouched(false)
       return
     }
     c.setTaskEditorHydratedTaskId(null)
@@ -61,8 +63,10 @@ export function useTaskNoteEditorEffects(c: any) {
     c.setCommentBody('')
     c.setExpandedCommentIds(new Set())
     c.setTaskEditorError(null)
+    c.setTaskEditorBaselineTask(JSON.parse(JSON.stringify(c.selectedTask)))
+    c.setTaskEditorTouched(false)
     c.setTaskEditorHydratedTaskId(c.selectedTask.id ?? null)
-  }, [c.selectedTask?.id, c.currentUserTimezone])
+  }, [c.selectedTask?.id, c.selectedTask?.updated_at, c.currentUserTimezone])
 
   React.useEffect(() => {
     if (!c.taskEditorError) return

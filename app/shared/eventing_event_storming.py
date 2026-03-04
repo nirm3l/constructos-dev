@@ -160,6 +160,11 @@ _EVENT_STORMING_OUTPUT_SCHEMA: dict[str, Any] = {
     "required": ["components", "relations"],
     "additionalProperties": False,
 }
+EVENT_STORMING_PROMPT_SOURCE_MAX_CHARS = 5000
+EVENT_STORMING_PROMPT_CONTEXT_FRAME_MAX_CHARS = 3600
+# Backward-compatible alias used by tests and existing callers.
+EVENT_STORMING_PROMPT_FRAME_MAX_CHARS = EVENT_STORMING_PROMPT_CONTEXT_FRAME_MAX_CHARS
+EVENT_STORMING_PROMPT_ENTITY_CONTEXT_MAX_ITEMS = 16
 
 
 def _extract_aggregate_from_stream(stream_name: str) -> tuple[str, str] | None:
@@ -572,16 +577,16 @@ def _event_storming_ai_prompt(
 ) -> str:
     tag_list = ", ".join(tags) if tags else "(none)"
     source_text = str(text or "").strip()
-    if len(source_text) > 5000:
-        source_text = source_text[:5000]
+    if len(source_text) > EVENT_STORMING_PROMPT_SOURCE_MAX_CHARS:
+        source_text = source_text[:EVENT_STORMING_PROMPT_SOURCE_MAX_CHARS]
     frame_text = str(context_frame_markdown or "").strip()
-    if len(frame_text) > 3600:
-        frame_text = frame_text[:3600]
+    if len(frame_text) > EVENT_STORMING_PROMPT_FRAME_MAX_CHARS:
+        frame_text = frame_text[:EVENT_STORMING_PROMPT_FRAME_MAX_CHARS]
     context_lines = [
         f"- {row['relation']} -> {row['neighbor_type']} [{row['neighbor_id']}] {row['neighbor_title']}"
         for row in entity_graph_context
         if row.get("neighbor_id")
-    ]
+    ][: max(1, int(EVENT_STORMING_PROMPT_ENTITY_CONTEXT_MAX_ITEMS))]
     existing_component_lines = [
         f"- {row['component_type']}: {row['component_title']}"
         for row in (project_component_snapshot.get("components") or [])

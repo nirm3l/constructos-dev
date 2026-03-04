@@ -627,9 +627,14 @@ def _build_engine(url: str):
     return create_engine(url, **kwargs)
 
 
+_existing_session_local = globals().get("SessionLocal")
 _engine_url = str(DATABASE_URL or "").strip() or _runtime_database_url()
 engine = _build_engine(_engine_url)
-SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+if isinstance(_existing_session_local, sessionmaker):
+    SessionLocal = _existing_session_local
+    SessionLocal.configure(bind=engine, autocommit=False, autoflush=False)
+else:
+    SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
 
 def ensure_engine() -> str:

@@ -139,13 +139,24 @@ class TaskApplicationService:
             handler=ToggleWatchHandler(self.ctx, task_id),
         )
 
-    def request_automation_run(self, task_id: str, payload: TaskAutomationRun) -> dict:
+    def request_automation_run(
+        self,
+        task_id: str,
+        payload: TaskAutomationRun,
+        *,
+        wake_runner: bool = True,
+    ) -> dict:
         return execute_command(
             self.db,
             command_name="Task.Automation.RequestRun",
             user_id=self.user.id,
             command_id=self.command_id,
-            handler=RequestAutomationRunHandler(self.ctx, task_id, payload.instruction),
+            handler=RequestAutomationRunHandler(
+                self.ctx,
+                task_id,
+                payload.instruction,
+                wake_runner=wake_runner,
+            ),
         )
 
 

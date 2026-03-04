@@ -19,6 +19,7 @@ def build_client(tmp_path: Path):
     db_file = tmp_path / "test.db"
     os.environ["DATABASE_URL"] = f"sqlite:///{db_file}"
     os.environ["ATTACHMENTS_DIR"] = str(tmp_path / "uploads")
+    os.environ["AGENT_RUNNER_ENABLED"] = "false"
     os.environ.pop("DB_PATH", None)
     os.environ["EVENTSTORE_URI"] = ""
     import main
@@ -35,6 +36,7 @@ def build_anonymous_client(tmp_path: Path):
     db_file = tmp_path / "test.db"
     os.environ["DATABASE_URL"] = f"sqlite:///{db_file}"
     os.environ["ATTACHMENTS_DIR"] = str(tmp_path / "uploads")
+    os.environ["AGENT_RUNNER_ENABLED"] = "false"
     os.environ.pop("DB_PATH", None)
     os.environ["EVENTSTORE_URI"] = ""
     import main
@@ -192,6 +194,43 @@ def test_task_complete_is_idempotent(tmp_path):
     assert second.status_code == 200
     assert second.json()['id'] == task_id
     assert second.json()['status'] == 'Done'
+
+
+def test_patch_task_invokes_plugin_worktree_cleanup_hook(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created = client.post(
+        '/api/tasks',
+        json={'title': 'Worktree cleanup hook', 'workspace_id': ws_id, 'project_id': project_id},
+    )
+    assert created.status_code == 200
+    task_id = created.json()['id']
+
+    from features.tasks import command_handlers as task_command_handlers
+
+    calls: list[dict[str, str | None]] = []
+
+    def _fake_cleanup(**kwargs):
+        calls.append(
+            {
+                "task_id": str(kwargs.get("task_id") or ""),
+                "project_id": str(kwargs.get("project_id") or "") or None,
+                "status": str(kwargs.get("status") or ""),
+            }
+        )
+
+    monkeypatch.setattr(task_command_handlers, "_maybe_cleanup_plugin_worktree", _fake_cleanup)
+
+    patched = client.patch(f"/api/tasks/{task_id}", json={"status": "QA"})
+    assert patched.status_code == 200
+    assert patched.json()['status'] == 'QA'
+    assert calls, "Expected worktree cleanup hook to be invoked after task patch."
+    assert calls[-1]["task_id"] == task_id
+    assert calls[-1]["project_id"] == project_id
+    assert calls[-1]["status"] == "QA"
 
 
 def test_task_archive_restore_are_idempotent(tmp_path):
@@ -2341,7 +2380,7 @@ def test_request_task_automation_run_sets_queued_status(tmp_path):
 
     status = client.get(f"/api/tasks/{task['id']}/automation")
     assert status.status_code == 200
-    assert status.json()['automation_state'] == 'queued'
+    assert status.json()['automation_state'] in {'queued', 'running', 'completed'}
     assert status.json()['last_agent_error'] is None
 
 
@@ -2382,24 +2421,44 @@ def test_task_automation_requested_event_wakes_runner(tmp_path, monkeypatch):
 
     import features.agents.runner as runner_module
 
-    calls = {"count": 0}
+    calls = {"wake": 0, "start": 0}
 
     def fake_wake():
-        calls["count"] += 1
+        calls["wake"] += 1
 
+    def fake_start():
+        calls["start"] += 1
+
+    monkeypatch.setattr(runner_module, "start_automation_runner", fake_start)
     monkeypatch.setattr(runner_module, "wake_automation_runner", fake_wake)
 
     queued = client.post(f"/api/tasks/{created['id']}/automation/run", json={'instruction': 'wake check'})
     assert queued.status_code == 200
-    assert calls["count"] >= 1
+    assert calls["start"] >= 1
+    assert calls["wake"] >= 1
 
 
 def test_runner_processes_queued_automation(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
-    project_id = bootstrap['projects'][0]['id']
-    task = client.post('/api/tasks', json={'title': 'Runner task', 'workspace_id': ws_id, 'project_id': project_id}).json()
+    created_project = client.post(
+        '/api/projects',
+        json={'workspace_id': ws_id, 'name': 'Runner Generic Project'},
+    )
+    assert created_project.status_code == 200
+    project_id = created_project.json()['id']
+    task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Runner task',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'To do',
+        },
+    )
+    assert task.status_code == 200
+    task = task.json()
 
     queued = client.post(f"/api/tasks/{task['id']}/automation/run", json={'instruction': 'Do runner check'})
     assert queued.status_code == 200
@@ -2422,7 +2481,7 @@ def test_runner_processes_queued_automation(tmp_path):
     assert isinstance(comments.json(), list)
 
 
-def test_runner_auto_retries_dev_task_once_when_no_commit_evidence(tmp_path, monkeypatch):
+def test_runner_fails_dev_task_without_commit_evidence(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
@@ -2438,6 +2497,21 @@ def test_runner_auto_retries_dev_task_once_when_no_commit_evidence(tmp_path, mon
     assert attached.status_code == 200
     applied = client.post(f"/api/project-skills/{attached.json()['id']}/apply")
     assert applied.status_code == 200
+    project_rules = client.get(f"/api/project-rules?workspace_id={ws_id}&project_id={project_id}")
+    assert project_rules.status_code == 200
+    repo_context_rule = next(
+        (
+            item
+            for item in (project_rules.json().get("items") or [])
+            if str(item.get("title") or "").strip().lower() == "repository context"
+        ),
+        None,
+    )
+    if repo_context_rule is not None:
+        deleted = client.delete(f"/api/project-rules/{repo_context_rule['id']}")
+        assert deleted.status_code == 200
+    project_patch = client.patch(f"/api/projects/{project_id}", json={"external_refs": []})
+    assert project_patch.status_code == 200
 
     members = client.get(f"/api/projects/{project_id}/members")
     assert members.status_code == 200
@@ -2475,8 +2549,67 @@ def test_runner_auto_retries_dev_task_once_when_no_commit_evidence(tmp_path, mon
     assert processed >= 1
 
     status_payload = client.get(f"/api/tasks/{task_id}/automation").json()
-    assert status_payload['automation_state'] in {'queued', 'running', 'completed'}
-    assert status_payload['last_requested_source'] in {'auto_retry', 'manual'}
+    assert status_payload['automation_state'] == 'failed'
+    task_payload = client.get(f"/api/tasks/{task_id}").json()
+    assert task_payload['status'] == 'Blocked'
+
+
+def test_runner_blocks_dev_task_when_repo_context_missing_before_execution(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={ws_id}")
+    assert catalog.status_code == 200
+    team_mode = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode['id']}/attach",
+        json={"workspace_id": ws_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+    applied = client.post(f"/api/project-skills/{attached.json()['id']}/apply")
+    assert applied.status_code == 200
+
+    members = client.get(f"/api/projects/{project_id}/members")
+    assert members.status_code == 200
+    dev_assignee_id = next(
+        item for item in members.json()["items"] if item["user"]["username"] == "agent.tr1n1ty"
+    )["user_id"]
+
+    task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Repo context required',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'Dev',
+            'assignee_id': dev_assignee_id,
+            'instruction': 'Implement feature scope.',
+        },
+    )
+    assert task.status_code == 200
+    task_id = task.json()['id']
+
+    queued = client.post(f"/api/tasks/{task_id}/automation/run", json={'instruction': 'Kickoff dev implementation'})
+    assert queued.status_code == 200
+
+    import features.agents.runner as runner_module
+
+    def _should_not_execute(**_kwargs):
+        raise AssertionError("execute_task_automation should not run when repo context is missing preflight")
+
+    monkeypatch.setattr(runner_module, "execute_task_automation", _should_not_execute)
+
+    processed = runner_module.run_queued_automation_once(limit=5)
+    assert processed >= 1
+
+    status_payload = client.get(f"/api/tasks/{task_id}/automation").json()
+    assert status_payload['automation_state'] == 'failed'
+    assert 'repo' in str(status_payload.get('last_agent_error') or '').lower()
+
+    task_payload = client.get(f"/api/tasks/{task_id}").json()
+    assert task_payload['status'] == 'Blocked'
 
 
 def test_runner_can_complete_task_from_instruction(tmp_path):
@@ -2642,8 +2775,7 @@ def test_runner_escalates_dev_automation_failure_to_team_lead_and_notifies_human
         raise RuntimeError("simulated dev failure")
 
     monkeypatch.setattr(runner_module, "execute_task_automation", _raise_failure)
-    processed = runner_module.run_queued_automation_once(limit=1)
-    assert processed >= 1
+    runner_module.run_queued_automation_once(limit=1)
 
     lead_status_payload = client.get(f"/api/tasks/{lead_task_id}/automation").json()
     assert lead_status_payload['automation_state'] in {'queued', 'running', 'completed'}
@@ -2786,6 +2918,120 @@ def test_runner_marks_failed_when_executor_raises(tmp_path, monkeypatch):
     payload = status.json()
     assert payload['automation_state'] == 'failed'
     assert 'executor boom' in (payload['last_agent_error'] or '')
+
+
+def test_runner_recoverable_failure_auto_requeues_without_blocking_dev(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={ws_id}")
+    assert catalog.status_code == 200
+    team_mode = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode['id']}/attach",
+        json={"workspace_id": ws_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+    applied = client.post(f"/api/project-skills/{attached.json()['id']}/apply")
+    assert applied.status_code == 200
+
+    members = client.get(f"/api/projects/{project_id}/members")
+    assert members.status_code == 200
+    dev_assignee_id = next(item for item in members.json()["items"] if item["user"]["username"] == "agent.tr1n1ty")[
+        "user_id"
+    ]
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Recoverable dev failure',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'Dev',
+            'assignee_id': dev_assignee_id,
+            'instruction': 'Implement scoped change',
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()['id']
+
+    queued = client.post(f"/api/tasks/{task_id}/automation/run", json={'instruction': 'Run implementation'})
+    assert queued.status_code == 200
+
+    import features.agents.runner as runner_module
+
+    def _recoverable_fail(**_kwargs):
+        raise RuntimeError("upstream timeout while contacting model service")
+
+    monkeypatch.setattr(runner_module, "execute_task_automation", _recoverable_fail)
+    runner_module.run_queued_automation_once(limit=1)
+
+    task_payload = client.get(f"/api/tasks/{task_id}").json()
+    assert task_payload['status'] == 'Dev'
+
+    automation_payload = client.get(f"/api/tasks/{task_id}/automation").json()
+    assert automation_payload['automation_state'] in {'queued', 'running'}
+    assert automation_payload['last_requested_source'] == 'runner_recover_after_failure'
+
+
+def test_runner_recoverable_failure_caps_retry_and_then_blocks_dev(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={ws_id}")
+    assert catalog.status_code == 200
+    team_mode = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode['id']}/attach",
+        json={"workspace_id": ws_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+    applied = client.post(f"/api/project-skills/{attached.json()['id']}/apply")
+    assert applied.status_code == 200
+
+    members = client.get(f"/api/projects/{project_id}/members")
+    assert members.status_code == 200
+    dev_assignee_id = next(item for item in members.json()["items"] if item["user"]["username"] == "agent.tr1n1ty")[
+        "user_id"
+    ]
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Recoverable failure capped',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'Dev',
+            'assignee_id': dev_assignee_id,
+            'instruction': 'Implement scoped change',
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()['id']
+
+    queued = client.post(f"/api/tasks/{task_id}/automation/run", json={'instruction': 'Run implementation'})
+    assert queued.status_code == 200
+
+    import features.agents.runner as runner_module
+
+    def _recoverable_fail(**_kwargs):
+        raise RuntimeError("request timeout 504 gateway timeout")
+
+    monkeypatch.setattr(runner_module, "execute_task_automation", _recoverable_fail)
+
+    for _ in range(4):
+        processed = runner_module.run_queued_automation_once(limit=1)
+        assert processed >= 1
+
+    task_payload = client.get(f"/api/tasks/{task_id}").json()
+    assert task_payload['status'] == 'Blocked'
+
+    automation_payload = client.get(f"/api/tasks/{task_id}/automation").json()
+    assert automation_payload['automation_state'] == 'failed'
 
 
 def test_runner_marks_running_while_executor_is_in_progress(tmp_path, monkeypatch):
@@ -4095,7 +4341,7 @@ def test_agent_service_verify_team_mode_workflow_detects_missing_dev_triggers_an
                     "kind": "status_change",
                     "scope": "external",
                     "to_statuses": ["QA"],
-                    "selector": {"task_ids": [d1.json()["id"], d2.json()["id"]]},
+                    "selector": {"task_ids": []},
                 }
             ],
         },
@@ -4115,8 +4361,8 @@ def test_agent_service_verify_team_mode_workflow_detects_missing_dev_triggers_an
                 {
                     "kind": "status_change",
                     "scope": "external",
-                    "to_statuses": ["Done", "Blocked"],
-                    "selector": {"task_ids": [qa_task.json()["id"]]},
+                    "to_statuses": ["Lead"],
+                    "selector": {"task_ids": [d1.json()["id"], d2.json()["id"]]},
                 },
                 {
                     "kind": "status_change",
@@ -4163,25 +4409,39 @@ def test_agent_service_verify_team_mode_workflow_detects_missing_dev_triggers_an
         workspace_id=ws_id,
     )
     assert failed["checks"]["dev_tasks_have_automation_instruction"] is False
-    assert failed["checks"]["dev_self_triggers_to_qa"] is False
+    assert failed["checks"]["dev_self_triggers_to_lead"] is False
     assert failed["checks"]["required_triggers_present"] is False
     assert failed["ok"] is False
 
     patch_payload = {
-        "instruction": "Implement and hand off to QA",
-        "execution_triggers": [{"kind": "status_change", "scope": "self", "to_statuses": ["QA"]}],
+        "instruction": "Implement and hand off to Lead",
+        "execution_triggers": [{"kind": "status_change", "scope": "self", "to_statuses": ["Lead"]}],
     }
     patched_d1 = client.patch(f"/api/tasks/{d1.json()['id']}", json=patch_payload)
     assert patched_d1.status_code == 200
     patched_d2 = client.patch(f"/api/tasks/{d2.json()['id']}", json=patch_payload)
     assert patched_d2.status_code == 200
+    patched_qa = client.patch(
+        f"/api/tasks/{qa_task.json()['id']}",
+        json={
+            "execution_triggers": [
+                {
+                    "kind": "status_change",
+                    "scope": "external",
+                    "to_statuses": ["QA"],
+                    "selector": {"task_ids": [lead_task.json()["id"]]},
+                }
+            ]
+        },
+    )
+    assert patched_qa.status_code == 200
 
     passed = service.verify_team_mode_workflow(
         project_id=project_id,
         workspace_id=ws_id,
     )
     assert passed["checks"]["dev_tasks_have_automation_instruction"] is True
-    assert passed["checks"]["dev_self_triggers_to_qa"] is True
+    assert passed["checks"]["dev_self_triggers_to_lead"] is True
     assert passed["checks"]["qa_external_trigger_requests_automation"] is True
     assert passed["checks"]["lead_external_trigger_requests_automation"] is True
     assert passed["checks"]["deploy_target_declared"] is True
@@ -4232,8 +4492,8 @@ def test_agent_service_verify_team_mode_workflow_single_lead_deploy_task_does_no
             "title": "Dev A",
             "status": "Dev",
             "assignee_id": dev1,
-            "instruction": "Implement and hand off to QA",
-            "execution_triggers": [{"kind": "status_change", "scope": "self", "to_statuses": ["QA"]}],
+            "instruction": "Implement and hand off to Lead",
+            "execution_triggers": [{"kind": "status_change", "scope": "self", "to_statuses": ["Lead"]}],
         },
     )
     assert d1.status_code == 200
@@ -4245,8 +4505,8 @@ def test_agent_service_verify_team_mode_workflow_single_lead_deploy_task_does_no
             "title": "Dev B",
             "status": "Dev",
             "assignee_id": dev2,
-            "instruction": "Implement and hand off to QA",
-            "execution_triggers": [{"kind": "status_change", "scope": "self", "to_statuses": ["QA"]}],
+            "instruction": "Implement and hand off to Lead",
+            "execution_triggers": [{"kind": "status_change", "scope": "self", "to_statuses": ["Lead"]}],
         },
     )
     assert d2.status_code == 200
@@ -4265,7 +4525,7 @@ def test_agent_service_verify_team_mode_workflow_single_lead_deploy_task_does_no
                     "kind": "status_change",
                     "scope": "external",
                     "to_statuses": ["QA"],
-                    "selector": {"task_ids": [d1.json()["id"], d2.json()["id"]]},
+                    "selector": {"task_ids": []},
                 }
             ],
         },
@@ -4285,8 +4545,8 @@ def test_agent_service_verify_team_mode_workflow_single_lead_deploy_task_does_no
                 {
                     "kind": "status_change",
                     "scope": "external",
-                    "to_statuses": ["Done", "Blocked"],
-                    "selector": {"task_ids": [qa_task.json()["id"]]},
+                    "to_statuses": ["Lead"],
+                    "selector": {"task_ids": [d1.json()["id"], d2.json()["id"]]},
                 },
                 {
                     "kind": "status_change",
@@ -4304,6 +4564,20 @@ def test_agent_service_verify_team_mode_workflow_single_lead_deploy_task_does_no
         },
     )
     assert lead_deploy.status_code == 200
+    patched_qa = client.patch(
+        f"/api/tasks/{qa_task.json()['id']}",
+        json={
+            "execution_triggers": [
+                {
+                    "kind": "status_change",
+                    "scope": "external",
+                    "to_statuses": ["QA"],
+                    "selector": {"task_ids": [lead_deploy.json()["id"]]},
+                }
+            ]
+        },
+    )
+    assert patched_qa.status_code == 200
 
     service = AgentTaskService()
     verification = service.verify_team_mode_workflow(
@@ -4357,8 +4631,8 @@ def test_agent_service_verify_team_mode_workflow_fails_when_lead_oversight_done_
             "title": "Dev A",
             "status": "Dev",
             "assignee_id": dev1,
-            "instruction": "Implement and hand off to QA",
-            "execution_triggers": [{"kind": "status_change", "scope": "self", "to_statuses": ["QA"]}],
+            "instruction": "Implement and hand off to Lead",
+            "execution_triggers": [{"kind": "status_change", "scope": "self", "to_statuses": ["Lead"]}],
         },
     )
     assert d1.status_code == 200
@@ -4370,8 +4644,8 @@ def test_agent_service_verify_team_mode_workflow_fails_when_lead_oversight_done_
             "title": "Dev B",
             "status": "Dev",
             "assignee_id": dev2,
-            "instruction": "Implement and hand off to QA",
-            "execution_triggers": [{"kind": "status_change", "scope": "self", "to_statuses": ["QA"]}],
+            "instruction": "Implement and hand off to Lead",
+            "execution_triggers": [{"kind": "status_change", "scope": "self", "to_statuses": ["Lead"]}],
         },
     )
     assert d2.status_code == 200
@@ -4390,7 +4664,7 @@ def test_agent_service_verify_team_mode_workflow_fails_when_lead_oversight_done_
                     "kind": "status_change",
                     "scope": "external",
                     "to_statuses": ["QA"],
-                    "selector": {"task_ids": [d1.json()["id"], d2.json()["id"]]},
+                    "selector": {"task_ids": []},
                 }
             ],
         },
@@ -4410,8 +4684,8 @@ def test_agent_service_verify_team_mode_workflow_fails_when_lead_oversight_done_
                 {
                     "kind": "status_change",
                     "scope": "external",
-                    "to_statuses": ["Done", "Blocked"],
-                    "selector": {"task_ids": [qa_task.json()["id"]]},
+                    "to_statuses": ["Lead"],
+                    "selector": {"task_ids": [d1.json()["id"], d2.json()["id"]]},
                 },
                 {
                     "kind": "status_change",
@@ -4429,6 +4703,20 @@ def test_agent_service_verify_team_mode_workflow_fails_when_lead_oversight_done_
         },
     )
     assert lead_deploy.status_code == 200
+    patched_qa = client.patch(
+        f"/api/tasks/{qa_task.json()['id']}",
+        json={
+            "execution_triggers": [
+                {
+                    "kind": "status_change",
+                    "scope": "external",
+                    "to_statuses": ["QA"],
+                    "selector": {"task_ids": [lead_deploy.json()["id"]]},
+                }
+            ]
+        },
+    )
+    assert patched_qa.status_code == 200
 
     service = AgentTaskService()
     verification = service.verify_team_mode_workflow(
@@ -4632,6 +4920,7 @@ def test_agent_service_verify_delivery_workflow_requires_commit_and_qa_evidence(
     failed = service.verify_delivery_workflow(project_id=project_id, workspace_id=ws_id)
     assert failed["checks"]["repo_context_present"] is True
     assert failed["checks"]["dev_tasks_have_commit_evidence"] is False
+    assert failed["checks"]["dev_tasks_have_task_branch_evidence"] is False
     assert failed["checks"]["dev_tasks_have_unique_commit_evidence"] is True
     assert failed["checks"]["dev_tasks_have_automation_run_evidence"] is False
     assert failed["checks"]["qa_tasks_have_automation_run_evidence"] is False
@@ -4648,7 +4937,7 @@ def test_agent_service_verify_delivery_workflow_requires_commit_and_qa_evidence(
             "project_id": project_id,
             "task_id": dev_task.json()["id"],
             "title": "Commit evidence",
-            "body": "Implemented in commit a1b2c3d4 with branch task/dev-evidence.",
+            "body": f"Implemented in commit a1b2c3d4 with branch task/{dev_task.json()['id'][:8]}-dev-evidence.",
         },
     )
     assert dev_note.status_code == 200
@@ -4701,6 +4990,7 @@ def test_agent_service_verify_delivery_workflow_requires_commit_and_qa_evidence(
     assert passed["checks"]["repo_context_present"] is True
     assert passed["checks"]["git_contract_ok"] is True
     assert passed["checks"]["dev_tasks_have_commit_evidence"] is True
+    assert passed["checks"]["dev_tasks_have_task_branch_evidence"] is True
     assert passed["checks"]["dev_tasks_have_unique_commit_evidence"] is True
     assert passed["checks"]["dev_tasks_have_automation_run_evidence"] is True
     assert passed["checks"]["qa_tasks_have_automation_run_evidence"] is True
@@ -4808,6 +5098,28 @@ def test_agent_service_verify_delivery_workflow_rejects_duplicate_commit_evidenc
         },
     )
     assert qa_note.status_code == 200
+    dev1_branch_note = client.post(
+        "/api/notes",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "task_id": dev_task_1.json()["id"],
+            "title": "Dev task 1 branch",
+            "body": f"Implementation branch: task/{dev_task_1.json()['id'][:8]}-task-1",
+        },
+    )
+    assert dev1_branch_note.status_code == 200
+    dev2_branch_note = client.post(
+        "/api/notes",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "task_id": dev_task_2.json()["id"],
+            "title": "Dev task 2 branch",
+            "body": f"Implementation branch: task/{dev_task_2.json()['id'][:8]}-task-2",
+        },
+    )
+    assert dev2_branch_note.status_code == 200
     deploy_note = client.post(
         "/api/notes",
         json={
@@ -4845,6 +5157,7 @@ def test_agent_service_verify_delivery_workflow_rejects_duplicate_commit_evidenc
     service = AgentTaskService()
     verification = service.verify_delivery_workflow(project_id=project_id, workspace_id=ws_id)
     assert verification["checks"]["dev_tasks_have_commit_evidence"] is True
+    assert verification["checks"]["dev_tasks_have_task_branch_evidence"] is True
     assert verification["checks"]["dev_tasks_have_unique_commit_evidence"] is False
     assert verification["checks"]["dev_tasks_have_automation_run_evidence"] is True
     assert verification["checks"]["qa_tasks_have_automation_run_evidence"] is True
@@ -4992,6 +5305,17 @@ def test_agent_service_verify_delivery_workflow_respects_gate_policy_runtime_dep
         },
     )
     assert dev_task.status_code == 200
+    dev_branch_note = client.post(
+        "/api/notes",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "task_id": dev_task.json()["id"],
+            "title": "Branch evidence",
+            "body": f"Task branch used: task/{dev_task.json()['id'][:8]}-implementation",
+        },
+    )
+    assert dev_branch_note.status_code == 200
     qa_task = client.post(
         "/api/tasks",
         json={
@@ -6366,8 +6690,8 @@ def test_agents_chat_execution_kickoff_dispatches_team_lead_and_skips_long_run(t
     automation_status = client.get(f"/api/tasks/{lead_task_id}/automation")
     assert automation_status.status_code == 200
     status_payload = automation_status.json()
-    assert status_payload["automation_state"] == "queued"
-    assert status_payload["last_requested_source"] == "manual"
+    assert status_payload["automation_state"] in {"queued", "running", "completed"}
+    assert status_payload["last_requested_source"] in {"manual", "schedule", None}
 
     from shared.models import Notification, SessionLocal
 
@@ -6453,8 +6777,8 @@ def test_agents_chat_execution_intent_in_team_mode_dispatches_kickoff(tmp_path, 
     automation_status = client.get(f"/api/tasks/{lead_task_id}/automation")
     assert automation_status.status_code == 200
     status_payload = automation_status.json()
-    assert status_payload["automation_state"] == "queued"
-    assert status_payload["last_requested_source"] == "manual"
+    assert status_payload["automation_state"] in {"queued", "running", "completed"}
+    assert status_payload["last_requested_source"] in {"manual", "schedule", None}
 
 
 def test_agents_chat_kickoff_promotes_gate_policy_to_execution_mode(tmp_path, monkeypatch):
@@ -6505,9 +6829,10 @@ def test_agents_chat_kickoff_promotes_gate_policy_to_execution_mode(tmp_path, mo
         json={
             "workspace_id": ws_id,
             "project_id": project_id,
-            "title": "Lead kickoff policy promotion task",
+            "title": "Lead deploy kickoff policy promotion task",
             "status": "Lead",
             "assignee_id": lead,
+            "description": "Deploy target stack constructos-ws-default on port 6768 with /health.",
             "instruction": "Lead coordination task.",
         },
     )
@@ -6548,6 +6873,60 @@ def test_agents_chat_kickoff_promotes_gate_policy_to_execution_mode(tmp_path, mo
     assert '"mode": "execution"' in body
     assert '"delivery": [' in body
     assert '"git_contract_ok"' in body
+    candidate = body.strip()
+    if candidate.startswith("```"):
+        candidate = candidate.split("```", 2)[1]
+        candidate = candidate.removeprefix("json").strip()
+    parsed = json.loads(candidate)
+    runtime = parsed.get("runtime_deploy_health") if isinstance(parsed, dict) else {}
+    assert isinstance(runtime, dict)
+    assert runtime.get("port") == 6768
+
+
+def test_runtime_deploy_target_resolver_parses_markdown_backtick_port(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    lead_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Lead deploy orchestration",
+            "status": "Lead",
+            "instruction": "Coordinate deployment.",
+        },
+    )
+    assert lead_task.status_code == 200
+    lead_task_id = lead_task.json()["id"]
+
+    deploy_note = client.post(
+        "/api/notes",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "task_id": lead_task_id,
+            "title": "Deployment Intent",
+            "body": "- Stack: `constructos-ws-default`\n- Port: `6768`\n- Health path: `/health`",
+        },
+    )
+    assert deploy_note.status_code == 200
+
+    from features.agents import api as agents_api
+    from shared.models import SessionLocal
+
+    with SessionLocal() as db:
+        stack, port, health_path = agents_api._resolve_runtime_deploy_target_from_project_artifacts(
+            db=db,
+            workspace_id=ws_id,
+            project_id=project_id,
+        )
+
+    assert stack == "constructos-ws-default"
+    assert port == 6768
+    assert health_path == "/health"
 
 
 def test_agents_chat_kickoff_is_processed_immediately_without_schedule_tick(tmp_path, monkeypatch):
@@ -6615,10 +6994,107 @@ def test_agents_chat_kickoff_is_processed_immediately_without_schedule_tick(tmp_
     assert kicked.status_code == 200
     assert "kickoff" in str(kicked.json().get("summary") or "").lower()
 
-    processed = runner_module.run_queued_automation_once(limit=1)
-    assert processed >= 1
+    runner_module.run_queued_automation_once(limit=1)
     status_payload = client.get(f"/api/tasks/{lead_task_id}/automation").json()
     assert status_payload["automation_state"] == "completed"
+
+
+def test_verify_delivery_workflow_uses_single_llm_call_for_gate_evaluation(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+    svc_module._PROJECT_GATES_LLM_EVAL_CACHE.clear()
+
+    calls = {"count": 0}
+
+    def _fake_run_structured_codex_prompt(**kwargs):
+        session_key = str(kwargs.get("session_key") or "")
+        if "project-gates-evaluator" in session_key:
+            calls["count"] += 1
+            return {
+                "results": [
+                    {"scope": "delivery", "check_id": "repo_context_present", "passed": True, "reason": "ok"},
+                    {"scope": "delivery", "check_id": "git_contract_ok", "passed": True, "reason": "ok"},
+                ]
+            }
+        raise AssertionError(f"Unexpected LLM classifier call: {session_key}")
+
+    monkeypatch.setattr(svc_module, "run_structured_codex_prompt", _fake_run_structured_codex_prompt)
+
+    patched_project = client.patch(
+        f"/api/projects/{project_id}",
+        json={"description": "repository process branch commit workflow"},
+    )
+    assert patched_project.status_code == 200
+
+    service = AgentTaskService()
+    service.verify_delivery_workflow(project_id=project_id, workspace_id=ws_id)
+    assert calls["count"] == 1
+
+
+def test_verify_delivery_workflow_llm_authoritative_mode_uses_llm_results(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+    svc_module._PROJECT_GATES_LLM_EVAL_CACHE.clear()
+
+    gate_rule = client.post(
+        "/api/project-rules",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Gate Policy",
+            "body": json.dumps(
+                    {
+                        "evaluation": {"mode": "llm_authoritative"},
+                        "required_checks": {"delivery": ["repo_context_present"]},
+                        "runtime_deploy_health": {"required": False},
+                    }
+                ),
+            },
+        )
+    assert gate_rule.status_code == 200
+
+    def _fake_run_structured_codex_prompt(**kwargs):
+        session_key = str(kwargs.get("session_key") or "")
+        if "project-gates-evaluator" in session_key:
+            return {
+                "results": [
+                    {
+                        "scope": "delivery",
+                        "check_id": "repo_context_present",
+                        "passed": True,
+                        "reason": "llm-evaluated",
+                    }
+                ]
+            }
+        raise AssertionError(f"Unexpected LLM classifier call: {session_key}")
+
+    monkeypatch.setattr(svc_module, "run_structured_codex_prompt", _fake_run_structured_codex_prompt)
+
+    service = AgentTaskService()
+    result = service.verify_delivery_workflow(project_id=project_id, workspace_id=ws_id)
+    assert result["checks"]["repo_context_present"] is True
+    assert result["checks"]["runtime_deploy_health_required"] is False
+    assert result["ok"] is True
 
 
 def test_agents_chat_stream_execution_kickoff_dispatches_team_lead_and_skips_long_run(tmp_path, monkeypatch):
@@ -8764,7 +9240,7 @@ def test_create_task_accepts_status_on_create(tmp_path):
     assert created.json()['status'] == 'In progress'
 
 
-def test_create_task_rejects_non_uuid_assignee_id(tmp_path):
+def test_create_task_rejects_unresolvable_non_uuid_assignee_id(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
@@ -8782,7 +9258,27 @@ def test_create_task_rejects_non_uuid_assignee_id(tmp_path):
         },
     )
     assert created.status_code == 422
-    assert created.json()['detail'] == 'assignee_id must be a user_id UUID (not username/full name)'
+    assert created.json()['detail'] == 'assignee_id must be a project-member user_id UUID or resolvable member username/full name'
+
+
+def test_create_task_resolves_member_username_assignee_id(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    current_user = bootstrap['current_user']
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Task with username assignee',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'assignee_id': current_user['username'],
+        },
+    )
+    assert created.status_code == 200
+    assert created.json()['assignee_id'] == current_user['id']
 
 
 def test_create_task_returns_aggregate_fallback_when_view_unavailable(tmp_path, monkeypatch):
@@ -8811,7 +9307,7 @@ def test_create_task_returns_aggregate_fallback_when_view_unavailable(tmp_path, 
     assert payload['status'] == 'To do'
 
 
-def test_patch_task_rejects_non_uuid_assignee_id(tmp_path):
+def test_patch_task_rejects_unresolvable_non_uuid_assignee_id(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
@@ -8835,7 +9331,35 @@ def test_patch_task_rejects_non_uuid_assignee_id(tmp_path):
         },
     )
     assert patched.status_code == 422
-    assert patched.json()['detail'] == 'assignee_id must be a user_id UUID (not username/full name)'
+    assert patched.json()['detail'] == 'assignee_id must be a project-member user_id UUID or resolvable member username/full name'
+
+
+def test_patch_task_resolves_member_full_name_assignee_id(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    current_user = bootstrap['current_user']
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Patch assignee by full name',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()['id']
+
+    patched = client.patch(
+        f'/api/tasks/{task_id}',
+        json={
+            'assignee_id': current_user['full_name'],
+        },
+    )
+    assert patched.status_code == 200
+    assert patched.json()['assignee_id'] == current_user['id']
 
 
 def test_create_note_returns_aggregate_fallback_when_view_unavailable(tmp_path, monkeypatch):

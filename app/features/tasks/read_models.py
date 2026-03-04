@@ -109,6 +109,19 @@ def list_tasks_read_model(db: Session, user, query: TaskListQuery) -> dict:
     total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one()
     tasks = db.execute(stmt.order_by(Task.order_index.asc(), Task.created_at.desc()).limit(query.limit).offset(query.offset)).scalars().all()
     task_ids = [t.id for t in tasks]
+    automation_state_by_task_id: dict[str, str] = {}
+    for task in tasks:
+        has_automation = bool(
+            str(task.instruction or task.scheduled_instruction or "").strip()
+            or normalize_execution_triggers(task.execution_triggers)
+        )
+        if not has_automation:
+            continue
+        try:
+            state, _ = rebuild_state(db, "Task", task.id)
+            automation_state_by_task_id[task.id] = str(state.get("automation_state") or "idle")
+        except Exception:
+            automation_state_by_task_id[task.id] = "idle"
     linked_note_count_by_task_id: dict[str, int] = {}
     if task_ids:
         note_counts = db.execute(
@@ -135,6 +148,7 @@ def list_tasks_read_model(db: Session, user, query: TaskListQuery) -> dict:
                 t,
                 created_by=created_by_map.get(t.id, ""),
                 linked_note_count=linked_note_count_by_task_id.get(t.id, 0),
+                automation_state=automation_state_by_task_id.get(t.id, "idle"),
             )
             for t in tasks
         ],

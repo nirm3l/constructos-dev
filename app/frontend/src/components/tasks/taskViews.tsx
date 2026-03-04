@@ -39,8 +39,30 @@ function formatRecurringRuleCompact(recurringRule: string | null | undefined): s
 
 function formatScheduleState(state: Task['schedule_state'] | null | undefined): string {
   const raw = String(state ?? '').trim()
-  if (!raw) return 'State: Unknown'
-  return `State: ${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
+  if (!raw) return 'Unknown'
+  return `${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
+}
+
+function formatAutomationState(state: string | null | undefined): string {
+  const raw = String(state ?? '').trim()
+  if (!raw) return 'Idle'
+  if (raw === 'completed') return 'Completed'
+  return `${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
+}
+
+function toExecutionChipClassState(state: string | null | undefined): string {
+  const raw = String(state ?? 'idle').trim().toLowerCase()
+  if (!raw) return 'idle'
+  if (raw === 'completed') return 'done'
+  return raw
+}
+
+function resolveEffectiveExecutionState(task: Task): string {
+  const automation = String(task.automation_state ?? '').trim().toLowerCase()
+  if (automation && automation !== 'idle') return automation
+  const schedule = String(task.schedule_state ?? '').trim().toLowerCase()
+  if (task.task_type === 'scheduled_instruction' && schedule) return schedule
+  return automation || 'idle'
 }
 
 const BOTTOM_TAB_ITEMS: Array<{ value: Tab; label: string; shortLabel: string; iconPath: string }> = [
@@ -125,12 +147,16 @@ export function TaskListItem({
 }) {
   const descriptionPreviewText = taskDescriptionPreview(task.description)
   const isScheduled = task.task_type === 'scheduled_instruction'
+  const hasAutomationInstruction = Boolean(String(task.instruction || task.scheduled_instruction || '').trim())
   const externalRefCount = Array.isArray(task.external_refs) ? task.external_refs.length : 0
   const attachmentCount = Array.isArray(task.attachment_refs) ? task.attachment_refs.length : 0
   const linkedNoteCount = Number.isFinite(task.linked_note_count as number) ? Number(task.linked_note_count) : 0
   const scheduleTrigger = formatScheduleTrigger(task.scheduled_at_utc)
   const scheduleRepeat = formatRecurringRuleCompact(task.recurring_rule)
   const scheduleState = formatScheduleState(task.schedule_state)
+  const effectiveExecutionState = resolveEffectiveExecutionState(task)
+  const executionStateLabel = formatAutomationState(effectiveExecutionState)
+  const executionStateClass = toExecutionChipClassState(effectiveExecutionState)
   const primaryAction = task.archived
     ? {
         label: 'Restore task',
@@ -190,8 +216,17 @@ export function TaskListItem({
               </span>
             </ChipTooltip>
             <ChipTooltip label={scheduleState}>
-              <span className={`task-schedule-chip task-schedule-state task-schedule-state-${task.schedule_state}`}>
-                {scheduleState}
+              <span className={`task-schedule-chip task-schedule-state task-schedule-state-${executionStateClass}`}>
+                {executionStateLabel}
+              </span>
+            </ChipTooltip>
+          </div>
+        )}
+        {!isScheduled && hasAutomationInstruction && (
+          <div className="task-schedule-compact">
+            <ChipTooltip label={executionStateLabel}>
+              <span className={`task-schedule-chip task-schedule-state task-schedule-state-${executionStateClass}`}>
+                {executionStateLabel}
               </span>
             </ChipTooltip>
           </div>

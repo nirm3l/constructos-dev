@@ -86,6 +86,9 @@ from features.agents.gates import (
     policy_required_checks,
     run_runtime_deploy_health_check,
 )
+from plugins import context_policy as plugin_context_policy
+from plugins import service_policy as plugin_service_policy
+from plugins.runner_policy import is_lead_role
 from shared.deps import ensure_role
 from shared.knowledge_graph import (
     build_graph_context_pack,
@@ -159,7 +162,8 @@ _COMMIT_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
 _COMMIT_SHA_EXPLICIT_RE = re.compile(
     r"(?i)(?:\b(?:commit|sha|changeset|hash)\s*[:=#]?\s*|/commit/)([0-9a-f]{7,40})\b"
 )
-_GITHUB_HOST_TOKENS = ("github.com", "www.github.com")
+_PROJECT_GATES_LLM_EVAL_CACHE: dict[str, dict[str, Any]] = {}
+_TEAM_MODE_PLUGIN_KEY = "team_mode"
 
 
 def _graph_summary_to_markdown(summary: dict[str, object] | None) -> str:
@@ -534,6 +538,9 @@ class AgentTaskService:
                 raise HTTPException(status_code=401, detail="User not found")
             return user
 
+    def _resolve_mcp_actor_user_id(self) -> str:
+        return str(self._actor_user_id or MCP_ACTOR_USER_ID).strip() or MCP_ACTOR_USER_ID
+
     def _resolve_preference_target_user_id(self, user_id: str | None) -> str:
         explicit_user_id = str(user_id or "").strip()
         if explicit_user_id:
@@ -543,9 +550,10 @@ class AgentTaskService:
         # In containerized runtime the MCP actor is often a dedicated bot account.
         # Preference updates should default to the primary app user unless the caller
         # explicitly targets a different user.
-        if MCP_ACTOR_USER_ID != DEFAULT_USER_ID:
+        actor_user_id = self._resolve_mcp_actor_user_id()
+        if actor_user_id != DEFAULT_USER_ID:
             return DEFAULT_USER_ID
-        return MCP_ACTOR_USER_ID
+        return actor_user_id
 
     def _resolve_workspace_for_create(self, *, db, explicit_workspace_id: str | None, project_id: str | None) -> tuple[str, str]:
         if not project_id:
@@ -1159,10 +1167,11 @@ class AgentTaskService:
 
     def get_my_preferences(self, *, auth_token: str | None = None, user_id: str | None = None) -> dict:
         self._require_token(auth_token)
+        actor_user_id = self._resolve_mcp_actor_user_id()
         with SessionLocal() as db:
             return self._user_gateway.get_preferences(
                 db=db,
-                actor_user_id=MCP_ACTOR_USER_ID,
+                actor_user_id=actor_user_id,
                 explicit_target_user_id=user_id,
                 implicit_target_user_id=self._resolve_preference_target_user_id(user_id),
             )
@@ -1175,7 +1184,7 @@ class AgentTaskService:
         user_id: str | None = None,
     ) -> dict:
         self._require_token(auth_token)
-        actor_user_id = MCP_ACTOR_USER_ID
+        actor_user_id = self._resolve_mcp_actor_user_id()
         implicit_target_user_id = self._resolve_preference_target_user_id(user_id)
         with SessionLocal() as db:
             current = self._user_gateway.get_preferences(
@@ -1221,7 +1230,7 @@ class AgentTaskService:
         normalized = str(theme or "").strip().lower()
         if normalized not in {"light", "dark"}:
             raise HTTPException(status_code=422, detail="theme must be one of: light, dark")
-        actor_user_id = MCP_ACTOR_USER_ID
+        actor_user_id = self._resolve_mcp_actor_user_id()
         implicit_target_user_id = self._resolve_preference_target_user_id(user_id)
         # Theme set is naturally idempotent by target value, so we avoid relying on
         # LLM-provided command_id values that may be unintentionally reused across turns.
@@ -1857,112 +1866,39 @@ class AgentTaskService:
                 task["scheduled_instruction"] = scheduled_instruction
 
     @classmethod
+    def _classify_project_context_signals(
+        cls,
+        *,
+        project_description: str,
+        project_external_refs: Any,
+        project_rules: list[ProjectRuleModel],
+        allow_llm: bool = True,
+    ) -> dict[str, Any]:
+        return plugin_context_policy.classify_project_delivery_context(
+            project_description=project_description,
+            project_external_refs=project_external_refs,
+            project_rules=project_rules,
+            parse_json_list=cls._parse_json_list,
+            allow_llm=allow_llm,
+        )
+
+    @classmethod
     def _project_has_github_context(
         cls,
         *,
         project_description: str,
         project_external_refs: Any,
         project_rules: list[ProjectRuleModel],
+        allow_llm: bool = True,
     ) -> bool:
-        parsed_refs = cls._parse_json_list(project_external_refs)
-        normalized_refs = sorted(
-            (
-                {
-                    "url": str(ref.get("url") or "").strip(),
-                    "title": str(ref.get("title") or "").strip(),
-                }
-                for ref in parsed_refs
-                if isinstance(ref, dict)
-            ),
-            key=lambda item: (item.get("url", "").lower(), item.get("title", "").lower()),
+        parsed = plugin_context_policy.classify_project_delivery_context(
+            project_description=project_description,
+            project_external_refs=project_external_refs,
+            project_rules=project_rules,
+            parse_json_list=cls._parse_json_list,
+            allow_llm=allow_llm,
         )
-        normalized_rules = sorted(
-            (
-                {
-                    "title": str(rule.title or "").strip(),
-                    "body": str(rule.body or "").strip(),
-                }
-                for rule in project_rules
-            ),
-            key=lambda item: (item.get("title", "").lower(), item.get("body", "").lower()),
-        )
-        # Explicit host/domain marker is a deterministic signal (not heuristic inference).
-        if any(token in str(project_description or "").lower() for token in _GITHUB_HOST_TOKENS):
-            return True
-        for ref in normalized_refs:
-            url = str(ref.get("url") or "").strip().lower()
-            if any(token in url for token in _GITHUB_HOST_TOKENS):
-                return True
-        for rule in normalized_rules:
-            blob = f"{rule.get('title') or ''} {rule.get('body') or ''}".lower()
-            if any(token in blob for token in _GITHUB_HOST_TOKENS):
-                return True
-
-        # If there is no GitHub mention at all, skip LLM classification entirely.
-        # LLM is used only for ambiguous textual mentions where explicit host markers are absent.
-        has_generic_github_mention = "github" in str(project_description or "").lower()
-        if not has_generic_github_mention:
-            for ref in normalized_refs:
-                ref_blob = f"{ref.get('url') or ''} {ref.get('title') or ''}".lower()
-                if "github" in ref_blob:
-                    has_generic_github_mention = True
-                    break
-        if not has_generic_github_mention:
-            for rule in normalized_rules:
-                blob = f"{rule.get('title') or ''} {rule.get('body') or ''}".lower()
-                if "github" in blob:
-                    has_generic_github_mention = True
-                    break
-        if not has_generic_github_mention:
-            return False
-
-        llm_payload = {
-            "project_description": str(project_description or ""),
-            "project_external_refs": normalized_refs[:40],
-            "project_rules": [
-                {
-                    "title": str(rule.get("title") or ""),
-                    "body": str(rule.get("body") or "")[:6000],
-                }
-                for rule in normalized_rules[:40]
-            ],
-            "decision_policy": {
-                "true_only_when": [
-                    "explicit GitHub host/domain references are present (github.com/www.github.com)",
-                    "or explicit GitHub repository/PR/issue URL-like markers are present in project-owned content",
-                ],
-                "false_when": [
-                    "generic mentions like 'GitHub', 'GitHub/Jira', or skill documentation references without explicit repo context",
-                ],
-            },
-        }
-        output_schema: dict[str, Any] = {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "has_github_context": {"type": "boolean"},
-                "reason": {"type": "string"},
-            },
-            "required": ["has_github_context", "reason"],
-        }
-        prompt = (
-            "Classify whether this project has explicit GitHub repository context.\n"
-            "Return JSON matching schema.\n"
-            "Set has_github_context=true only for explicit GitHub repository/domain references.\n"
-            "Do not treat generic mentions of GitHub in skill docs as context.\n\n"
-            f"Input:\n{json.dumps(llm_payload, ensure_ascii=True)}\n"
-        )
-        try:
-            parsed = run_structured_codex_prompt(
-                prompt=prompt,
-                output_schema=output_schema,
-                workspace_id=None,
-                session_key="project-github-context-classifier",
-                mcp_servers=[],
-            )
-            return bool(parsed.get("has_github_context"))
-        except Exception:
-            return False
+        return bool(parsed.get("has_github_context"))
 
     @classmethod
     def _project_has_repo_context(
@@ -1971,138 +1907,242 @@ class AgentTaskService:
         project_description: str,
         project_external_refs: Any,
         project_rules: list[ProjectRuleModel],
+        allow_llm: bool = True,
     ) -> bool:
-        parsed_refs = cls._parse_json_list(project_external_refs)
-        normalized_refs = sorted(
-            (
-                {
-                    "url": str(ref.get("url") or "").strip(),
-                    "title": str(ref.get("title") or "").strip(),
-                }
-                for ref in parsed_refs
-                if isinstance(ref, dict)
-            ),
-            key=lambda item: (item.get("url", "").lower(), item.get("title", "").lower()),
+        parsed = plugin_context_policy.classify_project_delivery_context(
+            project_description=project_description,
+            project_external_refs=project_external_refs,
+            project_rules=project_rules,
+            parse_json_list=cls._parse_json_list,
+            allow_llm=allow_llm,
         )
-        normalized_rules = sorted(
-            (
-                {
-                    "title": str(rule.title or "").strip(),
-                    "body": str(rule.body or "").strip(),
-                }
-                for rule in project_rules
-            ),
-            key=lambda item: (item.get("title", "").lower(), item.get("body", "").lower()),
-        )
+        return bool(parsed.get("has_repo_context"))
 
-        description_blob = str(project_description or "").strip()
-        rules_blob = "\n".join(f"{item.get('title') or ''}\n{item.get('body') or ''}" for item in normalized_rules).strip()
-        refs_blob = "\n".join(f"{item.get('url') or ''} {item.get('title') or ''}" for item in normalized_refs).strip()
-        combined_blob = f"{description_blob}\n{rules_blob}\n{refs_blob}".strip().lower()
-        for ref in normalized_refs:
-            url = str(ref.get("url") or "").strip().lower()
-            if not url:
+    @classmethod
+    def _evaluate_project_gates_with_llm(
+        cls,
+        *,
+        project_id: str,
+        workspace_id: str,
+        gate_policy: dict[str, Any],
+        tasks: list[dict[str, Any]],
+        member_role_by_user_id: dict[str, str],
+        notes_by_task: dict[str, list[Any]],
+        comments_by_task: dict[str, list[Any]],
+        project_rules: list[ProjectRuleModel],
+        project_skills: list[Any],
+        project_description: str,
+        project_external_refs: Any,
+    ) -> dict[str, dict[str, Any]]:
+        available_checks = gate_policy.get("available_checks") if isinstance(gate_policy, dict) else {}
+        required_checks = gate_policy.get("required_checks") if isinstance(gate_policy, dict) else {}
+        requested_by_scope: dict[str, list[str]] = {}
+        available_by_scope: dict[str, dict[str, Any]] = {}
+        required_by_scope: dict[str, list[str]] = {}
+        if isinstance(available_checks, dict):
+            for scope_name_raw, scope_available_raw in available_checks.items():
+                scope_name = str(scope_name_raw or "").strip()
+                if not scope_name:
+                    continue
+                scope_available = dict(scope_available_raw) if isinstance(scope_available_raw, dict) else {}
+                available_by_scope[scope_name] = scope_available
+        if isinstance(required_checks, dict):
+            for scope_name_raw, scope_required_raw in required_checks.items():
+                scope_name = str(scope_name_raw or "").strip()
+                if not scope_name:
+                    continue
+                if isinstance(scope_required_raw, list):
+                    scope_required = [str(item or "").strip() for item in scope_required_raw if str(item or "").strip()]
+                else:
+                    scope_required = []
+                required_by_scope[scope_name] = scope_required
+
+        scope_names = sorted(set(available_by_scope.keys()) | set(required_by_scope.keys()))
+        for scope_name in scope_names:
+            requested = sorted(
+                {
+                    str(item or "").strip()
+                    for item in list((available_by_scope.get(scope_name) or {}).keys()) + list(required_by_scope.get(scope_name) or [])
+                    if str(item or "").strip()
+                }
+            )
+            if requested:
+                requested_by_scope[scope_name] = requested
+
+        if not requested_by_scope:
+            return {
+                "team_mode": {"checks": {}, "reasons": {}},
+                "delivery": {"checks": {}, "reasons": {}},
+            }
+
+        serialized_rules = [
+            {
+                "id": str(getattr(rule, "id", "") or "").strip(),
+                "title": str(getattr(rule, "title", "") or "").strip(),
+                "body": str(getattr(rule, "body", "") or "")[:8000],
+            }
+            for rule in project_rules
+        ]
+        serialized_skills = [
+            {
+                "skill_key": str(getattr(skill, "skill_key", "") or "").strip(),
+                "enabled": bool(getattr(skill, "enabled", True)),
+                "mode": str(getattr(skill, "mode", "") or "").strip(),
+            }
+            for skill in project_skills
+        ]
+        serialized_tasks: list[dict[str, Any]] = []
+        for task in tasks:
+            task_id = str(task.get("id") or "").strip()
+            if not task_id:
                 continue
-            if any(host in url for host in ("github.com", "gitlab.com", "bitbucket.org")):
-                return True
-            if "/home/app/workspace/" in url or url.startswith("file://"):
-                return True
-            if url.endswith(".git") and "://" in url:
-                return True
-        if "/home/app/workspace/" in combined_blob:
-            return True
-        if not any(token in combined_blob for token in ("repo", "repository", "git", "branch", "commit", "workspace")):
-            return False
-
-        llm_payload = {
-            "project_description": description_blob,
-            "project_external_refs": normalized_refs[:40],
-            "project_rules": [
+            serialized_tasks.append(
                 {
-                    "title": str(rule.get("title") or ""),
-                    "body": str(rule.get("body") or "")[:8000],
+                    "id": task_id,
+                    "title": str(task.get("title") or "").strip(),
+                    "status": str(task.get("status") or "").strip(),
+                    "assignee_id": str(task.get("assignee_id") or "").strip(),
+                    "assignee_role": str(member_role_by_user_id.get(str(task.get("assignee_id") or "").strip()) or "").strip(),
+                    "description": str(task.get("description") or "")[:4000],
+                    "instruction": str(task.get("instruction") or "")[:4000],
+                    "scheduled_instruction": str(task.get("scheduled_instruction") or "")[:4000],
+                    "execution_triggers": task.get("execution_triggers") if isinstance(task.get("execution_triggers"), list) else [],
+                    "external_refs": cls._parse_json_list(task.get("external_refs")),
+                    "last_agent_run_at": str(task.get("last_agent_run_at") or "").strip(),
                 }
-                for rule in normalized_rules[:40]
-            ],
-            "decision_policy": {
-                "true_only_when": [
-                    "explicit repository context exists (local repo path, remote URL, repository identifier, or concrete branch/commit metadata tied to a repository)",
-                ],
-                "false_when": [
-                    "generic process mentions of git/github/repository without concrete project-owned repository context",
-                ],
+            )
+
+        serialized_notes: dict[str, list[dict[str, str]]] = {}
+        for task_id, items in notes_by_task.items():
+            normalized_task_id = str(task_id or "").strip()
+            if not normalized_task_id:
+                continue
+            serialized_notes[normalized_task_id] = [
+                {
+                    "id": str(getattr(item, "id", "") or "").strip(),
+                    "title": str(getattr(item, "title", "") or "").strip(),
+                    "body": str(getattr(item, "body", "") or "")[:4000],
+                }
+                for item in items
+            ]
+        serialized_comments: dict[str, list[dict[str, str]]] = {}
+        for task_id, items in comments_by_task.items():
+            normalized_task_id = str(task_id or "").strip()
+            if not normalized_task_id:
+                continue
+            serialized_comments[normalized_task_id] = [
+                {
+                    "id": str(getattr(item, "id", "") or "").strip(),
+                    "body": str(getattr(item, "body", "") or "")[:4000],
+                    "details": str(getattr(item, "details", "") or "")[:4000],
+                }
+                for item in items
+            ]
+
+        payload = {
+            "project_id": str(project_id or "").strip(),
+            "workspace_id": str(workspace_id or "").strip(),
+            "project_description": str(project_description or "")[:8000],
+            "project_external_refs": cls._parse_json_list(project_external_refs),
+            "project_rules": serialized_rules[:80],
+            "project_skills": serialized_skills,
+            "tasks": serialized_tasks[:500],
+            "notes_by_task": serialized_notes,
+            "comments_by_task": serialized_comments,
+            "checks": {
+                scope_name: {
+                    "required": list(required_by_scope.get(scope_name) or []),
+                    "available": dict(available_by_scope.get(scope_name) or {}),
+                    "requested": list(requested_by_scope.get(scope_name) or []),
+                }
+                for scope_name in sorted(requested_by_scope.keys())
             },
         }
+        payload_hash = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:20]
+        cache_key = f"project-gates-eval:{payload_hash}"
+        cached = _PROJECT_GATES_LLM_EVAL_CACHE.get(cache_key)
+        if isinstance(cached, dict):
+            return cached
+
+        scope_enum = sorted(requested_by_scope.keys())
         output_schema: dict[str, Any] = {
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "has_repo_context": {"type": "boolean"},
-                "reason": {"type": "string"},
+                "results": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "scope": {"type": "string", "enum": scope_enum},
+                            "check_id": {"type": "string"},
+                            "passed": {"type": "boolean"},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["scope", "check_id", "passed", "reason"],
+                    },
+                }
             },
-            "required": ["has_repo_context", "reason"],
+            "required": ["results"],
         }
-        payload_hash = hashlib.sha256(json.dumps(llm_payload, ensure_ascii=True, sort_keys=True).encode("utf-8")).hexdigest()[:16]
         prompt = (
-            "Classify whether this project has explicit repository context for delivery verification.\n"
+            "Evaluate project gate checks strictly from provided project snapshot.\n"
             "Return JSON matching schema.\n"
-            "Set has_repo_context=true only when concrete repository metadata exists in project-owned content.\n\n"
-            f"Input:\n{json.dumps(llm_payload, ensure_ascii=True)}\n"
+            "You must evaluate every requested check_id in each scope.\n"
+            "Do not infer missing evidence. If evidence is absent, mark passed=false.\n"
+            "Reasons must be short and grounded in provided snapshot.\n\n"
+            f"Input:\n{json.dumps(payload, ensure_ascii=True)}\n"
         )
         try:
             parsed = run_structured_codex_prompt(
                 prompt=prompt,
                 output_schema=output_schema,
                 workspace_id=None,
-                session_key=f"project-repo-context-classifier:{payload_hash}",
+                session_key=f"project-gates-evaluator:{payload_hash}",
                 mcp_servers=[],
                 use_cache=True,
             )
-            return bool(parsed.get("has_repo_context"))
         except Exception:
-            return False
+            parsed = {"results": []}
+
+        result_map: dict[str, dict[str, Any]] = {
+            scope_name: {"checks": {}, "reasons": {}}
+            for scope_name in scope_enum
+        }
+        result_map.setdefault("team_mode", {"checks": {}, "reasons": {}})
+        result_map.setdefault("delivery", {"checks": {}, "reasons": {}})
+        for item in (parsed.get("results") or []):
+            if not isinstance(item, dict):
+                continue
+            scope = str(item.get("scope") or "").strip()
+            check_id = str(item.get("check_id") or "").strip()
+            if scope not in result_map or not check_id:
+                continue
+            result_map[scope]["checks"][check_id] = bool(item.get("passed"))
+            result_map[scope]["reasons"][check_id] = str(item.get("reason") or "").strip()
+
+        _PROJECT_GATES_LLM_EVAL_CACHE[cache_key] = result_map
+        return result_map
 
     @staticmethod
     def _project_has_team_mode_enabled(*, db, workspace_id: str, project_id: str) -> bool:
-        row = db.execute(
-            select(ProjectSkill.id).where(
-                ProjectSkill.workspace_id == workspace_id,
-                ProjectSkill.project_id == project_id,
-                ProjectSkill.skill_key == "team_mode",
-                ProjectSkill.enabled == True,  # noqa: E712
-                ProjectSkill.is_deleted == False,  # noqa: E712
-            )
-        ).scalar_one_or_none()
-        return row is not None
+        return plugin_service_policy.project_has_plugin_enabled(
+            plugin_key=_TEAM_MODE_PLUGIN_KEY,
+            db=db,
+            workspace_id=workspace_id,
+            project_id=project_id,
+        )
 
     @staticmethod
     def _open_developer_tasks(*, db, project_id: str) -> list[dict[str, str]]:
-        rows = db.execute(
-            select(Task.id, Task.title, Task.status)
-            .join(
-                ProjectMember,
-                (ProjectMember.workspace_id == Task.workspace_id)
-                & (ProjectMember.project_id == Task.project_id)
-                & (ProjectMember.user_id == Task.assignee_id),
-            )
-            .where(
-                Task.project_id == project_id,
-                Task.is_deleted == False,  # noqa: E712
-                Task.archived == False,  # noqa: E712
-                Task.status != "Done",
-                ProjectMember.role == "DeveloperAgent",
-            )
-            .order_by(Task.created_at.asc())
-        ).all()
-        return [
-            {
-                "task_id": str(task_id or "").strip(),
-                "title": str(title or "").strip(),
-                "status": str(status or "").strip(),
-            }
-            for task_id, title, status in rows
-            if str(task_id or "").strip()
-        ]
+        return plugin_service_policy.open_plugin_developer_tasks(
+            plugin_key=_TEAM_MODE_PLUGIN_KEY,
+            db=db,
+            project_id=project_id,
+        )
 
     def _enforce_team_mode_done_transition(
         self,
@@ -2112,47 +2152,14 @@ class AgentTaskService:
         assignee_role: str,
         auth_token: str | None,
     ) -> None:
-        project_id = str(state.project_id or "").strip()
-        workspace_id = str(state.workspace_id or "").strip()
-        if not project_id or not workspace_id:
-            return
-        if not self._project_has_team_mode_enabled(db=db, workspace_id=workspace_id, project_id=project_id):
-            return
-        open_dev_tasks = self._open_developer_tasks(db=db, project_id=project_id)
-        if assignee_role == "QAAgent":
-            delivery = self.verify_delivery_workflow(
-                project_id=project_id,
-                workspace_id=workspace_id,
-                auth_token=auth_token,
-            )
-            required_checks = [
-                "repo_context_present",
-                "git_contract_ok",
-                "dev_tasks_have_commit_evidence",
-                "dev_tasks_have_unique_commit_evidence",
-                "qa_has_verifiable_artifacts",
-            ]
-            failing = [check for check in required_checks if not bool((delivery.get("checks") or {}).get(check))]
-            if open_dev_tasks:
-                failing.append("dev_tasks_all_done")
-            if failing:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "QA Done transition blocked by Team Mode closeout guards. "
-                        f"failed_checks={failing}; "
-                        f"open_dev_tasks={[item['task_id'] for item in open_dev_tasks]}"
-                    ),
-                )
-            return
-        if assignee_role == "TeamLeadAgent" and open_dev_tasks:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Lead Done transition blocked: open Dev tasks remain. "
-                    f"open_dev_tasks={[item['task_id'] for item in open_dev_tasks]}"
-                ),
-            )
+        plugin_service_policy.enforce_plugin_done_transition(
+            plugin_key=_TEAM_MODE_PLUGIN_KEY,
+            db=db,
+            state=state,
+            assignee_role=assignee_role,
+            verify_delivery_workflow_fn=self.verify_delivery_workflow,
+            auth_token=auth_token,
+        )
 
     def verify_team_mode_workflow(
         self,
@@ -2162,98 +2169,40 @@ class AgentTaskService:
         workspace_id: str | None = None,
         expected_event_storming_enabled: bool | None = None,
     ) -> dict:
-        self._require_token(auth_token)
-        user = self._resolve_actor_user()
-        with SessionLocal() as db:
-            project = self._load_project_scope(db=db, project_id=project_id)
-            if workspace_id and str(project.workspace_id) != str(workspace_id):
-                raise HTTPException(status_code=400, detail="Project does not belong to workspace")
-            ensure_role(db, project.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
-            members = db.execute(
-                select(ProjectMember, UserModel)
-                .join(UserModel, UserModel.id == ProjectMember.user_id)
-                .where(ProjectMember.project_id == project_id)
-            ).all()
-            member_role_by_user_id = {
-                str(pm.user_id): str(pm.role or "").strip()
-                for pm, _ in members
-            }
-            tasks_payload = list_tasks_read_model(
-                db,
-                user,
-                TaskListQuery(
-                    workspace_id=str(project.workspace_id),
-                    project_id=project_id,
-                    limit=500,
-                    offset=0,
-                    archived=False,
-                ),
-            )
-            notes = db.execute(
-                select(Note).where(
-                    Note.project_id == project_id,
-                    Note.is_deleted == False,  # noqa: E712
-                )
-            ).scalars().all()
-            comments = db.execute(
-                select(TaskComment).join(Task, Task.id == TaskComment.task_id).where(
-                    Task.project_id == project_id,
-                    Task.is_deleted == False,  # noqa: E712
-                )
-            ).scalars().all()
-            project_rules = db.execute(
-                select(ProjectRuleModel).where(
-                    ProjectRuleModel.project_id == project_id,
-                    ProjectRuleModel.is_deleted == False,  # noqa: E712
-                )
-            ).scalars().all()
-            project_skills = db.execute(
-                select(ProjectSkill).where(
-                    ProjectSkill.project_id == project_id,
-                    ProjectSkill.is_deleted == False,  # noqa: E712
-                )
-            ).scalars().all()
-            tasks = list(tasks_payload.get("items") or [])
-            self._enrich_tasks_with_automation_state(db=db, tasks=tasks)
-        gate_policy, gate_policy_source = self._parse_gate_policy_rule(project_rules=project_rules)
-        team_mode_enabled = any(
-            str(getattr(skill, "skill_key", "") or "").strip() == "team_mode"
-            for skill in project_skills
-        )
-        team_mode_active = bool(team_mode_enabled or gate_policy_source != "default")
-        if not team_mode_active:
-            required_checks = dict((gate_policy.get("required_checks") or {})) if isinstance(gate_policy, dict) else {}
-            required_checks["team_mode"] = []
-            gate_policy = dict(gate_policy) if isinstance(gate_policy, dict) else {}
-            gate_policy["required_checks"] = required_checks
-        notes_by_task: dict[str, list[Note]] = {}
-        for note in notes:
-            task_id = str(note.task_id or "").strip()
-            if task_id:
-                notes_by_task.setdefault(task_id, []).append(note)
-        comments_by_task: dict[str, list[TaskComment]] = {}
-        for comment in comments:
-            task_id = str(comment.task_id or "").strip()
-            if task_id:
-                comments_by_task.setdefault(task_id, []).append(comment)
-        verification = evaluate_team_mode_gates(
-            project_id=str(project_id),
-            workspace_id=str(project.workspace_id),
-            event_storming_enabled=bool(getattr(project, "event_storming_enabled", True)),
+        plugin_result = plugin_service_policy.verify_plugin_workflow(
+            plugin_key=_TEAM_MODE_PLUGIN_KEY,
+            project_id=project_id,
+            auth_token=auth_token,
+            workspace_id=workspace_id,
             expected_event_storming_enabled=expected_event_storming_enabled,
-            gate_policy=gate_policy,
-            gate_policy_source=gate_policy_source,
-            tasks=tasks,
-            member_role_by_user_id=member_role_by_user_id,
-            notes_by_task=notes_by_task,
-            comments_by_task=comments_by_task,
-            extract_deploy_ports=self._extract_deploy_ports,
-            has_deploy_stack_marker=self._has_deploy_stack_marker,
+            verify_workflow_core=self._verify_team_mode_workflow_core,
         )
-        verification["active"] = team_mode_active
-        verification["checks"] = dict(verification.get("checks") or {})
-        verification["checks"]["team_mode_skill_enabled"] = bool(team_mode_enabled)
-        return verification
+        if isinstance(plugin_result, dict):
+            return plugin_result
+        return self._verify_team_mode_workflow_core(
+            project_id=project_id,
+            auth_token=auth_token,
+            workspace_id=workspace_id,
+            expected_event_storming_enabled=expected_event_storming_enabled,
+        )
+
+    def _verify_team_mode_workflow_core(
+        self,
+        *,
+        project_id: str,
+        auth_token: str | None = None,
+        workspace_id: str | None = None,
+        expected_event_storming_enabled: bool | None = None,
+    ) -> dict:
+        from plugins.team_mode import service_orchestration as team_mode_service_orchestration
+
+        return team_mode_service_orchestration.verify_workflow_core(
+            self,
+            project_id=project_id,
+            auth_token=auth_token,
+            workspace_id=workspace_id,
+            expected_event_storming_enabled=expected_event_storming_enabled,
+        )
 
     def verify_delivery_workflow(
         self,
@@ -2324,8 +2273,11 @@ class AgentTaskService:
                 comments_by_task.setdefault(task_id, []).append(comment)
         gate_policy, gate_policy_source = self._parse_gate_policy_rule(project_rules=project_rules)
         skill_keys = {str(getattr(skill, "skill_key", "") or "").strip() for skill in project_skills}
-        delivery_skill_enabled = bool({"git_delivery", "team_mode", "github_delivery"} & skill_keys)
-        delivery_active = bool(delivery_skill_enabled or gate_policy_source != "default")
+        delivery_skill_enabled = plugin_service_policy.is_delivery_skill_enabled(skill_keys=skill_keys)
+        delivery_active = plugin_service_policy.is_delivery_workflow_active(
+            skill_keys=skill_keys,
+            gate_policy_source=gate_policy_source,
+        )
         if not delivery_active:
             required_checks = dict((gate_policy.get("required_checks") or {})) if isinstance(gate_policy, dict) else {}
             required_checks["delivery"] = []
@@ -2352,8 +2304,55 @@ class AgentTaskService:
             has_deploy_artifact_text=self._has_deploy_artifact_text,
             resolve_deploy_target_from_artifacts=self._resolve_deploy_target_from_artifacts,
             run_runtime_deploy_health_check_fn=self._run_runtime_deploy_health_check,
-            project_has_repo_context=self._project_has_repo_context,
+            project_has_repo_context=lambda **kwargs: self._project_has_repo_context(allow_llm=False, **kwargs),
         )
+        llm_eval = self._evaluate_project_gates_with_llm(
+            project_id=str(project_id),
+            workspace_id=str(project.workspace_id),
+            gate_policy=gate_policy,
+            tasks=tasks,
+            member_role_by_user_id=member_role_by_user_id,
+            notes_by_task=notes_by_task,
+            comments_by_task=comments_by_task,
+            project_rules=project_rules,
+            project_skills=project_skills,
+            project_description=str(getattr(project, "description", "") or ""),
+            project_external_refs=getattr(project, "external_refs", "[]"),
+        )
+        llm_delivery_checks = dict((llm_eval.get("delivery") or {}).get("checks") or {})
+        llm_delivery_reasons = dict((llm_eval.get("delivery") or {}).get("reasons") or {})
+        evaluation_cfg = gate_policy.get("evaluation") if isinstance(gate_policy.get("evaluation"), dict) else {}
+        evaluation_mode = str((evaluation_cfg or {}).get("mode") or "hybrid").strip().lower()
+        authoritative = evaluation_mode == "llm_authoritative"
+        runtime_required_value = bool((verification.get("checks") or {}).get("runtime_deploy_health_required"))
+        runtime_ok_value = bool((verification.get("checks") or {}).get("runtime_deploy_health_ok"))
+        if authoritative:
+            available = list(verification.get("available_checks") or [])
+            required = list(verification.get("required_checks") or [])
+            requested = sorted({str(item or "").strip() for item in (available + required) if str(item or "").strip()})
+            baseline_checks = dict(verification.get("checks") or {})
+            authoritative_checks: dict[str, bool] = {}
+            for check_id in requested:
+                if check_id == "runtime_deploy_health_required":
+                    authoritative_checks[check_id] = runtime_required_value
+                    continue
+                if check_id == "runtime_deploy_health_ok":
+                    authoritative_checks[check_id] = runtime_ok_value
+                    continue
+                if check_id in llm_delivery_checks:
+                    authoritative_checks[check_id] = bool(llm_delivery_checks.get(check_id))
+                else:
+                    authoritative_checks[check_id] = bool(baseline_checks.get(check_id))
+            verification["checks"] = authoritative_checks
+        else:
+            merged_checks = dict(verification.get("checks") or {})
+            merged_checks.update({str(k): bool(v) for k, v in llm_delivery_checks.items()})
+            verification["checks"] = merged_checks
+        verification["check_reasons"] = llm_delivery_reasons
+        required_checks = list(verification.get("required_checks") or [])
+        checks_ok, required_failed = evaluate_required_gate_checks(verification["checks"], required_checks)
+        verification["required_failed_checks"] = required_failed
+        verification["ok"] = bool(checks_ok)
         verification["active"] = delivery_active
         verification["checks"] = dict(verification.get("checks") or {})
         verification["checks"]["delivery_skill_enabled"] = bool(delivery_skill_enabled)
@@ -2369,179 +2368,48 @@ class AgentTaskService:
         expected_event_storming_enabled: bool | None = None,
         command_id: str | None = None,
     ) -> dict:
-        self._require_token(auth_token)
-        user = self._resolve_actor_user()
-        resolved_ref = str(project_id or project_ref or "").strip()
-        if not resolved_ref:
-            raise HTTPException(status_code=400, detail="project_id or project_ref is required")
-        with SessionLocal() as db:
-            project, _ = self._resolve_project_for_chat_context(
-                db=db,
-                user=user,
-                project_ref=resolved_ref,
-                workspace_id=workspace_id,
-            )
-            resolved_project_id = str(project.id)
-            resolved_workspace_id = str(project.workspace_id)
-            if workspace_id and resolved_workspace_id != str(workspace_id):
-                raise HTTPException(status_code=400, detail="Project does not belong to workspace")
-            ensure_role(db, project.workspace_id, user.id, {"Owner", "Admin", "Member"})
-            ensure_project_access(db, project.workspace_id, str(project.id), user.id, {"Owner", "Admin", "Member"})
-            project_rules = db.execute(
-                select(ProjectRuleModel).where(
-                    ProjectRuleModel.project_id == str(project.id),
-                    ProjectRuleModel.is_deleted == False,  # noqa: E712
-                )
-            ).scalars().all()
-            has_github_context = self._project_has_github_context(
-                project_description=str(getattr(project, "description", "") or ""),
-                project_external_refs=getattr(project, "external_refs", "[]"),
-                project_rules=project_rules,
-            )
-
-            def _workspace_skill_or_404(skill_key: str, *, required: bool) -> WorkspaceSkill | None:
-                ws = db.execute(
-                    select(WorkspaceSkill).where(
-                        WorkspaceSkill.workspace_id == str(project.workspace_id),
-                        WorkspaceSkill.skill_key == skill_key,
-                        WorkspaceSkill.is_deleted == False,  # noqa: E712
-                    )
-                ).scalar_one_or_none()
-                if required and ws is None:
-                    raise HTTPException(status_code=404, detail=f"Workspace skill not found: {skill_key}")
-                return ws
-
-            def _ensure_project_skill(ws_skill: WorkspaceSkill, *, attach_prefix: str, apply_prefix: str) -> tuple[ProjectSkill, bool, dict]:
-                project_skill = db.execute(
-                    select(ProjectSkill).where(
-                        ProjectSkill.workspace_id == str(project.workspace_id),
-                        ProjectSkill.project_id == str(project.id),
-                        ProjectSkill.skill_key == str(ws_skill.skill_key),
-                        ProjectSkill.is_deleted == False,  # noqa: E712
-                    )
-                ).scalar_one_or_none()
-                attached_local = False
-                if project_skill is None:
-                    attach_command_id = command_id or self._fallback_command_id(
-                        prefix=attach_prefix,
-                        payload={
-                        "workspace_id": str(project.workspace_id),
-                        "project_ref": str(project.id),
-                        "workspace_skill_id": str(ws_skill.id),
-                        "skill_key": str(ws_skill.skill_key),
-                        },
-                    )
-                    attached_view = ProjectSkillApplicationService(
-                        db,
-                        user,
-                        command_id=attach_command_id,
-                    ).attach_workspace_skill_to_project(
-                        workspace_skill_id=str(ws_skill.id),
-                        workspace_id=str(project.workspace_id),
-                        project_id=str(project.id),
-                    )
-                    attached_local = True
-                    attached_skill_id = str(attached_view.get("id") or "").strip()
-                    project_skill = db.get(ProjectSkill, attached_skill_id) if attached_skill_id else None
-                if project_skill is None:
-                    raise HTTPException(status_code=500, detail=f"Failed to attach skill: {ws_skill.skill_key}")
-                apply_command_id = command_id or self._fallback_command_id(
-                    prefix=apply_prefix,
-                    payload={"project_ref": str(project.id), "project_skill_id": str(project_skill.id)},
-                )
-                applied_view_local = ProjectSkillApplicationService(
-                    db,
-                    user,
-                    command_id=apply_command_id,
-                ).apply_project_skill(str(project_skill.id))
-                return project_skill, attached_local, applied_view_local
-
-            team_ws = _workspace_skill_or_404("team_mode", required=True)
-            github_ws = _workspace_skill_or_404("github_delivery", required=False)
-            if team_ws is None:
-                raise HTTPException(status_code=500, detail="Required skills failed to resolve")
-
-            _, team_attached, team_applied_view = _ensure_project_skill(
-                team_ws,
-                attach_prefix="mcp-ensure-team-mode-attach",
-                apply_prefix="mcp-ensure-team-mode-apply",
-            )
-            team_dependencies = list(team_applied_view.get("resolved_dependencies") or [])
-            git_dependency_from_team = next(
-                (item for item in team_dependencies if str(item.get("skill_key") or "").strip() == "git_delivery"),
-                None,
-            )
-            git_project_skill = db.execute(
-                select(ProjectSkill).where(
-                    ProjectSkill.workspace_id == str(project.workspace_id),
-                    ProjectSkill.project_id == str(project.id),
-                    ProjectSkill.skill_key == "git_delivery",
-                    ProjectSkill.is_deleted == False,  # noqa: E712
-                )
-            ).scalar_one_or_none()
-            if git_project_skill is None:
-                raise HTTPException(status_code=500, detail="Team Mode dependency git_delivery was not provisioned")
-
-            github_attached = False
-            github_applied_view: dict[str, Any] | None = None
-            github_project_skill: ProjectSkill | None = None
-            if has_github_context and github_ws is not None:
-                github_project_skill, github_attached, github_applied_view = _ensure_project_skill(
-                    github_ws,
-                    attach_prefix="mcp-ensure-github-delivery-attach",
-                    apply_prefix="mcp-ensure-github-delivery-apply",
-                )
-
-        verification = self.verify_team_mode_workflow(
-            project_id=resolved_project_id,
+        plugin_result = plugin_service_policy.ensure_plugin_project_contract(
+            plugin_key=_TEAM_MODE_PLUGIN_KEY,
+            project_id=project_id,
+            project_ref=project_ref,
             workspace_id=workspace_id,
             auth_token=auth_token,
             expected_event_storming_enabled=expected_event_storming_enabled,
+            command_id=command_id,
+            ensure_project_contract_core=self._ensure_team_mode_project_core,
         )
-        delivery_verification = self.verify_delivery_workflow(
-            project_id=resolved_project_id,
+        if isinstance(plugin_result, dict):
+            return plugin_result
+        return self._ensure_team_mode_project_core(
+            project_id=project_id,
+            project_ref=project_ref,
             workspace_id=workspace_id,
             auth_token=auth_token,
+            expected_event_storming_enabled=expected_event_storming_enabled,
+            command_id=command_id,
         )
-        members = self.list_project_members(
-            workspace_id=workspace_id or verification["workspace_id"],
-            project_id=resolved_project_id,
+
+    def _ensure_team_mode_project_core(
+        self,
+        *,
+        project_id: str | None = None,
+        project_ref: str | None = None,
+        workspace_id: str | None = None,
+        auth_token: str | None = None,
+        expected_event_storming_enabled: bool | None = None,
+        command_id: str | None = None,
+    ) -> dict:
+        from plugins.team_mode import service_orchestration as team_mode_service_orchestration
+
+        return team_mode_service_orchestration.ensure_project_contract_core(
+            self,
+            project_id=project_id,
+            project_ref=project_ref,
+            workspace_id=workspace_id,
             auth_token=auth_token,
-            limit=200,
-            offset=0,
+            expected_event_storming_enabled=expected_event_storming_enabled,
+            command_id=command_id,
         )
-        return {
-            "project_id": resolved_project_id,
-            "workspace_id": verification["workspace_id"],
-            "attached": bool(team_attached or bool(git_dependency_from_team and git_dependency_from_team.get("attached")) or github_attached),
-            "project_skill_id": str(team_applied_view.get("id") or "").strip(),
-            "generated_rule_id": str(team_applied_view.get("generated_rule_id") or "").strip() or None,
-            "team_mode_contract_complete": bool(team_applied_view.get("team_mode_contract_complete")),
-            "team_mode_roster": list(team_applied_view.get("team_mode_roster") or []),
-            "git_delivery": {
-                "project_skill_id": str(git_project_skill.id),
-                "attached": bool(git_dependency_from_team and git_dependency_from_team.get("attached")),
-                "applied": bool(git_dependency_from_team and git_dependency_from_team.get("applied")),
-                "generated_rule_id": str(git_project_skill.generated_rule_id or "").strip() or None,
-            },
-            "github_delivery": {
-                "eligible": bool(has_github_context and github_ws is not None),
-                "project_skill_id": str(github_project_skill.id) if github_project_skill is not None else None,
-                "attached": github_attached,
-                "applied": bool(github_applied_view) if github_applied_view is not None else False,
-                "generated_rule_id": (
-                    str(github_applied_view.get("generated_rule_id") or "").strip() or None
-                    if github_applied_view is not None
-                    else None
-                ),
-            },
-            "members": members,
-            "verification": verification,
-            "delivery_verification": delivery_verification,
-            "ok": bool(verification.get("ok"))
-            and bool(team_applied_view.get("team_mode_contract_complete"))
-            and bool(delivery_verification.get("ok")),
-        }
 
     def list_project_templates(
         self,
@@ -2572,7 +2440,7 @@ class AgentTaskService:
         auth_token: str | None = None,
         name: str = "",
         description: str = "",
-        custom_statuses: list[str] | None = None,
+        custom_statuses: Any | None = None,
         member_user_ids: list[str] | None = None,
         embedding_enabled: bool | None = None,
         embedding_model: str | None = None,
@@ -2590,7 +2458,7 @@ class AgentTaskService:
                 template_key=template_key,
                 name=name,
                 description=description,
-                custom_statuses=custom_statuses,
+                custom_statuses=self._normalize_custom_statuses(custom_statuses),
                 member_user_ids=member_user_ids or [],
                 embedding_enabled=embedding_enabled,
                 embedding_model=embedding_model,
@@ -2609,7 +2477,7 @@ class AgentTaskService:
         workspace_id: str | None = None,
         auth_token: str | None = None,
         description: str = "",
-        custom_statuses: list[str] | None = None,
+        custom_statuses: Any | None = None,
         member_user_ids: list[str] | None = None,
         embedding_enabled: bool | None = None,
         embedding_model: str | None = None,
@@ -2633,7 +2501,7 @@ class AgentTaskService:
                 template_key=template_key,
                 name=name,
                 description=description,
-                custom_statuses=custom_statuses,
+                custom_statuses=self._normalize_custom_statuses(custom_statuses),
                 member_user_ids=member_user_ids or [],
                 embedding_enabled=embedding_enabled,
                 embedding_model=embedding_model,
@@ -3049,7 +2917,7 @@ class AgentTaskService:
         workspace_id: str | None = None,
         auth_token: str | None = None,
         description: str = "",
-        custom_statuses: list[str] | None = None,
+        custom_statuses: Any | None = None,
         external_refs: list[dict[str, Any]] | None = None,
         attachment_refs: list[dict[str, Any]] | None = None,
         embedding_enabled: bool = False,
@@ -3073,7 +2941,7 @@ class AgentTaskService:
                 workspace_id=resolved_workspace_id,
                 name=name,
                 description=description,
-                custom_statuses=custom_statuses,
+                custom_statuses=self._normalize_custom_statuses(custom_statuses),
                 external_refs=external_refs or [],
                 attachment_refs=attachment_refs or [],
                 embedding_enabled=bool(embedding_enabled),
@@ -3100,6 +2968,8 @@ class AgentTaskService:
         patch_payload = dict(patch or {})
         if not patch_payload:
             raise HTTPException(status_code=400, detail="patch must include at least one field")
+        if "custom_statuses" in patch_payload:
+            patch_payload["custom_statuses"] = self._normalize_custom_statuses(patch_payload.get("custom_statuses"))
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             project = self._load_project_scope(db=db, project_id=project_id)
@@ -3624,10 +3494,11 @@ class AgentTaskService:
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             self._assert_project_rule_allowed(db=db, rule_id=rule_id)
-            payload = ProjectRulePatch(**patch)
+            normalized_patch = self._normalize_project_rule_patch(patch)
+            payload = ProjectRulePatch(**normalized_patch)
             effective_command_id = command_id or self._fallback_command_id(
                 prefix="mcp-project-rule-patch",
-                payload={"rule_id": rule_id, "patch": patch or {}},
+                payload={"rule_id": rule_id, "patch": normalized_patch},
             )
             return ProjectRuleApplicationService(
                 db, user, command_id=effective_command_id
@@ -3881,7 +3752,7 @@ class AgentTaskService:
                     assignee_role=assignee_role,
                     auth_token=auth_token,
                 )
-                if assignee_role == "TeamLeadAgent":
+                if is_lead_role(assignee_role):
                     team_mode_verification = self.verify_team_mode_workflow(
                         project_id=str(state.project_id),
                         workspace_id=str(state.workspace_id),
@@ -3942,7 +3813,7 @@ class AgentTaskService:
                 assignee_role=assignee_role,
                 auth_token=auth_token,
             )
-            if assignee_role == "TeamLeadAgent":
+            if is_lead_role(assignee_role):
                 team_mode_verification = self.verify_team_mode_workflow(
                     project_id=str(state.project_id),
                     workspace_id=str(state.workspace_id),
@@ -4293,3 +4164,42 @@ class AgentTaskService:
                 "created": bool(created),
                 "notification": serialize_notification(notification),
             }
+    @staticmethod
+    def _normalize_project_rule_patch(patch: dict | None) -> dict:
+        normalized = dict(patch or {})
+        body = normalized.get("body", None)
+        if isinstance(body, (dict, list)):
+            normalized["body"] = json.dumps(body, ensure_ascii=False)
+        return normalized
+
+    @staticmethod
+    def _normalize_custom_statuses(value: Any) -> list[str] | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return None
+            parsed: object | None = None
+            if raw.startswith("["):
+                try:
+                    parsed = json.loads(raw)
+                except Exception:
+                    parsed = None
+            if isinstance(parsed, list):
+                candidates = parsed
+            elif "," in raw:
+                candidates = [part.strip() for part in raw.split(",")]
+            else:
+                candidates = [raw]
+        elif isinstance(value, (list, tuple, set)):
+            candidates = list(value)
+        else:
+            raise HTTPException(status_code=422, detail="custom_statuses must be an array of strings")
+        normalized: list[str] = []
+        for item in candidates:
+            status = str(item or "").strip()
+            if not status or status in normalized:
+                continue
+            normalized.append(status)
+        return normalized or None

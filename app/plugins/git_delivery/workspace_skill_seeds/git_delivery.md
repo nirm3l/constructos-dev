@@ -32,3 +32,4 @@ Use this skill whenever implementation is expected to run against a Git reposito
 - Dev task cannot move beyond `QA` without commit evidence.
 - QA must verify reproducible artifacts (test output, logs, or commit trace) before final acceptance.
 - Lead deploy tasks require deployment execution evidence against the workspace stack `constructos-ws-default` by default (unless user overrides target stack).
+

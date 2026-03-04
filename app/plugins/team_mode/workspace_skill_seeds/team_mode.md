@@ -36,6 +36,9 @@ Use this skill when a project should be executed by a structured multi-agent del
 ## Delivery Workflow
 - Developers execute implementation through the delivery contract enforced by `git_delivery`.
 - Team Mode orchestration must not bypass `git_delivery` requirements for branching, commits, and evidence.
+- Developer automation runs in isolated per-task git worktrees/feature branches so parallel Dev execution does not share a mutable checkout.
+- Team Lead oversight must track per-task branch/evidence readiness and coordinate integration only after Dev/QA gates are satisfied.
+- When Dev tasks leave active implementation flow (for example move from `Dev` to `QA`/`Done`/`Blocked`), stale per-task worktrees should be cleaned up automatically.
 - Move tasks across board statuses exactly as defined by the project workflow.
 
 ## Team Lead Responsibilities
@@ -65,8 +68,8 @@ Use this skill when a project should be executed by a structured multi-agent del
 - QA failure requires explicit bug/fix loop (new bug task or linked existing task, fix commit evidence, and QA re-check evidence).
 - Failed post-deploy QA must move work back to Dev with a bug task, then return to Lead for re-deploy before final QA sign-off.
 - Prefer explicit Team Mode trigger transitions:
-  - Dev tasks self-trigger on `to_statuses=["QA"]`
-  - QA task external-trigger from Dev task ids on `to_statuses=["QA"]`
-  - Lead oversight external-trigger from QA task ids on `to_statuses=["Done", "Blocked"]`
+  - Dev tasks self-trigger on `to_statuses=["Lead"]`
+  - Lead oversight external-trigger from Dev task ids on `to_statuses=["Lead"]`
+  - QA task external-trigger from Lead task ids on `to_statuses=["QA"]`
   - Lead oversight external-trigger from Dev and QA task ids on `to_statuses=["Blocked"]`
-  - Deploy external-trigger from Lead task ids on `to_statuses=["Done"]`
+  - Deploy execution precedes QA sign-off when QA validates only main/deployed artifact.

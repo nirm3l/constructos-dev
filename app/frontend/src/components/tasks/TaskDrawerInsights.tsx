@@ -17,11 +17,18 @@ export function TaskDrawerInsights({ state }: { state: any }) {
   const automationTimeline = React.useMemo<AutomationTimelineEntry[]>(() => {
     const events = Array.isArray(state.activity.data) ? state.activity.data : []
     const entries: AutomationTimelineEntry[] = []
+    const seen = new Set<string>()
+    const pushUnique = (entry: AutomationTimelineEntry) => {
+      const dedupeKey = `${entry.action}|${entry.title}|${entry.createdAt ?? ''}|${entry.body}`
+      if (seen.has(dedupeKey)) return
+      seen.add(dedupeKey)
+      entries.push(entry)
+    }
     for (const event of events) {
       const action = String(event?.action || '')
       const details = (event?.details && typeof event.details === 'object' ? event.details : {}) as Record<string, unknown>
       if (action === 'TaskAutomationRequested') {
-        entries.push({
+        pushUnique({
           id: `${event.id}-requested`,
           action: 'requested',
           title: 'Run requested',
@@ -31,7 +38,7 @@ export function TaskDrawerInsights({ state }: { state: any }) {
         continue
       }
       if (action === 'TaskAutomationStarted') {
-        entries.push({
+        pushUnique({
           id: `${event.id}-started`,
           action: 'started',
           title: 'Run started',
@@ -41,7 +48,7 @@ export function TaskDrawerInsights({ state }: { state: any }) {
         continue
       }
       if (action === 'TaskAutomationCompleted') {
-        entries.push({
+        pushUnique({
           id: `${event.id}-completed`,
           action: 'completed',
           title: 'Run completed',
@@ -51,7 +58,7 @@ export function TaskDrawerInsights({ state }: { state: any }) {
         continue
       }
       if (action === 'TaskAutomationFailed') {
-        entries.push({
+        pushUnique({
           id: `${event.id}-failed`,
           action: 'failed',
           title: 'Run failed',

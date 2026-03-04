@@ -9,7 +9,21 @@ import re
 
 from sqlalchemy import select
 
+from plugins.runner_policy import (
+    blocker_escalation_notification,
+    is_agent_project_role,
+    is_blocker_source_role,
+    is_developer_role,
+    is_kickoff_instruction,
+    is_qa_role,
+    is_recurring_oversight_task,
+    lead_role_for_escalation,
+    normalize_success_outcome,
+    success_validation_error,
+    preflight_error as plugin_preflight_error,
+)
 from .executor import execute_task_automation
+from .service import AgentTaskService
 from features.tasks.domain import (
     EVENT_UPDATED as TASK_EVENT_UPDATED,
     EVENT_COMPLETED as TASK_EVENT_COMPLETED,
@@ -25,11 +39,12 @@ from features.tasks.domain import (
 )
 from shared.contracts import ConcurrencyConflictError
 from shared.eventing import append_event, rebuild_state
-from shared.models import ProjectMember, ProjectSkill, SessionLocal, Task, User as UserModel
+from shared.models import Note, Project, ProjectMember, ProjectRule, ProjectSkill, SessionLocal, Task, User as UserModel
 from shared.serializers import to_iso_utc
 from shared.typed_notifications import append_notification_created_event
 from shared.settings import (
     AGENT_EXECUTOR_TIMEOUT_SECONDS,
+    AGENT_RUNNER_ENABLED,
     AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS,
     AGENT_RUNNER_INTERVAL_SECONDS,
     AGENT_RUNNER_MAX_CONCURRENCY,
@@ -46,11 +61,17 @@ from shared.task_automation import (
 _runner_stop_event = threading.Event()
 _runner_wakeup_event = threading.Event()
 _runner_thread: threading.Thread | None = None
-_TEAM_MODE_AGENT_PROJECT_ROLES = {"TeamLeadAgent", "DeveloperAgent", "QAAgent"}
 _COMMIT_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
 _COMMIT_SHA_EXPLICIT_RE = re.compile(
     r"(?i)(?:\b(?:commit|sha|changeset|hash)\s*[:=#]?\s*|/commit/)([0-9a-f]{7,40})\b"
 )
+_TRANSIENT_INTERRUPT_RE = re.compile(r"(?:exit=-15|sigterm|terminated by signal 15)", re.IGNORECASE)
+_RECOVERABLE_FAILURE_RE = re.compile(
+    r"(?:exit=-15|sigterm|terminated by signal 15|timeout|timed out|429|rate limit|502|503|504|bad gateway|gateway timeout|temporarily unavailable|connection reset)",
+    re.IGNORECASE,
+)
+_MAX_RECOVERABLE_RETRIES = 3
+_KICKOFF_EXECUTION_HOLDOFF_SECONDS = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +92,20 @@ class QueuedAutomationRun:
     actor_user_id: str
 
 
+def _parse_iso_utc(value: str | None) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        candidate = raw.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(candidate)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
 def _normalize_nonnegative_int(value) -> int:
     try:
         parsed = int(value)
@@ -79,7 +114,7 @@ def _normalize_nonnegative_int(value) -> int:
     return max(0, parsed)
 
 
-def _project_has_team_mode_skill(*, db, workspace_id: str, project_id: str | None) -> bool:
+def _project_has_git_delivery_skill(*, db, workspace_id: str, project_id: str | None) -> bool:
     normalized_project_id = str(project_id or "").strip()
     if not normalized_project_id:
         return False
@@ -87,12 +122,33 @@ def _project_has_team_mode_skill(*, db, workspace_id: str, project_id: str | Non
         select(ProjectSkill.id).where(
             ProjectSkill.workspace_id == workspace_id,
             ProjectSkill.project_id == normalized_project_id,
-            ProjectSkill.skill_key == "team_mode",
+            ProjectSkill.skill_key == "git_delivery",
             ProjectSkill.enabled == True,  # noqa: E712
             ProjectSkill.is_deleted == False,  # noqa: E712
         )
     ).scalar_one_or_none()
     return row is not None
+
+
+def _project_has_repo_context(*, db, workspace_id: str, project_id: str | None) -> bool:
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_project_id:
+        return False
+    project = db.get(Project, normalized_project_id)
+    if project is None or bool(getattr(project, "is_deleted", False)):
+        return False
+    project_rules = db.execute(
+        select(ProjectRule).where(
+            ProjectRule.workspace_id == workspace_id,
+            ProjectRule.project_id == normalized_project_id,
+            ProjectRule.is_deleted == False,  # noqa: E712
+        )
+    ).scalars().all()
+    return AgentTaskService._project_has_repo_context(
+        project_description=str(getattr(project, "description", "") or ""),
+        project_external_refs=getattr(project, "external_refs", "[]"),
+        project_rules=project_rules,
+    )
 
 
 def _resolve_task_actor_user_id(
@@ -134,7 +190,7 @@ def _resolve_task_actor_user_id(
         if membership is None:
             return str(fallback_actor_user_id or "").strip() or AGENT_SYSTEM_USER_ID
         project_role = str(membership.role or "").strip()
-        if project_role not in _TEAM_MODE_AGENT_PROJECT_ROLES:
+        if not is_agent_project_role(project_role):
             return str(fallback_actor_user_id or "").strip() or AGENT_SYSTEM_USER_ID
     return assignee_id
 
@@ -160,29 +216,6 @@ def _resolve_assignee_project_role(
     return str(role or "").strip()
 
 
-def _is_team_mode_kickoff_instruction(instruction: str) -> bool:
-    return str(instruction or "").strip().casefold().startswith("team mode kickoff for project ")
-
-
-def _is_team_lead_recurring_oversight_task(state: dict | None) -> bool:
-    source = dict(state or {})
-    if str(source.get("task_type") or "").strip() != "scheduled_instruction":
-        return False
-    triggers = source.get("execution_triggers") or []
-    if not isinstance(triggers, list):
-        return False
-    for trigger in triggers:
-        if not isinstance(trigger, dict):
-            continue
-        if str(trigger.get("kind") or "").strip() != "schedule":
-            continue
-        recurring_rule = str(trigger.get("recurring_rule") or "").strip()
-        run_on_statuses = [str(item or "").strip() for item in (trigger.get("run_on_statuses") or [])]
-        if recurring_rule and "Lead" in run_on_statuses:
-            return True
-    return False
-
-
 def _extract_commit_shas_from_refs(refs: object) -> set[str]:
     out: set[str] = set()
     if not isinstance(refs, list):
@@ -195,6 +228,55 @@ def _extract_commit_shas_from_refs(refs: object) -> set[str]:
         for match in _COMMIT_SHA_EXPLICIT_RE.findall(text):
             out.add(str(match).lower())
     return out
+
+
+def _extract_commit_shas_from_text(text: str | None) -> set[str]:
+    raw = str(text or "")
+    return {str(match).lower() for match in _COMMIT_SHA_EXPLICIT_RE.findall(raw)}
+
+
+def _task_has_execution_evidence(*, db, task_id: str, state: dict | None) -> bool:
+    source = dict(state or {})
+    external_refs = source.get("external_refs")
+    if isinstance(external_refs, list):
+        for item in external_refs:
+            if isinstance(item, dict) and str(item.get("url") or "").strip():
+                return True
+            if isinstance(item, str) and str(item).strip():
+                return True
+    attachment_refs = source.get("attachment_refs")
+    if isinstance(attachment_refs, list):
+        for item in attachment_refs:
+            if isinstance(item, dict) and str(item.get("path") or "").strip():
+                return True
+    note_row = db.execute(
+        select(Note.id).where(
+            Note.task_id == task_id,
+            Note.is_deleted == False,  # noqa: E712
+        ).limit(1)
+    ).scalar_one_or_none()
+    return note_row is not None
+
+
+def _is_noop_ack_comment(comment: str | None) -> bool:
+    normalized = str(comment or "").strip().casefold()
+    if not normalized:
+        return False
+    return normalized.startswith("codex runner: request accepted, leaving progress note.")
+
+
+def _is_transient_runner_interruption(error: Exception | str | None) -> bool:
+    text = str(error or "").strip()
+    if not text:
+        return False
+    return bool(_TRANSIENT_INTERRUPT_RE.search(text))
+
+
+def _is_recoverable_failure(error: Exception | str | None) -> bool:
+    text = str(error or "").strip()
+    if not text:
+        return False
+    return bool(_RECOVERABLE_FAILURE_RE.search(text))
 
 
 def _resolve_project_human_member_user_ids(*, db, workspace_id: str, project_id: str | None) -> list[str]:
@@ -236,6 +318,9 @@ def _enqueue_team_lead_blocker_escalation(
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return 0
+    lead_role = lead_role_for_escalation(db=db, workspace_id=workspace_id, project_id=normalized_project_id)
+    if not str(lead_role or "").strip():
+        return 0
     lead_tasks = db.execute(
         select(Task)
         .join(
@@ -250,7 +335,7 @@ def _enqueue_team_lead_blocker_escalation(
             Task.is_deleted == False,  # noqa: E712
             Task.archived == False,  # noqa: E712
             Task.status != "Done",
-            ProjectMember.role == "TeamLeadAgent",
+            ProjectMember.role == str(lead_role),
         )
         .order_by(Task.created_at.asc())
     ).scalars().all()
@@ -299,31 +384,43 @@ def _enqueue_team_lead_blocker_escalation(
         project_id=normalized_project_id,
     )
     for human_id in human_ids:
+        notification_cfg = blocker_escalation_notification(
+            blocked_task_id=blocked_task_id,
+            blocked_title=blocked_title,
+            blocked_role=blocked_role,
+            blocked_status=blocked_status,
+            blocked_error=blocked_error,
+            queued_lead_tasks=queued,
+        )
+        message = str(notification_cfg.get("message") or "").strip() or (
+            f"Workflow blocker detected: {blocked_title or blocked_task_id} "
+            f"({blocked_role or 'agent'}, status={blocked_status or 'Blocked'}). "
+            "Lead escalation run was queued."
+        )
+        kind = str(notification_cfg.get("kind") or "").strip() or "workflow_blocker_escalation"
+        dedupe_prefix = str(notification_cfg.get("dedupe_prefix") or "").strip() or "workflow-blocker"
+        source_event = str(notification_cfg.get("source_event") or "").strip() or "agents.runner.blocker_escalation"
         append_notification_created_event(
             db,
             append_event_fn=append_event,
             user_id=human_id,
-            message=(
-                f"Team Mode blocker detected: {blocked_title or blocked_task_id} "
-                f"({blocked_role or 'agent'}, status={blocked_status or 'Blocked'}). "
-                "Team Lead escalation run was queued."
-            ),
+            message=message,
             actor_id=lead_assignee,
             workspace_id=workspace_id,
             project_id=normalized_project_id,
             task_id=blocked_task_id,
             notification_type="ManualMessage",
             severity="warning",
-            dedupe_key=f"team-mode-blocker:{blocked_task_id}:{blocked_status or 'Blocked'}:{dedupe_hash}",
+            dedupe_key=f"{dedupe_prefix}:{blocked_task_id}:{blocked_status or 'Blocked'}:{dedupe_hash}",
             payload={
-                "kind": "team_mode_blocker_escalation",
+                "kind": kind,
                 "blocked_task_id": blocked_task_id,
                 "blocked_role": blocked_role,
                 "blocked_status": blocked_status,
                 "queued_lead_tasks": queued,
                 "error": blocked_summary,
             },
-            source_event="agents.runner.blocker_escalation",
+            source_event=source_event,
         )
     return queued
 
@@ -433,6 +530,13 @@ def _claim_queued_task(task_id: str) -> QueuedAutomationRun | None:
             return None
         project_id = str(state.get("project_id") or "").strip() or None
         request_source = str(state.get("last_requested_source") or "").strip().lower()
+        requested_instruction = str(state.get("last_requested_instruction") or "").strip()
+        if is_kickoff_instruction(requested_instruction):
+            requested_at_dt = _parse_iso_utc(str(state.get("last_requested_at") or "").strip())
+            if requested_at_dt is not None:
+                age_seconds = (datetime.now(timezone.utc) - requested_at_dt).total_seconds()
+                if age_seconds < float(_KICKOFF_EXECUTION_HOLDOFF_SECONDS):
+                    return None
         trigger_task_id = str(state.get("last_requested_trigger_task_id") or "").strip() or None
         trigger_from_status = str(state.get("last_requested_from_status") or "").strip() or None
         trigger_to_status = str(state.get("last_requested_to_status") or "").strip() or None
@@ -518,26 +622,47 @@ def _record_automation_success(run: QueuedAutomationRun, *, summary: str, action
             project_id=project_id,
             assignee_id=str(state.get("assignee_id") or ""),
         )
+        git_delivery_enabled = _project_has_git_delivery_skill(db=db, workspace_id=workspace_id, project_id=project_id)
+
+        validation_error = success_validation_error(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=run.task_id,
+            task_state=state,
+            assignee_role=assignee_role,
+            action=action,
+            summary=summary,
+            comment=comment,
+            has_git_delivery_skill=git_delivery_enabled,
+        )
+        if validation_error:
+            raise RuntimeError(validation_error)
+
         queued_blocker_escalations = 0
-        kickoff_instruction = str(run.instruction or "").strip()
-        if (
-            action == "complete"
-            and assignee_role == "TeamLeadAgent"
-            and _is_team_mode_kickoff_instruction(kickoff_instruction)
-        ):
-            action = "comment"
-            summary = "Kickoff dispatch completed; Lead oversight task remains active."
-            if not str(comment or "").strip():
-                comment = "Kickoff completed in dispatch-only mode. Lead oversight task kept active for recurring coordination."
-        if (
-            action == "complete"
-            and assignee_role == "TeamLeadAgent"
-            and _is_team_lead_recurring_oversight_task(state)
-        ):
-            action = "comment"
-            summary = "Recurring lead oversight cycle completed; task remains active in Lead."
-            if not str(comment or "").strip():
-                comment = "Recurring Team Lead oversight task cannot be auto-completed by automation run."
+        action, summary, comment = normalize_success_outcome(
+            action=action,
+            summary=summary,
+            comment=comment,
+            instruction=str(run.instruction or "").strip(),
+            assignee_role=assignee_role,
+            task_state=state,
+        )
+
+        if _normalize_nonnegative_int(state.get("runner_recover_retry_count")) > 0:
+            append_event(
+                db,
+                aggregate_type="Task",
+                aggregate_id=run.task_id,
+                event_type=TASK_EVENT_UPDATED,
+                payload={"runner_recover_retry_count": 0},
+                metadata={
+                    "actor_id": actor_user_id,
+                    "workspace_id": workspace_id,
+                    "project_id": project_id,
+                    "task_id": run.task_id,
+                },
+            )
 
         if AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS:
             if action == "complete" and state.get("status") != "Done":
@@ -611,10 +736,11 @@ def _record_automation_success(run: QueuedAutomationRun, *, summary: str, action
         should_auto_retry = (
             run.request_source == "manual"
             and action == "comment"
+            and not _is_noop_ack_comment(comment)
             and (
-                (assignee_role == "DeveloperAgent" and current_status == "Dev" and not commit_shas)
+                (is_developer_role(assignee_role) and current_status == "Dev" and not commit_shas)
                 or (
-                    assignee_role == "QAAgent"
+                    is_qa_role(assignee_role)
                     and current_status == "QA"
                     and not bool(state.get("external_refs"))
                 )
@@ -640,7 +766,9 @@ def _record_automation_success(run: QueuedAutomationRun, *, summary: str, action
                         "task_id": run.task_id,
                     },
                 )
-        if assignee_role in {"DeveloperAgent", "QAAgent"} and str(state.get("status") or "").strip() == "Blocked":
+        if is_blocker_source_role(assignee_role) and str(
+            state.get("status") or ""
+        ).strip() == "Blocked":
             queued_blocker_escalations = _enqueue_team_lead_blocker_escalation(
                 db=db,
                 workspace_id=workspace_id,
@@ -668,6 +796,8 @@ def _record_automation_success(run: QueuedAutomationRun, *, summary: str, action
 def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> None:
     failed_at = to_iso_utc(datetime.now(timezone.utc))
     now_utc = datetime.now(timezone.utc)
+    transient_interruption = _is_transient_runner_interruption(error)
+    recoverable_failure = _is_recoverable_failure(error)
     with SessionLocal() as db:
         state, _ = rebuild_state(db, "Task", run.task_id)
         workspace_id = str(state.get("workspace_id") or run.workspace_id or "").strip()
@@ -686,6 +816,27 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             project_id=project_id,
             assignee_id=str(state.get("assignee_id") or ""),
         )
+        retry_count = _normalize_nonnegative_int(state.get("runner_recover_retry_count"))
+        should_retry = transient_interruption or (recoverable_failure and retry_count < _MAX_RECOVERABLE_RETRIES)
+        if (
+            AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS
+            and is_blocker_source_role(assignee_role)
+            and str(state.get("status") or "").strip() != "Blocked"
+            and not should_retry
+        ):
+            append_event(
+                db,
+                aggregate_type="Task",
+                aggregate_id=run.task_id,
+                event_type=TASK_EVENT_UPDATED,
+                payload={"status": "Blocked"},
+                metadata={
+                    "actor_id": actor_user_id,
+                    "workspace_id": workspace_id,
+                    "project_id": project_id,
+                    "task_id": run.task_id,
+                },
+            )
         queued_blocker_escalations = 0
         append_event(
             db,
@@ -724,6 +875,47 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 execution_triggers=state.get("execution_triggers"),
                 now_utc=now_utc,
             )
+        if should_retry:
+            append_event(
+                db,
+                aggregate_type="Task",
+                aggregate_id=run.task_id,
+                event_type=TASK_EVENT_UPDATED,
+                payload={"runner_recover_retry_count": retry_count + 1},
+                metadata={
+                    "actor_id": actor_user_id,
+                    "workspace_id": workspace_id,
+                    "project_id": project_id,
+                    "task_id": run.task_id,
+                },
+            )
+            retry_instruction = (
+                str(run.instruction or "").strip()
+                or str(state.get("instruction") or "").strip()
+                or str(state.get("scheduled_instruction") or "").strip()
+            )
+            if retry_instruction:
+                append_event(
+                    db,
+                    aggregate_type="Task",
+                    aggregate_id=run.task_id,
+                    event_type=EVENT_AUTOMATION_REQUESTED,
+                    payload={
+                        "requested_at": failed_at,
+                        "instruction": retry_instruction,
+                        "source": (
+                            "runner_recover_after_interrupt"
+                            if transient_interruption
+                            else "runner_recover_after_failure"
+                        ),
+                    },
+                    metadata={
+                        "actor_id": actor_user_id,
+                        "workspace_id": workspace_id,
+                        "project_id": project_id,
+                        "task_id": run.task_id,
+                    },
+                )
         _requeue_pending_status_change_request(
             db=db,
             run=run,
@@ -733,23 +925,52 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             actor_user_id=actor_user_id,
             requested_at_iso=failed_at,
         )
-        if assignee_role in {"DeveloperAgent", "QAAgent"}:
-            queued_blocker_escalations = _enqueue_team_lead_blocker_escalation(
-                db=db,
-                workspace_id=workspace_id,
-                project_id=project_id,
-                blocked_task_id=run.task_id,
-                blocked_title=str(state.get("title") or ""),
-                blocked_role=assignee_role,
-                blocked_status=str(state.get("status") or "").strip() or "Blocked",
-                blocked_error=str(error),
-            )
+        if is_blocker_source_role(assignee_role):
+            if not should_retry:
+                queued_blocker_escalations = _enqueue_team_lead_blocker_escalation(
+                    db=db,
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    blocked_task_id=run.task_id,
+                    blocked_title=str(state.get("title") or ""),
+                    blocked_role=assignee_role,
+                    blocked_status=str(state.get("status") or "").strip() or "Blocked",
+                    blocked_error=str(error),
+                )
         db.commit()
     if queued_blocker_escalations > 0:
         wake_automation_runner()
 
 
+def _preflight_automation_error(run: QueuedAutomationRun) -> str | None:
+    with SessionLocal() as db:
+        state, _ = rebuild_state(db, "Task", run.task_id)
+        workspace_id = str(state.get("workspace_id") or run.workspace_id or "").strip()
+        if not workspace_id:
+            return None
+        project_id = str(state.get("project_id") or run.project_id or "").strip() or None
+        assignee_role = _resolve_assignee_project_role(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            assignee_id=str(state.get("assignee_id") or ""),
+        )
+        return plugin_preflight_error(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_status=str(state.get("status") or "").strip() or None,
+            assignee_role=assignee_role,
+            has_git_delivery_skill=_project_has_git_delivery_skill(db=db, workspace_id=workspace_id, project_id=project_id),
+            has_repo_context=_project_has_repo_context(db=db, workspace_id=workspace_id, project_id=project_id),
+        )
+
+
 def _execute_claimed_automation(run: QueuedAutomationRun) -> None:
+    preflight_error = _preflight_automation_error(run)
+    if preflight_error:
+        _record_automation_failure(run, RuntimeError(preflight_error))
+        return
     try:
         if not run.instruction:
             raise RuntimeError("instruction is empty")
@@ -856,10 +1077,14 @@ def _runner_loop():
             _runner_wakeup_event.clear()
 
 
-def recover_stale_running_automation_once(limit: int = 20) -> int:
+def recover_stale_running_automation_once(limit: int = 20, stale_after_seconds_override: float | None = None) -> int:
     recovered = 0
     now = datetime.now(timezone.utc)
-    stale_after_seconds = max(float(AGENT_EXECUTOR_TIMEOUT_SECONDS) * 2.0, 90.0)
+    stale_after_seconds = (
+        max(float(stale_after_seconds_override), 0.0)
+        if stale_after_seconds_override is not None
+        else max(min(float(AGENT_EXECUTOR_TIMEOUT_SECONDS) * 2.0, 300.0), 90.0)
+    )
     with SessionLocal() as db:
         candidate_ids = db.execute(
             select(Task.id).where(Task.is_deleted == False).order_by(Task.updated_at.asc()).limit(max(limit * 10, limit))
@@ -970,13 +1195,9 @@ def queue_due_scheduled_tasks_once(limit: int = 20) -> int:
             if not workspace_id:
                 continue
             project_id = state.get("project_id")
-            # Team Mode oversight schedules should not auto-start before explicit kickoff.
-            # First run must come from manual/status-triggered request; schedule is fallback cadence afterwards.
-            if _project_has_team_mode_skill(
-                db=db,
-                workspace_id=str(workspace_id),
-                project_id=str(project_id or ""),
-            ):
+            # Kickoff guard applies only to recurring oversight schedules.
+            # Generic scheduled tasks should run normally.
+            if is_recurring_oversight_task(state):
                 last_requested_source = str(state.get("last_requested_source") or "").strip()
                 last_agent_run_at = str(state.get("last_agent_run_at") or "").strip()
                 if not last_requested_source and not last_agent_run_at:
@@ -1027,10 +1248,19 @@ def queue_due_scheduled_tasks_once(limit: int = 20) -> int:
 
 def start_automation_runner():
     global _runner_thread
+    if not AGENT_RUNNER_ENABLED:
+        return
     if _runner_thread and _runner_thread.is_alive():
         return
     _runner_stop_event.clear()
     _runner_wakeup_event.clear()
+    try:
+        # On process restart/deploy, immediately recover orphaned "running" tasks.
+        recovered = recover_stale_running_automation_once(limit=200, stale_after_seconds_override=0.0)
+        if recovered > 0:
+            logger.info("Automation runner startup recovered %s stale running task(s).", recovered)
+    except Exception:
+        logger.exception("Automation runner startup recovery failed.")
     _runner_thread = threading.Thread(target=_runner_loop, name="automation-runner", daemon=True)
     _runner_thread.start()
 
