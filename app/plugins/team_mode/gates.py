@@ -1,26 +1,21 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from shared.schedule import parse_recurring_rule
 
 DEFAULT_REQUIRED_TEAM_MODE_CHECKS: list[str] = [
-    "dev_tasks_have_automation_instruction",
-    "qa_tasks_have_automation_instruction",
-    "lead_tasks_have_automation_instruction",
     "role_coverage_present",
     "dev_self_triggers_to_lead",
     "lead_external_trigger_from_dev",
-    "lead_external_trigger_requests_automation",
     "qa_external_trigger_from_lead",
-    "qa_external_trigger_requests_automation",
     "lead_external_trigger_from_blocked_work",
-    "lead_external_trigger_from_blocked_work_requests_automation",
     "lead_recurring_schedule_on_lead",
     "lead_recurring_cadence_ok",
+    "lead_recurring_next_due_soon",
     "lead_oversight_not_done_before_delivery_complete",
     "required_triggers_present",
-    "event_storming_matches_expectation",
     "deploy_target_declared",
 ]
 
@@ -40,6 +35,7 @@ TEAM_MODE_CHECK_DESCRIPTIONS: dict[str, str] = {
     "deploy_external_trigger_from_lead_required": "Deploy-from-Lead trigger is required only when multiple Lead tasks exist.",
     "lead_recurring_schedule_on_lead": "Lead has recurring schedule configured to run on Lead status.",
     "lead_recurring_cadence_ok": "Lead recurring oversight cadence is within the configured maximum interval.",
+    "lead_recurring_next_due_soon": "Lead recurring oversight next run is near now (not deferred to a distant future timestamp).",
     "lead_oversight_not_done_before_delivery_complete": "Lead oversight recurring task is not marked Done before delivery handoff completes.",
     "deploy_target_declared": "Deploy task artifacts declare a deploy target port.",
     "deploy_stack_declared": "Deploy task artifacts declare a deploy stack/project name.",
@@ -68,6 +64,7 @@ TEAM_MODE_CHECK_EVALUATORS: dict[str, Callable[[dict[str, Any]], bool]] = {
     "deploy_external_trigger_from_lead_required": lambda f: bool(f["deploy_external_required"]),
     "lead_recurring_schedule_on_lead": lambda f: bool(f["lead_recurring_on_lead_ok"]),
     "lead_recurring_cadence_ok": lambda f: bool(f["lead_recurring_cadence_ok"]),
+    "lead_recurring_next_due_soon": lambda f: bool(f["lead_recurring_next_due_soon_ok"]),
     "lead_oversight_not_done_before_delivery_complete": lambda f: bool(f["lead_oversight_not_done_ok"]),
     "deploy_target_declared": lambda f: bool(f["deploy_target_declared_ok"]),
     "deploy_stack_declared": lambda f: bool(f["deploy_stack_declared_ok"]),
@@ -76,20 +73,14 @@ TEAM_MODE_CHECK_EVALUATORS: dict[str, Callable[[dict[str, Any]], bool]] = {
     "dev_external_trigger_to_qa_conflict": lambda f: bool(f["dev_external_to_qa_conflict"]),
     "qa_external_trigger_to_done_conflict": lambda f: bool(f["qa_external_to_done_conflict"]),
     "required_triggers_present": lambda f: bool(
-        f["dev_instruction_ok"]
-        and f["qa_instruction_ok"]
-        and f["lead_instruction_ok"]
-        and f["dev_self_ok"]
+        f["dev_self_ok"]
         and f["lead_external_from_dev_ok"]
-        and f["lead_external_from_dev_automation_ok"]
         and f["qa_external_from_lead_ok"]
-        and f["qa_external_from_lead_automation_ok"]
         and f["lead_external_from_blocked_work_ok"]
-        and f["lead_external_from_blocked_work_automation_ok"]
         and (f["deploy_external_from_lead_ok"] if f["deploy_external_required"] else True)
         and f["lead_recurring_on_lead_ok"]
         and f["lead_recurring_cadence_ok"]
-        and f["lead_oversight_not_done_ok"]
+        and f["lead_recurring_next_due_soon_ok"]
         and f["handoff_direction_clean"]
         and f["deploy_target_declared_ok"]
     ),
@@ -191,6 +182,18 @@ def evaluate_team_mode_gates(
         except Exception:
             parsed = 5
         return max(1, parsed)
+
+    def _parse_utc(value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except Exception:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     dev_tasks = [t for t in tasks if member_role_by_user_id.get(str(t.get("assignee_id") or "")) == "DeveloperAgent"]
     qa_tasks = [t for t in tasks if member_role_by_user_id.get(str(t.get("assignee_id") or "")) == "QAAgent"]
@@ -312,6 +315,21 @@ def evaluate_team_mode_gates(
         )
         for task in lead_tasks
     )
+    now_utc = datetime.now(timezone.utc)
+    lead_recurring_next_due_soon_ok = any(
+        any(
+            str(trigger.get("kind") or "").strip() == "schedule"
+            and "Lead" in [str(item or "").strip() for item in (trigger.get("run_on_statuses") or [])]
+            and (
+                (lambda due: bool(due) and due <= (now_utc + timedelta(minutes=max(2, lead_recurring_max_minutes * 2))))(
+                    _parse_utc(trigger.get("scheduled_at_utc"))
+                )
+            )
+            for trigger in (task.get("execution_triggers") or [])
+            if isinstance(trigger, dict)
+        )
+        for task in lead_tasks
+    )
     recurring_lead_tasks = [
         task
         for task in lead_tasks
@@ -400,6 +418,7 @@ def evaluate_team_mode_gates(
         "deploy_external_required": deploy_external_required,
         "lead_recurring_on_lead_ok": lead_recurring_on_lead_ok,
         "lead_recurring_cadence_ok": lead_recurring_cadence_ok,
+        "lead_recurring_next_due_soon_ok": lead_recurring_next_due_soon_ok,
         "lead_oversight_not_done_ok": lead_oversight_not_done_ok,
         "deploy_target_declared_ok": deploy_target_declared_ok,
         "deploy_stack_declared_ok": deploy_stack_declared_ok,

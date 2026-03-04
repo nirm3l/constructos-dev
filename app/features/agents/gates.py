@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+from ipaddress import ip_address
 from copy import deepcopy
 from typing import Any, Callable
 from plugins.base import GateEvaluationContext
@@ -104,6 +105,7 @@ def _build_default_gate_policy() -> dict[str, Any]:
         "stack": "constructos-ws-default",
         "port": None,
         "health_path": "/health",
+        "host": "gateway",
         "require_http_200": True,
     },
 }
@@ -212,6 +214,7 @@ def run_runtime_deploy_health_check(
     port: int | None,
     health_path: str,
     require_http_200: bool,
+    host: str | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "stack": stack,
@@ -290,33 +293,50 @@ def run_runtime_deploy_health_check(
             if result["port_mapped"]:
                 break
 
+    def _resolve_runtime_host(value: str | None) -> str:
+        raw = str(value or "").strip()
+        if raw and raw.lower() != "gateway":
+            try:
+                ip_address(raw)
+                return raw
+            except Exception:
+                return raw
+        if not os.path.exists("/.dockerenv"):
+            return "127.0.0.1"
+        try:
+            with open("/proc/net/route", "r", encoding="utf-8") as handle:
+                for line in handle.read().splitlines()[1:]:
+                    cols = [part.strip() for part in line.split()]
+                    if len(cols) < 4:
+                        continue
+                    destination = cols[1]
+                    gateway_hex = cols[2]
+                    flags_hex = cols[3]
+                    if destination != "00000000":
+                        continue
+                    flags = int(flags_hex, 16)
+                    if not (flags & 0x2):
+                        continue
+                    gateway_bytes = bytes.fromhex(gateway_hex)
+                    return ".".join(str(part) for part in gateway_bytes[::-1])
+        except Exception:
+            pass
+        return "172.17.0.1"
+
     if require_http_200:
         if result["port_mapped"]:
-            probe_hosts: list[str] = []
-            if os.path.exists("/.dockerenv"):
-                probe_hosts.append("host.docker.internal")
-                probe_hosts.extend(["172.17.0.1", "172.18.0.1", "172.19.0.1"])
-            probe_hosts.extend(["127.0.0.1", "localhost"])
-            deduped_probe_hosts: list[str] = []
-            for host in probe_hosts:
-                normalized = str(host or "").strip().lower()
-                if not normalized or normalized in deduped_probe_hosts:
-                    continue
-                deduped_probe_hosts.append(normalized)
+            selected_host = _resolve_runtime_host(host)
             try:
                 import urllib.request
 
-                for host in deduped_probe_hosts:
-                    url = f"http://{host}:{int(port)}{health_path}"
-                    try:
-                        with urllib.request.urlopen(url, timeout=3) as response:
-                            result["http_status"] = int(getattr(response, "status", 0) or 0)
-                            result["http_200"] = result["http_status"] == 200
-                            if result["http_200"]:
-                                result["http_url"] = url
-                                break
-                    except Exception as exc:  # pragma: no cover - platform/network dependent
-                        result["http_error"] = str(exc)
+                url = f"http://{selected_host}:{int(port)}{health_path}"
+                result["http_url"] = url
+                try:
+                    with urllib.request.urlopen(url, timeout=3) as response:
+                        result["http_status"] = int(getattr(response, "status", 0) or 0)
+                        result["http_200"] = result["http_status"] == 200
+                except Exception as exc:  # pragma: no cover - platform/network dependent
+                    result["http_error"] = str(exc)
             except Exception as exc:  # pragma: no cover - platform/network dependent
                 result["http_error"] = str(exc)
     else:
@@ -537,18 +557,21 @@ def evaluate_delivery_gates(
         runtime_policy=runtime_policy,
     )
     runtime_require_http_200 = bool(runtime_policy.get("require_http_200", True))
+    runtime_host = str(runtime_policy.get("host") or "").strip() or None
     runtime_check = (
         run_runtime_deploy_health_check_fn(
             stack=runtime_stack,
             port=runtime_port,
             health_path=runtime_health_path,
             require_http_200=runtime_require_http_200,
+            host=runtime_host,
         )
         if runtime_required
         else {
             "stack": runtime_stack,
             "port": runtime_port,
             "health_path": runtime_health_path,
+            "host": runtime_host or "gateway",
             "stack_running": False,
             "port_mapped": False,
             "http_200": False,

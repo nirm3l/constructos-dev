@@ -1092,6 +1092,38 @@ def test_project_board_supports_tag_filtering(tmp_path):
     assert {alpha_id, beta_id}.issubset(alpha_beta_ids)
 
 
+def test_project_board_exposes_live_automation_state(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    project = client.post('/api/projects', json={'workspace_id': ws_id, 'name': 'Board automation state'}).json()
+    task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Automation task',
+            'workspace_id': ws_id,
+            'project_id': project['id'],
+            'instruction': 'Do automation work',
+        },
+    )
+    assert task.status_code == 200
+    task_id = task.json()['id']
+
+    queued = client.post(
+        f'/api/tasks/{task_id}/automation/run',
+        json={'instruction': 'Run now'},
+    )
+    assert queued.status_code == 200
+    assert queued.json().get('automation_state') == 'queued'
+
+    board = client.get(f"/api/projects/{project['id']}/board")
+    assert board.status_code == 200
+    lane_tasks = [item for lane in board.json()['lanes'].values() for item in lane]
+    board_task = next(item for item in lane_tasks if item['id'] == task_id)
+    assert board_task.get('automation_state') == 'queued'
+
+
 def test_project_members_assignment_and_user_types(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -5441,7 +5473,7 @@ def test_agent_service_verify_delivery_workflow_respects_gate_policy_runtime_dep
     assert passed["ok"] is True
 
 
-def test_runtime_deploy_health_check_uses_host_docker_internal_in_container(monkeypatch):
+def test_runtime_deploy_health_check_honors_explicit_host_docker_internal(monkeypatch):
     from types import SimpleNamespace
     import urllib.request
 
@@ -5485,6 +5517,7 @@ def test_runtime_deploy_health_check_uses_host_docker_internal_in_container(monk
         port=6768,
         health_path="/health",
         require_http_200=True,
+        host="host.docker.internal",
     )
     assert result["stack_running"] is True
     assert result["port_mapped"] is True
@@ -5493,7 +5526,7 @@ def test_runtime_deploy_health_check_uses_host_docker_internal_in_container(monk
     assert result["http_url"] == "http://host.docker.internal:6768/health"
 
 
-def test_runtime_deploy_health_check_uses_linux_gateway_fallback(monkeypatch):
+def test_runtime_deploy_health_check_honors_explicit_linux_gateway_host(monkeypatch):
     from types import SimpleNamespace
     import urllib.request
 
@@ -5537,6 +5570,7 @@ def test_runtime_deploy_health_check_uses_linux_gateway_fallback(monkeypatch):
         port=6768,
         health_path="/health",
         require_http_200=True,
+        host="172.17.0.1",
     )
     assert result["stack_running"] is True
     assert result["port_mapped"] is True
@@ -5583,7 +5617,7 @@ def test_team_lead_done_transition_is_blocked_when_project_gates_fail(tmp_path):
         json={"status": "Done"},
     )
     assert blocked.status_code == 409
-    assert "Done transition blocked by project gates" in str(blocked.text)
+    assert "Lead Done transition blocked" in str(blocked.text)
 
 
 def test_agent_service_ensure_team_mode_project_sets_up_skill_and_roster(tmp_path, monkeypatch):
@@ -6710,7 +6744,7 @@ def test_agents_chat_execution_kickoff_dispatches_team_lead_and_skips_long_run(t
         assert "kickoff dispatched" in str(created.message or "").lower()
 
 
-def test_agents_chat_execution_intent_in_team_mode_dispatches_kickoff(tmp_path, monkeypatch):
+def test_agents_chat_execution_intent_without_kickoff_does_not_dispatch_team_mode_kickoff(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
@@ -6747,10 +6781,12 @@ def test_agents_chat_execution_intent_in_team_mode_dispatches_kickoff(tmp_path, 
 
     from features.agents import api as agents_api
 
-    def _should_not_run_long_automation(**_kwargs):
-        raise AssertionError("execute_task_automation should not run for Team Mode execution-intent dispatch")
-
-    monkeypatch.setattr(agents_api, "execute_task_automation", _should_not_run_long_automation)
+    from features.agents.executor import AutomationOutcome
+    monkeypatch.setattr(
+        agents_api,
+        "execute_task_automation",
+        lambda **_kwargs: AutomationOutcome(action="comment", summary="regular execution path", comment=None, usage=None),
+    )
     monkeypatch.setattr(
         agents_api,
         "_classify_chat_instruction_intents",
@@ -6772,9 +6808,75 @@ def test_agents_chat_execution_intent_in_team_mode_dispatches_kickoff(tmp_path, 
     assert kicked.status_code == 200
     payload = kicked.json()
     assert payload["action"] == "comment"
-    assert "kickoff" in str(payload["summary"] or "").lower()
+    assert "kickoff" not in str(payload["summary"] or "").lower()
 
     automation_status = client.get(f"/api/tasks/{lead_task_id}/automation")
+    assert automation_status.status_code == 200
+    status_payload = automation_status.json()
+    assert status_payload["automation_state"] == "idle"
+    assert status_payload["last_requested_source"] in {None, ""}
+
+
+def test_agents_chat_kickoff_dispatches_dev_tasks_deterministically(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={ws_id}")
+    assert catalog.status_code == 200
+    team_mode = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode['id']}/attach",
+        json={"workspace_id": ws_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+    applied = client.post(f"/api/project-skills/{attached.json()['id']}/apply")
+    assert applied.status_code == 200
+
+    members = client.get(f"/api/projects/{project_id}/members")
+    assert members.status_code == 200
+    dev = next(item for item in members.json()["items"] if item["role"] == "DeveloperAgent")["user_id"]
+
+    dev_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Dev kickoff deterministic task",
+            "status": "Dev",
+            "assignee_id": dev,
+            "instruction": "Implement deterministic kickoff validation for Dev dispatch.",
+        },
+    )
+    assert dev_task.status_code == 200
+    dev_task_id = dev_task.json()["id"]
+
+    from features.agents import api as agents_api
+    monkeypatch.setattr(
+        agents_api,
+        "_classify_chat_instruction_intents",
+        lambda **_kwargs: {
+            "execution_intent": True,
+            "execution_kickoff_intent": True,
+            "project_creation_intent": False,
+        },
+    )
+
+    kicked = client.post(
+        "/api/agents/chat",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "instruction": "Start implementation",
+        },
+    )
+    assert kicked.status_code == 200
+    payload = kicked.json()
+    assert payload["action"] == "comment"
+    assert "kickoff" in str(payload["summary"] or "").lower()
+
+    automation_status = client.get(f"/api/tasks/{dev_task_id}/automation")
     assert automation_status.status_code == 200
     status_payload = automation_status.json()
     assert status_payload["automation_state"] in {"queued", "running", "completed"}
@@ -8285,6 +8387,235 @@ def test_team_mode_scheduled_lead_task_does_not_autorun_before_kickoff(tmp_path)
     assert status['last_requested_source'] in (None, '')
 
 
+def test_team_mode_happy_path_queue_respects_gate_policy_mode(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={ws_id}")
+    assert catalog.status_code == 200
+    team_mode = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode['id']}/attach",
+        json={"workspace_id": ws_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+    applied = client.post(f"/api/project-skills/{attached.json()['id']}/apply")
+    assert applied.status_code == 200
+
+    members = client.get(f"/api/projects/{project_id}/members")
+    assert members.status_code == 200
+    dev_assignee = next(item for item in members.json()["items"] if item["role"] == "DeveloperAgent")["user_id"]
+
+    gate_rule = client.post(
+        '/api/project-rules',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'title': 'Gate Policy',
+            'body': json.dumps({'mode': 'setup'}),
+        },
+    )
+    assert gate_rule.status_code == 200
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Dev task gated by setup mode',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'Dev',
+            'assignee_id': dev_assignee,
+            'instruction': 'Implement feature work.',
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()['id']
+
+    from features.agents.runner import queue_team_mode_happy_path_once
+
+    queued_setup = queue_team_mode_happy_path_once(limit=20)
+    assert queued_setup == 0
+    status_setup = client.get(f"/api/tasks/{task_id}/automation").json()
+    assert status_setup['automation_state'] == 'idle'
+
+    updated = client.patch(
+        f"/api/project-rules/{gate_rule.json()['id']}",
+        json={'body': json.dumps({'mode': 'execution'})},
+    )
+    assert updated.status_code == 200
+
+    queued_execution = queue_team_mode_happy_path_once(limit=20)
+    assert queued_execution >= 1
+    status_execution = client.get(f"/api/tasks/{task_id}/automation").json()
+    assert status_execution['automation_state'] in {'queued', 'running', 'completed'}
+
+
+def test_team_mode_happy_path_defers_qa_until_lead_handoff(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={ws_id}")
+    assert catalog.status_code == 200
+    team_mode = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode['id']}/attach",
+        json={"workspace_id": ws_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+    applied = client.post(f"/api/project-skills/{attached.json()['id']}/apply")
+    assert applied.status_code == 200
+
+    members = client.get(f"/api/projects/{project_id}/members")
+    assert members.status_code == 200
+    lead_assignee = next(item for item in members.json()["items"] if item["role"] == "TeamLeadAgent")["user_id"]
+    qa_assignee = next(item for item in members.json()["items"] if item["role"] == "QAAgent")["user_id"]
+
+    gate_rule = client.post(
+        '/api/project-rules',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'title': 'Gate Policy',
+            'body': json.dumps({'mode': 'execution'}),
+        },
+    )
+    assert gate_rule.status_code == 200
+
+    lead_task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Lead orchestration',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'Lead',
+            'assignee_id': lead_assignee,
+            'instruction': 'Coordinate merge and deploy handoff.',
+        },
+    )
+    assert lead_task.status_code == 200
+    qa_task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'QA validation',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'QA',
+            'assignee_id': qa_assignee,
+            'instruction': 'Run validation on deployed app.',
+        },
+    )
+    assert qa_task.status_code == 200
+
+    from features.agents.runner import queue_team_mode_happy_path_once
+
+    queued = queue_team_mode_happy_path_once(limit=20)
+    assert queued >= 1
+
+    lead_status = client.get(f"/api/tasks/{lead_task.json()['id']}/automation").json()
+    qa_status = client.get(f"/api/tasks/{qa_task.json()['id']}/automation").json()
+    assert lead_status['automation_state'] in {'queued', 'running', 'completed'}
+    assert qa_status['automation_state'] == 'idle'
+
+
+def test_team_mode_closeout_completes_remaining_tasks_when_delivery_is_green(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={ws_id}")
+    assert catalog.status_code == 200
+    team_mode = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode['id']}/attach",
+        json={"workspace_id": ws_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+    applied = client.post(f"/api/project-skills/{attached.json()['id']}/apply")
+    assert applied.status_code == 200
+
+    gate_rule = client.post(
+        '/api/project-rules',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'title': 'Gate Policy',
+            'body': json.dumps({'mode': 'execution'}),
+        },
+    )
+    assert gate_rule.status_code == 200
+
+    members = client.get(f"/api/projects/{project_id}/members")
+    assert members.status_code == 200
+    member_items = members.json()["items"]
+    dev_assignee = next(item for item in member_items if item["role"] == "DeveloperAgent")["user_id"]
+    lead_assignee = next(item for item in member_items if item["role"] == "TeamLeadAgent")["user_id"]
+    qa_assignee = next(item for item in member_items if item["role"] == "QAAgent")["user_id"]
+
+    dev_task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Dev task',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'Lead',
+            'assignee_id': dev_assignee,
+            'instruction': 'Dev done, ready for closeout.',
+            'external_refs': [{'url': 'commit:deadbeef1'}],
+        },
+    )
+    assert dev_task.status_code == 200
+    lead_task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Lead deploy task',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'QA',
+            'assignee_id': lead_assignee,
+            'task_type': 'scheduled_instruction',
+            'scheduled_instruction': 'Lead deploy complete.',
+            'scheduled_at_utc': (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(),
+            'recurring_rule': 'every:5m',
+            'instruction': 'Lead deploy complete.',
+        },
+    )
+    assert lead_task.status_code == 200
+    qa_task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'QA task',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'Done',
+            'assignee_id': qa_assignee,
+            'instruction': 'QA already done.',
+        },
+    )
+    assert qa_task.status_code == 200
+
+    from features.agents.service import AgentTaskService
+
+    def _delivery_ok(self, *, project_id: str, auth_token=None, workspace_id=None):
+        return {"ok": True}
+
+    monkeypatch.setattr(AgentTaskService, "verify_delivery_workflow", _delivery_ok)
+
+    from features.agents.runner import closeout_team_mode_tasks_once
+
+    closed = closeout_team_mode_tasks_once(limit=20)
+    assert closed >= 2
+
+    dev_view = client.get(f"/api/tasks/{dev_task.json()['id']}").json()
+    lead_view = client.get(f"/api/tasks/{lead_task.json()['id']}").json()
+    assert dev_view["status"] == "Done"
+    assert lead_view["status"] == "Done"
+
+
 def test_team_mode_scheduled_lead_task_is_not_completed_by_schedule_run(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -9212,6 +9543,79 @@ def test_status_change_triggers_queue_pending_requests_when_target_is_busy(tmp_p
     after_second_payload = after_second.json()
     assert after_second_payload['automation_state'] == 'completed'
     assert int(after_second_payload.get('automation_pending_requests') or 0) == 0
+
+
+def test_runner_reconciles_satisfied_external_status_triggers_for_team_mode(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={ws_id}")
+    assert catalog.status_code == 200
+    team_mode = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode['id']}/attach",
+        json={"workspace_id": ws_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+    applied = client.post(f"/api/project-skills/{attached.json()['id']}/apply")
+    assert applied.status_code == 200
+
+    members = client.get(f"/api/projects/{project_id}/members")
+    assert members.status_code == 200
+    qa_assignee_id = next(item for item in members.json()["items"] if item["role"] == "QAAgent")["user_id"]
+    dev_assignee_id = next(item for item in members.json()["items"] if item["role"] == "DeveloperAgent")["user_id"]
+
+    qa_task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'QA blocked source',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'Blocked',
+            'assignee_id': qa_assignee_id,
+            'instruction': 'Record blocked reason',
+        },
+    )
+    assert qa_task.status_code == 200
+    qa_task_id = qa_task.json()['id']
+
+    bug_task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Dev bug fix task',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'Dev',
+            'assignee_id': dev_assignee_id,
+            'instruction': 'Fix QA-reported bug and attach commit evidence.',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'enabled': True,
+                    'scope': 'external',
+                    'selector': {'task_ids': [qa_task_id]},
+                    'to_statuses': ['Blocked'],
+                    'action': 'request_automation',
+                }
+            ],
+        },
+    )
+    assert bug_task.status_code == 200
+    bug_task_id = bug_task.json()['id']
+
+    from features.agents.runner import queue_satisfied_external_status_triggers_once
+
+    queued = queue_satisfied_external_status_triggers_once(limit=20)
+    assert queued >= 1
+
+    automation = client.get(f'/api/tasks/{bug_task_id}/automation')
+    assert automation.status_code == 200
+    payload = automation.json()
+    assert payload['automation_state'] == 'queued'
+    assert payload.get('last_requested_source') == 'trigger_reconcile'
+    assert payload.get('last_requested_trigger_task_id') == qa_task_id
 
 
 def test_create_task_requires_project_id(tmp_path):

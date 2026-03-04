@@ -152,9 +152,12 @@ class TeamModePlugin:
             and is_team_lead_recurring_oversight_task(task_state)
         ):
             normalized_action = "comment"
-            normalized_summary = "Recurring lead oversight cycle completed; task remains active in Lead."
+            normalized_summary = "Recurring Lead oversight cycle completed; task remains active."
             if not str(normalized_comment or "").strip():
-                normalized_comment = "Recurring Team Lead oversight task cannot be auto-completed by automation run."
+                normalized_comment = (
+                    "Recurring Team Lead oversight run completed. "
+                    "Task remains active for subsequent oversight cycles."
+                )
         return {"action": normalized_action, "summary": normalized_summary, "comment": normalized_comment}
 
     def runner_blocker_escalation_notification(

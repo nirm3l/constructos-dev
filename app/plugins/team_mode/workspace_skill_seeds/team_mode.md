@@ -29,7 +29,8 @@ Use this skill when a project should be executed by a structured multi-agent del
   - QA flow and Lead oversight automation are represented by status-change triggers and schedule (not status-only bookkeeping).
   - A deploy task exists with Docker Compose execution instructions scoped to app services on the workspace stack project `constructos-ws-default` (or explicit user override).
   - Deployment intent is recorded as a setup artifact (for example a pinned note or deploy-task note) with target port and stack.
-  - Team Lead recurring schedule triggers set `run_on_statuses` explicitly to Team Mode statuses (default `["Lead"]`).
+- Team Lead recurring schedule triggers set `run_on_statuses` explicitly to Team Mode statuses (default `["Lead"]`).
+- Team Lead recurring schedule must be seeded near current time (`scheduled_at_utc = now_utc + 1 minute`), not midnight/next-day placeholders.
   - Team Mode setup does not rely on generic schedule defaults such as `In progress`.
   - A project rule named `Gate Policy` exists (JSON) so required verification gates are explicit and editable in UI.
 
@@ -44,10 +45,14 @@ Use this skill when a project should be executed by a structured multi-agent del
 ## Team Lead Responsibilities
 - Run event-driven oversight when Dev/QA handoff status changes occur (`Done` and `Blocked`).
 - Run recurring oversight using scheduled task automation as fallback (`every:5m` default cadence unless user overrides).
+- Chat kickoff intents (for example "start implementation", "finish implementation") are dispatch-only; implementation/deploy actions must happen in queued Team Mode task automation runs, not inside the kickoff chat turn.
 - Monitor blocked, failed, and stale tasks and coordinate resolution.
 - Deploy the app stack using project-defined Docker Compose instructions scoped to app services.
 - Default deployment stack for chat-driven delivery is `constructos-ws-default` unless the user explicitly requests a different project name.
 - Record deployment execution evidence on the deploy task (for example command snippet + health URL/check output + runtime status).
+- Use the Gate Policy runtime endpoint as the canonical probe target:
+  - `runtime_deploy_health.host` + `runtime_deploy_health.port` + `runtime_deploy_health.health_path`
+  - default host value is `gateway` (container default-gateway IP), not `localhost`.
 - During setup-only requests, record deployment intent (`stack`, `port`, `health path`) and mark execution state as `not_started`.
 - Keep `Gate Policy` updated for setup/execution mode transitions (for example runtime deploy health not required in setup-only mode, required in execution mode).
 - If a blocker cannot be resolved, assign the task to a human member and move it to escalation status.
@@ -57,6 +62,7 @@ Use this skill when a project should be executed by a structured multi-agent del
 - Trigger QA after implementation status transitions (for example when work enters review/testing).
 - Execute automated validation using project test strategy (Playwright, integration tests, smoke checks, or equivalent).
 - After Team Lead deployment, run post-deploy QA checks against the deployed service endpoint.
+- QA should probe the same canonical runtime endpoint from Gate Policy; avoid `localhost` unless the policy host explicitly points to loopback.
 - Report failures with reproducible steps and evidence links, then verify fixes after re-run.
 - QA evidence should include explicit outcome markers (pass/fail) plus at least one concrete artifact reference or log excerpt.
 

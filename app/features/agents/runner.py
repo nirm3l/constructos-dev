@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import hashlib
+import json
 import threading
 from datetime import datetime, timezone
 import re
@@ -49,12 +50,18 @@ from shared.settings import (
     AGENT_RUNNER_INTERVAL_SECONDS,
     AGENT_RUNNER_MAX_CONCURRENCY,
     AGENT_SYSTEM_USER_ID,
+    MCP_AUTH_TOKEN,
     logger,
 )
 from shared.task_automation import (
+    STATUS_MATCH_ALL,
+    STATUS_SCOPE_EXTERNAL,
+    TRIGGER_KIND_STATUS_CHANGE,
     first_enabled_schedule_trigger,
+    normalize_execution_triggers,
     parse_schedule_due_at,
     rearm_first_schedule_trigger,
+    selector_matches_task,
     schedule_trigger_matches_status,
 )
 
@@ -72,6 +79,23 @@ _RECOVERABLE_FAILURE_RE = re.compile(
 )
 _MAX_RECOVERABLE_RETRIES = 3
 _KICKOFF_EXECUTION_HOLDOFF_SECONDS = 20
+_STATUS_CHANGE_AUTOMATION_ACTIONS = {
+    "automation",
+    "execute_instruction",
+    "queue",
+    "queue_automation",
+    "queue_instruction",
+    "request_automation",
+    "request_instruction",
+    "run",
+    "run_automation",
+    "run_instruction",
+    "run_task_instruction",
+    "start_automation",
+    "start_instruction",
+    "trigger_automation",
+    "trigger_instruction",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +138,19 @@ def _normalize_nonnegative_int(value) -> int:
     return max(0, parsed)
 
 
+def _parse_iso_timestamp(value: object) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _project_has_git_delivery_skill(*, db, workspace_id: str, project_id: str | None) -> bool:
     normalized_project_id = str(project_id or "").strip()
     if not normalized_project_id:
@@ -128,6 +165,69 @@ def _project_has_git_delivery_skill(*, db, workspace_id: str, project_id: str | 
         )
     ).scalar_one_or_none()
     return row is not None
+
+
+def _project_has_team_mode_skill(*, db, workspace_id: str, project_id: str | None) -> bool:
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_project_id:
+        return False
+    row = db.execute(
+        select(ProjectSkill.id).where(
+            ProjectSkill.workspace_id == workspace_id,
+            ProjectSkill.project_id == normalized_project_id,
+            ProjectSkill.skill_key == "team_mode",
+            ProjectSkill.enabled == True,  # noqa: E712
+            ProjectSkill.is_deleted == False,  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    return row is not None
+
+
+def _extract_json_body(raw: str) -> str:
+    candidate = str(raw or "").strip()
+    if not candidate.startswith("```"):
+        return candidate
+    lines = candidate.splitlines()
+    if len(lines) >= 2 and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    if lines and lines[0].strip().lower() == "json":
+        lines = lines[1:]
+    return "\n".join(lines).strip()
+
+
+def _project_team_mode_execution_enabled(*, db, workspace_id: str, project_id: str | None) -> bool:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return False
+    gate_rules = db.execute(
+        select(ProjectRule)
+        .where(
+            ProjectRule.workspace_id == workspace_id,
+            ProjectRule.project_id == normalized_project_id,
+            ProjectRule.is_deleted == False,  # noqa: E712
+            ProjectRule.title.ilike("Gate Policy"),
+        )
+        .order_by(ProjectRule.updated_at.desc())
+    ).scalars().all()
+    if not gate_rules:
+        return True
+    for rule in gate_rules:
+        parsed = None
+        body = _extract_json_body(str(rule.body or ""))
+        if body:
+            try:
+                parsed = json.loads(body)
+            except Exception:
+                parsed = None
+        if not isinstance(parsed, dict):
+            continue
+        mode = str(parsed.get("mode") or "").strip().lower()
+        if not mode:
+            return True
+        return mode == "execution"
+    return True
 
 
 def _project_has_repo_context(*, db, workspace_id: str, project_id: str | None) -> bool:
@@ -233,6 +333,60 @@ def _extract_commit_shas_from_refs(refs: object) -> set[str]:
 def _extract_commit_shas_from_text(text: str | None) -> set[str]:
     raw = str(text or "")
     return {str(match).lower() for match in _COMMIT_SHA_EXPLICIT_RE.findall(raw)}
+
+
+def _normalize_string_list(values: object) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        value = str(item or "").strip()
+        if not value:
+            continue
+        key = value.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+    return out
+
+
+def _parse_task_labels(raw_labels: str | None) -> list[str]:
+    if not raw_labels:
+        return []
+    try:
+        parsed = json.loads(raw_labels)
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item or "").strip() for item in parsed if str(item or "").strip()]
+
+
+def _task_state_for_selector(task: Task) -> dict[str, object]:
+    return {
+        "id": str(task.id or "").strip(),
+        "workspace_id": str(task.workspace_id or "").strip(),
+        "project_id": str(task.project_id or "").strip(),
+        "specification_id": str(task.specification_id or "").strip(),
+        "assignee_id": str(task.assignee_id or "").strip(),
+        "labels": _parse_task_labels(task.labels),
+        "status": str(task.status or "").strip(),
+        "updated_at": to_iso_utc(task.updated_at) if getattr(task, "updated_at", None) else None,
+    }
+
+
+def _normalize_status_change_action(raw: object) -> str | None:
+    if isinstance(raw, dict):
+        return str(raw.get("type") or raw.get("action") or "").strip().lower() or None
+    return str(raw or "").strip().lower() or None
+
+
+def _is_cross_task_automation_action(action: str | None) -> bool:
+    if not action:
+        return True
+    return action in _STATUS_CHANGE_AUTOMATION_ACTIONS
 
 
 def _task_has_execution_evidence(*, db, task_id: str, state: dict | None) -> bool:
@@ -1063,12 +1217,387 @@ def run_queued_automation_once(limit: int = 10) -> int:
     return len(claimed_runs)
 
 
+def queue_satisfied_external_status_triggers_once(limit: int = 20) -> int:
+    queued = 0
+    now_iso = to_iso_utc(datetime.now(timezone.utc))
+    with SessionLocal() as db:
+        candidate_tasks = db.execute(
+            select(Task)
+            .where(
+                Task.is_deleted == False,  # noqa: E712
+                Task.archived == False,  # noqa: E712
+                Task.execution_triggers.ilike("%status_change%"),
+            )
+            .order_by(Task.updated_at.asc())
+            .limit(max(limit * 20, limit))
+        ).scalars().all()
+        workspace_cache: dict[str, list[dict[str, object]]] = {}
+
+        def _workspace_states(workspace_id: str) -> list[dict[str, object]]:
+            if workspace_id not in workspace_cache:
+                rows = db.execute(
+                    select(Task).where(
+                        Task.workspace_id == workspace_id,
+                        Task.is_deleted == False,  # noqa: E712
+                        Task.archived == False,  # noqa: E712
+                    )
+                ).scalars().all()
+                workspace_cache[workspace_id] = [_task_state_for_selector(row) for row in rows]
+            return workspace_cache[workspace_id]
+
+        for task in candidate_tasks:
+            if queued >= limit:
+                break
+            task_id = str(task.id or "").strip()
+            if not task_id:
+                continue
+            workspace_id = str(task.workspace_id or "").strip()
+            project_id = str(task.project_id or "").strip() or None
+            if not workspace_id or not project_id:
+                continue
+            if not _project_has_team_mode_skill(db=db, workspace_id=workspace_id, project_id=project_id):
+                continue
+            if not _project_team_mode_execution_enabled(db=db, workspace_id=workspace_id, project_id=project_id):
+                continue
+
+            state, _ = rebuild_state(db, "Task", task_id)
+            if str(state.get("automation_state") or "idle").strip() in {"queued", "running"}:
+                continue
+            instruction = (
+                str(state.get("instruction") or "").strip()
+                or str(state.get("scheduled_instruction") or "").strip()
+            )
+            if not instruction:
+                continue
+
+            triggers = normalize_execution_triggers(state.get("execution_triggers"))
+            if not triggers:
+                continue
+            task_states = _workspace_states(workspace_id)
+            for trigger in triggers:
+                if str(trigger.get("kind") or "") != TRIGGER_KIND_STATUS_CHANGE:
+                    continue
+                if not bool(trigger.get("enabled", True)):
+                    continue
+                if str(trigger.get("scope") or "").strip().lower() != STATUS_SCOPE_EXTERNAL:
+                    continue
+                action = _normalize_status_change_action(trigger.get("action"))
+                if not _is_cross_task_automation_action(action):
+                    continue
+                # Reconcile only triggers defined by destination status. Transition-source constraints
+                # cannot be safely inferred without a concrete status-change event.
+                if _normalize_string_list(trigger.get("from_statuses")):
+                    continue
+                to_statuses = _normalize_string_list(trigger.get("to_statuses"))
+                if not to_statuses:
+                    continue
+                allowed_statuses = {value.casefold() for value in to_statuses}
+
+                selector = trigger.get("selector")
+                selected_sources = [
+                    item
+                    for item in task_states
+                    if str(item.get("id") or "").strip() != task_id and selector_matches_task(task_state=item, selector=selector)
+                ]
+                if not selected_sources:
+                    continue
+                satisfied_sources = [
+                    item
+                    for item in selected_sources
+                    if str(item.get("status") or "").strip().casefold() in allowed_statuses
+                ]
+                match_mode = str(trigger.get("match_mode") or "").strip().lower()
+                if match_mode == STATUS_MATCH_ALL:
+                    if len(satisfied_sources) != len(selected_sources):
+                        continue
+                    trigger_source = satisfied_sources[0]
+                else:
+                    if not satisfied_sources:
+                        continue
+                    trigger_source = satisfied_sources[0]
+
+                trigger_task_id = str(trigger_source.get("id") or "").strip() or None
+                trigger_to_status = str(trigger_source.get("status") or "").strip() or None
+                last_source = str(state.get("last_requested_source") or "").strip().lower()
+                last_trigger_task_id = str(state.get("last_requested_trigger_task_id") or "").strip()
+                last_to_status = str(state.get("last_requested_to_status") or "").strip()
+                if (
+                    last_source in {"status_change", "trigger_reconcile"}
+                    and last_trigger_task_id
+                    and trigger_task_id
+                    and last_trigger_task_id == trigger_task_id
+                    and (not trigger_to_status or last_to_status.casefold() == trigger_to_status.casefold())
+                ):
+                    continue
+
+                actor_user_id = _resolve_task_actor_user_id(db=db, task_id=task_id, state=state)
+                append_event(
+                    db,
+                    aggregate_type="Task",
+                    aggregate_id=task_id,
+                    event_type=EVENT_AUTOMATION_REQUESTED,
+                    payload={
+                        "requested_at": now_iso,
+                        "instruction": instruction,
+                        "source": "trigger_reconcile",
+                        "trigger_task_id": trigger_task_id,
+                        "from_status": None,
+                        "to_status": trigger_to_status,
+                        "triggered_at": str(trigger_source.get("updated_at") or now_iso),
+                    },
+                    metadata={
+                        "actor_id": actor_user_id,
+                        "workspace_id": workspace_id,
+                        "project_id": project_id,
+                        "task_id": task_id,
+                        "trigger_task_id": trigger_task_id,
+                        "trigger_to_status": trigger_to_status,
+                    },
+                )
+                db.commit()
+                queued += 1
+                break
+    return queued
+
+
+def _eligible_for_team_mode_auto_queue(state: dict[str, object], *, now_utc: datetime, cooldown_seconds: int = 45) -> bool:
+    automation_state = str(state.get("automation_state") or "idle").strip().lower()
+    if automation_state in {"queued", "running"}:
+        return False
+    if automation_state not in {"idle", "failed", "completed"}:
+        return False
+    last_requested = _parse_iso_timestamp(state.get("last_requested_at"))
+    if last_requested is None:
+        return True
+    return (now_utc - last_requested).total_seconds() >= float(max(5, cooldown_seconds))
+
+
+def queue_team_mode_happy_path_once(limit: int = 20) -> int:
+    queued = 0
+    now_utc = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        team_mode_projects = db.execute(
+            select(ProjectSkill.project_id)
+            .where(
+                ProjectSkill.skill_key == "team_mode",
+                ProjectSkill.enabled == True,  # noqa: E712
+                ProjectSkill.is_deleted == False,  # noqa: E712
+            )
+            .distinct()
+        ).scalars().all()
+        for project_id in [str(item or "").strip() for item in team_mode_projects if str(item or "").strip()]:
+            if queued >= limit:
+                break
+            project = db.get(Project, project_id)
+            if project is None or bool(getattr(project, "is_deleted", False)):
+                continue
+            workspace_id = str(project.workspace_id or "").strip()
+            if not workspace_id:
+                continue
+            if not _project_team_mode_execution_enabled(db=db, workspace_id=workspace_id, project_id=project_id):
+                continue
+
+            rows = db.execute(
+                select(Task, ProjectMember.role)
+                .join(
+                    ProjectMember,
+                    (ProjectMember.workspace_id == Task.workspace_id)
+                    & (ProjectMember.project_id == Task.project_id)
+                    & (ProjectMember.user_id == Task.assignee_id),
+                )
+                .where(
+                    Task.workspace_id == workspace_id,
+                    Task.project_id == project_id,
+                    Task.is_deleted == False,  # noqa: E712
+                    Task.archived == False,  # noqa: E712
+                    Task.status != "Done",
+                    ProjectMember.role.in_(["DeveloperAgent", "TeamLeadAgent", "QAAgent"]),
+                )
+                .order_by(Task.created_at.asc())
+            ).all()
+            if not rows:
+                continue
+
+            dev_candidates: list[tuple[Task, dict[str, object]]] = []
+            lead_candidates: list[tuple[Task, dict[str, object]]] = []
+            qa_candidates: list[tuple[Task, dict[str, object]]] = []
+            lead_tasks_in_lead_status = 0
+
+            for task, role in rows:
+                state, _ = rebuild_state(db, "Task", str(task.id))
+                normalized_role = str(role or "").strip()
+                normalized_status = str(state.get("status") or task.status or "").strip()
+                if normalized_role == "TeamLeadAgent" and normalized_status == "Lead":
+                    lead_tasks_in_lead_status += 1
+
+                if not _eligible_for_team_mode_auto_queue(state, now_utc=now_utc):
+                    continue
+                instruction = (
+                    str(state.get("instruction") or "").strip()
+                    or str(state.get("scheduled_instruction") or "").strip()
+                )
+                if not instruction:
+                    continue
+                if normalized_role == "DeveloperAgent" and normalized_status == "Dev":
+                    dev_candidates.append((task, state))
+                elif normalized_role == "TeamLeadAgent" and normalized_status == "Lead":
+                    lead_candidates.append((task, state))
+                elif normalized_role == "QAAgent" and normalized_status == "QA":
+                    qa_candidates.append((task, state))
+
+            to_queue: list[tuple[Task, dict[str, object]]] = []
+            if dev_candidates:
+                to_queue.extend([(task, state) for task, state in dev_candidates])
+            else:
+                # Mainline Team Mode progression: Dev -> Lead -> QA.
+                # QA runs only after Lead handoff has happened (no Lead task remains in Lead status).
+                if lead_tasks_in_lead_status > 0:
+                    to_queue.extend([(task, state) for task, state in lead_candidates])
+                else:
+                    to_queue.extend([(task, state) for task, state in qa_candidates])
+
+            from features.tasks.application import TaskApplicationService
+            from shared.core import TaskAutomationRun
+
+            for task, state in to_queue:
+                if queued >= limit:
+                    break
+                task_id = str(task.id or "").strip()
+                if not task_id:
+                    continue
+                actor_user_id = _resolve_task_actor_user_id(db=db, task_id=task_id, state=state)
+                actor = db.get(UserModel, actor_user_id)
+                if actor is None or not bool(getattr(actor, "is_active", False)):
+                    continue
+                instruction = (
+                    str(state.get("instruction") or "").strip()
+                    or str(state.get("scheduled_instruction") or "").strip()
+                )
+                if not instruction:
+                    continue
+                command_id = f"tm-orch-{project_id[:8]}-{task_id[:8]}-{int(now_utc.timestamp())}"
+                try:
+                    TaskApplicationService(db, actor, command_id=command_id).request_automation_run(
+                        task_id,
+                        TaskAutomationRun(instruction=instruction),
+                        wake_runner=False,
+                    )
+                except Exception:
+                    continue
+                queued += 1
+            db.commit()
+    return queued
+
+
+def closeout_team_mode_tasks_once(limit: int = 20) -> int:
+    completed = 0
+    now_utc = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        team_mode_projects = db.execute(
+            select(ProjectSkill.project_id)
+            .where(
+                ProjectSkill.skill_key == "team_mode",
+                ProjectSkill.enabled == True,  # noqa: E712
+                ProjectSkill.is_deleted == False,  # noqa: E712
+            )
+            .distinct()
+        ).scalars().all()
+        from features.agents.service import AgentTaskService
+        from features.tasks.application import TaskApplicationService
+
+        for project_id in [str(item or "").strip() for item in team_mode_projects if str(item or "").strip()]:
+            if completed >= limit:
+                break
+            project = db.get(Project, project_id)
+            if project is None or bool(getattr(project, "is_deleted", False)):
+                continue
+            workspace_id = str(project.workspace_id or "").strip()
+            if not workspace_id:
+                continue
+            if not _project_team_mode_execution_enabled(db=db, workspace_id=workspace_id, project_id=project_id):
+                continue
+
+            try:
+                verification = AgentTaskService(
+                    require_token=False,
+                    actor_user_id=AGENT_SYSTEM_USER_ID,
+                ).verify_delivery_workflow(
+                    project_id=project_id,
+                    workspace_id=workspace_id,
+                    auth_token=MCP_AUTH_TOKEN or None,
+                )
+            except Exception:
+                continue
+            if not bool((verification or {}).get("ok")):
+                continue
+
+            rows = db.execute(
+                select(Task, ProjectMember.role)
+                .join(
+                    ProjectMember,
+                    (ProjectMember.workspace_id == Task.workspace_id)
+                    & (ProjectMember.project_id == Task.project_id)
+                    & (ProjectMember.user_id == Task.assignee_id),
+                )
+                .where(
+                    Task.workspace_id == workspace_id,
+                    Task.project_id == project_id,
+                    Task.is_deleted == False,  # noqa: E712
+                    Task.archived == False,  # noqa: E712
+                    Task.status != "Done",
+                    ProjectMember.role.in_(["DeveloperAgent", "TeamLeadAgent", "QAAgent"]),
+                )
+                .order_by(Task.created_at.asc())
+            ).all()
+            if not rows:
+                continue
+
+            lead_rows_count = sum(1 for _, role in rows if str(role or "").strip() == "TeamLeadAgent")
+            ordered_candidates: list[tuple[Task, str, dict[str, object]]] = []
+            priority = {"DeveloperAgent": 0, "QAAgent": 1, "TeamLeadAgent": 2}
+            for task, role in rows:
+                normalized_role = str(role or "").strip()
+                state, _ = rebuild_state(db, "Task", str(task.id))
+                ordered_candidates.append((task, normalized_role, state))
+            ordered_candidates.sort(key=lambda item: priority.get(item[1], 99))
+
+            for task, role, state in ordered_candidates:
+                if completed >= limit:
+                    break
+                task_id = str(task.id or "").strip()
+                if not task_id:
+                    continue
+                if role == "TeamLeadAgent" and lead_rows_count > 1 and is_recurring_oversight_task(state):
+                    # Keep long-running oversight tasks active when there is a dedicated deploy Lead task.
+                    continue
+                actor_user_id = _resolve_task_actor_user_id(
+                    db=db,
+                    task_id=task_id,
+                    state=state,
+                    fallback_actor_user_id=AGENT_SYSTEM_USER_ID,
+                )
+                actor = db.get(UserModel, actor_user_id)
+                if actor is None or not bool(getattr(actor, "is_active", False)):
+                    continue
+                command_id = f"tm-close-{project_id[:8]}-{task_id[:8]}-{int(now_utc.timestamp())}"
+                try:
+                    TaskApplicationService(db, actor, command_id=command_id).complete_task(task_id)
+                except Exception:
+                    continue
+                completed += 1
+            db.commit()
+    return completed
+
+
 def _runner_loop():
     while not _runner_stop_event.is_set():
         try:
             recover_stale_running_automation_once(limit=20)
+            queue_team_mode_happy_path_once(limit=20)
+            queue_satisfied_external_status_triggers_once(limit=20)
             queue_due_scheduled_tasks_once(limit=20)
             run_queued_automation_once(limit=20)
+            closeout_team_mode_tasks_once(limit=20)
         except Exception:
             # Keep worker alive, but do not swallow diagnostics.
             logger.exception("Automation runner tick failed.")

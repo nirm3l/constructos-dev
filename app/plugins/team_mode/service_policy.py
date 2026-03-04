@@ -34,11 +34,11 @@ def open_developer_tasks(*, db: Any, project_id: str) -> list[dict[str, str]]:
             Task.project_id == project_id,
             Task.is_deleted == False,  # noqa: E712
             Task.archived == False,  # noqa: E712
-            Task.status != "Done",
             ProjectMember.role == "DeveloperAgent",
         )
         .order_by(Task.created_at.asc())
     ).all()
+    blocking_statuses = {"Dev", "Blocked", "To do"}
     return [
         {
             "task_id": str(task_id or "").strip(),
@@ -46,7 +46,7 @@ def open_developer_tasks(*, db: Any, project_id: str) -> list[dict[str, str]]:
             "status": str(status or "").strip(),
         }
         for task_id, title, status in rows
-        if str(task_id or "").strip()
+        if str(task_id or "").strip() and str(status or "").strip() in blocking_statuses
     ]
 
 
@@ -94,11 +94,38 @@ def enforce_done_transition(
             )
         return
 
-    if str(assignee_role or "").strip() == "TeamLeadAgent" and open_dev:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Lead Done transition blocked: open Dev tasks remain. "
-                f"open_dev_tasks={[item['task_id'] for item in open_dev]}"
-            ),
+    if str(assignee_role or "").strip() == "TeamLeadAgent":
+        if open_dev:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Lead Done transition blocked: open Dev tasks remain. "
+                    f"open_dev_tasks={[item['task_id'] for item in open_dev]}"
+                ),
+            )
+
+        delivery = verify_delivery_workflow_fn(
+            project_id=project_id,
+            workspace_id=workspace_id,
+            auth_token=auth_token,
         )
+        required_checks = [
+            "repo_context_present",
+            "git_contract_ok",
+            "dev_tasks_have_commit_evidence",
+            "dev_tasks_have_task_branch_evidence",
+            "dev_tasks_have_unique_commit_evidence",
+            "dev_tasks_have_automation_run_evidence",
+            "qa_tasks_have_automation_run_evidence",
+            "qa_has_verifiable_artifacts",
+            "deploy_execution_evidence_present",
+        ]
+        failing = [check for check in required_checks if not bool((delivery.get("checks") or {}).get(check))]
+        if failing:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Lead Done transition blocked by Team Mode delivery closeout guards. "
+                    f"failed_checks={failing}"
+                ),
+            )

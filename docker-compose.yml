@@ -4,6 +4,8 @@ x-codex-config-volume: &codex_config_volume "${CODEX_CONFIG_FILE}:/home/app/.cod
 x-codex-auth-volume: &codex_auth_volume "${CODEX_AUTH_FILE}:/home/app/.codex/auth.json:ro"
 x-codex-home-volume: &codex_home_volume "codex-home-data:/home/app/codex-home"
 x-codex-workspace-volume: &codex_workspace_volume "${AGENT_CODEX_WORKSPACE_MOUNT:-./data/workspace}:/home/app/workspace"
+x-agent-common-extra-hosts: &agent_common_extra_hosts
+  - "gateway:host-gateway"
 
 x-agent-common-fixed-env: &agent_common_fixed_env
   EVENTSTORE_URI: "esdb://kurrentdb:2113?tls=false"
@@ -30,7 +32,7 @@ x-agent-common-config-env: &agent_common_config_env
   AGENT_CODEX_WORKDIR: "/home/app/workspace"
   AGENT_CODEX_MODEL: "${AGENT_CODEX_MODEL:-}"
   AGENT_CODEX_REASONING_EFFORT: "${AGENT_CODEX_REASONING_EFFORT:-}"
-  AGENT_ENABLED_PLUGINS: "${AGENT_ENABLED_PLUGINS:-team_mode}"
+  AGENT_ENABLED_PLUGINS: "${AGENT_ENABLED_PLUGINS:-team_mode,git_delivery,github_delivery}"
   EVENT_STORMING_CODEX_REASONING_EFFORT: "low"
   MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:-dev-mcp-token}"
   GITHUB_PAT: "${GITHUB_PAT:-}"
@@ -124,6 +126,7 @@ services:
       - *codex_auth_volume
       - *codex_home_volume
       - *codex_workspace_volume
+    extra_hosts: *agent_common_extra_hosts
     ports:
       - "1102:8000"
     security_opt:
@@ -150,6 +153,7 @@ services:
       - *codex_auth_volume
       - *codex_home_volume
       - *codex_workspace_volume
+    extra_hosts: *agent_common_extra_hosts
     security_opt:
       - no-new-privileges:true
     cap_drop:

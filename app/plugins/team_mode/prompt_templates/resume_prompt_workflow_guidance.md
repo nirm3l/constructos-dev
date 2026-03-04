@@ -3,8 +3,11 @@
 - Do not set `expected_event_storming_enabled` (and do not toggle project `event_storming_enabled`) unless the user explicitly requested a target value.
 - Use manual Team Mode steps only as fallback when `ensure_team_mode_project` is unavailable or fails.
 - If user asks to create a new project, call `create_project` first, then call `ensure_team_mode_project` on the created project id (or exact project name).
-- If instruction is execution-oriented (for example `start implementation`, `begin implementation`, `execute tasks`, `kreni sa implementacijom`) and project already passes `verify_team_mode_workflow`, do NOT re-run Team Mode attach/apply/setup; proceed directly with task execution.
-- For execution-oriented instructions, setup-only/status-only updates are not enough.
+- If instruction is execution-oriented (for example `start implementation`, `begin implementation`, `finish implementation`, `execute tasks`) and Team Mode is enabled:
+  - treat chat request as **dispatch-only kickoff**,
+  - queue Team Mode automation runs and stop,
+  - do NOT directly implement code, run tests, or perform deploy steps from the chat turn itself.
+- For execution-oriented instructions, setup-only/status-only updates are not enough; kickoff must queue runnable Team Mode tasks.
 - Execution completion contract:
   1) implement planned scope for active Dev tasks,
   2) run tests/validation and include concrete results,
@@ -31,6 +34,7 @@
 - Team Mode defaults (unless user overrides): statuses `To do, Dev, QA, Lead, Done, Blocked`; Dev -> Lead -> QA -> Done automation path plus Blocked triage path to Lead; recurring Lead oversight (`every:5m`); QA validation task.
 - Ensure at least one recurring scheduled Team Lead oversight task is configured.
 - If creating a `scheduled_instruction` task, include `scheduled_at_utc` in the initial create call.
+- For recurring Team Lead oversight tasks, set `scheduled_at_utc` to near-now (`now_utc + 1 minute`), never midnight/next-day placeholder values.
 - Initial Team Mode task statuses must be explicit (unless user overrides): Dev tasks in `Dev`, QA validation task in `QA`, Lead oversight/deploy tasks in `Lead`.
 - Keep a project rule titled `Gate Policy` (JSON) updated so verification gates are explicit and editable from the UI Rules panel.
 - When using `update_project_rule`, send `patch` with only `title` and/or `body`; for Gate Policy updates set `patch.body` to a valid JSON object string (plain JSON or ```json fenced). Keep `required_checks` as object-of-arrays when present.
@@ -53,10 +57,17 @@
 - If the user requests deploy execution, do not claim deploy succeeded unless you actually executed deployment commands.
 - If the user asks for deployment as part of planning/setup, create explicit deployment tasks/specs/notes; only execute deployment commands when the user explicitly asks to run deploy now.
 - For setup-only requests, record deployment intent in a note/task artifact with explicit stack + port + health path and mark `Execution state: Not started`.
+- Record or preserve canonical runtime probe host in Gate Policy `runtime_deploy_health.host` (default `gateway`) so QA/Lead use one deterministic endpoint.
 - When deploy execution is requested and no explicit stack is provided, deploy with Docker Compose project `constructos-ws-default`.
 - Use `docker compose` (wrapper-enforced project) or explicit `docker compose -p constructos-ws-default ...` for deployment commands unless user overrides stack.
 - Treat delivery as incomplete if post-deploy QA is missing. Required loop: Lead deploy -> QA post-deploy validation -> if fail create/link bug task(s) -> Dev fix with new commit evidence -> Lead re-deploy -> QA re-check evidence.
+- QA and Lead health probes must target `http://<runtime_deploy_health.host>:<port><health_path>` from Gate Policy, not guessed hostnames.
+- Lead execution responsibility is explicit:
+  - after each successful Dev branch integration to main, update that Dev task to `Done` with merge evidence.
+  - after successful deploy of merged main, set Lead deploy task status to `QA` to trigger QA handoff.
 - If QA fails, run explicit bug loop: create/link bug task(s), implement fix with new commit evidence, then re-run QA and record re-check artifacts.
+  - For each new bug-fix Dev task created after QA is already `Blocked`, add external status trigger from failing QA task IDs on `to_statuses=["Blocked"]` and `action="request_automation"` so execution can start without waiting for another status flip.
+  - Immediately request automation on that bug-fix Dev task once (`run_task_with_codex`) as a fallback in case trigger reconciliation has not run yet.
 - For implementation work, create/use the project repository under `/home/app/workspace/<project-slug>` by default.
 - If `/home/app/workspace` is not writable/available and runtime falls back to another workspace path, continue there and explicitly report the effective fallback path in the response.
 - If Task Workdir / Task Branch are provided, execute implementation from that workdir and commit only on that branch.

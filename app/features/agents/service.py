@@ -1827,12 +1827,14 @@ class AgentTaskService:
         port: int | None,
         health_path: str,
         require_http_200: bool,
+        host: str | None = None,
     ) -> dict[str, Any]:
         return run_runtime_deploy_health_check(
             stack=stack,
             port=port,
             health_path=health_path,
             require_http_200=require_http_200,
+            host=host,
         )
 
     @staticmethod
