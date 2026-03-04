@@ -800,6 +800,7 @@ def execute_task_automation_stream(
     model: str | None = None,
     reasoning_effort: str | None = None,
     timeout_seconds: float | int | None | object = _TIMEOUT_UNSET,
+    stream_plain_text: bool = False,
 ) -> AutomationOutcome:
     # Deterministic shortcut for explicit completion requests.
     lower_instruction = (instruction or "").lower()
@@ -913,7 +914,7 @@ def execute_task_automation_stream(
         "task_branch": task_branch,
         "repo_root": repo_root,
         "stream_events": True,
-        "stream_plain_text": not bool(str(task_id or "").strip()),
+        "stream_plain_text": bool(stream_plain_text),
     }
     def _run_once() -> AutomationOutcome:
         stdout = _run_command_streaming(

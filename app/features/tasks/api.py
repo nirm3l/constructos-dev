@@ -1,11 +1,15 @@
 import json
+import queue
+import threading
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from features.agents.executor import execute_task_automation_stream
 from features.agents.gateway import build_ui_gateway
 from shared.core import (
     ActivityLog,
@@ -30,7 +34,16 @@ from shared.core import (
     serialize_task,
     to_iso_utc,
 )
+from shared.eventing import append_event, rebuild_state
+from shared.models import SessionLocal
 from .application import TaskApplicationService
+from .domain import (
+    EVENT_AUTOMATION_COMPLETED,
+    EVENT_AUTOMATION_FAILED,
+    EVENT_AUTOMATION_REQUESTED,
+    EVENT_AUTOMATION_STARTED,
+    EVENT_UPDATED as TASK_EVENT_UPDATED,
+)
 from .read_models import TaskListQuery, list_tasks_read_model
 
 router = APIRouter()
@@ -340,6 +353,216 @@ def request_automation_run(
         instruction=payload.instruction,
         command_id=command_id,
     )
+
+
+@router.post("/api/tasks/{task_id}/automation/stream")
+def run_automation_stream(
+    task_id: str,
+    payload: TaskAutomationRun,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    task_row = db.get(Task, task_id)
+    if not task_row or task_row.is_deleted:
+        raise HTTPException(status_code=404, detail="Task not found")
+    workspace_id = str(task_row.workspace_id or "").strip()
+    project_id = str(task_row.project_id or "").strip() or None
+    if project_id:
+        ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    else:
+        ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+
+    state, _ = rebuild_state(db, "Task", task_id)
+    title = str(state.get("title") or "")
+    description = str(state.get("description") or "")
+    status = str(state.get("status") or "To do")
+    instruction = str(payload.instruction or "").strip() or str(state.get("instruction") or state.get("scheduled_instruction") or "").strip()
+    if not instruction:
+        raise HTTPException(status_code=422, detail="instruction is required")
+
+    now_iso = to_iso_utc(datetime.now(timezone.utc))
+    append_event(
+        db,
+        aggregate_type="Task",
+        aggregate_id=task_id,
+        event_type=EVENT_AUTOMATION_REQUESTED,
+        payload={"requested_at": now_iso, "instruction": instruction, "source": "manual_stream"},
+        metadata={
+            "actor_id": user.id,
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "task_id": task_id,
+        },
+    )
+    append_event(
+        db,
+        aggregate_type="Task",
+        aggregate_id=task_id,
+        event_type=EVENT_AUTOMATION_STARTED,
+        payload={
+            "started_at": now_iso,
+            "last_agent_progress": "",
+            "last_agent_stream_status": "Automation run started.",
+            "last_agent_stream_updated_at": now_iso,
+        },
+        metadata={
+            "actor_id": user.id,
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "task_id": task_id,
+        },
+    )
+    db.commit()
+
+    stream_headers = {
+        "Cache-Control": "no-store",
+        "X-Accel-Buffering": "no",
+    }
+
+    def _stream():
+        event_queue: queue.Queue[dict[str, object]] = queue.Queue()
+        outcome_holder: dict[str, Any] = {}
+        error_holder: dict[str, Exception] = {}
+        done_event = threading.Event()
+
+        def _on_event(event: dict[str, object]) -> None:
+            event_queue.put(event)
+
+        def _worker() -> None:
+            try:
+                outcome_holder["value"] = execute_task_automation_stream(
+                    task_id=task_id,
+                    title=title,
+                    description=description,
+                    status=status,
+                    instruction=instruction,
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    actor_user_id=user.id,
+                    allow_mutations=True,
+                    on_event=_on_event,
+                    stream_plain_text=True,
+                )
+            except Exception as exc:  # pragma: no cover - surfaced to stream consumer
+                error_holder["value"] = exc
+            finally:
+                done_event.set()
+
+        worker = threading.Thread(target=_worker, daemon=True)
+        worker.start()
+
+        while True:
+            try:
+                event = event_queue.get(timeout=0.15)
+            except queue.Empty:
+                if done_event.is_set():
+                    break
+                continue
+            if not isinstance(event, dict):
+                continue
+            event_type = str(event.get("type") or "").strip()
+            if event_type in {"assistant_text", "status", "usage"}:
+                yield json.dumps(event, ensure_ascii=True) + "\n"
+
+        if "value" in error_holder:
+            failed_at = to_iso_utc(datetime.now(timezone.utc))
+            error_text = str(error_holder["value"])
+            with SessionLocal() as local_db:
+                append_event(
+                    local_db,
+                    aggregate_type="Task",
+                    aggregate_id=task_id,
+                    event_type=EVENT_AUTOMATION_FAILED,
+                    payload={"failed_at": failed_at, "error": error_text, "summary": "Automation runner failed."},
+                    metadata={
+                        "actor_id": user.id,
+                        "workspace_id": workspace_id,
+                        "project_id": project_id,
+                        "task_id": task_id,
+                    },
+                )
+                append_event(
+                    local_db,
+                    aggregate_type="Task",
+                    aggregate_id=task_id,
+                    event_type=TASK_EVENT_UPDATED,
+                    payload={
+                        "last_agent_stream_status": "Automation run failed.",
+                        "last_agent_stream_updated_at": failed_at,
+                    },
+                    metadata={
+                        "actor_id": user.id,
+                        "workspace_id": workspace_id,
+                        "project_id": project_id,
+                        "task_id": task_id,
+                    },
+                )
+                local_db.commit()
+            response = {
+                "ok": False,
+                "task_id": task_id,
+                "automation_state": "failed",
+                "summary": "Automation runner failed.",
+                "comment": error_text,
+            }
+            yield json.dumps({"type": "final", "response": response}, ensure_ascii=True) + "\n"
+            return
+
+        outcome = outcome_holder.get("value")
+        if outcome is None:
+            response = {
+                "ok": False,
+                "task_id": task_id,
+                "automation_state": "failed",
+                "summary": "Automation runner failed.",
+                "comment": "Missing automation outcome.",
+            }
+            yield json.dumps({"type": "final", "response": response}, ensure_ascii=True) + "\n"
+            return
+
+        completed_at = to_iso_utc(datetime.now(timezone.utc))
+        with SessionLocal() as local_db:
+            append_event(
+                local_db,
+                aggregate_type="Task",
+                aggregate_id=task_id,
+                event_type=EVENT_AUTOMATION_COMPLETED,
+                payload={"completed_at": completed_at, "summary": str(outcome.summary or "Automation run finished.")},
+                metadata={
+                    "actor_id": user.id,
+                    "workspace_id": workspace_id,
+                    "project_id": project_id,
+                    "task_id": task_id,
+                },
+            )
+            append_event(
+                local_db,
+                aggregate_type="Task",
+                aggregate_id=task_id,
+                event_type=TASK_EVENT_UPDATED,
+                payload={
+                    "last_agent_stream_status": "Automation run completed.",
+                    "last_agent_stream_updated_at": completed_at,
+                },
+                metadata={
+                    "actor_id": user.id,
+                    "workspace_id": workspace_id,
+                    "project_id": project_id,
+                    "task_id": task_id,
+                },
+            )
+            local_db.commit()
+
+        response = {
+            "ok": True,
+            "task_id": task_id,
+            "automation_state": "completed",
+            "summary": str(outcome.summary or "Automation run finished."),
+            "comment": str(outcome.comment or ""),
+        }
+        yield json.dumps({"type": "final", "response": response}, ensure_ascii=True) + "\n"
+
+    return StreamingResponse(_stream(), media_type="application/x-ndjson", headers=stream_headers)
 
 
 @router.get("/api/tasks/{task_id}/automation")

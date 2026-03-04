@@ -21,7 +21,7 @@ export function useTaskDetailsQueries(c: { userId: string; selectedTaskId: strin
     enabled: Boolean(c.selectedTaskId),
     refetchInterval: (q) => {
       const state = (q.state.data as TaskAutomationStatus | undefined)?.automation_state
-      if (state === 'queued' || state === 'running') return 2000
+      if (state === 'queued' || state === 'running') return 700
       return false
     }
   })

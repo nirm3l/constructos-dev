@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import threading
+import time
 from datetime import datetime, timezone
 import re
 
@@ -23,7 +24,7 @@ from plugins.runner_policy import (
     success_validation_error,
     preflight_error as plugin_preflight_error,
 )
-from .executor import execute_task_automation
+from .executor import execute_task_automation_stream
 from .service import AgentTaskService
 from features.tasks.domain import (
     EVENT_UPDATED as TASK_EVENT_UPDATED,
@@ -79,6 +80,12 @@ _RECOVERABLE_FAILURE_RE = re.compile(
 )
 _MAX_RECOVERABLE_RETRIES = 3
 _KICKOFF_EXECUTION_HOLDOFF_SECONDS = 20
+_AUTOMATION_STREAM_PROGRESS_MAX_CHARS = 24000
+_AUTOMATION_STREAM_FLUSH_INTERVAL_SECONDS = 0.35
+_AUTOMATION_STREAM_NOISY_STATUS_MESSAGES = {
+    "Codex started processing the request.",
+    "Reasoning step completed.",
+}
 _STATUS_CHANGE_AUTOMATION_ACTIONS = {
     "automation",
     "execute_instruction",
@@ -96,6 +103,10 @@ _STATUS_CHANGE_AUTOMATION_ACTIONS = {
     "trigger_automation",
     "trigger_instruction",
 }
+
+
+def execute_task_automation(**kwargs):
+    return execute_task_automation_stream(**kwargs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -705,7 +716,12 @@ def _claim_queued_task(task_id: str) -> QueuedAutomationRun | None:
                 aggregate_type="Task",
                 aggregate_id=task_id,
                 event_type=EVENT_AUTOMATION_STARTED,
-                payload={"started_at": now_iso},
+                payload={
+                    "started_at": now_iso,
+                    "last_agent_progress": "",
+                    "last_agent_stream_status": "Automation run started.",
+                    "last_agent_stream_updated_at": now_iso,
+                },
                 metadata={
                     "actor_id": actor_user_id,
                     "workspace_id": workspace_id,
@@ -861,6 +877,22 @@ def _record_automation_success(run: QueuedAutomationRun, *, summary: str, action
                 "task_id": run.task_id,
             },
         )
+        append_event(
+            db,
+            aggregate_type="Task",
+            aggregate_id=run.task_id,
+            event_type=TASK_EVENT_UPDATED,
+            payload={
+                "last_agent_stream_status": "Automation run completed.",
+                "last_agent_stream_updated_at": completed_at,
+            },
+            metadata={
+                "actor_id": actor_user_id,
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "task_id": run.task_id,
+            },
+        )
         if run.is_scheduled_run:
             append_event(
                 db,
@@ -1005,6 +1037,22 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 "task_id": run.task_id,
             },
         )
+        append_event(
+            db,
+            aggregate_type="Task",
+            aggregate_id=run.task_id,
+            event_type=TASK_EVENT_UPDATED,
+            payload={
+                "last_agent_stream_status": "Automation run failed.",
+                "last_agent_stream_updated_at": failed_at,
+            },
+            metadata={
+                "actor_id": actor_user_id,
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "task_id": run.task_id,
+            },
+        )
         schedule_state = str(state.get("schedule_state") or "").strip().lower()
         if run.is_scheduled_run or schedule_state in {"queued", "running"}:
             append_event(
@@ -1125,6 +1173,74 @@ def _execute_claimed_automation(run: QueuedAutomationRun) -> None:
     if preflight_error:
         _record_automation_failure(run, RuntimeError(preflight_error))
         return
+    stream_lock = threading.Lock()
+    stream_text = ""
+    stream_status = ""
+    last_flush_at = 0.0
+
+    def _persist_stream_progress(*, force: bool = False) -> None:
+        nonlocal last_flush_at, stream_text, stream_status
+        now_monotonic = time.monotonic()
+        if not force and (now_monotonic - last_flush_at) < _AUTOMATION_STREAM_FLUSH_INTERVAL_SECONDS:
+            return
+        last_flush_at = now_monotonic
+        with stream_lock:
+            progress = stream_text[-_AUTOMATION_STREAM_PROGRESS_MAX_CHARS:]
+            status_text = stream_status
+        now_iso = to_iso_utc(datetime.now(timezone.utc))
+        with SessionLocal() as db:
+            state, _ = rebuild_state(db, "Task", run.task_id)
+            workspace_id = str(state.get("workspace_id") or run.workspace_id or "").strip()
+            if not workspace_id:
+                return
+            project_id = str(state.get("project_id") or run.project_id or "").strip() or None
+            actor_user_id = _resolve_task_actor_user_id(
+                db=db,
+                task_id=run.task_id,
+                state=state,
+                fallback_actor_user_id=run.actor_user_id,
+            )
+            append_event(
+                db,
+                aggregate_type="Task",
+                aggregate_id=run.task_id,
+                event_type=TASK_EVENT_UPDATED,
+                payload={
+                    "last_agent_progress": progress,
+                    "last_agent_stream_status": status_text or None,
+                    "last_agent_stream_updated_at": now_iso,
+                },
+                metadata={
+                    "actor_id": actor_user_id,
+                    "workspace_id": workspace_id,
+                    "project_id": project_id,
+                    "task_id": run.task_id,
+                },
+            )
+            db.commit()
+
+    def _on_stream_event(event: dict[str, object]) -> None:
+        nonlocal stream_text, stream_status
+        event_type = str(event.get("type") or "").strip()
+        if event_type == "assistant_text":
+            delta = str(event.get("delta") or "")
+            if not delta:
+                return
+            with stream_lock:
+                stream_text = (stream_text + delta)[-_AUTOMATION_STREAM_PROGRESS_MAX_CHARS:]
+            _persist_stream_progress(force=False)
+            return
+        if event_type == "status":
+            message = str(event.get("message") or "").strip()
+            if not message:
+                return
+            if message in _AUTOMATION_STREAM_NOISY_STATUS_MESSAGES:
+                return
+            with stream_lock:
+                stream_status = message
+                stream_text = (f"{stream_text}\n\n{message}".strip())[-_AUTOMATION_STREAM_PROGRESS_MAX_CHARS:]
+            _persist_stream_progress(force=True)
+
     try:
         if not run.instruction:
             raise RuntimeError("instruction is empty")
@@ -1142,8 +1258,11 @@ def _execute_claimed_automation(run: QueuedAutomationRun) -> None:
             trigger_to_status=run.trigger_to_status,
             trigger_timestamp=run.triggered_at,
             allow_mutations=True,
+            on_event=_on_stream_event,
         )
+        _persist_stream_progress(force=True)
     except Exception as exc:
+        _persist_stream_progress(force=True)
         _record_automation_failure(run, exc)
         return
 

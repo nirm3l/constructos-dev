@@ -439,6 +439,9 @@ export type TaskAutomationStatus = {
   task_id: string
   automation_state: 'idle' | 'queued' | 'running' | 'completed' | 'failed'
   last_agent_run_at: string | null
+  last_agent_progress: string | null
+  last_agent_stream_status: string | null
+  last_agent_stream_updated_at: string | null
   last_agent_error: string | null
   last_agent_comment: string | null
   last_requested_instruction: string | null

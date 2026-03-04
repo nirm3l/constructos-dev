@@ -12,8 +12,17 @@ type AutomationTimelineEntry = {
   createdAt: string | null
 }
 
+function normalizeAutomationStreamStatus(message: string): string {
+  const text = String(message || '').trim()
+  if (!text) return ''
+  if (text === 'Codex started processing the request.') return ''
+  if (text === 'Reasoning step completed.') return ''
+  return text
+}
+
 export function TaskDrawerInsights({ state }: { state: any }) {
   const [confirmDeleteCommentId, setConfirmDeleteCommentId] = React.useState<number | null>(null)
+  const liveOutputRef = React.useRef<HTMLDivElement | null>(null)
   const automationTimeline = React.useMemo<AutomationTimelineEntry[]>(() => {
     const events = Array.isArray(state.activity.data) ? state.activity.data : []
     const entries: AutomationTimelineEntry[] = []
@@ -38,11 +47,15 @@ export function TaskDrawerInsights({ state }: { state: any }) {
         continue
       }
       if (action === 'TaskAutomationStarted') {
+        const startedAt = String(details.started_at || '').trim()
+        const startedLabel = startedAt
+          ? `Started at ${new Date(startedAt).toLocaleString()}.`
+          : 'Execution started.'
         pushUnique({
           id: `${event.id}-started`,
           action: 'started',
           title: 'Run started',
-          body: String(details.started_at ? `Started at: ${String(details.started_at)}` : 'Execution started.'),
+          body: startedLabel,
           createdAt: typeof event.created_at === 'string' ? event.created_at : null,
         })
         continue
@@ -69,6 +82,24 @@ export function TaskDrawerInsights({ state }: { state: any }) {
     }
     return entries
   }, [state.activity.data])
+  const liveAutomationProgress = String(state.automationStatus.data?.last_agent_progress || '').trim()
+  const liveAutomationStatusText = normalizeAutomationStreamStatus(
+    String(state.automationStatus.data?.last_agent_stream_status || '')
+  )
+  const lastAutomationSource = String(state.automationStatus.data?.last_requested_source || '').trim().toLowerCase()
+  const automationModeLabel = (() => {
+    if (lastAutomationSource === 'manual_stream') return 'stream'
+    if (lastAutomationSource) return 'dispatch'
+    return 'unknown'
+  })()
+  const isAutomationRunning = String(state.automationStatus.data?.automation_state || '').toLowerCase() === 'running'
+  const isAutomationQueued = String(state.automationStatus.data?.automation_state || '').toLowerCase() === 'queued'
+  React.useEffect(() => {
+    const el = liveOutputRef.current
+    if (!el) return
+    if (!isAutomationRunning && !isAutomationQueued) return
+    el.scrollTop = el.scrollHeight
+  }, [liveAutomationProgress, liveAutomationStatusText, isAutomationRunning, isAutomationQueued])
 
   return (
     <>
@@ -188,16 +219,48 @@ export function TaskDrawerInsights({ state }: { state: any }) {
         </Tabs.Content>
 
         <Tabs.Content className="taskdrawer-insights-content" value="automation">
-          <h4 style={{ margin: 0 }}>Codex Automation</h4>
+          <h4 style={{ margin: 0 }}>Automation</h4>
           <div className="automation-box">
             <div className="row wrap" style={{ marginBottom: 8 }}>
               <span className={`badge ${state.automationStatus.data?.automation_state === 'completed' ? 'done' : ''}`}>
                 State: {state.automationStatus.data?.automation_state ?? 'idle'}
               </span>
+              <span className="badge">Mode: {automationModeLabel}</span>
               {state.automationStatus.data?.last_agent_run_at && (
                 <span className="meta">Last run: {new Date(state.automationStatus.data.last_agent_run_at).toLocaleString()}</span>
               )}
+              {state.automationStatus.data?.last_agent_stream_updated_at && (
+                <span className="meta">
+                  Stream updated: {new Date(state.automationStatus.data.last_agent_stream_updated_at).toLocaleString()}
+                </span>
+              )}
             </div>
+            {(liveAutomationProgress || liveAutomationStatusText || isAutomationRunning || isAutomationQueued) && (
+              <div className="automation-history" aria-live="polite" style={{ marginBottom: 8 }}>
+                <div className={`automation-history-item ${isAutomationRunning ? 'started' : (isAutomationQueued ? 'requested' : 'completed')}`}>
+                  <div className="automation-history-head">
+                    <strong>Live output</strong>
+                    {liveAutomationStatusText && <span className="meta">{liveAutomationStatusText}</span>}
+                  </div>
+                  <div
+                    className="automation-history-body"
+                    ref={liveOutputRef}
+                    style={{ maxHeight: 260, overflowY: 'auto' }}
+                  >
+                    {liveAutomationProgress ? (
+                      <MarkdownView value={liveAutomationProgress} />
+                    ) : (
+                      <div className="meta">{isAutomationQueued ? 'Queued...' : 'Running...'}</div>
+                    )}
+                    {isAutomationRunning && (
+                      <div className="codex-chat-streaming-text" style={{ marginTop: 6 }}>
+                        <span className="codex-chat-stream-caret" />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
             {automationTimeline.length > 0 ? (
               <div className="automation-history" aria-live="polite">
                 {automationTimeline.map((entry) => (
@@ -233,7 +296,7 @@ export function TaskDrawerInsights({ state }: { state: any }) {
               <textarea
                 value={state.automationInstruction}
                 onChange={(e) => state.setAutomationInstruction(e.target.value)}
-                placeholder='Instruction (e.g. "#complete", "update due date", "create related task")'
+                placeholder='Instruction (default streams now; prefix with "#dispatch" to queue workflow execution)'
                 rows={4}
                 style={{ width: '100%' }}
               />
@@ -242,7 +305,7 @@ export function TaskDrawerInsights({ state }: { state: any }) {
                 onClick={() => state.runAutomationMutation.mutate()}
                 disabled={state.runAutomationMutation.isPending || !state.selectedTaskId}
               >
-                Run with Codex
+                Run now
               </button>
             </div>
           </div>

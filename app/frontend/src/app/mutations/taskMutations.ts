@@ -9,6 +9,7 @@ import {
   reorderTaskGroups,
   reopenTask,
   restoreTask,
+  runTaskAutomationStream,
   runTaskWithCodex,
 } from '../../api'
 
@@ -187,7 +188,47 @@ export function useTaskMutations(c: any) {
   })
 
   const runAutomationMutation = useMutation({
-    mutationFn: () => runTaskWithCodex(c.userId, c.selectedTaskId as string, c.automationInstruction.trim()),
+    mutationFn: async () => {
+      const taskId = c.selectedTaskId as string
+      const rawInstruction = String(c.automationInstruction || '').trim()
+      if (!rawInstruction) throw new Error('Instruction is required')
+      const dispatchMatch = rawInstruction.match(/^#dispatch\b\s*/i)
+      if (dispatchMatch) {
+        const queuedInstruction = rawInstruction.slice(dispatchMatch[0].length).trim() || rawInstruction
+        return runTaskWithCodex(c.userId, taskId, queuedInstruction)
+      }
+      await c.qc.invalidateQueries({ queryKey: ['automation-status', c.userId, taskId] })
+      return runTaskAutomationStream(c.userId, taskId, rawInstruction, {
+        onAssistantDelta: (delta) => {
+          const key = ['automation-status', c.userId, taskId] as const
+          c.qc.setQueryData(key, (current: any) => {
+            const existing = current && typeof current === 'object' ? current : {}
+            const previous = String(existing.last_agent_progress || '')
+            return {
+              ...existing,
+              task_id: taskId,
+              automation_state: 'running',
+              last_agent_progress: `${previous}${delta}`,
+              last_agent_stream_status: 'Running...',
+              last_agent_stream_updated_at: new Date().toISOString(),
+            }
+          })
+        },
+        onStatus: (message) => {
+          const key = ['automation-status', c.userId, taskId] as const
+          c.qc.setQueryData(key, (current: any) => {
+            const existing = current && typeof current === 'object' ? current : {}
+            return {
+              ...existing,
+              task_id: taskId,
+              automation_state: 'running',
+              last_agent_stream_status: String(message || '').trim() || 'Running...',
+              last_agent_stream_updated_at: new Date().toISOString(),
+            }
+          })
+        },
+      })
+    },
     onSuccess: async () => {
       c.setUiError(null)
       c.setAutomationInstruction('')

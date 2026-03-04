@@ -422,6 +422,83 @@ export const runTaskWithCodex = (userId: string, taskId: string, instruction: st
     userId,
     { method: 'POST', body: JSON.stringify({ instruction }) }
   )
+
+export async function runTaskAutomationStream(
+  userId: string,
+  taskId: string,
+  instruction: string,
+  handlers?: {
+    onAssistantDelta?: (delta: string) => void
+    onStatus?: (message: string) => void
+    signal?: AbortSignal
+  }
+): Promise<{ ok: boolean; task_id: string; automation_state: string; summary?: string; comment?: string }> {
+  const commandId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
+  const res = await fetch(`/api/tasks/${taskId}/automation/stream`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Command-Id': commandId,
+    },
+    body: JSON.stringify({ instruction }),
+    signal: handlers?.signal,
+  })
+  if (!res.ok) {
+    const raw = await res.text()
+    throw new Error(formatApiError(raw, res.status))
+  }
+  if (!res.body) {
+    throw new Error('Automation stream is unavailable')
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let finalResponse: { ok: boolean; task_id: string; automation_state: string; summary?: string; comment?: string } | null = null
+
+  const processLine = (line: string) => {
+    const trimmed = line.trim()
+    if (!trimmed) return
+    let event: any
+    try {
+      event = JSON.parse(trimmed)
+    } catch {
+      return
+    }
+    const type = String(event?.type || '').trim()
+    if (type === 'assistant_text') {
+      const delta = String(event?.delta || '')
+      if (delta) handlers?.onAssistantDelta?.(delta)
+      return
+    }
+    if (type === 'status') {
+      const message = String(event?.message || '').trim()
+      if (message) handlers?.onStatus?.(message)
+      return
+    }
+    if (type === 'final' && event?.response) {
+      finalResponse = event.response
+    }
+  }
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    while (true) {
+      const newlineIdx = buffer.indexOf('\n')
+      if (newlineIdx < 0) break
+      const line = buffer.slice(0, newlineIdx)
+      buffer = buffer.slice(newlineIdx + 1)
+      processLine(line)
+    }
+  }
+  if (buffer.trim()) processLine(buffer)
+  if (!finalResponse) throw new Error('Automation stream ended without a final response')
+  return finalResponse
+}
+
 export const getTaskAutomationStatus = (userId: string, taskId: string) =>
   api<TaskAutomationStatus>(`/api/tasks/${taskId}/automation`, userId)
 
