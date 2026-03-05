@@ -1,6 +1,7 @@
 import React from 'react'
 import * as AlertDialog from '@radix-ui/react-alert-dialog'
 import * as Tabs from '@radix-ui/react-tabs'
+import * as Tooltip from '@radix-ui/react-tooltip'
 import { runTaskAutomationLiveStream } from '../../api'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import { Icon } from '../shared/uiHelpers'
@@ -11,6 +12,26 @@ type AutomationTimelineEntry = {
   title: string
   body: string
   createdAt: string | null
+}
+
+function MetricsTooltip({
+  content,
+  children,
+}: {
+  content: string
+  children: React.ReactElement
+}) {
+  return (
+    <Tooltip.Root>
+      <Tooltip.Trigger asChild>{children}</Tooltip.Trigger>
+      <Tooltip.Portal>
+        <Tooltip.Content className="codex-chat-tooltip-content" sideOffset={6}>
+          {content}
+          <Tooltip.Arrow className="codex-chat-tooltip-arrow" />
+        </Tooltip.Content>
+      </Tooltip.Portal>
+    </Tooltip.Root>
+  )
 }
 
 function normalizeAutomationStreamStatus(message: string): string {
@@ -346,7 +367,7 @@ export function TaskDrawerInsights({ state }: { state: any }) {
   }, [automationTimeline[0]?.id, automationTimeline.length])
 
   return (
-    <>
+    <Tooltip.Provider delayDuration={180}>
       <Tabs.Root className="taskdrawer-insights-tabs" defaultValue="comments">
         <Tabs.List className="taskdrawer-insights-tabs-list" aria-label="Task insights">
           <Tabs.Trigger className="taskdrawer-insights-tab-trigger" value="comments">
@@ -471,12 +492,11 @@ export function TaskDrawerInsights({ state }: { state: any }) {
               </span>
               <span className="badge">Mode: {automationModeLabel}</span>
               {automationPromptMode && (
-                <span
-                  className="badge"
-                  title={automationPromptTooltip || undefined}
-                >
-                  Prompt: {automationPromptMode.toUpperCase()}
-                </span>
+                <MetricsTooltip content={automationPromptTooltip || 'Prompt metrics unavailable.'}>
+                  <span className="badge">
+                    Prompt: {automationPromptMode.toUpperCase()}
+                  </span>
+                </MetricsTooltip>
               )}
               {state.automationStatus.data?.last_agent_run_at && (
                 <span className="meta">Last run: {new Date(state.automationStatus.data.last_agent_run_at).toLocaleString()}</span>
@@ -671,6 +691,6 @@ export function TaskDrawerInsights({ state }: { state: any }) {
           </AlertDialog.Content>
         </AlertDialog.Portal>
       </AlertDialog.Root>
-    </>
+    </Tooltip.Provider>
   )
 }
