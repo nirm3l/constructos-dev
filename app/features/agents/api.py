@@ -2814,15 +2814,15 @@ def stop_agent_chat_stream(
     ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     stream_key = _chat_stream_key(workspace_id=workspace_id, session_id=_resolve_chat_session_id(session_id))
     _set_chat_stream_stop_requested(stream_key=stream_key, value=True)
-    cancelled = _request_chat_stream_cancel(stream_key=stream_key, run_id=run_id)
-    if cancelled:
-        _publish_chat_stream_event(
-            stream_key=stream_key,
-            event={"type": "status", "message": "Stop requested."},
-        )
     effective_run_id = run_id
     if not effective_run_id:
         state = _CHAT_STREAM_BROKER.current_state(key=stream_key)
         if isinstance(state, dict):
             effective_run_id = str(state.get("run_id") or "").strip()
+    cancelled = _request_chat_stream_cancel(stream_key=stream_key, run_id=effective_run_id)
+    if cancelled:
+        _publish_chat_stream_event(
+            stream_key=stream_key,
+            event={"type": "status", "message": "Stop requested."},
+        )
     return {"ok": True, "cancel_requested": bool(cancelled), "run_id": effective_run_id}

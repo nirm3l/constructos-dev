@@ -127,6 +127,7 @@ function normalizeResumeStateFromResponse(response: any): { attempted: boolean; 
 
 export function useMiscMutations(c: any) {
   const activeChatAbortControllerRef = React.useRef<AbortController | null>(null)
+  const pageUnloadingRef = React.useRef(false)
   const activeChatRunRef = React.useRef<{
     workspaceId: string
     sessionId: string
@@ -151,7 +152,15 @@ export function useMiscMutations(c: any) {
   }, [])
 
   React.useEffect(() => {
+    const markPageUnloading = () => {
+      pageUnloadingRef.current = true
+    }
+    if (typeof window !== 'undefined') {
+      window.addEventListener('beforeunload', markPageUnloading)
+      window.addEventListener('pagehide', markPageUnloading)
+    }
     return () => {
+      pageUnloadingRef.current = true
       const controller = activeChatAbortControllerRef.current
       if (controller) controller.abort()
       activeChatRunRef.current = null
@@ -160,6 +169,10 @@ export function useMiscMutations(c: any) {
       })
       stopFallbackTimerBySessionRef.current = {}
       stopRequestedBySessionRef.current = {}
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('beforeunload', markPageUnloading)
+        window.removeEventListener('pagehide', markPageUnloading)
+      }
     }
   }, [])
 
@@ -641,6 +654,11 @@ export function useMiscMutations(c: any) {
     },
     onError: (err) => {
       const sessionId = String(c.codexChatSessionId || '').trim()
+      const isAbortError = isAbortLikeError(err)
+      if (isAbortError && pageUnloadingRef.current) {
+        c.setUiError(null)
+        return
+      }
       if (sessionId) {
         delete stopRequestedBySessionRef.current[sessionId]
         clearStopFallbackTimerForSession(sessionId)
@@ -656,7 +674,7 @@ export function useMiscMutations(c: any) {
         })
       }
       clearChatRunningState()
-      if (isAbortLikeError(err)) {
+      if (isAbortError) {
         c.setUiError(null)
         return
       }

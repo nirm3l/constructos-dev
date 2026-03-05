@@ -205,17 +205,12 @@ export function useRealtimeEffects(c: any) {
       })
     }
 
-    const assistantTurnCreatedAt = (() => {
-      const match = codexChatTurns.find((turn: any) => String(turn?.id || '') === assistantTurnId)
-      const createdAt = Number(match?.createdAt || 0)
-      return Number.isFinite(createdAt) && createdAt > 0 ? createdAt : null
-    })()
     setIsCodexChatRunning(true)
     const resumedStartedAtRaw = Number(codexChatLiveRunStartedAt || 0)
     const resumedStartedAt = Number.isFinite(resumedStartedAtRaw) && resumedStartedAtRaw > 0
       ? resumedStartedAtRaw
       : null
-    const effectiveStartedAt = resumedStartedAt ?? assistantTurnCreatedAt ?? Date.now()
+    const effectiveStartedAt = resumedStartedAt ?? Date.now()
     setCodexChatRunStartedAt((prev: number | null) => prev ?? effectiveStartedAt)
     setCodexChatElapsedSeconds(Math.max(0, Math.floor((Date.now() - effectiveStartedAt) / 1000)))
 
@@ -365,15 +360,11 @@ export function useRealtimeEffects(c: any) {
       }
     }
   }, [
-    isCodexChatRunning,
-    codexChatLiveAssistantTurnId,
     codexChatLiveRunActive,
     codexChatLiveRunId,
     codexChatLiveRunStartedAt,
     codexChatLiveStopRequested,
-    codexChatLiveRunSeq,
     codexChatSessionId,
-    codexChatTurns,
     setCodexChatLiveRunForSession,
     setCodexChatRunStartedAt,
     setCodexChatTurnsForSession,
