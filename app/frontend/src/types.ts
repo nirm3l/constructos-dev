@@ -442,8 +442,16 @@ export type TaskAutomationStatus = {
   last_agent_progress: string | null
   last_agent_stream_status: string | null
   last_agent_stream_updated_at: string | null
+  last_agent_run_id: string | null
   last_agent_error: string | null
   last_agent_comment: string | null
+  last_agent_usage?: Record<string, unknown> | null
+  last_agent_prompt_mode?: 'full' | 'resume' | string | null
+  last_agent_prompt_segment_chars?: Record<string, number> | null
+  last_agent_codex_session_id?: string | null
+  last_agent_codex_resume_attempted?: boolean | null
+  last_agent_codex_resume_succeeded?: boolean | null
+  last_agent_codex_resume_fallback_used?: boolean | null
   last_requested_instruction: string | null
   last_requested_source: 'manual' | 'schedule' | 'status_change' | string | null
   last_requested_trigger_task_id: string | null
@@ -855,6 +863,8 @@ export type AgentChatUsage = {
   context_limit_tokens?: number
   graph_context_frame_mode?: 'full' | 'delta' | string
   graph_context_frame_revision?: string
+  prompt_mode?: 'full' | 'resume' | string
+  prompt_segment_chars?: Record<string, number>
   codex_resume_attempted?: boolean
   codex_resume_succeeded?: boolean
   codex_resume_fallback_used?: boolean

@@ -3209,6 +3209,18 @@ textarea:disabled {
   max-width: none;
 }
 
+@media (max-width: 768px) {
+  .mermaid-diagram {
+    min-width: 0;
+  }
+
+  .mermaid-diagram svg {
+    max-width: 100%;
+    width: 100%;
+    height: auto;
+  }
+}
+
 .mermaid-diagram-status {
   font-size: 12px;
   color: var(--muted);
@@ -7387,6 +7399,12 @@ textarea:disabled {
 
 .automation-history-body .markdown {
   margin: 0;
+  max-height: none;
+  overflow: visible;
+}
+
+.automation-history-body .mermaid-diagram-shell {
+  overflow-y: visible;
 }
 
 .codex-progress {

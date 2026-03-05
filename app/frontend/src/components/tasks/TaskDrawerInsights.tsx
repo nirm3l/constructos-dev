@@ -1,6 +1,7 @@
 import React from 'react'
 import * as AlertDialog from '@radix-ui/react-alert-dialog'
 import * as Tabs from '@radix-ui/react-tabs'
+import { runTaskAutomationLiveStream } from '../../api'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import { Icon } from '../shared/uiHelpers'
 
@@ -17,12 +18,16 @@ function normalizeAutomationStreamStatus(message: string): string {
   if (!text) return ''
   if (text === 'Codex started processing the request.') return ''
   if (text === 'Reasoning step completed.') return ''
+  if (text === 'Automation run completed.') return ''
   return text
 }
 
 export function TaskDrawerInsights({ state }: { state: any }) {
   const [confirmDeleteCommentId, setConfirmDeleteCommentId] = React.useState<number | null>(null)
   const liveOutputRef = React.useRef<HTMLDivElement | null>(null)
+  const automationHistoryRef = React.useRef<HTMLDivElement | null>(null)
+  const selectedTaskId = String(state.selectedTaskId || '').trim()
+  const lastAutomationSource = String(state.automationStatus.data?.last_requested_source || '').trim().toLowerCase()
   const automationTimeline = React.useMemo<AutomationTimelineEntry[]>(() => {
     const events = Array.isArray(state.activity.data) ? state.activity.data : []
     const entries: AutomationTimelineEntry[] = []
@@ -47,6 +52,9 @@ export function TaskDrawerInsights({ state }: { state: any }) {
         continue
       }
       if (action === 'TaskAutomationStarted') {
+        if (lastAutomationSource === 'manual_stream') {
+          continue
+        }
         const startedAt = String(details.started_at || '').trim()
         const startedLabel = startedAt
           ? `Started at ${new Date(startedAt).toLocaleString()}.`
@@ -61,11 +69,18 @@ export function TaskDrawerInsights({ state }: { state: any }) {
         continue
       }
       if (action === 'TaskAutomationCompleted') {
+        const completedBody = String(
+          details.comment ||
+          details.final_text ||
+          details.last_agent_comment ||
+          details.summary ||
+          'Completed'
+        )
         pushUnique({
           id: `${event.id}-completed`,
           action: 'completed',
           title: 'Run completed',
-          body: String(details.summary || 'Completed'),
+          body: completedBody,
           createdAt: typeof event.created_at === 'string' ? event.created_at : null,
         })
         continue
@@ -81,25 +96,254 @@ export function TaskDrawerInsights({ state }: { state: any }) {
       }
     }
     return entries
-  }, [state.activity.data])
-  const liveAutomationProgress = String(state.automationStatus.data?.last_agent_progress || '').trim()
-  const liveAutomationStatusText = normalizeAutomationStreamStatus(
-    String(state.automationStatus.data?.last_agent_stream_status || '')
+  }, [state.activity.data, lastAutomationSource])
+  const isLocalLiveRun = Boolean(
+    state.automationLiveActive &&
+    selectedTaskId &&
+    String(state.automationLiveTaskId || '').trim() === selectedTaskId
   )
-  const lastAutomationSource = String(state.automationStatus.data?.last_requested_source || '').trim().toLowerCase()
+  const liveAutomationProgress = String(
+    isLocalLiveRun
+      ? state.automationLiveBuffer
+      : (state.automationStatus.data?.last_agent_progress || '')
+  ).trim()
+  const liveAutomationStatusText = normalizeAutomationStreamStatus(String(
+    isLocalLiveRun
+      ? state.automationLiveStatusText
+      : (state.automationStatus.data?.last_agent_stream_status || '')
+  ))
+  const rawLiveAutomationStatusText = String(
+    isLocalLiveRun
+      ? state.automationLiveStatusText
+      : (state.automationStatus.data?.last_agent_stream_status || '')
+  ).trim()
   const automationModeLabel = (() => {
     if (lastAutomationSource === 'manual_stream') return 'stream'
     if (lastAutomationSource) return 'dispatch'
     return 'unknown'
   })()
+  const automationUsageRaw = state.automationStatus.data?.last_agent_usage
+  const automationUsage = automationUsageRaw && typeof automationUsageRaw === 'object'
+    ? (automationUsageRaw as Record<string, unknown>)
+    : null
+  const automationPromptModeRaw = String(
+    state.automationStatus.data?.last_agent_prompt_mode
+    || automationUsage?.prompt_mode
+    || ''
+  ).trim().toLowerCase()
+  const automationPromptMode = automationPromptModeRaw === 'full' || automationPromptModeRaw === 'resume'
+    ? automationPromptModeRaw
+    : ''
+  const automationPromptSegmentCharsRaw = (
+    state.automationStatus.data?.last_agent_prompt_segment_chars
+    || automationUsage?.prompt_segment_chars
+  )
+  const automationPromptSegmentChars = React.useMemo(() => {
+    if (!automationPromptSegmentCharsRaw || typeof automationPromptSegmentCharsRaw !== 'object') return {}
+    const out: Record<string, number> = {}
+    for (const [key, value] of Object.entries(automationPromptSegmentCharsRaw as Record<string, unknown>)) {
+      const normalizedKey = String(key || '').trim()
+      if (!normalizedKey) continue
+      const parsed = Number(value)
+      if (!Number.isFinite(parsed) || parsed < 0) continue
+      out[normalizedKey] = Math.round(parsed)
+    }
+    return out
+  }, [automationPromptSegmentCharsRaw])
+  const automationInputTokens = Number(automationUsage?.input_tokens)
+  const automationCachedInputTokens = Number(automationUsage?.cached_input_tokens)
+  const automationOutputTokens = Number(automationUsage?.output_tokens)
+  const automationContextLimitTokens = Number(automationUsage?.context_limit_tokens)
+  const automationGraphFrameMode = String(automationUsage?.graph_context_frame_mode || '').trim()
+  const automationGraphFrameRevision = String(automationUsage?.graph_context_frame_revision || '').trim()
+  const automationCodexSessionId = String(state.automationStatus.data?.last_agent_codex_session_id || '').trim()
+  const automationResumeAttempted = state.automationStatus.data?.last_agent_codex_resume_attempted
+  const automationResumeSucceeded = state.automationStatus.data?.last_agent_codex_resume_succeeded
+  const automationResumeFallbackUsed = state.automationStatus.data?.last_agent_codex_resume_fallback_used
+  const automationPromptTooltip = React.useMemo(() => {
+    if (!automationPromptMode) return ''
+    const lines: string[] = [`Prompt mode: ${automationPromptMode.toUpperCase()}`]
+    if (Number.isFinite(automationInputTokens) && automationInputTokens >= 0) {
+      lines.push(`Input tokens: ${Math.round(automationInputTokens)}`)
+    }
+    if (Number.isFinite(automationCachedInputTokens) && automationCachedInputTokens >= 0) {
+      lines.push(`Cached input tokens: ${Math.round(automationCachedInputTokens)}`)
+    }
+    if (Number.isFinite(automationOutputTokens) && automationOutputTokens >= 0) {
+      lines.push(`Output tokens: ${Math.round(automationOutputTokens)}`)
+    }
+    if (Number.isFinite(automationContextLimitTokens) && automationContextLimitTokens > 0) {
+      lines.push(`Context limit tokens: ${Math.round(automationContextLimitTokens)}`)
+    }
+    if (automationGraphFrameMode) {
+      lines.push(`Graph frame mode: ${automationGraphFrameMode}`)
+    }
+    if (automationGraphFrameRevision) {
+      lines.push(`Graph frame revision: ${automationGraphFrameRevision}`)
+    }
+    if (automationCodexSessionId) {
+      lines.push(`Codex session: ${automationCodexSessionId}`)
+    }
+    if (typeof automationResumeAttempted === 'boolean') {
+      lines.push(`Resume attempted: ${automationResumeAttempted ? 'yes' : 'no'}`)
+    }
+    if (typeof automationResumeSucceeded === 'boolean') {
+      lines.push(`Resume succeeded: ${automationResumeSucceeded ? 'yes' : 'no'}`)
+    }
+    if (typeof automationResumeFallbackUsed === 'boolean') {
+      lines.push(`Resume fallback used: ${automationResumeFallbackUsed ? 'yes' : 'no'}`)
+    }
+    const segmentEntries = Object.entries(automationPromptSegmentChars)
+      .filter(([, value]) => Number.isFinite(value) && value > 0)
+      .sort((a, b) => b[1] - a[1])
+    if (segmentEntries.length > 0) {
+      lines.push('Segments:')
+      for (const [key, value] of segmentEntries) {
+        lines.push(`${key}: ${value} chars`)
+      }
+    }
+    return lines.join('\n')
+  }, [
+    automationCachedInputTokens,
+    automationCodexSessionId,
+    automationContextLimitTokens,
+    automationGraphFrameMode,
+    automationGraphFrameRevision,
+    automationInputTokens,
+    automationOutputTokens,
+    automationPromptMode,
+    automationPromptSegmentChars,
+    automationResumeAttempted,
+    automationResumeFallbackUsed,
+    automationResumeSucceeded,
+  ])
   const isAutomationRunning = String(state.automationStatus.data?.automation_state || '').toLowerCase() === 'running'
   const isAutomationQueued = String(state.automationStatus.data?.automation_state || '').toLowerCase() === 'queued'
+  const isRecoverableLive = !isLocalLiveRun && (isAutomationRunning || isAutomationQueued)
+  const [recoveredLiveText, setRecoveredLiveText] = React.useState('')
+  const [recoveredLiveSnapshot, setRecoveredLiveSnapshot] = React.useState('')
+  const [resumeStreamSeq, setResumeStreamSeq] = React.useState(0)
+  const [resumeStreamRunId, setResumeStreamRunId] = React.useState<string | null>(null)
+  const [resumeStreamConnected, setResumeStreamConnected] = React.useState(false)
+  const selectedRunId = String(state.automationStatus.data?.last_agent_run_id || '').trim()
+  React.useEffect(() => {
+    if (!selectedRunId) {
+      setResumeStreamRunId(null)
+      setResumeStreamSeq(0)
+      return
+    }
+    if (selectedRunId !== resumeStreamRunId) {
+      setResumeStreamRunId(selectedRunId)
+      setResumeStreamSeq(0)
+      setRecoveredLiveText('')
+      setRecoveredLiveSnapshot('')
+    }
+  }, [resumeStreamRunId, selectedRunId])
+  React.useEffect(() => {
+    if (!isRecoverableLive) {
+      setResumeStreamConnected(false)
+      return
+    }
+    if (lastAutomationSource !== 'manual_stream') {
+      setResumeStreamConnected(false)
+      return
+    }
+    if (!selectedTaskId || !selectedRunId) {
+      setResumeStreamConnected(false)
+      return
+    }
+    const controller = new AbortController()
+    let cancelled = false
+    setResumeStreamConnected(true)
+    const startSeq = resumeStreamSeq
+    void runTaskAutomationLiveStream(state.userId, selectedTaskId, selectedRunId, startSeq, {
+      signal: controller.signal,
+      onSeq: (seq) => {
+        if (cancelled) return
+        setResumeStreamSeq((prev) => (seq > prev ? seq : prev))
+      },
+      onAssistantDelta: (delta) => {
+        if (cancelled || !delta) return
+        setRecoveredLiveText((prev) => `${prev}${delta}`)
+      },
+      onStatus: (message) => {
+        if (cancelled || !message) return
+        setRecoveredLiveSnapshot((prev) => {
+          const base = String(prev || '').trim()
+          return `${base ? `${base}\n\n` : ''}${message}`
+        })
+      },
+    }).catch(() => {
+      // Silent fallback to status polling snapshot.
+    }).finally(() => {
+      if (!cancelled) setResumeStreamConnected(false)
+    })
+    return () => {
+      cancelled = true
+      controller.abort()
+      setResumeStreamConnected(false)
+    }
+  }, [
+    isRecoverableLive,
+    lastAutomationSource,
+    selectedRunId,
+    selectedTaskId,
+    state.userId,
+  ])
+  React.useEffect(() => {
+    if (resumeStreamConnected) return
+    if (!isRecoverableLive) {
+      setRecoveredLiveText('')
+      setRecoveredLiveSnapshot('')
+      return
+    }
+    const next = String(state.automationStatus.data?.last_agent_progress || '')
+    if (!next) return
+    setRecoveredLiveSnapshot((prev) => {
+      const previous = String(prev || '')
+      if (!previous) {
+        setRecoveredLiveText(next)
+        return next
+      }
+      if (next.startsWith(previous)) {
+        const delta = next.slice(previous.length)
+        if (delta) setRecoveredLiveText((current) => `${current}${delta}`)
+      } else {
+        setRecoveredLiveText(next)
+      }
+      return next
+    })
+  }, [isRecoverableLive, resumeStreamConnected, state.automationStatus.data?.last_agent_progress])
+  const showLiveOutput = true
+  const isAutomationMutationPending = Boolean(state.runAutomationMutation?.isPending)
+  const streamChunkLength = 64
+  const displayedLiveAutomationProgress = isRecoverableLive
+    ? (recoveredLiveText || liveAutomationProgress)
+    : liveAutomationProgress
+  const liveStreamChunk = displayedLiveAutomationProgress
+    ? displayedLiveAutomationProgress.slice(-streamChunkLength)
+    : ''
+  const hasLiveStreamChunk = Boolean((isAutomationRunning || isAutomationQueued) && liveStreamChunk)
+  const liveStreamLeadText = hasLiveStreamChunk
+    ? displayedLiveAutomationProgress.slice(0, Math.max(0, displayedLiveAutomationProgress.length - liveStreamChunk.length))
+    : displayedLiveAutomationProgress
+  const shouldHideCompletedStatusDuringLiveRun =
+    isAutomationMutationPending && /completed/i.test(liveAutomationStatusText)
+  const visibleLiveStatusText = shouldHideCompletedStatusDuringLiveRun ? '' : liveAutomationStatusText
   React.useEffect(() => {
     const el = liveOutputRef.current
     if (!el) return
     if (!isAutomationRunning && !isAutomationQueued) return
     el.scrollTop = el.scrollHeight
-  }, [liveAutomationProgress, liveAutomationStatusText, isAutomationRunning, isAutomationQueued])
+  }, [displayedLiveAutomationProgress, liveAutomationStatusText, isAutomationRunning, isAutomationQueued])
+
+  React.useEffect(() => {
+    const el = automationHistoryRef.current
+    if (!el) return
+    if (!automationTimeline.length) return
+    // Keep newest automation entry in view when a new history item arrives.
+    el.scrollTop = 0
+  }, [automationTimeline[0]?.id, automationTimeline.length])
 
   return (
     <>
@@ -226,35 +470,62 @@ export function TaskDrawerInsights({ state }: { state: any }) {
                 State: {state.automationStatus.data?.automation_state ?? 'idle'}
               </span>
               <span className="badge">Mode: {automationModeLabel}</span>
+              {automationPromptMode && (
+                <span
+                  className="badge"
+                  title={automationPromptTooltip || undefined}
+                >
+                  Prompt: {automationPromptMode.toUpperCase()}
+                </span>
+              )}
               {state.automationStatus.data?.last_agent_run_at && (
                 <span className="meta">Last run: {new Date(state.automationStatus.data.last_agent_run_at).toLocaleString()}</span>
               )}
-              {state.automationStatus.data?.last_agent_stream_updated_at && (
+              {(isLocalLiveRun ? state.automationLiveUpdatedAt : state.automationStatus.data?.last_agent_stream_updated_at) && (
                 <span className="meta">
-                  Stream updated: {new Date(state.automationStatus.data.last_agent_stream_updated_at).toLocaleString()}
+                  Stream updated: {new Date(
+                    isLocalLiveRun
+                      ? state.automationLiveUpdatedAt
+                      : state.automationStatus.data.last_agent_stream_updated_at
+                  ).toLocaleString()}
                 </span>
               )}
             </div>
-            {(liveAutomationProgress || liveAutomationStatusText || isAutomationRunning || isAutomationQueued) && (
+            {showLiveOutput && (
               <div className="automation-history" aria-live="polite" style={{ marginBottom: 8 }}>
                 <div className={`automation-history-item ${isAutomationRunning ? 'started' : (isAutomationQueued ? 'requested' : 'completed')}`}>
                   <div className="automation-history-head">
                     <strong>Live output</strong>
-                    {liveAutomationStatusText && <span className="meta">{liveAutomationStatusText}</span>}
+                    {visibleLiveStatusText && <span className="meta">{visibleLiveStatusText}</span>}
                   </div>
                   <div
                     className="automation-history-body"
                     ref={liveOutputRef}
                     style={{ maxHeight: 260, overflowY: 'auto' }}
                   >
-                    {liveAutomationProgress ? (
-                      <MarkdownView value={liveAutomationProgress} />
+                    {displayedLiveAutomationProgress ? (
+                      (isAutomationRunning || isAutomationQueued) ? (
+                        <div className="codex-chat-streaming-text" aria-live="polite">
+                          {liveStreamLeadText}
+                          {hasLiveStreamChunk && (
+                            <span className="codex-chat-stream-last-chunk">
+                              {liveStreamChunk}
+                            </span>
+                          )}
+                          {isAutomationRunning && <span className="codex-chat-stream-caret" aria-hidden="true" />}
+                        </div>
+                      ) : (
+                        <MarkdownView value={liveAutomationProgress} />
+                      )
                     ) : (
-                      <div className="meta">{isAutomationQueued ? 'Queued...' : 'Running...'}</div>
-                    )}
-                    {isAutomationRunning && (
-                      <div className="codex-chat-streaming-text" style={{ marginTop: 6 }}>
-                        <span className="codex-chat-stream-caret" />
+                      <div className="meta">
+                        {rawLiveAutomationStatusText || (
+                          isAutomationQueued
+                            ? 'Queued...'
+                            : isAutomationRunning
+                              ? 'Running...'
+                              : 'No live output yet.'
+                        )}
                       </div>
                     )}
                   </div>
@@ -262,7 +533,7 @@ export function TaskDrawerInsights({ state }: { state: any }) {
               </div>
             )}
             {automationTimeline.length > 0 ? (
-              <div className="automation-history" aria-live="polite">
+              <div className="automation-history" aria-live="polite" ref={automationHistoryRef}>
                 {automationTimeline.map((entry) => (
                   <div key={entry.id} className={`automation-history-item ${entry.action}`}>
                     <div className="automation-history-head">

@@ -42,8 +42,8 @@ File: GraphSummary.md (source: knowledge_graph.summary)
 {graph_summary}
 
 Guidance:
-{context_guidance}- Enabled MCP servers for this run: {enabled_mcp_servers_text}.
-- If the user asks to implement/work on a specific project by ID or name (for example 'Implement project <id|name>'), call `get_project_chat_context(project_ref=..., workspace_id=...)` first.
+{context_guidance}{interaction_mode_guidance}- Enabled MCP servers for this run: {enabled_mcp_servers_text}.
+- If project context in this prompt is missing, stale, or ambiguous for the requested operation, call `get_project_chat_context(project_ref=..., workspace_id=...)`.
 - If `get_project_chat_context` returns ambiguous name matches, ask for a concrete project ID or workspace_id and then call it again.
 - Treat Soul.md, ProjectRules.md, ProjectSkills.md, GraphContext.md, GraphEvidence.json, and GraphSummary.md as durable project-level context.
 - ProjectRules.md defines how you should behave within this project.

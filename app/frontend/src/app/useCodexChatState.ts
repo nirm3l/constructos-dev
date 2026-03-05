@@ -28,6 +28,13 @@ export type ChatSession = {
   sessionAttachmentRefs: AttachmentRef[]
   codexSessionId: string | null
   codexResumeState: CodexResumeState | null
+  liveRunId: string | null
+  liveRunSeq: number
+  liveRunActive: boolean
+  liveAssistantTurnId: string | null
+  liveStatusText: string
+  liveRunStartedAt: number | null
+  liveStopRequested: boolean
   createdAt: number
   updatedAt: number
   lastTaskEventAt: number | null
@@ -44,6 +51,13 @@ export type ChatSessionServerSnapshot = {
   codexSessionId?: string | null
   codex_session_id?: string | null
   codexResumeState?: CodexResumeState | null
+  liveRunId?: string | null
+  liveRunSeq?: number
+  liveRunActive?: boolean
+  liveAssistantTurnId?: string | null
+  liveStatusText?: string
+  liveRunStartedAt?: number | null
+  liveStopRequested?: boolean
   createdAt?: number
   updatedAt?: number
   lastTaskEventAt?: number | null
@@ -142,6 +156,20 @@ function normalizeUsage(value: unknown): AgentChatUsage | null {
     ? usage.graph_context_frame_revision.trim()
     : ''
   if (frameRevision) normalized.graph_context_frame_revision = frameRevision
+  const promptMode = String(usage.prompt_mode || '').trim().toLowerCase()
+  if (promptMode === 'full' || promptMode === 'resume') normalized.prompt_mode = promptMode
+  const promptSegmentCharsRaw = usage.prompt_segment_chars
+  if (promptSegmentCharsRaw && typeof promptSegmentCharsRaw === 'object' && !Array.isArray(promptSegmentCharsRaw)) {
+    const normalizedSegments: Record<string, number> = {}
+    for (const [rawKey, rawValue] of Object.entries(promptSegmentCharsRaw as Record<string, unknown>)) {
+      const key = String(rawKey || '').trim()
+      const value = Number(rawValue)
+      if (!key) continue
+      if (!Number.isFinite(value) || value < 0) continue
+      normalizedSegments[key] = Math.floor(value)
+    }
+    if (Object.keys(normalizedSegments).length > 0) normalized.prompt_segment_chars = normalizedSegments
+  }
   return normalized
 }
 
@@ -246,6 +274,13 @@ function createSession(title: string, projectId = ''): ChatSession {
     sessionAttachmentRefs: [],
     codexSessionId: null,
     codexResumeState: null,
+    liveRunId: null,
+    liveRunSeq: 0,
+    liveRunActive: false,
+    liveAssistantTurnId: null,
+    liveStatusText: '',
+    liveRunStartedAt: null,
+    liveStopRequested: false,
     createdAt: now,
     updatedAt: now,
     lastTaskEventAt: null,
@@ -277,6 +312,27 @@ function normalizeSession(value: unknown): ChatSession | null {
       ? rawCodexSessionId.trim()
       : null
   const codexResumeState = normalizeResumeState(session.codexResumeState ?? session.codex_resume_state ?? session.usage)
+  const liveRunIdRaw = session.liveRunId ?? session.live_run_id
+  const liveRunId =
+    typeof liveRunIdRaw === 'string' && liveRunIdRaw.trim()
+      ? liveRunIdRaw.trim()
+      : null
+  const liveRunSeqRaw = Number(session.liveRunSeq ?? session.live_run_seq)
+  const liveRunSeq = Number.isFinite(liveRunSeqRaw) && liveRunSeqRaw > 0 ? Math.floor(liveRunSeqRaw) : 0
+  const liveRunActive = Boolean(session.liveRunActive ?? session.live_run_active)
+  const liveAssistantTurnIdRaw = session.liveAssistantTurnId ?? session.live_assistant_turn_id
+  const liveAssistantTurnId =
+    typeof liveAssistantTurnIdRaw === 'string' && liveAssistantTurnIdRaw.trim()
+      ? liveAssistantTurnIdRaw.trim()
+      : null
+  const liveStatusTextRaw = session.liveStatusText ?? session.live_status_text
+  const liveStatusText = typeof liveStatusTextRaw === 'string' ? liveStatusTextRaw.trim() : ''
+  const liveRunStartedAtRaw = Number(session.liveRunStartedAt ?? session.live_run_started_at)
+  const liveRunStartedAt =
+    Number.isFinite(liveRunStartedAtRaw) && liveRunStartedAtRaw > 0 ? Math.floor(liveRunStartedAtRaw) : null
+  const liveStopRequestedRaw = normalizeBool(session.liveStopRequested ?? session.live_stop_requested)
+  const liveStopRequested =
+    liveStopRequestedRaw === null ? false : Boolean(liveStopRequestedRaw)
   return {
     id,
     title: typeof session.title === 'string' && session.title.trim()
@@ -289,6 +345,13 @@ function normalizeSession(value: unknown): ChatSession | null {
     sessionAttachmentRefs: normalizeAttachmentRefs(session.sessionAttachmentRefs ?? session.session_attachment_refs),
     codexSessionId,
     codexResumeState,
+    liveRunId,
+    liveRunSeq,
+    liveRunActive,
+    liveAssistantTurnId,
+    liveStatusText,
+    liveRunStartedAt,
+    liveStopRequested,
     createdAt,
     updatedAt,
     lastTaskEventAt:
@@ -498,6 +561,50 @@ export function useCodexChatState(storageUserId?: string | null) {
     }))
   }, [patchSession])
 
+  const setCodexChatLiveRunForSession = React.useCallback((
+    sessionId: string,
+    patch: Partial<Pick<ChatSession, 'liveRunId' | 'liveRunSeq' | 'liveRunActive' | 'liveAssistantTurnId' | 'liveStatusText' | 'liveRunStartedAt' | 'liveStopRequested'>>
+  ) => {
+    patchSession(sessionId, (session) => ({
+      ...session,
+      liveRunId:
+        patch.liveRunId !== undefined
+          ? (patch.liveRunId && String(patch.liveRunId).trim() ? String(patch.liveRunId).trim() : null)
+          : session.liveRunId,
+      liveRunSeq:
+        patch.liveRunSeq !== undefined
+          ? Math.max(0, Math.floor(Number(patch.liveRunSeq) || 0))
+          : session.liveRunSeq,
+      liveRunActive:
+        patch.liveRunActive !== undefined
+          ? Boolean(patch.liveRunActive)
+          : session.liveRunActive,
+      liveAssistantTurnId:
+        patch.liveAssistantTurnId !== undefined
+          ? (patch.liveAssistantTurnId && String(patch.liveAssistantTurnId).trim()
+            ? String(patch.liveAssistantTurnId).trim()
+            : null)
+          : session.liveAssistantTurnId,
+      liveStatusText:
+        patch.liveStatusText !== undefined
+          ? String(patch.liveStatusText || '').trim()
+          : session.liveStatusText,
+      liveRunStartedAt:
+        patch.liveRunStartedAt !== undefined
+          ? (
+              patch.liveRunStartedAt && Number.isFinite(Number(patch.liveRunStartedAt))
+                ? Math.max(0, Math.floor(Number(patch.liveRunStartedAt)))
+                : null
+            )
+          : session.liveRunStartedAt,
+      liveStopRequested:
+        patch.liveStopRequested !== undefined
+          ? Boolean(patch.liveStopRequested)
+          : session.liveStopRequested,
+      updatedAt: Date.now(),
+    }))
+  }, [patchSession])
+
   const mergeCodexChatSessionsFromServer = React.useCallback((
     incomingSnapshots: ChatSessionServerSnapshot[],
     opts?: { activeSessionId?: string | null }
@@ -544,6 +651,38 @@ export function useCodexChatState(storageUserId?: string | null) {
                 : null)
               : (existing?.codexSessionId ?? null),
           codexResumeState: resumeState,
+          liveRunId:
+            snapshot.liveRunId !== undefined
+              ? (String(snapshot.liveRunId || '').trim() || null)
+              : (existing?.liveRunId ?? null),
+          liveRunSeq:
+            snapshot.liveRunSeq !== undefined && Number.isFinite(Number(snapshot.liveRunSeq))
+              ? Math.max(0, Math.floor(Number(snapshot.liveRunSeq)))
+              : (existing?.liveRunSeq ?? 0),
+          liveRunActive:
+            snapshot.liveRunActive !== undefined
+              ? Boolean(snapshot.liveRunActive)
+              : Boolean(existing?.liveRunActive),
+          liveAssistantTurnId:
+            snapshot.liveAssistantTurnId !== undefined
+              ? (String(snapshot.liveAssistantTurnId || '').trim() || null)
+              : (existing?.liveAssistantTurnId ?? null),
+          liveStatusText:
+            snapshot.liveStatusText !== undefined
+              ? String(snapshot.liveStatusText || '').trim()
+              : String(existing?.liveStatusText || ''),
+          liveRunStartedAt:
+            snapshot.liveRunStartedAt !== undefined
+              ? (
+                  snapshot.liveRunStartedAt === null
+                    ? null
+                    : normalizeTimestampMs(snapshot.liveRunStartedAt, existing?.liveRunStartedAt ?? now)
+                )
+              : (existing?.liveRunStartedAt ?? null),
+          liveStopRequested:
+            snapshot.liveStopRequested !== undefined
+              ? Boolean(snapshot.liveStopRequested)
+              : Boolean(existing?.liveStopRequested),
           createdAt,
           updatedAt,
           lastTaskEventAt,
@@ -640,6 +779,13 @@ export function useCodexChatState(storageUserId?: string | null) {
   const codexChatSessionAttachmentRefs = normalizeAttachmentRefs(activeSession?.sessionAttachmentRefs)
   const codexChatCodexSessionId = activeSession?.codexSessionId ?? null
   const codexChatResumeState = activeSession?.codexResumeState ?? null
+  const codexChatLiveRunId = activeSession?.liveRunId ?? null
+  const codexChatLiveRunSeq = activeSession?.liveRunSeq ?? 0
+  const codexChatLiveRunActive = Boolean(activeSession?.liveRunActive)
+  const codexChatLiveAssistantTurnId = activeSession?.liveAssistantTurnId ?? null
+  const codexChatLiveStatusText = activeSession?.liveStatusText ?? ''
+  const codexChatLiveRunStartedAt = activeSession?.liveRunStartedAt ?? null
+  const codexChatLiveStopRequested = Boolean(activeSession?.liveStopRequested)
   const codexChatLastTaskEventAt = activeSession?.lastTaskEventAt ?? null
   const codexChatActiveSessionTitle = activeSession?.title ?? ''
   const codexChatProjectSessions = React.useMemo(() => {
@@ -735,6 +881,14 @@ export function useCodexChatState(storageUserId?: string | null) {
     codexChatResumeState,
     setCodexChatResumeState,
     setCodexChatResumeStateForSession,
+    codexChatLiveRunId,
+    codexChatLiveRunSeq,
+    codexChatLiveRunActive,
+    codexChatLiveAssistantTurnId,
+    codexChatLiveStatusText,
+    codexChatLiveRunStartedAt,
+    codexChatLiveStopRequested,
+    setCodexChatLiveRunForSession,
     setCodexChatMcpServersForSession,
     mergeCodexChatSessionsFromServer,
   }

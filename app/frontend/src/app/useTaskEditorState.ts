@@ -32,6 +32,12 @@ export function useTaskEditorState() {
   const [commentBody, setCommentBody] = React.useState('')
   const [expandedCommentIds, setExpandedCommentIds] = React.useState<Set<string>>(new Set())
   const [automationInstruction, setAutomationInstruction] = React.useState('')
+  const [automationLiveTaskId, setAutomationLiveTaskId] = React.useState<string | null>(null)
+  const [automationLiveRunId, setAutomationLiveRunId] = React.useState<string | null>(null)
+  const [automationLiveActive, setAutomationLiveActive] = React.useState(false)
+  const [automationLiveBuffer, setAutomationLiveBuffer] = React.useState('')
+  const [automationLiveStatusText, setAutomationLiveStatusText] = React.useState('')
+  const [automationLiveUpdatedAt, setAutomationLiveUpdatedAt] = React.useState<string | null>(null)
   const [activityExpandedIds, setActivityExpandedIds] = React.useState<Set<number>>(new Set())
   const [activityShowRawDetails, setActivityShowRawDetails] = React.useState(false)
   const [scrollToNewestComment, setScrollToNewestComment] = React.useState(false)
@@ -59,7 +65,14 @@ export function useTaskEditorState() {
     editStatusTriggerExternalFromStatusesText, setEditStatusTriggerExternalFromStatusesText,
     editStatusTriggerExternalToStatusesText, setEditStatusTriggerExternalToStatusesText,
     commentBody, setCommentBody,
-    expandedCommentIds, setExpandedCommentIds, automationInstruction, setAutomationInstruction, activityExpandedIds,
+    expandedCommentIds, setExpandedCommentIds, automationInstruction, setAutomationInstruction,
+    automationLiveTaskId, setAutomationLiveTaskId,
+    automationLiveRunId, setAutomationLiveRunId,
+    automationLiveActive, setAutomationLiveActive,
+    automationLiveBuffer, setAutomationLiveBuffer,
+    automationLiveStatusText, setAutomationLiveStatusText,
+    automationLiveUpdatedAt, setAutomationLiveUpdatedAt,
+    activityExpandedIds,
     setActivityExpandedIds, activityShowRawDetails, setActivityShowRawDetails, scrollToNewestComment, setScrollToNewestComment,
     uiError, setUiError, uiInfo, setUiInfo, taskEditorError, setTaskEditorError,
     taskEditorHydratedTaskId, setTaskEditorHydratedTaskId,

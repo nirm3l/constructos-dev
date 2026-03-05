@@ -423,6 +423,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const selectedOptionalMcpServers = selectedMcpServers.filter(
     (name) => !CORE_MCP_LOOKUP_KEYS.has(normalizeMcpLookupKey(name))
   )
+  const isChatBusy = Boolean(state.runAgentChatMutation.isPending || state.isCodexChatRunning || state.codexChatLiveRunActive)
   const lastTurnId = state.codexChatTurns.length > 0
     ? state.codexChatTurns[state.codexChatTurns.length - 1]?.id ?? null
     : null
@@ -438,6 +439,42 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const contextFrameSummary = contextFrameMode
     ? `Frame ${contextFrameMode}${contextFrameRevisionShort ? ` · ${contextFrameRevisionShort}` : ''}`
     : null
+  const promptModeRaw = String(usage?.prompt_mode || '').trim().toLowerCase()
+  const promptMode = promptModeRaw === 'resume' || promptModeRaw === 'full' ? promptModeRaw.toUpperCase() : null
+  const promptSegmentChars = usage?.prompt_segment_chars && typeof usage.prompt_segment_chars === 'object'
+    ? usage.prompt_segment_chars
+    : null
+  const promptSegmentEntries = promptSegmentChars
+    ? Object.entries(promptSegmentChars)
+      .filter(([key, value]) => String(key || '').trim() && Number.isFinite(Number(value)) && Number(value) >= 0)
+      .sort((a, b) => Number(b[1]) - Number(a[1]))
+    : []
+  const promptSegmentsTotal = promptSegmentEntries.length > 0
+    ? promptSegmentEntries.reduce((sum, [, value]) => sum + Number(value), 0)
+    : null
+  const promptSegmentsSummary = promptSegmentsTotal !== null
+    ? `Prompt ${promptMode || 'N/A'} · ${(promptSegmentsTotal / 1000).toFixed(1)}k chars`
+    : null
+  const promptSegmentsTooltip = promptSegmentEntries.length > 0
+    ? promptSegmentEntries
+      .slice(0, 6)
+      .map(([key, value]) => `${key}: ${Number(value).toLocaleString()} chars`)
+      .join('\n')
+    : null
+  const contextFrameLabel = contextFrameSummary || null
+  const hasContextMetrics = Boolean(contextSummary || contextFrameLabel || promptSegmentsSummary || promptSegmentsTooltip)
+  const contextMetaText = contextSummary || 'Context'
+  const contextMetricsTooltip = (() => {
+    const lines: string[] = []
+    if (contextSummary) lines.push(contextSummary)
+    if (contextFrameLabel) lines.push(contextFrameLabel)
+    if (promptSegmentsSummary) lines.push(promptSegmentsSummary)
+    if (promptSegmentsTooltip) {
+      lines.push('Segments:')
+      lines.push(promptSegmentsTooltip)
+    }
+    return lines.length > 0 ? lines.join('\n') : null
+  })()
   const codexResumeFallbackUsed = Boolean(
     normalizeBool(state.codexChatResumeState?.fallbackUsed)
     || normalizeBool(usage?.codex_resume_fallback_used)
@@ -460,14 +497,13 @@ export function CodexChatDrawer({ state }: { state: any }) {
     && !state.runAgentChatMutation.isPending
     && !isDeletingSession
   )
-  const canCreateSession = !state.runAgentChatMutation.isPending
+  const canCreateSession = !isChatBusy
   const canUseProjectCreationStarter =
-    !state.runAgentChatMutation.isPending &&
-    !state.isCodexChatRunning &&
+    !isChatBusy &&
     Boolean(state.workspaceId)
   const canQuickConfirmCreate =
     canUseProjectCreationStarter && Boolean(state.workspaceId) && state.codexChatTurns.length > 0
-  const canClearChat = !state.runAgentChatMutation.isPending && state.codexChatTurns.length > 0
+  const canClearChat = !isChatBusy && state.codexChatTurns.length > 0
   const activeSpeechLang = String(state.speechLang || '').trim() || 'en-US'
   const speechLangName = activeSpeechLang === 'bs-BA' ? 'Bosnian' : 'English'
   const speechLangLabel = `${speechLangName} (${activeSpeechLang})`
@@ -503,7 +539,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
       state.setUiError('Voice input is not supported in this browser.')
       return
     }
-    if (state.runAgentChatMutation.isPending || isListening) return
+    if (isChatBusy || isListening) return
 
     const recognition = new Ctor()
     speechBaseInstructionRef.current = state.codexChatInstruction
@@ -584,11 +620,10 @@ export function CodexChatDrawer({ state }: { state: any }) {
         ? 'Listening...'
         : ''
   const canStopChat = Boolean(
-    state.isCodexChatRunning &&
-    state.runAgentChatMutation.isPending &&
+    (state.isCodexChatRunning || state.codexChatLiveRunActive) &&
     typeof state.cancelAgentChat === 'function'
   )
-  const mcpControlsDisabled = state.runAgentChatMutation.isPending
+  const mcpControlsDisabled = isChatBusy
   const handleOptionalMcpServersChange = (values: string[]) => {
     if (typeof state.setCodexChatMcpServers !== 'function') return
     const deduped: string[] = []
@@ -739,11 +774,19 @@ export function CodexChatDrawer({ state }: { state: any }) {
       createdAt: Date.now(),
       attachmentRefs: attachedRefs,
     }
+    const commandId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
     const history = [...state.codexChatTurns, nextUserTurn]
       .slice(-80)
       .map((t: any) => ({ role: t.role, content: t.content }))
     state.setCodexChatTurns((prev: any) => [...prev, nextUserTurn])
     setChatAttachmentRefs([])
+    if (typeof state.setCodexChatLiveRunForSession === 'function' && state.codexChatSessionId) {
+      state.setCodexChatLiveRunForSession(state.codexChatSessionId, {
+        liveRunId: commandId,
+        liveRunStartedAt: Date.now(),
+        liveRunActive: true,
+      })
+    }
     state.setIsCodexChatRunning(true)
     state.setCodexChatRunStartedAt(Date.now())
     state.setCodexChatElapsedSeconds(0)
@@ -757,6 +800,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
       reasoningEffort: effectiveReasoningEffort,
       attachmentRefs: attachedRefs,
       sessionAttachmentRefs,
+      commandId,
     })
   }
 
@@ -795,7 +839,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
             <Select.Root
               value={projectSelectValue}
               onValueChange={(value) => state.selectCodexChatProject(value === '__none__' ? '' : value)}
-              disabled={state.runAgentChatMutation.isPending}
+              disabled={isChatBusy}
             >
               <Select.Trigger
                 id="codex-chat-project-context"
@@ -885,7 +929,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
           <Select.Root
             value={state.codexChatActiveSessionId}
             onValueChange={(value) => state.setCodexChatActiveSessionId(value)}
-            disabled={state.runAgentChatMutation.isPending || sessions.length === 0}
+            disabled={isChatBusy || sessions.length === 0}
           >
             <Select.Trigger
               id="codex-chat-session-select"
@@ -988,14 +1032,10 @@ export function CodexChatDrawer({ state }: { state: any }) {
                 )}
               </div>
             )}
-            {contextSummary && (
-              <span className="codex-chat-session-meta-context">
-                {contextSummary}
-                {contextFrameSummary ? ` · ${contextFrameSummary}` : ''}
-              </span>
-            )}
-            {!contextSummary && contextFrameSummary && (
-              <span className="codex-chat-session-meta-context">{contextFrameSummary}</span>
+            {hasContextMetrics && (
+              <ChatTooltip content={contextMetricsTooltip || 'Context metrics unavailable.'}>
+                <span className="codex-chat-session-meta-context">{contextMetaText}</span>
+              </ChatTooltip>
             )}
           </div>
         )}
@@ -1259,7 +1299,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
                       }
                       startVoiceInput()
                     }}
-                    disabled={state.runAgentChatMutation.isPending || !speechSupported}
+                    disabled={isChatBusy || !speechSupported}
                     aria-label={isListening ? 'Stop voice input' : 'Start voice input'}
                   >
                     <Icon path="M12 15a3 3 0 0 0 3-3V7a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0m5 5v4m-4 0h8" />
@@ -1298,7 +1338,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
                     }
                     fileInputRef.current?.click()
                   }}
-                  disabled={state.runAgentChatMutation.isPending || isUploadingAttachments || isUpdatingSessionAttachments}
+                  disabled={isChatBusy || isUploadingAttachments || isUpdatingSessionAttachments}
                   aria-label="Attach files"
                 >
                   <Icon path="M21.44 11.05l-8.49 8.49a5.5 5.5 0 0 1-7.78-7.78l9.19-9.2a3.5 3.5 0 1 1 4.95 4.95l-9.2 9.19a1.5 1.5 0 0 1-2.12-2.12l8.48-8.49" />
@@ -1344,7 +1384,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
                     sendChatInstruction(state.codexChatInstruction, { clearInput: true })
                   }}
                   disabled={
-                    state.runAgentChatMutation.isPending
+                    isChatBusy
                     || isUploadingAttachments
                     || isUpdatingSessionAttachments
                     || !state.codexChatInstruction.trim()

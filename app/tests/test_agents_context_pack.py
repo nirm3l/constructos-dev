@@ -522,6 +522,36 @@ def test_codex_resume_prompt_includes_compact_fresh_evidence_snapshot():
     assert "score=0.992" in prompt
 
 
+def test_prompt_segment_char_stats_uses_instruction_breakdown():
+    from features.agents.codex_mcp_adapter import _prompt_segment_char_stats
+
+    stats = _prompt_segment_char_stats(
+        {
+            "instruction": "short",
+            "prompt_instruction_segments": {
+                "user_instruction": 120,
+                "attachment_context": 450,
+                "cross_session_updates": 210,
+            },
+            "trigger_task_id": "",
+            "trigger_from_status": "",
+            "trigger_to_status": "",
+            "trigger_timestamp": "",
+            "gate_policy_json": "{}",
+            "gate_policy_required_checks": "",
+            "graph_summary_markdown": "",
+            "graph_evidence_json": "[]",
+        },
+        mode="resume",
+    )
+
+    assert stats["instruction"] == 780
+    assert stats["instruction_user_instruction"] == 120
+    assert stats["instruction_attachment_context"] == 450
+    assert stats["instruction_cross_session_updates"] == 210
+    assert "fresh_memory_snapshot" in stats
+
+
 def test_codex_resume_prompt_includes_task_workspace_context():
     from features.agents.codex_mcp_adapter import _build_resume_prompt
 

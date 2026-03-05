@@ -192,51 +192,74 @@ export function useTaskMutations(c: any) {
       const taskId = c.selectedTaskId as string
       const rawInstruction = String(c.automationInstruction || '').trim()
       if (!rawInstruction) throw new Error('Instruction is required')
+      c.setAutomationLiveTaskId(null)
+      c.setAutomationLiveRunId(null)
+      c.setAutomationLiveActive(false)
+      c.setAutomationLiveBuffer('')
+      c.setAutomationLiveStatusText('')
+      c.setAutomationLiveUpdatedAt(null)
       const dispatchMatch = rawInstruction.match(/^#dispatch\b\s*/i)
       if (dispatchMatch) {
         const queuedInstruction = rawInstruction.slice(dispatchMatch[0].length).trim() || rawInstruction
         return runTaskWithCodex(c.userId, taskId, queuedInstruction)
       }
-      await c.qc.invalidateQueries({ queryKey: ['automation-status', c.userId, taskId] })
+      const key = ['automation-status', c.userId, taskId] as const
+      await c.qc.cancelQueries({ queryKey: key })
+      const runId = globalThis.crypto?.randomUUID?.() ?? `run-${Date.now()}`
+      let streamBuffer = ''
+      c.setAutomationLiveTaskId(taskId)
+      c.setAutomationLiveRunId(runId)
+      c.setAutomationLiveActive(true)
+      c.setAutomationLiveBuffer('')
+      c.setAutomationLiveStatusText('Running...')
+      c.setAutomationLiveUpdatedAt(new Date().toISOString())
+      c.qc.setQueryData(key, (current: any) => {
+        const existing = current && typeof current === 'object' ? current : {}
+        const nowIso = new Date().toISOString()
+        return {
+          ...existing,
+          task_id: taskId,
+          automation_state: 'running',
+          last_agent_progress: '',
+          last_agent_comment: null,
+          last_agent_error: null,
+          last_agent_stream_status: 'Running...',
+          last_agent_stream_updated_at: nowIso,
+          last_requested_instruction: rawInstruction,
+          last_requested_source: 'manual_stream',
+        }
+      })
       return runTaskAutomationStream(c.userId, taskId, rawInstruction, {
         onAssistantDelta: (delta) => {
-          const key = ['automation-status', c.userId, taskId] as const
-          c.qc.setQueryData(key, (current: any) => {
-            const existing = current && typeof current === 'object' ? current : {}
-            const previous = String(existing.last_agent_progress || '')
-            return {
-              ...existing,
-              task_id: taskId,
-              automation_state: 'running',
-              last_agent_progress: `${previous}${delta}`,
-              last_agent_stream_status: 'Running...',
-              last_agent_stream_updated_at: new Date().toISOString(),
-            }
-          })
+          streamBuffer += String(delta || '')
+          c.setAutomationLiveBuffer(streamBuffer)
+          c.setAutomationLiveUpdatedAt(new Date().toISOString())
         },
         onStatus: (message) => {
-          const key = ['automation-status', c.userId, taskId] as const
-          c.qc.setQueryData(key, (current: any) => {
-            const existing = current && typeof current === 'object' ? current : {}
-            return {
-              ...existing,
-              task_id: taskId,
-              automation_state: 'running',
-              last_agent_stream_status: String(message || '').trim() || 'Running...',
-              last_agent_stream_updated_at: new Date().toISOString(),
-            }
-          })
+          c.setAutomationLiveStatusText(String(message || '').trim() || 'Running...')
+          c.setAutomationLiveUpdatedAt(new Date().toISOString())
         },
       })
     },
     onSuccess: async () => {
       c.setUiError(null)
       c.setAutomationInstruction('')
+      c.setAutomationLiveActive(false)
+      c.setAutomationLiveStatusText('')
+      c.setAutomationLiveBuffer('')
+      c.setAutomationLiveUpdatedAt(null)
       await c.qc.invalidateQueries({ queryKey: ['automation-status', c.userId, c.selectedTaskId] })
       await c.qc.invalidateQueries({ queryKey: ['activity', c.userId, c.selectedTaskId] })
       await c.qc.invalidateQueries({ queryKey: ['tasks'] })
     },
-    onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Codex run failed')
+    onError: async (err) => {
+      c.setUiError(err instanceof Error ? err.message : 'Codex run failed')
+      c.setAutomationLiveActive(false)
+      c.setAutomationLiveStatusText('')
+      c.setAutomationLiveBuffer('')
+      c.setAutomationLiveUpdatedAt(null)
+      await c.qc.invalidateQueries({ queryKey: ['automation-status', c.userId, c.selectedTaskId] })
+    }
   })
 
   const createTaskGroupMutation = useMutation({

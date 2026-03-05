@@ -16,7 +16,7 @@ import uuid
 import zipfile
 import xml.etree.ElementTree as ET
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -42,6 +42,7 @@ from shared.models import (
     ProjectRule,
     Task,
 )
+from shared.in_memory_stream_broker import InMemoryStreamBroker
 from shared.settings import (
     ATTACHMENTS_DIR,
     AGENT_CHAT_HISTORY_COMPACT_THRESHOLD,
@@ -129,6 +130,93 @@ _CREATED_RESOURCE_ACTIONS: dict[str, str] = {
     "SpecificationCreated": "specification",
     "ProjectRuleCreated": "project_rule",
 }
+
+_CHAT_STREAM_BROKER = InMemoryStreamBroker(max_events=1500)
+_CHAT_STREAM_CANCEL_LOCK = threading.Lock()
+_CHAT_STREAM_CANCEL_EVENTS: dict[str, threading.Event] = {}
+_CHAT_STREAM_CANCEL_BY_KEY: dict[str, tuple[str, threading.Event]] = {}
+_CHAT_STREAM_STOP_REQUESTED_BY_KEY: dict[str, bool] = {}
+
+
+def _chat_stream_key(*, workspace_id: str, session_id: str) -> str:
+    return f"{str(workspace_id or '').strip()}::{str(session_id or '').strip()}"
+
+
+def _create_chat_stream_run(*, stream_key: str, preferred_run_id: str | None = None) -> str:
+    return _CHAT_STREAM_BROKER.create_run(key=stream_key, preferred_run_id=preferred_run_id)
+
+
+def _publish_chat_stream_event(*, stream_key: str, event: dict[str, object]) -> dict[str, object] | None:
+    return _CHAT_STREAM_BROKER.publish_event(key=stream_key, event=event)
+
+
+def _finish_chat_stream_run(*, stream_key: str) -> None:
+    _CHAT_STREAM_BROKER.finish_run(key=stream_key)
+
+
+def _subscribe_chat_stream_run(
+    *,
+    stream_key: str,
+    run_id: str,
+    since_seq: int,
+) -> tuple[queue.Queue[dict[str, object]], list[dict[str, object]], bool]:
+    return _CHAT_STREAM_BROKER.subscribe_run(key=stream_key, run_id=run_id, since_seq=since_seq)
+
+
+def _unsubscribe_chat_stream_run(*, stream_key: str, subscriber_queue: queue.Queue[dict[str, object]]) -> None:
+    _CHAT_STREAM_BROKER.unsubscribe_run(key=stream_key, subscriber_queue=subscriber_queue)
+
+
+def _chat_stream_cancel_key(*, stream_key: str, run_id: str) -> str:
+    return f"{stream_key}::{str(run_id or '').strip()}"
+
+
+def _register_chat_stream_cancel_event(*, stream_key: str, run_id: str) -> threading.Event:
+    event = threading.Event()
+    key = _chat_stream_cancel_key(stream_key=stream_key, run_id=run_id)
+    with _CHAT_STREAM_CANCEL_LOCK:
+        _CHAT_STREAM_CANCEL_EVENTS[key] = event
+        _CHAT_STREAM_CANCEL_BY_KEY[stream_key] = (str(run_id or "").strip(), event)
+    return event
+
+
+def _request_chat_stream_cancel(*, stream_key: str, run_id: str) -> bool:
+    normalized_run_id = str(run_id or "").strip()
+    key = _chat_stream_cancel_key(stream_key=stream_key, run_id=normalized_run_id)
+    with _CHAT_STREAM_CANCEL_LOCK:
+        event = _CHAT_STREAM_CANCEL_EVENTS.get(key)
+        if event is None:
+            current = _CHAT_STREAM_CANCEL_BY_KEY.get(stream_key)
+            if isinstance(current, tuple) and len(current) == 2:
+                event = current[1]
+    if event is None:
+        return False
+    event.set()
+    return True
+
+
+def _clear_chat_stream_cancel_event(*, stream_key: str, run_id: str) -> None:
+    key = _chat_stream_cancel_key(stream_key=stream_key, run_id=run_id)
+    with _CHAT_STREAM_CANCEL_LOCK:
+        _CHAT_STREAM_CANCEL_EVENTS.pop(key, None)
+        current = _CHAT_STREAM_CANCEL_BY_KEY.get(stream_key)
+        if isinstance(current, tuple) and len(current) == 2:
+            current_run_id = str(current[0] or "").strip()
+            if current_run_id == str(run_id or "").strip():
+                _CHAT_STREAM_CANCEL_BY_KEY.pop(stream_key, None)
+
+
+def _set_chat_stream_stop_requested(*, stream_key: str, value: bool) -> None:
+    with _CHAT_STREAM_CANCEL_LOCK:
+        if value:
+            _CHAT_STREAM_STOP_REQUESTED_BY_KEY[stream_key] = True
+        else:
+            _CHAT_STREAM_STOP_REQUESTED_BY_KEY.pop(stream_key, None)
+
+
+def _is_chat_stream_stop_requested(*, stream_key: str) -> bool:
+    with _CHAT_STREAM_CANCEL_LOCK:
+        return bool(_CHAT_STREAM_STOP_REQUESTED_BY_KEY.get(stream_key))
 
 
 @lru_cache(maxsize=16)
@@ -355,11 +443,23 @@ def _extract_pdf_text(path: Path, *, max_chars: int) -> tuple[str, bool, str | N
     return full_text, truncated, None
 
 
+def _attachment_checksum(*, path: str, mime_type: str, size_bytes: int, snippet: str) -> str:
+    payload = {
+        "path": path,
+        "mime_type": mime_type,
+        "size_bytes": size_bytes,
+        "snippet": _truncate_chat_delta_text(snippet, max_chars=2048),
+    }
+    material = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def _build_attachment_context(
     *,
     payload: AgentChatRun,
     db: Session,
     user: User,
+    reuse_session_extracted_context: bool = False,
 ) -> tuple[str, list[dict[str, object]], list[dict[str, object]]]:
     def _ref_value(ref: object, field: str) -> object:
         if isinstance(ref, dict):
@@ -416,13 +516,46 @@ def _build_attachment_context(
 
         display_name = str(_ref_value(ref, "name") or Path(path).name or f"attachment-{index}").strip()
         mime_type = str(_ref_value(ref, "mime_type") or "").strip() or mimetypes.guess_type(display_name)[0] or ""
+        size_bytes = int(candidate.stat().st_size)
         normalized_ref: dict[str, object] = {
             "path": path,
             "name": display_name,
             "mime_type": mime_type or None,
-            "size_bytes": int(candidate.stat().st_size),
+            "size_bytes": size_bytes,
             "extraction_status": "pending",
         }
+        ref_checksum = str(_ref_value(ref, "checksum") or "").strip()
+        if ref_checksum:
+            normalized_ref["checksum"] = ref_checksum
+
+        is_message_ref = path_key in message_ref_paths
+        is_session_ref = path_key in session_ref_paths
+        prior_status = str(_ref_value(ref, "extraction_status") or "").strip().lower()
+        prior_extracted_text = str(_ref_value(ref, "extracted_text") or "").strip()
+        can_reuse_session_context = (
+            reuse_session_extracted_context
+            and is_session_ref
+            and not is_message_ref
+            and (prior_status in {"extracted", "truncated", "reused"} or bool(prior_extracted_text))
+        )
+        if can_reuse_session_context:
+            normalized_ref["extraction_status"] = "reused"
+            if not ref_checksum:
+                normalized_ref["checksum"] = _attachment_checksum(
+                    path=path,
+                    mime_type=mime_type,
+                    size_bytes=size_bytes,
+                    snippet=prior_extracted_text,
+                )
+            short_checksum = str(normalized_ref.get("checksum") or "").strip()[:10]
+            checksum_text = f"; checksum={short_checksum}" if short_checksum else ""
+            lines.append(f"Attachment {index}: {display_name} (reused from session memory{checksum_text})")
+            if is_message_ref:
+                processed_message_refs.append(normalized_ref)
+            if is_session_ref:
+                processed_session_refs.append(normalized_ref)
+            lines.append("")
+            continue
 
         lines.append(f"Attachment {index}: {display_name}")
         lines.append(f"Path: {path}")
@@ -432,9 +565,9 @@ def _build_attachment_context(
         if remaining_chars <= 0:
             lines.append("Content: omitted (chat attachment context limit reached).")
             normalized_ref["extraction_status"] = "skipped_limit"
-            if path_key in message_ref_paths:
+            if is_message_ref:
                 processed_message_refs.append(normalized_ref)
-            if path_key in session_ref_paths:
+            if is_session_ref:
                 processed_session_refs.append(normalized_ref)
             lines.append("")
             break
@@ -454,6 +587,12 @@ def _build_attachment_context(
         if snippet:
             normalized_ref["extraction_status"] = "extracted" if not truncated else "truncated"
             normalized_ref["extracted_text"] = snippet
+            normalized_ref["checksum"] = _attachment_checksum(
+                path=path,
+                mime_type=mime_type,
+                size_bytes=size_bytes,
+                snippet=snippet,
+            )
             lines.append("Content:")
             lines.append(snippet)
             if truncated:
@@ -462,9 +601,16 @@ def _build_attachment_context(
         else:
             normalized_ref["extraction_status"] = "skipped"
             lines.append(status_message or "Content: omitted (empty or unreadable file).")
-        if path_key in message_ref_paths:
+            if not ref_checksum:
+                normalized_ref["checksum"] = _attachment_checksum(
+                    path=path,
+                    mime_type=mime_type,
+                    size_bytes=size_bytes,
+                    snippet="",
+                )
+        if is_message_ref:
             processed_message_refs.append(normalized_ref)
-        if path_key in session_ref_paths:
+        if is_session_ref:
             processed_session_refs.append(normalized_ref)
         lines.append("")
 
@@ -492,6 +638,9 @@ def _build_attachment_context(
             else None,
             "extraction_status": "skipped_file_limit",
         }
+        checksum = str(_ref_value(ref, "checksum") or "").strip()
+        if checksum:
+            normalized_ref["checksum"] = checksum
         if path_key in message_ref_paths:
             processed_message_refs.append(normalized_ref)
         if path_key in session_ref_paths:
@@ -569,8 +718,14 @@ def _coerce_bool(value: object) -> bool | None:
     return None
 
 
-def _build_usage_with_resume_metadata(outcome: AutomationOutcome) -> dict[str, object]:
+def _build_usage_with_resume_metadata(
+    outcome: AutomationOutcome,
+    *,
+    extra_usage: dict[str, object] | None = None,
+) -> dict[str, object]:
     usage_payload: dict[str, object] = dict(outcome.usage or {})
+    if isinstance(extra_usage, dict):
+        usage_payload.update(extra_usage)
     usage_payload["codex_resume_attempted"] = bool(outcome.resume_attempted)
     usage_payload["codex_resume_succeeded"] = bool(outcome.resume_succeeded)
     usage_payload["codex_resume_fallback_used"] = bool(outcome.resume_fallback_used)
@@ -821,6 +976,7 @@ def _load_cross_session_recent_updates(
     message_time = func.coalesce(ChatMessage.turn_created_at, ChatMessage.created_at)
     base_query = (
         select(
+            ChatMessage.id,
             ChatMessage.role,
             ChatMessage.content,
             ChatSession.session_key,
@@ -853,18 +1009,23 @@ def _load_cross_session_recent_updates(
         rows = db.execute(fallback_query).all()
     out: list[dict[str, str]] = []
     seen: set[str] = set()
-    for role_raw, content_raw, source_session_key, _ in rows:
+    for message_id_raw, role_raw, content_raw, source_session_key, _ in rows:
         content = _truncate_chat_delta_text(str(content_raw or ""))
         if not content:
             continue
         normalized_role = "assistant" if str(role_raw or "").strip().lower() == "assistant" else "user"
         source_key = str(source_session_key or "").strip()
+        message_id = str(message_id_raw or "").strip()
+        update_id = hashlib.sha256(
+            f"{message_id}|{source_key}|{normalized_role}|{content}".encode("utf-8")
+        ).hexdigest()[:24]
         dedupe_key = f"{source_key}|{normalized_role}|{content}".lower()
         if dedupe_key in seen:
             continue
         seen.add(dedupe_key)
         out.append(
             {
+                "update_id": update_id,
                 "role": normalized_role,
                 "content": content,
                 "source_session_key": source_key,
@@ -888,7 +1049,9 @@ def _compose_cross_session_updates_text(updates: list[dict[str, str]]) -> str:
         content = str(item.get("content") or "").strip()
         if not content:
             continue
-        lines.append(f"- {source_label}{role_label}: {content}")
+        update_id = str(item.get("update_id") or "").strip()
+        update_prefix = f"[{update_id}] " if update_id else ""
+        lines.append(f"- {update_prefix}{source_label}{role_label}: {content}")
     if not lines:
         return ""
     return (
@@ -1005,8 +1168,70 @@ def _load_persisted_session_attachment_refs(
         checksum = str(item.get("checksum") or "").strip()
         if checksum:
             normalized["checksum"] = checksum
+        extraction_status = str(item.get("extraction_status") or "").strip().lower()
+        if extraction_status in {"extracted", "truncated", "reused", "skipped", "skipped_limit", "skipped_file_limit"}:
+            normalized["extraction_status"] = extraction_status
+        extracted_text = str(item.get("extracted_text") or "").strip()
+        if extracted_text:
+            normalized["extracted_text"] = extracted_text
         out.append(normalized)
     return out
+
+
+def _load_chat_session_usage_metadata(
+    *,
+    db: Session,
+    user: User,
+    workspace_id: str,
+    session_id: str | None,
+) -> dict[str, object]:
+    session_key = str(session_id or "").strip()
+    if not session_key:
+        return {}
+    session = db.execute(
+        select(ChatSession).where(
+            ChatSession.workspace_id == workspace_id,
+            ChatSession.session_key == session_key,
+            ChatSession.created_by == user.id,
+        )
+    ).scalar_one_or_none()
+    if session is None:
+        return {}
+    if session.project_id:
+        ensure_project_access(db, workspace_id, session.project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    try:
+        payload = json.loads(session.usage_json or "{}")
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _load_sent_cross_session_update_ids(
+    *,
+    db: Session,
+    user: User,
+    workspace_id: str,
+    session_id: str | None,
+    max_items: int = 160,
+) -> list[str]:
+    usage = _load_chat_session_usage_metadata(
+        db=db,
+        user=user,
+        workspace_id=workspace_id,
+        session_id=session_id,
+    )
+    raw = usage.get("sent_cross_session_update_ids")
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        update_id = str(item or "").strip()
+        if not update_id or update_id in seen:
+            continue
+        seen.add(update_id)
+        out.append(update_id)
+    return out[-max(1, int(max_items)) :]
 
 
 def _parse_compact_command(instruction: str) -> tuple[bool, str]:
@@ -1669,7 +1894,15 @@ def _prepare_chat_instruction(
     user: User,
     resume_codex_session_id: str | None = None,
     resume_last_succeeded: bool | None = None,
-) -> tuple[str, list[dict[str, str]], bool, list[dict[str, object]], list[dict[str, object]], dict[str, bool]]:
+) -> tuple[
+    str,
+    list[dict[str, str]],
+    bool,
+    list[dict[str, object]],
+    list[dict[str, object]],
+    dict[str, bool],
+    dict[str, object],
+]:
     raw_instruction = (payload.instruction or "").strip()
     force_compact, instruction = _parse_compact_command(raw_instruction)
     if not raw_instruction:
@@ -1718,11 +1951,19 @@ def _prepare_chat_instruction(
             summary = "Chat history compacted."
         else:
             summary = "Chat history compaction skipped."
-        return summary, compacted_history, True, [], [], {
-            "execution_intent": False,
-            "execution_kickoff_intent": False,
-            "project_creation_intent": False,
-        }
+        return (
+            summary,
+            compacted_history,
+            True,
+            [],
+            [],
+            {
+                "execution_intent": False,
+                "execution_kickoff_intent": False,
+                "project_creation_intent": False,
+            },
+            {"prompt_instruction_segments": {"user_instruction": len(instruction)}},
+        )
     if not instruction:
         raise HTTPException(status_code=400, detail="instruction is required")
 
@@ -1730,15 +1971,19 @@ def _prepare_chat_instruction(
         payload=payload_for_attachments,
         db=db,
         user=user,
+        reuse_session_extracted_context=resume_active,
     )
     instruction_with_context = instruction
+    instruction_segments: dict[str, int] = {"user_instruction": len(instruction)}
     if attachment_context:
         instruction_with_context = f"{instruction}\n\n{attachment_context}"
+        instruction_segments["attachment_context"] = len(attachment_context)
     intent_flags = {
         "execution_intent": False,
         "execution_kickoff_intent": False,
         "project_creation_intent": False,
     }
+    mandate_text = ""
     if (
         payload.allow_mutations
         and str(payload.project_id or "").strip()
@@ -1750,7 +1995,10 @@ def _prepare_chat_instruction(
             session_id=payload.session_id,
         )
         if bool(intent_flags.get("execution_intent")):
-            instruction_with_context = f"{instruction_with_context}\n\n{_build_execution_intent_mandate()}"
+            mandate_text = _build_execution_intent_mandate()
+            instruction_with_context = f"{instruction_with_context}\n\n{mandate_text}"
+            instruction_segments["intent_mandate"] = len(mandate_text)
+    usage_metadata: dict[str, object] = {"prompt_instruction_segments": instruction_segments}
     if resume_active:
         # For resumed Codex threads, avoid resending stitched history on every turn.
         # Instead, inject only small fresh deltas from other project chat sessions so stale
@@ -1762,7 +2010,38 @@ def _prepare_chat_instruction(
             project_id=payload.project_id,
             session_id=payload.session_id,
         )
-        cross_session_updates_text = _compose_cross_session_updates_text(cross_session_updates)
+        already_sent_update_ids_list = _load_sent_cross_session_update_ids(
+            db=db,
+            user=user,
+            workspace_id=payload.workspace_id,
+            session_id=payload.session_id,
+        )
+        already_sent_update_ids = set(already_sent_update_ids_list)
+        if already_sent_update_ids_list:
+            # Preserve dedupe memory across turns even when there are no new
+            # cross-session updates in the current turn.
+            usage_metadata["sent_cross_session_update_ids"] = already_sent_update_ids_list[-160:]
+        cross_session_updates_filtered = [
+            item
+            for item in cross_session_updates
+            if str(item.get("update_id") or "").strip() not in already_sent_update_ids
+        ]
+        cross_session_updates_text = _compose_cross_session_updates_text(cross_session_updates_filtered)
+        if cross_session_updates_text:
+            instruction_segments["cross_session_updates"] = len(cross_session_updates_text)
+        if cross_session_updates_filtered:
+            combined_ids = [
+                *list(already_sent_update_ids),
+                *[str(item.get("update_id") or "").strip() for item in cross_session_updates_filtered],
+            ]
+            deduped_ids: list[str] = []
+            seen_ids: set[str] = set()
+            for update_id in combined_ids:
+                if not update_id or update_id in seen_ids:
+                    continue
+                seen_ids.add(update_id)
+                deduped_ids.append(update_id)
+            usage_metadata["sent_cross_session_update_ids"] = deduped_ids[-160:]
         effective_instruction = (
             f"{instruction_with_context}\n\n{cross_session_updates_text}"
             if cross_session_updates_text
@@ -1770,6 +2049,9 @@ def _prepare_chat_instruction(
         )
     else:
         effective_instruction = _compose_chat_instruction(instruction_with_context, compacted_history)
+        history_stitch_chars = max(0, len(effective_instruction) - len(instruction_with_context))
+        if history_stitch_chars > 0:
+            instruction_segments["history_stitch"] = history_stitch_chars
     return (
         effective_instruction,
         compacted_history,
@@ -1777,6 +2059,7 @@ def _prepare_chat_instruction(
         prepared_attachment_refs,
         prepared_session_attachment_refs,
         intent_flags,
+        usage_metadata,
     )
 
 
@@ -1812,6 +2095,7 @@ def agent_chat(
         prepared_attachment_refs,
         prepared_session_attachment_refs,
         intent_flags,
+        chat_usage_metadata,
     ) = _prepare_chat_instruction(
         payload=payload_with_session,
         db=db,
@@ -1852,7 +2136,7 @@ def agent_chat(
             session_id=session_id,
             mcp_servers=mcp_servers,
             content=effective_instruction,
-            usage={},
+            usage=dict(chat_usage_metadata or {}),
             codex_session_id=None,
         )
         return {
@@ -1937,6 +2221,11 @@ def agent_chat(
             mcp_servers=mcp_servers,
             model=model,
             reasoning_effort=reasoning_effort,
+            prompt_instruction_segments=(
+                chat_usage_metadata.get("prompt_instruction_segments")
+                if isinstance(chat_usage_metadata, dict)
+                else None
+            ),
             timeout_seconds=0,
         )
         ok_by_contract, final_summary, final_comment = _apply_execution_evidence_contract(
@@ -1969,7 +2258,10 @@ def agent_chat(
             session_id=session_id,
             mcp_servers=mcp_servers,
             content=_assistant_text(final_summary, final_comment),
-            usage=_build_usage_with_resume_metadata(outcome),
+            usage=_build_usage_with_resume_metadata(
+                outcome,
+                extra_usage=(chat_usage_metadata if isinstance(chat_usage_metadata, dict) else None),
+            ),
             codex_session_id=outcome.codex_session_id,
             run_started_at=run_started_at,
         )
@@ -2077,6 +2369,7 @@ def agent_chat_stream(
         prepared_attachment_refs,
         prepared_session_attachment_refs,
         intent_flags,
+        chat_usage_metadata,
     ) = _prepare_chat_instruction(
         payload=payload_with_session,
         db=db,
@@ -2123,7 +2416,7 @@ def agent_chat_stream(
             session_id=session_id,
             mcp_servers=mcp_servers,
             content=effective_instruction,
-            usage={},
+            usage=dict(chat_usage_metadata or {}),
             codex_session_id=None,
         )
         compact_response = {
@@ -2191,12 +2484,47 @@ def agent_chat_stream(
 
     description = f"General Codex chat context. workspace_id={payload.workspace_id}; project_id={effective_project_id or ''}"
     run_started_at = datetime.now(timezone.utc)
+    stream_key = _chat_stream_key(workspace_id=payload.workspace_id, session_id=session_id)
+    run_id = _create_chat_stream_run(
+        stream_key=stream_key,
+        preferred_run_id=str(command_id or "").strip() or None,
+    )
+    _set_chat_stream_stop_requested(stream_key=stream_key, value=False)
+    cancel_event = _register_chat_stream_cancel_event(stream_key=stream_key, run_id=run_id)
 
     def _stream() -> object:
-        event_queue: queue.Queue[dict[str, object] | None] = queue.Queue()
+        subscriber_queue, replay_events, _ = _subscribe_chat_stream_run(
+            stream_key=stream_key,
+            run_id=run_id,
+            since_seq=0,
+        )
+        done_event = threading.Event()
+        outcome_holder: dict[str, object] = {}
+        error_holder: dict[str, Exception] = {}
+        finalize_lock = threading.Lock()
+        finalized_response: dict[str, object] = {}
+        streamed_assistant_text_parts: list[str] = []
+        streamed_parts_lock = threading.Lock()
+
+        _publish_chat_stream_event(
+            stream_key=stream_key,
+            event={"type": "stream_run", "run_id": run_id},
+        )
+        _publish_chat_stream_event(
+            stream_key=stream_key,
+            event={"type": "status", "message": "Codex started processing the request."},
+        )
 
         def _on_event(event: dict[str, object]) -> None:
-            event_queue.put(event)
+            if cancel_event.is_set() or _is_chat_stream_stop_requested(stream_key=stream_key):
+                return
+            item_type = str(event.get("type") or "").strip().lower()
+            if item_type == "assistant_text":
+                delta = str(event.get("delta") or "")
+                if delta:
+                    with streamed_parts_lock:
+                        streamed_assistant_text_parts.append(delta)
+            _publish_chat_stream_event(stream_key=stream_key, event=dict(event))
 
         def _worker() -> None:
             try:
@@ -2216,115 +2544,285 @@ def agent_chat_stream(
                     on_event=_on_event,
                     model=model,
                     reasoning_effort=reasoning_effort,
+                    prompt_instruction_segments=(
+                        chat_usage_metadata.get("prompt_instruction_segments")
+                        if isinstance(chat_usage_metadata, dict)
+                        else None
+                    ),
                     timeout_seconds=0,
+                    stream_plain_text=True,
+                    cancel_event=cancel_event,
                 )
-                final_payload = {
-                    "ok": True,
-                    "action": outcome.action,
-                    "summary": outcome.summary,
-                    "comment": outcome.comment,
-                    "session_id": session_id,
-                    "codex_session_id": outcome.codex_session_id,
-                    "usage": outcome.usage,
-                    "resume_attempted": bool(outcome.resume_attempted),
-                    "resume_succeeded": bool(outcome.resume_succeeded),
-                    "resume_fallback_used": bool(outcome.resume_fallback_used),
-                }
-                event_queue.put({"type": "final", "response": final_payload})
+                outcome_holder["value"] = outcome
             except TimeoutError:
-                timeout_payload = {
-                    "ok": False,
-                    "action": "comment",
-                    "summary": _chat_timeout_summary(),
-                    "comment": _build_chat_timeout_comment(),
-                    "session_id": session_id,
-                    "codex_session_id": None,
-                    "usage": None,
-                    "resume_attempted": False,
-                    "resume_succeeded": False,
-                    "resume_fallback_used": False,
-                }
-                event_queue.put({"type": "final", "response": timeout_payload})
+                error_holder["value"] = TimeoutError(_chat_timeout_summary())
             except Exception as exc:
                 logger.exception("Agent chat stream worker failed.")
-                error_detail = str(exc).strip()
-                if not error_detail:
-                    error_detail = type(exc).__name__
-                error_payload = {
-                    "ok": False,
-                    "action": "comment",
-                    "summary": _build_chat_error_summary(),
-                    "comment": error_detail[:500],
-                    "session_id": session_id,
-                    "codex_session_id": None,
-                    "usage": None,
-                    "resume_attempted": False,
-                    "resume_succeeded": False,
-                    "resume_fallback_used": False,
-                }
-                event_queue.put({"type": "final", "response": error_payload})
+                error_holder["value"] = exc
             finally:
-                event_queue.put(None)
+                done_event.set()
+
+        def _finalize_once() -> dict[str, object]:
+            with finalize_lock:
+                existing = finalized_response.get("value")
+                if isinstance(existing, dict):
+                    return existing
+
+                if "value" in error_holder:
+                    exc = error_holder["value"]
+                    error_detail = str(exc).strip() or type(exc).__name__
+                    if isinstance(exc, TimeoutError):
+                        response = {
+                            "ok": False,
+                            "action": "comment",
+                            "summary": _chat_timeout_summary(),
+                            "comment": _build_chat_timeout_comment(),
+                            "session_id": session_id,
+                            "codex_session_id": None,
+                            "usage": None,
+                            "resume_attempted": False,
+                            "resume_succeeded": False,
+                            "resume_fallback_used": False,
+                        }
+                    else:
+                        response = {
+                            "ok": False,
+                            "action": "comment",
+                            "summary": _build_chat_error_summary(),
+                            "comment": error_detail[:500],
+                            "session_id": session_id,
+                            "codex_session_id": None,
+                            "usage": None,
+                            "resume_attempted": False,
+                            "resume_succeeded": False,
+                            "resume_fallback_used": False,
+                        }
+                else:
+                    outcome = outcome_holder.get("value")
+                    if outcome is None:
+                        response = {
+                            "ok": False,
+                            "action": "comment",
+                            "summary": _build_chat_error_summary(),
+                            "comment": "Missing automation outcome.",
+                            "session_id": session_id,
+                            "codex_session_id": None,
+                            "usage": None,
+                            "resume_attempted": False,
+                            "resume_succeeded": False,
+                            "resume_fallback_used": False,
+                        }
+                    else:
+                        outcome_obj = outcome  # type: ignore[assignment]
+                        response = {
+                            "ok": True,
+                            "action": getattr(outcome_obj, "action", "comment"),
+                            "summary": getattr(outcome_obj, "summary", ""),
+                            "comment": getattr(outcome_obj, "comment", ""),
+                            "session_id": session_id,
+                            "codex_session_id": getattr(outcome_obj, "codex_session_id", None),
+                            "usage": getattr(outcome_obj, "usage", None),
+                            "resume_attempted": bool(getattr(outcome_obj, "resume_attempted", False)),
+                            "resume_succeeded": bool(getattr(outcome_obj, "resume_succeeded", False)),
+                            "resume_fallback_used": bool(getattr(outcome_obj, "resume_fallback_used", False)),
+                        }
+
+                if cancel_event.is_set() or _is_chat_stream_stop_requested(stream_key=stream_key):
+                    response = {
+                        "ok": True,
+                        "action": "comment",
+                        "summary": "Stopped.",
+                        "comment": "Run cancelled by user.",
+                        "session_id": session_id,
+                        "codex_session_id": None,
+                        "usage": None,
+                        "resume_attempted": False,
+                        "resume_succeeded": False,
+                        "resume_fallback_used": False,
+                    }
+
+                if isinstance(chat_usage_metadata, dict):
+                    merged_usage = {
+                        **(response.get("usage") if isinstance(response.get("usage"), dict) else {}),
+                        **chat_usage_metadata,
+                    }
+                    response["usage"] = merged_usage
+
+                ok_by_contract, final_summary, final_comment = _apply_execution_evidence_contract(
+                    db=db,
+                    user_id=user.id,
+                    project_id=effective_project_id,
+                    execution_intent=bool(intent_flags.get("execution_intent")),
+                    allow_mutations=bool(payload.allow_mutations),
+                    run_started_at=run_started_at,
+                    summary=str(response.get("summary") or ""),
+                    comment=str(response.get("comment") or "") or None,
+                )
+                response["ok"] = bool(ok_by_contract) and bool(response.get("ok"))
+                response["summary"] = final_summary
+                response["comment"] = final_comment
+
+                with streamed_parts_lock:
+                    assistant_content = "".join(streamed_assistant_text_parts).strip()
+                if assistant_content and not bool(response.get("ok")):
+                    assistant_content = _assistant_text(
+                        assistant_content,
+                        _assistant_text(final_summary, str(final_comment or "")),
+                    )
+                elif not assistant_content:
+                    assistant_content = _assistant_text(
+                        final_summary,
+                        str(final_comment or ""),
+                    )
+
+                _persist_assistant_message_with_links(
+                    db=db,
+                    user=user,
+                    command_id=command_id,
+                    workspace_id=payload.workspace_id,
+                    project_id=effective_project_id,
+                    session_id=session_id,
+                    mcp_servers=mcp_servers,
+                    content=assistant_content,
+                    usage=(
+                        {
+                            **(response.get("usage") if isinstance(response.get("usage"), dict) else {}),
+                            "codex_resume_attempted": bool(response.get("resume_attempted")),
+                            "codex_resume_succeeded": bool(response.get("resume_succeeded")),
+                            "codex_resume_fallback_used": bool(response.get("resume_fallback_used")),
+                        }
+                    ),
+                    codex_session_id=str(response.get("codex_session_id") or "").strip() or None,
+                    run_started_at=run_started_at,
+                )
+
+                _publish_chat_stream_event(
+                    stream_key=stream_key,
+                    event={"type": "final", "response": response},
+                )
+                _finish_chat_stream_run(stream_key=stream_key)
+                _clear_chat_stream_cancel_event(stream_key=stream_key, run_id=run_id)
+                _set_chat_stream_stop_requested(stream_key=stream_key, value=False)
+                finalized_response["value"] = response
+                return response
+
+        def _background_finalize() -> None:
+            done_event.wait()
+            _finalize_once()
 
         worker = threading.Thread(target=_worker, daemon=True)
         worker.start()
-        streamed_assistant_text_parts: list[str] = []
+        finalizer = threading.Thread(target=_background_finalize, daemon=True)
+        finalizer.start()
 
-        while True:
-            item = event_queue.get()
-            if item is None:
-                break
-            item_type = str(item.get("type") or "").strip().lower()
-            if item_type == "assistant_text":
-                streamed_assistant_text_parts.append(str(item.get("delta") or ""))
-            if item_type == "final":
-                response = item.get("response")
-                if isinstance(response, dict):
-                    ok_by_contract, final_summary, final_comment = _apply_execution_evidence_contract(
-                        db=db,
-                        user_id=user.id,
-                        project_id=effective_project_id,
-                        execution_intent=bool(intent_flags.get("execution_intent")),
-                        allow_mutations=bool(payload.allow_mutations),
-                        run_started_at=run_started_at,
-                        summary=str(response.get("summary") or ""),
-                        comment=str(response.get("comment") or "") or None,
-                    )
-                    response["ok"] = bool(ok_by_contract) and bool(response.get("ok"))
-                    response["summary"] = final_summary
-                    response["comment"] = final_comment
-                    assistant_content = "".join(streamed_assistant_text_parts).strip()
-                    if assistant_content and not bool(response.get("ok")):
-                        # Persist explicit failure context even when partial streamed text exists.
-                        assistant_content = _assistant_text(
-                            assistant_content,
-                            _assistant_text(final_summary, str(final_comment or "")),
-                        )
-                    elif not assistant_content:
-                        assistant_content = _assistant_text(
-                            final_summary,
-                            str(final_comment or ""),
-                        )
-                    _persist_assistant_message_with_links(
-                        db=db,
-                        user=user,
-                        command_id=command_id,
-                        workspace_id=payload.workspace_id,
-                        project_id=effective_project_id,
-                        session_id=session_id,
-                        mcp_servers=mcp_servers,
-                        content=assistant_content,
-                        usage=(
-                            {
-                                **(response.get("usage") if isinstance(response.get("usage"), dict) else {}),
-                                "codex_resume_attempted": bool(response.get("resume_attempted")),
-                                "codex_resume_succeeded": bool(response.get("resume_succeeded")),
-                                "codex_resume_fallback_used": bool(response.get("resume_fallback_used")),
-                            }
-                        ),
-                        codex_session_id=str(response.get("codex_session_id") or "").strip() or None,
-                        run_started_at=run_started_at,
-                    )
-            yield json.dumps(item, ensure_ascii=True) + "\n"
+        try:
+            saw_final = False
+            for event in replay_events:
+                yield json.dumps(event, ensure_ascii=True) + "\n"
+                if str(event.get("type") or "").strip().lower() == "final":
+                    saw_final = True
+            while True:
+                try:
+                    event = subscriber_queue.get(timeout=0.25)
+                except queue.Empty:
+                    if done_event.is_set():
+                        break
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                yield json.dumps(event, ensure_ascii=True) + "\n"
+                if str(event.get("type") or "").strip().lower() == "final":
+                    saw_final = True
+                    break
+            response = _finalize_once()
+            if not saw_final and bool(response):
+                yield json.dumps({"type": "final", "response": response}, ensure_ascii=True) + "\n"
+        finally:
+            _unsubscribe_chat_stream_run(stream_key=stream_key, subscriber_queue=subscriber_queue)
+            if done_event.is_set():
+                _clear_chat_stream_cancel_event(stream_key=stream_key, run_id=run_id)
+                _set_chat_stream_stop_requested(stream_key=stream_key, value=False)
 
     return StreamingResponse(_stream(), media_type="application/x-ndjson", headers=stream_headers)
+
+
+@router.get("/api/agents/chat/stream")
+def resume_agent_chat_stream(
+    workspace_id: str,
+    session_id: str,
+    run_id: str,
+    since_seq: int = 0,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    normalized_session_id = _resolve_chat_session_id(session_id)
+    stream_key = _chat_stream_key(workspace_id=workspace_id, session_id=normalized_session_id)
+    subscriber_queue, replay_events, done = _subscribe_chat_stream_run(
+        stream_key=stream_key,
+        run_id=run_id,
+        since_seq=since_seq,
+    )
+    if not replay_events and done:
+        raise HTTPException(status_code=404, detail="Chat stream run is not available")
+
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Accel-Buffering": "no",
+    }
+
+    def _stream():
+        try:
+            for event in replay_events:
+                yield json.dumps(event, ensure_ascii=True) + "\n"
+            if done:
+                return
+            while True:
+                try:
+                    event = subscriber_queue.get(timeout=0.5)
+                except queue.Empty:
+                    broker = _CHAT_STREAM_BROKER.current_state(key=stream_key)
+                    if not isinstance(broker, dict):
+                        break
+                    if str(broker.get("run_id") or "").strip() != str(run_id).strip():
+                        break
+                    if bool(broker.get("done")):
+                        break
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                yield json.dumps(event, ensure_ascii=True) + "\n"
+                if str(event.get("type") or "").strip().lower() == "final":
+                    break
+        finally:
+            _unsubscribe_chat_stream_run(stream_key=stream_key, subscriber_queue=subscriber_queue)
+
+    return StreamingResponse(_stream(), media_type="application/x-ndjson", headers=headers)
+
+
+@router.post("/api/agents/chat/stop")
+def stop_agent_chat_stream(
+    payload: dict[str, str] = Body(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    session_id = str(payload.get("session_id") or "").strip()
+    run_id = str(payload.get("run_id") or "").strip()
+    if not workspace_id or not session_id:
+        raise HTTPException(status_code=400, detail="workspace_id and session_id are required")
+    ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    stream_key = _chat_stream_key(workspace_id=workspace_id, session_id=_resolve_chat_session_id(session_id))
+    _set_chat_stream_stop_requested(stream_key=stream_key, value=True)
+    cancelled = _request_chat_stream_cancel(stream_key=stream_key, run_id=run_id)
+    if cancelled:
+        _publish_chat_stream_event(
+            stream_key=stream_key,
+            event={"type": "status", "message": "Stop requested."},
+        )
+    effective_run_id = run_id
+    if not effective_run_id:
+        state = _CHAT_STREAM_BROKER.current_state(key=stream_key)
+        if isinstance(state, dict):
+            effective_run_id = str(state.get("run_id") or "").strip()
+    return {"ok": True, "cancel_requested": bool(cancelled), "run_id": effective_run_id}

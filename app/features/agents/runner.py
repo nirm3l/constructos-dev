@@ -24,7 +24,7 @@ from plugins.runner_policy import (
     success_validation_error,
     preflight_error as plugin_preflight_error,
 )
-from .executor import execute_task_automation_stream
+from .executor import AutomationOutcome, build_automation_usage_metadata, execute_task_automation_stream
 from .service import AgentTaskService
 from features.tasks.domain import (
     EVENT_UPDATED as TASK_EVENT_UPDATED,
@@ -147,6 +147,23 @@ def _normalize_nonnegative_int(value) -> int:
     except Exception:
         return 0
     return max(0, parsed)
+
+
+def _coerce_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return None
 
 
 def _parse_iso_timestamp(value: object) -> datetime | None:
@@ -718,7 +735,7 @@ def _claim_queued_task(task_id: str) -> QueuedAutomationRun | None:
                 event_type=EVENT_AUTOMATION_STARTED,
                 payload={
                     "started_at": now_iso,
-                    "last_agent_progress": "",
+                    "last_agent_progress": "Automation run started.",
                     "last_agent_stream_status": "Automation run started.",
                     "last_agent_stream_updated_at": now_iso,
                 },
@@ -771,7 +788,12 @@ def _claim_queued_task(task_id: str) -> QueuedAutomationRun | None:
     )
 
 
-def _record_automation_success(run: QueuedAutomationRun, *, summary: str, action: str, comment: str | None) -> None:
+def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationOutcome) -> None:
+    action = str(outcome.action or "").strip()
+    summary = str(outcome.summary or "").strip()
+    comment = str(outcome.comment or "").strip() or None
+    usage_metadata = build_automation_usage_metadata(outcome)
+    usage_payload = usage_metadata.get("last_agent_usage")
     completed_at = to_iso_utc(datetime.now(timezone.utc))
     now_utc = datetime.now(timezone.utc)
     with SessionLocal() as db:
@@ -869,7 +891,19 @@ def _record_automation_success(run: QueuedAutomationRun, *, summary: str, action
             aggregate_type="Task",
             aggregate_id=run.task_id,
             event_type=EVENT_AUTOMATION_COMPLETED,
-            payload={"completed_at": completed_at, "summary": summary, "source_event": EVENT_AUTOMATION_REQUESTED},
+            payload={
+                "completed_at": completed_at,
+                "summary": summary,
+                "source_event": EVENT_AUTOMATION_REQUESTED,
+                "comment": comment,
+                "usage": usage_payload if isinstance(usage_payload, dict) else None,
+                "prompt_mode": usage_metadata.get("last_agent_prompt_mode"),
+                "prompt_segment_chars": usage_metadata.get("last_agent_prompt_segment_chars"),
+                "codex_session_id": usage_metadata.get("last_agent_codex_session_id"),
+                "resume_attempted": usage_metadata.get("last_agent_codex_resume_attempted"),
+                "resume_succeeded": usage_metadata.get("last_agent_codex_resume_succeeded"),
+                "resume_fallback_used": usage_metadata.get("last_agent_codex_resume_fallback_used"),
+            },
             metadata={
                 "actor_id": actor_user_id,
                 "workspace_id": workspace_id,
@@ -885,6 +919,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, summary: str, action
             payload={
                 "last_agent_stream_status": "Automation run completed.",
                 "last_agent_stream_updated_at": completed_at,
+                **usage_metadata,
             },
             metadata={
                 "actor_id": actor_user_id,
@@ -1173,6 +1208,15 @@ def _execute_claimed_automation(run: QueuedAutomationRun) -> None:
     if preflight_error:
         _record_automation_failure(run, RuntimeError(preflight_error))
         return
+    resume_codex_session_id: str | None = None
+    with SessionLocal() as db:
+        state, _ = rebuild_state(db, "Task", run.task_id)
+        existing_codex_session_id = str(state.get("last_agent_codex_session_id") or "").strip()
+        resume_attempted = _coerce_bool(state.get("last_agent_codex_resume_attempted"))
+        resume_last_succeeded = _coerce_bool(state.get("last_agent_codex_resume_succeeded"))
+        resume_blocked = resume_attempted is True and resume_last_succeeded is False
+        if existing_codex_session_id and not resume_blocked:
+            resume_codex_session_id = existing_codex_session_id
     stream_lock = threading.Lock()
     stream_text = ""
     stream_status = ""
@@ -1257,7 +1301,9 @@ def _execute_claimed_automation(run: QueuedAutomationRun) -> None:
             trigger_from_status=run.trigger_from_status,
             trigger_to_status=run.trigger_to_status,
             trigger_timestamp=run.triggered_at,
+            codex_session_id=resume_codex_session_id,
             allow_mutations=True,
+            prompt_instruction_segments={"user_instruction": len(run.instruction)},
             on_event=_on_stream_event,
         )
         _persist_stream_progress(force=True)
@@ -1269,9 +1315,7 @@ def _execute_claimed_automation(run: QueuedAutomationRun) -> None:
     try:
         _record_automation_success(
             run,
-            summary=outcome.summary,
-            action=outcome.action,
-            comment=outcome.comment,
+            outcome=outcome,
         )
     except Exception as exc:
         _record_automation_failure(run, exc)

@@ -6,6 +6,7 @@ import re
 import shlex
 import subprocess
 import threading
+import signal
 from pathlib import Path
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -487,6 +488,22 @@ def _parse_command_outcome(stdout: str) -> AutomationOutcome:
         frame_revision = str(usage_raw.get("graph_context_frame_revision") or "").strip()
         if frame_revision:
             usage["graph_context_frame_revision"] = frame_revision
+        prompt_mode = str(usage_raw.get("prompt_mode") or "").strip().lower()
+        if prompt_mode in {"full", "resume"}:
+            usage["prompt_mode"] = prompt_mode
+        segment_chars_raw = usage_raw.get("prompt_segment_chars")
+        if isinstance(segment_chars_raw, dict):
+            segment_chars: dict[str, int] = {}
+            for key, raw_value in segment_chars_raw.items():
+                normalized_key = str(key or "").strip()
+                if not normalized_key:
+                    continue
+                try:
+                    segment_chars[normalized_key] = max(0, int(raw_value))
+                except (TypeError, ValueError):
+                    continue
+            if segment_chars:
+                usage["prompt_segment_chars"] = segment_chars
         if not usage:
             usage = None
     if action not in {"complete", "comment"}:
@@ -532,11 +549,69 @@ def _attach_context_frame_usage(
     )
 
 
+def _sanitize_prompt_segment_chars(raw_value: object) -> dict[str, int]:
+    if not isinstance(raw_value, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key, value in raw_value.items():
+        normalized_key = str(key or "").strip()
+        if not normalized_key:
+            continue
+        try:
+            out[normalized_key] = max(0, int(value))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def build_automation_usage_metadata(outcome: AutomationOutcome) -> dict[str, object]:
+    usage_raw = outcome.usage if isinstance(outcome.usage, dict) else {}
+    usage: dict[str, object] = {}
+    for key in ("input_tokens", "cached_input_tokens", "output_tokens", "context_limit_tokens"):
+        raw_value = usage_raw.get(key)
+        if raw_value is None:
+            continue
+        try:
+            usage[key] = max(0, int(raw_value))
+        except (TypeError, ValueError):
+            continue
+
+    prompt_mode_raw = str(usage_raw.get("prompt_mode") or "").strip().lower()
+    prompt_mode = prompt_mode_raw if prompt_mode_raw in {"full", "resume"} else None
+    if prompt_mode:
+        usage["prompt_mode"] = prompt_mode
+
+    prompt_segment_chars = _sanitize_prompt_segment_chars(usage_raw.get("prompt_segment_chars"))
+    if prompt_segment_chars:
+        usage["prompt_segment_chars"] = prompt_segment_chars
+
+    frame_mode_raw = str(usage_raw.get("graph_context_frame_mode") or "").strip().lower()
+    frame_mode = frame_mode_raw if frame_mode_raw in {"full", "delta"} else None
+    if frame_mode:
+        usage["graph_context_frame_mode"] = frame_mode
+    frame_revision = str(usage_raw.get("graph_context_frame_revision") or "").strip()
+    if frame_revision:
+        usage["graph_context_frame_revision"] = frame_revision
+
+    codex_session_id = str(outcome.codex_session_id or "").strip() or None
+    payload: dict[str, object] = {
+        "last_agent_usage": usage if usage else None,
+        "last_agent_prompt_mode": prompt_mode,
+        "last_agent_prompt_segment_chars": prompt_segment_chars or None,
+        "last_agent_codex_session_id": codex_session_id,
+        "last_agent_codex_resume_attempted": bool(outcome.resume_attempted),
+        "last_agent_codex_resume_succeeded": bool(outcome.resume_succeeded),
+        "last_agent_codex_resume_fallback_used": bool(outcome.resume_fallback_used),
+    }
+    return payload
+
+
 def _run_command_streaming(
     *,
     command: list[str],
     context: dict[str, object],
     timeout_seconds: float | None,
+    cancel_event: threading.Event | None = None,
     on_event: Callable[[dict[str, object]], None] | None = None,
 ) -> str:
     proc = subprocess.Popen(
@@ -546,8 +621,10 @@ def _run_command_streaming(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        start_new_session=True,
     )
     timed_out = False
+    cancelled = False
     done = threading.Event()
     timeout_error_message = "Executor timed out."
     if timeout_seconds is not None:
@@ -561,11 +638,34 @@ def _run_command_streaming(
             return
         if proc.poll() is None:
             timed_out = True
-            proc.kill()
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                proc.kill()
 
     if timeout_seconds is not None:
         watchdog = threading.Thread(target=_timeout_watchdog, daemon=True)
         watchdog.start()
+
+    def _cancel_watchdog() -> None:
+        nonlocal cancelled
+        if cancel_event is None:
+            return
+        if done.wait(0):
+            return
+        cancel_event.wait()
+        if done.is_set():
+            return
+        if proc.poll() is None:
+            cancelled = True
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                proc.kill()
+
+    if cancel_event is not None:
+        cancel_thread = threading.Thread(target=_cancel_watchdog, daemon=True)
+        cancel_thread.start()
 
     input_payload = json.dumps(context)
     if proc.stdin is None:
@@ -597,6 +697,8 @@ def _run_command_streaming(
     done.set()
     if timed_out:
         raise TimeoutError(timeout_error_message)
+    if cancelled:
+        raise InterruptedError("Execution cancelled by user.")
     if return_code != 0:
         err_text = "\n".join(lines).strip()
         raise RuntimeError(f"Executor failed (exit={return_code}): {err_text[:2000]}")
@@ -623,6 +725,7 @@ def execute_task_automation(
     mcp_servers: list[str] | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    prompt_instruction_segments: dict[str, int] | None = None,
     timeout_seconds: float | int | None | object = _TIMEOUT_UNSET,
 ) -> AutomationOutcome:
     # Deterministic shortcut: users can explicitly complete a task via "#complete".
@@ -733,6 +836,7 @@ def execute_task_automation(
         "mcp_servers": mcp_servers,
         "model": model,
         "reasoning_effort": reasoning_effort,
+        "prompt_instruction_segments": prompt_instruction_segments,
         "executor_timeout_seconds": raw_timeout,
         "task_workdir": task_workdir,
         "task_branch": task_branch,
@@ -799,8 +903,10 @@ def execute_task_automation_stream(
     on_event: Callable[[dict[str, object]], None] | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    prompt_instruction_segments: dict[str, int] | None = None,
     timeout_seconds: float | int | None | object = _TIMEOUT_UNSET,
     stream_plain_text: bool = False,
+    cancel_event: threading.Event | None = None,
 ) -> AutomationOutcome:
     # Deterministic shortcut for explicit completion requests.
     lower_instruction = (instruction or "").lower()
@@ -875,6 +981,9 @@ def execute_task_automation_stream(
     frame_mode = str(context_frame.get("mode") or "full").strip().lower()
     frame_revision = str(context_frame.get("revision") or "").strip()
     raw_timeout, run_timeout_seconds = _resolve_run_timeout_seconds(timeout_seconds)
+    # Chat-mode runs (no task_id) should always stream plain text deltas to the UI.
+    effective_stream_plain_text = bool(stream_plain_text or not str(task_id or "").strip())
+
     context = {
         "task_id": task_id,
         "title": title,
@@ -909,20 +1018,31 @@ def execute_task_automation_stream(
         "mcp_servers": mcp_servers,
         "model": model,
         "reasoning_effort": reasoning_effort,
+        "prompt_instruction_segments": prompt_instruction_segments,
         "executor_timeout_seconds": raw_timeout,
         "task_workdir": task_workdir,
         "task_branch": task_branch,
         "repo_root": repo_root,
         "stream_events": True,
-        "stream_plain_text": bool(stream_plain_text),
+        "stream_plain_text": effective_stream_plain_text,
     }
     def _run_once() -> AutomationOutcome:
-        stdout = _run_command_streaming(
-            command=command,
-            context=context,
-            timeout_seconds=run_timeout_seconds,
-            on_event=on_event,
-        )
+        try:
+            stdout = _run_command_streaming(
+                command=command,
+                context=context,
+                timeout_seconds=run_timeout_seconds,
+                cancel_event=cancel_event,
+                on_event=on_event,
+            )
+        except InterruptedError:
+            if on_event is not None:
+                on_event({"type": "status", "message": "Run cancelled by user."})
+            return AutomationOutcome(
+                action="comment",
+                summary="Stopped.",
+                comment="Run cancelled by user.",
+            )
         return _attach_context_frame_usage(
             _parse_command_outcome(stdout),
             frame_mode=frame_mode,

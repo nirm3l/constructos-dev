@@ -14,9 +14,19 @@ import {
 export function useTaskNoteEditorEffects(c: any) {
   React.useEffect(() => {
     if (!c.selectedTask) {
-      c.setTaskEditorHydratedTaskId(null)
-      c.setTaskEditorBaselineTask(null)
-      c.setTaskEditorTouched(false)
+      // During query refetch, selectedTask may be temporarily undefined while a task is still selected.
+      // Only clear editor/live state when no task is selected at all.
+      if (!c.selectedTaskId) {
+        c.setTaskEditorHydratedTaskId(null)
+        c.setTaskEditorBaselineTask(null)
+        c.setTaskEditorTouched(false)
+        c.setAutomationLiveTaskId(null)
+        c.setAutomationLiveRunId(null)
+        c.setAutomationLiveActive(false)
+        c.setAutomationLiveBuffer('')
+        c.setAutomationLiveStatusText('')
+        c.setAutomationLiveUpdatedAt(null)
+      }
       return
     }
     c.setTaskEditorHydratedTaskId(null)

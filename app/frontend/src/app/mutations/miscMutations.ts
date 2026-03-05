@@ -1,6 +1,6 @@
 import React from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { addComment, deleteComment, markAllNotificationsRead, markNotificationRead, patchMyPreferences, runAgentChatStream } from '../../api'
+import { addComment, deleteComment, markAllNotificationsRead, markNotificationRead, patchMyPreferences, runAgentChatStream, stopAgentChatStream } from '../../api'
 import type { ChatMcpServer, ChatReasoningEffort } from '../../types'
 
 const ENTITY_ID_SOURCE = '[0-9a-fA-F]{8,}(?:-[0-9a-fA-F]{4,}){0,4}'
@@ -127,6 +127,13 @@ function normalizeResumeStateFromResponse(response: any): { attempted: boolean; 
 
 export function useMiscMutations(c: any) {
   const activeChatAbortControllerRef = React.useRef<AbortController | null>(null)
+  const activeChatRunRef = React.useRef<{
+    workspaceId: string
+    sessionId: string
+    runId: string | null
+  } | null>(null)
+  const stopRequestedBySessionRef = React.useRef<Record<string, number>>({})
+  const stopFallbackTimerBySessionRef = React.useRef<Record<string, number>>({})
 
   const clearChatRunningState = React.useCallback(() => {
     c.setIsCodexChatRunning(false)
@@ -134,12 +141,75 @@ export function useMiscMutations(c: any) {
     c.setCodexChatElapsedSeconds(0)
   }, [c])
 
+  const clearStopFallbackTimerForSession = React.useCallback((sessionId: string) => {
+    if (!sessionId) return
+    const timerId = stopFallbackTimerBySessionRef.current[sessionId]
+    if (timerId) {
+      globalThis.clearTimeout(timerId)
+      delete stopFallbackTimerBySessionRef.current[sessionId]
+    }
+  }, [])
+
+  React.useEffect(() => {
+    return () => {
+      const controller = activeChatAbortControllerRef.current
+      if (controller) controller.abort()
+      activeChatRunRef.current = null
+      Object.values(stopFallbackTimerBySessionRef.current).forEach((timerId) => {
+        if (timerId) globalThis.clearTimeout(timerId)
+      })
+      stopFallbackTimerBySessionRef.current = {}
+      stopRequestedBySessionRef.current = {}
+    }
+  }, [])
+
   const cancelAgentChat = React.useCallback(() => {
-    const controller = activeChatAbortControllerRef.current
-    if (!controller) return
-    controller.abort()
+    const activeRun = activeChatRunRef.current
+    const workspaceId = String(activeRun?.workspaceId || c.workspaceId || '').trim()
+    const sessionId = String(activeRun?.sessionId || c.codexChatSessionId || '').trim()
+    const runId = String(activeRun?.runId || c.codexChatLiveRunId || '').trim()
+    const abortLocal = () => {
+      const controller = activeChatAbortControllerRef.current
+      if (controller) controller.abort()
+    }
+
+    if (!workspaceId || !sessionId) {
+      abortLocal()
+      return
+    }
+
+    clearStopFallbackTimerForSession(sessionId)
+
+    stopRequestedBySessionRef.current[sessionId] = Date.now()
+    if (typeof c.setCodexChatLiveRunForSession === 'function') {
+      c.setCodexChatLiveRunForSession(sessionId, {
+        liveStatusText: 'Stop requested…',
+        liveRunActive: false,
+        liveRunId: null,
+        liveRunSeq: 0,
+        liveStopRequested: true,
+      })
+    }
+
+    void stopAgentChatStream(c.userId, {
+      workspace_id: workspaceId,
+      session_id: sessionId,
+      run_id: runId || null,
+    }).catch(() => {
+      // Ignore stop API errors; local abort already applied.
+    })
+
+    // Immediately stop local stream consumption.
+    abortLocal()
     clearChatRunningState()
-  }, [clearChatRunningState])
+    activeChatRunRef.current = null
+
+    // Safety net for stale controllers.
+    const fallbackTimer = globalThis.setTimeout(() => {
+      abortLocal()
+    }, 2_000)
+    stopFallbackTimerBySessionRef.current[sessionId] = fallbackTimer
+  }, [c, clearChatRunningState, clearStopFallbackTimerForSession])
 
   const setChatTurnsForSession = (
     sessionId: string,
@@ -187,6 +257,23 @@ export function useMiscMutations(c: any) {
     }
     if (typeof c.setCodexChatResumeState === 'function') {
       c.setCodexChatResumeState(resumeState)
+    }
+  }
+
+  const setChatLiveRunForSession = (
+    sessionId: string,
+    patch: {
+      liveRunId?: string | null
+      liveRunSeq?: number
+      liveRunActive?: boolean
+      liveAssistantTurnId?: string | null
+      liveStatusText?: string
+      liveRunStartedAt?: number | null
+      liveStopRequested?: boolean
+    }
+  ) => {
+    if (sessionId && typeof c.setCodexChatLiveRunForSession === 'function') {
+      c.setCodexChatLiveRunForSession(sessionId, patch)
     }
   }
 
@@ -245,6 +332,7 @@ export function useMiscMutations(c: any) {
       history: Array<{ role: 'user' | 'assistant'; content: string }>
       projectId: string | null
       sessionId: string
+      commandId?: string
       mcpServers?: ChatMcpServer[]
       model?: string | null
       reasoningEffort?: ChatReasoningEffort | string | null
@@ -252,6 +340,9 @@ export function useMiscMutations(c: any) {
       sessionAttachmentRefs?: Array<{ path: string; name?: string; mime_type?: string; size_bytes?: number }>
     }) => {
       const sessionId = payload.sessionId || c.codexChatSessionId
+      if (sessionId) {
+        delete stopRequestedBySessionRef.current[sessionId]
+      }
       const assistantTurnId = globalThis.crypto?.randomUUID?.() ?? `a-${Date.now()}`
       const assistantCreatedAt = Date.now()
       const thinkingFrames = ['Thinking.', 'Thinking..', 'Thinking...']
@@ -290,6 +381,15 @@ export function useMiscMutations(c: any) {
           createdAt: assistantCreatedAt,
         },
       ])
+      setChatLiveRunForSession(sessionId, {
+        liveRunId: null,
+        liveRunSeq: 0,
+        liveRunActive: true,
+        liveAssistantTurnId: assistantTurnId,
+        liveStatusText: 'Running…',
+        liveRunStartedAt: Date.now(),
+        liveStopRequested: false,
+      })
       startThinkingAnimation()
 
       let streamedReply = ''
@@ -365,6 +465,11 @@ export function useMiscMutations(c: any) {
         }
         const abortController = new AbortController()
         activeChatAbortControllerRef.current = abortController
+        activeChatRunRef.current = {
+          workspaceId: String(c.workspaceId || '').trim(),
+          sessionId: String(sessionId || '').trim(),
+          runId: null,
+        }
         const response = await runAgentChatStream(
           c.userId,
           {
@@ -379,10 +484,52 @@ export function useMiscMutations(c: any) {
             model: payload.model || null,
             reasoning_effort: payload.reasoningEffort || null,
             allow_mutations: true,
+            command_id: payload.commandId || null,
           },
           {
             onAssistantDelta: (delta) => {
+              if (sessionId && stopRequestedBySessionRef.current[sessionId]) return
               enqueueStreamDelta(delta)
+            },
+            onRunId: (runId) => {
+              const normalizedRunId = String(runId || '').trim()
+              if (normalizedRunId) {
+                const current = activeChatRunRef.current
+                if (current && String(current.sessionId || '').trim() === String(sessionId || '').trim()) {
+                  activeChatRunRef.current = {
+                    ...current,
+                    runId: normalizedRunId,
+                  }
+                }
+              }
+              const persistedStartedAt = Number(
+                c.codexChatLiveRunStartedAt
+                ?? c.codexChatRunStartedAt
+                ?? 0
+              )
+              setChatLiveRunForSession(sessionId, {
+                liveRunId: runId,
+                liveRunActive: true,
+                liveAssistantTurnId: assistantTurnId,
+                liveRunStartedAt:
+                  Number.isFinite(persistedStartedAt) && persistedStartedAt > 0
+                    ? persistedStartedAt
+                    : Date.now(),
+              })
+            },
+            onSeq: (seq) => {
+              setChatLiveRunForSession(sessionId, {
+                liveRunSeq: seq,
+                liveRunActive: true,
+                liveAssistantTurnId: assistantTurnId,
+              })
+            },
+            onStatus: (message) => {
+              setChatLiveRunForSession(sessionId, {
+                liveStatusText: message || '',
+                liveRunActive: true,
+                liveAssistantTurnId: assistantTurnId,
+              })
             },
             onUsage: (usage) => {
               setChatUsageForSession(sessionId, usage ?? null)
@@ -396,11 +543,15 @@ export function useMiscMutations(c: any) {
       } catch (err) {
         cancelStreamFlush()
         if (isAbortLikeError(err)) {
-          const stoppedContent = streamedReply.trim() ? streamedReply : 'Stopped.'
           setChatTurnsForSession(sessionId, (prev: any[]) =>
             prev.map((turn: any) =>
               turn.id === assistantTurnId
-                ? { ...turn, content: stoppedContent, lastStreamChunk: '', streamShimmerChunk: '' }
+                ? {
+                    ...turn,
+                    content: streamedReply.trim() ? streamedReply : String(turn?.content || ''),
+                    lastStreamChunk: '',
+                    streamShimmerChunk: '',
+                  }
                 : turn
             )
           )
@@ -417,52 +568,93 @@ export function useMiscMutations(c: any) {
         throw err
       } finally {
         activeChatAbortControllerRef.current = null
+        activeChatRunRef.current = null
       }
     },
     onSuccess: async (result, variables) => {
       const { response, assistantTurnId, assistantCreatedAt, streamedReply, sessionId } = result
+      const stopRequested = Boolean(sessionId && stopRequestedBySessionRef.current[sessionId])
+      if (sessionId) {
+        delete stopRequestedBySessionRef.current[sessionId]
+        clearStopFallbackTimerForSession(sessionId)
+      }
       c.setUiError(null)
       setChatCodexSessionForSession(sessionId, response.codex_session_id ?? null)
       setChatResumeStateForSession(sessionId, normalizeResumeStateFromResponse(response))
       if (response.usage) {
         setChatUsageForSession(sessionId, response.usage)
       }
-      const fallbackReply = [response.summary, response.comment].filter(Boolean).join('\n\n').trim()
-      const rawReply = streamedReply.trim() ? streamedReply : fallbackReply
-      const reply = linkifyAgentReply(
-        rawReply,
-        variables.projectId || c.codexChatProjectId || c.selectedProjectId || null
-      )
-      setChatTurnsForSession(sessionId, (prev: any[]) => {
-        if (!reply) {
-          return prev.filter((turn: any) => turn.id !== assistantTurnId)
-        }
-        let found = false
-        const next = prev.map((turn: any) => {
-          if (turn.id !== assistantTurnId) return turn
-          found = true
-          return { ...turn, content: reply, lastStreamChunk: '', streamShimmerChunk: '' }
+      if (!stopRequested) {
+        const fallbackReply = [response.summary, response.comment].filter(Boolean).join('\n\n').trim()
+        const rawReply = streamedReply.trim() ? streamedReply : fallbackReply
+        const reply = linkifyAgentReply(
+          rawReply,
+          variables.projectId || c.codexChatProjectId || c.selectedProjectId || null
+        )
+        setChatTurnsForSession(sessionId, (prev: any[]) => {
+          if (!reply) {
+            return prev.filter((turn: any) => turn.id !== assistantTurnId)
+          }
+          let found = false
+          const next = prev.map((turn: any) => {
+            if (turn.id !== assistantTurnId) return turn
+            found = true
+            return { ...turn, content: reply, lastStreamChunk: '', streamShimmerChunk: '' }
+          })
+          if (found) return next
+          return [
+            ...next,
+            {
+              id: assistantTurnId,
+              role: 'assistant',
+              content: reply,
+              lastStreamChunk: '',
+              streamShimmerChunk: '',
+              createdAt: assistantCreatedAt,
+            },
+          ]
         })
-        if (found) return next
-        return [
-          ...next,
-          {
-            id: assistantTurnId,
-            role: 'assistant',
-            content: reply,
-            lastStreamChunk: '',
-            streamShimmerChunk: '',
-            createdAt: assistantCreatedAt,
-          },
-        ]
-      })
+      } else {
+        setChatTurnsForSession(sessionId, (prev: any[]) =>
+          prev.map((turn: any) =>
+            turn.id === assistantTurnId
+              ? { ...turn, lastStreamChunk: '', streamShimmerChunk: '' }
+              : turn
+          )
+        )
+      }
       if (response.ok === false) {
         c.setUiError(response.summary || response.comment || 'Chat request failed')
       }
+      setChatLiveRunForSession(sessionId, {
+        liveRunId: null,
+        liveRunSeq: 0,
+        liveRunActive: false,
+        liveAssistantTurnId: null,
+        liveStatusText: '',
+        liveRunStartedAt: null,
+      })
       clearChatRunningState()
-      await c.invalidateAll()
+      if (!stopRequested) {
+        await c.invalidateAll()
+      }
     },
     onError: (err) => {
+      const sessionId = String(c.codexChatSessionId || '').trim()
+      if (sessionId) {
+        delete stopRequestedBySessionRef.current[sessionId]
+        clearStopFallbackTimerForSession(sessionId)
+      }
+      if (sessionId) {
+        setChatLiveRunForSession(sessionId, {
+          liveRunActive: false,
+          liveRunId: null,
+          liveRunSeq: 0,
+          liveAssistantTurnId: null,
+          liveStatusText: '',
+          liveRunStartedAt: null,
+        })
+      }
       clearChatRunningState()
       if (isAbortLikeError(err)) {
         c.setUiError(null)

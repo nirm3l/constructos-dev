@@ -456,6 +456,7 @@ export async function runTaskAutomationStream(
   const decoder = new TextDecoder()
   let buffer = ''
   let finalResponse: { ok: boolean; task_id: string; automation_state: string; summary?: string; comment?: string } | null = null
+  let assistantDeltaSeen = false
 
   const processLine = (line: string) => {
     const trimmed = line.trim()
@@ -469,7 +470,10 @@ export async function runTaskAutomationStream(
     const type = String(event?.type || '').trim()
     if (type === 'assistant_text') {
       const delta = String(event?.delta || '')
-      if (delta) handlers?.onAssistantDelta?.(delta)
+      if (delta) {
+        assistantDeltaSeen = true
+        handlers?.onAssistantDelta?.(delta)
+      }
       return
     }
     if (type === 'status') {
@@ -495,8 +499,113 @@ export async function runTaskAutomationStream(
     }
   }
   if (buffer.trim()) processLine(buffer)
-  if (!finalResponse) throw new Error('Automation stream ended without a final response')
-  return finalResponse
+  let resolvedFinalResponse = finalResponse as {
+    ok: boolean
+    task_id: string
+    automation_state: string
+    summary?: string
+    comment?: string
+  } | null
+  if (!resolvedFinalResponse) {
+    try {
+      const liveStatus = await getTaskAutomationStatus(userId, taskId)
+      const automationState = String(liveStatus?.automation_state || 'running').trim() || 'running'
+      const derivedComment = String(
+        liveStatus?.last_agent_comment
+        || liveStatus?.last_agent_progress
+        || liveStatus?.last_agent_stream_status
+        || ''
+      ).trim()
+      resolvedFinalResponse = {
+        ok: automationState !== 'failed',
+        task_id: taskId,
+        automation_state: automationState,
+        summary:
+          automationState === 'failed'
+            ? 'Automation run failed.'
+            : automationState === 'completed'
+              ? 'Automation run completed.'
+              : 'Automation run accepted.',
+        comment: derivedComment,
+      }
+    } catch {
+      throw new Error('Automation stream ended without a final response')
+    }
+  }
+  if (!assistantDeltaSeen) {
+    const finalComment = String(resolvedFinalResponse.comment || '').trim()
+    if (finalComment) handlers?.onAssistantDelta?.(finalComment)
+  }
+  return resolvedFinalResponse
+}
+
+export async function runTaskAutomationLiveStream(
+  userId: string,
+  taskId: string,
+  runId: string,
+  sinceSeq: number,
+  handlers?: {
+    onAssistantDelta?: (delta: string) => void
+    onStatus?: (message: string) => void
+    onSeq?: (seq: number) => void
+    signal?: AbortSignal
+  }
+): Promise<void> {
+  const url = `/api/tasks/${taskId}/automation/stream${queryString({
+    run_id: runId,
+    since_seq: sinceSeq,
+  })}`
+  const res = await fetch(url, {
+    method: 'GET',
+    credentials: 'same-origin',
+    signal: handlers?.signal,
+  })
+  if (!res.ok) {
+    const raw = await res.text()
+    throw new Error(formatApiError(raw, res.status))
+  }
+  if (!res.body) throw new Error('Automation live stream is unavailable')
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  const processLine = (line: string) => {
+    const trimmed = line.trim()
+    if (!trimmed) return
+    let event: any
+    try {
+      event = JSON.parse(trimmed)
+    } catch {
+      return
+    }
+    const seq = Number(event?.seq || 0)
+    if (Number.isFinite(seq) && seq > 0) handlers?.onSeq?.(seq)
+    const type = String(event?.type || '').trim()
+    if (type === 'assistant_text') {
+      const delta = String(event?.delta || '')
+      if (delta) handlers?.onAssistantDelta?.(delta)
+      return
+    }
+    if (type === 'status') {
+      const message = String(event?.message || '').trim()
+      if (message) handlers?.onStatus?.(message)
+      return
+    }
+  }
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    while (true) {
+      const newlineIdx = buffer.indexOf('\n')
+      if (newlineIdx < 0) break
+      const line = buffer.slice(0, newlineIdx)
+      buffer = buffer.slice(newlineIdx + 1)
+      processLine(line)
+    }
+  }
+  if (buffer.trim()) processLine(buffer)
 }
 
 export const getTaskAutomationStatus = (userId: string, taskId: string) =>
@@ -602,15 +711,20 @@ export async function runAgentChatStream(
     model?: string | null
     reasoning_effort?: ChatReasoningEffort | string | null
     allow_mutations?: boolean
+    command_id?: string | null
   },
   handlers?: {
     onAssistantDelta?: (delta: string) => void
     onStatus?: (message: string) => void
+    onRunId?: (runId: string) => void
+    onSeq?: (seq: number) => void
     onUsage?: (usage: AgentChatResponse['usage']) => void
     signal?: AbortSignal
   }
 ): Promise<AgentChatResponse> {
-  const commandId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
+  const commandId = String(payload.command_id || '').trim()
+    || (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`)
+  handlers?.onRunId?.(commandId)
   const res = await fetch('/api/agents/chat/stream', {
     method: 'POST',
     credentials: 'same-origin',
@@ -643,7 +757,14 @@ export async function runAgentChatStream(
     } catch {
       return
     }
+    const seq = Number(event?.seq || 0)
+    if (Number.isFinite(seq) && seq > 0) handlers?.onSeq?.(seq)
+    const runId = String(event?.run_id || '').trim()
+    if (runId) handlers?.onRunId?.(runId)
     const type = String(event?.type || '').trim()
+    if (type === 'stream_run') {
+      return
+    }
     if (type === 'assistant_text') {
       const delta = String(event?.delta || '')
       if (delta) handlers?.onAssistantDelta?.(delta)
@@ -684,6 +805,110 @@ export async function runAgentChatStream(
   }
   return finalResponse
 }
+
+export async function runAgentChatLiveStream(
+  userId: string,
+  payload: {
+    workspace_id: string
+    session_id: string
+    run_id: string
+    since_seq: number
+  },
+  handlers?: {
+    onAssistantDelta?: (delta: string) => void
+    onStatus?: (message: string) => void
+    onRunId?: (runId: string) => void
+    onSeq?: (seq: number) => void
+    onUsage?: (usage: AgentChatResponse['usage']) => void
+    signal?: AbortSignal
+  }
+): Promise<AgentChatResponse | null> {
+  void userId
+  const url = `/api/agents/chat/stream${queryString({
+    workspace_id: payload.workspace_id,
+    session_id: payload.session_id,
+    run_id: payload.run_id,
+    since_seq: payload.since_seq,
+  })}`
+  const res = await fetch(url, {
+    method: 'GET',
+    credentials: 'same-origin',
+    signal: handlers?.signal,
+  })
+  if (!res.ok) {
+    const raw = await res.text()
+    throw new Error(formatApiError(raw, res.status))
+  }
+  if (!res.body) throw new Error('Chat live stream is unavailable')
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let finalResponse: AgentChatResponse | null = null
+
+  const processLine = (line: string) => {
+    const trimmed = line.trim()
+    if (!trimmed) return
+    let event: any
+    try {
+      event = JSON.parse(trimmed)
+    } catch {
+      return
+    }
+    const seq = Number(event?.seq || 0)
+    if (Number.isFinite(seq) && seq > 0) handlers?.onSeq?.(seq)
+    const runId = String(event?.run_id || '').trim()
+    if (runId) handlers?.onRunId?.(runId)
+    const type = String(event?.type || '').trim()
+    if (type === 'stream_run') return
+    if (type === 'assistant_text') {
+      const delta = String(event?.delta || '')
+      if (delta) handlers?.onAssistantDelta?.(delta)
+      return
+    }
+    if (type === 'status') {
+      const message = String(event?.message || '').trim()
+      if (message) handlers?.onStatus?.(message)
+      return
+    }
+    if (type === 'usage') {
+      handlers?.onUsage?.(event?.usage ?? null)
+      return
+    }
+    if (type === 'final' && event?.response) {
+      finalResponse = event.response as AgentChatResponse
+    }
+  }
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    while (true) {
+      const newlineIdx = buffer.indexOf('\n')
+      if (newlineIdx < 0) break
+      const line = buffer.slice(0, newlineIdx)
+      buffer = buffer.slice(newlineIdx + 1)
+      processLine(line)
+    }
+  }
+  if (buffer.trim()) processLine(buffer)
+  return finalResponse
+}
+
+export const stopAgentChatStream = async (
+  userId: string,
+  payload: {
+    workspace_id: string
+    session_id: string
+    run_id?: string | null
+  }
+) =>
+  api<{ ok: boolean; cancel_requested: boolean; run_id: string }>(
+    '/api/agents/chat/stop',
+    userId,
+    { method: 'POST', body: JSON.stringify(payload) }
+  )
 
 export const getNotifications = (userId: string) => api<Notification[]>('/api/notifications', userId)
 

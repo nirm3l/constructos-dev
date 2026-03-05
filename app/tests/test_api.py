@@ -2470,7 +2470,7 @@ def test_task_automation_requested_event_wakes_runner(tmp_path, monkeypatch):
     assert calls["wake"] >= 1
 
 
-def test_runner_processes_queued_automation(tmp_path):
+def test_runner_processes_queued_automation(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
@@ -2492,6 +2492,32 @@ def test_runner_processes_queued_automation(tmp_path):
     assert task.status_code == 200
     task = task.json()
 
+    from features.agents import runner as runner_module
+    from features.agents.executor import AutomationOutcome
+
+    def _fake_execute_task_automation(**_kwargs):
+        return AutomationOutcome(
+            action='comment',
+            summary='Runner completed task automation.',
+            comment='Runner completed task automation.',
+            usage={
+                'input_tokens': 900,
+                'cached_input_tokens': 450,
+                'output_tokens': 120,
+                'prompt_mode': 'resume',
+                'prompt_segment_chars': {
+                    'instruction': 900,
+                    'graph_context': 450,
+                },
+            },
+            codex_session_id='task-thread-001',
+            resume_attempted=True,
+            resume_succeeded=True,
+            resume_fallback_used=False,
+        )
+
+    monkeypatch.setattr(runner_module, "execute_task_automation", _fake_execute_task_automation)
+
     queued = client.post(f"/api/tasks/{task['id']}/automation/run", json={'instruction': 'Do runner check'})
     assert queued.status_code == 200
     assert queued.json()['automation_state'] == 'queued'
@@ -2506,6 +2532,11 @@ def test_runner_processes_queued_automation(tmp_path):
     payload = status.json()
     assert payload['automation_state'] == 'completed'
     assert payload['last_agent_comment'] is not None
+    assert payload['last_agent_prompt_mode'] == 'resume'
+    assert payload['last_agent_prompt_segment_chars']['instruction'] == 900
+    assert payload['last_agent_codex_session_id'] == 'task-thread-001'
+    assert payload['last_agent_codex_resume_attempted'] is True
+    assert payload['last_agent_codex_resume_succeeded'] is True
 
     comments = client.get(f"/api/tasks/{task['id']}/comments")
     assert comments.status_code == 200
@@ -6539,6 +6570,327 @@ def test_agents_chat_endpoint_uses_persisted_session_attachment_context(tmp_path
     assert 'Attached file context:' in instruction
     assert 'autoloaded session attachment text' in instruction
     assert attachment_ref['path'] in instruction
+
+
+def test_agents_chat_endpoint_reuses_session_attachment_context_on_resume(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    session_id = 'chat-session-context-reuse-test'
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+    from shared.models import ChatSession, SessionLocal
+
+    captured: dict[str, object] = {}
+
+    def _fake_execute_task_automation(**kwargs):
+        captured.update(kwargs)
+        return AutomationOutcome(action='comment', summary='ok', comment=None, usage=None)
+
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+    monkeypatch.setattr(
+        agents_api,
+        '_load_chat_session_codex_state',
+        lambda **_kwargs: ('codex-thread-1', True),
+    )
+
+    created = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Create session for attachment reuse',
+            'session_id': session_id,
+            'history': [],
+        },
+    )
+    assert created.status_code == 200
+
+    uploaded = client.post(
+        '/api/attachments/upload',
+        data={'workspace_id': ws_id, 'project_id': project_id},
+        files={'file': ('session-reuse.txt', BytesIO(b'reused attachment payload text'), 'text/plain')},
+    )
+    assert uploaded.status_code == 200
+    attachment_ref = uploaded.json()
+
+    with SessionLocal() as db:
+        session = db.query(ChatSession).filter(ChatSession.workspace_id == ws_id, ChatSession.session_key == session_id).one()
+        session.session_attachment_refs = json.dumps(
+            [
+                {
+                    'path': attachment_ref['path'],
+                    'name': attachment_ref.get('name') or 'session-reuse.txt',
+                    'mime_type': attachment_ref.get('mime_type') or 'text/plain',
+                    'size_bytes': attachment_ref.get('size_bytes') or 0,
+                    'checksum': 'seeded-checksum',
+                    'extraction_status': 'extracted',
+                    'extracted_text': 'reused attachment payload text',
+                }
+            ]
+        )
+        db.commit()
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Continue with pinned session attachment',
+            'session_id': session_id,
+            'history': [],
+        },
+    )
+    assert res.status_code == 200
+    instruction = str(captured.get('instruction') or '')
+    assert 'Attached file context:' in instruction
+    assert '(reused from session memory' in instruction
+    assert 'reused attachment payload text' not in instruction
+
+
+def test_metrics_chat_prompt_segments_endpoint_aggregates_usage(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    def _fake_execute_task_automation(**_kwargs):
+        return AutomationOutcome(
+            action='comment',
+            summary='ok',
+            comment=None,
+            usage={
+                'input_tokens': 1200,
+                'output_tokens': 80,
+                'prompt_mode': 'resume',
+                'prompt_segment_chars': {
+                    'instruction': 300,
+                    'fresh_memory_snapshot': 450,
+                },
+            },
+        )
+
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+
+    created = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Seed metrics',
+            'session_id': 'chat-metrics-segment-test',
+        },
+    )
+    assert created.status_code == 200
+
+    metrics = client.get(
+        '/api/metrics/chat-prompt-segments',
+        params={'workspace_id': ws_id, 'project_id': project_id, 'limit': 20},
+    )
+    assert metrics.status_code == 200
+    payload = metrics.json()
+    assert payload['runs_scanned'] >= 1
+    assert payload['runs_analyzed'] >= 1
+    assert int(payload['prompt_mode_counts'].get('resume') or 0) >= 1
+    assert int(payload['segment_totals_chars'].get('instruction') or 0) >= 300
+    assert int(payload['segment_totals_chars'].get('fresh_memory_snapshot') or 0) >= 450
+
+
+def test_metrics_task_automation_prompt_segments_endpoint_aggregates_usage(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created_task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Task automation metrics seed',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert created_task.status_code == 200
+    task_id = created_task.json()['id']
+
+    from features.tasks import api as tasks_api
+    from features.agents.executor import AutomationOutcome
+
+    def _fake_execute_task_automation_stream(**_kwargs):
+        return AutomationOutcome(
+            action='comment',
+            summary='ok',
+            comment='done',
+            usage={
+                'input_tokens': 1500,
+                'output_tokens': 120,
+                'prompt_mode': 'resume',
+                'prompt_segment_chars': {
+                    'instruction': 500,
+                    'graph_context': 700,
+                },
+            },
+            codex_session_id='task-metrics-thread-1',
+            resume_attempted=True,
+            resume_succeeded=True,
+            resume_fallback_used=False,
+        )
+
+    monkeypatch.setattr(tasks_api, 'execute_task_automation_stream', _fake_execute_task_automation_stream)
+
+    run = client.post(
+        f'/api/tasks/{task_id}/automation/stream',
+        json={'instruction': 'Seed task prompt metrics'},
+    )
+    assert run.status_code == 200
+
+    metrics = client.get(
+        '/api/metrics/task-automation-prompt-segments',
+        params={'workspace_id': ws_id, 'project_id': project_id, 'limit': 20},
+    )
+    assert metrics.status_code == 200
+    payload = metrics.json()
+    assert payload['runs_scanned'] >= 1
+    assert payload['runs_analyzed'] >= 1
+    assert int(payload['prompt_mode_counts'].get('resume') or 0) >= 1
+    assert int(payload['segment_totals_chars'].get('instruction') or 0) >= 500
+    assert int(payload['segment_totals_chars'].get('graph_context') or 0) >= 700
+
+
+def test_task_automation_stream_reuses_codex_session_after_non_resume_first_run(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created_task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Task codex resume carry-over',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert created_task.status_code == 200
+    task_id = created_task.json()['id']
+
+    from features.tasks import api as tasks_api
+    from features.agents.executor import AutomationOutcome
+
+    captured_codex_session_ids: list[str | None] = []
+
+    def _fake_execute_task_automation_stream(**kwargs):
+        captured_codex_session_ids.append(kwargs.get('codex_session_id'))
+        return AutomationOutcome(
+            action='comment',
+            summary='ok',
+            comment='done',
+            usage={
+                'prompt_mode': 'full',
+                'prompt_segment_chars': {'instruction': 100},
+            },
+            codex_session_id='task-thread-carry-over-1',
+            resume_attempted=False,
+            resume_succeeded=False,
+            resume_fallback_used=False,
+        )
+
+    monkeypatch.setattr(tasks_api, 'execute_task_automation_stream', _fake_execute_task_automation_stream)
+
+    first = client.post(
+        f'/api/tasks/{task_id}/automation/stream',
+        json={'instruction': 'First run'},
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        f'/api/tasks/{task_id}/automation/stream',
+        json={'instruction': 'Second run'},
+    )
+    assert second.status_code == 200
+
+    assert len(captured_codex_session_ids) >= 2
+    assert captured_codex_session_ids[0] in {None, ''}
+    assert captured_codex_session_ids[1] == 'task-thread-carry-over-1'
+
+
+def test_agents_chat_resume_dedupes_cross_session_updates_between_turns(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    session_id = 'chat-resume-cross-update-dedupe'
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    captured_instructions: list[str] = []
+
+    def _fake_execute_task_automation(**kwargs):
+        captured_instructions.append(str(kwargs.get('instruction') or ''))
+        return AutomationOutcome(action='comment', summary='ok', comment=None, usage={})
+
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+    monkeypatch.setattr(
+        agents_api,
+        '_load_chat_session_codex_state',
+        lambda **_kwargs: ('codex-thread-1', True),
+    )
+    monkeypatch.setattr(
+        agents_api,
+        '_load_cross_session_recent_updates',
+        lambda **_kwargs: [
+            {
+                'update_id': 'upd-001',
+                'role': 'assistant',
+                'content': 'Important change from another session.',
+                'source_session_key': 'other-session',
+            }
+        ],
+    )
+
+    first = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'First resume turn',
+            'session_id': session_id,
+        },
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Second resume turn',
+            'session_id': session_id,
+        },
+    )
+    assert second.status_code == 200
+
+    third = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'Third resume turn',
+            'session_id': session_id,
+        },
+    )
+    assert third.status_code == 200
+
+    assert len(captured_instructions) >= 3
+    assert 'Important change from another session.' in captured_instructions[0]
+    assert 'Important change from another session.' not in captured_instructions[1]
+    assert 'Important change from another session.' not in captured_instructions[2]
 
 
 def test_agents_chat_stream_endpoint_persists_attachment_without_fk_error(tmp_path, monkeypatch):

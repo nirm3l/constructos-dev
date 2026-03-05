@@ -1,15 +1,17 @@
 import json
 import queue
 import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from features.agents.executor import execute_task_automation_stream
+from features.agents.executor import build_automation_usage_metadata, execute_task_automation_stream
 from features.agents.gateway import build_ui_gateway
 from shared.core import (
     ActivityLog,
@@ -35,7 +37,8 @@ from shared.core import (
     to_iso_utc,
 )
 from shared.eventing import append_event, rebuild_state
-from shared.models import SessionLocal
+from shared.in_memory_stream_broker import InMemoryStreamBroker
+from shared.models import CommandExecution, SessionLocal
 from .application import TaskApplicationService
 from .domain import (
     EVENT_AUTOMATION_COMPLETED,
@@ -47,6 +50,45 @@ from .domain import (
 from .read_models import TaskListQuery, list_tasks_read_model
 
 router = APIRouter()
+
+_STREAM_BROKER = InMemoryStreamBroker(max_events=1500)
+
+
+def _create_stream_run(task_id: str) -> str:
+    return _STREAM_BROKER.create_run(key=task_id)
+
+
+def _publish_stream_event(task_id: str, event: dict[str, Any]) -> dict[str, Any] | None:
+    return _STREAM_BROKER.publish_event(key=task_id, event=event)
+
+
+def _finish_stream_run(task_id: str) -> None:
+    _STREAM_BROKER.finish_run(key=task_id)
+
+
+def _subscribe_stream_run(task_id: str, run_id: str, since_seq: int) -> tuple[queue.Queue, list[dict[str, Any]], bool]:
+    return _STREAM_BROKER.subscribe_run(key=task_id, run_id=run_id, since_seq=since_seq)
+
+
+def _unsubscribe_stream_run(task_id: str, subscriber_queue: queue.Queue) -> None:
+    _STREAM_BROKER.unsubscribe_run(key=task_id, subscriber_queue=subscriber_queue)
+
+
+def _coerce_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return None
 
 
 @router.get("/api/tasks")
@@ -361,7 +403,33 @@ def run_automation_stream(
     payload: TaskAutomationRun,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    command_id: str | None = Depends(get_command_id),
 ):
+    def _single_final_stream(response: dict[str, Any]) -> StreamingResponse:
+        body = json.dumps({"type": "final", "response": response}, ensure_ascii=True) + "\n"
+        return StreamingResponse(iter([body]), media_type="application/x-ndjson", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+    normalized_command_id = str(command_id or "").strip() or None
+    if normalized_command_id:
+        existing = db.execute(
+            select(CommandExecution).where(CommandExecution.command_id == normalized_command_id)
+        ).scalar_one_or_none()
+        if existing is not None:
+            try:
+                replay_payload = json.loads(existing.response_json or "{}")
+            except Exception:
+                replay_payload = {}
+            if not isinstance(replay_payload, dict):
+                replay_payload = {}
+            replay_response = {
+                "ok": bool(replay_payload.get("ok", True)),
+                "task_id": str(replay_payload.get("task_id") or task_id),
+                "automation_state": str(replay_payload.get("automation_state") or "completed"),
+                "summary": str(replay_payload.get("summary") or "Automation run replayed from command idempotency."),
+                "comment": str(replay_payload.get("comment") or ""),
+            }
+            return _single_final_stream(replay_response)
+
     task_row = db.get(Task, task_id)
     if not task_row or task_row.is_deleted:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -373,12 +441,28 @@ def run_automation_stream(
         ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
 
     state, _ = rebuild_state(db, "Task", task_id)
+    current_automation_state = str(state.get("automation_state") or "").strip().lower()
+    if current_automation_state in {"queued", "running"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Automation is already in progress for this task.",
+        )
     title = str(state.get("title") or "")
     description = str(state.get("description") or "")
     status = str(state.get("status") or "To do")
     instruction = str(payload.instruction or "").strip() or str(state.get("instruction") or state.get("scheduled_instruction") or "").strip()
     if not instruction:
         raise HTTPException(status_code=422, detail="instruction is required")
+    existing_codex_session_id = str(state.get("last_agent_codex_session_id") or "").strip()
+    resume_attempted = _coerce_bool(state.get("last_agent_codex_resume_attempted"))
+    resume_last_succeeded = _coerce_bool(state.get("last_agent_codex_resume_succeeded"))
+    resume_blocked = resume_attempted is True and resume_last_succeeded is False
+    resume_codex_session_id = (
+        existing_codex_session_id
+        if existing_codex_session_id and not resume_blocked
+        else None
+    )
+    run_id = _create_stream_run(task_id)
 
     now_iso = to_iso_utc(datetime.now(timezone.utc))
     append_event(
@@ -404,6 +488,7 @@ def run_automation_stream(
             "last_agent_progress": "",
             "last_agent_stream_status": "Automation run started.",
             "last_agent_stream_updated_at": now_iso,
+            "last_agent_run_id": run_id,
         },
         metadata={
             "actor_id": user.id,
@@ -413,6 +498,48 @@ def run_automation_stream(
         },
     )
     db.commit()
+    _publish_stream_event(task_id, {"type": "status", "message": "Automation run started."})
+    if normalized_command_id:
+        try:
+            db.add(
+                CommandExecution(
+                    command_id=normalized_command_id,
+                    command_name="Task.AutomationStream",
+                    user_id=user.id,
+                    response_json=json.dumps(
+                        {
+                            "ok": True,
+                            "task_id": task_id,
+                            "automation_state": "running",
+                            "summary": "Automation stream run accepted.",
+                            "comment": "",
+                        },
+                        ensure_ascii=True,
+                    ),
+                )
+            )
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            existing = db.execute(
+                select(CommandExecution).where(CommandExecution.command_id == normalized_command_id)
+            ).scalar_one_or_none()
+            if existing is not None:
+                try:
+                    replay_payload = json.loads(existing.response_json or "{}")
+                except Exception:
+                    replay_payload = {}
+                if not isinstance(replay_payload, dict):
+                    replay_payload = {}
+                replay_response = {
+                    "ok": bool(replay_payload.get("ok", True)),
+                    "task_id": str(replay_payload.get("task_id") or task_id),
+                    "automation_state": str(replay_payload.get("automation_state") or "completed"),
+                    "summary": str(replay_payload.get("summary") or "Automation run replayed from command idempotency."),
+                    "comment": str(replay_payload.get("comment") or ""),
+                }
+                return _single_final_stream(replay_response)
+            raise
 
     stream_headers = {
         "Cache-Control": "no-store",
@@ -424,9 +551,67 @@ def run_automation_stream(
         outcome_holder: dict[str, Any] = {}
         error_holder: dict[str, Exception] = {}
         done_event = threading.Event()
+        stream_text = ""
+        stream_status = ""
+        last_flush_at = 0.0
+        stream_max_chars = 24000
+        stream_flush_interval_seconds = 0.35
+        finalize_lock = threading.Lock()
+        finalized_response: dict[str, Any] = {}
+        stream_lock = threading.Lock()
+
+        def _persist_stream_progress(*, force: bool = False) -> None:
+            nonlocal last_flush_at, stream_text, stream_status
+            now_monotonic = time.monotonic()
+            if not force and (now_monotonic - last_flush_at) < stream_flush_interval_seconds:
+                return
+            last_flush_at = now_monotonic
+            with stream_lock:
+                progress_text = stream_text[-stream_max_chars:]
+                status_text = stream_status or None
+            now_iso = to_iso_utc(datetime.now(timezone.utc))
+            with SessionLocal() as local_db:
+                append_event(
+                    local_db,
+                    aggregate_type="Task",
+                    aggregate_id=task_id,
+                    event_type=TASK_EVENT_UPDATED,
+                    payload={
+                        "last_agent_progress": progress_text,
+                        "last_agent_stream_status": status_text,
+                        "last_agent_stream_updated_at": now_iso,
+                        "last_agent_run_id": run_id,
+                    },
+                    metadata={
+                        "actor_id": user.id,
+                        "workspace_id": workspace_id,
+                        "project_id": project_id,
+                        "task_id": task_id,
+                    },
+                )
+                local_db.commit()
 
         def _on_event(event: dict[str, object]) -> None:
-            event_queue.put(event)
+            nonlocal stream_text, stream_status
+            event_type = str(event.get("type") or "").strip()
+            if event_type == "assistant_text":
+                delta = str(event.get("delta") or "")
+                if delta:
+                    with stream_lock:
+                        stream_text = (stream_text + delta)[-stream_max_chars:]
+                    _persist_stream_progress(force=False)
+            elif event_type == "status":
+                message = str(event.get("message") or "").strip()
+                if message:
+                    with stream_lock:
+                        stream_status = message
+                        stream_text = (f"{stream_text}\n\n{message}".strip())[-stream_max_chars:]
+                    _persist_stream_progress(force=True)
+            published = _publish_stream_event(task_id, dict(event))
+            if published:
+                event_queue.put(published)
+            else:
+                event_queue.put(event)
 
         def _worker() -> None:
             try:
@@ -438,8 +623,10 @@ def run_automation_stream(
                     instruction=instruction,
                     workspace_id=workspace_id,
                     project_id=project_id,
+                    codex_session_id=resume_codex_session_id,
                     actor_user_id=user.id,
                     allow_mutations=True,
+                    prompt_instruction_segments={"user_instruction": len(instruction)},
                     on_event=_on_event,
                     stream_plain_text=True,
                 )
@@ -448,8 +635,176 @@ def run_automation_stream(
             finally:
                 done_event.set()
 
+        def _finalize_once() -> dict[str, Any]:
+            with finalize_lock:
+                existing = finalized_response.get("value")
+                if isinstance(existing, dict):
+                    return existing
+                _persist_stream_progress(force=True)
+
+                if "value" in error_holder:
+                    failed_at = to_iso_utc(datetime.now(timezone.utc))
+                    error_text = str(error_holder["value"])
+                    with SessionLocal() as local_db:
+                        append_event(
+                            local_db,
+                            aggregate_type="Task",
+                            aggregate_id=task_id,
+                            event_type=EVENT_AUTOMATION_FAILED,
+                            payload={"failed_at": failed_at, "error": error_text, "summary": "Automation runner failed."},
+                            metadata={
+                                "actor_id": user.id,
+                                "workspace_id": workspace_id,
+                                "project_id": project_id,
+                                "task_id": task_id,
+                            },
+                        )
+                        append_event(
+                            local_db,
+                            aggregate_type="Task",
+                            aggregate_id=task_id,
+                            event_type=TASK_EVENT_UPDATED,
+                            payload={
+                                "last_agent_stream_status": "Automation run failed.",
+                                "last_agent_stream_updated_at": failed_at,
+                                "last_agent_run_id": run_id,
+                            },
+                            metadata={
+                                "actor_id": user.id,
+                                "workspace_id": workspace_id,
+                                "project_id": project_id,
+                                "task_id": task_id,
+                            },
+                        )
+                        local_db.commit()
+                        if normalized_command_id:
+                            command_row = local_db.execute(
+                                select(CommandExecution).where(CommandExecution.command_id == normalized_command_id)
+                            ).scalar_one_or_none()
+                            if command_row is not None:
+                                command_row.response_json = json.dumps(
+                                    {
+                                        "ok": False,
+                                        "task_id": task_id,
+                                        "automation_state": "failed",
+                                        "summary": "Automation runner failed.",
+                                        "comment": error_text,
+                                    },
+                                    ensure_ascii=True,
+                                )
+                                local_db.commit()
+                    response = {
+                        "ok": False,
+                        "task_id": task_id,
+                        "automation_state": "failed",
+                        "summary": "Automation runner failed.",
+                        "comment": error_text,
+                    }
+                    _publish_stream_event(task_id, {"type": "final", "response": response})
+                    _finish_stream_run(task_id)
+                    finalized_response["value"] = response
+                    return response
+
+                outcome = outcome_holder.get("value")
+                if outcome is None:
+                    response = {
+                        "ok": False,
+                        "task_id": task_id,
+                        "automation_state": "failed",
+                        "summary": "Automation runner failed.",
+                        "comment": "Missing automation outcome.",
+                    }
+                    _publish_stream_event(task_id, {"type": "final", "response": response})
+                    _finish_stream_run(task_id)
+                    finalized_response["value"] = response
+                    return response
+
+                completed_at = to_iso_utc(datetime.now(timezone.utc))
+                outcome_comment = str(outcome.comment or "").strip()
+                usage_metadata = build_automation_usage_metadata(outcome)
+                usage_payload = usage_metadata.get("last_agent_usage")
+                with SessionLocal() as local_db:
+                    append_event(
+                        local_db,
+                        aggregate_type="Task",
+                        aggregate_id=task_id,
+                        event_type=EVENT_AUTOMATION_COMPLETED,
+                        payload={
+                            "completed_at": completed_at,
+                            "summary": str(outcome.summary or "Automation run finished."),
+                            "comment": outcome_comment,
+                            "usage": usage_payload if isinstance(usage_payload, dict) else None,
+                            "prompt_mode": usage_metadata.get("last_agent_prompt_mode"),
+                            "prompt_segment_chars": usage_metadata.get("last_agent_prompt_segment_chars"),
+                            "codex_session_id": usage_metadata.get("last_agent_codex_session_id"),
+                            "resume_attempted": usage_metadata.get("last_agent_codex_resume_attempted"),
+                            "resume_succeeded": usage_metadata.get("last_agent_codex_resume_succeeded"),
+                            "resume_fallback_used": usage_metadata.get("last_agent_codex_resume_fallback_used"),
+                        },
+                        metadata={
+                            "actor_id": user.id,
+                            "workspace_id": workspace_id,
+                            "project_id": project_id,
+                            "task_id": task_id,
+                        },
+                    )
+                    append_event(
+                        local_db,
+                        aggregate_type="Task",
+                        aggregate_id=task_id,
+                        event_type=TASK_EVENT_UPDATED,
+                        payload={
+                            "last_agent_stream_status": "Automation run completed.",
+                            "last_agent_stream_updated_at": completed_at,
+                            "last_agent_progress": outcome_comment or str(outcome.summary or ""),
+                            "last_agent_comment": outcome_comment or None,
+                            "last_agent_run_id": run_id,
+                            **usage_metadata,
+                        },
+                        metadata={
+                            "actor_id": user.id,
+                            "workspace_id": workspace_id,
+                            "project_id": project_id,
+                            "task_id": task_id,
+                        },
+                    )
+                    local_db.commit()
+                    if normalized_command_id:
+                        command_row = local_db.execute(
+                            select(CommandExecution).where(CommandExecution.command_id == normalized_command_id)
+                        ).scalar_one_or_none()
+                        if command_row is not None:
+                            command_row.response_json = json.dumps(
+                                {
+                                    "ok": True,
+                                    "task_id": task_id,
+                                    "automation_state": "completed",
+                                    "summary": str(outcome.summary or "Automation run finished."),
+                                    "comment": outcome_comment,
+                                },
+                                ensure_ascii=True,
+                            )
+                            local_db.commit()
+                response = {
+                    "ok": True,
+                    "task_id": task_id,
+                    "automation_state": "completed",
+                    "summary": str(outcome.summary or "Automation run finished."),
+                    "comment": str(outcome.comment or ""),
+                }
+                _publish_stream_event(task_id, {"type": "final", "response": response})
+                _finish_stream_run(task_id)
+                finalized_response["value"] = response
+                return response
+
+        def _background_finalize() -> None:
+            done_event.wait()
+            _finalize_once()
+
         worker = threading.Thread(target=_worker, daemon=True)
         worker.start()
+        finalizer = threading.Thread(target=_background_finalize, daemon=True)
+        finalizer.start()
 
         while True:
             try:
@@ -464,102 +819,7 @@ def run_automation_stream(
             if event_type in {"assistant_text", "status", "usage"}:
                 yield json.dumps(event, ensure_ascii=True) + "\n"
 
-        if "value" in error_holder:
-            failed_at = to_iso_utc(datetime.now(timezone.utc))
-            error_text = str(error_holder["value"])
-            with SessionLocal() as local_db:
-                append_event(
-                    local_db,
-                    aggregate_type="Task",
-                    aggregate_id=task_id,
-                    event_type=EVENT_AUTOMATION_FAILED,
-                    payload={"failed_at": failed_at, "error": error_text, "summary": "Automation runner failed."},
-                    metadata={
-                        "actor_id": user.id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": task_id,
-                    },
-                )
-                append_event(
-                    local_db,
-                    aggregate_type="Task",
-                    aggregate_id=task_id,
-                    event_type=TASK_EVENT_UPDATED,
-                    payload={
-                        "last_agent_stream_status": "Automation run failed.",
-                        "last_agent_stream_updated_at": failed_at,
-                    },
-                    metadata={
-                        "actor_id": user.id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": task_id,
-                    },
-                )
-                local_db.commit()
-            response = {
-                "ok": False,
-                "task_id": task_id,
-                "automation_state": "failed",
-                "summary": "Automation runner failed.",
-                "comment": error_text,
-            }
-            yield json.dumps({"type": "final", "response": response}, ensure_ascii=True) + "\n"
-            return
-
-        outcome = outcome_holder.get("value")
-        if outcome is None:
-            response = {
-                "ok": False,
-                "task_id": task_id,
-                "automation_state": "failed",
-                "summary": "Automation runner failed.",
-                "comment": "Missing automation outcome.",
-            }
-            yield json.dumps({"type": "final", "response": response}, ensure_ascii=True) + "\n"
-            return
-
-        completed_at = to_iso_utc(datetime.now(timezone.utc))
-        with SessionLocal() as local_db:
-            append_event(
-                local_db,
-                aggregate_type="Task",
-                aggregate_id=task_id,
-                event_type=EVENT_AUTOMATION_COMPLETED,
-                payload={"completed_at": completed_at, "summary": str(outcome.summary or "Automation run finished.")},
-                metadata={
-                    "actor_id": user.id,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
-                    "task_id": task_id,
-                },
-            )
-            append_event(
-                local_db,
-                aggregate_type="Task",
-                aggregate_id=task_id,
-                event_type=TASK_EVENT_UPDATED,
-                payload={
-                    "last_agent_stream_status": "Automation run completed.",
-                    "last_agent_stream_updated_at": completed_at,
-                },
-                metadata={
-                    "actor_id": user.id,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
-                    "task_id": task_id,
-                },
-            )
-            local_db.commit()
-
-        response = {
-            "ok": True,
-            "task_id": task_id,
-            "automation_state": "completed",
-            "summary": str(outcome.summary or "Automation run finished."),
-            "comment": str(outcome.comment or ""),
-        }
+        response = _finalize_once()
         yield json.dumps({"type": "final", "response": response}, ensure_ascii=True) + "\n"
 
     return StreamingResponse(_stream(), media_type="application/x-ndjson", headers=stream_headers)
@@ -569,3 +829,59 @@ def run_automation_stream(
 def task_automation_status(task_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     gateway = build_ui_gateway(actor_user_id=user.id)
     return gateway.get_task_automation_status(task_id=task_id)
+
+
+@router.get("/api/tasks/{task_id}/automation/stream")
+def resume_automation_stream(
+    task_id: str,
+    run_id: str,
+    since_seq: int = 0,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    task_row = db.get(Task, task_id)
+    if not task_row or task_row.is_deleted:
+        raise HTTPException(status_code=404, detail="Task not found")
+    workspace_id = str(task_row.workspace_id or "").strip()
+    project_id = str(task_row.project_id or "").strip() or None
+    if project_id:
+        ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    else:
+        ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+
+    subscriber_queue, replay_events, done = _subscribe_stream_run(task_id, run_id, since_seq)
+    if not replay_events and done:
+        raise HTTPException(status_code=404, detail="Automation stream run is not available")
+
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Accel-Buffering": "no",
+    }
+
+    def _stream():
+        try:
+            for event in replay_events:
+                yield json.dumps(event, ensure_ascii=True) + "\n"
+            if done:
+                return
+            while True:
+                try:
+                    event = subscriber_queue.get(timeout=0.5)
+                except queue.Empty:
+                    broker = _STREAM_BROKER.current_state(key=task_id)
+                    if not isinstance(broker, dict):
+                        break
+                    if str(broker.get("run_id") or "").strip() != str(run_id).strip():
+                        break
+                    if bool(broker.get("done")):
+                        break
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                yield json.dumps(event, ensure_ascii=True) + "\n"
+                if str(event.get("type") or "").strip() == "final":
+                    break
+        finally:
+            _unsubscribe_stream_run(task_id, subscriber_queue)
+
+    return StreamingResponse(_stream(), media_type="application/x-ndjson", headers=headers)

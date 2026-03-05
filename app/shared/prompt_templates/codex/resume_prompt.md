@@ -27,7 +27,7 @@ Fresh Cross-Session Memory Snapshot (generated for this turn):
 {fresh_memory_snapshot}
 
 Guidance:
-{task_guidance}- Enabled MCP servers for this run: {enabled_mcp_servers_text}.
+{task_guidance}{interaction_mode_guidance}- Enabled MCP servers for this run: {enabled_mcp_servers_text}.
 - For factual questions that may depend on other sessions, prefer Fresh Cross-Session Memory Snapshot over stale thread memory.
 - If prior thread context appears stale or missing, refresh by calling get_project_chat_context(project_ref=..., workspace_id=...).
 - Treat Gate Policy Snapshot + Gate Required Checks as explicit execution constraints for this project.
@@ -45,4 +45,5 @@ Guidance:
   - required role coverage present
   - user-required flags/artifacts satisfied (for example explicit event-storming preference, specs/notes present when requested)
 - For setup-only requests, include a final line `Execution state: Not started` plus `Deploy target recorded: <stack>:<port>`.
-{mutation_policy}{response_tail}
+{mutation_policy}
+{response_tail}

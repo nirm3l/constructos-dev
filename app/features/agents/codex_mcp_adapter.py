@@ -538,6 +538,7 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     allow_mutations = bool(ctx.get("allow_mutations", True))
     mcp_servers = _normalize_prompt_mcp_servers(ctx.get("mcp_servers"))
     enabled_mcp_servers_text = ", ".join(mcp_servers)
+    stream_plain_text = bool(ctx.get("stream_plain_text"))
     soul_md = project_description.strip() or "_(empty)_"
     graph_md = graph_context_markdown or "_(knowledge graph unavailable)_"
     graph_evidence = graph_evidence_json or "[]"
@@ -549,6 +550,9 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         if not isinstance(item, dict):
             continue
         title = str(item.get("title") or "").strip()
+        if title.lower() == "gate policy":
+            # Gate Policy is rendered in a dedicated section below; skip duplicate copy here.
+            continue
         body = str(item.get("body") or "").strip()
         if not title and not body:
             continue
@@ -581,7 +585,8 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     skills_md = "\n".join(skills_md_lines) if skills_md_lines else "_(no project skills)_"
     has_task_context = bool(str(task_id or "").strip())
     context_guidance = (
-        "- First call MCP tool get_task(task_id) to validate current task data.\n"
+        "- If task context is present, validate current task data with get_task(task_id) before mutations.\n"
+        "- Keep this internal; do not start responses by narrating tool checks.\n"
         if has_task_context
         else "- This is a general chat request (not bound to a single task). Use workspace/project context and MCP tools as needed.\n"
     )
@@ -592,6 +597,15 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         else "- Mutating tools are NOT allowed for this request.\n"
         "- Do not create/update/delete/archive/complete entities.\n"
         "- Do not call mutating MCP tools; produce analysis/summary only.\n"
+    )
+    interaction_mode_guidance = (
+        "- This run is manual chat-like automation mode.\n"
+        "- Default behavior: answer the instruction directly in Markdown.\n"
+        "- Do not mutate tasks/projects or post task comments/notes unless explicitly requested by the instruction.\n"
+        "- For greetings/questions (for example 'Hello'), reply conversationally with no side effects.\n"
+        "- Do not describe internal planning/tool-call steps unless the user explicitly asks for them.\n"
+        if (stream_plain_text and not structured_response)
+        else "- This run is workflow automation mode; execute requested operations and persist evidence when appropriate.\n"
     )
     response_header = (
         "Return ONLY JSON matching the schema.\n\n"
@@ -637,6 +651,7 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
             "graph_evidence": graph_evidence,
             "graph_summary": graph_summary,
             "context_guidance": context_guidance,
+            "interaction_mode_guidance": interaction_mode_guidance,
             "plugin_workflow_guidance": _render_plugin_workflow_guidance("full_prompt_workflow_guidance.md"),
             "enabled_mcp_servers_text": enabled_mcp_servers_text,
             "mutation_policy": mutation_policy,
@@ -650,6 +665,99 @@ def _normalize_snapshot_text(value: object, *, max_chars: int) -> str:
     if len(normalized) <= max_chars:
         return normalized
     return f"{normalized[: max(0, max_chars - 3)]}..."
+
+
+def _render_rules_markdown_for_segments(project_rules: list[object]) -> str:
+    lines: list[str] = []
+    for item in project_rules:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        if title.lower() == "gate policy":
+            continue
+        body = str(item.get("body") or "").strip()
+        if not title and not body:
+            continue
+        label = title or "Untitled rule"
+        lines.append(f"- {label}: {body}" if body else f"- {label}")
+    return "\n".join(lines).strip()
+
+
+def _render_skills_markdown_for_segments(project_skills: list[object]) -> str:
+    lines: list[str] = []
+    for item in project_skills:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        skill_key = str(item.get("skill_key") or "").strip()
+        summary = str(item.get("summary") or "").strip()
+        mode = str(item.get("mode") or "").strip().lower() or "advisory"
+        trust_level = str(item.get("trust_level") or "").strip().lower() or "reviewed"
+        source_locator = str(item.get("source_locator") or "").strip()
+        if not name and not skill_key:
+            continue
+        label = name or skill_key
+        key_text = f" ({skill_key})" if skill_key else ""
+        source_text = f" source={source_locator}" if source_locator else ""
+        suffix_parts = [f"mode={mode}", f"trust={trust_level}"]
+        if summary:
+            suffix_parts.append(summary)
+        lines.append(f"- {label}{key_text}: {'; '.join(suffix_parts)}{source_text}")
+    return "\n".join(lines).strip()
+
+
+def _prompt_segment_char_stats(
+    ctx: dict,
+    *,
+    mode: str,
+) -> dict[str, int]:
+    normalized_mode = str(mode or "").strip().lower()
+    instruction = str(ctx.get("instruction") or "").strip()
+    status_change = (
+        f"- Source task ID: {str(ctx.get('trigger_task_id') or '').strip() or '_(not available)_'}\n"
+        f"- From status: {str(ctx.get('trigger_from_status') or '').strip() or '_(not available)_'}\n"
+        f"- To status: {str(ctx.get('trigger_to_status') or '').strip() or '_(not available)_'}\n"
+        f"- Triggered at: {str(ctx.get('trigger_timestamp') or '').strip() or '_(not available)_'}\n"
+    ).strip()
+    gate_policy = str(ctx.get("gate_policy_json") or "").strip()
+    gate_required_checks = str(ctx.get("gate_policy_required_checks") or "").strip()
+
+    stats: dict[str, int] = {
+        "status_change_trigger_context": len(status_change),
+        "gate_policy": len(gate_policy),
+        "gate_required_checks": len(gate_required_checks),
+    }
+    instruction_breakdown = ctx.get("prompt_instruction_segments")
+    instruction_parts: dict[str, int] = {}
+    if isinstance(instruction_breakdown, dict):
+        for key_raw, value_raw in instruction_breakdown.items():
+            key = str(key_raw or "").strip()
+            if not key:
+                continue
+            try:
+                value = max(0, int(value_raw))
+            except (TypeError, ValueError):
+                continue
+            instruction_parts[f"instruction_{key}"] = value
+    if instruction_parts:
+        stats.update(instruction_parts)
+        stats["instruction"] = sum(instruction_parts.values())
+    else:
+        stats["instruction"] = len(instruction)
+    if normalized_mode == "resume":
+        stats["fresh_memory_snapshot"] = len(_build_resume_fresh_memory_snapshot(ctx))
+    else:
+        project_description = str(ctx.get("project_description") or "").strip()
+        project_rules = ctx.get("project_rules") if isinstance(ctx.get("project_rules"), list) else []
+        project_skills = ctx.get("project_skills") if isinstance(ctx.get("project_skills"), list) else []
+        stats["soul"] = len(project_description)
+        stats["project_rules"] = len(_render_rules_markdown_for_segments(project_rules))
+        stats["project_skills"] = len(_render_skills_markdown_for_segments(project_skills))
+        stats["graph_context"] = len(str(ctx.get("graph_context_markdown") or "").strip())
+        stats["graph_evidence"] = len(str(ctx.get("graph_evidence_json") or "").strip())
+        stats["graph_summary"] = len(str(ctx.get("graph_summary_markdown") or "").strip())
+
+    return {key: value for key, value in stats.items() if isinstance(value, int) and value >= 0}
 
 
 def _build_resume_fresh_memory_snapshot(
@@ -742,9 +850,11 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     allow_mutations = bool(ctx.get("allow_mutations", True))
     mcp_servers = _normalize_prompt_mcp_servers(ctx.get("mcp_servers"))
     enabled_mcp_servers_text = ", ".join(mcp_servers) if mcp_servers else "_(none selected)_"
+    stream_plain_text = bool(ctx.get("stream_plain_text"))
     has_task_context = bool(str(task_id or "").strip())
     task_guidance = (
-        "- If task context is present, call get_task(task_id) before mutating state.\n"
+        "- If task context is present, validate with get_task(task_id) before mutating state.\n"
+        "- Keep validation/tool steps internal; do not prepend them to user-facing replies.\n"
         if has_task_context
         else "- This is a general chat request; use workspace/project context as needed.\n"
     )
@@ -752,6 +862,15 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         "- Mutating tools are allowed for this request.\n"
         if allow_mutations
         else "- Mutating tools are NOT allowed for this request.\n"
+    )
+    interaction_mode_guidance = (
+        "- This run is manual chat-like automation mode.\n"
+        "- Default behavior: answer the instruction directly in Markdown.\n"
+        "- Do not mutate tasks/projects or post task comments/notes unless explicitly requested by the instruction.\n"
+        "- For greetings/questions (for example 'Hello'), reply conversationally with no side effects.\n"
+        "- Do not describe internal planning/tool-call steps unless the user explicitly asks for them.\n"
+        if (stream_plain_text and not structured_response)
+        else "- This run is workflow automation mode; execute requested operations and persist evidence when appropriate.\n"
     )
     response_header = (
         "Return ONLY JSON matching the schema.\n\n"
@@ -792,6 +911,7 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
             "status_change_trigger_context": status_change_trigger_context,
             "fresh_memory_snapshot": fresh_memory_snapshot,
             "task_guidance": task_guidance,
+            "interaction_mode_guidance": interaction_mode_guidance,
             "plugin_workflow_guidance": _render_plugin_workflow_guidance("resume_prompt_workflow_guidance.md"),
             "enabled_mcp_servers_text": enabled_mcp_servers_text,
             "mutation_policy": mutation_policy,
@@ -1591,6 +1711,8 @@ def main() -> int:
     structured_response = not (stream_events and stream_plain_text)
     start_prompt = _build_prompt(ctx, structured_response=structured_response)
     resume_prompt = _build_resume_prompt(ctx, structured_response=structured_response)
+    full_prompt_segments = _prompt_segment_char_stats(ctx, mode="full")
+    resume_prompt_segments = _prompt_segment_char_stats(ctx, mode="resume")
     schema = {
         "type": "object",
         "properties": {
@@ -1672,13 +1794,18 @@ def main() -> int:
         summary = _derive_summary_from_text(comment)
     if not summary:
         summary = EMPTY_ASSISTANT_SUMMARY
+    effective_prompt_mode = "resume" if (resume_attempted and resume_succeeded) else "full"
+    effective_prompt_segments = resume_prompt_segments if effective_prompt_mode == "resume" else full_prompt_segments
+    usage_payload: dict[str, object] | None = dict(usage or {})
+    usage_payload["prompt_mode"] = effective_prompt_mode
+    usage_payload["prompt_segment_chars"] = effective_prompt_segments
     print(
         json.dumps(
             {
                 "action": action,
                 "summary": summary,
                 "comment": comment,
-                "usage": usage,
+                "usage": usage_payload,
                 "codex_session_id": codex_session_id,
                 "resume_attempted": resume_attempted,
                 "resume_succeeded": resume_succeeded,

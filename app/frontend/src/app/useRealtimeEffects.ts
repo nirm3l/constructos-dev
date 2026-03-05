@@ -1,6 +1,6 @@
 import React from 'react'
 import type { Notification } from '../types'
-import { listChatSessionMessages, listChatSessions } from '../api'
+import { listChatSessionMessages, listChatSessions, runAgentChatLiveStream } from '../api'
 import type { ChatSessionServerSnapshot } from './useCodexChatState'
 
 const CHAT_NEAR_BOTTOM_THRESHOLD_PX = 28
@@ -23,8 +23,20 @@ export function useRealtimeEffects(c: any) {
     codexChatHistoryRef,
     codexChatTurns,
     codexChatActiveSessionId,
+    codexChatSessionId,
+    codexChatLiveRunId,
+    codexChatLiveRunSeq,
+    codexChatLiveRunActive,
+    codexChatLiveAssistantTurnId,
+    codexChatLiveRunStartedAt,
+    codexChatLiveStopRequested,
+    setCodexChatLiveRunForSession,
+    setCodexChatTurnsForSession,
+    setIsCodexChatRunning,
+    setCodexChatRunStartedAt,
     mergeCodexChatSessionsFromServer,
   } = c
+  const chatLiveResumeAbortRef = React.useRef<AbortController | null>(null)
   const shouldStickChatToBottomRef = React.useRef(true)
   const isChatNearBottom = React.useCallback((el: HTMLDivElement) => {
     const distanceToBottom = el.scrollHeight - el.clientHeight - el.scrollTop
@@ -82,6 +94,7 @@ export function useRealtimeEffects(c: any) {
   const refreshChatFromServer = React.useCallback(async () => {
     if (!userId || !workspaceId) return
     if (isCodexChatRunning) return
+    if (codexChatLiveRunActive) return
     if (typeof mergeCodexChatSessionsFromServer !== 'function') return
     try {
       const sessions = await listChatSessions(userId, workspaceId, { include_archived: false, limit: 40 })
@@ -133,6 +146,7 @@ export function useRealtimeEffects(c: any) {
     }
   }, [
     codexChatActiveSessionId,
+    codexChatLiveRunActive,
     isCodexChatRunning,
     mergeCodexChatSessionsFromServer,
     normalizeAttachmentRefs,
@@ -148,6 +162,226 @@ export function useRealtimeEffects(c: any) {
       }
     }
   }, [realtimeRefreshTimerRef])
+
+  React.useEffect(() => {
+    return () => {
+      if (chatLiveResumeAbortRef.current) {
+        chatLiveResumeAbortRef.current.abort()
+      }
+    }
+  }, [])
+
+  React.useEffect(() => {
+    if (!showCodexChat || !workspaceId || !userId || !codexChatSessionId) return
+    if (!codexChatLiveRunActive) return
+    if (codexChatLiveStopRequested) return
+    // Do not start a resume stream while the local foreground stream is already active.
+    if (isCodexChatRunning) return
+    const runId = String(codexChatLiveRunId || '').trim()
+    if (!runId) return
+    if (chatLiveResumeAbortRef.current) return
+
+    let assistantTurnId = String(codexChatLiveAssistantTurnId || '').trim()
+    if (!assistantTurnId) {
+      assistantTurnId = `live-${runId}`
+      setCodexChatTurnsForSession(codexChatSessionId, (prev: any[]) => {
+        if (prev.some((turn: any) => String(turn?.id || '') === assistantTurnId)) return prev
+        return [
+          ...prev,
+          {
+            id: assistantTurnId,
+            role: 'assistant',
+            content: '',
+            lastStreamChunk: '',
+            streamShimmerChunk: '',
+            createdAt: Date.now(),
+            attachmentRefs: [],
+          },
+        ]
+      })
+      setCodexChatLiveRunForSession(codexChatSessionId, {
+        liveAssistantTurnId: assistantTurnId,
+        liveRunActive: true,
+      })
+    }
+
+    const assistantTurnCreatedAt = (() => {
+      const match = codexChatTurns.find((turn: any) => String(turn?.id || '') === assistantTurnId)
+      const createdAt = Number(match?.createdAt || 0)
+      return Number.isFinite(createdAt) && createdAt > 0 ? createdAt : null
+    })()
+    setIsCodexChatRunning(true)
+    const resumedStartedAtRaw = Number(codexChatLiveRunStartedAt || 0)
+    const resumedStartedAt = Number.isFinite(resumedStartedAtRaw) && resumedStartedAtRaw > 0
+      ? resumedStartedAtRaw
+      : null
+    const effectiveStartedAt = resumedStartedAt ?? assistantTurnCreatedAt ?? Date.now()
+    setCodexChatRunStartedAt((prev: number | null) => prev ?? effectiveStartedAt)
+    setCodexChatElapsedSeconds(Math.max(0, Math.floor((Date.now() - effectiveStartedAt) / 1000)))
+
+    const appendDelta = (delta: string) => {
+      if (!delta) return
+      if (codexChatLiveStopRequested) return
+      setCodexChatTurnsForSession(codexChatSessionId, (prev: any[]) =>
+        {
+          const targetByIdIndex = prev.findIndex((turn: any) => String(turn?.id || '') === assistantTurnId)
+          const targetAssistantIndex = targetByIdIndex >= 0
+            ? targetByIdIndex
+            : (() => {
+                for (let i = prev.length - 1; i >= 0; i -= 1) {
+                  if (String(prev[i]?.role || '') === 'assistant') return i
+                }
+                return -1
+              })()
+
+          if (targetAssistantIndex < 0) {
+            const createdAt = Date.now()
+            return [
+              ...prev,
+              {
+                id: assistantTurnId,
+                role: 'assistant',
+                content: delta,
+                lastStreamChunk: delta,
+                streamShimmerChunk: delta,
+                createdAt,
+                attachmentRefs: [],
+              },
+            ]
+          }
+
+          return prev.map((turn: any, index: number) => {
+            if (index !== targetAssistantIndex) return turn
+            const current = String(turn?.content || '')
+            return {
+              ...turn,
+              id: String(turn?.id || '').trim() || assistantTurnId,
+              role: 'assistant',
+              content: `${current}${delta}`,
+              lastStreamChunk: delta,
+              streamShimmerChunk: `${String(turn?.streamShimmerChunk || '')}${delta}`,
+            }
+          })
+        }
+      )
+    }
+
+    const abortController = new AbortController()
+    chatLiveResumeAbortRef.current = abortController
+    const isRetryableResumeError = (err: unknown): boolean => {
+      const message = String((err as any)?.message || '').toLowerCase()
+      if (!message) return false
+      return (
+        message.includes('chat stream run is not available')
+        || message.includes('request failed (404)')
+      )
+    }
+
+    const waitMs = (ms: number) =>
+      new Promise<void>((resolve) => {
+        const timer = window.setTimeout(() => resolve(), ms)
+        const onAbort = () => {
+          window.clearTimeout(timer)
+          resolve()
+        }
+        abortController.signal.addEventListener('abort', onAbort, { once: true })
+      })
+
+    const streamWithRetry = async () => {
+      const retryDeadlineMs = Date.now() + 20_000
+      let nextSinceSeq = Math.max(0, Number(codexChatLiveRunSeq || 0))
+      while (!abortController.signal.aborted) {
+        try {
+          await runAgentChatLiveStream(
+            userId,
+            {
+              workspace_id: workspaceId,
+              session_id: codexChatSessionId,
+              run_id: runId,
+              since_seq: nextSinceSeq,
+            },
+            {
+              signal: abortController.signal,
+              onAssistantDelta: appendDelta,
+              onRunId: (nextRunId) => {
+                setCodexChatLiveRunForSession(codexChatSessionId, { liveRunId: nextRunId, liveRunActive: true })
+              },
+              onSeq: (seq) => {
+                nextSinceSeq = Math.max(nextSinceSeq, Number(seq || 0))
+                setCodexChatLiveRunForSession(codexChatSessionId, {
+                  liveRunSeq: seq,
+                  liveRunActive: true,
+                  liveAssistantTurnId: assistantTurnId,
+                })
+              },
+              onStatus: (message) => {
+                setCodexChatLiveRunForSession(codexChatSessionId, {
+                  liveStatusText: message || '',
+                  liveRunActive: true,
+                  liveAssistantTurnId: assistantTurnId,
+                })
+              },
+            }
+          )
+          return
+        } catch (err) {
+          if (abortController.signal.aborted) return
+          if (!isRetryableResumeError(err) || Date.now() >= retryDeadlineMs) {
+            throw err
+          }
+          setCodexChatLiveRunForSession(codexChatSessionId, {
+            liveStatusText: 'Reconnecting stream...',
+            liveRunActive: true,
+            liveAssistantTurnId: assistantTurnId,
+          })
+          await waitMs(350)
+        }
+      }
+    }
+
+    void streamWithRetry()
+      .catch(() => {
+        // Stream run may already be finalized/evicted; state is cleared in finally.
+      })
+      .finally(() => {
+        if (chatLiveResumeAbortRef.current === abortController) {
+          chatLiveResumeAbortRef.current = null
+        }
+        setCodexChatLiveRunForSession(codexChatSessionId, {
+          liveRunActive: false,
+          liveRunId: null,
+          liveRunSeq: 0,
+          liveStatusText: '',
+          liveAssistantTurnId: null,
+          liveRunStartedAt: null,
+        })
+        setIsCodexChatRunning(false)
+        setCodexChatRunStartedAt(null)
+      })
+    return () => {
+      abortController.abort()
+      if (chatLiveResumeAbortRef.current === abortController) {
+        chatLiveResumeAbortRef.current = null
+      }
+    }
+  }, [
+    isCodexChatRunning,
+    codexChatLiveAssistantTurnId,
+    codexChatLiveRunActive,
+    codexChatLiveRunId,
+    codexChatLiveRunStartedAt,
+    codexChatLiveStopRequested,
+    codexChatLiveRunSeq,
+    codexChatSessionId,
+    codexChatTurns,
+    setCodexChatLiveRunForSession,
+    setCodexChatRunStartedAt,
+    setCodexChatTurnsForSession,
+    setIsCodexChatRunning,
+    showCodexChat,
+    userId,
+    workspaceId,
+  ])
 
   React.useEffect(() => {
     if (!workspaceId || !userId) return
