@@ -22,7 +22,7 @@ from shared.core import (
 )
 
 from .domain import ProjectRuleAggregate
-from features.agents.gates import DEFAULT_GATE_POLICY, merge_gate_policy_dict
+from features.agents.gates import DEFAULT_GATE_POLICY, filter_gate_policy_scopes, merge_gate_policy_dict
 
 _GATE_POLICY_RULE_TITLES = ("gate policy", "delivery gates", "workflow gates")
 
@@ -83,7 +83,24 @@ def _validate_gate_policy_shape(value: object) -> bool:
 
 
 def _normalize_gate_policy(policy: dict) -> dict:
-    return merge_gate_policy_dict(dict(DEFAULT_GATE_POLICY), dict(policy or {}))
+    source_policy = dict(policy or {})
+    merged = merge_gate_policy_dict(dict(DEFAULT_GATE_POLICY), source_policy)
+    required_scopes = set()
+    available_scopes = set()
+    required_raw = source_policy.get("required_checks")
+    if isinstance(required_raw, dict):
+        required_scopes = {str(key or "").strip() for key in required_raw.keys() if str(key or "").strip()}
+    available_raw = source_policy.get("available_checks")
+    if isinstance(available_raw, dict):
+        available_scopes = {str(key or "").strip() for key in available_raw.keys() if str(key or "").strip()}
+    explicit_scopes = required_scopes | available_scopes
+    if "team_mode" in source_policy:
+        explicit_scopes.add("team_mode")
+    if "delivery" in source_policy:
+        explicit_scopes.add("delivery")
+    if explicit_scopes:
+        return filter_gate_policy_scopes(merged, include_scopes=explicit_scopes)
+    return merged
 
 
 def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> None:

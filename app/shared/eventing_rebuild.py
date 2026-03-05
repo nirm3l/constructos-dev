@@ -1778,6 +1778,8 @@ def project_event(db: Session, ev: EventEnvelope):
         user.agent_chat_reasoning_effort = str(
             p.get("agent_chat_reasoning_effort") or user.agent_chat_reasoning_effort or "medium"
         )
+        user.onboarding_quick_tour_completed = bool(p.get("onboarding_quick_tour_completed", False))
+        user.onboarding_advanced_tour_completed = bool(p.get("onboarding_advanced_tour_completed", False))
 
         workspace_id = p.get("workspace_id")
         workspace_role = p.get("workspace_role")
@@ -1850,6 +1852,10 @@ def project_event(db: Session, ev: EventEnvelope):
                 user.agent_chat_model = str(p.get("agent_chat_model") or "")
             if "agent_chat_reasoning_effort" in p and p.get("agent_chat_reasoning_effort"):
                 user.agent_chat_reasoning_effort = str(p.get("agent_chat_reasoning_effort"))
+            if "onboarding_quick_tour_completed" in p:
+                user.onboarding_quick_tour_completed = bool(p.get("onboarding_quick_tour_completed"))
+            if "onboarding_advanced_tour_completed" in p:
+                user.onboarding_advanced_tour_completed = bool(p.get("onboarding_advanced_tour_completed"))
 
     workspace_id = m.get("workspace_id")
     actor_id = m.get("actor_id")

@@ -3,8 +3,11 @@ import { AppHeader } from './AppHeader'
 import { AppNotices } from './AppNotices'
 import { AppPrimaryPanels } from './AppPrimaryPanels'
 import { AppOverlays } from './AppOverlays'
+import { OnboardingTour } from './OnboardingTour'
 
 export function AppContent({ state }: { state: any }) {
+  const tourControlsRef = React.useRef<{ startQuick: () => void; startAdvanced: () => void } | null>(null)
+
   const handleHeaderProjectSelect = React.useCallback((projectId: string) => {
     const normalizedProjectId = String(projectId || '').trim()
     if (!normalizedProjectId) return
@@ -80,6 +83,22 @@ export function AppContent({ state }: { state: any }) {
         onOpenProject={(projectId) => {
           state.setSelectedProjectId(projectId)
           state.setTab('projects')
+        }}
+        onStartQuickTour={() => tourControlsRef.current?.startQuick()}
+        onStartAdvancedTour={() => tourControlsRef.current?.startAdvanced()}
+      />
+
+      <OnboardingTour
+        userId={state.userId}
+        workspaceId={state.workspaceId}
+        quickTourCompleted={Boolean(state.bootstrap.data?.current_user?.onboarding_quick_tour_completed)}
+        advancedTourCompleted={Boolean(state.bootstrap.data?.current_user?.onboarding_advanced_tour_completed)}
+        setTab={state.setTab}
+        setShowQuickAdd={state.setShowQuickAdd}
+        setShowCodexChat={state.setShowCodexChat}
+        saveTourProgress={state.saveOnboardingTourProgress}
+        registerControls={(controls) => {
+          tourControlsRef.current = controls
         }}
       />
 

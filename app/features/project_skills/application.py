@@ -21,7 +21,10 @@ from sqlalchemy.orm import Session
 from features.rules.application import ProjectRuleApplicationService
 from features.agents.gates import (
     DEFAULT_GATE_POLICY as _DEFAULT_AGENT_GATE_POLICY,
+    default_required_delivery_checks,
+    filter_gate_policy_scopes,
     merge_gate_policy_dict,
+    normalize_delivery_required_checks,
 )
 from plugins import skill_policy as plugin_skill_policy
 from plugins.team_mode.skill_contract import (
@@ -144,6 +147,25 @@ def _build_gate_policy_for_skill_keys(skill_keys: set[str]) -> dict[str, Any]:
     patch = plugin_skill_policy.build_gate_policy_patch_for_skill_keys(skill_keys)
     if isinstance(patch, dict) and patch:
         policy = merge_gate_policy_dict(policy, patch)
+    normalized_skill_keys = {str(item or "").strip().lower() for item in (skill_keys or set()) if str(item or "").strip()}
+    team_mode_enabled = TEAM_MODE_SKILL_KEY in normalized_skill_keys
+    include_scopes = {"delivery"}
+    if team_mode_enabled:
+        include_scopes.add("team_mode")
+    policy = filter_gate_policy_scopes(policy, include_scopes=include_scopes)
+    required_checks_raw = policy.get("required_checks")
+    required_checks = dict(required_checks_raw) if isinstance(required_checks_raw, dict) else {}
+    delivery_raw = required_checks.get("delivery")
+    delivery_required = (
+        [str(item or "").strip() for item in delivery_raw if str(item or "").strip()]
+        if isinstance(delivery_raw, list)
+        else default_required_delivery_checks(team_mode_enabled=team_mode_enabled)
+    )
+    required_checks["delivery"] = normalize_delivery_required_checks(
+        delivery_required,
+        team_mode_enabled=team_mode_enabled,
+    )
+    policy["required_checks"] = required_checks
     return policy
 
 
@@ -788,6 +810,24 @@ class ProjectSkillApplicationService:
             )
         self.db.flush()
 
+    def _apply_git_delivery_contract_if_needed(self, *, skill: ProjectSkill) -> None:
+        if str(skill.skill_key or "").strip().lower() != _GIT_DELIVERY_SKILL_KEY:
+            return
+        project = _require_project_scope(
+            self.db,
+            workspace_id=skill.workspace_id,
+            project_id=skill.project_id,
+        )
+        ensure_team_mode_repository_context(
+            db=self.db,
+            project=project,
+            actor_user_id=self.user.id,
+            default_codex_workdir=_DEFAULT_CODEX_WORKDIR,
+            repository_context_rule_title=_REPOSITORY_CONTEXT_RULE_TITLE,
+            ensure_local_repository_bootstrap_fn=self._ensure_local_repository_bootstrap,
+        )
+        self.db.flush()
+
     def _assert_generated_rule_id_uniqueness(self, *, skill: ProjectSkill) -> None:
         generated_rule_id = str(skill.generated_rule_id or "").strip()
         if not generated_rule_id:
@@ -1266,6 +1306,7 @@ class ProjectSkillApplicationService:
             source_content=source_content,
             create_if_missing=True,
         )
+        self._apply_git_delivery_contract_if_needed(skill=skill)
         self._apply_team_mode_contract_if_needed(skill=skill)
         skill.generated_rule_id = generated_rule_id
         self._assert_generated_rule_id_uniqueness(skill=skill)

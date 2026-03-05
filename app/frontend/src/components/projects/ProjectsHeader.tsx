@@ -31,6 +31,7 @@ export function ProjectsHeader({
           }}
           title={showProjectCreateForm ? 'Close create project form' : 'Create project'}
           aria-label={showProjectCreateForm ? 'Close create project form' : 'Create project'}
+          data-tour-id="project-new-project"
         >
           <Icon path={showProjectCreateForm ? 'M6 6l12 12M18 6L6 18' : 'M12 5v14M5 12h14'} />
           <span>{showProjectCreateForm ? 'Close' : 'Project'}</span>

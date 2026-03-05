@@ -31,6 +31,8 @@ class UserAggregate(Aggregate):
         notifications_enabled: bool,
         agent_chat_model: str = "",
         agent_chat_reasoning_effort: str = "medium",
+        onboarding_quick_tour_completed: bool = False,
+        onboarding_advanced_tour_completed: bool = False,
         workspace_id: str | None = None,
         workspace_role: str = "Member",
     ) -> None:
@@ -47,6 +49,8 @@ class UserAggregate(Aggregate):
         self.notifications_enabled = notifications_enabled
         self.agent_chat_model = agent_chat_model
         self.agent_chat_reasoning_effort = agent_chat_reasoning_effort
+        self.onboarding_quick_tour_completed = bool(onboarding_quick_tour_completed)
+        self.onboarding_advanced_tour_completed = bool(onboarding_advanced_tour_completed)
         self.workspace_roles = {workspace_id: workspace_role} if workspace_id else {}
 
     @event("PreferencesUpdated")
@@ -57,6 +61,8 @@ class UserAggregate(Aggregate):
         notifications_enabled: bool | None = None,
         agent_chat_model: str | None = None,
         agent_chat_reasoning_effort: str | None = None,
+        onboarding_quick_tour_completed: bool | None = None,
+        onboarding_advanced_tour_completed: bool | None = None,
     ) -> None:
         if theme is not None:
             self.theme = str(theme)
@@ -68,6 +74,10 @@ class UserAggregate(Aggregate):
             self.agent_chat_model = str(agent_chat_model)
         if agent_chat_reasoning_effort is not None:
             self.agent_chat_reasoning_effort = str(agent_chat_reasoning_effort)
+        if onboarding_quick_tour_completed is not None:
+            self.onboarding_quick_tour_completed = bool(onboarding_quick_tour_completed)
+        if onboarding_advanced_tour_completed is not None:
+            self.onboarding_advanced_tour_completed = bool(onboarding_advanced_tour_completed)
 
     @event("PasswordChanged")
     def change_password(

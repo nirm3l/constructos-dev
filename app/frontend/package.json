@@ -21,6 +21,7 @@
     "@radix-ui/react-tooltip": "^1.2.8",
     "@tanstack/react-query": "^5.90.6",
     "@xyflow/react": "^12.10.1",
+    "driver.js": "^1.4.0",
     "highlight.js": "^11.11.1",
     "mermaid": "^11.12.3",
     "react": "^19.1.1",

@@ -39,6 +39,7 @@ from shared.models import (
     CommandExecution,
     Note,
     Project,
+    ProjectSkill,
     ProjectRule,
     Task,
 )
@@ -63,7 +64,9 @@ from features.chat.command_handlers import (
 )
 from features.agents.gates import (
     DEFAULT_GATE_POLICY,
-    DEFAULT_REQUIRED_DELIVERY_CHECKS,
+    default_required_delivery_checks,
+    filter_gate_policy_scopes,
+    normalize_delivery_required_checks,
     parse_gate_policy_rule,
 )
 
@@ -1487,6 +1490,22 @@ def _promote_gate_policy_to_execution_mode_if_needed(
     project_id: str,
     command_id: str | None,
 ) -> None:
+    enabled_skill_keys = {
+        str(item or "").strip().lower()
+        for item in db.execute(
+            select(ProjectSkill.skill_key).where(
+                ProjectSkill.workspace_id == workspace_id,
+                ProjectSkill.project_id == project_id,
+                ProjectSkill.enabled == True,  # noqa: E712
+                ProjectSkill.is_deleted == False,  # noqa: E712
+            )
+        ).scalars().all()
+        if str(item or "").strip()
+    }
+    effective_scopes = {"delivery"}
+    if "team_mode" in enabled_skill_keys:
+        effective_scopes.add("team_mode")
+
     project_rules = db.execute(
         select(ProjectRule)
         .where(
@@ -1499,6 +1518,7 @@ def _promote_gate_policy_to_execution_mode_if_needed(
     gate_policy, _source = parse_gate_policy_rule(project_rules=project_rules)
     if not isinstance(gate_policy, dict):
         gate_policy = deepcopy(DEFAULT_GATE_POLICY)
+    gate_policy = filter_gate_policy_scopes(gate_policy, include_scopes=effective_scopes)
     required_checks_raw = gate_policy.get("required_checks")
     if not isinstance(required_checks_raw, dict):
         required_checks_raw = {}
@@ -1534,7 +1554,16 @@ def _promote_gate_policy_to_execution_mode_if_needed(
     if not runtime_health_path and detected_health_path:
         runtime_updates["health_path"] = detected_health_path
 
-    needs_update = mode_value != "execution" or not delivery_checks or bool(runtime_updates)
+    normalized_delivery_checks = normalize_delivery_required_checks(
+        delivery_checks,
+        team_mode_enabled=("team_mode" in enabled_skill_keys),
+    )
+    needs_update = (
+        mode_value != "execution"
+        or not normalized_delivery_checks
+        or normalized_delivery_checks != delivery_checks
+        or bool(runtime_updates)
+    )
     if not needs_update:
         return
 
@@ -1543,8 +1572,12 @@ def _promote_gate_policy_to_execution_mode_if_needed(
     updated_required_checks = updated_policy.get("required_checks")
     if not isinstance(updated_required_checks, dict):
         updated_required_checks = {}
-    if not delivery_checks:
-        updated_required_checks["delivery"] = list(DEFAULT_REQUIRED_DELIVERY_CHECKS)
+    if normalized_delivery_checks:
+        updated_required_checks["delivery"] = normalized_delivery_checks
+    else:
+        updated_required_checks["delivery"] = default_required_delivery_checks(
+            team_mode_enabled=("team_mode" in enabled_skill_keys)
+        )
     updated_policy["required_checks"] = updated_required_checks
     updated_runtime_cfg = updated_policy.get("runtime_deploy_health")
     updated_runtime = dict(updated_runtime_cfg) if isinstance(updated_runtime_cfg, dict) else {}
@@ -1594,6 +1627,22 @@ def _sync_gate_policy_runtime_target_if_needed(
     project_id: str,
     command_id: str | None,
 ) -> bool:
+    enabled_skill_keys = {
+        str(item or "").strip().lower()
+        for item in db.execute(
+            select(ProjectSkill.skill_key).where(
+                ProjectSkill.workspace_id == workspace_id,
+                ProjectSkill.project_id == project_id,
+                ProjectSkill.enabled == True,  # noqa: E712
+                ProjectSkill.is_deleted == False,  # noqa: E712
+            )
+        ).scalars().all()
+        if str(item or "").strip()
+    }
+    effective_scopes = {"delivery"}
+    if "team_mode" in enabled_skill_keys:
+        effective_scopes.add("team_mode")
+
     project_rules = db.execute(
         select(ProjectRule)
         .where(
@@ -1606,6 +1655,7 @@ def _sync_gate_policy_runtime_target_if_needed(
     gate_policy, _source = parse_gate_policy_rule(project_rules=project_rules)
     if not isinstance(gate_policy, dict):
         gate_policy = deepcopy(DEFAULT_GATE_POLICY)
+    gate_policy = filter_gate_policy_scopes(gate_policy, include_scopes=effective_scopes)
 
     runtime_cfg = gate_policy.get("runtime_deploy_health")
     runtime_policy = dict(runtime_cfg) if isinstance(runtime_cfg, dict) else {}

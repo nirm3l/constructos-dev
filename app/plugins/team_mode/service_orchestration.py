@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from features.agents.gates import evaluate_required_checks as evaluate_required_gate_checks
 from features.agents.gates import evaluate_team_mode_gates
+from features.agents.gates import filter_gate_policy_scopes
 from features.project_skills.application import ProjectSkillApplicationService
 from plugins.github_delivery.service_orchestration import ensure_project_skill_when_github_context
 from features.tasks.read_models import TaskListQuery, list_tasks_read_model
@@ -91,9 +92,16 @@ def verify_workflow_core(
     gate_policy, gate_policy_source = service._parse_gate_policy_rule(project_rules=project_rules)
     team_mode_enabled = any(
         str(getattr(skill, "skill_key", "") or "").strip() == TEAM_MODE_PLUGIN_KEY
+        and bool(getattr(skill, "enabled", True))
         for skill in project_skills
     )
-    team_mode_active = bool(team_mode_enabled or gate_policy_source != "default")
+    gate_policy = filter_gate_policy_scopes(
+        gate_policy,
+        include_scopes={"team_mode"} if team_mode_enabled else set(),
+    )
+    # Team Mode gates must stay independent from delivery-only gate-policy changes.
+    # Keep Team Mode verification active only when Team Mode skill is enabled.
+    team_mode_active = bool(team_mode_enabled)
     if not team_mode_active:
         required_checks = dict((gate_policy.get("required_checks") or {})) if isinstance(gate_policy, dict) else {}
         required_checks["team_mode"] = []
@@ -123,23 +131,27 @@ def verify_workflow_core(
         extract_deploy_ports=service._extract_deploy_ports,
         has_deploy_stack_marker=service._has_deploy_stack_marker,
     )
-    llm_eval = service._evaluate_project_gates_with_llm(
-        project_id=str(project_id),
-        workspace_id=str(project.workspace_id),
-        gate_policy=gate_policy,
-        tasks=tasks,
-        member_role_by_user_id=member_role_by_user_id,
-        notes_by_task=notes_by_task,
-        comments_by_task=comments_by_task,
-        project_rules=project_rules,
-        project_skills=project_skills,
-        project_description=str(getattr(project, "description", "") or ""),
-        project_external_refs=getattr(project, "external_refs", "[]"),
-    )
-    llm_team_checks = dict((llm_eval.get("team_mode") or {}).get("checks") or {})
-    llm_team_reasons = dict((llm_eval.get("team_mode") or {}).get("reasons") or {})
     evaluation_cfg = gate_policy.get("evaluation") if isinstance(gate_policy.get("evaluation"), dict) else {}
-    evaluation_mode = str((evaluation_cfg or {}).get("mode") or "hybrid").strip().lower()
+    evaluation_mode = str((evaluation_cfg or {}).get("mode") or "deterministic").strip().lower()
+    use_llm_evaluation = evaluation_mode in {"hybrid", "llm_authoritative"}
+    llm_team_checks: dict[str, bool] = {}
+    llm_team_reasons: dict[str, str] = {}
+    if use_llm_evaluation:
+        llm_eval = service._evaluate_project_gates_with_llm(
+            project_id=str(project_id),
+            workspace_id=str(project.workspace_id),
+            gate_policy=gate_policy,
+            tasks=tasks,
+            member_role_by_user_id=member_role_by_user_id,
+            notes_by_task=notes_by_task,
+            comments_by_task=comments_by_task,
+            project_rules=project_rules,
+            project_skills=project_skills,
+            project_description=str(getattr(project, "description", "") or ""),
+            project_external_refs=getattr(project, "external_refs", "[]"),
+        )
+        llm_team_checks = dict((llm_eval.get("team_mode") or {}).get("checks") or {})
+        llm_team_reasons = dict((llm_eval.get("team_mode") or {}).get("reasons") or {})
     authoritative = evaluation_mode == "llm_authoritative"
     if authoritative:
         available = list(verification.get("available_checks") or [])

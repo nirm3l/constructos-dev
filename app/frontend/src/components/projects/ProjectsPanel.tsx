@@ -10,7 +10,7 @@ type ProjectsPanelProps = {
 
 export function ProjectsPanel({ state }: ProjectsPanelProps) {
   return (
-    <section className="card">
+    <section className="card" data-tour-id="projects-panel">
       <ProjectsHeader
         totalProjects={state.bootstrap.data.projects.length}
         showProjectCreateForm={state.showProjectCreateForm}

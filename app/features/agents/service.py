@@ -82,6 +82,7 @@ from features.agents.gates import (
     evaluate_delivery_gates,
     evaluate_required_checks as evaluate_required_gate_checks,
     evaluate_team_mode_gates,
+    filter_gate_policy_scopes,
     parse_gate_policy_rule,
     policy_required_checks,
     run_runtime_deploy_health_check,
@@ -2274,12 +2275,22 @@ class AgentTaskService:
             if task_id:
                 comments_by_task.setdefault(task_id, []).append(comment)
         gate_policy, gate_policy_source = self._parse_gate_policy_rule(project_rules=project_rules)
-        skill_keys = {str(getattr(skill, "skill_key", "") or "").strip() for skill in project_skills}
+        skill_states = {
+            str(getattr(skill, "skill_key", "") or "").strip(): bool(getattr(skill, "enabled", True))
+            for skill in project_skills
+            if str(getattr(skill, "skill_key", "") or "").strip()
+        }
+        skill_keys = {key for key, enabled in skill_states.items() if enabled}
+        team_mode_enabled = bool(skill_states.get("team_mode"))
         delivery_skill_enabled = plugin_service_policy.is_delivery_skill_enabled(skill_keys=skill_keys)
         delivery_active = plugin_service_policy.is_delivery_workflow_active(
             skill_keys=skill_keys,
             gate_policy_source=gate_policy_source,
         )
+        effective_scopes = {"delivery"}
+        if team_mode_enabled:
+            effective_scopes.add("team_mode")
+        gate_policy = filter_gate_policy_scopes(gate_policy, include_scopes=effective_scopes)
         if not delivery_active:
             required_checks = dict((gate_policy.get("required_checks") or {})) if isinstance(gate_policy, dict) else {}
             required_checks["delivery"] = []
@@ -2308,23 +2319,27 @@ class AgentTaskService:
             run_runtime_deploy_health_check_fn=self._run_runtime_deploy_health_check,
             project_has_repo_context=lambda **kwargs: self._project_has_repo_context(allow_llm=False, **kwargs),
         )
-        llm_eval = self._evaluate_project_gates_with_llm(
-            project_id=str(project_id),
-            workspace_id=str(project.workspace_id),
-            gate_policy=gate_policy,
-            tasks=tasks,
-            member_role_by_user_id=member_role_by_user_id,
-            notes_by_task=notes_by_task,
-            comments_by_task=comments_by_task,
-            project_rules=project_rules,
-            project_skills=project_skills,
-            project_description=str(getattr(project, "description", "") or ""),
-            project_external_refs=getattr(project, "external_refs", "[]"),
-        )
-        llm_delivery_checks = dict((llm_eval.get("delivery") or {}).get("checks") or {})
-        llm_delivery_reasons = dict((llm_eval.get("delivery") or {}).get("reasons") or {})
         evaluation_cfg = gate_policy.get("evaluation") if isinstance(gate_policy.get("evaluation"), dict) else {}
-        evaluation_mode = str((evaluation_cfg or {}).get("mode") or "hybrid").strip().lower()
+        evaluation_mode = str((evaluation_cfg or {}).get("mode") or "deterministic").strip().lower()
+        use_llm_evaluation = evaluation_mode in {"hybrid", "llm_authoritative"}
+        llm_delivery_checks: dict[str, bool] = {}
+        llm_delivery_reasons: dict[str, str] = {}
+        if use_llm_evaluation:
+            llm_eval = self._evaluate_project_gates_with_llm(
+                project_id=str(project_id),
+                workspace_id=str(project.workspace_id),
+                gate_policy=gate_policy,
+                tasks=tasks,
+                member_role_by_user_id=member_role_by_user_id,
+                notes_by_task=notes_by_task,
+                comments_by_task=comments_by_task,
+                project_rules=project_rules,
+                project_skills=project_skills,
+                project_description=str(getattr(project, "description", "") or ""),
+                project_external_refs=getattr(project, "external_refs", "[]"),
+            )
+            llm_delivery_checks = dict((llm_eval.get("delivery") or {}).get("checks") or {})
+            llm_delivery_reasons = dict((llm_eval.get("delivery") or {}).get("reasons") or {})
         authoritative = evaluation_mode == "llm_authoritative"
         runtime_required_value = bool((verification.get("checks") or {}).get("runtime_deploy_health_required"))
         runtime_ok_value = bool((verification.get("checks") or {}).get("runtime_deploy_health_ok"))

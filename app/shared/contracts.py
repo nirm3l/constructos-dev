@@ -246,6 +246,8 @@ class UserPreferencesPatch(BaseModel):
     notifications_enabled: bool | None = None
     agent_chat_model: str | None = None
     agent_chat_reasoning_effort: str | None = None
+    onboarding_quick_tour_completed: bool | None = None
+    onboarding_advanced_tour_completed: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

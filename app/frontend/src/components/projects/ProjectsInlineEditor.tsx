@@ -359,6 +359,7 @@ export function ProjectsInlineEditor({
     Array<{
       scopeKey: string
       scopeTitle: string
+      active: boolean
       checks: Record<string, boolean | string | number | null>
       requiredChecks: string[]
       failedChecks: string[]
@@ -383,6 +384,9 @@ export function ProjectsInlineEditor({
         const scopeRaw = payload[scopeKey]
         if (!scopeRaw || typeof scopeRaw !== 'object') return null
         const scope = scopeRaw as Record<string, unknown>
+        const activeValue = scope.active
+        const scopeActive = typeof activeValue === 'boolean' ? activeValue : true
+        if (!scopeActive) return null
         const checksRaw = scope.checks
         const checks =
           checksRaw && typeof checksRaw === 'object'
@@ -445,6 +449,7 @@ export function ProjectsInlineEditor({
         return {
           scopeKey,
           scopeTitle,
+          active: scopeActive,
           checks,
           requiredChecks,
           failedChecks,
@@ -504,7 +509,10 @@ export function ProjectsInlineEditor({
         runtimeScope: scope,
       }))
     }
-    return scopeKeys.map((scopeKey) => {
+    return scopeKeys
+      .map((scopeKey) => {
+      const runtimeScope = runtimeScopeMap.get(scopeKey)
+      if (!runtimeScope) return null
       const requiredChecks = Array.isArray(requiredChecksRaw[scopeKey])
         ? (requiredChecksRaw[scopeKey] as unknown[])
             .map((item) => String(item || '').trim())
@@ -525,9 +533,10 @@ export function ProjectsInlineEditor({
         scopeTitle: toTitle(scopeKey),
         requiredChecks,
         availableDescriptions,
-        runtimeScope: runtimeScopeMap.get(scopeKey),
+        runtimeScope,
       }
     })
+      .filter((item): item is NonNullable<typeof item> => Boolean(item))
   }, [gatePolicyPayload, gateScopeEntries, runtimeScopeMap])
   const gateSummary = React.useMemo(() => {
     return gateConfigScopes.reduce(

@@ -94,6 +94,8 @@ class UserOperationGateway:
             "notifications_enabled": bool(resolved.target.notifications_enabled),
             "agent_chat_model": str(resolved.target.agent_chat_model or ""),
             "agent_chat_reasoning_effort": str(resolved.target.agent_chat_reasoning_effort or "medium"),
+            "onboarding_quick_tour_completed": bool(resolved.target.onboarding_quick_tour_completed),
+            "onboarding_advanced_tour_completed": bool(resolved.target.onboarding_advanced_tour_completed),
         }
 
     def patch_preferences(

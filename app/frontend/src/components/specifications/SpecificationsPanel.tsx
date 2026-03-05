@@ -204,7 +204,7 @@ export function SpecificationsPanel({ state }: { state: any }) {
   }, [])
 
   return (
-    <section className="card">
+    <section className="card" data-tour-id="specifications-panel">
       <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
         <h2 style={{ margin: 0 }}>Specifications ({state.specifications.data?.total ?? 0})</h2>
         <div className="row wrap specs-create-actions" style={{ gap: 6 }}>
@@ -215,6 +215,7 @@ export function SpecificationsPanel({ state }: { state: any }) {
             disabled={state.createSpecificationMutation.isPending}
             title="Create specification"
             aria-label="Create specification"
+            data-tour-id="spec-new"
           >
             <Icon path="M12 5v14M5 12h14" />
             <span>{state.createSpecificationMutation.isPending ? 'Creating...' : 'Spec'}</span>

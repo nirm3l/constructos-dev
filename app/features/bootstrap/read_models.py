@@ -194,6 +194,8 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
             "timezone": user.timezone,
             "agent_chat_model": current_agent_chat_model,
             "agent_chat_reasoning_effort": current_agent_chat_reasoning_effort,
+            "onboarding_quick_tour_completed": bool(getattr(user, "onboarding_quick_tour_completed", False)),
+            "onboarding_advanced_tour_completed": bool(getattr(user, "onboarding_advanced_tour_completed", False)),
         },
         "workspaces": [{"id": w.id, "name": w.name, "type": w.type} for w in workspaces],
         "memberships": [{"workspace_id": m.workspace_id, "role": m.role} for m in memberships],

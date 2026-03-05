@@ -30,12 +30,17 @@ function buildProjectCreationStarter(): string {
     'Help me create a new project with a streamlined setup flow.',
     'Workflow requirements:',
     '1. Ask one clarifying question at a time, but only for missing inputs.',
-    '2. Default to manual setup unless I explicitly ask for a template.',
-    '3. Do not ask template-vs-manual when my request already implies a custom/manual setup.',
-    '4. If I directly ask to create the project, treat that as confirmation and create once required fields are complete.',
-    '5. If template setup is requested, run list_project_templates -> get_project_template -> preview_project_from_template -> create_project_from_template.',
-    '6. After creation, ask whether tasks/specifications/rules should be adjusted.',
-    '7. Return a clickable project link in this format: ?tab=projects&project=<project_id>.',
+    '2. Ask for project name first, then ask: "What should this project do in short?"',
+    '3. Ask whether we want Team Mode. Explain it briefly in chat: Team Mode sets up a multi-role workflow (Dev -> Lead -> QA) with automation.',
+    '4. Do not force Team Mode. If Team Mode is declined, ask whether we want Git Delivery, and explain it briefly: Git Delivery enforces repo-based delivery flow (branching, commits, and delivery evidence).',
+    '5. If Git Delivery is enabled, ask whether deployment should run via Docker Compose, and if yes ask which port should be used.',
+    '6. Default to manual setup unless I explicitly ask for a template.',
+    '7. Do not ask template-vs-manual when my request already implies a custom/manual setup.',
+    '8. If I directly ask to create the project, treat that as confirmation and create once required fields are complete.',
+    '9. If template setup is requested, run list_project_templates -> get_project_template -> preview_project_from_template -> create_project_from_template.',
+    '10. Keep prompts sharp and concise. Avoid vague or repeated questions.',
+    '11. After creation, ask whether tasks/specifications/rules should be adjusted.',
+    '12. Return a clickable project link in this format: ?tab=projects&project=<project_id>.',
   ].join('\n')
 }
 
@@ -1162,7 +1167,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
             </div>
           )}
         </div>
-        <div className="codex-chat-composer">
+        <div className="codex-chat-composer" data-tour-id="codex-chat-composer">
           <textarea
             ref={inputRef}
             className="codex-chat-input"

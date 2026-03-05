@@ -7,6 +7,8 @@ export type User = {
   theme: 'light' | 'dark'
   agent_chat_model?: string
   agent_chat_reasoning_effort?: ChatReasoningEffort | string
+  onboarding_quick_tour_completed?: boolean
+  onboarding_advanced_tour_completed?: boolean
 }
 
 export type AuthUser = {
@@ -18,6 +20,8 @@ export type AuthUser = {
   theme: 'light' | 'dark'
   agent_chat_model?: string
   agent_chat_reasoning_effort?: ChatReasoningEffort | string
+  onboarding_quick_tour_completed?: boolean
+  onboarding_advanced_tour_completed?: boolean
   must_change_password: boolean
   memberships: Array<{ workspace_id: string; role: string }>
 }

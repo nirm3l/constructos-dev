@@ -379,6 +379,10 @@ def ensure_user_table_columns(db: Session):
         db.execute(text("ALTER TABLE users ADD COLUMN agent_chat_model VARCHAR(128) DEFAULT ''"))
     if "agent_chat_reasoning_effort" not in existing:
         db.execute(text("ALTER TABLE users ADD COLUMN agent_chat_reasoning_effort VARCHAR(16) DEFAULT 'medium'"))
+    if "onboarding_quick_tour_completed" not in existing:
+        db.execute(text("ALTER TABLE users ADD COLUMN onboarding_quick_tour_completed BOOLEAN DEFAULT FALSE"))
+    if "onboarding_advanced_tour_completed" not in existing:
+        db.execute(text("ALTER TABLE users ADD COLUMN onboarding_advanced_tour_completed BOOLEAN DEFAULT FALSE"))
     db.execute(text("UPDATE users SET user_type='human' WHERE user_type IS NULL OR user_type = ''"))
     db.execute(text("UPDATE users SET user_type='agent' WHERE id = :agent_id"), {"agent_id": AGENT_SYSTEM_USER_ID})
     db.execute(text("UPDATE users SET must_change_password=TRUE WHERE must_change_password IS NULL"))
@@ -389,6 +393,12 @@ def ensure_user_table_columns(db: Session):
             "UPDATE users SET agent_chat_reasoning_effort='medium' "
             "WHERE agent_chat_reasoning_effort IS NULL OR agent_chat_reasoning_effort = ''"
         )
+    )
+    db.execute(
+        text("UPDATE users SET onboarding_quick_tour_completed=FALSE WHERE onboarding_quick_tour_completed IS NULL")
+    )
+    db.execute(
+        text("UPDATE users SET onboarding_advanced_tour_completed=FALSE WHERE onboarding_advanced_tour_completed IS NULL")
     )
     db.commit()
 
@@ -720,6 +730,8 @@ def bootstrap_data():
                         theme="light",
                         agent_chat_model="",
                         agent_chat_reasoning_effort="medium",
+                        onboarding_quick_tour_completed=False,
+                        onboarding_advanced_tour_completed=False,
                     ),
                     Workspace(id=BOOTSTRAP_WORKSPACE_ID, name="My Workspace", type="team"),
                 ]

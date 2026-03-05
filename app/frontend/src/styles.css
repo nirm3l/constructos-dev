@@ -36,6 +36,10 @@ html {
   scrollbar-gutter: stable both-edges;
 }
 
+html[data-tour-active="1"] {
+  scrollbar-gutter: auto;
+}
+
 /* Radix/RemoveScroll may add body margin compensation that reintroduces width shifts. */
 html body[data-scroll-locked],
 html body.with-scroll-bars-hidden[data-scroll-locked] {
@@ -11215,4 +11219,102 @@ textarea {
   .tab-label {
     font-size: 9px;
   }
+}
+
+.app-tour-popover {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 20px 48px rgba(15, 23, 42, 0.24);
+  background: linear-gradient(
+    155deg,
+    color-mix(in srgb, var(--surface), white 3%),
+    color-mix(in srgb, var(--surface-alt), var(--surface) 74%)
+  );
+  color: var(--text);
+}
+
+.app-tour-popover .driver-popover-title {
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: var(--text);
+}
+
+.app-tour-popover .driver-popover-description {
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--text), var(--muted) 28%);
+}
+
+.app-tour-popover .driver-popover-progress-text {
+  color: color-mix(in srgb, var(--muted), var(--text) 10%);
+}
+
+.app-tour-popover .driver-popover-close-btn {
+  color: color-mix(in srgb, var(--muted), var(--text) 24%);
+}
+
+.app-tour-popover .driver-popover-close-btn:hover,
+.app-tour-popover .driver-popover-close-btn:focus-visible {
+  color: var(--text);
+}
+
+.app-tour-popover .driver-popover-next-btn,
+.app-tour-popover .driver-popover-prev-btn,
+.app-tour-popover .driver-popover-close-btn {
+  border-radius: 999px;
+}
+
+.app-tour-popover .driver-popover-next-btn,
+.app-tour-popover .driver-popover-prev-btn {
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 24%);
+}
+
+.app-tour-popover .driver-popover-next-btn {
+  background: linear-gradient(135deg, var(--brand), var(--brand-strong));
+  color: #eafff2;
+  text-shadow: none;
+}
+
+.app-tour-popover .driver-popover-next-btn:hover,
+.app-tour-popover .driver-popover-next-btn:focus-visible {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--brand), white 8%),
+    color-mix(in srgb, var(--brand-strong), white 4%)
+  );
+}
+
+.app-tour-popover .driver-popover-prev-btn {
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 45%);
+  color: color-mix(in srgb, var(--text), var(--muted) 22%);
+  text-shadow: none;
+}
+
+.app-tour-popover .driver-popover-prev-btn:hover,
+.app-tour-popover .driver-popover-prev-btn:focus-visible {
+  background: color-mix(in srgb, var(--surface-alt), var(--surface) 35%);
+}
+
+.app-tour-popover .driver-popover-arrow {
+  border-color: var(--surface-alt);
+}
+
+[data-theme="dark"] .app-tour-popover {
+  box-shadow:
+    0 26px 56px rgba(0, 0, 0, 0.58),
+    0 0 0 1px color-mix(in srgb, var(--line), var(--brand) 20%);
+  background: linear-gradient(
+    155deg,
+    color-mix(in srgb, var(--surface), #08130d 26%),
+    color-mix(in srgb, var(--surface-alt), #060f0a 38%)
+  );
+}
+
+[data-theme="dark"] .app-tour-popover .driver-popover-prev-btn {
+  background: color-mix(in srgb, var(--surface-alt), #0b1711 40%);
+  color: color-mix(in srgb, var(--text), #d4ffe4 24%);
+}
+
+[data-theme="dark"] .app-tour-popover .driver-popover-prev-btn:hover,
+[data-theme="dark"] .app-tour-popover .driver-popover-prev-btn:focus-visible {
+  background: color-mix(in srgb, var(--surface-alt), #0f2017 52%);
 }

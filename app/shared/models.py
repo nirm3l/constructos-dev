@@ -42,6 +42,8 @@ class User(Base, TimeMixin):
     notifications_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     agent_chat_model: Mapped[str] = mapped_column(String(128), default="")
     agent_chat_reasoning_effort: Mapped[str] = mapped_column(String(16), default="medium")
+    onboarding_quick_tour_completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    onboarding_advanced_tour_completed: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class Workspace(Base, TimeMixin):

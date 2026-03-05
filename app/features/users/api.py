@@ -122,6 +122,8 @@ def _serialize_auth_user(db: Session, user: User) -> dict:
         "theme": user.theme,
         "agent_chat_model": str(user.agent_chat_model or ""),
         "agent_chat_reasoning_effort": str(user.agent_chat_reasoning_effort or "medium"),
+        "onboarding_quick_tour_completed": bool(user.onboarding_quick_tour_completed),
+        "onboarding_advanced_tour_completed": bool(user.onboarding_advanced_tour_completed),
         "must_change_password": bool(user.must_change_password),
         "memberships": [{"workspace_id": workspace_id, "role": role} for workspace_id, role in memberships],
     }

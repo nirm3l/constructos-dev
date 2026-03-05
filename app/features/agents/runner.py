@@ -73,6 +73,7 @@ _COMMIT_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
 _COMMIT_SHA_EXPLICIT_RE = re.compile(
     r"(?i)(?:\b(?:commit|sha|changeset|hash)\s*[:=#]?\s*|/commit/)([0-9a-f]{7,40})\b"
 )
+_TASK_BRANCH_RE = re.compile(r"\btask/[a-z0-9][a-z0-9._/-]*\b", re.IGNORECASE)
 _TRANSIENT_INTERRUPT_RE = re.compile(r"(?:exit=-15|sigterm|terminated by signal 15)", re.IGNORECASE)
 _RECOVERABLE_FAILURE_RE = re.compile(
     r"(?:exit=-15|sigterm|terminated by signal 15|timeout|timed out|429|rate limit|502|503|504|bad gateway|gateway timeout|temporarily unavailable|connection reset)",
@@ -361,6 +362,42 @@ def _extract_commit_shas_from_refs(refs: object) -> set[str]:
 def _extract_commit_shas_from_text(text: str | None) -> set[str]:
     raw = str(text or "")
     return {str(match).lower() for match in _COMMIT_SHA_EXPLICIT_RE.findall(raw)}
+
+
+def _task_has_git_delivery_completion_evidence(
+    *,
+    state: dict | None,
+    summary: str,
+    comment: str | None,
+) -> bool:
+    source = dict(state or {})
+    title = str(source.get("title") or "").strip()
+    description = str(source.get("description") or "").strip()
+    instruction = str(source.get("instruction") or "").strip()
+    scheduled_instruction = str(source.get("scheduled_instruction") or "").strip()
+    refs = source.get("external_refs")
+    corpus = "\n".join(
+        [
+            title,
+            description,
+            instruction,
+            scheduled_instruction,
+            str(summary or ""),
+            str(comment or ""),
+        ]
+    )
+    commit_refs = _extract_commit_shas_from_refs(refs)
+    commit_text = _extract_commit_shas_from_text(corpus)
+    has_commit_evidence = bool(commit_refs or commit_text)
+    has_branch_evidence = bool(_TASK_BRANCH_RE.search(corpus))
+    if not (has_commit_evidence and has_branch_evidence):
+        return False
+    is_deploy_task = "deploy" in title.lower() or "docker compose" in title.lower()
+    if not is_deploy_task:
+        return True
+    deploy_markers = ("docker compose", "/health", "http 200", "up (healthy)", "healthcheck")
+    deploy_corpus = corpus.lower()
+    return any(marker in deploy_corpus for marker in deploy_markers)
 
 
 def _normalize_string_list(values: object) -> list[str]:
@@ -815,6 +852,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
             assignee_id=str(state.get("assignee_id") or ""),
         )
         git_delivery_enabled = _project_has_git_delivery_skill(db=db, workspace_id=workspace_id, project_id=project_id)
+        team_mode_enabled = _project_has_team_mode_skill(db=db, workspace_id=workspace_id, project_id=project_id)
 
         validation_error = success_validation_error(
             db=db,
@@ -840,6 +878,14 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
             assignee_role=assignee_role,
             task_state=state,
         )
+        if (
+            action != "complete"
+            and git_delivery_enabled
+            and not team_mode_enabled
+            and str(state.get("status") or "").strip() != "Done"
+            and _task_has_git_delivery_completion_evidence(state=state, summary=summary, comment=comment)
+        ):
+            action = "complete"
 
         if _normalize_nonnegative_int(state.get("runner_recover_retry_count")) > 0:
             append_event(

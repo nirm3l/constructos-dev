@@ -406,6 +406,18 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       setUiError(toErrorMessage(error, 'Chat execution settings update failed'))
     },
   })
+  const onboardingTourPreferencesMutation = useMutation({
+    mutationFn: (payload: {
+      onboarding_quick_tour_completed?: boolean
+      onboarding_advanced_tour_completed?: boolean
+    }) => patchMyPreferences(userId, payload),
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Onboarding tour preference update failed'))
+    },
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['bootstrap', userId] })
+    },
+  })
   const { frontendVersion, backendVersion, backendBuild, backendDeployedAtUtc } = useAppVersion()
   const workspaceId = bootstrap.data?.workspaces[0]?.id ?? ''
   const userTimezone = bootstrap.data?.current_user?.timezone
@@ -2026,6 +2038,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       themeMutation,
       saveChatExecutionPreferences: chatExecutionPreferencesMutation.mutateAsync,
       saveChatExecutionPreferencesPending: chatExecutionPreferencesMutation.isPending,
+      saveOnboardingTourProgress: onboardingTourPreferencesMutation.mutateAsync,
+      saveOnboardingTourProgressPending: onboardingTourPreferencesMutation.isPending,
       changeMyPassword: changeMyPasswordMutation.mutateAsync,
       changeMyPasswordPending: changeMyPasswordMutation.isPending,
       submitFeedback: submitFeedbackMutation.mutateAsync,

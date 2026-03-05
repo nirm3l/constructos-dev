@@ -21,11 +21,18 @@ DEFAULT_REQUIRED_DELIVERY_CHECKS: list[str] = [
     "dev_tasks_have_task_branch_evidence",
     "dev_tasks_have_unique_commit_evidence",
     "dev_tasks_have_automation_run_evidence",
+]
+_TEAM_MODE_DELIVERY_REQUIRED_CHECKS: list[str] = [
     "qa_tasks_have_automation_run_evidence",
     "lead_tasks_have_automation_run_evidence",
     "qa_has_verifiable_artifacts",
     "deploy_execution_evidence_present",
 ]
+DEFAULT_REQUIRED_DELIVERY_CHECKS_WITH_TEAM_MODE: list[str] = [
+    *DEFAULT_REQUIRED_DELIVERY_CHECKS,
+    *_TEAM_MODE_DELIVERY_REQUIRED_CHECKS,
+]
+TEAM_MODE_ONLY_DELIVERY_CHECKS: set[str] = set(_TEAM_MODE_DELIVERY_REQUIRED_CHECKS)
 DELIVERY_CHECK_DESCRIPTIONS: dict[str, str] = {
     "repo_context_present": "Repository context is discoverable from project metadata/rules/refs.",
     "git_contract_ok": "Git delivery contract is satisfied end-to-end.",
@@ -41,6 +48,29 @@ DELIVERY_CHECK_DESCRIPTIONS: dict[str, str] = {
     "runtime_deploy_health_required": "Runtime health probe is required by gate policy.",
     "runtime_deploy_health_ok": "Runtime deploy stack is up, mapped, and healthy when required.",
 }
+
+
+def default_required_delivery_checks(*, team_mode_enabled: bool) -> list[str]:
+    if team_mode_enabled:
+        return list(DEFAULT_REQUIRED_DELIVERY_CHECKS_WITH_TEAM_MODE)
+    return list(DEFAULT_REQUIRED_DELIVERY_CHECKS)
+
+
+def normalize_delivery_required_checks(
+    required_checks: list[str],
+    *,
+    team_mode_enabled: bool,
+) -> list[str]:
+    blocked = TEAM_MODE_ONLY_DELIVERY_CHECKS if not team_mode_enabled else set()
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for check in required_checks:
+        check_id = str(check or "").strip()
+        if not check_id or check_id in blocked or check_id in seen:
+            continue
+        normalized.append(check_id)
+        seen.add(check_id)
+    return normalized
 
 
 def _build_gate_check_catalog() -> dict[str, list[dict[str, Any]]]:
@@ -123,6 +153,29 @@ def merge_gate_policy_dict(base: dict[str, Any], override: dict[str, Any]) -> di
         else:
             merged[key] = value
     return merged
+
+
+def filter_gate_policy_scopes(
+    policy: dict[str, Any],
+    *,
+    include_scopes: set[str],
+) -> dict[str, Any]:
+    filtered = dict(policy or {})
+    normalized_scopes = {str(scope or "").strip() for scope in (include_scopes or set()) if str(scope or "").strip()}
+    for field in ("required_checks", "available_checks"):
+        raw = filtered.get(field)
+        if not isinstance(raw, dict):
+            continue
+        filtered[field] = {
+            str(key): value
+            for key, value in raw.items()
+            if str(key or "").strip() in normalized_scopes
+        }
+    if "team_mode" not in normalized_scopes:
+        filtered.pop("team_mode", None)
+    if "delivery" not in normalized_scopes:
+        filtered.pop("delivery", None)
+    return filtered
 
 
 def parse_gate_policy_rule(*, project_rules: list[Any]) -> tuple[dict[str, Any], str]:
@@ -530,7 +583,7 @@ def evaluate_delivery_gates(
         for sha in shas:
             commit_to_tasks.setdefault(sha, set()).add(task_id)
     duplicated_commits = sorted(sha for sha, task_ids in commit_to_tasks.items() if len(task_ids) > 1)
-    unique_commit_per_dev_ok = bool(dev_tasks) and not duplicated_commits
+    unique_commit_per_dev_ok = not duplicated_commits
 
     dev_missing = [
         {"task_id": str(task.get("id") or "").strip(), "title": str(task.get("title") or "").strip() or str(task.get("id") or "").strip()}
@@ -587,17 +640,17 @@ def evaluate_delivery_gates(
         project_external_refs=project_external_refs,
         project_rules=project_rules,
     )
-    dev_commit_evidence_ok = bool(dev_tasks) and not dev_missing
+    dev_commit_evidence_ok = (not dev_tasks) or not dev_missing
     dev_branch_missing = [
         {"task_id": str(task.get("id") or "").strip(), "title": str(task.get("title") or "").strip() or str(task.get("id") or "").strip()}
         for task in dev_tasks
         if not _task_has_expected_branch_evidence(task)
     ]
-    dev_task_branch_evidence_ok = bool(dev_tasks) and not dev_branch_missing
-    dev_automation_run_evidence_ok = bool(dev_tasks) and all(_task_has_automation_run(task) for task in dev_tasks)
-    qa_automation_run_evidence_ok = bool(qa_tasks) and all(_task_has_automation_run(task) for task in qa_tasks)
-    lead_automation_run_evidence_ok = bool(role_lead_tasks) and all(_task_has_automation_run(task) for task in role_lead_tasks)
-    qa_artifacts_ok = bool(qa_tasks) and not qa_missing
+    dev_task_branch_evidence_ok = (not dev_tasks) or not dev_branch_missing
+    dev_automation_run_evidence_ok = (not dev_tasks) or all(_task_has_automation_run(task) for task in dev_tasks)
+    qa_automation_run_evidence_ok = (not qa_tasks) or all(_task_has_automation_run(task) for task in qa_tasks)
+    lead_automation_run_evidence_ok = (not role_lead_tasks) or all(_task_has_automation_run(task) for task in role_lead_tasks)
+    qa_artifacts_ok = (not qa_tasks) or not qa_missing
     deploy_evidence_required = bool(team_mode_enabled and lead_deploy_tasks)
     deploy_execution_evidence_ok = (not deploy_evidence_required) or (not deploy_missing)
     facts = {
@@ -618,18 +671,11 @@ def evaluate_delivery_gates(
     required_checks = policy_required_checks(
         gate_policy,
         "delivery",
-        [
-            "repo_context_present",
-            "git_contract_ok",
-            "dev_tasks_have_commit_evidence",
-            "dev_tasks_have_task_branch_evidence",
-            "dev_tasks_have_unique_commit_evidence",
-            "dev_tasks_have_automation_run_evidence",
-            "qa_tasks_have_automation_run_evidence",
-            "lead_tasks_have_automation_run_evidence",
-            "qa_has_verifiable_artifacts",
-            "deploy_execution_evidence_present",
-        ],
+        default_required_delivery_checks(team_mode_enabled=team_mode_enabled),
+    )
+    required_checks = normalize_delivery_required_checks(
+        required_checks,
+        team_mode_enabled=team_mode_enabled,
     )
     checks_ok, required_failed = evaluate_required_checks(checks, required_checks)
     return {

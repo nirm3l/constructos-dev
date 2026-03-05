@@ -28,6 +28,8 @@ type AppHeaderProps = {
   onOpenNote: (noteId: string, projectId?: string | null) => boolean
   onOpenSpecification: (specificationId: string, projectId?: string | null) => void
   onOpenProject: (projectId: string) => void
+  onStartQuickTour: () => void
+  onStartAdvancedTour: () => void
 }
 
 function notificationPayloadId(notification: Notification, key: string): string | null {
@@ -120,6 +122,8 @@ export function AppHeader({
   onOpenNote,
   onOpenSpecification,
   onOpenProject,
+  onStartQuickTour,
+  onStartAdvancedTour,
 }: AppHeaderProps) {
   const brandSubTop = 'From spec to ship,'
   const brandSubBottom = 'with context under control...'
@@ -156,6 +160,7 @@ export function AppHeader({
                   <button
                     className={`top-notif-btn ${showNotificationsPanel ? 'active' : ''}`.trim()}
                     aria-label="Notifications"
+                    data-tour-id="header-notifications"
                   >
                     <Icon path="M12 22a2 2 0 0 0 2-2H10a2 2 0 0 0 2 2zm6-6V11a6 6 0 1 0-12 0v5L4 18v1h16v-1l-2-2z" />
                     {unreadCount > 0 && <span className="notif-dot">{Math.min(99, unreadCount)}</span>}
@@ -290,6 +295,7 @@ export function AppHeader({
                 className={`top-graph-btn ${tab === 'knowledge-graph' ? 'active' : ''}`.trim()}
                 onClick={() => setTab('knowledge-graph')}
                 aria-label="Knowledge Graph"
+                data-tour-id="header-knowledge-graph"
               >
                 <Icon path="M6 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm12 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm-6 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM7.4 6.6l3.9 10.8M16.6 6.6l-3.9 10.8" />
               </button>
@@ -315,7 +321,11 @@ export function AppHeader({
             <DropdownMenu.Root>
               <HeaderTooltip content="Open settings and navigation">
                 <DropdownMenu.Trigger asChild>
-                  <button className={`top-profile-btn ${tab === 'profile' ? 'active' : ''}`.trim()} aria-label="Open settings menu">
+                  <button
+                    className={`top-profile-btn ${tab === 'profile' ? 'active' : ''}`.trim()}
+                    aria-label="Open settings menu"
+                    data-tour-id="header-settings-menu"
+                  >
                     <Icon path="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7zm8 3.5-1.9.7a6.9 6.9 0 0 1-.6 1.5l.9 1.8-2 2-.6-.3-1.2-.6a6.9 6.9 0 0 1-1.5.6L12 20l-1-.1-1-.2-.7-1.9a6.9 6.9 0 0 1-1.5-.6l-1.8.9-2-2 .9-1.8a6.9 6.9 0 0 1-.6-1.5L4 12l.1-1 .2-1 .6-.2 1.3-.5a6.9 6.9 0 0 1 .6-1.5L5.9 6l2-2 1.8.9a6.9 6.9 0 0 1 1.5-.6L12 4l1 .1 1 .2.7 1.9a6.9 6.9 0 0 1 1.5.6L18 5.9l2 2-.9 1.8a6.9 6.9 0 0 1 .6 1.5L20 12z" />
                   </button>
                 </DropdownMenu.Trigger>
@@ -332,6 +342,12 @@ export function AppHeader({
                     Knowledge Graph
                   </DropdownMenu.Item>
                   <DropdownMenu.Separator className="header-settings-menu-separator" />
+                  <DropdownMenu.Item className="header-settings-menu-item" onSelect={onStartQuickTour}>
+                    Start quick tour
+                  </DropdownMenu.Item>
+                  <DropdownMenu.Item className="header-settings-menu-item" onSelect={onStartAdvancedTour}>
+                    Start advanced tour
+                  </DropdownMenu.Item>
                   <DropdownMenu.Item className="header-settings-menu-item" onSelect={() => setTab('search')}>
                     Global search
                   </DropdownMenu.Item>
@@ -351,12 +367,13 @@ export function AppHeader({
                 if (tab !== 'search') setTab('search')
               }}
               placeholder="Search tasks, notes, specifications..."
+              data-tour-id="header-search"
             />
           </div>
           <div className="header-project-scope">
             <span className="meta">Project</span>
             <Select.Root value={projectSelectValue} onValueChange={setSelectedProjectId}>
-              <Select.Trigger className="header-project-trigger" aria-label="Select project">
+              <Select.Trigger className="header-project-trigger" aria-label="Select project" data-tour-id="header-project-select">
                 <Select.Value placeholder="Select project" />
                 <Select.Icon asChild>
                   <span className="header-project-trigger-icon">

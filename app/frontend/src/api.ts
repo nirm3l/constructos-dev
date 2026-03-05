@@ -1390,6 +1390,8 @@ export const patchMyPreferences = (
     notifications_enabled?: boolean
     agent_chat_model?: string | null
     agent_chat_reasoning_effort?: ChatReasoningEffort | string | null
+    onboarding_quick_tour_completed?: boolean
+    onboarding_advanced_tour_completed?: boolean
   }
 ) => api<{
   id: string
@@ -1398,6 +1400,8 @@ export const patchMyPreferences = (
   notifications_enabled: boolean
   agent_chat_model?: string
   agent_chat_reasoning_effort?: ChatReasoningEffort | string
+  onboarding_quick_tour_completed?: boolean
+  onboarding_advanced_tour_completed?: boolean
 }>('/api/me/preferences', userId, { method: 'PATCH', body: JSON.stringify(payload) })
 
 export const getNotes = (

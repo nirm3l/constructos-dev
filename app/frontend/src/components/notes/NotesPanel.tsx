@@ -842,7 +842,7 @@ export function NotesPanel({
   }
 
   return (
-    <section className="card">
+    <section className="card" data-tour-id="notes-panel">
       <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
         <h2 style={{ margin: 0 }}>Notes ({state.notes.data?.total ?? 0})</h2>
         <div className="row wrap notes-create-actions" style={{ gap: 6 }}>

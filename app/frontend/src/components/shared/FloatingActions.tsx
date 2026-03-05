@@ -16,6 +16,7 @@ export function FloatingActions({ state }: { state: any }) {
         }}
         title="New Task"
         aria-label="New Task"
+        data-tour-id="fab-new-task"
       >
         <Icon path="M12 4v16M4 12h16" />
       </button>
@@ -28,6 +29,7 @@ export function FloatingActions({ state }: { state: any }) {
         }}
         title="Chat"
         aria-label="Chat"
+        data-tour-id="fab-chat"
       >
         <Icon path="M4 4h16v11H7l-3 3V4z" />
         <span>{state.isCodexChatRunning ? `Chat (${state.codexChatElapsedSeconds}s)` : 'Chat'}</span>

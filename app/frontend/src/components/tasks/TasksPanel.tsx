@@ -629,7 +629,7 @@ export function TasksPanel({
   const taskGroupDialogSubmitLabel = taskGroupDialogMode === 'rename' ? 'Save' : 'Create'
 
   return (
-    <section className="card">
+    <section className="card" data-tour-id="tasks-panel">
       <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
         <h2 style={{ margin: 0 }}>{panelTitle}</h2>
         {allowBoardView && (
@@ -670,6 +670,7 @@ export function TasksPanel({
             onClick={() => onNewTask('manual')}
             title="Create task"
             aria-label="Create task"
+            data-tour-id="tasks-new-task"
           >
             <Icon path="M12 5v14M5 12h14" />
             <span>Task</span>

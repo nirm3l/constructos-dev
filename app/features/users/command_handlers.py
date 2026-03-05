@@ -117,6 +117,10 @@ class PatchUserPreferencesHandler:
             event_payload["agent_chat_reasoning_effort"] = _normalize_reasoning_effort(
                 data.get("agent_chat_reasoning_effort")
             )
+        if "onboarding_quick_tour_completed" in data:
+            event_payload["onboarding_quick_tour_completed"] = bool(data.get("onboarding_quick_tour_completed"))
+        if "onboarding_advanced_tour_completed" in data:
+            event_payload["onboarding_advanced_tour_completed"] = bool(data.get("onboarding_advanced_tour_completed"))
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = repo.load_with_class(
             aggregate_type="User",
@@ -144,6 +148,18 @@ class PatchUserPreferencesHandler:
             "agent_chat_reasoning_effort": event_payload.get(
                 "agent_chat_reasoning_effort",
                 self.ctx.user.agent_chat_reasoning_effort,
+            ),
+            "onboarding_quick_tour_completed": bool(
+                event_payload.get(
+                    "onboarding_quick_tour_completed",
+                    self.ctx.user.onboarding_quick_tour_completed,
+                )
+            ),
+            "onboarding_advanced_tour_completed": bool(
+                event_payload.get(
+                    "onboarding_advanced_tour_completed",
+                    self.ctx.user.onboarding_advanced_tour_completed,
+                )
             ),
         }
 
