@@ -36,6 +36,10 @@ def should_prepare_task_worktree(
     actor_project_role: str | None,
     assignee_project_role: str | None,
 ) -> bool:
+    if git_delivery_enabled and not plugin_enabled:
+        # Standalone Git Delivery uses a single project workspace on main.
+        return False
+
     if not plugin_enabled or not git_delivery_enabled:
         return False
     for plugin in list_workflow_plugins():

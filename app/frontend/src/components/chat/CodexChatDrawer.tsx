@@ -32,7 +32,7 @@ function buildProjectCreationStarter(): string {
     '1. Ask one clarifying question at a time, but only for missing inputs.',
     '2. Ask for project name first, then ask: "What should this project do in short?"',
     '3. Ask whether we want Team Mode. Explain it briefly in chat: Team Mode sets up a multi-role workflow (Dev -> Lead -> QA) with automation.',
-    '4. Do not force Team Mode. If Team Mode is declined, ask whether we want Git Delivery, and explain it briefly: Git Delivery enforces repo-based delivery flow (branching, commits, and delivery evidence).',
+    '4. Do not force Team Mode. If Team Mode is declined, ask whether we want Git Delivery, and explain it briefly: Git Delivery enforces repo-based delivery flow on the main branch with per-task commits and delivery evidence.',
     '5. If Git Delivery is enabled, ask whether deployment should run via Docker Compose, and if yes ask which port should be used.',
     '6. Default to manual setup unless I explicitly ask for a template.',
     '7. Do not ask template-vs-manual when my request already implies a custom/manual setup.',

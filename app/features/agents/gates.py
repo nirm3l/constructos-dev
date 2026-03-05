@@ -18,11 +18,11 @@ DEFAULT_REQUIRED_DELIVERY_CHECKS: list[str] = [
     "repo_context_present",
     "git_contract_ok",
     "dev_tasks_have_commit_evidence",
-    "dev_tasks_have_task_branch_evidence",
     "dev_tasks_have_unique_commit_evidence",
     "dev_tasks_have_automation_run_evidence",
 ]
 _TEAM_MODE_DELIVERY_REQUIRED_CHECKS: list[str] = [
+    "dev_tasks_have_task_branch_evidence",
     "qa_tasks_have_automation_run_evidence",
     "lead_tasks_have_automation_run_evidence",
     "qa_has_verifiable_artifacts",
@@ -244,7 +244,6 @@ DELIVERY_CHECK_EVALUATORS: dict[str, Callable[[dict[str, Any]], bool]] = {
     "git_contract_ok": lambda f: bool(
         f["repo_context_present"]
         and f["dev_commit_evidence_ok"]
-        and f["dev_task_branch_evidence_ok"]
         and f["unique_commit_per_dev_ok"]
     ),
     "dev_tasks_have_commit_evidence": lambda f: bool(f["dev_commit_evidence_ok"]),
@@ -486,21 +485,32 @@ def evaluate_delivery_gates(
     lead_deploy_tasks = [
         task for task in role_lead_tasks if "deploy" in str(task.get("title") or "").lower() or "docker compose" in str(task.get("title") or "").lower()
     ]
+    standalone_deploy_tasks = [
+        task
+        for task in tasks
+        if "deploy" in str(task.get("title") or "").lower() or "docker compose" in str(task.get("title") or "").lower()
+    ]
     team_mode_enabled = any(
         str(getattr(skill, "skill_key", "") or "").strip() == TEAM_MODE_SKILL_KEY for skill in project_skills
     )
+    if not team_mode_enabled:
+        eligible_statuses = {"dev", "in progress", "qa", "lead", "done", "completed"}
+        dev_tasks = [
+            task
+            for task in tasks
+            if str(task.get("task_type") or "manual").strip().lower() != "scheduled_instruction"
+            and str(task.get("status") or "").strip().lower() in eligible_statuses
+        ]
 
     def _task_commit_shas(task: dict[str, Any]) -> set[str]:
         task_id = str(task.get("id") or "").strip()
         if not task_id:
             return set()
+        # Commit evidence must be persisted in external refs, not only free-text comments.
         shas: set[str] = set()
         shas.update(extract_commit_shas_from_refs(task.get("external_refs")))
         for note in notes_by_task.get(task_id, []):
-            shas.update(extract_commit_shas_from_text(f"{note.title or ''}\n{note.body or ''}"))
             shas.update(extract_commit_shas_from_refs(note.external_refs))
-        for comment in comments_by_task.get(task_id, []):
-            shas.update(extract_commit_shas_from_text(comment.body))
         return shas
 
     def _task_has_qa_artifacts(task: dict[str, Any]) -> bool:
@@ -603,6 +613,7 @@ def evaluate_delivery_gates(
     runtime_policy_raw = gate_policy.get("runtime_deploy_health") if isinstance(gate_policy, dict) else {}
     runtime_policy = runtime_policy_raw if isinstance(runtime_policy_raw, dict) else {}
     runtime_required = bool(runtime_policy.get("required"))
+    runtime_required_effective = bool(runtime_required or (not team_mode_enabled and bool(standalone_deploy_tasks)))
     runtime_stack, runtime_port, runtime_health_path = resolve_deploy_target_from_artifacts(
         deploy_tasks=lead_deploy_tasks,
         notes_by_task=notes_by_task,
@@ -619,7 +630,7 @@ def evaluate_delivery_gates(
             require_http_200=runtime_require_http_200,
             host=runtime_host,
         )
-        if runtime_required
+        if runtime_required_effective
         else {
             "stack": runtime_stack,
             "port": runtime_port,
@@ -664,7 +675,7 @@ def evaluate_delivery_gates(
         "qa_artifacts_ok": qa_artifacts_ok,
         "deploy_evidence_required": deploy_evidence_required,
         "deploy_execution_evidence_ok": deploy_execution_evidence_ok,
-        "runtime_required": runtime_required,
+        "runtime_required": runtime_required_effective,
         "runtime_ok": runtime_ok,
     }
     checks = evaluate_check_registry(registry=DELIVERY_CHECK_EVALUATORS, facts=facts)
@@ -677,6 +688,11 @@ def evaluate_delivery_gates(
         required_checks,
         team_mode_enabled=team_mode_enabled,
     )
+    if not team_mode_enabled and bool(standalone_deploy_tasks):
+        required_checks = normalize_delivery_required_checks(
+            [*required_checks, "runtime_deploy_health_ok"],
+            team_mode_enabled=team_mode_enabled,
+        )
     checks_ok, required_failed = evaluate_required_checks(checks, required_checks)
     return {
         "project_id": str(project_id),

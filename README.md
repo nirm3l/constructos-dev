@@ -9,13 +9,7 @@ m4tr1x is a task/project platform that combines:
 - `MCP` tools plus Codex automation for AI-assisted execution.
 
 ## Documentation
-- `docs/01-business-overview.md` - business architecture, value model, KPI framework.
-- `docs/02-technical-architecture.md` - technical architecture, command flow, projection model.
-- `docs/03-domain-model-and-workflows.md` - domain model, lifecycle logic, key workflows.
-- `docs/04-api-and-mcp-map.md` - REST surface, SSE behavior, MCP tools map.
-- `docs/05-operations-runbook.md` - deployment, env config, observability, troubleshooting.
-- `docs/08-cqrs-consistency-guardrails.md` - CQRS consistency rules, allowlist policy, and guardrail enforcement.
-- `docs/12-macos-m4-licensing-and-distribution-plan.md` - cross-platform runtime, licensing, and distribution roadmap.
+Project documentation is being rewritten and is temporarily unavailable in this repository.
 
 ## System At A Glance
 ```mermaid

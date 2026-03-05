@@ -442,6 +442,17 @@ def _ensure_task_worktree(
     return task_worktree, branch_name, repo_root
 
 
+def _resolve_project_repo_root_and_branch(*, project_name: str | None) -> tuple[Path, str]:
+    workspace_root = _resolve_workspace_root()
+    project_slug = _slugify(str(project_name or "").strip(), fallback="project")
+    repo_root = workspace_root / project_slug
+    _ensure_git_repo_initialized(repo_root=repo_root)
+    code, branch_out, _err = _run_git(cwd=repo_root, args=["branch", "--show-current"])
+    if code == 0 and str(branch_out or "").strip():
+        return repo_root, str(branch_out or "").strip()
+    return repo_root, "main"
+
+
 def _placeholder_outcome(*, instruction: str, current_status: str) -> AutomationOutcome:
     lower_instruction = instruction.lower()
     should_complete = any(token in lower_instruction for token in ("#complete", "complete task", "mark done"))
@@ -763,7 +774,7 @@ def execute_task_automation(
         project_team_mode_enabled=project_team_mode_enabled,
         assignee_project_role=assignee_project_role,
     )
-    git_delivery_enabled = bool(project_git_delivery_enabled and team_mode_enabled)
+    git_delivery_enabled = bool(project_git_delivery_enabled)
     effective_gate_policy_required_checks = gate_policy_required_checks if team_mode_enabled else []
     task_workdir: str | None = None
     task_branch: str | None = None
@@ -783,6 +794,11 @@ def execute_task_automation(
         task_workdir = str(workdir_path)
         task_branch = branch_name
         repo_root = str(repo_root_path)
+    elif git_delivery_enabled and not team_mode_enabled:
+        repo_root_path, current_branch = _resolve_project_repo_root_and_branch(project_name=project_name)
+        task_workdir = str(repo_root_path)
+        repo_root = str(repo_root_path)
+        task_branch = current_branch
     context_scope_type = "chat_session" if str(effective_chat_session_id or "").strip() else "task_automation"
     context_scope_id = str(effective_chat_session_id or "").strip() or str(task_id or "").strip() or "general"
     context_frame = build_project_context_frame(
@@ -942,7 +958,7 @@ def execute_task_automation_stream(
         project_team_mode_enabled=project_team_mode_enabled,
         assignee_project_role=assignee_project_role,
     )
-    git_delivery_enabled = bool(project_git_delivery_enabled and team_mode_enabled)
+    git_delivery_enabled = bool(project_git_delivery_enabled)
     effective_gate_policy_required_checks = gate_policy_required_checks if team_mode_enabled else []
     task_workdir: str | None = None
     task_branch: str | None = None
@@ -962,6 +978,11 @@ def execute_task_automation_stream(
         task_workdir = str(workdir_path)
         task_branch = branch_name
         repo_root = str(repo_root_path)
+    elif git_delivery_enabled and not team_mode_enabled:
+        repo_root_path, current_branch = _resolve_project_repo_root_and_branch(project_name=project_name)
+        task_workdir = str(repo_root_path)
+        repo_root = str(repo_root_path)
+        task_branch = current_branch
     context_scope_type = "chat_session" if str(effective_chat_session_id or "").strip() else "task_automation"
     context_scope_id = str(effective_chat_session_id or "").strip() or str(task_id or "").strip() or "general"
     context_frame = build_project_context_frame(

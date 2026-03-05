@@ -1,7 +1,7 @@
 ---
 skill_key: git_delivery
 name: Git Delivery Skill
-summary: Use this skill for repository-based implementation workflow, branch/commit policy, and delivery evidence independent of provider.
+summary: Use this skill for repository-based implementation workflow on main, per-task commit policy, and delivery evidence independent of provider.
 source_locator: seed://workspace-skills/git-delivery
 mode: enforced
 trust_level: verified
@@ -14,8 +14,9 @@ Use this skill whenever implementation is expected to run against a Git reposito
 - Validate repository presence before implementation (`.git` exists and working tree is accessible).
 - If repository is missing, set execution to `Blocked` with a concrete prerequisite note.
 
-## Branching And Commits
-- Developers implement on feature branches named `task/<task-id>-<slug>`.
+## Main Branch And Commits
+- In standalone Git Delivery mode (without Team Mode), developers implement directly on `main`.
+- When Team Mode is enabled, Team Mode workflow may enforce per-task branches/worktrees.
 - Each Dev task requires at least one commit before handoff.
 - Each Dev task must reference a unique commit SHA (do not reuse the same commit evidence across multiple Dev tasks).
 - Keep commits scoped to task intent and include task id in commit message.
