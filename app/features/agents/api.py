@@ -2802,7 +2802,7 @@ def resume_agent_chat_stream(
 
 @router.post("/api/agents/chat/stop")
 def stop_agent_chat_stream(
-    payload: dict[str, str] = Body(...),
+    payload: dict[str, object] = Body(...),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
