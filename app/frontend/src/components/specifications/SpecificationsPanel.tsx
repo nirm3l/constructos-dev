@@ -33,6 +33,7 @@ export function SpecificationsPanel({ state }: { state: any }) {
   const [showSpecTagPicker, setShowSpecTagPicker] = React.useState(false)
   const [specTagQuery, setSpecTagQuery] = React.useState('')
   const [specResourceSections, setSpecResourceSections] = React.useState<string[]>(['external-links', 'file-attachments'])
+  const [previewOnlySpecificationId, setPreviewOnlySpecificationId] = React.useState<string | null>(null)
 
   React.useEffect(() => {
     setNewTaskTitle('')
@@ -46,6 +47,9 @@ export function SpecificationsPanel({ state }: { state: any }) {
     setShowSpecTagPicker(false)
     setSpecTagQuery('')
     setSpecResourceSections(['external-links', 'file-attachments'])
+  }, [selectedSpecificationId])
+  React.useEffect(() => {
+    if (!selectedSpecificationId) setPreviewOnlySpecificationId(null)
   }, [selectedSpecificationId])
 
 
@@ -203,6 +207,34 @@ export function SpecificationsPanel({ state }: { state: any }) {
     setSpecResourceSections((prev) => (prev.includes(value) ? prev : [...prev, value]))
   }, [])
 
+  const openSpecificationPreviewFullscreen = React.useCallback((specificationId: string) => {
+    const alreadyOpen = String(state.selectedSpecificationId || '').trim() === String(specificationId || '').trim()
+    if (!alreadyOpen) {
+      const changed = state.toggleSpecificationEditor(specificationId)
+      if (!changed) return
+    }
+    setPreviewOnlySpecificationId(specificationId)
+    state.setSpecificationEditorView('preview')
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const row = document.getElementById(`spec-row-${specificationId}`)
+        const surface = row?.querySelector('.md-editor-surface') as HTMLElement | null
+        if (!surface) return
+        const doc = document as Document & { webkitFullscreenElement?: Element | null }
+        const isFullscreen = surface.classList.contains('md-editor-fullscreen')
+          || document.fullscreenElement === surface
+          || doc.webkitFullscreenElement === surface
+        if (isFullscreen) return
+        surface.setAttribute('data-md-fullscreen-mode', 'readonly')
+        const fullscreenButton = surface.querySelector('.md-mode-toggle .md-fullscreen-btn') as HTMLButtonElement | null
+        fullscreenButton?.click()
+        window.setTimeout(() => {
+          surface.removeAttribute('data-md-fullscreen-mode')
+        }, 0)
+      })
+    })
+  }, [state])
+
   return (
     <section className="card" data-tour-id="specifications-panel">
       <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
@@ -250,13 +282,15 @@ export function SpecificationsPanel({ state }: { state: any }) {
               </Select.Content>
             </Select.Portal>
           </Select.Root>
-          <PopularTagFilters
-            tags={state.taskTagSuggestions ?? []}
-            selectedTags={state.specificationTags}
-            onToggleTag={state.toggleSpecificationFilterTag}
-            onClear={() => state.clearSpecificationFilterTags()}
-            idPrefix="spec-filter"
-          />
+          {items.length > 0 && (
+            <PopularTagFilters
+              tags={state.taskTagSuggestions ?? []}
+              selectedTags={state.specificationTags}
+              onToggleTag={state.toggleSpecificationFilterTag}
+              onClear={() => state.clearSpecificationFilterTags()}
+              idPrefix="spec-filter"
+            />
+          )}
         </div>
 
         <div className="task-list">
@@ -270,14 +304,36 @@ export function SpecificationsPanel({ state }: { state: any }) {
                 const attachmentRefCount = specification.attachment_refs?.length ?? 0
                 const editorExternalRefs = state.parseExternalRefsText(state.editSpecificationExternalRefsText)
                 const editorAttachmentRefs = state.parseAttachmentRefsText(state.editSpecificationAttachmentRefsText)
+                const specChangedFields = (() => {
+                  if (!isOpen) return [] as string[]
+                  const changed: string[] = []
+                  const baselineTitle = String(specification.title || '')
+                  const baselineStatus = String(specification.status || 'Draft')
+                  const baselineBody = String(specification.body || '')
+                  const baselineTags = parseCommaTags((specification.tags ?? []).join(',')).map((tag) => tag.toLowerCase()).join(',')
+                  const editorTags = parseCommaTags(state.editSpecificationTags ?? '').map((tag) => tag.toLowerCase()).join(',')
+                  const baselineExternalRefs = JSON.stringify(specification.external_refs ?? [])
+                  const editorExternalRefsJson = JSON.stringify(editorExternalRefs)
+                  const baselineAttachmentRefs = JSON.stringify(specification.attachment_refs ?? [])
+                  const editorAttachmentRefsJson = JSON.stringify(editorAttachmentRefs)
+                  if (String(state.editSpecificationTitle || '') !== baselineTitle) changed.push('Title')
+                  if (String(state.editSpecificationStatus || 'Draft') !== baselineStatus) changed.push('Status')
+                  if (String(state.editSpecificationBody || '') !== baselineBody) changed.push('Body')
+                  if (editorTags !== baselineTags) changed.push('Tags')
+                  if (editorExternalRefsJson !== baselineExternalRefs) changed.push('External links')
+                  if (editorAttachmentRefsJson !== baselineAttachmentRefs) changed.push('Attachments')
+                  return changed
+                })()
                 const editorExternalLinksMeta = editorExternalRefs.length > 0
                   ? `${editorExternalRefs.length} linked`
                   : 'No links added'
                 const editorAttachmentsMeta = editorAttachmentRefs.length > 0
                   ? `${editorAttachmentRefs.length} files attached`
                   : 'No attachments'
+                const isPreviewOnly = previewOnlySpecificationId === specification.id
                 const openSpecificationFromMenu = () => {
                   if (isOpen) return
+                  setPreviewOnlySpecificationId(null)
                   state.toggleSpecificationEditor(specification.id)
                 }
                 const toggleArchiveFromMenu = () => {
@@ -293,6 +349,7 @@ export function SpecificationsPanel({ state }: { state: any }) {
                     id={`spec-row-${specification.id}`}
                     className={`note-row ${isOpen ? 'open selected' : ''}`}
                     onClick={() => {
+                      setPreviewOnlySpecificationId(null)
                       state.toggleSpecificationEditor(specification.id)
                     }}
                     role="button"
@@ -302,21 +359,40 @@ export function SpecificationsPanel({ state }: { state: any }) {
                     {specification.archived && <span className="badge">Archived</span>}
                     <strong>{displayTitle}</strong>
                   </div>
-                  <div className="note-row-actions" onClick={(event) => event.stopPropagation()}>
+                  <div
+                    className="note-row-actions"
+                    onClick={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                  >
                     <button
                       className="action-icon note-row-actions-trigger"
                       type="button"
                       title="Copy specification link"
                       aria-label="Copy specification link"
-                      onClick={() =>
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.stopPropagation()
                         state.copyShareLink({
                           tab: 'specifications',
                           projectId: specification.project_id,
                           specificationId: specification.id,
                         })
-                      }
+                      }}
                     >
                       <Icon path="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4m2 7a5 5 0 0 0-7.07 0L3.1 13.83a5 5 0 1 0 7.07 7.07L13 18" />
+                    </button>
+                    <button
+                      className="action-icon note-row-actions-trigger"
+                      type="button"
+                      title="Open preview fullscreen"
+                      aria-label="Open preview fullscreen"
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        openSpecificationPreviewFullscreen(specification.id)
+                      }}
+                    >
+                      <Icon path="M8 3H5a2 2 0 0 0-2 2v3m16 0V5a2 2 0 0 0-2-2h-3M8 21H5a2 2 0 0 1-2-2v-3m16 0v3a2 2 0 0 1-2 2h-3" />
                     </button>
                     <DropdownMenu.Root>
                       <DropdownMenu.Trigger asChild>
@@ -331,9 +407,28 @@ export function SpecificationsPanel({ state }: { state: any }) {
                       </DropdownMenu.Trigger>
                       <DropdownMenu.Portal>
                         <DropdownMenu.Content className="task-group-menu-content note-row-menu-content" sideOffset={8} align="end">
-                          <DropdownMenu.Item className="task-group-menu-item" onSelect={openSpecificationFromMenu} disabled={isOpen}>
+                          <DropdownMenu.Item
+                            className="task-group-menu-item"
+                            onSelect={(event) => {
+                              event.preventDefault()
+                              event.stopPropagation()
+                              openSpecificationFromMenu()
+                            }}
+                            disabled={isOpen}
+                          >
                             <Icon path="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6zm9 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
                             <span>{isOpen ? 'Editor open' : 'Open editor'}</span>
+                          </DropdownMenu.Item>
+                          <DropdownMenu.Item
+                            className="task-group-menu-item"
+                            onSelect={(event) => {
+                              event.preventDefault()
+                              event.stopPropagation()
+                              openSpecificationPreviewFullscreen(specification.id)
+                            }}
+                          >
+                            <Icon path="M8 3H5a2 2 0 0 0-2 2v3m16 0V5a2 2 0 0 0-2-2h-3M8 21H5a2 2 0 0 1-2-2v-3m16 0v3a2 2 0 0 1-2 2h-3" />
+                            <span>Preview fullscreen</span>
                           </DropdownMenu.Item>
                           <DropdownMenu.Separator className="task-group-menu-separator" />
                           <DropdownMenu.Item className="task-group-menu-item" onSelect={toggleArchiveFromMenu}>
@@ -409,18 +504,6 @@ export function SpecificationsPanel({ state }: { state: any }) {
                         onChange={(e) => state.setEditSpecificationTitle(e.target.value)}
                         placeholder="Title"
                       />
-                      <div className="note-actions">
-                        {state.specificationIsDirty && <span className="badge unsaved-badge">Unsaved</span>}
-                        <button
-                          className="action-icon primary"
-                          onClick={() => state.saveSpecificationMutation.mutate()}
-                          disabled={state.saveSpecificationMutation.isPending || !state.specificationIsDirty}
-                          title="Save specification"
-                          aria-label="Save specification"
-                        >
-                          <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
-                        </button>
-                      </div>
                     </div>
 
                     <div className="row" style={{ marginBottom: 8 }}>
@@ -539,11 +622,19 @@ export function SpecificationsPanel({ state }: { state: any }) {
                       </Popover.Root>
                     </div>
 
-                    <div className="md-editor-surface">
+                    <div
+                      className="md-editor-surface"
+                      onClick={(event) => event.stopPropagation()}
+                      onPointerDown={(event) => event.stopPropagation()}
+                    >
                       <MarkdownModeToggle
                         view={state.specificationEditorView}
                         onChange={state.setSpecificationEditorView}
                         ariaLabel="Specification editor view"
+                        previewOnlyWhenFullscreen={isPreviewOnly}
+                        onFullscreenTriggerMode={(mode, nextFullscreen) => {
+                          if (!nextFullscreen || mode === 'regular') setPreviewOnlySpecificationId(null)
+                        }}
                       />
                       <div className="md-editor-content">
                         {state.specificationEditorView === 'write' ? (
@@ -882,6 +973,29 @@ export function SpecificationsPanel({ state }: { state: any }) {
                         </Accordion.Content>
                       </Accordion.Item>
                     </Accordion.Root>
+                    {(state.specificationIsDirty || state.saveSpecificationMutation.isPending) && (
+                      <div className="project-editor-savebar spec-editor-savebar">
+                        <div className="project-editor-savebar-meta">
+                          <span className="badge unsaved-badge">1 unsaved section</span>
+                          <span className="meta">
+                            Changed: {specChangedFields.length > 0 ? specChangedFields.join(', ') : 'Specification'}
+                          </span>
+                        </div>
+                        <button
+                          className="status-chip on project-editor-savebar-btn"
+                          type="button"
+                          onClick={() => state.saveSpecificationMutation.mutate()}
+                          disabled={state.saveSpecificationMutation.isPending || !state.specificationIsDirty}
+                          title="Save all specification changes"
+                          aria-label="Save all specification changes"
+                        >
+                          <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+                          <span className="project-editor-savebar-btn-label">
+                            {state.saveSpecificationMutation.isPending ? 'Saving...' : 'Save all changes'}
+                          </span>
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
                   </div>

@@ -17,22 +17,22 @@ TEAM_MODE_AGENT_SPECS: tuple[dict[str, str], ...] = (
     {
         "username": "agent.m0rph3u5",
         "full_name": "M0rph3u5",
-        "project_role": "TeamLeadAgent",
+        "project_role": "Lead",
     },
     {
         "username": "agent.tr1n1ty",
         "full_name": "Tr1n1ty",
-        "project_role": "DeveloperAgent",
+        "project_role": "Developer",
     },
     {
         "username": "agent.n30",
         "full_name": "N30",
-        "project_role": "DeveloperAgent",
+        "project_role": "Developer",
     },
     {
         "username": "agent.0r4cl3",
         "full_name": "0r4cl3",
-        "project_role": "QAAgent",
+        "project_role": "QA",
     },
 )
 

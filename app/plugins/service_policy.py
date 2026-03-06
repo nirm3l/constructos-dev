@@ -124,18 +124,18 @@ def ensure_plugin_project_contract(
 def is_delivery_workflow_active(
     *,
     skill_keys: set[str],
-    gate_policy_source: str,
+    plugin_policy_source: str,
 ) -> bool:
     normalized_skill_keys = {
         str(item or "").strip().lower() for item in (skill_keys or set()) if str(item or "").strip()
     }
     return bool(
-        is_delivery_skill_enabled(skill_keys=normalized_skill_keys)
-        or str(gate_policy_source or "").strip() != "default"
+        is_delivery_plugin_active(skill_keys=normalized_skill_keys)
+        or str(plugin_policy_source or "").strip() != "default"
     )
 
 
-def is_delivery_skill_enabled(*, skill_keys: set[str]) -> bool:
+def is_delivery_plugin_active(*, skill_keys: set[str]) -> bool:
     normalized_skill_keys = {
         str(item or "").strip().lower() for item in (skill_keys or set()) if str(item or "").strip()
     }

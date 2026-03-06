@@ -4,9 +4,10 @@ import hashlib
 import hmac
 import inspect
 import json
+import os
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import HTTPException
@@ -79,17 +80,19 @@ from shared.core import (
 from features.project_templates.schemas import ProjectFromTemplateCreate, ProjectFromTemplatePreview
 from features.agents.codex_mcp_adapter import run_structured_codex_prompt
 from features.agents.gates import (
-    evaluate_delivery_gates,
-    evaluate_required_checks as evaluate_required_gate_checks,
-    evaluate_team_mode_gates,
-    filter_gate_policy_scopes,
-    parse_gate_policy_rule,
-    policy_required_checks,
+    DEFAULT_REQUIRED_DELIVERY_CHECKS,
+    DELIVERY_CHECK_DESCRIPTIONS,
+    evaluate_delivery_checks,
+    evaluate_required_checks as evaluate_required_policy_checks,
+    filter_plugin_policy_scopes,
+    merge_plugin_policy_dict,
     run_runtime_deploy_health_check,
 )
 from plugins import context_policy as plugin_context_policy
 from plugins import service_policy as plugin_service_policy
 from plugins.runner_policy import is_lead_role
+from plugins.team_mode.gates import DEFAULT_REQUIRED_TEAM_MODE_CHECKS, TEAM_MODE_CHECK_DESCRIPTIONS
+from plugins.team_mode.task_roles import TEAM_MODE_ROLES, derive_task_role, normalize_team_agents
 from shared.deps import ensure_role
 from shared.knowledge_graph import (
     build_graph_context_pack,
@@ -105,6 +108,7 @@ from shared.models import (
     Notification,
     Note,
     ProjectMember,
+    ProjectPluginConfig,
     ProjectRule as ProjectRuleModel,
     ProjectSkill,
     Task,
@@ -145,6 +149,9 @@ _READ_ONLY_MCP_METHODS = frozenset(
         "get_task_automation_status",
         "get_my_preferences",
         "get_project_chat_context",
+        "get_project_plugin_config",
+        "get_project_capabilities",
+        "diff_project_plugin_config",
         "graph_get_project_overview",
         "graph_get_neighbors",
         "graph_find_related_resources",
@@ -153,6 +160,7 @@ _READ_ONLY_MCP_METHODS = frozenset(
         "search_project_knowledge",
         "verify_team_mode_workflow",
         "verify_delivery_workflow",
+        "validate_project_plugin_config",
         "list_project_templates",
         "get_project_template",
         "preview_project_from_template",
@@ -163,8 +171,684 @@ _COMMIT_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
 _COMMIT_SHA_EXPLICIT_RE = re.compile(
     r"(?i)(?:\b(?:commit|sha|changeset|hash)\s*[:=#]?\s*|/commit/)([0-9a-f]{7,40})\b"
 )
-_PROJECT_GATES_LLM_EVAL_CACHE: dict[str, dict[str, Any]] = {}
+_PROJECT_POLICY_CHECKS_LLM_EVAL_CACHE: dict[str, dict[str, Any]] = {}
 _TEAM_MODE_PLUGIN_KEY = "team_mode"
+_PROJECT_PLUGIN_KEYS: set[str] = {"team_mode", "git_delivery", "docker_compose"}
+
+
+def _safe_json_loads_object(raw: str, *, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
+    text = str(raw or "").strip()
+    if not text:
+        return dict(fallback or {})
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return dict(fallback or {})
+    if isinstance(parsed, dict):
+        return parsed
+    return dict(fallback or {})
+
+
+def _safe_json_loads_array(raw: str, *, fallback: list[Any] | None = None) -> list[Any]:
+    text = str(raw or "").strip()
+    if not text:
+        return list(fallback or [])
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return list(fallback or [])
+    if isinstance(parsed, list):
+        return parsed
+    return list(fallback or [])
+
+
+def _normalize_plugin_key(plugin_key: str) -> str:
+    normalized = str(plugin_key or "").strip().lower()
+    if normalized not in _PROJECT_PLUGIN_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"plugin_key must be one of: {', '.join(sorted(_PROJECT_PLUGIN_KEYS))}",
+        )
+    return normalized
+
+
+def _json_pointer_escape(token: str) -> str:
+    return str(token or "").replace("~", "~0").replace("/", "~1")
+
+
+def _json_diff_values(before: Any, after: Any, path: str = "") -> list[dict[str, Any]]:
+    if isinstance(before, dict) and isinstance(after, dict):
+        changes: list[dict[str, Any]] = []
+        all_keys = sorted(set(before.keys()) | set(after.keys()), key=lambda item: str(item))
+        for raw_key in all_keys:
+            key = str(raw_key)
+            pointer = f"{path}/{_json_pointer_escape(key)}" if path else f"/{_json_pointer_escape(key)}"
+            if key not in before:
+                changes.append({"op": "add", "path": pointer, "after": after.get(key)})
+                continue
+            if key not in after:
+                changes.append({"op": "remove", "path": pointer, "before": before.get(key)})
+                continue
+            changes.extend(_json_diff_values(before.get(key), after.get(key), pointer))
+        return changes
+    if isinstance(before, list) and isinstance(after, list):
+        if before == after:
+            return []
+        return [{"op": "replace", "path": path or "/", "before": before, "after": after}]
+    if before != after:
+        return [{"op": "replace", "path": path or "/", "before": before, "after": after}]
+    return []
+
+
+def _team_mode_default_config() -> dict[str, Any]:
+    default_statuses = ["To do", "Dev", "QA", "Lead", "Done", "Blocked"]
+    default_transitions = [
+        {"from": "To do", "to": "Dev", "allowed_roles": ["Developer", "Lead"]},
+        {"from": "Dev", "to": "Lead", "allowed_roles": ["Developer"]},
+        {"from": "Lead", "to": "QA", "allowed_roles": ["Lead"]},
+        {"from": "QA", "to": "Done", "allowed_roles": ["QA"]},
+        {"from": "To do", "to": "Blocked", "allowed_roles": ["Developer", "QA", "Lead"]},
+        {"from": "Dev", "to": "Blocked", "allowed_roles": ["Developer", "Lead"]},
+        {"from": "Lead", "to": "Blocked", "allowed_roles": ["Lead"]},
+        {"from": "QA", "to": "Blocked", "allowed_roles": ["QA", "Lead"]},
+        {"from": "Blocked", "to": "Dev", "allowed_roles": ["Developer", "Lead"]},
+        {"from": "Blocked", "to": "Lead", "allowed_roles": ["Lead"]},
+        {"from": "Blocked", "to": "QA", "allowed_roles": ["QA", "Lead"]},
+    ]
+    return {
+        "required_checks": {"team_mode": list(DEFAULT_REQUIRED_TEAM_MODE_CHECKS)},
+        "team": {
+            "agents": [
+                {
+                    "id": "dev-a",
+                    "name": "Developer A",
+                    "authority_role": "Developer",
+                },
+                {
+                    "id": "dev-b",
+                    "name": "Developer B",
+                    "authority_role": "Developer",
+                },
+                {
+                    "id": "qa-a",
+                    "name": "QA A",
+                    "authority_role": "QA",
+                },
+                {
+                    "id": "lead-a",
+                    "name": "Lead A",
+                    "authority_role": "Lead",
+                },
+            ]
+        },
+        "workflow": {"statuses": default_statuses, "transitions": default_transitions},
+        "governance": {"merge_authority_roles": ["Lead"], "task_move_authority_roles": ["Lead"]},
+        "automation": {"lead_recurring_max_minutes": 5},
+    }
+
+
+def _git_delivery_default_config() -> dict[str, Any]:
+    return {
+        "required_checks": {
+            "delivery": list(DEFAULT_REQUIRED_DELIVERY_CHECKS),
+        }
+    }
+
+
+def _docker_compose_default_config(*, port: int | None = None) -> dict[str, Any]:
+    normalized_port: int | None
+    if port is None:
+        normalized_port = None
+    else:
+        try:
+            normalized_port = int(port)
+        except Exception:
+            normalized_port = None
+    return {
+        "compose_project_name": "constructos-app",
+        "workspace_root": "/workspace",
+        "allowed_services": [],
+        "protected_services": ["license-control-plane", "license-control-plane-backup"],
+        "runtime_deploy_health": {
+            "required": False,
+            "stack": "constructos-ws-default",
+            "port": normalized_port,
+            "health_path": "/health",
+            "require_http_200": True,
+        },
+    }
+
+
+def _default_plugin_config(plugin_key: str) -> dict[str, Any]:
+    normalized = _normalize_plugin_key(plugin_key)
+    if normalized == _TEAM_MODE_PLUGIN_KEY:
+        return _team_mode_default_config()
+    if normalized == "git_delivery":
+        return _git_delivery_default_config()
+    if normalized == "docker_compose":
+        return _docker_compose_default_config()
+    return {}
+
+
+def _validate_team_mode_config(config: dict[str, Any]) -> tuple[list[dict[str, str]], list[str]]:
+    errors: list[dict[str, str]] = []
+    warnings: list[str] = []
+    allowed_checks = set(TEAM_MODE_CHECK_DESCRIPTIONS.keys())
+
+    required_checks = config.get("required_checks")
+    if required_checks is not None and not isinstance(required_checks, dict):
+        errors.append(
+            {
+                "path": "required_checks",
+                "code": "invalid_type",
+                "message": "required_checks must be an object",
+            }
+        )
+    elif isinstance(required_checks, dict):
+        team_mode_required = required_checks.get("team_mode")
+        if team_mode_required is not None and not isinstance(team_mode_required, list):
+            errors.append(
+                {
+                    "path": "required_checks.team_mode",
+                    "code": "invalid_type",
+                    "message": "required_checks.team_mode must be an array",
+                }
+            )
+        elif isinstance(team_mode_required, list):
+            seen: set[str] = set()
+            for idx, value in enumerate(team_mode_required):
+                check_id = str(value or "").strip()
+                if not check_id:
+                    errors.append(
+                        {
+                            "path": f"required_checks.team_mode[{idx}]",
+                            "code": "empty_value",
+                            "message": "check id cannot be empty",
+                        }
+                    )
+                    continue
+                if check_id not in allowed_checks:
+                    errors.append(
+                        {
+                            "path": f"required_checks.team_mode[{idx}]",
+                            "code": "unknown_check",
+                            "message": f"unknown team_mode check id: {check_id}",
+                        }
+                    )
+                    continue
+                if check_id in seen:
+                    warnings.append(f"required_checks.team_mode contains duplicate value: {check_id}")
+                seen.add(check_id)
+
+    team = config.get("team")
+    workflow = config.get("workflow")
+    governance = config.get("governance")
+    automation = config.get("automation")
+
+    if team is None:
+        team = {}
+    elif not isinstance(team, dict):
+        errors.append({"path": "team", "code": "invalid_type", "message": "team must be an object"})
+        team = {}
+    if not isinstance(workflow, dict):
+        errors.append({"path": "workflow", "code": "invalid_type", "message": "workflow must be an object"})
+        workflow = {}
+    if not isinstance(governance, dict):
+        errors.append({"path": "governance", "code": "invalid_type", "message": "governance must be an object"})
+        governance = {}
+    if not isinstance(automation, dict):
+        errors.append({"path": "automation", "code": "invalid_type", "message": "automation must be an object"})
+        automation = {}
+
+    roles_in_team: set[str] = set()
+    agents = team.get("agents")
+    if agents is None:
+        agents = []
+    elif not isinstance(agents, list):
+        errors.append({"path": "team.agents", "code": "invalid_type", "message": "team.agents must be an array"})
+        agents = []
+    seen_agent_ids: set[str] = set()
+    for idx, agent in enumerate(agents):
+        if not isinstance(agent, dict):
+            errors.append(
+                {
+                    "path": f"team.agents[{idx}]",
+                    "code": "invalid_type",
+                    "message": "each team agent must be an object",
+                }
+            )
+            continue
+        agent_id = str(agent.get("id") or "").strip()
+        name = str(agent.get("name") or "").strip()
+        authority_role = str(agent.get("authority_role") or "").strip()
+        executor_user_id = str(agent.get("executor_user_id") or "").strip()
+        if not agent_id:
+            errors.append(
+                {"path": f"team.agents[{idx}].id", "code": "required", "message": "agent id is required"}
+            )
+        elif agent_id in seen_agent_ids:
+            errors.append(
+                {
+                    "path": f"team.agents[{idx}].id",
+                    "code": "duplicate_value",
+                    "message": f"duplicate agent id: {agent_id}",
+                }
+            )
+        else:
+            seen_agent_ids.add(agent_id)
+        if not name:
+            errors.append(
+                {"path": f"team.agents[{idx}].name", "code": "required", "message": "agent name is required"}
+            )
+        if not authority_role:
+            errors.append(
+                {
+                    "path": f"team.agents[{idx}].authority_role",
+                    "code": "required",
+                    "message": "agent authority_role is required",
+                }
+            )
+        elif authority_role not in TEAM_MODE_ROLES:
+            errors.append(
+                {
+                    "path": f"team.agents[{idx}].authority_role",
+                    "code": "unknown_role",
+                    "message": f"unknown authority_role: {authority_role}",
+                }
+            )
+        else:
+            roles_in_team.add(authority_role)
+        if executor_user_id and not re.fullmatch(r"[0-9a-fA-F-]{36}", executor_user_id):
+            errors.append(
+                {
+                    "path": f"team.agents[{idx}].executor_user_id",
+                    "code": "invalid_format",
+                    "message": "executor_user_id must be a UUID when provided",
+                }
+            )
+    if not agents:
+        warnings.append("team.agents is empty; defaults to virtual Team Mode role routing by task status")
+
+    statuses = workflow.get("statuses")
+    if not isinstance(statuses, list):
+        errors.append({"path": "workflow.statuses", "code": "invalid_type", "message": "workflow.statuses must be an array"})
+        statuses = []
+    normalized_statuses = [str(item or "").strip() for item in statuses if str(item or "").strip()]
+    if len(normalized_statuses) != len(set(normalized_statuses)):
+        errors.append(
+            {
+                "path": "workflow.statuses",
+                "code": "duplicate_values",
+                "message": "workflow.statuses must not contain duplicates",
+            }
+        )
+    if not normalized_statuses:
+        errors.append({"path": "workflow.statuses", "code": "required", "message": "at least one status is required"})
+    status_set = set(normalized_statuses)
+
+    transitions = workflow.get("transitions")
+    if not isinstance(transitions, list):
+        errors.append(
+            {"path": "workflow.transitions", "code": "invalid_type", "message": "workflow.transitions must be an array"}
+        )
+        transitions = []
+    for idx, transition in enumerate(transitions):
+        if not isinstance(transition, dict):
+            errors.append(
+                {
+                    "path": f"workflow.transitions[{idx}]",
+                    "code": "invalid_type",
+                    "message": "each transition must be an object",
+                }
+            )
+            continue
+        from_status = str(transition.get("from") or "").strip()
+        to_status = str(transition.get("to") or "").strip()
+        allowed_roles = transition.get("allowed_roles")
+        if not from_status:
+            errors.append(
+                {"path": f"workflow.transitions[{idx}].from", "code": "required", "message": "from status is required"}
+            )
+        elif from_status not in status_set:
+            errors.append(
+                {
+                    "path": f"workflow.transitions[{idx}].from",
+                    "code": "unknown_status",
+                    "message": f"unknown from status: {from_status}",
+                }
+            )
+        if not to_status:
+            errors.append(
+                {"path": f"workflow.transitions[{idx}].to", "code": "required", "message": "to status is required"}
+            )
+        elif to_status not in status_set:
+            errors.append(
+                {
+                    "path": f"workflow.transitions[{idx}].to",
+                    "code": "unknown_status",
+                    "message": f"unknown to status: {to_status}",
+                }
+            )
+        if not isinstance(allowed_roles, list) or not [str(item or "").strip() for item in allowed_roles if str(item or "").strip()]:
+            errors.append(
+                {
+                    "path": f"workflow.transitions[{idx}].allowed_roles",
+                    "code": "required",
+                    "message": "allowed_roles must contain at least one role",
+                }
+            )
+
+    merge_roles = governance.get("merge_authority_roles")
+    if not isinstance(merge_roles, list):
+        errors.append(
+            {
+                "path": "governance.merge_authority_roles",
+                "code": "invalid_type",
+                "message": "governance.merge_authority_roles must be an array",
+            }
+        )
+        merge_roles = []
+    for idx, role in enumerate(merge_roles):
+        normalized_role = str(role or "").strip()
+        if not normalized_role:
+            errors.append(
+                {
+                    "path": f"governance.merge_authority_roles[{idx}]",
+                    "code": "empty_value",
+                    "message": "merge authority roles cannot contain empty values",
+                }
+            )
+            continue
+        if roles_in_team and normalized_role not in roles_in_team:
+            errors.append(
+                {
+                    "path": f"governance.merge_authority_roles[{idx}]",
+                    "code": "unknown_role",
+                    "message": f"merge authority role not present in team.agents: {normalized_role}",
+                }
+            )
+
+    lead_recurring_max_minutes = automation.get("lead_recurring_max_minutes")
+    try:
+        recurring_minutes = int(lead_recurring_max_minutes)
+    except Exception:
+        recurring_minutes = 5
+        errors.append(
+            {
+                "path": "automation.lead_recurring_max_minutes",
+                "code": "invalid_type",
+                "message": "lead_recurring_max_minutes must be an integer",
+            }
+        )
+    if recurring_minutes < 1:
+        errors.append(
+            {
+                "path": "automation.lead_recurring_max_minutes",
+                "code": "out_of_range",
+                "message": "lead_recurring_max_minutes must be >= 1",
+            }
+        )
+    elif recurring_minutes > 120:
+        warnings.append("automation.lead_recurring_max_minutes above 120 may generate noisy oversight cycles")
+
+    if not transitions:
+        warnings.append("workflow.transitions is empty; transition policy will deny all cross-status moves by default")
+    return errors, warnings
+
+
+def _compile_plugin_policy(plugin_key: str, config: dict[str, Any]) -> dict[str, Any]:
+    if plugin_key == _TEAM_MODE_PLUGIN_KEY:
+        team_cfg = config.get("team") if isinstance(config.get("team"), dict) else {}
+        agents_raw = team_cfg.get("agents") if isinstance(team_cfg, dict) else []
+        agents = (
+            [
+                {
+                    "id": str(item.get("id") or "").strip(),
+                    "name": str(item.get("name") or "").strip(),
+                    "authority_role": str(item.get("authority_role") or "").strip(),
+                    "executor_user_id": str(item.get("executor_user_id") or "").strip() or None,
+                }
+                for item in agents_raw
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            ]
+            if isinstance(agents_raw, list)
+            else []
+        )
+        automation = config.get("automation") if isinstance(config.get("automation"), dict) else {}
+        required_checks_cfg = config.get("required_checks") if isinstance(config.get("required_checks"), dict) else {}
+        team_mode_required_raw = required_checks_cfg.get("team_mode") if isinstance(required_checks_cfg, dict) else None
+        team_mode_required = (
+            [str(item or "").strip() for item in team_mode_required_raw if str(item or "").strip()]
+            if isinstance(team_mode_required_raw, list)
+            else list(DEFAULT_REQUIRED_TEAM_MODE_CHECKS)
+        )
+        raw_minutes = automation.get("lead_recurring_max_minutes") if isinstance(automation, dict) else None
+        try:
+            lead_recurring_max_minutes = max(1, int(raw_minutes))
+        except Exception:
+            lead_recurring_max_minutes = 5
+        compiled = {
+            "version": 1,
+            "required_checks": {"team_mode": team_mode_required},
+            "available_checks": {"team_mode": dict(TEAM_MODE_CHECK_DESCRIPTIONS)},
+            "team_mode": {"lead_recurring_max_minutes": lead_recurring_max_minutes},
+            "team": {
+                "agents": agents,
+                "authority_role_counts": {
+                    role: sum(1 for agent in agents if str(agent.get("authority_role") or "").strip() == role)
+                    for role in sorted(TEAM_MODE_ROLES)
+                },
+            },
+        }
+        return compiled
+    if plugin_key == "git_delivery":
+        required_checks_cfg = config.get("required_checks") if isinstance(config.get("required_checks"), dict) else {}
+        delivery_required_raw = required_checks_cfg.get("delivery") if isinstance(required_checks_cfg, dict) else None
+        delivery_required = (
+            [str(item or "").strip() for item in delivery_required_raw if str(item or "").strip()]
+            if isinstance(delivery_required_raw, list)
+            else list(DEFAULT_REQUIRED_DELIVERY_CHECKS)
+        )
+        compiled = {
+            "version": 1,
+            "required_checks": {"delivery": delivery_required},
+            "available_checks": {"delivery": dict(DELIVERY_CHECK_DESCRIPTIONS)},
+        }
+        return compiled
+    if plugin_key == "docker_compose":
+        runtime_cfg_raw = config.get("runtime_deploy_health") if isinstance(config.get("runtime_deploy_health"), dict) else {}
+        runtime_cfg = runtime_cfg_raw if isinstance(runtime_cfg_raw, dict) else {}
+        return {
+            "version": 1,
+            "docker_compose": {
+                "compose_project_name": str(config.get("compose_project_name") or "constructos-app"),
+                "workspace_root": str(config.get("workspace_root") or "/workspace"),
+                "allowed_services": [
+                    str(item or "").strip()
+                    for item in (config.get("allowed_services") if isinstance(config.get("allowed_services"), list) else [])
+                    if str(item or "").strip()
+                ],
+                "protected_services": [
+                    str(item or "").strip()
+                    for item in (config.get("protected_services") if isinstance(config.get("protected_services"), list) else [])
+                    if str(item or "").strip()
+                ],
+            },
+            "runtime_deploy_health": {
+                "required": bool(runtime_cfg.get("required", False)),
+                "stack": str(runtime_cfg.get("stack") or "constructos-ws-default"),
+                "port": runtime_cfg.get("port"),
+                "health_path": str(runtime_cfg.get("health_path") or "/health"),
+                "require_http_200": bool(runtime_cfg.get("require_http_200", True)),
+            },
+        }
+    return {"version": 1, "plugin_key": plugin_key}
+
+
+def _validate_plugin_config(plugin_key: str, config: dict[str, Any]) -> tuple[list[dict[str, str]], list[str]]:
+    if plugin_key == _TEAM_MODE_PLUGIN_KEY:
+        errors, warnings = _validate_team_mode_config(config)
+        allowed_keys = {"required_checks", "team", "workflow", "governance", "automation"}
+        for key in sorted(config.keys()):
+            normalized = str(key or "").strip()
+            if normalized and normalized not in allowed_keys:
+                errors.append(
+                    {
+                        "path": normalized,
+                        "code": "unknown_field",
+                        "message": f"unknown field for team_mode config: {normalized}",
+                    }
+                )
+        return errors, warnings
+    if plugin_key == "git_delivery":
+        errors: list[dict[str, str]] = []
+        warnings: list[str] = []
+        allowed_keys = {"required_checks"}
+        for key in sorted(config.keys()):
+            normalized = str(key or "").strip()
+            if not normalized:
+                continue
+            if normalized == "evaluation":
+                warnings.append("evaluation configuration is deprecated for core mode and will be ignored")
+                continue
+            if normalized not in allowed_keys:
+                errors.append(
+                    {
+                        "path": normalized,
+                        "code": "unknown_field",
+                        "message": f"unknown field for git_delivery config: {normalized}",
+                    }
+                )
+        allowed_checks = set(DELIVERY_CHECK_DESCRIPTIONS.keys())
+        required_checks = config.get("required_checks")
+        if required_checks is not None and not isinstance(required_checks, dict):
+            errors.append(
+                {
+                    "path": "required_checks",
+                    "code": "invalid_type",
+                    "message": "required_checks must be an object",
+                }
+            )
+        elif isinstance(required_checks, dict):
+            delivery = required_checks.get("delivery")
+            if delivery is not None and not isinstance(delivery, list):
+                errors.append(
+                    {
+                        "path": "required_checks.delivery",
+                        "code": "invalid_type",
+                        "message": "required_checks.delivery must be an array",
+                    }
+                )
+            elif isinstance(delivery, list):
+                seen: set[str] = set()
+                for idx, value in enumerate(delivery):
+                    check_id = str(value or "").strip()
+                    if not check_id:
+                        errors.append(
+                            {
+                                "path": f"required_checks.delivery[{idx}]",
+                                "code": "empty_value",
+                                "message": "check id cannot be empty",
+                            }
+                        )
+                        continue
+                    if check_id not in allowed_checks:
+                        errors.append(
+                            {
+                                "path": f"required_checks.delivery[{idx}]",
+                                "code": "unknown_check",
+                                "message": f"unknown delivery check id: {check_id}",
+                            }
+                        )
+                        continue
+                    if check_id in seen:
+                        warnings.append(f"required_checks.delivery contains duplicate value: {check_id}")
+                    seen.add(check_id)
+        return errors, warnings
+    if plugin_key == "docker_compose":
+        errors: list[dict[str, str]] = []
+        warnings: list[str] = []
+        allowed_keys = {
+            "compose_project_name",
+            "workspace_root",
+            "allowed_services",
+            "protected_services",
+            "runtime_deploy_health",
+        }
+        for key in sorted(config.keys()):
+            normalized = str(key or "").strip()
+            if normalized and normalized not in allowed_keys:
+                errors.append(
+                    {
+                        "path": normalized,
+                        "code": "unknown_field",
+                        "message": f"unknown field for docker_compose config: {normalized}",
+                    }
+                )
+        runtime = config.get("runtime_deploy_health")
+        if runtime is not None and not isinstance(runtime, dict):
+            errors.append(
+                {
+                    "path": "runtime_deploy_health",
+                    "code": "invalid_type",
+                    "message": "runtime_deploy_health must be an object",
+                }
+            )
+        elif isinstance(runtime, dict):
+            allowed_runtime_keys = {"required", "stack", "port", "health_path", "require_http_200"}
+            for key in sorted(runtime.keys()):
+                normalized_key = str(key or "").strip()
+                if normalized_key and normalized_key not in allowed_runtime_keys:
+                    errors.append(
+                        {
+                            "path": f"runtime_deploy_health.{normalized_key}",
+                            "code": "unknown_field",
+                            "message": f"unknown field for runtime_deploy_health: {normalized_key}",
+                        }
+                    )
+            port = runtime.get("port")
+            if port is not None:
+                try:
+                    port_value = int(port)
+                except Exception:
+                    errors.append(
+                        {
+                            "path": "runtime_deploy_health.port",
+                            "code": "invalid_type",
+                            "message": "runtime_deploy_health.port must be an integer or null",
+                        }
+                    )
+                else:
+                    if port_value < 1 or port_value > 65535:
+                        errors.append(
+                            {
+                                "path": "runtime_deploy_health.port",
+                                "code": "out_of_range",
+                                "message": "runtime_deploy_health.port must be between 1 and 65535",
+                            }
+                        )
+            health_path = str(runtime.get("health_path") or "").strip()
+            if health_path and not health_path.startswith("/"):
+                errors.append(
+                    {
+                        "path": "runtime_deploy_health.health_path",
+                        "code": "invalid_format",
+                        "message": "runtime_deploy_health.health_path must start with '/'",
+                    }
+                )
+            if bool(runtime.get("required")) and runtime.get("port") in (None, "", "null"):
+                warnings.append("runtime_deploy_health.required=true without explicit port may rely on auto-discovery")
+        return errors, warnings
+    return [], []
+
+
+def _effective_compiled_policy_from_row(*, plugin_key: str, config_json: str, compiled_policy_json: str | None = None) -> dict[str, Any]:
+    default_config = _default_plugin_config(plugin_key)
+    config_obj = _safe_json_loads_object(config_json, fallback=default_config)
+    try:
+        return _compile_plugin_policy(plugin_key, config_obj)
+    except Exception:
+        return _safe_json_loads_object(str(compiled_policy_json or "").strip(), fallback={})
 
 
 def _graph_summary_to_markdown(summary: dict[str, object] | None) -> str:
@@ -1131,6 +1815,451 @@ class AgentTaskService:
                 raise HTTPException(status_code=404, detail="Project skill not found")
             return skill
 
+    def get_project_plugin_config(
+        self,
+        *,
+        project_id: str,
+        plugin_key: str,
+        auth_token: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        normalized_plugin_key = _normalize_plugin_key(plugin_key)
+        self._assert_project_allowed(project_id)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            project = self._load_project_scope(db=db, project_id=project_id)
+            resolved_workspace_id = str(project.workspace_id)
+            self._assert_workspace_allowed(resolved_workspace_id)
+            if workspace_id and str(workspace_id) != resolved_workspace_id:
+                raise HTTPException(status_code=400, detail="Project does not belong to workspace")
+            ensure_role(db, resolved_workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            row = db.execute(
+                select(ProjectPluginConfig).where(
+                    ProjectPluginConfig.workspace_id == resolved_workspace_id,
+                    ProjectPluginConfig.project_id == str(project_id),
+                    ProjectPluginConfig.plugin_key == normalized_plugin_key,
+                    ProjectPluginConfig.is_deleted == False,  # noqa: E712
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                default_config = _default_plugin_config(normalized_plugin_key)
+                return {
+                    "workspace_id": resolved_workspace_id,
+                    "project_id": str(project_id),
+                    "plugin_key": normalized_plugin_key,
+                    "enabled": False,
+                    "version": 0,
+                    "schema_version": 1,
+                    "config": default_config,
+                    "compiled_policy": _compile_plugin_policy(normalized_plugin_key, default_config),
+                    "last_validation_errors": [],
+                    "last_validated_at": None,
+                    "exists": False,
+                }
+            row_config = _safe_json_loads_object(row.config_json, fallback={})
+            if not row_config:
+                row_config = _default_plugin_config(normalized_plugin_key)
+            effective_compiled = _effective_compiled_policy_from_row(
+                plugin_key=normalized_plugin_key,
+                config_json=json.dumps(row_config, ensure_ascii=False),
+                compiled_policy_json=row.compiled_policy_json,
+            )
+            return {
+                "workspace_id": str(row.workspace_id),
+                "project_id": str(row.project_id),
+                "plugin_key": str(row.plugin_key),
+                "enabled": bool(row.enabled),
+                "version": int(row.version or 1),
+                "schema_version": int(row.schema_version or 1),
+                "config": row_config,
+                "compiled_policy": effective_compiled,
+                "last_validation_errors": _safe_json_loads_array(row.last_validation_errors_json),
+                "last_validated_at": row.last_validated_at.isoformat() if row.last_validated_at else None,
+                "exists": True,
+            }
+
+    def get_project_capabilities(
+        self,
+        *,
+        project_id: str,
+        auth_token: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        self._assert_project_allowed(project_id)
+        user = self._resolve_actor_user()
+        with SessionLocal() as db:
+            project = self._load_project_scope(db=db, project_id=project_id)
+            resolved_workspace_id = str(project.workspace_id)
+            self._assert_workspace_allowed(resolved_workspace_id)
+            if workspace_id and str(workspace_id) != resolved_workspace_id:
+                raise HTTPException(status_code=400, detail="Project does not belong to workspace")
+            ensure_role(db, resolved_workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            rows = db.execute(
+                select(ProjectPluginConfig).where(
+                    ProjectPluginConfig.workspace_id == resolved_workspace_id,
+                    ProjectPluginConfig.project_id == str(project_id),
+                    ProjectPluginConfig.plugin_key.in_(sorted(_PROJECT_PLUGIN_KEYS)),
+                    ProjectPluginConfig.is_deleted == False,  # noqa: E712
+                )
+            ).scalars().all()
+        row_by_key = {
+            str(getattr(row, "plugin_key", "") or "").strip(): row
+            for row in rows
+            if str(getattr(row, "plugin_key", "") or "").strip()
+        }
+        plugins: list[dict[str, Any]] = []
+        enabled_plugin_keys: list[str] = []
+        for plugin_key in sorted(_PROJECT_PLUGIN_KEYS):
+            row = row_by_key.get(plugin_key)
+            exists = row is not None
+            enabled = bool(getattr(row, "enabled", False)) if row is not None else False
+            if enabled:
+                enabled_plugin_keys.append(plugin_key)
+            plugins.append(
+                {
+                    "plugin_key": plugin_key,
+                    "exists": exists,
+                    "enabled": enabled,
+                    "version": int(getattr(row, "version", 0) or 0) if row is not None else 0,
+                    "schema_version": int(getattr(row, "schema_version", 1) or 1) if row is not None else 1,
+                }
+            )
+        return {
+            "workspace_id": resolved_workspace_id,
+            "project_id": str(project_id),
+            "enabled_plugin_keys": enabled_plugin_keys,
+            "plugins": plugins,
+            "capabilities": {
+                "team_mode": "team_mode" in enabled_plugin_keys,
+                "git_delivery": "git_delivery" in enabled_plugin_keys,
+                "docker_compose": "docker_compose" in enabled_plugin_keys,
+            },
+        }
+
+    def validate_project_plugin_config(
+        self,
+        *,
+        project_id: str,
+        plugin_key: str,
+        draft_config: dict[str, Any] | str,
+        auth_token: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        normalized_plugin_key = _normalize_plugin_key(plugin_key)
+        self._assert_project_allowed(project_id)
+        user = self._resolve_actor_user()
+        normalized_config: dict[str, Any]
+        if isinstance(draft_config, str):
+            normalized_config = _safe_json_loads_object(draft_config)
+        elif isinstance(draft_config, dict):
+            normalized_config = dict(draft_config)
+        else:
+            raise HTTPException(status_code=422, detail="draft_config must be an object or JSON object string")
+        with SessionLocal() as db:
+            project = self._load_project_scope(db=db, project_id=project_id)
+            resolved_workspace_id = str(project.workspace_id)
+            self._assert_workspace_allowed(resolved_workspace_id)
+            if workspace_id and str(workspace_id) != resolved_workspace_id:
+                raise HTTPException(status_code=400, detail="Project does not belong to workspace")
+            ensure_role(db, resolved_workspace_id, user.id, {"Owner", "Admin", "Member"})
+        errors, warnings = _validate_plugin_config(normalized_plugin_key, normalized_config)
+        compiled_policy = _compile_plugin_policy(normalized_plugin_key, normalized_config)
+        return {
+            "workspace_id": resolved_workspace_id,
+            "project_id": str(project_id),
+            "plugin_key": normalized_plugin_key,
+            "schema_version": 1,
+            "errors": errors,
+            "warnings": warnings,
+            "blocking": bool(errors),
+            "normalized_config": normalized_config,
+            "compiled_policy": compiled_policy,
+        }
+
+    def diff_project_plugin_config(
+        self,
+        *,
+        project_id: str,
+        plugin_key: str,
+        draft_config: dict[str, Any] | str,
+        auth_token: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        normalized_plugin_key = _normalize_plugin_key(plugin_key)
+        current = self.get_project_plugin_config(
+            project_id=project_id,
+            plugin_key=normalized_plugin_key,
+            auth_token=auth_token,
+            workspace_id=workspace_id,
+        )
+        validation = self.validate_project_plugin_config(
+            project_id=project_id,
+            plugin_key=normalized_plugin_key,
+            draft_config=draft_config,
+            auth_token=auth_token,
+            workspace_id=workspace_id,
+        )
+        current_config = dict(current.get("config") or {})
+        current_compiled_policy = dict(current.get("compiled_policy") or {})
+        next_config = dict(validation.get("normalized_config") or {})
+        next_compiled_policy = dict(validation.get("compiled_policy") or {})
+        config_changes = _json_diff_values(current_config, next_config)
+        compiled_policy_changes = _json_diff_values(current_compiled_policy, next_compiled_policy)
+        return {
+            "workspace_id": str(current.get("workspace_id") or ""),
+            "project_id": str(project_id),
+            "plugin_key": normalized_plugin_key,
+            "current_version": int(current.get("version") or 0),
+            "exists": bool(current.get("exists", False)),
+            "blocking": bool(validation.get("blocking")),
+            "errors": list(validation.get("errors") or []),
+            "warnings": list(validation.get("warnings") or []),
+            "config_changes": config_changes,
+            "compiled_policy_changes": compiled_policy_changes,
+            "current_config": current_config,
+            "next_config": next_config,
+            "current_compiled_policy": current_compiled_policy,
+            "next_compiled_policy": next_compiled_policy,
+            "changed": bool(config_changes or compiled_policy_changes),
+        }
+
+    def apply_project_plugin_config(
+        self,
+        *,
+        project_id: str,
+        plugin_key: str,
+        config: dict[str, Any] | str,
+        expected_version: int | None = None,
+        enabled: bool | None = None,
+        auth_token: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        normalized_plugin_key = _normalize_plugin_key(plugin_key)
+        self._assert_project_allowed(project_id)
+        validation = self.validate_project_plugin_config(
+            project_id=project_id,
+            plugin_key=normalized_plugin_key,
+            draft_config=config,
+            auth_token=auth_token,
+            workspace_id=workspace_id,
+        )
+        if bool(validation.get("blocking")):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Plugin config validation failed",
+                    "plugin_key": normalized_plugin_key,
+                    "errors": validation.get("errors") or [],
+                },
+            )
+        normalized_config = dict(validation.get("normalized_config") or {})
+        compiled_policy = dict(validation.get("compiled_policy") or {})
+        user = self._resolve_actor_user()
+        now_utc = datetime.now(timezone.utc)
+        with SessionLocal() as db:
+            project = self._load_project_scope(db=db, project_id=project_id)
+            resolved_workspace_id = str(project.workspace_id)
+            self._assert_workspace_allowed(resolved_workspace_id)
+            if workspace_id and str(workspace_id) != resolved_workspace_id:
+                raise HTTPException(status_code=400, detail="Project does not belong to workspace")
+            ensure_role(db, resolved_workspace_id, user.id, {"Owner", "Admin", "Member"})
+            row = db.execute(
+                select(ProjectPluginConfig).where(
+                    ProjectPluginConfig.workspace_id == resolved_workspace_id,
+                    ProjectPluginConfig.project_id == str(project_id),
+                    ProjectPluginConfig.plugin_key == normalized_plugin_key,
+                    ProjectPluginConfig.is_deleted == False,  # noqa: E712
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                row = ProjectPluginConfig(
+                    workspace_id=resolved_workspace_id,
+                    project_id=str(project_id),
+                    plugin_key=normalized_plugin_key,
+                    enabled=bool(enabled if enabled is not None else True),
+                    version=1,
+                    schema_version=1,
+                    config_json=json.dumps(normalized_config, ensure_ascii=False),
+                    compiled_policy_json=json.dumps(compiled_policy, ensure_ascii=False),
+                    last_validation_errors_json="[]",
+                    last_validated_at=now_utc,
+                    created_by=str(user.id),
+                    updated_by=str(user.id),
+                )
+                db.add(row)
+                db.commit()
+                db.refresh(row)
+                created = True
+            else:
+                current_version = int(row.version or 1)
+                if expected_version is not None and int(expected_version) != current_version:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Version mismatch for {normalized_plugin_key}: "
+                            f"expected_version={int(expected_version)}, current_version={current_version}"
+                        ),
+                    )
+                row.config_json = json.dumps(normalized_config, ensure_ascii=False)
+                row.compiled_policy_json = json.dumps(compiled_policy, ensure_ascii=False)
+                row.last_validation_errors_json = "[]"
+                row.last_validated_at = now_utc
+                row.enabled = bool(enabled if enabled is not None else row.enabled)
+                row.version = current_version + 1
+                row.schema_version = 1
+                row.updated_by = str(user.id)
+                db.add(row)
+                db.commit()
+                db.refresh(row)
+                created = False
+            return {
+                "workspace_id": str(row.workspace_id),
+                "project_id": str(row.project_id),
+                "plugin_key": str(row.plugin_key),
+                "enabled": bool(row.enabled),
+                "version": int(row.version or 1),
+                "schema_version": int(row.schema_version or 1),
+                "config": _safe_json_loads_object(row.config_json),
+                "compiled_policy": _effective_compiled_policy_from_row(
+                    plugin_key=normalized_plugin_key,
+                    config_json=row.config_json,
+                    compiled_policy_json=row.compiled_policy_json,
+                ),
+                "created": created,
+            }
+
+    def set_project_plugin_enabled(
+        self,
+        *,
+        project_id: str,
+        plugin_key: str,
+        enabled: bool,
+        auth_token: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict:
+        self._require_token(auth_token)
+        normalized_plugin_key = _normalize_plugin_key(plugin_key)
+        self._assert_project_allowed(project_id)
+        user = self._resolve_actor_user()
+        now_utc = datetime.now(timezone.utc)
+        with SessionLocal() as db:
+            project = self._load_project_scope(db=db, project_id=project_id)
+            resolved_workspace_id = str(project.workspace_id)
+            self._assert_workspace_allowed(resolved_workspace_id)
+            if workspace_id and str(workspace_id) != resolved_workspace_id:
+                raise HTTPException(status_code=400, detail="Project does not belong to workspace")
+            ensure_role(db, resolved_workspace_id, user.id, {"Owner", "Admin", "Member"})
+            row = db.execute(
+                select(ProjectPluginConfig).where(
+                    ProjectPluginConfig.workspace_id == resolved_workspace_id,
+                    ProjectPluginConfig.project_id == str(project_id),
+                    ProjectPluginConfig.plugin_key == normalized_plugin_key,
+                    ProjectPluginConfig.is_deleted == False,  # noqa: E712
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                default_config = _default_plugin_config(normalized_plugin_key)
+                row = ProjectPluginConfig(
+                    workspace_id=resolved_workspace_id,
+                    project_id=str(project_id),
+                    plugin_key=normalized_plugin_key,
+                    enabled=bool(enabled),
+                    version=1,
+                    schema_version=1,
+                    config_json=json.dumps(default_config, ensure_ascii=False),
+                    compiled_policy_json=json.dumps(_compile_plugin_policy(normalized_plugin_key, default_config), ensure_ascii=False),
+                    last_validation_errors_json="[]",
+                    last_validated_at=now_utc,
+                    created_by=str(user.id),
+                    updated_by=str(user.id),
+                )
+                db.add(row)
+                db.commit()
+                db.refresh(row)
+            else:
+                row_config = _safe_json_loads_object(str(row.config_json or "").strip(), fallback={})
+                if bool(enabled) and not row_config:
+                    row_config = _default_plugin_config(normalized_plugin_key)
+                    row.config_json = json.dumps(row_config, ensure_ascii=False)
+                effective_row_config = _safe_json_loads_object(str(row.config_json or "").strip(), fallback={})
+                row.enabled = bool(enabled)
+                row.compiled_policy_json = json.dumps(
+                    _effective_compiled_policy_from_row(
+                        plugin_key=normalized_plugin_key,
+                        config_json=json.dumps(effective_row_config, ensure_ascii=False),
+                        compiled_policy_json=row.compiled_policy_json,
+                    ),
+                    ensure_ascii=False,
+                )
+                row.version = int(row.version or 1) + 1
+                row.updated_by = str(user.id)
+                row.last_validated_at = now_utc
+                db.add(row)
+                db.commit()
+                db.refresh(row)
+            if normalized_plugin_key == _TEAM_MODE_PLUGIN_KEY and bool(enabled):
+                git_delivery_row = db.execute(
+                    select(ProjectPluginConfig).where(
+                        ProjectPluginConfig.workspace_id == resolved_workspace_id,
+                        ProjectPluginConfig.project_id == str(project_id),
+                        ProjectPluginConfig.plugin_key == "git_delivery",
+                        ProjectPluginConfig.is_deleted == False,  # noqa: E712
+                    )
+                ).scalar_one_or_none()
+                if git_delivery_row is None:
+                    git_default_config: dict[str, Any] = _default_plugin_config("git_delivery")
+                    git_delivery_row = ProjectPluginConfig(
+                        workspace_id=resolved_workspace_id,
+                        project_id=str(project_id),
+                        plugin_key="git_delivery",
+                        enabled=True,
+                        version=1,
+                        schema_version=1,
+                        config_json=json.dumps(git_default_config, ensure_ascii=False),
+                        compiled_policy_json=json.dumps(
+                            _compile_plugin_policy("git_delivery", git_default_config),
+                            ensure_ascii=False,
+                        ),
+                        last_validation_errors_json="[]",
+                        last_validated_at=now_utc,
+                        created_by=str(user.id),
+                        updated_by=str(user.id),
+                    )
+                    db.add(git_delivery_row)
+                    db.commit()
+                elif not bool(git_delivery_row.enabled):
+                    git_row_config = _safe_json_loads_object(str(git_delivery_row.config_json or "").strip(), fallback={})
+                    if not git_row_config:
+                        git_row_config = _default_plugin_config("git_delivery")
+                        git_delivery_row.config_json = json.dumps(git_row_config, ensure_ascii=False)
+                    git_delivery_row.enabled = True
+                    git_delivery_row.compiled_policy_json = json.dumps(
+                        _effective_compiled_policy_from_row(
+                            plugin_key="git_delivery",
+                            config_json=git_delivery_row.config_json,
+                            compiled_policy_json=git_delivery_row.compiled_policy_json,
+                        ),
+                        ensure_ascii=False,
+                    )
+                    git_delivery_row.version = int(git_delivery_row.version or 1) + 1
+                    git_delivery_row.updated_by = str(user.id)
+                    git_delivery_row.last_validated_at = now_utc
+                    db.add(git_delivery_row)
+                    db.commit()
+            return {
+                "workspace_id": str(row.workspace_id),
+                "project_id": str(row.project_id),
+                "plugin_key": str(row.plugin_key),
+                "enabled": bool(row.enabled),
+                "version": int(row.version or 1),
+                "schema_version": int(row.schema_version or 1),
+            }
+
     def get_workspace_skill(self, *, skill_id: str, auth_token: str | None = None) -> dict:
         self._require_token(auth_token)
         user = self._resolve_actor_user()
@@ -1758,21 +2887,9 @@ class AgentTaskService:
                 return candidate
         return None
 
-    @classmethod
-    def _parse_gate_policy_rule(
-        cls,
-        *,
-        project_rules: list[ProjectRuleModel],
-    ) -> tuple[dict[str, Any], str]:
-        return parse_gate_policy_rule(project_rules=project_rules)
-
-    @staticmethod
-    def _policy_required_checks(policy: dict[str, Any], scope: str, default_checks: list[str]) -> list[str]:
-        return policy_required_checks(policy, scope, default_checks)
-
     @staticmethod
     def _evaluate_required_checks(checks: dict[str, Any], required_checks: list[str]) -> tuple[bool, list[str]]:
-        return evaluate_required_gate_checks(checks, required_checks)
+        return evaluate_required_policy_checks(checks, required_checks)
 
     @classmethod
     def _resolve_deploy_target_from_artifacts(
@@ -1922,12 +3039,12 @@ class AgentTaskService:
         return bool(parsed.get("has_repo_context"))
 
     @classmethod
-    def _evaluate_project_gates_with_llm(
+    def _evaluate_project_policy_checks_with_llm(
         cls,
         *,
         project_id: str,
         workspace_id: str,
-        gate_policy: dict[str, Any],
+        plugin_policy: dict[str, Any],
         tasks: list[dict[str, Any]],
         member_role_by_user_id: dict[str, str],
         notes_by_task: dict[str, list[Any]],
@@ -1937,8 +3054,8 @@ class AgentTaskService:
         project_description: str,
         project_external_refs: Any,
     ) -> dict[str, dict[str, Any]]:
-        available_checks = gate_policy.get("available_checks") if isinstance(gate_policy, dict) else {}
-        required_checks = gate_policy.get("required_checks") if isinstance(gate_policy, dict) else {}
+        available_checks = plugin_policy.get("available_checks") if isinstance(plugin_policy, dict) else {}
+        required_checks = plugin_policy.get("required_checks") if isinstance(plugin_policy, dict) else {}
         requested_by_scope: dict[str, list[str]] = {}
         available_by_scope: dict[str, dict[str, Any]] = {}
         required_by_scope: dict[str, list[str]] = {}
@@ -2064,8 +3181,8 @@ class AgentTaskService:
         payload_hash = hashlib.sha256(
             json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
         ).hexdigest()[:20]
-        cache_key = f"project-gates-eval:{payload_hash}"
-        cached = _PROJECT_GATES_LLM_EVAL_CACHE.get(cache_key)
+        cache_key = f"project-policy-checks-eval:{payload_hash}"
+        cached = _PROJECT_POLICY_CHECKS_LLM_EVAL_CACHE.get(cache_key)
         if isinstance(cached, dict):
             return cached
 
@@ -2092,7 +3209,7 @@ class AgentTaskService:
             "required": ["results"],
         }
         prompt = (
-            "Evaluate project gate checks strictly from provided project snapshot.\n"
+            "Evaluate project policy checks strictly from provided project snapshot.\n"
             "Return JSON matching schema.\n"
             "You must evaluate every requested check_id in each scope.\n"
             "Do not infer missing evidence. If evidence is absent, mark passed=false.\n"
@@ -2104,7 +3221,7 @@ class AgentTaskService:
                 prompt=prompt,
                 output_schema=output_schema,
                 workspace_id=None,
-                session_key=f"project-gates-evaluator:{payload_hash}",
+                session_key=f"project-policy-checks-evaluator:{payload_hash}",
                 mcp_servers=[],
                 use_cache=True,
             )
@@ -2127,7 +3244,7 @@ class AgentTaskService:
             result_map[scope]["checks"][check_id] = bool(item.get("passed"))
             result_map[scope]["reasons"][check_id] = str(item.get("reason") or "").strip()
 
-        _PROJECT_GATES_LLM_EVAL_CACHE[cache_key] = result_map
+        _PROJECT_POLICY_CHECKS_LLM_EVAL_CACHE[cache_key] = result_map
         return result_map
 
     @staticmethod
@@ -2262,6 +3379,14 @@ class AgentTaskService:
                     ProjectSkill.is_deleted == False,  # noqa: E712
                 )
             ).scalars().all()
+            plugin_configs = db.execute(
+                select(ProjectPluginConfig).where(
+                    ProjectPluginConfig.workspace_id == str(project.workspace_id),
+                    ProjectPluginConfig.project_id == project_id,
+                    ProjectPluginConfig.plugin_key.in_(["team_mode", "git_delivery", "docker_compose"]),
+                    ProjectPluginConfig.is_deleted == False,  # noqa: E712
+                )
+            ).scalars().all()
             tasks = list(tasks_payload.get("items") or [])
             self._enrich_tasks_with_automation_state(db=db, tasks=tasks)
         notes_by_task: dict[str, list[Note]] = {}
@@ -2274,33 +3399,51 @@ class AgentTaskService:
             task_id = str(comment.task_id or "").strip()
             if task_id:
                 comments_by_task.setdefault(task_id, []).append(comment)
-        gate_policy, gate_policy_source = self._parse_gate_policy_rule(project_rules=project_rules)
-        skill_states = {
-            str(getattr(skill, "skill_key", "") or "").strip(): bool(getattr(skill, "enabled", True))
-            for skill in project_skills
-            if str(getattr(skill, "skill_key", "") or "").strip()
+        plugin_by_key = {
+            str(getattr(row, "plugin_key", "") or "").strip(): row
+            for row in plugin_configs
+            if str(getattr(row, "plugin_key", "") or "").strip()
         }
-        skill_keys = {key for key, enabled in skill_states.items() if enabled}
-        team_mode_enabled = bool(skill_states.get("team_mode"))
-        delivery_skill_enabled = plugin_service_policy.is_delivery_skill_enabled(skill_keys=skill_keys)
-        delivery_active = plugin_service_policy.is_delivery_workflow_active(
-            skill_keys=skill_keys,
-            gate_policy_source=gate_policy_source,
+        team_mode_row = plugin_by_key.get("team_mode")
+        git_delivery_row = plugin_by_key.get("git_delivery")
+        docker_compose_row = plugin_by_key.get("docker_compose")
+        team_mode_enabled = bool(getattr(team_mode_row, "enabled", False))
+        git_delivery_enabled = bool(getattr(git_delivery_row, "enabled", False))
+        delivery_active = bool(git_delivery_enabled or team_mode_enabled)
+        source_ids = [
+            str(getattr(row, "id", "") or "").strip()
+            for row in (git_delivery_row, docker_compose_row, team_mode_row)
+            if row is not None and str(getattr(row, "id", "") or "").strip()
+        ]
+        plugin_policy_source = (
+            f"project_plugin_config:{','.join(source_ids)}"
+            if source_ids
+            else "project_plugin_config:missing"
         )
+        plugin_policy: dict[str, Any] = {}
+        for row in (git_delivery_row, docker_compose_row, team_mode_row):
+            if row is None:
+                continue
+            compiled = _effective_compiled_policy_from_row(
+                plugin_key=str(getattr(row, "plugin_key", "") or "").strip(),
+                config_json=str(getattr(row, "config_json", "") or "").strip(),
+                compiled_policy_json=str(getattr(row, "compiled_policy_json", "") or "").strip(),
+            )
+            plugin_policy = merge_plugin_policy_dict(plugin_policy, compiled)
         effective_scopes = {"delivery"}
         if team_mode_enabled:
             effective_scopes.add("team_mode")
-        gate_policy = filter_gate_policy_scopes(gate_policy, include_scopes=effective_scopes)
+        plugin_policy = filter_plugin_policy_scopes(plugin_policy, include_scopes=effective_scopes)
         if not delivery_active:
-            required_checks = dict((gate_policy.get("required_checks") or {})) if isinstance(gate_policy, dict) else {}
+            required_checks = dict((plugin_policy.get("required_checks") or {})) if isinstance(plugin_policy, dict) else {}
             required_checks["delivery"] = []
-            gate_policy = dict(gate_policy) if isinstance(gate_policy, dict) else {}
-            gate_policy["required_checks"] = required_checks
-        verification = evaluate_delivery_gates(
+            plugin_policy = dict(plugin_policy) if isinstance(plugin_policy, dict) else {}
+            plugin_policy["required_checks"] = required_checks
+        verification = evaluate_delivery_checks(
             project_id=str(project_id),
             workspace_id=str(project.workspace_id),
-            gate_policy=gate_policy,
-            gate_policy_source=gate_policy_source,
+            plugin_policy=plugin_policy,
+            plugin_policy_source=plugin_policy_source,
             tasks=tasks,
             member_role_by_user_id=member_role_by_user_id,
             notes_by_task=notes_by_task,
@@ -2309,6 +3452,7 @@ class AgentTaskService:
             project_skills=project_skills,
             project_description=str(getattr(project, "description", "") or ""),
             project_external_refs=getattr(project, "external_refs", "[]"),
+            team_mode_enabled=team_mode_enabled,
             extract_commit_shas_from_refs=self._extract_commit_shas_from_refs,
             extract_commit_shas_from_text=self._extract_commit_shas_from_text,
             parse_json_list=self._parse_json_list,
@@ -2319,61 +3463,1218 @@ class AgentTaskService:
             run_runtime_deploy_health_check_fn=self._run_runtime_deploy_health_check,
             project_has_repo_context=lambda **kwargs: self._project_has_repo_context(allow_llm=False, **kwargs),
         )
-        evaluation_cfg = gate_policy.get("evaluation") if isinstance(gate_policy.get("evaluation"), dict) else {}
-        evaluation_mode = str((evaluation_cfg or {}).get("mode") or "deterministic").strip().lower()
-        use_llm_evaluation = evaluation_mode in {"hybrid", "llm_authoritative"}
-        llm_delivery_checks: dict[str, bool] = {}
-        llm_delivery_reasons: dict[str, str] = {}
-        if use_llm_evaluation:
-            llm_eval = self._evaluate_project_gates_with_llm(
-                project_id=str(project_id),
-                workspace_id=str(project.workspace_id),
-                gate_policy=gate_policy,
-                tasks=tasks,
-                member_role_by_user_id=member_role_by_user_id,
-                notes_by_task=notes_by_task,
-                comments_by_task=comments_by_task,
-                project_rules=project_rules,
-                project_skills=project_skills,
-                project_description=str(getattr(project, "description", "") or ""),
-                project_external_refs=getattr(project, "external_refs", "[]"),
-            )
-            llm_delivery_checks = dict((llm_eval.get("delivery") or {}).get("checks") or {})
-            llm_delivery_reasons = dict((llm_eval.get("delivery") or {}).get("reasons") or {})
-        authoritative = evaluation_mode == "llm_authoritative"
-        runtime_required_value = bool((verification.get("checks") or {}).get("runtime_deploy_health_required"))
-        runtime_ok_value = bool((verification.get("checks") or {}).get("runtime_deploy_health_ok"))
-        if authoritative:
-            available = list(verification.get("available_checks") or [])
-            required = list(verification.get("required_checks") or [])
-            requested = sorted({str(item or "").strip() for item in (available + required) if str(item or "").strip()})
-            baseline_checks = dict(verification.get("checks") or {})
-            authoritative_checks: dict[str, bool] = {}
-            for check_id in requested:
-                if check_id == "runtime_deploy_health_required":
-                    authoritative_checks[check_id] = runtime_required_value
-                    continue
-                if check_id == "runtime_deploy_health_ok":
-                    authoritative_checks[check_id] = runtime_ok_value
-                    continue
-                if check_id in llm_delivery_checks:
-                    authoritative_checks[check_id] = bool(llm_delivery_checks.get(check_id))
-                else:
-                    authoritative_checks[check_id] = bool(baseline_checks.get(check_id))
-            verification["checks"] = authoritative_checks
-        else:
-            merged_checks = dict(verification.get("checks") or {})
-            merged_checks.update({str(k): bool(v) for k, v in llm_delivery_checks.items()})
-            verification["checks"] = merged_checks
-        verification["check_reasons"] = llm_delivery_reasons
+        verification["check_reasons"] = {}
         required_checks = list(verification.get("required_checks") or [])
-        checks_ok, required_failed = evaluate_required_gate_checks(verification["checks"], required_checks)
+        checks_ok, required_failed = evaluate_required_policy_checks(verification["checks"], required_checks)
         verification["required_failed_checks"] = required_failed
         verification["ok"] = bool(checks_ok)
         verification["active"] = delivery_active
         verification["checks"] = dict(verification.get("checks") or {})
-        verification["checks"]["delivery_skill_enabled"] = bool(delivery_skill_enabled)
+        verification["checks"]["git_delivery_enabled"] = bool(git_delivery_enabled)
+        role_scoped_tasks = [
+            task
+            for task in tasks
+            if derive_task_role(
+                task_like={
+                    "assignee_id": str(task.get("assignee_id") or "").strip(),
+                    "labels": task.get("labels"),
+                    "status": str(task.get("status") or "").strip(),
+                },
+                member_role_by_user_id=member_role_by_user_id,
+            )
+            in {"Developer", "Lead", "QA"}
+        ]
+        has_kickoff_signal = any(
+            bool(
+                str(task.get("last_requested_source") or "").strip()
+                or str(task.get("last_agent_run_at") or "").strip()
+                or str(task.get("automation_state") or "").strip().lower() in {"queued", "running", "completed", "failed"}
+            )
+            for task in role_scoped_tasks
+        )
+        kickoff_required = bool(team_mode_enabled and role_scoped_tasks and not has_kickoff_signal)
+        verification["kickoff_required"] = kickoff_required
+        verification["kickoff_hint"] = (
+            "Execution is not started yet. Start kickoff from chat when you are ready."
+            if kickoff_required
+            else "Kickoff already requested or execution has started."
+        )
         return verification
+
+    @staticmethod
+    def _setup_error_payload(exc: Exception) -> dict[str, Any]:
+        if isinstance(exc, HTTPException):
+            detail = exc.detail
+            message: str
+            if isinstance(detail, dict):
+                message = str(detail.get("message") or detail)
+            else:
+                message = str(detail or f"HTTP {exc.status_code}")
+            return {
+                "type": "http_error",
+                "status_code": int(exc.status_code),
+                "message": message,
+                "detail": detail,
+            }
+        return {
+            "type": "runtime_error",
+            "status_code": None,
+            "message": str(exc),
+            "detail": str(exc),
+        }
+
+    @staticmethod
+    def _is_retryable_setup_error(error: dict[str, Any]) -> bool:
+        status_code = error.get("status_code")
+        if status_code is None:
+            return False
+        try:
+            code = int(status_code)
+        except Exception:
+            return False
+        return code in {409, 429, 500, 502, 503, 504}
+
+    def _run_setup_step(
+        self,
+        *,
+        steps: list[dict[str, Any]],
+        blocking_errors: list[dict[str, Any]],
+        step_id: str,
+        title: str,
+        action,
+        blocking: bool = True,
+        max_attempts: int = 1,
+    ) -> Any | None:
+        attempts = 0
+        while attempts < max(1, int(max_attempts)):
+            attempts += 1
+            try:
+                result = action()
+                steps.append(
+                    {
+                        "id": step_id,
+                        "title": title,
+                        "status": "ok",
+                        "blocking": bool(blocking),
+                        "attempts": attempts,
+                    }
+                )
+                return result
+            except Exception as exc:
+                error = self._setup_error_payload(exc)
+                retryable = self._is_retryable_setup_error(error)
+                if retryable and attempts < max(1, int(max_attempts)):
+                    continue
+                step_payload = {
+                    "id": step_id,
+                    "title": title,
+                    "status": "error",
+                    "blocking": bool(blocking),
+                    "attempts": attempts,
+                    "error": error,
+                }
+                steps.append(step_payload)
+                if blocking:
+                    blocking_errors.append(step_payload)
+                return None
+        return None
+
+    @staticmethod
+    def _append_skipped_setup_step(
+        *,
+        steps: list[dict[str, Any]],
+        step_id: str,
+        title: str,
+        reason: str,
+    ) -> None:
+        steps.append(
+            {
+                "id": step_id,
+                "title": title,
+                "status": "skipped",
+                "blocking": False,
+                "attempts": 0,
+                "reason": reason,
+            }
+        )
+
+    @staticmethod
+    def _normalize_optional_config_object(raw: dict[str, Any] | str | None, *, field_name: str) -> dict[str, Any] | None:
+        if raw is None:
+            return None
+        if isinstance(raw, dict):
+            return dict(raw)
+        if isinstance(raw, str):
+            parsed = _safe_json_loads_object(raw)
+            if parsed:
+                return parsed
+            text = str(raw or "").strip()
+            if text in {"{}", ""}:
+                return {}
+        raise HTTPException(status_code=422, detail=f"{field_name} must be an object or JSON object string")
+
+    def _apply_plugin_config_with_retry(
+        self,
+        *,
+        project_id: str,
+        workspace_id: str,
+        plugin_key: str,
+        config: dict[str, Any],
+        auth_token: str | None,
+    ) -> dict[str, Any]:
+        current = self.get_project_plugin_config(
+            project_id=project_id,
+            plugin_key=plugin_key,
+            workspace_id=workspace_id,
+            auth_token=auth_token,
+        )
+        expected_version_raw = current.get("version")
+        expected_version: int | None
+        try:
+            expected_version = int(expected_version_raw) if int(expected_version_raw) >= 1 else None
+        except Exception:
+            expected_version = None
+        try:
+            return self.apply_project_plugin_config(
+                project_id=project_id,
+                plugin_key=plugin_key,
+                config=config,
+                workspace_id=workspace_id,
+                expected_version=expected_version,
+                auth_token=auth_token,
+            )
+        except HTTPException as exc:
+            detail_text = str(exc.detail or "")
+            if int(exc.status_code) != 409 or "Version mismatch" not in detail_text:
+                raise
+            refreshed = self.get_project_plugin_config(
+                project_id=project_id,
+                plugin_key=plugin_key,
+                workspace_id=workspace_id,
+                auth_token=auth_token,
+            )
+            refreshed_version_raw = refreshed.get("version")
+            try:
+                refreshed_version = int(refreshed_version_raw) if int(refreshed_version_raw) >= 1 else None
+            except Exception:
+                refreshed_version = None
+            return self.apply_project_plugin_config(
+                project_id=project_id,
+                plugin_key=plugin_key,
+                config=config,
+                workspace_id=workspace_id,
+                expected_version=refreshed_version,
+                auth_token=auth_token,
+            )
+
+    def _seed_team_mode_default_tasks(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        auth_token: str | None,
+        command_id: str | None,
+    ) -> dict[str, Any]:
+        items = list(
+            (
+                self.list_tasks(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    auth_token=auth_token,
+                    archived=False,
+                    limit=500,
+                    offset=0,
+                ).get("items")
+                or []
+            )
+        )
+
+        task_by_agent: dict[str, dict[str, Any]] = {}
+        for task in items:
+            slot = str(task.get("assigned_agent_code") or "").strip()
+            if slot and slot not in task_by_agent:
+                task_by_agent[slot] = task
+
+        def _mk_command_id(suffix: str) -> str | None:
+            if not command_id:
+                return None
+            return f"{command_id}:{suffix}"
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        schedule_iso = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+        defaults = {
+            "dev-a": {
+                "title": "Core implementation",
+                "status": "Dev",
+                "instruction": "Implement assigned feature scope and move task to Lead when ready.",
+                "labels": ["tm.seed:team-mode-core", "tm.role:Developer"],
+            },
+            "dev-b": {
+                "title": "Integration work",
+                "status": "Dev",
+                "instruction": "Implement assigned feature scope and move task to Lead when ready.",
+                "labels": ["tm.seed:team-mode-core", "tm.role:Developer"],
+            },
+            "qa-a": {
+                "title": "Validation",
+                "status": "QA",
+                "instruction": "Validate Lead handoff and record pass/fail evidence before closing.",
+                "labels": ["tm.seed:team-mode-core", "tm.role:QA"],
+            },
+            "lead-a": {
+                "title": "Integration and deploy oversight",
+                "status": "Lead",
+                "instruction": "Review Developer handoff, manage deploy readiness, and move work to QA.",
+                "labels": ["tm.seed:team-mode-core", "tm.role:Lead"],
+            },
+        }
+
+        def _resolve_slot_assignee_map() -> dict[str, str]:
+            with SessionLocal() as db:
+                member_rows = db.execute(
+                    select(
+                        ProjectMember.user_id,
+                        UserModel.username,
+                        UserModel.user_type,
+                        UserModel.is_active,
+                    ).join(UserModel, UserModel.id == ProjectMember.user_id).where(
+                        ProjectMember.workspace_id == workspace_id,
+                        ProjectMember.project_id == project_id,
+                    )
+                ).all()
+                active_agent_member_ids: set[str] = set()
+                default_agent_member_id = ""
+                for user_id, username, user_type, is_active in member_rows:
+                    normalized_user_id = str(user_id or "").strip()
+                    if not normalized_user_id or not bool(is_active):
+                        continue
+                    if str(user_type or "").strip().lower() != "agent":
+                        continue
+                    active_agent_member_ids.add(normalized_user_id)
+                    if not default_agent_member_id:
+                        default_agent_member_id = normalized_user_id
+                    if str(username or "").strip().lower() == "codex-bot":
+                        default_agent_member_id = normalized_user_id
+                        break
+
+                if not active_agent_member_ids:
+                    return {}
+
+                config_row = db.execute(
+                    select(ProjectPluginConfig.config_json).where(
+                        ProjectPluginConfig.workspace_id == workspace_id,
+                        ProjectPluginConfig.project_id == project_id,
+                        ProjectPluginConfig.plugin_key == "team_mode",
+                        ProjectPluginConfig.enabled == True,  # noqa: E712
+                        ProjectPluginConfig.is_deleted == False,  # noqa: E712
+                    )
+                ).scalar_one_or_none()
+                config_obj: dict[str, Any] = {}
+                if config_row:
+                    try:
+                        parsed = json.loads(str(config_row or "").strip() or "{}")
+                        if isinstance(parsed, dict):
+                            config_obj = parsed
+                    except Exception:
+                        config_obj = {}
+                agents = normalize_team_agents(config_obj.get("team"))
+                by_slot: dict[str, str] = {}
+                for agent in agents:
+                    slot = str(agent.get("id") or "").strip()
+                    if not slot:
+                        continue
+                    executor_user_id = str(agent.get("executor_user_id") or "").strip()
+                    if executor_user_id and executor_user_id in active_agent_member_ids:
+                        by_slot[slot] = executor_user_id
+                        continue
+                    if default_agent_member_id:
+                        by_slot[slot] = default_agent_member_id
+                return by_slot
+
+        slot_assignee_by_slot = _resolve_slot_assignee_map()
+        def _slot_assignee_patch(slot: str) -> dict[str, Any]:
+            assignee_id = str(slot_assignee_by_slot.get(slot) or "").strip()
+            if not assignee_id:
+                return {"assigned_agent_code": slot}
+            return {"assignee_id": assignee_id, "assigned_agent_code": slot}
+
+        created_task_ids: list[str] = []
+        for slot in ("dev-a", "dev-b", "qa-a", "lead-a"):
+            existing = task_by_agent.get(slot)
+            if existing is not None:
+                continue
+            assignee_id = str(slot_assignee_by_slot.get(slot) or "").strip() or None
+            created = self.create_task(
+                workspace_id=workspace_id,
+                project_id=project_id,
+                title=str(defaults[slot]["title"]),
+                status=str(defaults[slot]["status"]),
+                instruction=str(defaults[slot]["instruction"]),
+                labels=list(defaults[slot]["labels"]),
+                assignee_id=assignee_id,
+                assigned_agent_code=slot,
+                auth_token=auth_token,
+                command_id=_mk_command_id(f"seed-task-{slot}"),
+            )
+            created_id = str(created.get("id") or "").strip()
+            if not created_id:
+                raise HTTPException(status_code=500, detail=f"Failed to create Team Mode task for {slot}")
+            created_task_ids.append(created_id)
+            task_by_agent[slot] = created
+
+        for slot in ("dev-a", "dev-b", "qa-a", "lead-a"):
+            if slot not in task_by_agent:
+                raise HTTPException(status_code=500, detail=f"Missing Team Mode task for {slot}")
+
+        dev_a_id = str(task_by_agent["dev-a"].get("id") or "").strip()
+        dev_b_id = str(task_by_agent["dev-b"].get("id") or "").strip()
+        qa_a_id = str(task_by_agent["qa-a"].get("id") or "").strip()
+        lead_a_id = str(task_by_agent["lead-a"].get("id") or "").strip()
+
+        self.update_task(
+            task_id=dev_a_id,
+            patch={
+                "instruction": str(defaults["dev-a"]["instruction"]),
+                **_slot_assignee_patch("dev-a"),
+                "execution_triggers": [
+                    {
+                        "kind": "status_change",
+                        "scope": "self",
+                        "enabled": True,
+                        "to_statuses": ["Lead"],
+                        "action": "request_automation",
+                    }
+                ],
+            },
+            auth_token=auth_token,
+            command_id=_mk_command_id("seed-trigger-dev-a"),
+        )
+        self.update_task(
+            task_id=dev_b_id,
+            patch={
+                "instruction": str(defaults["dev-b"]["instruction"]),
+                **_slot_assignee_patch("dev-b"),
+                "execution_triggers": [
+                    {
+                        "kind": "status_change",
+                        "scope": "self",
+                        "enabled": True,
+                        "to_statuses": ["Lead"],
+                        "action": "request_automation",
+                    }
+                ],
+            },
+            auth_token=auth_token,
+            command_id=_mk_command_id("seed-trigger-dev-b"),
+        )
+        self.update_task(
+            task_id=lead_a_id,
+            patch={
+                "instruction": str(defaults["lead-a"]["instruction"]),
+                **_slot_assignee_patch("lead-a"),
+                "execution_triggers": [
+                    {
+                        "kind": "status_change",
+                        "scope": "external",
+                        "enabled": True,
+                        "selector": {"task_ids": [dev_a_id, dev_b_id]},
+                        "to_statuses": ["Lead"],
+                        "action": "request_automation",
+                    },
+                    {
+                        "kind": "status_change",
+                        "scope": "external",
+                        "enabled": True,
+                        "selector": {"task_ids": [dev_a_id, dev_b_id, qa_a_id]},
+                        "to_statuses": ["Blocked"],
+                        "action": "request_automation",
+                    },
+                    {
+                        "kind": "schedule",
+                        "enabled": True,
+                        "run_on_statuses": ["Lead"],
+                        "scheduled_at_utc": schedule_iso,
+                        "recurring_rule": "every:5m",
+                        "action": "request_automation",
+                    },
+                ],
+            },
+            auth_token=auth_token,
+            command_id=_mk_command_id("seed-trigger-lead-a"),
+        )
+        self.update_task(
+            task_id=qa_a_id,
+            patch={
+                "instruction": str(defaults["qa-a"]["instruction"]),
+                **_slot_assignee_patch("qa-a"),
+                "execution_triggers": [
+                    {
+                        "kind": "status_change",
+                        "scope": "external",
+                        "enabled": True,
+                        "selector": {"task_ids": [lead_a_id]},
+                        "to_statuses": ["QA"],
+                        "action": "request_automation",
+                    }
+                ],
+            },
+            auth_token=auth_token,
+            command_id=_mk_command_id("seed-trigger-qa-a"),
+        )
+        return {
+            "task_ids": {
+                "dev_a": dev_a_id,
+                "dev_b": dev_b_id,
+                "qa_a": qa_a_id,
+                "lead_a": lead_a_id,
+            },
+            "created_task_ids": created_task_ids,
+            "seeded_at_utc": now_iso,
+        }
+
+    @staticmethod
+    def _slugify_project_name(value: str, *, fallback: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+        return normalized or fallback
+
+    def _ensure_default_repository_context_for_project(
+        self,
+        *,
+        project_id: str,
+        workspace_id: str,
+        project_name: str,
+        auth_token: str | None,
+        command_id: str | None,
+    ) -> dict[str, Any]:
+        workspace_root = str(os.getenv("AGENT_CODEX_WORKDIR", "/home/app/workspace") or "").strip() or "/home/app/workspace"
+        project_slug = self._slugify_project_name(str(project_name or "").strip(), fallback=str(project_id)[:8] or "project")
+        repo_path = f"{workspace_root.rstrip('/')}/{project_slug}"
+        repo_url = f"file://{repo_path}"
+
+        with SessionLocal() as db:
+            project = self._load_project_scope(db=db, project_id=project_id)
+            ensure_role(db, project.workspace_id, self._resolve_actor_user().id, {"Owner", "Admin", "Member"})
+            refs = self._parse_json_list(getattr(project, "external_refs", "[]"))
+
+        existing_idx: int | None = None
+        for idx, item in enumerate(refs):
+            if not isinstance(item, dict):
+                continue
+            title_lower = str(item.get("title") or "").strip().lower()
+            url_value = str(item.get("url") or "").strip()
+            url_lower = url_value.lower()
+            if title_lower in {"repository context", "repo context"}:
+                existing_idx = idx
+                break
+            if url_lower.startswith("file://") and ("/home/app/workspace/" in url_lower or url_lower.endswith(f"/{project_slug}")):
+                existing_idx = idx
+                break
+
+        desired = {
+            "url": repo_url,
+            "title": "Repository context",
+            "source": "setup_orchestration_default",
+        }
+
+        changed = False
+        if existing_idx is None:
+            refs.append(desired)
+            changed = True
+        elif refs[existing_idx] != desired:
+            refs[existing_idx] = desired
+            changed = True
+
+        if not changed:
+            return {"updated": False, "repository_url": repo_url}
+
+        self.update_project(
+            project_id=project_id,
+            patch={"external_refs": refs},
+            auth_token=auth_token,
+            command_id=(f"{str(command_id or '').strip()}:repo-context"[:64] if str(command_id or "").strip() else None),
+        )
+        return {"updated": True, "repository_url": repo_url}
+
+    def setup_project_orchestration(
+        self,
+        *,
+        name: str | None = None,
+        short_description: str = "",
+        project_id: str | None = None,
+        workspace_id: str | None = None,
+        enable_team_mode: bool | None = None,
+        enable_git_delivery: bool | None = None,
+        enable_docker_compose: bool | None = None,
+        docker_port: int | None = None,
+        team_mode_config: dict[str, Any] | str | None = None,
+        git_delivery_config: dict[str, Any] | str | None = None,
+        docker_compose_config: dict[str, Any] | str | None = None,
+        expected_event_storming_enabled: bool | None = None,
+        seed_team_tasks: bool = True,
+        kickoff_after_setup: bool = False,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        self._require_token(auth_token)
+        normalized_name = str(name or "").strip()
+        normalized_project_id = str(project_id or "").strip()
+        is_new_project_setup = not bool(normalized_project_id)
+
+        missing_inputs: list[dict[str, Any]] = []
+
+        def _add_missing_input(
+            *,
+            key: str,
+            question: str,
+            value_type: str,
+            options: list[str] | None = None,
+        ) -> None:
+            payload: dict[str, Any] = {
+                "key": key,
+                "question": question,
+                "type": value_type,
+            }
+            if isinstance(options, list) and options:
+                payload["options"] = list(options)
+            missing_inputs.append(payload)
+
+        if is_new_project_setup and not normalized_name:
+            _add_missing_input(
+                key="name",
+                question="What should the new project be named?",
+                value_type="string",
+            )
+
+        normalized_short_description = str(short_description or "").strip()
+        if is_new_project_setup and not normalized_short_description:
+            _add_missing_input(
+                key="short_description",
+                question="What should this project do in short?",
+                value_type="string",
+            )
+
+        if is_new_project_setup and enable_team_mode is None:
+            _add_missing_input(
+                key="enable_team_mode",
+                question="Do you want Team Mode for this project?",
+                value_type="boolean",
+                options=["yes", "no"],
+            )
+
+        effective_git_for_questions: bool | None = None
+        if enable_team_mode is True:
+            effective_git_for_questions = True
+        elif enable_team_mode is False:
+            if enable_git_delivery is None and is_new_project_setup:
+                _add_missing_input(
+                    key="enable_git_delivery",
+                    question="Team Mode is off. Do you want Git Delivery?",
+                    value_type="boolean",
+                    options=["yes", "no"],
+                )
+            if enable_git_delivery is not None:
+                effective_git_for_questions = bool(enable_git_delivery)
+        elif enable_git_delivery is not None:
+            effective_git_for_questions = bool(enable_git_delivery)
+
+        if is_new_project_setup and effective_git_for_questions is True and enable_docker_compose is None:
+            _add_missing_input(
+                key="enable_docker_compose",
+                question="Git Delivery is enabled. Should deployment run via Docker Compose?",
+                value_type="boolean",
+                options=["yes", "no"],
+            )
+
+        if (
+            is_new_project_setup
+            and effective_git_for_questions is True
+            and enable_docker_compose is True
+            and docker_port is None
+        ):
+            _add_missing_input(
+                key="docker_port",
+                question="Which port should Docker Compose use?",
+                value_type="integer",
+            )
+
+        if missing_inputs:
+            resolved_inputs = {
+                "name": normalized_name or None,
+                "short_description": normalized_short_description or None,
+                "enable_team_mode": enable_team_mode,
+                "enable_git_delivery": enable_git_delivery,
+                "enable_docker_compose": enable_docker_compose,
+                "docker_port": docker_port,
+            }
+            setup_path = {
+                "is_new_project": bool(is_new_project_setup),
+                "team_mode_selected": bool(enable_team_mode) if enable_team_mode is not None else None,
+                "git_delivery_selected": (
+                    bool(enable_git_delivery)
+                    if enable_git_delivery is not None
+                    else (True if enable_team_mode is True else None)
+                ),
+                "docker_compose_selected": bool(enable_docker_compose) if enable_docker_compose is not None else None,
+            }
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "Missing required setup inputs for setup_project_orchestration",
+                    "code": "missing_setup_inputs",
+                    "missing_inputs": missing_inputs,
+                    "next_question": str(missing_inputs[0].get("question") or "").strip(),
+                    "next_input_key": str(missing_inputs[0].get("key") or "").strip(),
+                    "resolved_inputs": resolved_inputs,
+                    "setup_path": setup_path,
+                },
+            )
+
+        normalized_team_cfg = self._normalize_optional_config_object(team_mode_config, field_name="team_mode_config")
+        normalized_git_cfg = self._normalize_optional_config_object(git_delivery_config, field_name="git_delivery_config")
+        normalized_docker_cfg = self._normalize_optional_config_object(
+            docker_compose_config,
+            field_name="docker_compose_config",
+        )
+
+        steps: list[dict[str, Any]] = []
+        blocking_errors: list[dict[str, Any]] = []
+        created_project = False
+        resolved_project_id = normalized_project_id
+        resolved_workspace_id = str(workspace_id or "").strip() or None
+        resolved_project_name = normalized_name or None
+
+        if not normalized_project_id:
+            created = self._run_setup_step(
+                steps=steps,
+                blocking_errors=blocking_errors,
+                step_id="create_project",
+                title="Create project",
+                blocking=True,
+                max_attempts=2,
+                action=lambda: self.create_project(
+                    name=normalized_name,
+                    description=short_description,
+                    workspace_id=workspace_id,
+                    auth_token=auth_token,
+                    command_id=command_id,
+                ),
+            )
+            if isinstance(created, dict):
+                resolved_project_id = str(created.get("id") or "").strip()
+                resolved_workspace_id = str(created.get("workspace_id") or "").strip() or resolved_workspace_id
+                resolved_project_name = str(created.get("name") or "").strip() or resolved_project_name
+                created_project = bool(resolved_project_id)
+        else:
+            resolved = self._run_setup_step(
+                steps=steps,
+                blocking_errors=blocking_errors,
+                step_id="resolve_project",
+                title="Resolve existing project",
+                blocking=True,
+                max_attempts=1,
+                action=lambda: self.get_project_capabilities(
+                    project_id=normalized_project_id,
+                    workspace_id=workspace_id,
+                    auth_token=auth_token,
+                ),
+            )
+            if isinstance(resolved, dict):
+                resolved_workspace_id = str(resolved.get("workspace_id") or "").strip() or resolved_workspace_id
+                with SessionLocal() as db:
+                    project_row = self._load_project_scope(db=db, project_id=normalized_project_id)
+                    resolved_project_name = str(getattr(project_row, "name", "") or "").strip() or resolved_project_name
+
+        if not resolved_project_id or not resolved_workspace_id:
+            return {
+                "contract_version": 1,
+                "ok": False,
+                "blocking": True,
+                "execution_state": "setup_failed",
+                "project": {
+                    "id": resolved_project_id or None,
+                    "workspace_id": resolved_workspace_id or None,
+                    "name": resolved_project_name,
+                    "created": created_project,
+                    "link": f"?tab=projects&project={resolved_project_id}" if resolved_project_id else None,
+                },
+                "requested": {},
+                "effective": {},
+                "steps": steps,
+                "verification": {},
+                "errors": [item.get("error") for item in blocking_errors if isinstance(item.get("error"), dict)],
+            }
+
+        capabilities = self._run_setup_step(
+            steps=steps,
+            blocking_errors=blocking_errors,
+            step_id="read_capabilities",
+            title="Read current plugin capabilities",
+            blocking=True,
+            max_attempts=1,
+            action=lambda: self.get_project_capabilities(
+                project_id=resolved_project_id,
+                workspace_id=resolved_workspace_id,
+                auth_token=auth_token,
+            ),
+        )
+        plugin_state = {
+            "team_mode": False,
+            "git_delivery": False,
+            "docker_compose": False,
+        }
+        if isinstance(capabilities, dict):
+            caps = capabilities.get("capabilities") if isinstance(capabilities.get("capabilities"), dict) else {}
+            plugin_state = {
+                "team_mode": bool(caps.get("team_mode")),
+                "git_delivery": bool(caps.get("git_delivery")),
+                "docker_compose": bool(caps.get("docker_compose")),
+            }
+
+        requested_team = plugin_state["team_mode"] if enable_team_mode is None else bool(enable_team_mode)
+        requested_git = plugin_state["git_delivery"] if enable_git_delivery is None else bool(enable_git_delivery)
+        requested_docker = plugin_state["docker_compose"] if enable_docker_compose is None else bool(enable_docker_compose)
+        adjustments: list[str] = []
+        if requested_team and not requested_git:
+            requested_git = True
+            adjustments.append("Git Delivery was auto-enabled because Team Mode is enabled.")
+        if requested_docker and not requested_git:
+            validation_error = {
+                "type": "validation_error",
+                "status_code": 422,
+                "message": "docker_compose requires git_delivery enabled",
+                "detail": "Enable git_delivery or disable docker_compose.",
+            }
+            steps.append(
+                {
+                    "id": "validate_plugin_dependencies",
+                    "title": "Validate plugin dependencies",
+                    "status": "error",
+                    "blocking": True,
+                    "attempts": 1,
+                    "error": validation_error,
+                }
+            )
+            blocking_errors.append({"error": validation_error})
+
+        requested = {
+            "team_mode_enabled": requested_team,
+            "git_delivery_enabled": requested_git,
+            "docker_compose_enabled": requested_docker,
+            "docker_port": docker_port,
+            "seed_team_tasks": bool(seed_team_tasks),
+            "kickoff_after_setup": bool(kickoff_after_setup),
+        }
+
+        if not blocking_errors:
+            self._run_setup_step(
+                steps=steps,
+                blocking_errors=blocking_errors,
+                step_id="set_plugin_team_mode",
+                title="Set Team Mode plugin enabled",
+                blocking=True,
+                max_attempts=2,
+                action=lambda: self.set_project_plugin_enabled(
+                    project_id=resolved_project_id,
+                    plugin_key="team_mode",
+                    enabled=requested_team,
+                    workspace_id=resolved_workspace_id,
+                    auth_token=auth_token,
+                ),
+            )
+        if not blocking_errors:
+            self._run_setup_step(
+                steps=steps,
+                blocking_errors=blocking_errors,
+                step_id="set_plugin_git_delivery",
+                title="Set Git Delivery plugin enabled",
+                blocking=True,
+                max_attempts=2,
+                action=lambda: self.set_project_plugin_enabled(
+                    project_id=resolved_project_id,
+                    plugin_key="git_delivery",
+                    enabled=requested_git,
+                    workspace_id=resolved_workspace_id,
+                    auth_token=auth_token,
+                ),
+            )
+        if not blocking_errors:
+            self._run_setup_step(
+                steps=steps,
+                blocking_errors=blocking_errors,
+                step_id="set_plugin_docker_compose",
+                title="Set Docker Compose plugin enabled",
+                blocking=True,
+                max_attempts=2,
+                action=lambda: self.set_project_plugin_enabled(
+                    project_id=resolved_project_id,
+                    plugin_key="docker_compose",
+                    enabled=requested_docker,
+                    workspace_id=resolved_workspace_id,
+                    auth_token=auth_token,
+                ),
+            )
+
+        if not blocking_errors and requested_team:
+            self._run_setup_step(
+                steps=steps,
+                blocking_errors=blocking_errors,
+                step_id="apply_config_team_mode",
+                title="Apply Team Mode config",
+                blocking=True,
+                max_attempts=2,
+                action=lambda: self._apply_plugin_config_with_retry(
+                    project_id=resolved_project_id,
+                    workspace_id=resolved_workspace_id,
+                    plugin_key="team_mode",
+                    config=normalized_team_cfg or _team_mode_default_config(),
+                    auth_token=auth_token,
+                ),
+            )
+        else:
+            self._append_skipped_setup_step(
+                steps=steps,
+                step_id="apply_config_team_mode",
+                title="Apply Team Mode config",
+                reason="Team Mode is disabled",
+            )
+
+        if not blocking_errors and requested_git:
+            self._run_setup_step(
+                steps=steps,
+                blocking_errors=blocking_errors,
+                step_id="apply_config_git_delivery",
+                title="Apply Git Delivery config",
+                blocking=True,
+                max_attempts=2,
+                action=lambda: self._apply_plugin_config_with_retry(
+                    project_id=resolved_project_id,
+                    workspace_id=resolved_workspace_id,
+                    plugin_key="git_delivery",
+                    config=normalized_git_cfg or _git_delivery_default_config(),
+                    auth_token=auth_token,
+                ),
+            )
+        else:
+            self._append_skipped_setup_step(
+                steps=steps,
+                step_id="apply_config_git_delivery",
+                title="Apply Git Delivery config",
+                reason="Git Delivery is disabled",
+            )
+
+        repository_context_result: dict[str, Any] | None = None
+        if not blocking_errors and requested_git:
+            repo_ctx = self._run_setup_step(
+                steps=steps,
+                blocking_errors=blocking_errors,
+                step_id="ensure_default_repository_context",
+                title="Ensure default repository context",
+                blocking=False,
+                max_attempts=1,
+                action=lambda: self._ensure_default_repository_context_for_project(
+                    project_id=resolved_project_id,
+                    workspace_id=resolved_workspace_id,
+                    project_name=resolved_project_name or resolved_project_id,
+                    auth_token=auth_token,
+                    command_id=command_id,
+                ),
+            )
+            if isinstance(repo_ctx, dict):
+                repository_context_result = repo_ctx
+        else:
+            self._append_skipped_setup_step(
+                steps=steps,
+                step_id="ensure_default_repository_context",
+                title="Ensure default repository context",
+                reason="Git Delivery is disabled",
+            )
+
+        if not blocking_errors and requested_docker:
+            docker_default = _docker_compose_default_config(port=docker_port)
+            if normalized_docker_cfg:
+                runtime = normalized_docker_cfg.get("runtime_deploy_health")
+                if isinstance(runtime, dict) and docker_port is not None:
+                    runtime["port"] = int(docker_port)
+                elif docker_port is not None:
+                    normalized_docker_cfg["runtime_deploy_health"] = {
+                        "required": False,
+                        "stack": "constructos-ws-default",
+                        "port": int(docker_port),
+                        "health_path": "/health",
+                        "require_http_200": True,
+                    }
+            self._run_setup_step(
+                steps=steps,
+                blocking_errors=blocking_errors,
+                step_id="apply_config_docker_compose",
+                title="Apply Docker Compose config",
+                blocking=True,
+                max_attempts=2,
+                action=lambda: self._apply_plugin_config_with_retry(
+                    project_id=resolved_project_id,
+                    workspace_id=resolved_workspace_id,
+                    plugin_key="docker_compose",
+                    config=normalized_docker_cfg or docker_default,
+                    auth_token=auth_token,
+                ),
+            )
+        else:
+            self._append_skipped_setup_step(
+                steps=steps,
+                step_id="apply_config_docker_compose",
+                title="Apply Docker Compose config",
+                reason="Docker Compose is disabled",
+            )
+
+        seeded_entities: dict[str, Any] = {}
+        if not blocking_errors and requested_team and bool(seed_team_tasks):
+            seeded = self._run_setup_step(
+                steps=steps,
+                blocking_errors=blocking_errors,
+                step_id="seed_team_mode_tasks",
+                title="Seed Team Mode default tasks",
+                blocking=True,
+                max_attempts=1,
+                action=lambda: self._seed_team_mode_default_tasks(
+                    workspace_id=resolved_workspace_id,
+                    project_id=resolved_project_id,
+                    auth_token=auth_token,
+                    command_id=command_id,
+                ),
+            )
+            if isinstance(seeded, dict):
+                seeded_entities["team_mode_tasks"] = seeded
+        else:
+            self._append_skipped_setup_step(
+                steps=steps,
+                step_id="seed_team_mode_tasks",
+                title="Seed Team Mode default tasks",
+                reason="Team Mode is disabled or task seeding is disabled",
+            )
+
+        kickoff_result: dict[str, Any] | None = None
+        if not blocking_errors and requested_team and bool(kickoff_after_setup):
+            kicked = self._run_setup_step(
+                steps=steps,
+                blocking_errors=blocking_errors,
+                step_id="dispatch_team_mode_kickoff",
+                title="Dispatch Team Mode kickoff",
+                blocking=True,
+                max_attempts=1,
+                action=lambda: self._dispatch_team_mode_kickoff_after_setup(
+                    workspace_id=resolved_workspace_id,
+                    project_id=resolved_project_id,
+                    auth_token=auth_token,
+                    command_id=command_id,
+                ),
+            )
+            if isinstance(kicked, dict):
+                kickoff_result = kicked
+        else:
+            self._append_skipped_setup_step(
+                steps=steps,
+                step_id="dispatch_team_mode_kickoff",
+                title="Dispatch Team Mode kickoff",
+                reason="kickoff_after_setup is disabled or Team Mode is not active",
+            )
+
+        verification: dict[str, Any] = {}
+        if not blocking_errors and requested_team:
+            verify_team = self._run_setup_step(
+                steps=steps,
+                blocking_errors=blocking_errors,
+                step_id="verify_team_mode_workflow",
+                title="Verify Team Mode workflow",
+                blocking=False,
+                max_attempts=1,
+                action=lambda: self.verify_team_mode_workflow(
+                    project_id=resolved_project_id,
+                    workspace_id=resolved_workspace_id,
+                    auth_token=auth_token,
+                    expected_event_storming_enabled=expected_event_storming_enabled,
+                ),
+            )
+            if isinstance(verify_team, dict):
+                verification["team_mode"] = verify_team
+        else:
+            self._append_skipped_setup_step(
+                steps=steps,
+                step_id="verify_team_mode_workflow",
+                title="Verify Team Mode workflow",
+                reason="Team Mode is disabled",
+            )
+
+        if not blocking_errors and requested_git:
+            verify_delivery = self._run_setup_step(
+                steps=steps,
+                blocking_errors=blocking_errors,
+                step_id="verify_delivery_workflow",
+                title="Verify delivery workflow",
+                blocking=False,
+                max_attempts=1,
+                action=lambda: self.verify_delivery_workflow(
+                    project_id=resolved_project_id,
+                    workspace_id=resolved_workspace_id,
+                    auth_token=auth_token,
+                ),
+            )
+            if isinstance(verify_delivery, dict):
+                verification["delivery"] = verify_delivery
+        else:
+            self._append_skipped_setup_step(
+                steps=steps,
+                step_id="verify_delivery_workflow",
+                title="Verify delivery workflow",
+                reason="Git Delivery is disabled",
+            )
+
+        final_configs: dict[str, Any] = {}
+        for key in ("team_mode", "git_delivery", "docker_compose"):
+            payload = self.get_project_plugin_config(
+                project_id=resolved_project_id,
+                plugin_key=key,
+                workspace_id=resolved_workspace_id,
+                auth_token=auth_token,
+            )
+            final_configs[key] = {
+                "enabled": bool(payload.get("enabled")),
+                "version": int(payload.get("version") or 0),
+                "exists": bool(payload.get("exists")),
+            }
+
+        blocking = bool(blocking_errors)
+        workflow_ok = True
+        if requested_team:
+            workflow_ok = workflow_ok and bool((verification.get("team_mode") or {}).get("ok"))
+        if requested_git:
+            workflow_ok = workflow_ok and bool((verification.get("delivery") or {}).get("ok"))
+
+        def _failed_checks_with_descriptions(scope_payload: dict[str, Any] | None) -> list[dict[str, str]]:
+            payload = scope_payload if isinstance(scope_payload, dict) else {}
+            failed_ids = [str(item or "").strip() for item in (payload.get("required_failed_checks") or []) if str(item or "").strip()]
+            descriptions = payload.get("check_descriptions") if isinstance(payload.get("check_descriptions"), dict) else {}
+            results: list[dict[str, str]] = []
+            for check_id in failed_ids:
+                results.append(
+                    {
+                        "id": check_id,
+                        "description": str(descriptions.get(check_id) or "Verification requirement is not satisfied.").strip(),
+                    }
+                )
+            return results
+
+        team_verification = verification.get("team_mode") if isinstance(verification.get("team_mode"), dict) else {}
+        delivery_verification = verification.get("delivery") if isinstance(verification.get("delivery"), dict) else {}
+
+        user_facing_summary = {
+            "project_link": f"?tab=projects&project={resolved_project_id}",
+            "configured": {
+                "team_mode_enabled": bool(final_configs.get("team_mode", {}).get("enabled")),
+                "git_delivery_enabled": bool(final_configs.get("git_delivery", {}).get("enabled")),
+                "docker_compose_enabled": bool(final_configs.get("docker_compose", {}).get("enabled")),
+                "docker_port": int(docker_port) if docker_port is not None else None,
+                "repository_url": (
+                    str(repository_context_result.get("repository_url") or "").strip()
+                    if isinstance(repository_context_result, dict)
+                    else None
+                ),
+            },
+            "kickoff_required": False if bool(kickoff_after_setup) else True,
+            "kickoff_hint": (
+                "Kickoff was dispatched as part of setup."
+                if bool(kickoff_after_setup)
+                else "Start execution only when ready by running kickoff from chat."
+            ),
+            "verification": {
+                "team_mode_ok": bool(team_verification.get("ok")) if requested_team else None,
+                "team_mode_failed_requirements": _failed_checks_with_descriptions(team_verification),
+                "delivery_ok": bool(delivery_verification.get("ok")) if requested_git else None,
+                "delivery_failed_requirements": _failed_checks_with_descriptions(delivery_verification),
+            },
+            "next_action_hint": (
+                "Setup is complete and kickoff was dispatched."
+                if (bool(kickoff_after_setup) and (not blocking and workflow_ok))
+                else "Setup is complete. Execution is not started automatically; run kickoff when you want the team to start implementation."
+                if (not blocking and workflow_ok)
+                else "Some required checks failed. Review failed requirements and apply the suggested fixes before execution."
+            ),
+        }
+        if kickoff_result is not None:
+            user_facing_summary["kickoff"] = {
+                "ok": bool(kickoff_result.get("ok")),
+                "summary": str(kickoff_result.get("summary") or "").strip(),
+                "comment": str(kickoff_result.get("comment") or "").strip() or None,
+                "queued_task_ids": list(kickoff_result.get("queued_task_ids") or []),
+                "queued_by_role": dict(kickoff_result.get("queued_by_role") or {}),
+            }
+
+        return {
+            "contract_version": 1,
+            "ok": (not blocking) and bool(workflow_ok),
+            "blocking": blocking,
+            "execution_state": "setup_complete" if (not blocking) else "setup_failed",
+            "project": {
+                "id": resolved_project_id,
+                "workspace_id": resolved_workspace_id,
+                "name": resolved_project_name,
+                "created": created_project,
+                "link": f"?tab=projects&project={resolved_project_id}",
+            },
+            "requested": requested,
+            "effective": {
+                "team_mode_enabled": bool(final_configs.get("team_mode", {}).get("enabled")),
+                "git_delivery_enabled": bool(final_configs.get("git_delivery", {}).get("enabled")),
+                "docker_compose_enabled": bool(final_configs.get("docker_compose", {}).get("enabled")),
+            },
+            "plugins": final_configs,
+            "seeded_entities": seeded_entities,
+            "verification": verification,
+            "steps": steps,
+            "adjustments": adjustments,
+            "errors": [item.get("error") for item in blocking_errors if isinstance(item.get("error"), dict)],
+            "user_facing_summary": user_facing_summary,
+            "kickoff": kickoff_result,
+        }
+
+    def _dispatch_team_mode_kickoff_after_setup(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        auth_token: str | None,
+        command_id: str | None,
+    ) -> dict[str, Any]:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+
+        def _command_id_with_suffix(base: str | None, suffix: str) -> str | None:
+            normalized = str(base or "").strip()
+            if not normalized:
+                return None
+            return f"{normalized}:{str(suffix or '').strip()}"[:64]
+
+        with SessionLocal() as db:
+            from plugins.team_mode.api_kickoff import maybe_dispatch_execution_kickoff
+
+            result = maybe_dispatch_execution_kickoff(
+                db=db,
+                user=user,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                intent_flags={"execution_kickoff_intent": True},
+                allow_mutations=True,
+                command_id=command_id,
+                promote_plugin_policy_to_execution_mode_if_needed=lambda **_kwargs: None,
+                build_team_lead_kickoff_instruction=lambda **kwargs: (
+                    f"Team Mode kickoff for project {str(kwargs.get('project_id') or '').strip()}.\n\n"
+                    "Primary objective: start execution with Lead-first orchestration.\n"
+                    "Keep this kickoff dispatch-only and do not complete the Lead task in kickoff.\n"
+                ),
+                command_id_with_suffix=_command_id_with_suffix,
+            )
+            if not isinstance(result, dict):
+                raise HTTPException(status_code=409, detail="Team Mode kickoff could not be dispatched")
+            return result
 
     def ensure_team_mode_project(
         self,
@@ -2556,6 +4857,7 @@ class AgentTaskService:
         scheduled_at_utc: str | None = None,
         schedule_timezone: str | None = None,
         assignee_id: str | None = None,
+        assigned_agent_code: str | None = None,
         labels: Any | None = None,
         command_id: str | None = None,
     ) -> dict:
@@ -2608,6 +4910,7 @@ class AgentTaskService:
                     "scheduled_at_utc": scheduled_at_utc,
                     "schedule_timezone": schedule_timezone,
                     "assignee_id": assignee_id,
+                    "assigned_agent_code": assigned_agent_code,
                     "labels": normalized_labels or [],
                 },
             )
@@ -2624,6 +4927,7 @@ class AgentTaskService:
                 "attachment_refs": attachment_refs or [],
                 "specification_id": specification_id,
                 "assignee_id": assignee_id,
+                "assigned_agent_code": assigned_agent_code,
                 "labels": normalized_labels or [],
             }
             if instruction is not None:
@@ -3159,9 +5463,66 @@ class AgentTaskService:
                     "generated_rule_id": str(getattr(skill_row, "generated_rule_id", "") or ""),
                 },
             )
-            return ProjectSkillApplicationService(
+            applied = ProjectSkillApplicationService(
                 db, user, command_id=effective_command_id
             ).apply_project_skill(skill_id)
+            project_workspace_id = str(getattr(skill_row, "workspace_id", "") or "").strip()
+            project_scope_id = str(getattr(skill_row, "project_id", "") or "").strip()
+            enabled_project_skills = db.execute(
+                select(ProjectSkill.skill_key).where(
+                    ProjectSkill.workspace_id == project_workspace_id,
+                    ProjectSkill.project_id == project_scope_id,
+                    ProjectSkill.enabled == True,  # noqa: E712
+                    ProjectSkill.is_deleted == False,  # noqa: E712
+                )
+            ).scalars().all()
+            enabled_plugin_keys = {
+                str(item or "").strip().lower()
+                for item in enabled_project_skills
+                if str(item or "").strip().lower() in _PROJECT_PLUGIN_KEYS
+            }
+            if enabled_plugin_keys:
+                now_utc = datetime.now(timezone.utc)
+                for plugin_key in enabled_plugin_keys:
+                    plugin_row = db.execute(
+                        select(ProjectPluginConfig).where(
+                            ProjectPluginConfig.workspace_id == project_workspace_id,
+                            ProjectPluginConfig.project_id == project_scope_id,
+                            ProjectPluginConfig.plugin_key == plugin_key,
+                            ProjectPluginConfig.is_deleted == False,  # noqa: E712
+                        )
+                    ).scalar_one_or_none()
+                    if plugin_row is None:
+                        config = _default_plugin_config(plugin_key)
+                        plugin_row = ProjectPluginConfig(
+                            workspace_id=project_workspace_id,
+                            project_id=project_scope_id,
+                            plugin_key=plugin_key,
+                            enabled=True,
+                            version=1,
+                            schema_version=1,
+                            config_json=json.dumps(config, ensure_ascii=False),
+                            compiled_policy_json=json.dumps(_compile_plugin_policy(plugin_key, config), ensure_ascii=False),
+                            last_validation_errors_json="[]",
+                            last_validated_at=now_utc,
+                            created_by=str(user.id),
+                            updated_by=str(user.id),
+                        )
+                    else:
+                        config = _safe_json_loads_object(str(getattr(plugin_row, "config_json", "") or "").strip(), fallback={})
+                        if not config:
+                            config = _default_plugin_config(plugin_key)
+                        plugin_row.enabled = True
+                        plugin_row.version = int(getattr(plugin_row, "version", 1) or 1) + 1
+                        plugin_row.schema_version = 1
+                        plugin_row.config_json = json.dumps(config, ensure_ascii=False)
+                        plugin_row.compiled_policy_json = json.dumps(_compile_plugin_policy(plugin_key, config), ensure_ascii=False)
+                        plugin_row.last_validation_errors_json = "[]"
+                        plugin_row.last_validated_at = now_utc
+                        plugin_row.updated_by = str(user.id)
+                    db.add(plugin_row)
+                db.commit()
+            return applied
 
     def import_workspace_skill(
         self,
@@ -3786,7 +6147,7 @@ class AgentTaskService:
                         raise HTTPException(
                             status_code=409,
                             detail=(
-                                "Done transition blocked by project gates. "
+                                "Done transition blocked by project policy checks. "
                                 f"team_mode_ok={bool(team_mode_verification.get('ok'))}"
                                 + (f"; team_mode_failed=[{team_mode_failed}]" if team_mode_failed else "")
                                 + f"; delivery_ok={bool(delivery_verification.get('ok'))}"
@@ -3847,7 +6208,7 @@ class AgentTaskService:
                     raise HTTPException(
                         status_code=409,
                         detail=(
-                            "Done transition blocked by project gates. "
+                            "Done transition blocked by project policy checks. "
                             f"team_mode_ok={bool(team_mode_verification.get('ok'))}"
                             + (f"; team_mode_failed=[{team_mode_failed}]" if team_mode_failed else "")
                             + f"; delivery_ok={bool(delivery_verification.get('ok'))}"

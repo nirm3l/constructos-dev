@@ -165,6 +165,49 @@ def test_license_status_hides_legacy_public_beta_metadata_for_non_beta_subscript
     assert "public_beta_free_until" not in metadata
 
 
+def test_license_status_includes_update_notification_with_stable_id_and_type(tmp_path: Path):
+    client = build_client(tmp_path)
+    from shared.models import LicenseInstallation, SessionLocal
+
+    with SessionLocal() as db:
+        installation = db.execute(
+            select(LicenseInstallation).where(LicenseInstallation.installation_id == TEST_INSTALLATION_ID)
+        ).scalar_one()
+        installation.metadata_json = json.dumps(
+            {
+                "latest_app_version": "v9.9.9",
+                "latest_image_tag": "v9.9.9",
+                "latest_release_at": "2026-03-01T12:00:00+00:00",
+            }
+        )
+        db.commit()
+
+    res = client.get("/api/license/status")
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["ok"] is True
+    license_payload = payload["license"]
+    notifications = license_payload.get("notifications") or []
+    assert isinstance(notifications, list)
+    assert len(notifications) >= 1
+    update_notifications = [n for n in notifications if n.get("notification_type") == "AppUpdateAvailable"]
+    assert len(update_notifications) == 1
+    item = update_notifications[0]
+    assert str(item.get("id") or "").startswith("license-app-update:")
+    assert item.get("dedupe_key") == item.get("id")
+    assert isinstance(item.get("payload"), dict)
+    assert item["payload"].get("action") == "auto_update_app_images"
+    assert item["payload"].get("target_image_tag") == "v9.9.9"
+
+
+def test_auto_update_endpoint_rejects_invalid_image_tag(tmp_path: Path):
+    client = build_client(tmp_path)
+
+    res = client.post("/api/license/auto-update", json={"image_tag": "bad tag with space"})
+    assert res.status_code == 400
+    assert "Invalid image_tag format" in res.json().get("detail", "")
+
+
 def test_expired_license_blocks_write_endpoints(tmp_path: Path):
     client = build_client(tmp_path)
     from shared.models import LicenseInstallation, SessionLocal

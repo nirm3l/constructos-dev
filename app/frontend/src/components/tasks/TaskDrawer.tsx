@@ -153,6 +153,7 @@ function TaskDrawerSelect({
   ariaLabel,
   options,
   triggerClassName,
+  disabled,
 }: {
   value: string
   onValueChange: (value: string) => void
@@ -160,10 +161,15 @@ function TaskDrawerSelect({
   ariaLabel: string
   options: TaskSelectOption[]
   triggerClassName?: string
+  disabled?: boolean
 }) {
   return (
-    <Select.Root value={value} onValueChange={onValueChange}>
-      <Select.Trigger className={triggerClassName || 'quickadd-project-trigger taskdrawer-select-trigger'} aria-label={ariaLabel}>
+    <Select.Root value={value} onValueChange={onValueChange} disabled={disabled}>
+      <Select.Trigger
+        className={triggerClassName || 'quickadd-project-trigger taskdrawer-select-trigger'}
+        aria-label={ariaLabel}
+        disabled={disabled}
+      >
         <Select.Value placeholder={placeholder} />
         <Select.Icon asChild>
           <span className="quickadd-project-trigger-icon" aria-hidden="true">
@@ -420,6 +426,25 @@ export function TaskDrawer({ state }: { state: any }) {
     const current = String(state.editAssigneeId || '').trim()
     if (!current) return '__none__'
     return assigneeSelectOptions.some((option) => option.value === current) ? current : '__none__'
+  })()
+  const teamAgentOptions = (() => {
+    const out: TaskSelectOption[] = [{ value: '__none__', label: 'No team agent' }]
+    const configuredAgents = Array.isArray(state.taskTeamAgents) ? state.taskTeamAgents : []
+    for (const item of configuredAgents) {
+      const id = String(item?.id || '').trim()
+      if (!id) continue
+      const name = String(item?.name || '').trim()
+      const role = String(item?.authority_role || '').trim()
+      const labelBase = name || id
+      const roleSuffix = role ? ` • ${role}` : ''
+      out.push({ value: id, label: `${labelBase} (${id})${roleSuffix}` })
+    }
+    return out
+  })()
+  const teamAgentSelectValue = (() => {
+    const current = String(state.editAssignedAgentCode || '').trim()
+    if (!current) return '__none__'
+    return teamAgentOptions.some((option) => option.value === current) ? current : '__none__'
   })()
   const statusSelectValue = String(state.editStatus || '').trim() || statusSelectOptions[0]?.value || 'To do'
   const prioritySelectValue = (() => {
@@ -735,11 +760,40 @@ export function TaskDrawer({ state }: { state: any }) {
             <span className="field-label">Assignee</span>
             <TaskDrawerSelect
               value={assigneeSelectValue}
-              onValueChange={(value) => state.setEditAssigneeId(value === '__none__' ? '' : value)}
+              onValueChange={(value) => {
+                if (value === '__none__') {
+                  state.setEditAssigneeId('')
+                  state.setEditAssignedAgentCode('')
+                  return
+                }
+                state.setEditAssigneeId(value)
+              }}
               placeholder="Unassigned"
               ariaLabel="Task assignee"
               options={assigneeSelectOptions}
             />
+          </label>
+          <label className="field-control task-field-half">
+            <span className="field-label">Team agent</span>
+            <TaskDrawerSelect
+              value={teamAgentSelectValue}
+              onValueChange={(value) => state.setEditAssignedAgentCode(value === '__none__' ? '' : value)}
+              placeholder="No team agent"
+              ariaLabel="Task team agent"
+              options={teamAgentOptions}
+              triggerClassName="quickadd-project-trigger taskdrawer-select-trigger"
+              disabled={!String(state.editAssigneeId || '').trim() || teamAgentOptions.length <= 1}
+            />
+            {!String(state.editAssigneeId || '').trim() && (
+              <span className="meta" style={{ marginTop: 6, display: 'inline-block' }}>
+                Assign a user first to enable team agent routing.
+              </span>
+            )}
+            {String(state.editAssigneeId || '').trim() && teamAgentOptions.length <= 1 && (
+              <span className="meta" style={{ marginTop: 6, display: 'inline-block' }}>
+                No Team Mode agents are configured for this project.
+              </span>
+            )}
           </label>
           <label className="field-control task-field-full">
             <span className="field-label">Due date</span>

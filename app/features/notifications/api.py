@@ -97,6 +97,16 @@ def mark_notification(
     return NotificationApplicationService(db, user, command_id=command_id).mark_read(notification_id)
 
 
+@router.post("/api/notifications/{notification_id}/unread")
+def mark_notification_unread(
+    notification_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+    command_id: str | None = Depends(get_command_id),
+):
+    return NotificationApplicationService(db, user, command_id=command_id).mark_unread(notification_id)
+
+
 @router.get("/api/notifications/stream")
 async def notifications_stream(
     request: Request,

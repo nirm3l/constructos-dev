@@ -26,22 +26,7 @@ function appendTranscript(base: string, transcript: string): string {
 }
 
 function buildProjectCreationStarter(): string {
-  return [
-    'Help me create a new project with a streamlined setup flow.',
-    'Workflow requirements:',
-    '1. Ask one clarifying question at a time, but only for missing inputs.',
-    '2. Ask for project name first, then ask: "What should this project do in short?"',
-    '3. Ask whether we want Team Mode. Explain it briefly in chat: Team Mode sets up a multi-role workflow (Dev -> Lead -> QA) with automation.',
-    '4. Do not force Team Mode. If Team Mode is declined, ask whether we want Git Delivery, and explain it briefly: Git Delivery enforces repo-based delivery flow on the main branch with per-task commits and delivery evidence.',
-    '5. If Git Delivery is enabled, ask whether deployment should run via Docker Compose, and if yes ask which port should be used.',
-    '6. Default to manual setup unless I explicitly ask for a template.',
-    '7. Do not ask template-vs-manual when my request already implies a custom/manual setup.',
-    '8. If I directly ask to create the project, treat that as confirmation and create once required fields are complete.',
-    '9. If template setup is requested, run list_project_templates -> get_project_template -> preview_project_from_template -> create_project_from_template.',
-    '10. Keep prompts sharp and concise. Avoid vague or repeated questions.',
-    '11. After creation, ask whether tasks/specifications/rules should be adjusted.',
-    '12. Return a clickable project link in this format: ?tab=projects&project=<project_id>.',
-  ].join('\n')
+  return 'Help me set up a new project in chat. Use setup_project_orchestration and, if inputs are missing, ask only the next missing question from the tool response.'
 }
 
 const CHAT_INPUT_MIN_HEIGHT_PX = 64
@@ -213,6 +198,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const [deleteSessionDialogOpen, setDeleteSessionDialogOpen] = React.useState(false)
   const [clearChatDialogOpen, setClearChatDialogOpen] = React.useState(false)
   const [deleteSessionId, setDeleteSessionId] = React.useState<string | null>(null)
+  const [projectSetupStarterUsed, setProjectSetupStarterUsed] = React.useState(false)
   const [resumeCommandCopyState, setResumeCommandCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
   const [turnCopyState, setTurnCopyState] = React.useState<TurnCopyState>({ status: 'idle', turnId: null })
   const codexThreadId = String(state.codexChatCodexSessionId || '').trim()
@@ -276,6 +262,10 @@ export function CodexChatDrawer({ state }: { state: any }) {
 
   React.useEffect(() => {
     setTurnCopyState({ status: 'idle', turnId: null })
+  }, [state.codexChatSessionId])
+
+  React.useEffect(() => {
+    setProjectSetupStarterUsed(false)
   }, [state.codexChatSessionId])
 
   React.useEffect(() => {
@@ -505,9 +495,8 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const canCreateSession = !isChatBusy
   const canUseProjectCreationStarter =
     !isChatBusy &&
-    Boolean(state.workspaceId)
-  const canQuickConfirmCreate =
-    canUseProjectCreationStarter && Boolean(state.workspaceId) && state.codexChatTurns.length > 0
+    Boolean(state.workspaceId) &&
+    !projectSetupStarterUsed
   const canClearChat = !isChatBusy && state.codexChatTurns.length > 0
   const activeSpeechLang = String(state.speechLang || '').trim() || 'en-US'
   const speechLangName = activeSpeechLang === 'bs-BA' ? 'Bosnian' : 'English'
@@ -703,6 +692,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const applyProjectCreationStarter = () => {
     if (!canUseProjectCreationStarter) return
     state.setUiError(null)
+    setProjectSetupStarterUsed(true)
     sendChatInstruction(buildProjectCreationStarter())
   }
 
@@ -1185,14 +1175,6 @@ export function CodexChatDrawer({ state }: { state: any }) {
                 onClick={() => applyProjectCreationStarter()}
               >
                 Start project setup
-              </button>
-              <button
-                className="status-chip"
-                type="button"
-                disabled={!canQuickConfirmCreate}
-                onClick={() => sendChatInstruction('confirm create')}
-              >
-                Confirm create
               </button>
               <span className="meta">
                 No project is selected, so chat can create a new one interactively.

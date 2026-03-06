@@ -5,36 +5,36 @@ from typing import Any, Callable
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from shared.models import ProjectMember, ProjectSkill, Task
+from shared.models import ProjectMember, ProjectPluginConfig, Task
+from .task_roles import canonicalize_role, derive_task_role
 
 
 def project_has_team_mode_enabled(*, db: Any, workspace_id: str, project_id: str) -> bool:
     row = db.execute(
-        select(ProjectSkill.id).where(
-            ProjectSkill.workspace_id == workspace_id,
-            ProjectSkill.project_id == project_id,
-            ProjectSkill.skill_key == "team_mode",
-            ProjectSkill.enabled == True,  # noqa: E712
-            ProjectSkill.is_deleted == False,  # noqa: E712
+        select(ProjectPluginConfig.id).where(
+            ProjectPluginConfig.workspace_id == workspace_id,
+            ProjectPluginConfig.project_id == project_id,
+            ProjectPluginConfig.plugin_key == "team_mode",
+            ProjectPluginConfig.enabled == True,  # noqa: E712
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
         )
     ).scalar_one_or_none()
     return row is not None
 
 
 def open_developer_tasks(*, db: Any, project_id: str) -> list[dict[str, str]]:
+    member_role_by_user_id = {
+        str(user_id): str(role or "").strip()
+        for user_id, role in db.execute(
+            select(ProjectMember.user_id, ProjectMember.role).where(ProjectMember.project_id == project_id)
+        ).all()
+    }
     rows = db.execute(
-        select(Task.id, Task.title, Task.status)
-        .join(
-            ProjectMember,
-            (ProjectMember.workspace_id == Task.workspace_id)
-            & (ProjectMember.project_id == Task.project_id)
-            & (ProjectMember.user_id == Task.assignee_id),
-        )
+        select(Task.id, Task.title, Task.status, Task.assignee_id, Task.labels)
         .where(
             Task.project_id == project_id,
             Task.is_deleted == False,  # noqa: E712
             Task.archived == False,  # noqa: E712
-            ProjectMember.role == "DeveloperAgent",
         )
         .order_by(Task.created_at.asc())
     ).all()
@@ -45,7 +45,16 @@ def open_developer_tasks(*, db: Any, project_id: str) -> list[dict[str, str]]:
             "title": str(title or "").strip(),
             "status": str(status or "").strip(),
         }
-        for task_id, title, status in rows
+        for task_id, title, status, assignee_id, labels in rows
+        if derive_task_role(
+            task_like={
+                "assignee_id": str(assignee_id or "").strip(),
+                "labels": labels,
+                "status": str(status or "").strip(),
+            },
+            member_role_by_user_id=member_role_by_user_id,
+        )
+        == "Developer"
         if str(task_id or "").strip() and str(status or "").strip() in blocking_statuses
     ]
 
@@ -67,7 +76,7 @@ def enforce_done_transition(
 
     open_dev = open_developer_tasks(db=db, project_id=project_id)
 
-    if str(assignee_role or "").strip() == "QAAgent":
+    if canonicalize_role(assignee_role) == "QA":
         delivery = verify_delivery_workflow_fn(
             project_id=project_id,
             workspace_id=workspace_id,
@@ -94,7 +103,7 @@ def enforce_done_transition(
             )
         return
 
-    if str(assignee_role or "").strip() == "TeamLeadAgent":
+    if canonicalize_role(assignee_role) == "Lead":
         if open_dev:
             raise HTTPException(
                 status_code=409,

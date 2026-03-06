@@ -127,7 +127,7 @@ export function TaskDrawerInsights({ state }: { state: any }) {
     isLocalLiveRun
       ? state.automationLiveBuffer
       : (state.automationStatus.data?.last_agent_progress || '')
-  ).trim()
+  )
   const liveAutomationStatusText = normalizeAutomationStreamStatus(String(
     isLocalLiveRun
       ? state.automationLiveStatusText
@@ -265,10 +265,6 @@ export function TaskDrawerInsights({ state }: { state: any }) {
       setResumeStreamConnected(false)
       return
     }
-    if (lastAutomationSource !== 'manual_stream') {
-      setResumeStreamConnected(false)
-      return
-    }
     if (!selectedTaskId || !selectedRunId) {
       setResumeStreamConnected(false)
       return
@@ -306,7 +302,6 @@ export function TaskDrawerInsights({ state }: { state: any }) {
     }
   }, [
     isRecoverableLive,
-    lastAutomationSource,
     selectedRunId,
     selectedTaskId,
     state.userId,
@@ -337,24 +332,25 @@ export function TaskDrawerInsights({ state }: { state: any }) {
   }, [isRecoverableLive, resumeStreamConnected, state.automationStatus.data?.last_agent_progress])
   const showLiveOutput = true
   const isAutomationMutationPending = Boolean(state.runAutomationMutation?.isPending)
-  const streamChunkLength = 64
   const displayedLiveAutomationProgress = isRecoverableLive
     ? (recoveredLiveText || liveAutomationProgress)
     : liveAutomationProgress
-  const liveStreamChunk = displayedLiveAutomationProgress
-    ? displayedLiveAutomationProgress.slice(-streamChunkLength)
-    : ''
-  const hasLiveStreamChunk = Boolean((isAutomationRunning || isAutomationQueued) && liveStreamChunk)
-  const liveStreamLeadText = hasLiveStreamChunk
-    ? displayedLiveAutomationProgress.slice(0, Math.max(0, displayedLiveAutomationProgress.length - liveStreamChunk.length))
-    : displayedLiveAutomationProgress
   const shouldHideCompletedStatusDuringLiveRun =
     isAutomationMutationPending && /completed/i.test(liveAutomationStatusText)
   const visibleLiveStatusText = shouldHideCompletedStatusDuringLiveRun ? '' : liveAutomationStatusText
+  const liveOutputStickToBottomRef = React.useRef(true)
+  const handleLiveOutputScroll = React.useCallback(() => {
+    const el = liveOutputRef.current
+    if (!el) return
+    const thresholdPx = 32
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    liveOutputStickToBottomRef.current = distanceFromBottom <= thresholdPx
+  }, [])
   React.useEffect(() => {
     const el = liveOutputRef.current
     if (!el) return
     if (!isAutomationRunning && !isAutomationQueued) return
+    if (!liveOutputStickToBottomRef.current) return
     el.scrollTop = el.scrollHeight
   }, [displayedLiveAutomationProgress, liveAutomationStatusText, isAutomationRunning, isAutomationQueued])
 
@@ -521,17 +517,13 @@ export function TaskDrawerInsights({ state }: { state: any }) {
                   <div
                     className="automation-history-body"
                     ref={liveOutputRef}
+                    onScroll={handleLiveOutputScroll}
                     style={{ maxHeight: 260, overflowY: 'auto' }}
                   >
                     {displayedLiveAutomationProgress ? (
                       (isAutomationRunning || isAutomationQueued) ? (
                         <div className="codex-chat-streaming-text" aria-live="polite">
-                          {liveStreamLeadText}
-                          {hasLiveStreamChunk && (
-                            <span className="codex-chat-stream-last-chunk">
-                              {liveStreamChunk}
-                            </span>
-                          )}
+                          {displayedLiveAutomationProgress}
                           {isAutomationRunning && <span className="codex-chat-stream-caret" aria-hidden="true" />}
                         </div>
                       ) : (

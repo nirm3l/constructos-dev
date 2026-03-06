@@ -523,8 +523,8 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     graph_context_markdown = str(ctx.get("graph_context_markdown") or "").strip()
     graph_evidence_json = str(ctx.get("graph_evidence_json") or "").strip()
     graph_summary_markdown = str(ctx.get("graph_summary_markdown") or "").strip()
-    gate_policy_json = str(ctx.get("gate_policy_json") or "").strip()
-    gate_policy_required_checks = str(ctx.get("gate_policy_required_checks") or "").strip()
+    plugin_policy_json = str(ctx.get("plugin_policy_json") or "").strip()
+    plugin_required_checks = str(ctx.get("plugin_required_checks") or "").strip()
     trigger_task_id = str(ctx.get("trigger_task_id") or "").strip() or "_(not available)_"
     trigger_from_status = str(ctx.get("trigger_from_status") or "").strip() or "_(not available)_"
     trigger_to_status = str(ctx.get("trigger_to_status") or "").strip() or "_(not available)_"
@@ -543,15 +543,15 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     graph_md = graph_context_markdown or "_(knowledge graph unavailable)_"
     graph_evidence = graph_evidence_json or "[]"
     graph_summary = graph_summary_markdown or "_(summary unavailable)_"
-    gate_policy_md = gate_policy_json or "_(Gate Policy unavailable)_"
-    gate_required_checks_md = gate_policy_required_checks or "_(none)_"
+    plugin_policy_md = plugin_policy_json or "_(Plugin Policy unavailable)_"
+    plugin_required_checks_md = plugin_required_checks or "_(none)_"
     rules_md_lines: list[str] = []
     for item in project_rules:
         if not isinstance(item, dict):
             continue
         title = str(item.get("title") or "").strip()
-        if title.lower() == "gate policy":
-            # Gate Policy is rendered in a dedicated section below; skip duplicate copy here.
+        if title.lower() == "plugin policy":
+            # Policy is rendered in a dedicated section below; skip duplicate copy here.
             continue
         body = str(item.get("body") or "").strip()
         if not title and not body:
@@ -645,8 +645,8 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
             "soul_md": soul_md,
             "rules_md": rules_md,
             "skills_md": skills_md,
-            "gate_policy_md": gate_policy_md,
-            "gate_required_checks_md": gate_required_checks_md,
+            "plugin_policy_md": plugin_policy_md,
+            "plugin_required_checks_md": plugin_required_checks_md,
             "graph_md": graph_md,
             "graph_evidence": graph_evidence,
             "graph_summary": graph_summary,
@@ -673,7 +673,7 @@ def _render_rules_markdown_for_segments(project_rules: list[object]) -> str:
         if not isinstance(item, dict):
             continue
         title = str(item.get("title") or "").strip()
-        if title.lower() == "gate policy":
+        if title.lower() == "plugin policy":
             continue
         body = str(item.get("body") or "").strip()
         if not title and not body:
@@ -719,13 +719,13 @@ def _prompt_segment_char_stats(
         f"- To status: {str(ctx.get('trigger_to_status') or '').strip() or '_(not available)_'}\n"
         f"- Triggered at: {str(ctx.get('trigger_timestamp') or '').strip() or '_(not available)_'}\n"
     ).strip()
-    gate_policy = str(ctx.get("gate_policy_json") or "").strip()
-    gate_required_checks = str(ctx.get("gate_policy_required_checks") or "").strip()
+    plugin_policy = str(ctx.get("plugin_policy_json") or "").strip()
+    plugin_required_checks = str(ctx.get("plugin_required_checks") or "").strip()
 
     stats: dict[str, int] = {
         "status_change_trigger_context": len(status_change),
-        "gate_policy": len(gate_policy),
-        "gate_required_checks": len(gate_required_checks),
+        "plugin_policy": len(plugin_policy),
+        "plugin_required_checks": len(plugin_required_checks),
     }
     instruction_breakdown = ctx.get("prompt_instruction_segments")
     instruction_parts: dict[str, int] = {}
@@ -834,8 +834,8 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         str(instruction or "")
     )
     project_name = ctx.get("project_name") or ""
-    gate_policy_json = str(ctx.get("gate_policy_json") or "").strip()
-    gate_policy_required_checks = str(ctx.get("gate_policy_required_checks") or "").strip()
+    plugin_policy_json = str(ctx.get("plugin_policy_json") or "").strip()
+    plugin_required_checks = str(ctx.get("plugin_required_checks") or "").strip()
     trigger_task_id = str(ctx.get("trigger_task_id") or "").strip() or "_(not available)_"
     trigger_from_status = str(ctx.get("trigger_from_status") or "").strip() or "_(not available)_"
     trigger_to_status = str(ctx.get("trigger_to_status") or "").strip() or "_(not available)_"
@@ -906,8 +906,8 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
             "task_workdir": task_workdir,
             "task_branch": task_branch,
             "repo_root": repo_root,
-            "gate_policy_md": gate_policy_json or "_(Gate Policy unavailable)_",
-            "gate_required_checks_md": gate_policy_required_checks or "_(none)_",
+            "plugin_policy_md": plugin_policy_json or "_(Plugin Policy unavailable)_",
+            "plugin_required_checks_md": plugin_required_checks or "_(none)_",
             "status_change_trigger_context": status_change_trigger_context,
             "fresh_memory_snapshot": fresh_memory_snapshot,
             "task_guidance": task_guidance,

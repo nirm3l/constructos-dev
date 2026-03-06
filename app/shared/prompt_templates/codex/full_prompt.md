@@ -26,11 +26,11 @@ File: ProjectRules.md (source: project_rules)
 File: ProjectSkills.md (source: project_skills)
 {skills_md}
 
-File: GatePolicy.json (source: project_rules["Gate Policy"])
-{gate_policy_md}
+File: PluginPolicy.json (source: project_plugin_configs[*].compiled_policy_json)
+{plugin_policy_md}
 
-File: GateRequiredChecks.md (source: gate_policy.required_checks)
-{gate_required_checks_md}
+File: PluginRequiredChecks.md (source: plugin_policy.required_checks)
+{plugin_required_checks_md}
 
 File: GraphContext.md (source: knowledge_graph)
 {graph_md}
@@ -50,7 +50,7 @@ Guidance:
 - ProjectSkills.md captures reusable skills configured for this project.
 - Apply ProjectSkills with mode=enforced before advisory skills.
 - If no enforced skill applies, use advisory skills as guidance alongside project rules.
-- Treat GatePolicy.json + GateRequiredChecks.md as explicit execution constraints for this project.
+- Treat PluginPolicy.json + PluginRequiredChecks.md as explicit execution constraints for this project.
 - GraphContext.md captures resource relations and should guide dependency-aware decisions.
 - GraphEvidence.json is the canonical evidence source for grounded claims.
 - GraphSummary.md can be used as a concise overview, but validate against GraphEvidence.json before acting.
@@ -59,9 +59,25 @@ Guidance:
 - {plugin_workflow_guidance}
 - You may call task-management MCP tools relevant to the request.
 - Read each MCP tool description and follow its payload contract and operational guidance.
+- For new project setup flows, prefer `setup_project_orchestration(...)` once required inputs are complete instead of long manual per-tool setup chains.
+- For interactive new-project setup in chat, call `setup_project_orchestration(...)` as early as possible.
+- If the tool returns HTTP 422 with `missing_inputs`, ask only the `next_question` (or the first missing input question) and retry after user response.
+- When asking that required follow-up question, output only the question text. Do not add preamble, status narration, or troubleshooting details.
+- When `setup_project_orchestration(...)` succeeds, present a user-friendly completion summary:
+  - project link first (`?tab=projects&project=<project_id>`),
+  - short "Configured" list (Team Mode, Git Delivery, Docker Compose + port),
+  - plain-language "Needs attention" items for failed requirements (use descriptions, avoid raw check IDs unless asked).
+- For setup-only project creation, stop after the completion summary.
+- Do not ask for repository URL/path or additional delivery evidence setup unless the user explicitly asks to continue with repository linking or execution.
+- Setup-only completion must explicitly state that execution has not started and requires explicit kickoff.
+- For setup completion responses, start directly with the final summary block (project link + configured/verification/execution lines).
+- Do not prepend status narration such as "Applying...", "Running...", or "Now...".
+- For setup-only responses, include an explicit line: `Kickoff required: Yes` followed by one short sentence how to start execution.
 - Keep progress updates short and separated by newlines; never merge many status updates into one long paragraph.
-- For mutating MCP tool calls, always provide command_id.
+- For mutating MCP tool calls, provide `command_id` only when that specific tool supports it.
 - If retrying the same mutation, reuse the exact same command_id.
+- Keep users informed with concise milestone updates (what finished + what is next).
+- Do not expose low-level payload/schema troubleshooting details in user-facing progress text.
 - When mentioning created/updated entities in summary/comment, include clickable Markdown links (not raw IDs).
 - Never return generic phrases like 'open task' or 'open note' without a concrete link target.
 - For each created entity, include at least one explicit link that can be clicked in chat.
@@ -70,14 +86,9 @@ Guidance:
   - Task: ?tab=tasks&project=<project_id>&task=<task_id>
   - Specification: ?tab=specifications&project=<project_id>&specification=<specification_id>
   - Project: ?tab=projects&project=<project_id>
-- If Team Mode was requested, end with a compact `Team Mode Verification` checklist with explicit `OK/FAIL` for:
-  - skill attached
-  - skill applied
-  - agent members present
-  - UUID assignments valid
-  - required triggers present
-  - required role coverage present
-  - user-required flags/artifacts satisfied (for example explicit event-storming preference, specs/notes present when requested)
+- If Team Mode was requested, include verification outcome only as:
+  - `Verification: PASS` when required checks pass, or
+  - `Verification: Needs attention` with short plain-language failed requirement descriptions.
 - For setup-only requests, include a final line `Execution state: Not started` plus `Deploy target recorded: <stack>:<port>`.
 {mutation_policy}
 {response_tail}

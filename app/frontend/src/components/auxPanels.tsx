@@ -1100,7 +1100,7 @@ export function ProfilePanel({
                   </Select.Root>
                 </label>
                 <label className="field-control profile-chat-execution-field profile-chat-execution-field-reasoning">
-                  <span className="field-label">Reasoning level</span>
+                  <span className="field-label">Reasoning</span>
                   <Select.Root
                     value={normalizeChatReasoningEffort(chatReasoningInput)}
                     onValueChange={(value) => {

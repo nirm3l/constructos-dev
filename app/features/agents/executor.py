@@ -14,8 +14,9 @@ from dataclasses import dataclass
 from sqlalchemy import select
 
 from plugins import executor_policy as plugin_executor_policy
+from plugins.team_mode.task_roles import canonicalize_role, derive_task_role
 from shared.context_frames import build_project_context_frame
-from shared.models import Project, ProjectMember, ProjectRule, ProjectSkill, SessionLocal, Task
+from shared.models import Project, ProjectMember, ProjectPluginConfig, ProjectRule, ProjectSkill, SessionLocal, Task
 from shared.settings import AGENT_CODEX_COMMAND, AGENT_EXECUTOR_MODE, AGENT_EXECUTOR_TIMEOUT_SECONDS
 
 _TIMEOUT_UNSET = object()
@@ -159,34 +160,59 @@ def _load_project_context(
     return str(row[0] or "").strip() or None, str(row[1] or ""), normalized_rules, normalized_skills
 
 
-def _extract_gate_policy_context(project_rules: list[dict[str, str]]) -> tuple[str, str]:
-    gate_rule = next(
-        (
-            item
-            for item in project_rules
-            if str(item.get("title") or "").strip().lower() == "gate policy"
-        ),
-        None,
-    )
-    if not isinstance(gate_rule, dict):
-        return "_(Gate Policy not found)_", "_(none)_"
-    raw_body = str(gate_rule.get("body") or "").strip()
-    if not raw_body:
-        return "_(Gate Policy body is empty)_", "_(none)_"
-    body = raw_body
-    fenced_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw_body, flags=re.DOTALL | re.IGNORECASE)
-    if fenced_match:
-        body = str(fenced_match.group(1) or "").strip()
-    try:
-        parsed = json.loads(body)
-    except Exception:
-        return raw_body, "_(required_checks unavailable)_"
-    if not isinstance(parsed, dict):
-        return raw_body, "_(required_checks unavailable)_"
-    gate_policy_json = json.dumps(parsed, ensure_ascii=False, indent=2)
-    required_checks = parsed.get("required_checks")
+def _deep_merge_dicts(base: dict[str, object], override: dict[str, object]) -> dict[str, object]:
+    merged: dict[str, object] = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(dict(merged.get(key) or {}), value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_project_plugin_runtime(
+    project_id: str | None,
+) -> tuple[bool, bool, str, str]:
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_project_id:
+        return False, False, "_(Plugin Policy unavailable)_", "_(none)_"
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(
+                ProjectPluginConfig.plugin_key,
+                ProjectPluginConfig.enabled,
+                ProjectPluginConfig.compiled_policy_json,
+            ).where(
+                ProjectPluginConfig.project_id == normalized_project_id,
+                ProjectPluginConfig.plugin_key.in_(["team_mode", "git_delivery"]),
+                ProjectPluginConfig.is_deleted == False,  # noqa: E712
+            )
+        ).all()
+
+    policy: dict[str, object] = {}
+    team_mode_enabled = False
+    git_delivery_enabled = False
+    for plugin_key_raw, enabled_raw, compiled_policy_raw in rows:
+        plugin_key = str(plugin_key_raw or "").strip().lower()
+        enabled = bool(enabled_raw)
+        if plugin_key == "team_mode":
+            team_mode_enabled = enabled
+        elif plugin_key == "git_delivery":
+            git_delivery_enabled = enabled
+        compiled_text = str(compiled_policy_raw or "").strip()
+        if not compiled_text:
+            continue
+        try:
+            parsed = json.loads(compiled_text)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            policy = _deep_merge_dicts(policy, parsed)
+
+    plugin_policy_json = json.dumps(policy, ensure_ascii=False, indent=2) if policy else "_(Plugin Policy unavailable)_"
+    required_checks = policy.get("required_checks")
     if not isinstance(required_checks, dict):
-        return gate_policy_json, "_(required_checks unavailable)_"
+        return team_mode_enabled, (git_delivery_enabled or team_mode_enabled), plugin_policy_json, "_(required_checks unavailable)_"
     lines: list[str] = []
     for scope, checks in required_checks.items():
         scope_name = str(scope or "").strip() or "unknown"
@@ -195,7 +221,12 @@ def _extract_gate_policy_context(project_rules: list[dict[str, str]]) -> tuple[s
             lines.append(f"- {scope_name}: _(none)_")
             continue
         lines.append(f"- {scope_name}: {', '.join(check_names)}")
-    return gate_policy_json, ("\n".join(lines).strip() or "_(none)_")
+    return (
+        team_mode_enabled,
+        (git_delivery_enabled or team_mode_enabled),
+        plugin_policy_json,
+        ("\n".join(lines).strip() or "_(none)_"),
+    )
 
 
 def _resolve_actor_project_role(*, actor_user_id: str | None, project_id: str | None) -> str | None:
@@ -210,7 +241,7 @@ def _resolve_actor_project_role(*, actor_user_id: str | None, project_id: str | 
                 ProjectMember.user_id == normalized_actor_user_id,
             )
         ).scalar_one_or_none()
-    normalized_role = str(membership or "").strip()
+    normalized_role = canonicalize_role(membership)
     return normalized_role or None
 
 
@@ -220,23 +251,37 @@ def _resolve_task_assignee_project_role(*, task_id: str | None, project_id: str 
     if not normalized_task_id or not normalized_project_id:
         return None
     with SessionLocal() as db:
-        assignee_id = db.execute(
-            select(Task.assignee_id).where(
+        task_row = db.execute(
+            select(Task.assignee_id, Task.status, Task.labels).where(
                 Task.id == normalized_task_id,
                 Task.project_id == normalized_project_id,
                 Task.is_deleted == False,  # noqa: E712
             )
-        ).scalar_one_or_none()
+        ).first()
+        if task_row is None:
+            return None
+        assignee_id, status, labels = task_row
         normalized_assignee_id = str(assignee_id or "").strip()
         if not normalized_assignee_id:
             return None
+        declared_role = derive_task_role(
+            task_like={
+                "assignee_id": normalized_assignee_id,
+                "labels": labels,
+                "status": str(status or "").strip(),
+            },
+            member_role_by_user_id={},
+            allow_status_fallback=False,
+        )
+        if declared_role:
+            return declared_role
         membership = db.execute(
             select(ProjectMember.role).where(
                 ProjectMember.project_id == normalized_project_id,
                 ProjectMember.user_id == normalized_assignee_id,
             )
         ).scalar_one_or_none()
-    normalized_role = str(membership or "").strip()
+    normalized_role = canonicalize_role(membership)
     return normalized_role or None
 
 
@@ -757,25 +802,23 @@ def execute_task_automation(
     )
     command = shlex.split(AGENT_CODEX_COMMAND)
     project_name, project_description, project_rules, project_skills = _load_project_context(project_id)
-    gate_policy_json, gate_policy_required_checks = _extract_gate_policy_context(project_rules)
+    (
+        project_team_mode_enabled,
+        project_git_delivery_enabled,
+        plugin_policy_json,
+        plugin_policy_required_checks,
+    ) = _load_project_plugin_runtime(project_id)
     actor_project_role = _resolve_actor_project_role(actor_user_id=actor_user_id, project_id=project_id)
     assignee_project_role = (
         _resolve_task_assignee_project_role(task_id=task_id, project_id=project_id)
         or actor_project_role
     )
-    workflow_skill_keys = plugin_executor_policy.workflow_plugin_skill_keys()
-    project_team_mode_enabled = any(
-        str(item.get("skill_key") or "").strip().lower() in workflow_skill_keys for item in project_skills
-    )
-    project_git_delivery_enabled = any(
-        str(item.get("skill_key") or "").strip().lower() == "git_delivery" for item in project_skills
-    ) or any(str(item.get("skill_key") or "").strip().lower() == "team_mode" for item in project_skills)
     team_mode_enabled = _is_task_scoped_team_mode_context_enabled(
         project_team_mode_enabled=project_team_mode_enabled,
         assignee_project_role=assignee_project_role,
     )
     git_delivery_enabled = bool(project_git_delivery_enabled)
-    effective_gate_policy_required_checks = gate_policy_required_checks if team_mode_enabled else []
+    effective_plugin_policy_required_checks = plugin_policy_required_checks if team_mode_enabled else []
     task_workdir: str | None = None
     task_branch: str | None = None
     repo_root: str | None = None
@@ -841,8 +884,8 @@ def execute_task_automation(
         "project_skills": project_skills,
         "team_mode_enabled": team_mode_enabled,
         "git_delivery_enabled": git_delivery_enabled,
-        "gate_policy_json": gate_policy_json,
-        "gate_policy_required_checks": effective_gate_policy_required_checks,
+        "plugin_policy_json": plugin_policy_json,
+        "plugin_required_checks": effective_plugin_policy_required_checks,
         "graph_context_markdown": graph_context_markdown,
         "graph_evidence_json": graph_evidence_json,
         "graph_summary_markdown": graph_summary_markdown,
@@ -941,25 +984,23 @@ def execute_task_automation_stream(
     )
     command = shlex.split(AGENT_CODEX_COMMAND)
     project_name, project_description, project_rules, project_skills = _load_project_context(project_id)
-    gate_policy_json, gate_policy_required_checks = _extract_gate_policy_context(project_rules)
+    (
+        project_team_mode_enabled,
+        project_git_delivery_enabled,
+        plugin_policy_json,
+        plugin_policy_required_checks,
+    ) = _load_project_plugin_runtime(project_id)
     actor_project_role = _resolve_actor_project_role(actor_user_id=actor_user_id, project_id=project_id)
     assignee_project_role = (
         _resolve_task_assignee_project_role(task_id=task_id, project_id=project_id)
         or actor_project_role
     )
-    workflow_skill_keys = plugin_executor_policy.workflow_plugin_skill_keys()
-    project_team_mode_enabled = any(
-        str(item.get("skill_key") or "").strip().lower() in workflow_skill_keys for item in project_skills
-    )
-    project_git_delivery_enabled = any(
-        str(item.get("skill_key") or "").strip().lower() == "git_delivery" for item in project_skills
-    ) or any(str(item.get("skill_key") or "").strip().lower() == "team_mode" for item in project_skills)
     team_mode_enabled = _is_task_scoped_team_mode_context_enabled(
         project_team_mode_enabled=project_team_mode_enabled,
         assignee_project_role=assignee_project_role,
     )
     git_delivery_enabled = bool(project_git_delivery_enabled)
-    effective_gate_policy_required_checks = gate_policy_required_checks if team_mode_enabled else []
+    effective_plugin_policy_required_checks = plugin_policy_required_checks if team_mode_enabled else []
     task_workdir: str | None = None
     task_branch: str | None = None
     repo_root: str | None = None
@@ -1028,8 +1069,8 @@ def execute_task_automation_stream(
         "project_skills": project_skills,
         "team_mode_enabled": team_mode_enabled,
         "git_delivery_enabled": git_delivery_enabled,
-        "gate_policy_json": gate_policy_json,
-        "gate_policy_required_checks": effective_gate_policy_required_checks,
+        "plugin_policy_json": plugin_policy_json,
+        "plugin_required_checks": effective_plugin_policy_required_checks,
         "graph_context_markdown": graph_context_markdown,
         "graph_evidence_json": graph_evidence_json,
         "graph_summary_markdown": graph_summary_markdown,

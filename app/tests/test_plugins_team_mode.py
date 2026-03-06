@@ -20,12 +20,12 @@ def test_workflow_plugin_registry_includes_team_mode() -> None:
     _clear_plugin_registry_cache()
 
 
-def test_default_gate_policy_and_catalog_include_team_mode_plugin_scope() -> None:
+def test_default_plugin_policy_and_catalog_include_team_mode_plugin_scope() -> None:
     _clear_plugin_registry_cache()
-    assert "team_mode" in gates_module.DEFAULT_GATE_POLICY.get("required_checks", {})
-    assert "team_mode" in gates_module.DEFAULT_GATE_POLICY.get("available_checks", {})
+    assert "team_mode" in gates_module.DEFAULT_PLUGIN_POLICY.get("required_checks", {})
+    assert "team_mode" in gates_module.DEFAULT_PLUGIN_POLICY.get("available_checks", {})
 
-    catalog = gates_module.gate_check_catalog_by_scope()
+    catalog = gates_module.plugin_check_catalog_by_scope()
     assert "team_mode" in catalog
     assert any(item["id"] == "dev_self_triggers_to_lead" for item in catalog["team_mode"])
     _clear_plugin_registry_cache()
@@ -36,7 +36,7 @@ def test_workflow_plugin_registry_respects_enabled_plugins_env_list(monkeypatch)
     _clear_plugin_registry_cache()
     plugins = plugin_registry.list_workflow_plugins()
     keys = {str(getattr(plugin, "key", "")).strip() for plugin in plugins}
-    assert keys == {"team_mode", "git_delivery"}
+    assert keys == {"team_mode"}
     _clear_plugin_registry_cache()
 
 
@@ -109,10 +109,10 @@ def test_task_policy_dispatches_team_mode_cleanup_rules() -> None:
     _clear_plugin_registry_cache()
 
 
-def test_skill_policy_dispatches_team_mode_dependencies_and_gate_patch() -> None:
+def test_skill_policy_dispatches_no_team_mode_or_git_delivery_dependency() -> None:
     _clear_plugin_registry_cache()
     deps = plugin_skill_policy.skill_dependencies()
-    assert deps.get("team_mode") == ("git_delivery",)
-    patch = plugin_skill_policy.build_gate_policy_patch_for_skill_keys({"team_mode"})
-    assert patch.get("evaluation", {}).get("mode") == "llm_authoritative"
+    assert deps.get("team_mode") is None
+    patch = plugin_skill_policy.build_plugin_policy_patch_for_skill_keys({"team_mode"})
+    assert patch == {}
     _clear_plugin_registry_cache()

@@ -92,6 +92,17 @@ function normalizeAttachmentRefsForDirtyCheck(
 }
 
 export function useEditorGuards(c: any) {
+  const requestDiscardChanges = React.useCallback((message: string, onConfirm: () => void): boolean => {
+    if (typeof c.requestDiscardChanges === 'function') {
+      c.requestDiscardChanges(message, onConfirm)
+      return false
+    }
+    if (typeof window === 'undefined') return true
+    if (!window.confirm(message)) return false
+    onConfirm()
+    return true
+  }, [c.requestDiscardChanges])
+
   const toggleCreateProjectMember = React.useCallback((userIdToToggle: string) => {
     const id = String(userIdToToggle || '').trim()
     if (!id) return
@@ -243,6 +254,7 @@ export function useEditorGuards(c: any) {
       project_id: String(c.editProjectId || baselineTask.project_id || ''),
       task_group_id: c.editTaskGroupId || null,
       assignee_id: c.editAssigneeId || null,
+      assigned_agent_code: c.editAssigneeId ? (c.editAssignedAgentCode || null) : null,
       labels: c.editTaskTags,
       due_date: c.editDueDate || '',
       task_type: c.editTaskType,
@@ -274,6 +286,7 @@ export function useEditorGuards(c: any) {
       project_id: String(baselineTask.project_id || ''),
       task_group_id: baselineTask.task_group_id ?? null,
       assignee_id: baselineTask.assignee_id ?? null,
+      assigned_agent_code: baselineTask.assigned_agent_code ?? null,
       labels: baselineTask.labels ?? [],
       due_date: toLocalDateTimeInput(baselineTask.due_date),
       task_type: baselineTask.task_type ?? 'manual',
@@ -308,6 +321,7 @@ export function useEditorGuards(c: any) {
     c.editProjectId,
     c.editTaskGroupId,
     c.editAssigneeId,
+    c.editAssignedAgentCode,
     c.editRecurringEvery,
     c.editRecurringUnit,
     c.editScheduledAtUtc,
@@ -337,56 +351,88 @@ export function useEditorGuards(c: any) {
   ])
 
   const confirmDiscardChanges = React.useCallback(() => {
-    if (typeof window === 'undefined') return true
-    return window.confirm('You have unsaved changes. Discard them?')
-  }, [])
+    return requestDiscardChanges('You have unsaved changes. Discard them?', () => undefined)
+  }, [requestDiscardChanges])
 
   const closeTaskEditor = React.useCallback(() => {
-    if (taskIsDirty && !confirmDiscardChanges()) return false
+    if (taskIsDirty) {
+      return requestDiscardChanges('You have unsaved task changes. Discard them?', () => {
+        c.setSelectedTaskId(null)
+        c.setTaskEditorError(null)
+      })
+    }
     c.setSelectedTaskId(null)
     c.setTaskEditorError(null)
     return true
-  }, [c.setSelectedTaskId, c.setTaskEditorError, confirmDiscardChanges, taskIsDirty])
+  }, [c.setSelectedTaskId, c.setTaskEditorError, requestDiscardChanges, taskIsDirty])
 
   const openTaskEditor = React.useCallback((taskId: string) => {
     if (c.selectedTaskId === taskId) return true
-    if (c.selectedTaskId && taskIsDirty && !confirmDiscardChanges()) return false
+    if (c.selectedTaskId && taskIsDirty) {
+      return requestDiscardChanges('You have unsaved task changes. Discard them?', () => {
+        c.setSelectedTaskId(taskId)
+        c.setTaskEditorError(null)
+      })
+    }
     c.setSelectedTaskId(taskId)
     c.setTaskEditorError(null)
     return true
-  }, [c.selectedTaskId, c.setSelectedTaskId, c.setTaskEditorError, confirmDiscardChanges, taskIsDirty])
+  }, [c.selectedTaskId, c.setSelectedTaskId, c.setTaskEditorError, requestDiscardChanges, taskIsDirty])
 
   const toggleNoteEditor = React.useCallback((noteId: string) => {
     if (c.selectedNoteId === noteId) {
-      if (noteIsDirty && !confirmDiscardChanges()) return false
+      if (noteIsDirty) {
+        return requestDiscardChanges('You have unsaved note changes. Discard them?', () => {
+          c.setSelectedNoteId(null)
+        })
+      }
       c.setSelectedNoteId(null)
       return true
     }
-    if (c.selectedNoteId && noteIsDirty && !confirmDiscardChanges()) return false
+    if (c.selectedNoteId && noteIsDirty) {
+      return requestDiscardChanges('You have unsaved note changes. Discard them?', () => {
+        c.setSelectedNoteId(noteId)
+      })
+    }
     c.setSelectedNoteId(noteId)
     return true
-  }, [c.selectedNoteId, c.setSelectedNoteId, confirmDiscardChanges, noteIsDirty])
+  }, [c.selectedNoteId, c.setSelectedNoteId, requestDiscardChanges, noteIsDirty])
 
   const toggleSpecificationEditor = React.useCallback((specificationId: string) => {
     if (c.selectedSpecificationId === specificationId) {
-      if (specificationIsDirty && !confirmDiscardChanges()) return false
+      if (specificationIsDirty) {
+        return requestDiscardChanges('You have unsaved specification changes. Discard them?', () => {
+          c.setSelectedSpecificationId(null)
+        })
+      }
       c.setSelectedSpecificationId(null)
       return true
     }
-    if (c.selectedSpecificationId && specificationIsDirty && !confirmDiscardChanges()) return false
+    if (c.selectedSpecificationId && specificationIsDirty) {
+      return requestDiscardChanges('You have unsaved specification changes. Discard them?', () => {
+        c.setSelectedSpecificationId(specificationId)
+      })
+    }
     c.setSelectedSpecificationId(specificationId)
     return true
   }, [
     c.selectedSpecificationId,
     c.setSelectedSpecificationId,
     specificationIsDirty,
-    confirmDiscardChanges,
+    requestDiscardChanges,
   ])
 
   const toggleProjectEditor = React.useCallback((projectId: string) => {
+    const hasProjectUnsavedChanges = projectIsDirty || Boolean(c.projectEditorHasUnsavedChanges)
     if (c.selectedProjectId === projectId) {
       if (c.showProjectEditForm) {
-        if (projectIsDirty && !confirmDiscardChanges()) return false
+        if (hasProjectUnsavedChanges) {
+          return requestDiscardChanges('You have unsaved project changes. Discard them?', () => {
+            if (typeof c.setProjectEditorHasUnsavedChanges === 'function') c.setProjectEditorHasUnsavedChanges(false)
+            c.setShowProjectEditForm(false)
+          })
+        }
+        if (typeof c.setProjectEditorHasUnsavedChanges === 'function') c.setProjectEditorHasUnsavedChanges(false)
         c.setShowProjectEditForm(false)
         return true
       }
@@ -394,17 +440,35 @@ export function useEditorGuards(c: any) {
       c.setShowProjectEditForm(true)
       return true
     }
-    if (c.showProjectEditForm && projectIsDirty && !confirmDiscardChanges()) return false
+    if (c.showProjectEditForm && hasProjectUnsavedChanges) {
+      return requestDiscardChanges('You have unsaved project changes. Discard them?', () => {
+        if (typeof c.setProjectEditorHasUnsavedChanges === 'function') c.setProjectEditorHasUnsavedChanges(false)
+        c.setSelectedProjectId(projectId)
+        c.setShowProjectEditForm(false)
+      })
+    }
+    if (typeof c.setProjectEditorHasUnsavedChanges === 'function') c.setProjectEditorHasUnsavedChanges(false)
     c.setSelectedProjectId(projectId)
     c.setShowProjectEditForm(false)
     return true
-  }, [c.selectedProjectId, c.showProjectEditForm, c.setShowProjectEditForm, c.setShowProjectCreateForm, c.setSelectedProjectId, confirmDiscardChanges, projectIsDirty])
+  }, [
+    c.selectedProjectId,
+    c.showProjectEditForm,
+    c.setShowProjectEditForm,
+    c.setShowProjectCreateForm,
+    c.setSelectedProjectId,
+    c.setProjectEditorHasUnsavedChanges,
+    c.projectEditorHasUnsavedChanges,
+    requestDiscardChanges,
+    projectIsDirty,
+  ])
 
   return {
     toggleCreateProjectMember,
     toggleEditProjectMember,
     projectIsDirty,
     noteIsDirty,
+    specificationIsDirty,
     taskIsDirty,
     confirmDiscardChanges,
     closeTaskEditor,

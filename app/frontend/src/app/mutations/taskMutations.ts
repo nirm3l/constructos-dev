@@ -57,6 +57,7 @@ export function useTaskMutations(c: any) {
       due_date?: string | null
       priority?: string
       labels?: string[]
+      instruction?: string | null
       task_type?: 'manual' | 'scheduled_instruction'
       scheduled_instruction?: string | null
       scheduled_at_utc?: string | null
@@ -111,8 +112,12 @@ export function useTaskMutations(c: any) {
             : effectiveTaskType === 'scheduled_instruction'
               ? resolvedTimezone
               : null
+        const instruction =
+          payload?.instruction !== undefined
+            ? payload.instruction
+            : (String(c.quickTaskScheduledInstruction || '').trim() || null)
 
-        return createTask(c.userId, {
+        const createPayload: Parameters<typeof createTask>[1] = {
           title: payload?.title?.trim() || c.taskTitle.trim(),
           workspace_id: c.workspaceId,
           project_id: payload?.project_id || c.quickProjectId || c.selectedProjectId,
@@ -124,12 +129,16 @@ export function useTaskMutations(c: any) {
           labels: payload?.labels ?? c.quickTaskTags,
           external_refs: c.parseExternalRefsText(c.quickTaskExternalRefsText),
           attachment_refs: c.parseAttachmentRefsText(c.quickTaskAttachmentRefsText),
-          recurring_rule: payload?.recurring_rule ?? null,
+          instruction,
           task_type: effectiveTaskType,
-          scheduled_instruction: scheduledInstruction,
-          scheduled_at_utc: scheduledAtUtc,
-          schedule_timezone: scheduleTimezone,
-        })
+        }
+        if (effectiveTaskType === 'scheduled_instruction') {
+          createPayload.recurring_rule = payload?.recurring_rule ?? null
+          createPayload.scheduled_instruction = scheduledInstruction
+          createPayload.scheduled_at_utc = scheduledAtUtc
+          createPayload.schedule_timezone = scheduleTimezone
+        }
+        return createTask(c.userId, createPayload)
       },
     onSuccess: async (task, payload) => {
       c.setUiError(null)

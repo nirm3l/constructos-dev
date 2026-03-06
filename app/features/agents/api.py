@@ -7,7 +7,6 @@ import mimetypes
 import os
 import queue
 import re
-from copy import deepcopy
 from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,7 +23,6 @@ from sqlalchemy.orm import Session
 from plugins import api_policy as plugin_api_policy
 from shared.core import (
     AgentChatRun,
-    ProjectRuleCreate,
     User,
     ensure_project_access,
     ensure_role,
@@ -39,8 +37,7 @@ from shared.models import (
     CommandExecution,
     Note,
     Project,
-    ProjectSkill,
-    ProjectRule,
+    ProjectPluginConfig,
     Task,
 )
 from shared.in_memory_stream_broker import InMemoryStreamBroker
@@ -54,21 +51,18 @@ from shared.settings import (
 
 from .executor import AutomationOutcome, execute_task_automation, execute_task_automation_stream
 from .codex_mcp_adapter import run_structured_codex_prompt
-from .mcp_registry import normalize_chat_mcp_servers as normalize_chat_mcp_servers_registry
+from .mcp_registry import (
+    filter_mcp_servers_for_project_plugins as filter_mcp_servers_for_project_plugins_registry,
+    normalize_chat_mcp_servers as normalize_chat_mcp_servers_registry,
+)
+from .gateway import build_ui_gateway
 from features.chat.application import ChatApplicationService
-from features.rules.application import ProjectRuleApplicationService
 from features.chat.command_handlers import (
     AppendAssistantMessagePayload,
     AppendUserMessagePayload,
     LinkMessageResourcePayload,
 )
-from features.agents.gates import (
-    DEFAULT_GATE_POLICY,
-    default_required_delivery_checks,
-    filter_gate_policy_scopes,
-    normalize_delivery_required_checks,
-    parse_gate_policy_rule,
-)
+from features.agents.gates import default_required_delivery_checks, normalize_delivery_required_checks
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -139,10 +133,24 @@ _CHAT_STREAM_CANCEL_LOCK = threading.Lock()
 _CHAT_STREAM_CANCEL_EVENTS: dict[str, threading.Event] = {}
 _CHAT_STREAM_CANCEL_BY_KEY: dict[str, tuple[str, threading.Event]] = {}
 _CHAT_STREAM_STOP_REQUESTED_BY_KEY: dict[str, bool] = {}
+_PROJECT_SETUP_STARTER_NEXT_QUESTION = "What should the new project be named?"
 
 
 def _chat_stream_key(*, workspace_id: str, session_id: str) -> str:
     return f"{str(workspace_id or '').strip()}::{str(session_id or '').strip()}"
+
+
+def _is_project_setup_starter_instruction(instruction: str) -> bool:
+    normalized = str(instruction or "").strip().casefold()
+    if not normalized:
+        return False
+    if "setup_project_orchestration" not in normalized:
+        return False
+    return (
+        "set up a new project" in normalized
+        or "create a new project" in normalized
+        or "start project setup" in normalized
+    )
 
 
 def _create_chat_stream_run(*, stream_key: str, preferred_run_id: str | None = None) -> str:
@@ -290,9 +298,17 @@ def _chat_timeout_summary() -> str:
     return "Codex execution timed out."
 
 
-def _normalize_chat_mcp_servers(raw_servers: list[str] | None) -> list[str]:
+def _normalize_chat_mcp_servers(
+    raw_servers: list[str] | None,
+    *,
+    project_id: str | None = None,
+) -> list[str]:
     try:
-        return normalize_chat_mcp_servers_registry(raw_servers, strict=True)
+        normalized = normalize_chat_mcp_servers_registry(raw_servers, strict=True)
+        return filter_mcp_servers_for_project_plugins_registry(
+            project_id=project_id,
+            selected_servers=normalized,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1353,6 +1369,65 @@ def _build_chat_error_summary() -> str:
     return _render_prompt_template("chat_error_summary.md", {}).strip()
 
 
+def _extract_missing_setup_question(error_text: str) -> str | None:
+    raw = str(error_text or "").strip()
+    if not raw:
+        return None
+
+    def _extract_from_dict(payload: dict[str, object]) -> str | None:
+        code = str(payload.get("code") or "").strip().lower()
+        if code != "missing_setup_inputs":
+            return None
+        question = str(payload.get("next_question") or "").strip()
+        if question:
+            return question
+        missing = payload.get("missing_inputs")
+        if isinstance(missing, list):
+            for item in missing:
+                if not isinstance(item, dict):
+                    continue
+                question_text = str(item.get("question") or "").strip()
+                if question_text:
+                    return question_text
+        return None
+
+    try:
+        parsed_direct = json.loads(raw)
+    except Exception:
+        parsed_direct = None
+    if isinstance(parsed_direct, dict):
+        extracted = _extract_from_dict(parsed_direct)
+        if extracted:
+            return extracted
+
+    decoder = json.JSONDecoder()
+    for index in range(len(raw)):
+        if raw[index] != "{":
+            continue
+        try:
+            candidate, _ = decoder.raw_decode(raw[index:])
+        except Exception:
+            continue
+        if isinstance(candidate, dict):
+            extracted = _extract_from_dict(candidate)
+            if extracted:
+                return extracted
+
+    match = re.search(r'"next_question"\s*:\s*"([^"]+)"', raw)
+    if match:
+        fallback_question = str(match.group(1) or "").strip()
+        if fallback_question:
+            return fallback_question
+    return None
+
+
+def _map_chat_exception_to_response(exc: Exception) -> tuple[bool, str, str | None]:
+    missing_setup_question = _extract_missing_setup_question(str(exc))
+    if missing_setup_question:
+        return True, missing_setup_question, None
+    return False, _build_chat_error_summary(), str(exc).strip()[:500]
+
+
 def _build_team_lead_kickoff_instruction(*, project_id: str, requester_user_id: str) -> str:
     return _render_prompt_template(
         "team_mode_kickoff_instruction.md",
@@ -1482,7 +1557,7 @@ def _resolve_runtime_deploy_target_from_project_artifacts(
     return resolved_stack, resolved_port, resolved_health_path
 
 
-def _promote_gate_policy_to_execution_mode_if_needed(
+def _promote_plugin_policy_to_execution_mode_if_needed(
     *,
     db: Session,
     user: User,
@@ -1490,136 +1565,101 @@ def _promote_gate_policy_to_execution_mode_if_needed(
     project_id: str,
     command_id: str | None,
 ) -> None:
-    enabled_skill_keys = {
-        str(item or "").strip().lower()
-        for item in db.execute(
-            select(ProjectSkill.skill_key).where(
-                ProjectSkill.workspace_id == workspace_id,
-                ProjectSkill.project_id == project_id,
-                ProjectSkill.enabled == True,  # noqa: E712
-                ProjectSkill.is_deleted == False,  # noqa: E712
-            )
-        ).scalars().all()
-        if str(item or "").strip()
-    }
-    effective_scopes = {"delivery"}
-    if "team_mode" in enabled_skill_keys:
-        effective_scopes.add("team_mode")
-
-    project_rules = db.execute(
-        select(ProjectRule)
-        .where(
-            ProjectRule.workspace_id == workspace_id,
-            ProjectRule.project_id == project_id,
-            ProjectRule.is_deleted == False,  # noqa: E712
+    plugin_rows = db.execute(
+        select(ProjectPluginConfig).where(
+            ProjectPluginConfig.workspace_id == workspace_id,
+            ProjectPluginConfig.project_id == project_id,
+            ProjectPluginConfig.plugin_key.in_(["team_mode", "git_delivery", "docker_compose"]),
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
         )
-        .order_by(ProjectRule.updated_at.desc(), ProjectRule.id.desc())
     ).scalars().all()
-    gate_policy, _source = parse_gate_policy_rule(project_rules=project_rules)
-    if not isinstance(gate_policy, dict):
-        gate_policy = deepcopy(DEFAULT_GATE_POLICY)
-    gate_policy = filter_gate_policy_scopes(gate_policy, include_scopes=effective_scopes)
-    required_checks_raw = gate_policy.get("required_checks")
-    if not isinstance(required_checks_raw, dict):
-        required_checks_raw = {}
-    delivery_required = required_checks_raw.get("delivery")
-    delivery_checks = (
-        [str(item or "").strip() for item in delivery_required if str(item or "").strip()]
-        if isinstance(delivery_required, list)
-        else []
-    )
-    mode_value = str(gate_policy.get("mode") or "").strip().lower()
-    runtime_cfg = gate_policy.get("runtime_deploy_health")
-    runtime_policy = dict(runtime_cfg) if isinstance(runtime_cfg, dict) else {}
-    runtime_stack = str(runtime_policy.get("stack") or "").strip() or None
-    runtime_port_raw = runtime_policy.get("port")
-    runtime_port: int | None = None
-    if isinstance(runtime_port_raw, int):
-        runtime_port = runtime_port_raw if 1 <= int(runtime_port_raw) <= 65535 else None
-    elif isinstance(runtime_port_raw, str) and runtime_port_raw.strip().isdigit():
-        parsed_port = int(runtime_port_raw.strip())
-        runtime_port = parsed_port if 1 <= parsed_port <= 65535 else None
-    runtime_health_path = str(runtime_policy.get("health_path") or "").strip() or None
+    row_by_key = {
+        str(getattr(row, "plugin_key", "") or "").strip().lower(): row
+        for row in plugin_rows
+        if str(getattr(row, "plugin_key", "") or "").strip()
+    }
+    team_mode_enabled = bool(getattr(row_by_key.get("team_mode"), "enabled", False))
+    git_delivery_enabled = bool(getattr(row_by_key.get("git_delivery"), "enabled", False))
+    if not (team_mode_enabled or git_delivery_enabled):
+        return
+
+    git_delivery_config: dict[str, object] = {}
+    git_delivery_row = row_by_key.get("git_delivery")
+    if git_delivery_row is not None:
+        try:
+            parsed = json.loads(str(getattr(git_delivery_row, "config_json", "") or "").strip() or "{}")
+            if isinstance(parsed, dict):
+                git_delivery_config = dict(parsed)
+        except Exception:
+            git_delivery_config = {}
 
     detected_stack, detected_port, detected_health_path = _resolve_runtime_deploy_target_from_project_artifacts(
         db=db,
         workspace_id=workspace_id,
         project_id=project_id,
     )
-    runtime_updates: dict[str, object] = {}
-    if not runtime_stack and detected_stack:
-        runtime_updates["stack"] = detected_stack
-    if runtime_port is None and detected_port is not None:
-        runtime_updates["port"] = detected_port
-    if not runtime_health_path and detected_health_path:
-        runtime_updates["health_path"] = detected_health_path
-
+    required_checks_cfg = (
+        dict(git_delivery_config.get("required_checks"))
+        if isinstance(git_delivery_config.get("required_checks"), dict)
+        else {}
+    )
+    delivery_checks_raw = required_checks_cfg.get("delivery")
+    delivery_checks = (
+        [str(item or "").strip() for item in delivery_checks_raw if str(item or "").strip()]
+        if isinstance(delivery_checks_raw, list)
+        else []
+    )
     normalized_delivery_checks = normalize_delivery_required_checks(
-        delivery_checks,
-        team_mode_enabled=("team_mode" in enabled_skill_keys),
+        delivery_checks if delivery_checks else default_required_delivery_checks(team_mode_enabled=team_mode_enabled),
+        team_mode_enabled=team_mode_enabled,
     )
-    needs_update = (
-        mode_value != "execution"
-        or not normalized_delivery_checks
-        or normalized_delivery_checks != delivery_checks
-        or bool(runtime_updates)
-    )
-    if not needs_update:
-        return
+    required_checks_cfg["delivery"] = normalized_delivery_checks
+    git_delivery_config["required_checks"] = required_checks_cfg
+    git_delivery_config["evaluation"] = {"mode": "deterministic"}
 
-    updated_policy = deepcopy(gate_policy)
-    updated_policy["mode"] = "execution"
-    updated_required_checks = updated_policy.get("required_checks")
-    if not isinstance(updated_required_checks, dict):
-        updated_required_checks = {}
-    if normalized_delivery_checks:
-        updated_required_checks["delivery"] = normalized_delivery_checks
-    else:
-        updated_required_checks["delivery"] = default_required_delivery_checks(
-            team_mode_enabled=("team_mode" in enabled_skill_keys)
-        )
-    updated_policy["required_checks"] = updated_required_checks
-    updated_runtime_cfg = updated_policy.get("runtime_deploy_health")
-    updated_runtime = dict(updated_runtime_cfg) if isinstance(updated_runtime_cfg, dict) else {}
-    if runtime_updates:
-        updated_runtime.update(runtime_updates)
-    if updated_runtime:
-        updated_policy["runtime_deploy_health"] = updated_runtime
-    body = json.dumps(updated_policy, ensure_ascii=False, indent=2)
-
-    ProjectRuleApplicationService(
-        db,
-        user,
-        command_id=_command_id_with_suffix(command_id, "gate-policy-execution"),
-    ).create_project_rule(
-        ProjectRuleCreate(
-            workspace_id=workspace_id,
-            project_id=project_id,
-            title="Gate Policy",
-            body=body,
-        )
+    build_ui_gateway(actor_user_id=user.id).apply_project_plugin_config(
+        project_id=project_id,
+        workspace_id=workspace_id,
+        plugin_key="git_delivery",
+        config=git_delivery_config,
+        enabled=True,
     )
 
-    updated_rules = db.execute(
-        select(ProjectRule)
-        .where(
-            ProjectRule.workspace_id == workspace_id,
-            ProjectRule.project_id == project_id,
-            ProjectRule.is_deleted == False,  # noqa: E712
-        )
-        .order_by(ProjectRule.updated_at.desc(), ProjectRule.id.desc())
-    ).scalars().all()
-    readback_policy, _readback_source = parse_gate_policy_rule(project_rules=updated_rules)
-    readback_mode = str(readback_policy.get("mode") or "").strip().lower()
-    if readback_mode != "execution":
-        logger.warning(
-            "Gate Policy promotion readback mismatch for project %s: mode=%s",
-            project_id,
-            readback_mode,
-        )
+    docker_compose_config: dict[str, object] = {}
+    docker_compose_row = row_by_key.get("docker_compose")
+    if docker_compose_row is not None:
+        try:
+            parsed = json.loads(str(getattr(docker_compose_row, "config_json", "") or "").strip() or "{}")
+            if isinstance(parsed, dict):
+                docker_compose_config = dict(parsed)
+        except Exception:
+            docker_compose_config = {}
+    runtime_cfg = (
+        dict(docker_compose_config.get("runtime_deploy_health"))
+        if isinstance(docker_compose_config.get("runtime_deploy_health"), dict)
+        else {}
+    )
+    if "required" not in runtime_cfg:
+        runtime_cfg["required"] = bool(team_mode_enabled)
+    if not str(runtime_cfg.get("stack") or "").strip() and detected_stack:
+        runtime_cfg["stack"] = detected_stack
+    runtime_port_raw = runtime_cfg.get("port")
+    has_valid_port = isinstance(runtime_port_raw, int) and 1 <= int(runtime_port_raw) <= 65535
+    if not has_valid_port and detected_port is not None:
+        runtime_cfg["port"] = int(detected_port)
+    if not str(runtime_cfg.get("health_path") or "").strip() and detected_health_path:
+        runtime_cfg["health_path"] = detected_health_path
+    docker_compose_config["runtime_deploy_health"] = runtime_cfg
+    build_ui_gateway(actor_user_id=user.id).apply_project_plugin_config(
+        project_id=project_id,
+        workspace_id=workspace_id,
+        plugin_key="docker_compose",
+        config=docker_compose_config,
+        enabled=True,
+    )
 
 
-def _sync_gate_policy_runtime_target_if_needed(
+def _sync_plugin_runtime_target_if_needed(
     *,
     db: Session,
     user: User,
@@ -1627,81 +1667,56 @@ def _sync_gate_policy_runtime_target_if_needed(
     project_id: str,
     command_id: str | None,
 ) -> bool:
-    enabled_skill_keys = {
-        str(item or "").strip().lower()
-        for item in db.execute(
-            select(ProjectSkill.skill_key).where(
-                ProjectSkill.workspace_id == workspace_id,
-                ProjectSkill.project_id == project_id,
-                ProjectSkill.enabled == True,  # noqa: E712
-                ProjectSkill.is_deleted == False,  # noqa: E712
-            )
-        ).scalars().all()
-        if str(item or "").strip()
-    }
-    effective_scopes = {"delivery"}
-    if "team_mode" in enabled_skill_keys:
-        effective_scopes.add("team_mode")
-
-    project_rules = db.execute(
-        select(ProjectRule)
-        .where(
-            ProjectRule.workspace_id == workspace_id,
-            ProjectRule.project_id == project_id,
-            ProjectRule.is_deleted == False,  # noqa: E712
+    row = db.execute(
+        select(ProjectPluginConfig).where(
+            ProjectPluginConfig.workspace_id == workspace_id,
+            ProjectPluginConfig.project_id == project_id,
+            ProjectPluginConfig.plugin_key == "docker_compose",
+            ProjectPluginConfig.enabled == True,  # noqa: E712
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
         )
-        .order_by(ProjectRule.updated_at.desc(), ProjectRule.id.desc())
-    ).scalars().all()
-    gate_policy, _source = parse_gate_policy_rule(project_rules=project_rules)
-    if not isinstance(gate_policy, dict):
-        gate_policy = deepcopy(DEFAULT_GATE_POLICY)
-    gate_policy = filter_gate_policy_scopes(gate_policy, include_scopes=effective_scopes)
+    ).scalar_one_or_none()
+    if row is None:
+        return False
+    config: dict[str, object] = {}
+    try:
+        parsed = json.loads(str(getattr(row, "config_json", "") or "").strip() or "{}")
+        if isinstance(parsed, dict):
+            config = dict(parsed)
+    except Exception:
+        config = {}
 
-    runtime_cfg = gate_policy.get("runtime_deploy_health")
-    runtime_policy = dict(runtime_cfg) if isinstance(runtime_cfg, dict) else {}
-    runtime_stack = str(runtime_policy.get("stack") or "").strip() or None
-    runtime_port_raw = runtime_policy.get("port")
-    runtime_port: int | None = None
-    if isinstance(runtime_port_raw, int):
-        runtime_port = runtime_port_raw if 1 <= int(runtime_port_raw) <= 65535 else None
-    elif isinstance(runtime_port_raw, str) and runtime_port_raw.strip().isdigit():
-        parsed_port = int(runtime_port_raw.strip())
-        runtime_port = parsed_port if 1 <= parsed_port <= 65535 else None
-    runtime_health_path = str(runtime_policy.get("health_path") or "").strip() or None
+    runtime_cfg = dict(config.get("runtime_deploy_health")) if isinstance(config.get("runtime_deploy_health"), dict) else {}
+    runtime_stack = str(runtime_cfg.get("stack") or "").strip() or None
+    runtime_port_raw = runtime_cfg.get("port")
+    runtime_health_path = str(runtime_cfg.get("health_path") or "").strip() or None
+    has_valid_port = isinstance(runtime_port_raw, int) and 1 <= int(runtime_port_raw) <= 65535
 
     detected_stack, detected_port, detected_health_path = _resolve_runtime_deploy_target_from_project_artifacts(
         db=db,
         workspace_id=workspace_id,
         project_id=project_id,
     )
-    runtime_updates: dict[str, object] = {}
+    changed = False
     if not runtime_stack and detected_stack:
-        runtime_updates["stack"] = detected_stack
-    if runtime_port is None and detected_port is not None:
-        runtime_updates["port"] = detected_port
+        runtime_cfg["stack"] = detected_stack
+        changed = True
+    if not has_valid_port and detected_port is not None:
+        runtime_cfg["port"] = int(detected_port)
+        changed = True
     if not runtime_health_path and detected_health_path:
-        runtime_updates["health_path"] = detected_health_path
-    if not runtime_updates:
+        runtime_cfg["health_path"] = detected_health_path
+        changed = True
+    if not changed:
         return False
 
-    updated_policy = deepcopy(gate_policy)
-    updated_runtime_cfg = updated_policy.get("runtime_deploy_health")
-    updated_runtime = dict(updated_runtime_cfg) if isinstance(updated_runtime_cfg, dict) else {}
-    updated_runtime.update(runtime_updates)
-    updated_policy["runtime_deploy_health"] = updated_runtime
-    body = json.dumps(updated_policy, ensure_ascii=False, indent=2)
-
-    ProjectRuleApplicationService(
-        db,
-        user,
-        command_id=_command_id_with_suffix(command_id, "gate-policy-runtime-sync"),
-    ).create_project_rule(
-        ProjectRuleCreate(
-            workspace_id=workspace_id,
-            project_id=project_id,
-            title="Gate Policy",
-            body=body,
-        )
+    config["runtime_deploy_health"] = runtime_cfg
+    build_ui_gateway(actor_user_id=user.id).apply_project_plugin_config(
+        project_id=project_id,
+        workspace_id=workspace_id,
+        plugin_key="docker_compose",
+        config=config,
+        enabled=True,
     )
     return True
 
@@ -2131,7 +2146,10 @@ def agent_chat(
         instruction=payload.instruction,
     )
     model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
-    mcp_servers = _normalize_chat_mcp_servers(payload.mcp_servers)
+    mcp_servers = _normalize_chat_mcp_servers(
+        payload.mcp_servers,
+        project_id=effective_project_id,
+    )
     existing_codex_session_id, resume_last_succeeded = _load_chat_session_codex_state(
         db=db,
         workspace_id=payload.workspace_id,
@@ -2176,6 +2194,33 @@ def agent_chat(
         )
     )
 
+    if _is_project_setup_starter_instruction(payload.instruction):
+        summary = _PROJECT_SETUP_STARTER_NEXT_QUESTION
+        _persist_assistant_message_with_links(
+            db=db,
+            user=user,
+            command_id=command_id,
+            workspace_id=payload.workspace_id,
+            project_id=effective_project_id,
+            session_id=session_id,
+            mcp_servers=mcp_servers,
+            content=summary,
+            usage={},
+            codex_session_id=None,
+        )
+        return {
+            "ok": True,
+            "action": "comment",
+            "summary": summary,
+            "comment": None,
+            "session_id": session_id,
+            "codex_session_id": None,
+            "usage": None,
+            "resume_attempted": False,
+            "resume_succeeded": False,
+            "resume_fallback_used": False,
+        }
+
     if compact_only:
         _persist_assistant_message_with_links(
             db=db,
@@ -2210,13 +2255,13 @@ def agent_chat(
         intent_flags=intent_flags,
         allow_mutations=bool(payload.allow_mutations),
         command_id=command_id,
-        promote_gate_policy_to_execution_mode_if_needed=_promote_gate_policy_to_execution_mode_if_needed,
+        promote_plugin_policy_to_execution_mode_if_needed=_promote_plugin_policy_to_execution_mode_if_needed,
         build_team_lead_kickoff_instruction=_build_team_lead_kickoff_instruction,
         command_id_with_suffix=_command_id_with_suffix,
     )
     if bool(payload.allow_mutations) and str(effective_project_id or "").strip():
         try:
-            _sync_gate_policy_runtime_target_if_needed(
+            _sync_plugin_runtime_target_if_needed(
                 db=db,
                 user=user,
                 workspace_id=payload.workspace_id,
@@ -2224,7 +2269,7 @@ def agent_chat(
                 command_id=command_id,
             )
         except Exception:
-            logger.exception("Failed to sync Gate Policy runtime target for project %s", effective_project_id)
+            logger.exception("Failed to sync plugin runtime deploy target for project %s", effective_project_id)
     if kickoff_result is not None:
         summary = str(kickoff_result.get("summary") or "").strip() or "Team Mode kickoff dispatched."
         comment = str(kickoff_result.get("comment") or "").strip() or None
@@ -2290,7 +2335,7 @@ def agent_chat(
         )
         if bool(payload.allow_mutations) and str(effective_project_id or "").strip():
             try:
-                _sync_gate_policy_runtime_target_if_needed(
+                _sync_plugin_runtime_target_if_needed(
                     db=db,
                     user=user,
                     workspace_id=payload.workspace_id,
@@ -2298,7 +2343,7 @@ def agent_chat(
                     command_id=command_id,
                 )
             except Exception:
-                logger.exception("Failed to sync Gate Policy runtime target for project %s", effective_project_id)
+                logger.exception("Failed to sync plugin runtime deploy target for project %s", effective_project_id)
         _persist_assistant_message_with_links(
             db=db,
             user=user,
@@ -2357,9 +2402,7 @@ def agent_chat(
         }
     except Exception as exc:
         # Avoid bubbling internal exceptions to the client as 500 errors.
-        msg = str(exc)
-        error_summary = _build_chat_error_summary()
-        error_comment = msg[:500]
+        mapped_ok, mapped_summary, mapped_comment = _map_chat_exception_to_response(exc)
         _persist_assistant_message_with_links(
             db=db,
             user=user,
@@ -2368,16 +2411,16 @@ def agent_chat(
             project_id=effective_project_id,
             session_id=session_id,
             mcp_servers=mcp_servers,
-            content=_assistant_text(error_summary, error_comment),
+            content=_assistant_text(mapped_summary, mapped_comment),
             usage={},
             codex_session_id=None,
             run_started_at=run_started_at,
         )
         return {
-            "ok": False,
+            "ok": bool(mapped_ok),
             "action": "comment",
-            "summary": error_summary,
-            "comment": error_comment,
+            "summary": mapped_summary,
+            "comment": mapped_comment,
             "session_id": session_id,
             "codex_session_id": None,
             "usage": None,
@@ -2405,7 +2448,10 @@ def agent_chat_stream(
         instruction=payload.instruction,
     )
     model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
-    mcp_servers = _normalize_chat_mcp_servers(payload.mcp_servers)
+    mcp_servers = _normalize_chat_mcp_servers(
+        payload.mcp_servers,
+        project_id=effective_project_id,
+    )
     existing_codex_session_id, resume_last_succeeded = _load_chat_session_codex_state(
         db=db,
         workspace_id=payload.workspace_id,
@@ -2456,6 +2502,38 @@ def agent_chat_stream(
         "Connection": "keep-alive",
     }
 
+    if _is_project_setup_starter_instruction(payload.instruction):
+        summary = _PROJECT_SETUP_STARTER_NEXT_QUESTION
+        _persist_assistant_message_with_links(
+            db=db,
+            user=user,
+            command_id=command_id,
+            workspace_id=payload.workspace_id,
+            project_id=effective_project_id,
+            session_id=session_id,
+            mcp_servers=mcp_servers,
+            content=summary,
+            usage={},
+            codex_session_id=None,
+        )
+        starter_response = {
+            "ok": True,
+            "action": "comment",
+            "summary": summary,
+            "comment": None,
+            "session_id": session_id,
+            "codex_session_id": None,
+            "usage": None,
+            "resume_attempted": False,
+            "resume_succeeded": False,
+            "resume_fallback_used": False,
+        }
+
+        def _starter_stream():
+            yield json.dumps({"type": "final", "response": starter_response}, ensure_ascii=True) + "\n"
+
+        return StreamingResponse(_starter_stream(), media_type="application/x-ndjson", headers=stream_headers)
+
     if compact_only:
         _persist_assistant_message_with_links(
             db=db,
@@ -2495,7 +2573,7 @@ def agent_chat_stream(
         intent_flags=intent_flags,
         allow_mutations=bool(payload.allow_mutations),
         command_id=command_id,
-        promote_gate_policy_to_execution_mode_if_needed=_promote_gate_policy_to_execution_mode_if_needed,
+        promote_plugin_policy_to_execution_mode_if_needed=_promote_plugin_policy_to_execution_mode_if_needed,
         build_team_lead_kickoff_instruction=_build_team_lead_kickoff_instruction,
         command_id_with_suffix=_command_id_with_suffix,
     )
@@ -2620,7 +2698,6 @@ def agent_chat_stream(
 
                 if "value" in error_holder:
                     exc = error_holder["value"]
-                    error_detail = str(exc).strip() or type(exc).__name__
                     if isinstance(exc, TimeoutError):
                         response = {
                             "ok": False,
@@ -2635,17 +2712,19 @@ def agent_chat_stream(
                             "resume_fallback_used": False,
                         }
                     else:
+                        mapped_ok, mapped_summary, mapped_comment = _map_chat_exception_to_response(exc)
                         response = {
-                            "ok": False,
+                            "ok": bool(mapped_ok),
                             "action": "comment",
-                            "summary": _build_chat_error_summary(),
-                            "comment": error_detail[:500],
+                            "summary": mapped_summary,
+                            "comment": mapped_comment,
                             "session_id": session_id,
                             "codex_session_id": None,
                             "usage": None,
                             "resume_attempted": False,
                             "resume_succeeded": False,
                             "resume_fallback_used": False,
+                            "_force_summary_only": bool(mapped_ok and mapped_comment is None),
                         }
                 else:
                     outcome = outcome_holder.get("value")
@@ -2714,6 +2793,8 @@ def agent_chat_stream(
 
                 with streamed_parts_lock:
                     assistant_content = "".join(streamed_assistant_text_parts).strip()
+                if bool(response.get("_force_summary_only")):
+                    assistant_content = str(response.get("summary") or "").strip()
                 if assistant_content and not bool(response.get("ok")):
                     assistant_content = _assistant_text(
                         assistant_content,
@@ -2753,6 +2834,7 @@ def agent_chat_stream(
                 _finish_chat_stream_run(stream_key=stream_key)
                 _clear_chat_stream_cancel_event(stream_key=stream_key, run_id=run_id)
                 _set_chat_stream_stop_requested(stream_key=stream_key, value=False)
+                response.pop("_force_summary_only", None)
                 finalized_response["value"] = response
                 return response
 

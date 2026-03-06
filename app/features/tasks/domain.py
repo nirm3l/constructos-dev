@@ -22,6 +22,7 @@ class TaskAggregate(Aggregate):
         priority: str,
         due_date: str | None,
         assignee_id: str | None,
+        assigned_agent_code: str | None,
         labels: list[str],
         subtasks: list[dict[str, Any]],
         attachments: list[dict[str, Any]],
@@ -48,6 +49,7 @@ class TaskAggregate(Aggregate):
         self.priority = priority
         self.due_date = due_date
         self.assignee_id = assignee_id
+        self.assigned_agent_code = assigned_agent_code
         self.labels = labels
         self.subtasks = subtasks
         self.attachments = attachments

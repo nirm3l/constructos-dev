@@ -3,11 +3,13 @@ from __future__ import annotations
 import io
 import json
 import os
+import sys
 import time
 import uuid
 from contextlib import contextmanager
 from importlib import reload
 from pathlib import Path
+from types import SimpleNamespace
 
 from shared.models import ProjectMember, SessionLocal, User as UserModel
 
@@ -320,27 +322,13 @@ def test_execute_task_automation_sets_task_worktree_context_for_team_mode_develo
                 role="DeveloperAgent",
             )
         )
-        db.add(
-            ProjectSkill(
-                id=str(uuid.uuid4()),
-                workspace_id=ws_id,
-                project_id=project["id"],
-                skill_key="team_mode",
-                name="Team Mode Skill",
-                summary="Team orchestration.",
-                source_type="seed",
-                source_locator="seed://team_mode",
-                source_version="1.0.0",
-                trust_level="verified",
-                mode="enforced",
-                generated_rule_id=None,
-                manifest_json="{}",
-                created_by=bootstrap["current_user"]["id"],
-                updated_by=bootstrap["current_user"]["id"],
-                is_deleted=False,
-            )
-        )
         db.commit()
+
+    enable_team_mode = client.post(
+        f"/api/projects/{project['id']}/plugins/team_mode/enabled",
+        json={"enabled": True},
+    )
+    assert enable_team_mode.status_code == 200
 
     from features.agents import executor as executor_module
 
@@ -508,7 +496,7 @@ def test_codex_resume_prompt_includes_compact_fresh_evidence_snapshot():
                         "entity_type": "ChatMessage",
                         "source_type": "chat_message.content",
                         "final_score": 0.992,
-                        "snippet": "Tajni broj je 44",
+                        "snippet": "The secret number is 44",
                     }
                 ]
             ),
@@ -518,7 +506,7 @@ def test_codex_resume_prompt_includes_compact_fresh_evidence_snapshot():
     assert "Fresh Cross-Session Memory Snapshot" in prompt
     assert "Fresh Summary:" in prompt
     assert "Fresh Evidence:" in prompt
-    assert "Tajni broj je 44" in prompt
+    assert "The secret number is 44" in prompt
     assert "score=0.992" in prompt
 
 
@@ -537,8 +525,8 @@ def test_prompt_segment_char_stats_uses_instruction_breakdown():
             "trigger_from_status": "",
             "trigger_to_status": "",
             "trigger_timestamp": "",
-            "gate_policy_json": "{}",
-            "gate_policy_required_checks": "",
+            "plugin_policy_json": "{}",
+            "plugin_required_checks": "",
             "graph_summary_markdown": "",
             "graph_evidence_json": "[]",
         },
@@ -633,9 +621,14 @@ def test_codex_prompt_includes_interactive_project_creation_guidance():
     )
 
     assert "Read each MCP tool description and follow its payload contract and operational guidance." in prompt
+    assert "prefer `setup_project_orchestration(...)` once required inputs are complete" in prompt
+    assert "call `setup_project_orchestration(...)` as early as possible" in prompt
+    assert "returns HTTP 422 with `missing_inputs`" in prompt
+    assert "ask only the `next_question`" in prompt
+    assert "present a user-friendly completion summary" in prompt
     assert "Dev -> Lead -> QA -> Done" in prompt
     assert "at least one recurring scheduled Team Lead oversight task" in prompt
-    assert "If Team Mode is requested, you MUST execute this setup order" in prompt
+    assert "If Team Mode is requested, prefer this setup flow" in prompt
     assert "If the user requests an exact task count, keep that exact count" in prompt
 
 
@@ -659,6 +652,9 @@ def test_mcp_tool_descriptions_include_operation_specific_guidance():
     assert "chat default profile" in mcp_server.CREATE_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION.lower()
     assert "preview_project_from_template" in mcp_server.CREATE_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION
     assert "in-app notification" in mcp_server.SEND_IN_APP_NOTIFICATION_TOOL_DESCRIPTION.lower()
+    assert "staged project setup in one call" in mcp_server.SETUP_PROJECT_ORCHESTRATION_TOOL_DESCRIPTION
+    assert "missing_inputs" in mcp_server.SETUP_PROJECT_ORCHESTRATION_TOOL_DESCRIPTION
+    assert "legacy fallback" in mcp_server.ENSURE_TEAM_MODE_PROJECT_TOOL_DESCRIPTION.lower()
     source = inspect.getsource(mcp_server)
     assert "embedding_enabled: bool = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED" in source
     assert "chat_index_mode: str = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE" in source
@@ -667,6 +663,60 @@ def test_mcp_tool_descriptions_include_operation_specific_guidance():
     assert "chat_index_mode: str | None = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE" in source
     assert "chat_attachment_ingestion_mode: str | None = MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE" in source
     assert "def send_in_app_notification(" in source
+
+
+def test_create_mcp_registers_and_executes_setup_project_orchestration_tool(monkeypatch):
+    from features.agents import mcp_server
+
+    class FakeFastMCP:
+        def __init__(self, name: str):
+            self.name = name
+            self._tools: dict[str, dict[str, object]] = {}
+
+        def tool(self, description: str = ""):
+            def _decorator(fn):
+                self._tools[fn.__name__] = {"fn": fn, "description": description}
+                return fn
+
+            return _decorator
+
+    captured: dict[str, object] = {}
+
+    class FakeGateway:
+        def setup_project_orchestration(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "contract_version": 1,
+                "ok": True,
+                "project": {"id": "project-e2e", "link": "?tab=projects&project=project-e2e"},
+            }
+
+    monkeypatch.setitem(sys.modules, "fastmcp", SimpleNamespace(FastMCP=FakeFastMCP))
+    monkeypatch.setattr(mcp_server, "build_mcp_gateway", lambda: FakeGateway())
+    monkeypatch.setattr(mcp_server, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(mcp_server, "AGENT_ENABLED_PLUGINS", ["team_mode", "git_delivery", "docker_compose"])
+
+    mcp = mcp_server.create_mcp()
+    setup_tool = mcp._tools.get("setup_project_orchestration")
+    assert setup_tool is not None
+    fn = setup_tool["fn"]
+    payload = fn(
+        name="MCP E2E",
+        short_description="End-to-end registration test.",
+        workspace_id="ws-1",
+        enable_team_mode=True,
+        enable_docker_compose=True,
+        docker_port=6768,
+        seed_team_tasks=True,
+        command_id="e2e-setup-001",
+    )
+
+    assert payload["ok"] is True
+    assert payload["project"]["id"] == "project-e2e"
+    assert captured["name"] == "MCP E2E"
+    assert captured["enable_team_mode"] is True
+    assert captured["enable_docker_compose"] is True
+    assert captured["docker_port"] == 6768
 
 
 def test_codex_usage_extraction_from_json_stream():

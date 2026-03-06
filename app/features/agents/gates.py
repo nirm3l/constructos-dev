@@ -7,24 +7,20 @@ import subprocess
 from ipaddress import ip_address
 from copy import deepcopy
 from typing import Any, Callable
-from plugins.base import GateEvaluationContext
+from plugins.base import PolicyEvaluationContext
 from plugins.registry import list_workflow_plugins, plugin_by_key
 from plugins.runner_policy import is_developer_role, is_lead_role, is_qa_role
-from plugins.team_mode.skill_contract import TEAM_MODE_SKILL_KEY
+from plugins.team_mode.task_roles import derive_task_role
 
 COMMIT_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
-GATE_POLICY_RULE_TITLES = ("gate policy", "delivery gates", "workflow gates")
 DEFAULT_REQUIRED_DELIVERY_CHECKS: list[str] = [
     "repo_context_present",
     "git_contract_ok",
     "dev_tasks_have_commit_evidence",
-    "dev_tasks_have_unique_commit_evidence",
-    "dev_tasks_have_automation_run_evidence",
+    "qa_has_verifiable_artifacts",
 ]
 _TEAM_MODE_DELIVERY_REQUIRED_CHECKS: list[str] = [
-    "dev_tasks_have_task_branch_evidence",
     "qa_tasks_have_automation_run_evidence",
-    "lead_tasks_have_automation_run_evidence",
     "qa_has_verifiable_artifacts",
     "deploy_execution_evidence_present",
 ]
@@ -45,7 +41,7 @@ DELIVERY_CHECK_DESCRIPTIONS: dict[str, str] = {
     "qa_has_verifiable_artifacts": "QA tasks include verifiable artifacts (logs, links, evidence notes).",
     "deploy_execution_evidence_required": "Deploy evidence is required when Team Mode has deploy tasks.",
     "deploy_execution_evidence_present": "Deploy execution evidence exists for Lead deploy tasks.",
-    "runtime_deploy_health_required": "Runtime health probe is required by gate policy.",
+    "runtime_deploy_health_required": "Runtime health probe is required by plugin policy.",
     "runtime_deploy_health_ok": "Runtime deploy stack is up, mapped, and healthy when required.",
 }
 
@@ -73,14 +69,14 @@ def normalize_delivery_required_checks(
     return normalized
 
 
-def _build_gate_check_catalog() -> dict[str, list[dict[str, Any]]]:
+def _build_plugin_check_catalog() -> dict[str, list[dict[str, Any]]]:
     plugin_scopes: dict[str, list[dict[str, Any]]] = {}
     for plugin in list_workflow_plugins():
-        scope = str(plugin.gate_scope() or "").strip()
+        scope = str(plugin.check_scope() or "").strip()
         if not scope:
             continue
         required = set(plugin.default_required_checks())
-        descriptions = plugin.gate_check_descriptions()
+        descriptions = plugin.check_descriptions()
         plugin_scopes[scope] = [
             {
                 "id": check_id,
@@ -107,11 +103,51 @@ def _build_gate_check_catalog() -> dict[str, list[dict[str, Any]]]:
     return catalog
 
 
-def gate_check_catalog_by_scope() -> dict[str, list[dict[str, Any]]]:
-    return deepcopy(_build_gate_check_catalog())
+def plugin_check_catalog_by_scope() -> dict[str, list[dict[str, Any]]]:
+    return deepcopy(_build_plugin_check_catalog())
 
 
-def _build_default_gate_policy() -> dict[str, Any]:
+def merge_plugin_policy_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge_plugin_policy_dict(dict(merged.get(key) or {}), value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def filter_plugin_policy_scopes(
+    policy: dict[str, Any],
+    *,
+    include_scopes: set[str],
+) -> dict[str, Any]:
+    filtered = dict(policy or {})
+    normalized_scopes = {str(scope or "").strip() for scope in (include_scopes or set()) if str(scope or "").strip()}
+    for field in ("required_checks", "available_checks"):
+        raw = filtered.get(field)
+        if not isinstance(raw, dict):
+            continue
+        filtered[field] = {
+            str(key): value
+            for key, value in raw.items()
+            if str(key or "").strip() in normalized_scopes
+        }
+    if "team_mode" not in normalized_scopes:
+        filtered.pop("team_mode", None)
+    if "delivery" not in normalized_scopes:
+        filtered.pop("delivery", None)
+    return filtered
+
+
+def plugin_policy_required_checks(policy: dict[str, Any], scope: str, default_checks: list[str]) -> list[str]:
+    required = ((policy.get("required_checks") or {}).get(scope) if isinstance(policy.get("required_checks"), dict) else None)
+    if isinstance(required, list):
+        return [str(item or "").strip() for item in required if str(item or "").strip()]
+    return list(default_checks)
+
+
+def _build_default_plugin_policy() -> dict[str, Any]:
     def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
         merged: dict[str, Any] = dict(base)
         for key, value in override.items():
@@ -135,86 +171,13 @@ def _build_default_gate_policy() -> dict[str, Any]:
         "stack": "constructos-ws-default",
         "port": None,
         "health_path": "/health",
-        "host": "gateway",
         "require_http_200": True,
     },
-}
+    }
     for plugin in list_workflow_plugins():
-        base = _deep_merge(base, plugin.default_gate_policy_patch())
+        base = _deep_merge(base, plugin.default_plugin_policy_patch())
     return base
-DEFAULT_GATE_POLICY: dict[str, Any] = _build_default_gate_policy()
-
-
-def merge_gate_policy_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    merged: dict[str, Any] = dict(base)
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = merge_gate_policy_dict(dict(merged.get(key) or {}), value)
-        else:
-            merged[key] = value
-    return merged
-
-
-def filter_gate_policy_scopes(
-    policy: dict[str, Any],
-    *,
-    include_scopes: set[str],
-) -> dict[str, Any]:
-    filtered = dict(policy or {})
-    normalized_scopes = {str(scope or "").strip() for scope in (include_scopes or set()) if str(scope or "").strip()}
-    for field in ("required_checks", "available_checks"):
-        raw = filtered.get(field)
-        if not isinstance(raw, dict):
-            continue
-        filtered[field] = {
-            str(key): value
-            for key, value in raw.items()
-            if str(key or "").strip() in normalized_scopes
-        }
-    if "team_mode" not in normalized_scopes:
-        filtered.pop("team_mode", None)
-    if "delivery" not in normalized_scopes:
-        filtered.pop("delivery", None)
-    return filtered
-
-
-def parse_gate_policy_rule(*, project_rules: list[Any]) -> tuple[dict[str, Any], str]:
-    policy = dict(DEFAULT_GATE_POLICY)
-    source = "default"
-    def _sort_key(rule: Any) -> tuple[Any, str]:
-        updated = getattr(rule, "updated_at", None)
-        created = getattr(rule, "created_at", None)
-        timestamp = updated or created
-        return (timestamp, str(getattr(rule, "id", "") or ""))
-
-    ordered_rules = sorted(list(project_rules), key=_sort_key, reverse=True)
-    for rule in ordered_rules:
-        title = str(getattr(rule, "title", "") or "").strip().lower()
-        if not any(marker in title for marker in GATE_POLICY_RULE_TITLES):
-            continue
-        raw_body = str(getattr(rule, "body", "") or "").strip()
-        if not raw_body:
-            continue
-        candidate_text = raw_body
-        fenced_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw_body, flags=re.IGNORECASE | re.DOTALL)
-        if fenced_match:
-            candidate_text = str(fenced_match.group(1) or "").strip()
-        try:
-            parsed = json.loads(candidate_text)
-        except Exception:
-            continue
-        if isinstance(parsed, dict):
-            policy = merge_gate_policy_dict(policy, parsed)
-            source = f"project_rule:{getattr(rule, 'id', '')}"
-            break
-    return policy, source
-
-
-def policy_required_checks(policy: dict[str, Any], scope: str, default_checks: list[str]) -> list[str]:
-    required = ((policy.get("required_checks") or {}).get(scope) if isinstance(policy.get("required_checks"), dict) else None)
-    if isinstance(required, list):
-        return [str(item or "").strip() for item in required if str(item or "").strip()]
-    return list(default_checks)
+DEFAULT_PLUGIN_POLICY: dict[str, Any] = _build_default_plugin_policy()
 
 
 def evaluate_required_checks(checks: dict[str, Any], required_checks: list[str]) -> tuple[bool, list[str]]:
@@ -244,7 +207,6 @@ DELIVERY_CHECK_EVALUATORS: dict[str, Callable[[dict[str, Any]], bool]] = {
     "git_contract_ok": lambda f: bool(
         f["repo_context_present"]
         and f["dev_commit_evidence_ok"]
-        and f["unique_commit_per_dev_ok"]
     ),
     "dev_tasks_have_commit_evidence": lambda f: bool(f["dev_commit_evidence_ok"]),
     "dev_tasks_have_task_branch_evidence": lambda f: bool(f["dev_task_branch_evidence_ok"]),
@@ -404,8 +366,8 @@ def evaluate_team_mode_gates(
     workspace_id: str,
     event_storming_enabled: bool,
     expected_event_storming_enabled: bool | None,
-    gate_policy: dict[str, Any],
-    gate_policy_source: str,
+    plugin_policy: dict[str, Any],
+    plugin_policy_source: str,
     tasks: list[dict[str, Any]],
     member_role_by_user_id: dict[str, str],
     notes_by_task: dict[str, list[Any]],
@@ -413,7 +375,7 @@ def evaluate_team_mode_gates(
     extract_deploy_ports: Callable[[str], set[str]],
     has_deploy_stack_marker: Callable[[str], bool],
 ) -> dict[str, Any]:
-    plugin = plugin_by_key(TEAM_MODE_SKILL_KEY)
+    plugin = plugin_by_key("team_mode")
     if plugin is None:
         return {
             "checks": {},
@@ -422,16 +384,16 @@ def evaluate_team_mode_gates(
             "required_checks": [],
             "required_failed_checks": [],
             "ok": True,
-            "source": gate_policy_source,
+            "source": plugin_policy_source,
         }
-    return plugin.evaluate_gates(
-        GateEvaluationContext(
+    return plugin.evaluate_checks(
+        PolicyEvaluationContext(
             project_id=project_id,
             workspace_id=workspace_id,
             event_storming_enabled=event_storming_enabled,
             expected_event_storming_enabled=expected_event_storming_enabled,
-            gate_policy=gate_policy,
-            gate_policy_source=gate_policy_source,
+            plugin_policy=plugin_policy,
+            plugin_policy_source=plugin_policy_source,
             tasks=tasks,
             member_role_by_user_id=member_role_by_user_id,
             notes_by_task=notes_by_task,
@@ -446,8 +408,8 @@ def evaluate_delivery_gates(
     *,
     project_id: str,
     workspace_id: str,
-    gate_policy: dict[str, Any],
-    gate_policy_source: str,
+    plugin_policy: dict[str, Any],
+    plugin_policy_source: str,
     tasks: list[dict[str, Any]],
     member_role_by_user_id: dict[str, str],
     notes_by_task: dict[str, list[Any]],
@@ -456,6 +418,7 @@ def evaluate_delivery_gates(
     project_skills: list[Any],
     project_description: str,
     project_external_refs: Any,
+    team_mode_enabled: bool,
     extract_commit_shas_from_refs: Callable[[Any], set[str]],
     extract_commit_shas_from_text: Callable[[str], set[str]],
     parse_json_list: Callable[[Any], list[dict[str, Any]]],
@@ -472,13 +435,25 @@ def evaluate_delivery_gates(
         return bool(str(task.get("last_agent_run_at") or "").strip())
 
     role_dev_tasks = [
-        t for t in tasks if is_developer_role(member_role_by_user_id.get(str(t.get("assignee_id") or "")))
+        t
+        for t in tasks
+        if is_developer_role(
+            derive_task_role(task_like=t, member_role_by_user_id=member_role_by_user_id)
+        )
     ]
     role_qa_tasks = [
-        t for t in tasks if is_qa_role(member_role_by_user_id.get(str(t.get("assignee_id") or "")))
+        t
+        for t in tasks
+        if is_qa_role(
+            derive_task_role(task_like=t, member_role_by_user_id=member_role_by_user_id)
+        )
     ]
     role_lead_tasks = [
-        t for t in tasks if is_lead_role(member_role_by_user_id.get(str(t.get("assignee_id") or "")))
+        t
+        for t in tasks
+        if is_lead_role(
+            derive_task_role(task_like=t, member_role_by_user_id=member_role_by_user_id)
+        )
     ]
     dev_tasks = role_dev_tasks or [t for t in tasks if str(t.get("status") or "").strip() == "Dev"]
     qa_tasks = role_qa_tasks or [t for t in tasks if str(t.get("status") or "").strip() == "QA"]
@@ -490,9 +465,6 @@ def evaluate_delivery_gates(
         for task in tasks
         if "deploy" in str(task.get("title") or "").lower() or "docker compose" in str(task.get("title") or "").lower()
     ]
-    team_mode_enabled = any(
-        str(getattr(skill, "skill_key", "") or "").strip() == TEAM_MODE_SKILL_KEY for skill in project_skills
-    )
     if not team_mode_enabled:
         eligible_statuses = {"dev", "in progress", "qa", "lead", "done", "completed"}
         dev_tasks = [
@@ -506,11 +478,24 @@ def evaluate_delivery_gates(
         task_id = str(task.get("id") or "").strip()
         if not task_id:
             return set()
-        # Commit evidence must be persisted in external refs, not only free-text comments.
         shas: set[str] = set()
         shas.update(extract_commit_shas_from_refs(task.get("external_refs")))
+        shas.update(
+            extract_commit_shas_from_text(
+                "\n".join(
+                    [
+                        str(task.get("title") or ""),
+                        str(task.get("description") or ""),
+                        str(task.get("instruction") or ""),
+                    ]
+                )
+            )
+        )
         for note in notes_by_task.get(task_id, []):
             shas.update(extract_commit_shas_from_refs(note.external_refs))
+            shas.update(extract_commit_shas_from_text(f"{str(note.title or '')}\n{str(note.body or '')}"))
+        for comment in comments_by_task.get(task_id, []):
+            shas.update(extract_commit_shas_from_text(str(comment.body or "")))
         return shas
 
     def _task_has_qa_artifacts(task: dict[str, Any]) -> bool:
@@ -610,7 +595,7 @@ def evaluate_delivery_gates(
         for task in lead_deploy_tasks
         if not _task_has_deploy_artifacts(task)
     ]
-    runtime_policy_raw = gate_policy.get("runtime_deploy_health") if isinstance(gate_policy, dict) else {}
+    runtime_policy_raw = plugin_policy.get("runtime_deploy_health") if isinstance(plugin_policy, dict) else {}
     runtime_policy = runtime_policy_raw if isinstance(runtime_policy_raw, dict) else {}
     runtime_required = bool(runtime_policy.get("required"))
     runtime_required_effective = bool(runtime_required or (not team_mode_enabled and bool(standalone_deploy_tasks)))
@@ -621,7 +606,7 @@ def evaluate_delivery_gates(
         runtime_policy=runtime_policy,
     )
     runtime_require_http_200 = bool(runtime_policy.get("require_http_200", True))
-    runtime_host = str(runtime_policy.get("host") or "").strip() or None
+    runtime_host = None
     runtime_check = (
         run_runtime_deploy_health_check_fn(
             stack=runtime_stack,
@@ -679,8 +664,8 @@ def evaluate_delivery_gates(
         "runtime_ok": runtime_ok,
     }
     checks = evaluate_check_registry(registry=DELIVERY_CHECK_EVALUATORS, facts=facts)
-    required_checks = policy_required_checks(
-        gate_policy,
+    required_checks = plugin_policy_required_checks(
+        plugin_policy,
         "delivery",
         default_required_delivery_checks(team_mode_enabled=team_mode_enabled),
     )
@@ -702,8 +687,8 @@ def evaluate_delivery_gates(
         "check_descriptions": dict(DELIVERY_CHECK_DESCRIPTIONS),
         "required_checks": required_checks,
         "required_failed_checks": required_failed,
-        "gate_policy": gate_policy,
-        "gate_policy_source": gate_policy_source,
+        "plugin_policy": plugin_policy,
+        "plugin_policy_source": plugin_policy_source,
         "runtime_deploy_health": runtime_check,
         "counts": {
             "tasks_total": len(tasks),
@@ -725,3 +710,85 @@ def evaluate_delivery_gates(
         },
         "ok": bool(checks_ok),
     }
+
+
+def evaluate_team_mode_checks(
+    *,
+    project_id: str,
+    workspace_id: str,
+    event_storming_enabled: bool,
+    expected_event_storming_enabled: bool | None,
+    plugin_policy: dict[str, Any],
+    plugin_policy_source: str,
+    tasks: list[dict[str, Any]],
+    member_role_by_user_id: dict[str, str],
+    notes_by_task: dict[str, list[Any]],
+    comments_by_task: dict[str, list[Any]],
+    extract_deploy_ports: Callable[[str], set[str]],
+    has_deploy_stack_marker: Callable[[str], bool],
+) -> dict[str, Any]:
+    return evaluate_team_mode_gates(
+        project_id=project_id,
+        workspace_id=workspace_id,
+        event_storming_enabled=event_storming_enabled,
+        expected_event_storming_enabled=expected_event_storming_enabled,
+        plugin_policy=plugin_policy,
+        plugin_policy_source=plugin_policy_source,
+        tasks=tasks,
+        member_role_by_user_id=member_role_by_user_id,
+        notes_by_task=notes_by_task,
+        comments_by_task=comments_by_task,
+        extract_deploy_ports=extract_deploy_ports,
+        has_deploy_stack_marker=has_deploy_stack_marker,
+    )
+
+
+def evaluate_delivery_checks(
+    *,
+    project_id: str,
+    workspace_id: str,
+    plugin_policy: dict[str, Any],
+    plugin_policy_source: str,
+    tasks: list[dict[str, Any]],
+    member_role_by_user_id: dict[str, str],
+    notes_by_task: dict[str, list[Any]],
+    comments_by_task: dict[str, list[Any]],
+    project_rules: list[Any],
+    project_skills: list[Any],
+    project_description: str,
+    project_external_refs: Any,
+    team_mode_enabled: bool,
+    extract_commit_shas_from_refs: Callable[[Any], set[str]],
+    extract_commit_shas_from_text: Callable[[str], set[str]],
+    parse_json_list: Callable[[Any], list[dict[str, Any]]],
+    has_http_external_ref: Callable[[Any], bool],
+    has_qa_artifact_text: Callable[[str], bool],
+    has_deploy_artifact_text: Callable[[str], bool],
+    resolve_deploy_target_from_artifacts: Callable[..., tuple[str, int | None, str]],
+    run_runtime_deploy_health_check_fn: Callable[..., dict[str, Any]],
+    project_has_repo_context: Callable[..., bool],
+) -> dict[str, Any]:
+    return evaluate_delivery_gates(
+        project_id=project_id,
+        workspace_id=workspace_id,
+        plugin_policy=plugin_policy,
+        plugin_policy_source=plugin_policy_source,
+        tasks=tasks,
+        member_role_by_user_id=member_role_by_user_id,
+        notes_by_task=notes_by_task,
+        comments_by_task=comments_by_task,
+        project_rules=project_rules,
+        project_skills=project_skills,
+        project_description=project_description,
+        project_external_refs=project_external_refs,
+        team_mode_enabled=team_mode_enabled,
+        extract_commit_shas_from_refs=extract_commit_shas_from_refs,
+        extract_commit_shas_from_text=extract_commit_shas_from_text,
+        parse_json_list=parse_json_list,
+        has_http_external_ref=has_http_external_ref,
+        has_qa_artifact_text=has_qa_artifact_text,
+        has_deploy_artifact_text=has_deploy_artifact_text,
+        resolve_deploy_target_from_artifacts=resolve_deploy_target_from_artifacts,
+        run_runtime_deploy_health_check_fn=run_runtime_deploy_health_check_fn,
+        project_has_repo_context=project_has_repo_context,
+    )

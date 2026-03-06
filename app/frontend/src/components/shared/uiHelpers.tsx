@@ -139,10 +139,18 @@ export function MarkdownModeToggle({
   view,
   onChange,
   ariaLabel,
+  hideEditAndSplit = false,
+  previewOnly = false,
+  previewOnlyWhenFullscreen = false,
+  onFullscreenTriggerMode,
 }: {
   view: MarkdownEditorView
   onChange: (next: MarkdownEditorView) => void
   ariaLabel: string
+  hideEditAndSplit?: boolean
+  previewOnly?: boolean
+  previewOnlyWhenFullscreen?: boolean
+  onFullscreenTriggerMode?: (mode: 'readonly' | 'regular', nextFullscreen: boolean) => void
 }) {
   const rootRef = React.useRef<HTMLDivElement | null>(null)
   const [isFullscreen, setIsFullscreen] = React.useState(false)
@@ -315,12 +323,60 @@ export function MarkdownModeToggle({
       onChange(nextValue)
     }
   }, [onChange])
+  const stopEventPropagation = React.useCallback((event: React.SyntheticEvent) => {
+    event.stopPropagation()
+  }, [])
+
+  const hideModeToggle = previewOnly || (previewOnlyWhenFullscreen && isFullscreen)
 
   return (
-    <div ref={rootRef} className="seg md-mode-toggle" role="tablist" aria-label={ariaLabel}>
+    <div
+      ref={rootRef}
+      className="seg md-mode-toggle"
+      role="tablist"
+      aria-label={ariaLabel}
+      onClick={stopEventPropagation}
+      onPointerDown={stopEventPropagation}
+    >
+      {!hideModeToggle && (
+        <ToggleGroup.Root
+          type="single"
+          value={view}
+          onValueChange={onViewValueChange}
+          className="md-mode-toggle-group"
+          aria-label={ariaLabel}
+        >
+          {!hideEditAndSplit && (
+            <ToggleGroup.Item className="seg-btn" value="write" aria-label="Edit">
+              Edit
+            </ToggleGroup.Item>
+          )}
+          <ToggleGroup.Item className="seg-btn" value="preview" aria-label="Preview">
+            Preview
+          </ToggleGroup.Item>
+          {!hideEditAndSplit && (
+            <ToggleGroup.Item
+              className="seg-btn"
+              value="split"
+              aria-label="Split view"
+              title="Split editor and preview"
+            >
+              Split
+            </ToggleGroup.Item>
+          )}
+        </ToggleGroup.Root>
+      )}
       <button
         className={`seg-btn md-fullscreen-btn ${isFullscreen ? 'active' : ''}`}
-        onClick={toggleFullscreen}
+        onClick={(event) => {
+          event.stopPropagation()
+          const surface = getEditorSurface()
+          const mode = String(surface?.getAttribute('data-md-fullscreen-mode') || '').trim().toLowerCase() === 'readonly'
+            ? 'readonly'
+            : 'regular'
+          onFullscreenTriggerMode?.(mode, !isFullscreen)
+          void toggleFullscreen()
+        }}
         type="button"
         title={isFullscreen ? 'Exit fullscreen editor' : 'Open fullscreen editor'}
         aria-label={isFullscreen ? 'Exit fullscreen editor' : 'Open fullscreen editor'}
@@ -328,29 +384,6 @@ export function MarkdownModeToggle({
         <Icon path={isFullscreen ? 'M9 9H5V5M15 9h4V5M9 15H5v4M15 15h4v4' : 'M9 5H5v4M15 5h4v4M9 19H5v-4M15 19h4v-4'} />
         <span className="md-fullscreen-label">{isFullscreen ? 'Exit' : 'Full'}</span>
       </button>
-      <ToggleGroup.Root
-        type="single"
-        value={view}
-        onValueChange={onViewValueChange}
-        className="md-mode-toggle-group"
-        aria-label={ariaLabel}
-      >
-        <ToggleGroup.Item className="seg-btn" value="write" aria-label="Edit">
-          Edit
-        </ToggleGroup.Item>
-        <ToggleGroup.Item className="seg-btn" value="preview" aria-label="Preview">
-          Preview
-        </ToggleGroup.Item>
-        <ToggleGroup.Item
-          className="seg-btn"
-          value="split"
-          aria-label="Split view"
-          title="Split editor and preview"
-        >
-          Split
-        </ToggleGroup.Item>
-      </ToggleGroup.Root>
-      <span className="md-chip">MD</span>
     </div>
   )
 }

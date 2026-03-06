@@ -6,8 +6,9 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from shared.core import User, append_event
-from shared.models import ProjectMember, ProjectSkill, Task
+from shared.models import ProjectMember, ProjectPluginConfig, Task
 from shared.typed_notifications import append_notification_created_event
+from .task_roles import derive_task_role
 
 
 def maybe_dispatch_execution_kickoff(
@@ -19,14 +20,14 @@ def maybe_dispatch_execution_kickoff(
     intent_flags: dict[str, bool] | None,
     allow_mutations: bool,
     command_id: str | None,
-    promote_gate_policy_to_execution_mode_if_needed: Callable[..., None] | None = None,
+    promote_plugin_policy_to_execution_mode_if_needed: Callable[..., None] | None = None,
     build_team_lead_kickoff_instruction: Callable[..., str] | None = None,
     command_id_with_suffix: Callable[[str | None, str], str | None] | None = None,
 ) -> dict[str, object] | None:
     normalized_project_id = str(project_id or "").strip()
     if not allow_mutations or not normalized_project_id:
         return None
-    if not callable(promote_gate_policy_to_execution_mode_if_needed):
+    if not callable(promote_plugin_policy_to_execution_mode_if_needed):
         return None
     if not callable(build_team_lead_kickoff_instruction):
         return None
@@ -39,18 +40,19 @@ def maybe_dispatch_execution_kickoff(
     if not should_dispatch_kickoff:
         return None
 
-    team_mode_skill = db.execute(
-        select(ProjectSkill.id).where(
-            ProjectSkill.workspace_id == workspace_id,
-            ProjectSkill.project_id == normalized_project_id,
-            ProjectSkill.skill_key == "team_mode",
-            ProjectSkill.is_deleted == False,  # noqa: E712
+    team_mode_plugin_enabled = db.execute(
+        select(ProjectPluginConfig.id).where(
+            ProjectPluginConfig.workspace_id == workspace_id,
+            ProjectPluginConfig.project_id == normalized_project_id,
+            ProjectPluginConfig.plugin_key == "team_mode",
+            ProjectPluginConfig.enabled == True,  # noqa: E712
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
         )
     ).scalar_one_or_none()
-    if team_mode_skill is None:
+    if team_mode_plugin_enabled is None:
         return None
 
-    promote_gate_policy_to_execution_mode_if_needed(
+    promote_plugin_policy_to_execution_mode_if_needed(
         db=db,
         user=user,
         workspace_id=workspace_id,
@@ -58,24 +60,24 @@ def maybe_dispatch_execution_kickoff(
         command_id=command_id,
     )
 
-    rows = db.execute(
-        select(Task, ProjectMember.role)
-        .join(
-            ProjectMember,
-            (ProjectMember.workspace_id == Task.workspace_id)
-            & (ProjectMember.project_id == Task.project_id)
-            & (ProjectMember.user_id == Task.assignee_id),
-        )
-        .where(
+    member_role_by_user_id = {
+        str(user_id): str(role or "").strip()
+        for user_id, role in db.execute(
+            select(ProjectMember.user_id, ProjectMember.role).where(
+                ProjectMember.project_id == normalized_project_id
+            )
+        ).all()
+    }
+    tasks = db.execute(
+        select(Task).where(
             Task.workspace_id == workspace_id,
             Task.project_id == normalized_project_id,
             Task.is_deleted == False,  # noqa: E712
             Task.archived == False,  # noqa: E712
             Task.status != "Done",
-            ProjectMember.role.in_(["DeveloperAgent", "TeamLeadAgent", "QAAgent"]),
         )
         .order_by(Task.created_at.asc())
-    ).all()
+    ).scalars().all()
 
     def _task_instruction(task: Task) -> str:
         return str(task.instruction or "").strip() or str(task.scheduled_instruction or "").strip()
@@ -83,19 +85,28 @@ def maybe_dispatch_execution_kickoff(
     candidates_dev: list[tuple[Task, str]] = []
     candidates_lead: list[tuple[Task, str]] = []
     candidates_qa: list[tuple[Task, str]] = []
-    for task, role in rows:
-        normalized_role = str(role or "").strip()
+    for task in tasks:
+        normalized_role = derive_task_role(
+            task_like={
+                "assignee_id": str(task.assignee_id or "").strip(),
+                "labels": task.labels,
+                "status": str(task.status or "").strip(),
+            },
+            member_role_by_user_id=member_role_by_user_id,
+        )
+        if normalized_role not in {"Developer", "Lead", "QA"}:
+            continue
         normalized_status = str(task.status or "").strip()
-        if normalized_role == "DeveloperAgent" and normalized_status == "Dev" and _task_instruction(task):
+        if normalized_role == "Developer" and normalized_status == "Dev" and _task_instruction(task):
             candidates_dev.append((task, normalized_role))
-        elif normalized_role == "TeamLeadAgent" and normalized_status == "Lead" and _task_instruction(task):
+        elif normalized_role == "Lead" and normalized_status == "Lead" and _task_instruction(task):
             candidates_lead.append((task, normalized_role))
-        elif normalized_role == "QAAgent" and normalized_status in {"QA", "Blocked"} and _task_instruction(task):
+        elif normalized_role == "QA" and normalized_status in {"QA", "Blocked"} and _task_instruction(task):
             candidates_qa.append((task, normalized_role))
 
-    kickoff_targets: list[tuple[Task, str]] = [*candidates_dev, *candidates_lead]
-    if not kickoff_targets:
-        kickoff_targets = list(candidates_qa)
+    # Kickoff is Lead-first: dispatch only Team Lead oversight task(s).
+    # Dev/QA should start from Team Mode trigger flow after Lead orchestration.
+    kickoff_targets: list[tuple[Task, str]] = list(candidates_lead)
 
     kickoff_instruction = build_team_lead_kickoff_instruction(
         project_id=normalized_project_id,
@@ -105,14 +116,14 @@ def maybe_dispatch_execution_kickoff(
     from shared.core import TaskAutomationRun
 
     queued_task_ids: list[str] = []
-    queued_by_role: dict[str, int] = {"DeveloperAgent": 0, "TeamLeadAgent": 0, "QAAgent": 0}
+    queued_by_role: dict[str, int] = {"Developer": 0, "Lead": 0, "QA": 0}
     failed: list[dict[str, str]] = []
     for task, role in kickoff_targets:
         task_id = str(task.id or "").strip()
         if not task_id:
             continue
         task_command_id = command_id_with_suffix(command_id, f"kickoff-{task_id[:8]}")
-        instruction = kickoff_instruction if str(role or "").strip() == "TeamLeadAgent" else _task_instruction(task)
+        instruction = kickoff_instruction if str(role or "").strip() == "Lead" else _task_instruction(task)
         if not instruction:
             continue
         try:
@@ -129,9 +140,9 @@ def maybe_dispatch_execution_kickoff(
             failed.append({"task_id": task_id, "error": str(exc)[:200]})
 
     kickoff_ok = len(queued_task_ids) > 0 and not failed
-    queued_dev = int(queued_by_role.get("DeveloperAgent", 0))
-    queued_lead = int(queued_by_role.get("TeamLeadAgent", 0))
-    queued_qa = int(queued_by_role.get("QAAgent", 0))
+    queued_dev = int(queued_by_role.get("Developer", 0))
+    queued_lead = int(queued_by_role.get("Lead", 0))
+    queued_qa = int(queued_by_role.get("QA", 0))
     if kickoff_ok:
         message = (
             f"Team Mode kickoff dispatched for project {normalized_project_id}: "
@@ -171,7 +182,7 @@ def maybe_dispatch_execution_kickoff(
             "ok": False,
             "action": "comment",
             "summary": "Team Mode kickoff blocked: no runnable Team Mode tasks found.",
-            "comment": "Ensure Dev/Lead/QA tasks are in active workflow statuses with automation instructions, then retry kickoff.",
+            "comment": "Ensure at least one Lead task is in Lead status with an automation instruction, then retry kickoff.",
             "kickoff_dispatched": False,
             "queued_task_ids": [],
             "queued_by_role": queued_by_role,

@@ -72,7 +72,7 @@ class Project(Base, TimeMixin):
     custom_statuses: Mapped[str] = mapped_column(Text, default='["To do", "In progress", "Done"]')
     external_refs: Mapped[str] = mapped_column(Text, default="[]")
     attachment_refs: Mapped[str] = mapped_column(Text, default="[]")
-    embedding_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    embedding_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     embedding_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     context_pack_evidence_top_k: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chat_index_mode: Mapped[str] = mapped_column(String(32), default="OFF")
@@ -128,6 +128,26 @@ class ProjectSkill(Base, TimeMixin):
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class ProjectPluginConfig(Base, TimeMixin):
+    __tablename__ = "project_plugin_configs"
+    __table_args__ = (UniqueConstraint("project_id", "plugin_key", name="ux_project_plugin_configs_project_key"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    plugin_key: Mapped[str] = mapped_column(String(128), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    config_json: Mapped[str] = mapped_column(Text, default="{}")
+    compiled_policy_json: Mapped[str] = mapped_column(Text, default="{}")
+    last_validation_errors_json: Mapped[str] = mapped_column(Text, default="[]")
+    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    updated_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class WorkspaceSkill(Base, TimeMixin):
     __tablename__ = "workspace_skills"
     __table_args__ = (UniqueConstraint("workspace_id", "skill_key", name="ux_workspace_skills_workspace_key"),)
@@ -176,6 +196,7 @@ class Task(Base, TimeMixin):
     priority: Mapped[str] = mapped_column(String(16), default="Med")
     due_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     assignee_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    assigned_agent_code: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     labels: Mapped[str] = mapped_column(Text, default="[]")
     subtasks: Mapped[str] = mapped_column(Text, default="[]")
     attachments: Mapped[str] = mapped_column(Text, default="[]")

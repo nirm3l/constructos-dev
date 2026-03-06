@@ -9,6 +9,7 @@ export function useTaskEditorState() {
   const [editProjectId, setEditProjectId] = React.useState('')
   const [editTaskGroupId, setEditTaskGroupId] = React.useState('')
   const [editAssigneeId, setEditAssigneeId] = React.useState('')
+  const [editAssignedAgentCode, setEditAssignedAgentCode] = React.useState('')
   const [editTaskTags, setEditTaskTags] = React.useState<string[]>([])
   const [editTaskExternalRefsText, setEditTaskExternalRefsText] = React.useState('')
   const [editTaskAttachmentRefsText, setEditTaskAttachmentRefsText] = React.useState('')
@@ -50,7 +51,7 @@ export function useTaskEditorState() {
 
   return {
     editStatus, setEditStatus, editTitle, setEditTitle, editDescription, setEditDescription, editPriority, setEditPriority,
-    editDueDate, setEditDueDate, editProjectId, setEditProjectId, editTaskGroupId, setEditTaskGroupId, editAssigneeId, setEditAssigneeId, editTaskTags, setEditTaskTags, editTaskExternalRefsText,
+    editDueDate, setEditDueDate, editProjectId, setEditProjectId, editTaskGroupId, setEditTaskGroupId, editAssigneeId, setEditAssigneeId, editAssignedAgentCode, setEditAssignedAgentCode, editTaskTags, setEditTaskTags, editTaskExternalRefsText,
     setEditTaskExternalRefsText, editTaskAttachmentRefsText, setEditTaskAttachmentRefsText, showTaskTagPicker,
     setShowTaskTagPicker, taskTagPickerQuery, setTaskTagPickerQuery, editTaskType, setEditTaskType, editScheduledAtUtc,
     setEditScheduledAtUtc, editScheduleTimezone, setEditScheduleTimezone, editScheduleRunOnStatuses, setEditScheduleRunOnStatuses,

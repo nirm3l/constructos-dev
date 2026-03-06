@@ -254,7 +254,7 @@ export function useAppActions(c: any) {
 
   const buildTaskPatchPayload = React.useCallback(() => {
     if (!c.selectedTaskId) throw new Error('No task selected')
-    const instruction = c.editScheduledInstruction.trim() || null
+    const automationInstruction = c.editScheduledInstruction.trim() || null
     const scheduledAtUtc =
       c.editTaskType === 'scheduled_instruction' && c.editScheduledAtUtc
         ? new Date(c.editScheduledAtUtc).toISOString()
@@ -279,7 +279,7 @@ export function useAppActions(c: any) {
       externalFromStatusesText: c.editStatusTriggerExternalFromStatusesText,
       externalToStatusesText: c.editStatusTriggerExternalToStatusesText,
     })
-    const payload = {
+    const payload: Parameters<typeof patchTask>[2] = {
       title: c.editTitle.trim() || 'Untitled',
       description: c.editDescription,
       status: c.editStatus,
@@ -287,17 +287,20 @@ export function useAppActions(c: any) {
       project_id: c.editProjectId || c.selectedTask?.project_id,
       task_group_id: c.editTaskGroupId || null,
       assignee_id: c.editAssigneeId || null,
+      assigned_agent_code: c.editAssigneeId ? (c.editAssignedAgentCode || null) : null,
       labels: c.editTaskTags,
       external_refs: c.parseExternalRefsText(c.editTaskExternalRefsText),
       attachment_refs: c.parseAttachmentRefsText(c.editTaskAttachmentRefsText),
       due_date: c.editDueDate ? new Date(c.editDueDate).toISOString() : null,
-      instruction,
+      instruction: automationInstruction,
       execution_triggers: executionTriggers,
       task_type: c.editTaskType,
-      scheduled_at_utc: scheduledAtUtc || null,
-      schedule_timezone: c.editTaskType === 'scheduled_instruction' ? (c.editScheduleTimezone || null) : null,
-      scheduled_instruction: c.editTaskType === 'scheduled_instruction' ? instruction : null,
-      recurring_rule: recurringRule,
+    }
+    if (c.editTaskType === 'scheduled_instruction') {
+      payload.scheduled_at_utc = scheduledAtUtc || null
+      payload.schedule_timezone = c.editScheduleTimezone || null
+      payload.scheduled_instruction = automationInstruction
+      payload.recurring_rule = recurringRule
     }
     return { payload }
   }, [
@@ -307,6 +310,7 @@ export function useAppActions(c: any) {
     c.editProjectId,
     c.editTaskGroupId,
     c.editAssigneeId,
+    c.editAssignedAgentCode,
     c.editRecurringEvery,
     c.editRecurringUnit,
     c.editScheduledAtUtc,

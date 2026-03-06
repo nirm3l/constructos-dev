@@ -9,6 +9,7 @@ from .command_handlers import (
     CommandContext,
     MarkAllNotificationsReadHandler,
     MarkNotificationReadHandler,
+    MarkNotificationUnreadHandler,
 )
 
 
@@ -26,6 +27,15 @@ class NotificationApplicationService:
             user_id=self.user.id,
             command_id=self.command_id,
             handler=MarkNotificationReadHandler(self.ctx, notification_id),
+        )
+
+    def mark_unread(self, notification_id: str) -> dict:
+        return execute_command(
+            self.db,
+            command_name="Notification.MarkUnread",
+            user_id=self.user.id,
+            command_id=self.command_id,
+            handler=MarkNotificationUnreadHandler(self.ctx, notification_id),
         )
 
     def mark_all_read(self) -> dict:

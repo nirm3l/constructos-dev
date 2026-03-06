@@ -1,4 +1,5 @@
 import React from 'react'
+import * as AlertDialog from '@radix-ui/react-alert-dialog'
 import { BottomTabs } from '../tasks/taskViews'
 import { CodexChatDrawer } from '../chat/CodexChatDrawer'
 import { FloatingActions } from '../shared/FloatingActions'
@@ -8,6 +9,32 @@ export function AppOverlays({ state }: { state: any }) {
   return (
     <>
       <BottomTabs tab={state.tab} onSelectTab={state.setTab} />
+
+      <AlertDialog.Root open={Boolean(state.discardDialogOpen)} onOpenChange={(open) => {
+        if (!open) state.handleDiscardDialogCancel?.()
+      }}>
+        <AlertDialog.Portal>
+          <AlertDialog.Overlay className="drawer-backdrop" />
+          <AlertDialog.Content className="dialog-content">
+            <AlertDialog.Title>Discard changes?</AlertDialog.Title>
+            <AlertDialog.Description className="meta" style={{ marginTop: 6 }}>
+              {String(state.discardDialogMessage || 'You have unsaved changes. Discard them?')}
+            </AlertDialog.Description>
+            <div className="dialog-actions">
+              <AlertDialog.Cancel asChild>
+                <button className="status-chip" type="button" onClick={() => state.handleDiscardDialogCancel?.()}>
+                  Cancel
+                </button>
+              </AlertDialog.Cancel>
+              <AlertDialog.Action asChild>
+                <button className="status-chip danger-ghost" type="button" onClick={() => state.handleDiscardDialogConfirm?.()}>
+                  Discard
+                </button>
+              </AlertDialog.Action>
+            </div>
+          </AlertDialog.Content>
+        </AlertDialog.Portal>
+      </AlertDialog.Root>
 
       <FloatingActions
         state={{
@@ -64,6 +91,9 @@ export function AppOverlays({ state }: { state: any }) {
           setEditTaskGroupId: state.setEditTaskGroupId,
           editAssigneeId: state.editAssigneeId,
           setEditAssigneeId: state.setEditAssigneeId,
+          editAssignedAgentCode: state.editAssignedAgentCode,
+          setEditAssignedAgentCode: state.setEditAssignedAgentCode,
+          taskTeamAgents: state.taskTeamAgents,
           editTaskTags: state.editTaskTags,
           tagHue: state.tagHue,
           setShowTaskTagPicker: state.setShowTaskTagPicker,

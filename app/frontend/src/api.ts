@@ -9,6 +9,7 @@ import type {
   FeedbackCreateRequest,
   FeedbackCreateResponse,
   LicenseActivationResponse,
+  LicenseAutoUpdateResponse,
   LicenseStatusResponse,
   AgentChatResponse,
   ChatMessageRecord,
@@ -38,7 +39,11 @@ import type {
   ProjectMembersPage,
   ProjectFromTemplatePreviewResponse,
   ProjectFromTemplateResponse,
-  ProjectGatesVerifyResponse,
+  ProjectPolicyChecksVerifyResponse,
+  ProjectCapabilities,
+  ProjectPluginConfig,
+  ProjectPluginConfigDiff,
+  ProjectPluginConfigValidation,
   ProjectRule,
   ProjectRulesPage,
   ProjectSkill,
@@ -140,6 +145,10 @@ export const activateLicense = (userId: string, payload: { activation_code: stri
   api<LicenseActivationResponse>('/api/license/activate', userId, {
     method: 'POST',
     body: JSON.stringify(payload),
+  })
+export const triggerLicenseAutoUpdate = (userId: string) =>
+  api<LicenseAutoUpdateResponse>('/api/license/auto-update', userId, {
+    method: 'POST',
   })
 
 export const submitFeedback = (userId: string, payload: FeedbackCreateRequest) =>
@@ -306,6 +315,7 @@ export const createTask = (
     priority?: string
     due_date?: string | null
     assignee_id?: string | null
+    assigned_agent_code?: string | null
     labels?: string[]
     external_refs?: ExternalRef[]
     attachment_refs?: AttachmentRef[]
@@ -342,6 +352,8 @@ export const patchTask = (
       | 'due_date'
       | 'project_id'
       | 'task_group_id'
+      | 'assignee_id'
+      | 'assigned_agent_code'
       | 'title'
       | 'priority'
       | 'labels'
@@ -915,6 +927,9 @@ export const getNotifications = (userId: string) => api<Notification[]>('/api/no
 export const markNotificationRead = (userId: string, id: string) =>
   api<{ ok: true }>(`/api/notifications/${id}/read`, userId, { method: 'POST' })
 
+export const markNotificationUnread = (userId: string, id: string) =>
+  api<{ ok: true }>(`/api/notifications/${id}/unread`, userId, { method: 'POST' })
+
 export const markAllNotificationsRead = (userId: string) =>
   api<{ ok: true; updated: number }>('/api/notifications/read-all', userId, { method: 'POST' })
 
@@ -1106,8 +1121,71 @@ export const searchProjectKnowledge = (
 export const getProjectEventStormingOverview = (userId: string, projectId: string) =>
   api<EventStormingOverview>(`/api/projects/${projectId}/event-storming/overview`, userId)
 
-export const getProjectGatesVerification = (userId: string, projectId: string) =>
-  api<ProjectGatesVerifyResponse>(`/api/projects/${projectId}/gates/verify`, userId)
+export const getProjectPolicyChecksVerification = (userId: string, projectId: string) =>
+  api<ProjectPolicyChecksVerifyResponse>(`/api/projects/${projectId}/checks/verify`, userId)
+
+export const getProjectPluginConfig = (
+  userId: string,
+  projectId: string,
+  pluginKey: 'team_mode' | 'git_delivery' | 'docker_compose'
+) => api<ProjectPluginConfig>(`/api/projects/${projectId}/plugins/${pluginKey}`, userId)
+
+export const validateProjectPluginConfig = (
+  userId: string,
+  projectId: string,
+  pluginKey: 'team_mode' | 'git_delivery' | 'docker_compose',
+  payload: {
+    draft_config: Record<string, unknown>
+  }
+) =>
+  api<ProjectPluginConfigValidation>(`/api/projects/${projectId}/plugins/${pluginKey}/validate`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const applyProjectPluginConfig = (
+  userId: string,
+  projectId: string,
+  pluginKey: 'team_mode' | 'git_delivery' | 'docker_compose',
+  payload: {
+    config: Record<string, unknown>
+    expected_version?: number
+    enabled?: boolean
+  }
+) =>
+  api<ProjectPluginConfig>(`/api/projects/${projectId}/plugins/${pluginKey}/apply`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const setProjectPluginEnabled = (
+  userId: string,
+  projectId: string,
+  pluginKey: 'team_mode' | 'git_delivery' | 'docker_compose',
+  payload: {
+    enabled: boolean
+  }
+) =>
+  api<ProjectPluginConfig>(`/api/projects/${projectId}/plugins/${pluginKey}/enabled`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const diffProjectPluginConfig = (
+  userId: string,
+  projectId: string,
+  pluginKey: 'team_mode' | 'git_delivery' | 'docker_compose',
+  payload: {
+    draft_config: Record<string, unknown>
+  }
+) =>
+  api<ProjectPluginConfigDiff>(`/api/projects/${projectId}/plugins/${pluginKey}/diff`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const getProjectCapabilities = (userId: string, projectId: string) =>
+  api<ProjectCapabilities>(`/api/projects/${projectId}/capabilities`, userId)
 
 export const getProjectEventStormingSubgraph = (
   userId: string,

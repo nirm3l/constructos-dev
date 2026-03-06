@@ -120,6 +120,7 @@ export function NotesPanel({
   const [dropTargetKey, setDropTargetKey] = React.useState<string | null>(null)
   const [openSectionKeys, setOpenSectionKeys] = React.useState<string[]>([])
   const [noteEditorOpenSections, setNoteEditorOpenSections] = React.useState<string[]>([])
+  const [previewOnlyNoteId, setPreviewOnlyNoteId] = React.useState<string | null>(null)
 
   React.useEffect(() => {
     const allKeys = noteSections.map((section) => section.key)
@@ -135,6 +136,9 @@ export function NotesPanel({
   React.useEffect(() => {
     setNoteEditorOpenSections([])
   }, [state.selectedNote?.id])
+  React.useEffect(() => {
+    if (!state.selectedNoteId) setPreviewOnlyNoteId(null)
+  }, [state.selectedNoteId])
 
 
   const createGroupBusy = Boolean(state.createNoteGroupMutation?.isPending)
@@ -259,6 +263,36 @@ export function NotesPanel({
     })
   }, [state.createNoteMutation])
 
+  const openNotePreviewFullscreen = React.useCallback((noteId: string) => {
+    const alreadyOpen = String(state.selectedNoteId || '').trim() === String(noteId || '').trim()
+    if (!alreadyOpen) {
+      const changed = state.toggleNoteEditor(noteId)
+      if (!changed) return
+    }
+    setPreviewOnlyNoteId(noteId)
+    state.setShowTagPicker(false)
+    state.setTagPickerQuery('')
+    state.setNoteEditorView('preview')
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const row = document.getElementById(`note-row-${noteId}`)
+        const surface = row?.querySelector('.md-editor-surface') as HTMLElement | null
+        if (!surface) return
+        const doc = document as Document & { webkitFullscreenElement?: Element | null }
+        const isFullscreen = surface.classList.contains('md-editor-fullscreen')
+          || document.fullscreenElement === surface
+          || doc.webkitFullscreenElement === surface
+        if (isFullscreen) return
+        surface.setAttribute('data-md-fullscreen-mode', 'readonly')
+        const fullscreenButton = surface.querySelector('.md-mode-toggle .md-fullscreen-btn') as HTMLButtonElement | null
+        fullscreenButton?.click()
+        window.setTimeout(() => {
+          surface.removeAttribute('data-md-fullscreen-mode')
+        }, 0)
+      })
+    })
+  }, [state])
+
   const onNoteDragStart = React.useCallback((event: React.DragEvent<HTMLDivElement>, noteId: string) => {
     if (moveNoteBusy) return
     setDraggingNoteId(noteId)
@@ -364,6 +398,7 @@ export function NotesPanel({
     const hasResources = externalRefCount > 0 || attachmentRefCount > 0
     const openNoteFromMenu = () => {
       if (isOpen) return
+      setPreviewOnlyNoteId(null)
       const changed = state.toggleNoteEditor(n.id)
       if (!changed) return
       state.setShowTagPicker(false)
@@ -391,6 +426,7 @@ export function NotesPanel({
     }
     const editorExternalRefs = state.parseExternalRefsText(state.editNoteExternalRefsText)
     const editorAttachmentRefs = state.parseAttachmentRefsText(state.editNoteAttachmentRefsText)
+    const isPreviewOnly = previewOnlyNoteId === n.id
     const editorExternalLinksMeta = editorExternalRefs.length > 0
       ? `${editorExternalRefs.length} linked`
       : 'No links added'
@@ -404,6 +440,7 @@ export function NotesPanel({
         id={`note-row-${n.id}`}
         className={`note-row note-draggable ${isOpen ? 'open selected' : ''}`}
         onClick={() => {
+          setPreviewOnlyNoteId(null)
           const changed = state.toggleNoteEditor(n.id)
           if (!changed) return
           state.setShowTagPicker(false)
@@ -425,15 +462,36 @@ export function NotesPanel({
             {n.archived && <span className="badge">Archived</span>}
             <strong>{displayTitle}</strong>
           </div>
-          <div className="note-row-actions" onClick={(event) => event.stopPropagation()}>
+          <div
+            className="note-row-actions"
+            onClick={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
             <button
               className="action-icon note-row-actions-trigger"
               type="button"
               title="Copy note link"
               aria-label="Copy note link"
-              onClick={() => actions.copyShareLink({ tab: 'notes', projectId: n.project_id, noteId: n.id })}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation()
+                actions.copyShareLink({ tab: 'notes', projectId: n.project_id, noteId: n.id })
+              }}
             >
               <Icon path="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4m2 7a5 5 0 0 0-7.07 0L3.1 13.83a5 5 0 1 0 7.07 7.07L13 18" />
+            </button>
+            <button
+              className="action-icon note-row-actions-trigger"
+              type="button"
+              title="Open preview fullscreen"
+              aria-label="Open preview fullscreen"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation()
+                openNotePreviewFullscreen(n.id)
+              }}
+            >
+              <Icon path="M8 3H5a2 2 0 0 0-2 2v3m16 0V5a2 2 0 0 0-2-2h-3M8 21H5a2 2 0 0 1-2-2v-3m16 0v3a2 2 0 0 1-2 2h-3" />
             </button>
             <DropdownMenu.Root>
               <DropdownMenu.Trigger asChild>
@@ -448,9 +506,28 @@ export function NotesPanel({
               </DropdownMenu.Trigger>
               <DropdownMenu.Portal>
                 <DropdownMenu.Content className="task-group-menu-content note-row-menu-content" sideOffset={8} align="end">
-                  <DropdownMenu.Item className="task-group-menu-item" onSelect={openNoteFromMenu} disabled={isOpen}>
+                  <DropdownMenu.Item
+                    className="task-group-menu-item"
+                    onSelect={(event) => {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      openNoteFromMenu()
+                    }}
+                    disabled={isOpen}
+                  >
                     <Icon path="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6zm9 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
                     <span>{isOpen ? 'Editor open' : 'Open editor'}</span>
+                  </DropdownMenu.Item>
+                  <DropdownMenu.Item
+                    className="task-group-menu-item"
+                    onSelect={(event) => {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      openNotePreviewFullscreen(n.id)
+                    }}
+                  >
+                    <Icon path="M8 3H5a2 2 0 0 0-2 2v3m16 0V5a2 2 0 0 0-2-2h-3M8 21H5a2 2 0 0 1-2-2v-3m16 0v3a2 2 0 0 1-2 2h-3" />
+                    <span>Preview fullscreen</span>
                   </DropdownMenu.Item>
                   <DropdownMenu.Separator className="task-group-menu-separator" />
                   <DropdownMenu.Item className="task-group-menu-item" onSelect={togglePinFromMenu}>
@@ -557,18 +634,6 @@ export function NotesPanel({
                 onChange={(e) => state.setEditNoteTitle(e.target.value)}
                 placeholder="Title"
               />
-              <div className="note-actions">
-                {state.noteIsDirty && <span className="badge unsaved-badge">Unsaved</span>}
-                <button
-                  className="action-icon primary"
-                  onClick={() => state.saveNoteMutation.mutate()}
-                  disabled={state.saveNoteMutation.isPending || !state.noteIsDirty}
-                  title="Save note"
-                  aria-label="Save note"
-                >
-                  <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
-                </button>
-              </div>
             </div>
 
             <label className="field-control" style={{ marginBottom: 8 }}>
@@ -616,11 +681,19 @@ export function NotesPanel({
               </Select.Root>
             </label>
 
-            <div className="md-editor-surface">
+            <div
+              className="md-editor-surface"
+              onClick={(event) => event.stopPropagation()}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
               <MarkdownModeToggle
                 view={state.noteEditorView}
                 onChange={state.setNoteEditorView}
                 ariaLabel="Note editor view"
+                previewOnlyWhenFullscreen={isPreviewOnly}
+                onFullscreenTriggerMode={(mode, nextFullscreen) => {
+                  if (!nextFullscreen || mode === 'regular') setPreviewOnlyNoteId(null)
+                }}
               />
               <div className="md-editor-content">
                 {state.noteEditorView === 'write' ? (
@@ -835,6 +908,27 @@ export function NotesPanel({
               <div className="meta">Created by: {state.selectedNoteCreator}</div>
               {state.selectedNoteTimeMeta && <div className="meta">{state.selectedNoteTimeMeta.label}: {state.toUserDateTime(state.selectedNoteTimeMeta.value, state.userTimezone)}</div>}
             </div>
+            {(state.noteIsDirty || state.saveNoteMutation.isPending) && (
+              <div className="project-editor-savebar note-editor-savebar">
+                <div className="project-editor-savebar-meta">
+                  <span className="badge unsaved-badge">1 unsaved section</span>
+                  <span className="meta">Changed: Note</span>
+                </div>
+                <button
+                  className="status-chip on project-editor-savebar-btn"
+                  type="button"
+                  onClick={() => state.saveNoteMutation.mutate()}
+                  disabled={state.saveNoteMutation.isPending || !state.noteIsDirty}
+                  title="Save all note changes"
+                  aria-label="Save all note changes"
+                >
+                  <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+                  <span className="project-editor-savebar-btn-label">
+                    {state.saveNoteMutation.isPending ? 'Saving...' : 'Save all changes'}
+                  </span>
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -922,15 +1016,17 @@ export function NotesPanel({
           </label>
         </div>
 
-        <div className="row wrap notes-tag-filters">
-          <PopularTagFilters
-            tags={state.noteTagSuggestions}
-            selectedTags={state.noteTags}
-            onToggleTag={state.toggleNoteFilterTag}
-            onClear={() => state.clearNoteFilterTags()}
-            idPrefix="note-filter"
-          />
-        </div>
+        {filteredNotes.length > 0 && (
+          <div className="row wrap notes-tag-filters">
+            <PopularTagFilters
+              tags={state.noteTagSuggestions}
+              selectedTags={state.noteTags}
+              onToggleTag={state.toggleNoteFilterTag}
+              onClear={() => state.clearNoteFilterTags()}
+              idPrefix="note-filter"
+            />
+          </div>
+        )}
 
         <div className="task-list notes-list">
           {state.notes.isLoading && <div className="notice">Loading notes...</div>}

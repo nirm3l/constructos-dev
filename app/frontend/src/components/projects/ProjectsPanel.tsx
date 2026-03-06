@@ -15,8 +15,9 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
         totalProjects={state.bootstrap.data.projects.length}
         showProjectCreateForm={state.showProjectCreateForm}
         showProjectEditForm={state.showProjectEditForm}
-        projectIsDirty={state.projectIsDirty}
+        projectIsDirty={Boolean(state.projectIsDirty || state.projectEditorHasUnsavedChanges)}
         confirmDiscardChanges={state.confirmDiscardChanges}
+        requestDiscardChanges={state.requestDiscardChanges}
         setShowProjectEditForm={state.setShowProjectEditForm}
         setShowProjectCreateForm={state.setShowProjectCreateForm}
       />
@@ -169,6 +170,7 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
             toggleEditProjectMember={state.toggleEditProjectMember}
             selectedProjectCreator={state.selectedProjectCreator}
             selectedProjectTimeMeta={state.selectedProjectTimeMeta}
+            onUnsavedChange={state.setProjectEditorHasUnsavedChanges}
           />
         )}
       />

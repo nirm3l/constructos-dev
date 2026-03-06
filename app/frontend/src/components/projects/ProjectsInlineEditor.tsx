@@ -1,12 +1,26 @@
 import React from 'react'
 import { createPortal } from 'react-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as AlertDialog from '@radix-ui/react-alert-dialog'
 import * as Select from '@radix-ui/react-select'
 import * as Accordion from '@radix-ui/react-accordion'
 import * as Tabs from '@radix-ui/react-tabs'
-import { getProjectEventStormingOverview, getProjectGatesVerification } from '../../api'
+import * as Tooltip from '@radix-ui/react-tooltip'
+import {
+  applyProjectPluginConfig,
+  createProjectRule,
+  deleteProjectRule,
+  diffProjectPluginConfig,
+  getProjectEventStormingOverview,
+  getProjectCapabilities,
+  getProjectMembers,
+  getProjectPolicyChecksVerification,
+  getProjectPluginConfig,
+  patchProjectRule,
+  setProjectPluginEnabled,
+  validateProjectPluginConfig,
+} from '../../api'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import type {
   AgentChatUsage,
@@ -15,7 +29,12 @@ import type {
   GraphContextPack,
   GraphProjectOverview,
   Project,
-  ProjectGatesVerifyResponse,
+  ProjectPolicyChecksVerifyResponse,
+  ProjectCapabilities,
+  ProjectPluginConfig,
+  ProjectPluginConfigDiff,
+  ProjectPluginConfigValidation,
+  ProjectMembersPage,
   ProjectRule,
   ProjectRulesPage,
   ProjectSkill,
@@ -44,6 +63,7 @@ import {
 type ProjectMutation = {
   isPending: boolean
   mutate: (...args: any[]) => void
+  mutateAsync?: (...args: any[]) => Promise<unknown>
 }
 
 type WorkspaceUser = {
@@ -57,6 +77,203 @@ type CodexResumeStateLike = {
   succeeded?: boolean
   fallbackUsed?: boolean
 } | null
+
+type ProjectPluginKey = 'team_mode' | 'git_delivery' | 'docker_compose'
+type TeamModeRole = 'Developer' | 'QA' | 'Lead'
+type StagedRuleCreate = { clientId: string; title: string; body: string }
+type StagedSkillImportUrl = {
+  clientId: string
+  source_url: string
+  skill_key?: string
+  mode?: 'advisory' | 'enforced'
+  trust_level?: 'verified' | 'reviewed' | 'untrusted'
+}
+type StagedSkillImportFile = {
+  clientId: string
+  file: File
+  skill_key?: string
+  mode?: 'advisory' | 'enforced'
+  trust_level?: 'verified' | 'reviewed' | 'untrusted'
+}
+
+function pluginLabel(value: ProjectPluginKey): string {
+  if (value === 'team_mode') return 'Team Mode'
+  if (value === 'git_delivery') return 'Git Delivery'
+  return 'Docker Compose'
+}
+
+function prettyJson(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? {}, null, 2)
+  } catch {
+    return '{}'
+  }
+}
+
+function prettyCompact(value: unknown): string {
+  try {
+    const raw = JSON.stringify(value)
+    if (!raw) return 'null'
+    return raw.length > 160 ? `${raw.slice(0, 157)}...` : raw
+  } catch {
+    return String(value)
+  }
+}
+
+const TEAM_MODE_ROLES: TeamModeRole[] = ['Developer', 'QA', 'Lead']
+
+function buildTeamModeStarterConfig(args: {
+  statuses: string[]
+}): Record<string, unknown> {
+  const statuses = args.statuses.length ? args.statuses : ['To do', 'Dev', 'QA', 'Lead', 'Done', 'Blocked']
+  const statusSet = new Set(statuses)
+  const hasCanonicalFlow = ['To do', 'Dev', 'Lead', 'QA', 'Done', 'Blocked'].every((status) => statusSet.has(status))
+  const transitions = hasCanonicalFlow
+    ? [
+        { from: 'To do', to: 'Dev', allowed_roles: ['Developer', 'Lead'] },
+        { from: 'Dev', to: 'Lead', allowed_roles: ['Developer'] },
+        { from: 'Lead', to: 'QA', allowed_roles: ['Lead'] },
+        { from: 'QA', to: 'Done', allowed_roles: ['QA'] },
+        { from: 'To do', to: 'Blocked', allowed_roles: ['Developer', 'QA', 'Lead'] },
+        { from: 'Dev', to: 'Blocked', allowed_roles: ['Developer', 'Lead'] },
+        { from: 'Lead', to: 'Blocked', allowed_roles: ['Lead'] },
+        { from: 'QA', to: 'Blocked', allowed_roles: ['QA', 'Lead'] },
+        { from: 'Blocked', to: 'Dev', allowed_roles: ['Developer', 'Lead'] },
+        { from: 'Blocked', to: 'Lead', allowed_roles: ['Lead'] },
+        { from: 'Blocked', to: 'QA', allowed_roles: ['QA', 'Lead'] },
+      ]
+    : [
+        statuses.length >= 2 ? { from: statuses[0], to: statuses[1], allowed_roles: ['Developer'] } : null,
+        statuses.length >= 3 ? { from: statuses[1], to: statuses[2], allowed_roles: ['Lead'] } : null,
+        statuses.length >= 4 ? { from: statuses[2], to: statuses[3], allowed_roles: ['QA'] } : null,
+      ].filter(Boolean)
+  return {
+    required_checks: {
+      team_mode: ['role_coverage_present', 'required_triggers_present', 'lead_oversight_not_done_before_delivery_complete'],
+    },
+    team: {
+      agents: [
+        { id: 'dev-a', name: 'Developer A', authority_role: 'Developer' },
+        { id: 'dev-b', name: 'Developer B', authority_role: 'Developer' },
+        { id: 'qa-a', name: 'QA A', authority_role: 'QA' },
+        { id: 'lead-a', name: 'Lead A', authority_role: 'Lead' },
+      ],
+    },
+    workflow: {
+      statuses,
+      transitions,
+    },
+    governance: {
+      merge_authority_roles: ['Lead'],
+      task_move_authority_roles: ['Developer', 'QA', 'Lead'],
+    },
+    automation: {
+      lead_recurring_max_minutes: 5,
+    },
+  }
+}
+
+function isTeamModeMinimalDefaultConfig(config: unknown): boolean {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return false
+  const root = config as Record<string, unknown>
+  const team = root.team && typeof root.team === 'object' && !Array.isArray(root.team)
+    ? (root.team as Record<string, unknown>)
+    : {}
+  const workflow = root.workflow && typeof root.workflow === 'object' && !Array.isArray(root.workflow)
+    ? (root.workflow as Record<string, unknown>)
+    : {}
+  const members = Array.isArray(team.members)
+    ? team.members.filter((item) => item && typeof item === 'object')
+    : []
+  const agents = Array.isArray(team.agents)
+    ? team.agents.filter((item) => item && typeof item === 'object')
+    : []
+  const transitions = Array.isArray(workflow.transitions)
+    ? workflow.transitions.filter((item) => item && typeof item === 'object')
+    : []
+  return members.length === 0 && agents.length === 0 && transitions.length === 0
+}
+
+const GIT_DELIVERY_STARTER_CONFIG: Record<string, unknown> = {
+  required_checks: {
+    delivery: ['repo_context_present', 'git_contract_ok', 'dev_tasks_have_commit_evidence', 'qa_has_verifiable_artifacts'],
+  },
+}
+
+const DOCKER_COMPOSE_STARTER_CONFIG: Record<string, unknown> = {
+  compose_project_name: 'constructos-app',
+  workspace_root: '/workspace',
+  allowed_services: ['task-app', 'mcp-tools'],
+  protected_services: ['license-control-plane', 'license-control-plane-backup'],
+  runtime_deploy_health: {
+    required: false,
+    stack: 'constructos-ws-default',
+    port: null,
+    health_path: '/health',
+    require_http_200: true,
+  },
+}
+
+function parseJsonObject(rawText: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(rawText || '{}') as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    return parsed as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
+
+function isEmptyObject(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return true
+  return Object.keys(value as Record<string, unknown>).length === 0
+}
+
+function roleLabel(value: string): string {
+  const normalized = String(value || '').trim()
+  if (normalized === 'DeveloperAgent') return 'Developer'
+  if (normalized === 'QAAgent') return 'QA'
+  if (normalized === 'TeamLeadAgent') return 'Lead'
+  if (normalized === 'Developer') return 'Developer'
+  if (normalized === 'QA') return 'QA'
+  if (normalized === 'Lead') return 'Lead'
+  return normalized || 'Unknown'
+}
+
+function InfoTip({ text }: { text: string }) {
+  return (
+    <Tooltip.Provider delayDuration={120}>
+      <Tooltip.Root>
+        <Tooltip.Trigger asChild>
+          <button type="button" className="project-plugin-tooltip-trigger" aria-label={text}>
+            <Icon path="M12 16v-4m0-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </button>
+        </Tooltip.Trigger>
+        <Tooltip.Portal>
+          <Tooltip.Content className="header-tooltip-content" side="top" sideOffset={6}>
+            {text}
+            <Tooltip.Arrow className="header-tooltip-arrow" />
+          </Tooltip.Content>
+        </Tooltip.Portal>
+      </Tooltip.Root>
+    </Tooltip.Provider>
+  )
+}
+
+function csvToList(value: string): string[] {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function listToCsv(value: unknown): string {
+  if (!Array.isArray(value)) return ''
+  return value
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .join(', ')
+}
 
 export function ProjectsInlineEditor({
   project,
@@ -133,6 +350,7 @@ export function ProjectsInlineEditor({
   toggleEditProjectMember,
   selectedProjectCreator,
   selectedProjectTimeMeta,
+  onUnsavedChange,
 }: {
   project: Project
   selectedProject: Project
@@ -216,6 +434,7 @@ export function ProjectsInlineEditor({
   toggleEditProjectMember: (userIdToToggle: string) => void
   selectedProjectCreator: string
   selectedProjectTimeMeta: { label: 'Created' | 'Updated'; value: string } | null
+  onUnsavedChange?: (hasUnsavedChanges: boolean) => void
 }) {
   const modelOptions = React.useMemo(
     () =>
@@ -282,36 +501,87 @@ export function ProjectsInlineEditor({
     ? 'OFF'
     : editProjectChatIndexMode
   const chatAttachmentDisabled = chatPolicyDisabled || effectiveChatIndexMode === 'OFF'
+  const queryClient = useQueryClient()
   const inlineEventStormingOverviewQuery = useQuery({
     queryKey: ['project-event-storming-overview', userId, project.id],
     queryFn: () => getProjectEventStormingOverview(userId, project.id),
     enabled: Boolean(userId && project.id && selectedProject?.id === project.id),
   })
   const eventStormingOverview = inlineEventStormingOverviewQuery.data ?? projectEventStormingOverview?.data
-  const gateSkillKeys = React.useMemo(
-    () =>
-      new Set(
-        (projectSkills.data?.items ?? [])
-          .map((item) => String(item.skill_key || '').trim())
-          .filter(Boolean)
-      ),
-    [projectSkills.data?.items]
-  )
-  const hasGateRelevantSkills = gateSkillKeys.has('team_mode') || gateSkillKeys.has('git_delivery') || gateSkillKeys.has('github_delivery')
-  const hasGatePolicyRule = React.useMemo(
-    () =>
-      (projectRules.data?.items ?? []).some((rule) => {
-        const title = String(rule.title || '').trim().toLowerCase()
-        return title.includes('gate policy') || title.includes('delivery gates') || title.includes('workflow gates')
-      }),
-    [projectRules.data?.items]
-  )
-  const shouldShowProjectGates = hasGateRelevantSkills || hasGatePolicyRule
-  const projectGatesQuery = useQuery<ProjectGatesVerifyResponse>({
-    queryKey: ['project-gates-verify', userId, project.id],
-    queryFn: () => getProjectGatesVerification(userId, project.id),
-    enabled: Boolean(userId && project.id && selectedProject?.id === project.id && shouldShowProjectGates),
+  const teamModePluginQuery = useQuery<ProjectPluginConfig>({
+    queryKey: ['project-plugin-config', userId, project.id, 'team_mode'],
+    queryFn: () => getProjectPluginConfig(userId, project.id, 'team_mode'),
+    enabled: Boolean(userId && project.id && selectedProject?.id === project.id),
+  })
+  const projectMembersQuery = useQuery<ProjectMembersPage>({
+    queryKey: ['project-members-inline', userId, project.id],
+    queryFn: () => getProjectMembers(userId, project.id),
+    enabled: Boolean(userId && project.id && selectedProject?.id === project.id),
+  })
+  const gitDeliveryPluginQuery = useQuery<ProjectPluginConfig>({
+    queryKey: ['project-plugin-config', userId, project.id, 'git_delivery'],
+    queryFn: () => getProjectPluginConfig(userId, project.id, 'git_delivery'),
+    enabled: Boolean(userId && project.id && selectedProject?.id === project.id),
+  })
+  const dockerComposePluginQuery = useQuery<ProjectPluginConfig>({
+    queryKey: ['project-plugin-config', userId, project.id, 'docker_compose'],
+    queryFn: () => getProjectPluginConfig(userId, project.id, 'docker_compose'),
+    enabled: Boolean(userId && project.id && selectedProject?.id === project.id),
+  })
+  const projectCapabilitiesQuery = useQuery<ProjectCapabilities>({
+    queryKey: ['project-capabilities', userId, project.id],
+    queryFn: () => getProjectCapabilities(userId, project.id),
+    enabled: Boolean(userId && project.id && selectedProject?.id === project.id),
+  })
+  const shouldShowProjectChecks = Boolean(teamModePluginQuery.data?.enabled || gitDeliveryPluginQuery.data?.enabled)
+  const capabilityByPluginKey = React.useMemo(() => {
+    const out: Record<string, { enabled: boolean; version: number }> = {}
+    for (const item of projectCapabilitiesQuery.data?.plugins || []) {
+      const key = String(item?.plugin_key || '').trim()
+      if (!key) continue
+      out[key] = {
+        enabled: Boolean(item.enabled),
+        version: Number(item.version || 0),
+      }
+    }
+    return out
+  }, [projectCapabilitiesQuery.data?.plugins])
+  const projectChecksQuery = useQuery<ProjectPolicyChecksVerifyResponse>({
+    queryKey: ['project-checks-verify', userId, project.id],
+    queryFn: () => getProjectPolicyChecksVerification(userId, project.id),
+    enabled: Boolean(userId && project.id && selectedProject?.id === project.id && shouldShowProjectChecks),
     refetchInterval: 20_000,
+  })
+  const validatePluginConfigMutation = useMutation({
+    mutationFn: (params: { pluginKey: ProjectPluginKey; draftConfig: Record<string, unknown> }) =>
+      validateProjectPluginConfig(userId, project.id, params.pluginKey, {
+        draft_config: params.draftConfig,
+      }),
+  })
+  const applyPluginConfigMutation = useMutation({
+    mutationFn: (params: {
+      pluginKey: ProjectPluginKey
+      config: Record<string, unknown>
+      expectedVersion?: number
+      enabled?: boolean
+    }) =>
+      applyProjectPluginConfig(userId, project.id, params.pluginKey, {
+        config: params.config,
+        expected_version: params.expectedVersion,
+        enabled: params.enabled,
+      }),
+  })
+  const setPluginEnabledMutation = useMutation({
+    mutationFn: (params: { pluginKey: ProjectPluginKey; enabled: boolean }) =>
+      setProjectPluginEnabled(userId, project.id, params.pluginKey, {
+        enabled: params.enabled,
+      }),
+  })
+  const diffPluginConfigMutation = useMutation({
+    mutationFn: (params: { pluginKey: ProjectPluginKey; draftConfig: Record<string, unknown> }) =>
+      diffProjectPluginConfig(userId, project.id, params.pluginKey, {
+        draft_config: params.draftConfig,
+      }),
   })
   const eventStormingFrameModeRaw = String(eventStormingOverview?.context_frame?.mode || '').trim().toLowerCase()
   const eventStormingFrameMode = eventStormingFrameModeRaw === 'full' || eventStormingFrameModeRaw === 'delta'
@@ -354,7 +624,7 @@ export function ProjectsInlineEditor({
       { key: 'ReadModel', label: 'Read Model', color: '#64748b', count: Number(counts.ReadModel || 0) },
     ]
   }, [eventStormingOverview?.component_counts])
-  const projectGatesSnapshot = projectGatesQuery.data
+  const projectChecksSnapshot = projectChecksQuery.data
   const gateScopeEntries = React.useMemo<
     Array<{
       scopeKey: string
@@ -369,8 +639,8 @@ export function ProjectsInlineEditor({
       gatePolicy?: Record<string, unknown>
     }>
   >(() => {
-    if (!projectGatesSnapshot || typeof projectGatesSnapshot !== 'object') return []
-    const payload = projectGatesSnapshot as Record<string, unknown>
+    if (!projectChecksSnapshot || typeof projectChecksSnapshot !== 'object') return []
+    const payload = projectChecksSnapshot as Record<string, unknown>
     const catalogRaw =
       payload.catalog && typeof payload.catalog === 'object'
         ? (payload.catalog as Record<string, unknown>)
@@ -405,7 +675,7 @@ export function ProjectsInlineEditor({
             ? (scope.check_descriptions as Record<string, string>)
             : {}
 
-        const policyRaw = scope.gate_policy
+        const policyRaw = scope.plugin_policy
         const policy =
           policyRaw && typeof policyRaw === 'object'
             ? (policyRaw as Record<string, unknown>)
@@ -455,12 +725,12 @@ export function ProjectsInlineEditor({
           failedChecks,
           checkDescriptions,
           availableChecks,
-          gatePolicySource: String(scope.gate_policy_source || '').trim() || 'default',
+          gatePolicySource: String(scope.plugin_policy_source || '').trim() || 'default',
           gatePolicy: policy,
         }
       })
       .filter((item): item is NonNullable<typeof item> => Boolean(item))
-  }, [projectGatesSnapshot])
+  }, [projectChecksSnapshot])
   const gatePolicyPayload = React.useMemo(() => {
     for (const scope of gateScopeEntries) {
       if (scope.gatePolicy && Object.keys(scope.gatePolicy).length > 0) return scope.gatePolicy
@@ -556,10 +826,8 @@ export function ProjectsInlineEditor({
     () => gateScopeEntries.find((scope) => scope.gatePolicySource !== 'default')?.gatePolicySource || 'default',
     [gateScopeEntries]
   )
-  const gatePolicyRuleId = React.useMemo(() => {
-    const match = /^project_rule:([a-f0-9-]{36})$/i.exec(gatePolicySource)
-    return match?.[1] ?? null
-  }, [gatePolicySource])
+  const deliveryKickoffRequired = Boolean(projectChecksSnapshot?.delivery?.kickoff_required)
+  const deliveryKickoffHint = String(projectChecksSnapshot?.delivery?.kickoff_hint || '').trim()
   const effectiveEventStormingEnabled = Boolean(editProjectEventStormingEnabled ?? true)
   const projectExternalRefs = React.useMemo(
     () => parseExternalRefsText(editProjectExternalRefsText),
@@ -574,7 +842,15 @@ export function ProjectsInlineEditor({
   const [skillImportSourceUrl, setSkillImportSourceUrl] = React.useState('')
   const skillImportFileInputRef = React.useRef<HTMLInputElement | null>(null)
   const [projectEditorTab, setProjectEditorTab] = React.useState<
-    'overview' | 'gates' | 'rules' | 'skills' | 'resources' | 'context'
+    | 'overview'
+    | 'checks'
+    | 'team-mode'
+    | 'git-delivery'
+    | 'docker-compose'
+    | 'rules'
+    | 'skills'
+    | 'resources'
+    | 'context'
   >('overview')
   const [skillImportKey, setSkillImportKey] = React.useState('')
   const [skillImportMode, setSkillImportMode] = React.useState<'advisory' | 'enforced'>('advisory')
@@ -594,6 +870,1130 @@ export function ProjectsInlineEditor({
   const [removeProjectPromptOpen, setRemoveProjectPromptOpen] = React.useState(false)
   const [deleteRulePrompt, setDeleteRulePrompt] = React.useState<{ id: string; title: string } | null>(null)
   const [deleteSkillPrompt, setDeleteSkillPrompt] = React.useState<{ id: string; name: string } | null>(null)
+  const [teamModeConfigText, setTeamModeConfigText] = React.useState('{}')
+  const [gitDeliveryConfigText, setGitDeliveryConfigText] = React.useState('{}')
+  const [dockerComposeConfigText, setDockerComposeConfigText] = React.useState('{}')
+  const [teamModePersistedText, setTeamModePersistedText] = React.useState('{}')
+  const [gitDeliveryPersistedText, setGitDeliveryPersistedText] = React.useState('{}')
+  const [dockerComposePersistedText, setDockerComposePersistedText] = React.useState('{}')
+  const [teamModeLocalEditLock, setTeamModeLocalEditLock] = React.useState(false)
+  const [gitDeliveryLocalEditLock, setGitDeliveryLocalEditLock] = React.useState(false)
+  const [dockerComposeLocalEditLock, setDockerComposeLocalEditLock] = React.useState(false)
+  const teamModeHydratedKeyRef = React.useRef<string>('')
+  const gitDeliveryHydratedKeyRef = React.useRef<string>('')
+  const dockerComposeHydratedKeyRef = React.useRef<string>('')
+  const [pluginUiStatus, setPluginUiStatus] = React.useState<
+    Partial<Record<ProjectPluginKey, { tone: 'ok' | 'error' | 'warning'; text: string }>>
+  >({})
+  const [pluginValidationByKey, setPluginValidationByKey] = React.useState<
+    Partial<Record<ProjectPluginKey, ProjectPluginConfigValidation>>
+  >({})
+  const [pluginDiffByKey, setPluginDiffByKey] = React.useState<Partial<Record<ProjectPluginKey, ProjectPluginConfigDiff>>>({})
+  const [globalSaveStatus, setGlobalSaveStatus] = React.useState<{ tone: 'ok' | 'error' | 'warning'; text: string } | null>(null)
+  const [stagedRuleCreates, setStagedRuleCreates] = React.useState<StagedRuleCreate[]>([])
+  const [stagedRulePatches, setStagedRulePatches] = React.useState<Record<string, { title: string; body: string }>>({})
+  const [stagedRuleDeletes, setStagedRuleDeletes] = React.useState<string[]>([])
+  const [rulesSavePending, setRulesSavePending] = React.useState(false)
+  const [stagedSkillImportUrls, setStagedSkillImportUrls] = React.useState<StagedSkillImportUrl[]>([])
+  const [stagedSkillImportFiles, setStagedSkillImportFiles] = React.useState<StagedSkillImportFile[]>([])
+  const [stagedSkillAttachIds, setStagedSkillAttachIds] = React.useState<string[]>([])
+  const [stagedSkillApplyIds, setStagedSkillApplyIds] = React.useState<string[]>([])
+  const ruleCreateSeqRef = React.useRef(1)
+  const stagedSkillSeqRef = React.useRef(1)
+  const teamModeConfigDirty = React.useMemo(
+    () => String(teamModeConfigText || '').trim() !== String(teamModePersistedText || '').trim(),
+    [teamModeConfigText, teamModePersistedText]
+  )
+  const gitDeliveryConfigDirty = React.useMemo(
+    () => String(gitDeliveryConfigText || '').trim() !== String(gitDeliveryPersistedText || '').trim(),
+    [gitDeliveryConfigText, gitDeliveryPersistedText]
+  )
+  const dockerComposeConfigDirty = React.useMemo(
+    () => String(dockerComposeConfigText || '').trim() !== String(dockerComposePersistedText || '').trim(),
+    [dockerComposeConfigText, dockerComposePersistedText]
+  )
+  const sourceProjectRules = React.useMemo(() => projectRules.data?.items ?? [], [projectRules.data?.items])
+  const sourceRuleById = React.useMemo(() => {
+    const out = new Map<string, ProjectRule>()
+    for (const rule of sourceProjectRules) {
+      const id = String(rule.id || '').trim()
+      if (!id) continue
+      out.set(id, rule)
+    }
+    return out
+  }, [sourceProjectRules])
+  const stagedRuleCreateById = React.useMemo(() => {
+    const out = new Map<string, StagedRuleCreate>()
+    for (const item of stagedRuleCreates) out.set(item.clientId, item)
+    return out
+  }, [stagedRuleCreates])
+  const stagedRuleDeleteSet = React.useMemo(() => new Set(stagedRuleDeletes), [stagedRuleDeletes])
+  const rulesListItems = React.useMemo(() => {
+    const items: Array<{
+      id: string
+      title: string
+      body: string
+      updatedAt?: string | null
+      isNew: boolean
+      isPatched: boolean
+    }> = []
+    for (const rule of sourceProjectRules) {
+      const id = String(rule.id || '').trim()
+      if (!id || stagedRuleDeleteSet.has(id)) continue
+      const patch = stagedRulePatches[id]
+      items.push({
+        id,
+        title: patch ? patch.title : String(rule.title || ''),
+        body: patch ? patch.body : String(rule.body || ''),
+        updatedAt: String(rule.updated_at || ''),
+        isNew: false,
+        isPatched: Boolean(patch),
+      })
+    }
+    for (const draft of stagedRuleCreates) {
+      items.push({
+        id: draft.clientId,
+        title: draft.title,
+        body: draft.body,
+        updatedAt: null,
+        isNew: true,
+        isPatched: true,
+      })
+    }
+    return items
+  }, [sourceProjectRules, stagedRuleCreates, stagedRuleDeleteSet, stagedRulePatches])
+  const rulesDirty = React.useMemo(
+    () => stagedRuleCreates.length > 0 || stagedRuleDeletes.length > 0 || Object.keys(stagedRulePatches).length > 0,
+    [stagedRuleCreates.length, stagedRuleDeletes.length, stagedRulePatches]
+  )
+  const selectedRuleListItem = React.useMemo(
+    () => rulesListItems.find((item) => item.id === selectedProjectRuleId) ?? null,
+    [rulesListItems, selectedProjectRuleId]
+  )
+  const currentRuleEditorDirty = React.useMemo(() => {
+    if (!selectedProjectRuleId) return false
+    if (!selectedRuleListItem) {
+      return Boolean(String(projectRuleTitle || '').trim() || String(projectRuleBody || '').trim())
+    }
+    return (
+      String(projectRuleTitle || '') !== String(selectedRuleListItem.title || '') ||
+      String(projectRuleBody || '') !== String(selectedRuleListItem.body || '')
+    )
+  }, [projectRuleBody, projectRuleTitle, selectedProjectRuleId, selectedRuleListItem])
+  const skillsDirty = React.useMemo(
+    () =>
+      stagedSkillImportUrls.length > 0 ||
+      stagedSkillImportFiles.length > 0 ||
+      stagedSkillAttachIds.length > 0 ||
+      stagedSkillApplyIds.length > 0,
+    [stagedSkillApplyIds.length, stagedSkillAttachIds.length, stagedSkillImportFiles.length, stagedSkillImportUrls.length]
+  )
+  const teamModeStarterConfig = React.useMemo(
+    () =>
+      buildTeamModeStarterConfig({
+        statuses: csvToList(editProjectCustomStatusesText),
+      }),
+    [editProjectCustomStatusesText]
+  )
+
+  React.useEffect(() => {
+    setTeamModeLocalEditLock(false)
+    setGitDeliveryLocalEditLock(false)
+    setDockerComposeLocalEditLock(false)
+    setGlobalSaveStatus(null)
+    setStagedRuleCreates([])
+    setStagedRulePatches({})
+    setStagedRuleDeletes([])
+    setRulesSavePending(false)
+    setStagedSkillImportUrls([])
+    setStagedSkillImportFiles([])
+    setStagedSkillAttachIds([])
+    setStagedSkillApplyIds([])
+    ruleCreateSeqRef.current = 1
+    stagedSkillSeqRef.current = 1
+  }, [project.id])
+
+  React.useEffect(() => {
+    if (!teamModePluginQuery.data) return
+    const shouldUseStarter =
+      teamModePluginQuery.data.exists === false ||
+      Number(teamModePluginQuery.data.version || 0) < 1 ||
+      isEmptyObject(teamModePluginQuery.data.config) ||
+      (Number(teamModePluginQuery.data.version || 0) === 1 && isTeamModeMinimalDefaultConfig(teamModePluginQuery.data.config))
+    const next = shouldUseStarter ? teamModeStarterConfig : teamModePluginQuery.data.config
+    const currentProjectPrefix = `${project.id}:`
+    if (
+      teamModeLocalEditLock &&
+      teamModeConfigDirty &&
+      teamModeHydratedKeyRef.current.startsWith(currentProjectPrefix)
+    ) {
+      return
+    }
+    const hydrationKey = `${project.id}:${Number(teamModePluginQuery.data.version || 0)}:${prettyJson(next)}`
+    if (teamModeHydratedKeyRef.current === hydrationKey) return
+    const serialized = prettyJson(next)
+    setTeamModeConfigText(serialized)
+    setTeamModePersistedText(serialized)
+    setTeamModeLocalEditLock(false)
+    teamModeHydratedKeyRef.current = hydrationKey
+  }, [project.id, teamModePluginQuery.data, teamModeStarterConfig, teamModeConfigDirty, teamModeLocalEditLock])
+
+  React.useEffect(() => {
+    if (!gitDeliveryPluginQuery.data) return
+    const next = isEmptyObject(gitDeliveryPluginQuery.data.config)
+      ? GIT_DELIVERY_STARTER_CONFIG
+      : gitDeliveryPluginQuery.data.config
+    const currentProjectPrefix = `${project.id}:`
+    if (
+      gitDeliveryLocalEditLock &&
+      gitDeliveryConfigDirty &&
+      gitDeliveryHydratedKeyRef.current.startsWith(currentProjectPrefix)
+    ) {
+      return
+    }
+    const hydrationKey = `${project.id}:${Number(gitDeliveryPluginQuery.data.version || 0)}:${prettyJson(next)}`
+    if (gitDeliveryHydratedKeyRef.current === hydrationKey) return
+    const serialized = prettyJson(next)
+    setGitDeliveryConfigText(serialized)
+    setGitDeliveryPersistedText(serialized)
+    setGitDeliveryLocalEditLock(false)
+    gitDeliveryHydratedKeyRef.current = hydrationKey
+  }, [project.id, gitDeliveryPluginQuery.data, gitDeliveryConfigDirty, gitDeliveryLocalEditLock])
+
+  React.useEffect(() => {
+    if (!dockerComposePluginQuery.data) return
+    const next = isEmptyObject(dockerComposePluginQuery.data.config)
+      ? DOCKER_COMPOSE_STARTER_CONFIG
+      : dockerComposePluginQuery.data.config
+    const currentProjectPrefix = `${project.id}:`
+    if (
+      dockerComposeLocalEditLock &&
+      dockerComposeConfigDirty &&
+      dockerComposeHydratedKeyRef.current.startsWith(currentProjectPrefix)
+    ) {
+      return
+    }
+    const hydrationKey = `${project.id}:${Number(dockerComposePluginQuery.data.version || 0)}:${prettyJson(next)}`
+    if (dockerComposeHydratedKeyRef.current === hydrationKey) return
+    const serialized = prettyJson(next)
+    setDockerComposeConfigText(serialized)
+    setDockerComposePersistedText(serialized)
+    setDockerComposeLocalEditLock(false)
+    dockerComposeHydratedKeyRef.current = hydrationKey
+  }, [project.id, dockerComposePluginQuery.data, dockerComposeConfigDirty, dockerComposeLocalEditLock])
+
+  const parsePluginConfigText = React.useCallback((pluginKey: ProjectPluginKey, rawText: string): Record<string, unknown> | null => {
+    try {
+      const parsed = JSON.parse(rawText || '{}') as unknown
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        setPluginUiStatus((prev) => ({
+          ...prev,
+          [pluginKey]: { tone: 'error', text: 'Config must be a JSON object.' },
+        }))
+        return null
+      }
+      return parsed as Record<string, unknown>
+    } catch (err) {
+      setPluginUiStatus((prev) => ({
+        ...prev,
+        [pluginKey]: { tone: 'error', text: toErrorMessage(err, 'Invalid JSON payload.') },
+      }))
+      return null
+    }
+  }, [])
+
+  const teamModeDraft = React.useMemo(() => parseJsonObject(teamModeConfigText), [teamModeConfigText])
+  const gitDeliveryDraft = React.useMemo(() => parseJsonObject(gitDeliveryConfigText), [gitDeliveryConfigText])
+  const dockerComposeDraft = React.useMemo(() => parseJsonObject(dockerComposeConfigText), [dockerComposeConfigText])
+
+  const patchTeamModeDraft = React.useCallback(
+    (updater: (draft: Record<string, unknown>) => Record<string, unknown>) => {
+      if (!teamModeDraft) {
+        setPluginUiStatus((prev) => ({
+          ...prev,
+          team_mode: { tone: 'error', text: 'Team Mode JSON is invalid.' },
+        }))
+        return
+      }
+      setTeamModeLocalEditLock(true)
+      setGlobalSaveStatus(null)
+      setTeamModeConfigText(prettyJson(updater({ ...teamModeDraft })))
+    },
+    [teamModeDraft]
+  )
+
+  const patchGitDeliveryDraft = React.useCallback(
+    (updater: (draft: Record<string, unknown>) => Record<string, unknown>) => {
+      if (!gitDeliveryDraft) {
+        setPluginUiStatus((prev) => ({
+          ...prev,
+          git_delivery: { tone: 'error', text: 'Git Delivery JSON is invalid.' },
+        }))
+        return
+      }
+      setGitDeliveryLocalEditLock(true)
+      setGlobalSaveStatus(null)
+      setGitDeliveryConfigText(prettyJson(updater({ ...gitDeliveryDraft })))
+    },
+    [gitDeliveryDraft]
+  )
+
+  const patchDockerComposeDraft = React.useCallback(
+    (updater: (draft: Record<string, unknown>) => Record<string, unknown>) => {
+      if (!dockerComposeDraft) {
+        setPluginUiStatus((prev) => ({
+          ...prev,
+          docker_compose: { tone: 'error', text: 'Docker Compose JSON is invalid.' },
+        }))
+        return
+      }
+      setDockerComposeLocalEditLock(true)
+      setGlobalSaveStatus(null)
+      setDockerComposeConfigText(prettyJson(updater({ ...dockerComposeDraft })))
+    },
+    [dockerComposeDraft]
+  )
+
+  const teamModeQuick = React.useMemo(() => {
+    const team = (teamModeDraft?.team as Record<string, unknown> | undefined) || {}
+    const workflow = (teamModeDraft?.workflow as Record<string, unknown> | undefined) || {}
+    const governance = (teamModeDraft?.governance as Record<string, unknown> | undefined) || {}
+    const automation = (teamModeDraft?.automation as Record<string, unknown> | undefined) || {}
+    const leadRecurringRaw = automation.lead_recurring_max_minutes
+    const leadRecurring = Number.isFinite(Number(leadRecurringRaw)) ? Number(leadRecurringRaw) : 5
+    const transitions = Array.isArray(workflow.transitions)
+      ? workflow.transitions
+          .filter((item) => item && typeof item === 'object')
+          .map((item) => item as Record<string, unknown>)
+      : []
+    const mergeRoles = Array.isArray(governance.merge_authority_roles)
+      ? governance.merge_authority_roles.map((item) => String(item || '').trim()).filter(Boolean)
+      : []
+    const agents = Array.isArray(team.agents)
+      ? team.agents
+          .filter((item) => item && typeof item === 'object')
+          .map((item) => item as Record<string, unknown>)
+      : []
+    return {
+      statusesCsv: listToCsv(workflow.statuses),
+      leadRecurring,
+      transitions,
+      mergeRoles,
+      agents,
+      teamRoles: [...TEAM_MODE_ROLES],
+    }
+  }, [teamModeDraft])
+
+  const gitDeliveryQuick = React.useMemo(() => {
+    const requiredChecks = (gitDeliveryDraft?.required_checks as Record<string, unknown> | undefined) || {}
+    const deliveryChecks = Array.isArray(requiredChecks.delivery)
+      ? requiredChecks.delivery.map((item) => String(item || '').trim()).filter(Boolean)
+      : []
+    return {
+      deliveryChecks,
+    }
+  }, [gitDeliveryDraft])
+
+  const dockerComposeQuick = React.useMemo(() => {
+    const runtime = (dockerComposeDraft?.runtime_deploy_health as Record<string, unknown> | undefined) || {}
+    const portRaw = runtime.port
+    const port = portRaw == null || String(portRaw).trim() === '' ? '' : String(portRaw)
+    return {
+      runtimeRequired: Boolean(runtime.required),
+      runtimeStack: String(runtime.stack || ''),
+      runtimePort: port,
+      runtimeHealthPath: String(runtime.health_path || ''),
+      runtimeRequireHttp200: runtime.require_http_200 == null ? true : Boolean(runtime.require_http_200),
+    }
+  }, [dockerComposeDraft])
+
+  const teamModePolicySummary = React.useMemo(() => {
+    const compiled = (teamModePluginQuery.data?.compiled_policy as Record<string, unknown> | undefined) || {}
+    const required = (compiled.required_checks as Record<string, unknown> | undefined) || {}
+    const available = (compiled.available_checks as Record<string, unknown> | undefined) || {}
+    const teamModeRequired = Array.isArray(required.team_mode)
+      ? required.team_mode.map((item) => String(item || '').trim()).filter(Boolean)
+      : []
+    const teamModeAvailable = available.team_mode && typeof available.team_mode === 'object'
+      ? Object.entries(available.team_mode as Record<string, unknown>)
+          .map(([id, description]) => ({
+            id: String(id || '').trim(),
+            description: String(description || '').trim(),
+          }))
+          .filter((item) => Boolean(item.id))
+          .sort((a, b) => a.id.localeCompare(b.id))
+      : []
+    const automation = (compiled.team_mode as Record<string, unknown> | undefined) || {}
+    const recurring = Number.isFinite(Number(automation.lead_recurring_max_minutes))
+      ? Number(automation.lead_recurring_max_minutes)
+      : null
+    return {
+      teamModeRequired,
+      teamModeAvailable,
+      recurring,
+      raw: compiled,
+    }
+  }, [teamModePluginQuery.data?.compiled_policy])
+
+  const gitDeliveryPolicySummary = React.useMemo(() => {
+    const compiled = (gitDeliveryPluginQuery.data?.compiled_policy as Record<string, unknown> | undefined) || {}
+    const required = (compiled.required_checks as Record<string, unknown> | undefined) || {}
+    const available = (compiled.available_checks as Record<string, unknown> | undefined) || {}
+    const deliveryRequired = Array.isArray(required.delivery)
+      ? required.delivery.map((item) => String(item || '').trim()).filter(Boolean)
+      : []
+    const deliveryAvailable = available.delivery && typeof available.delivery === 'object'
+      ? Object.entries(available.delivery as Record<string, unknown>)
+          .map(([id, description]) => ({
+            id: String(id || '').trim(),
+            description: String(description || '').trim(),
+          }))
+          .filter((item) => Boolean(item.id))
+          .sort((a, b) => a.id.localeCompare(b.id))
+      : []
+    return {
+      deliveryRequired,
+      deliveryAvailable,
+      raw: compiled,
+    }
+  }, [gitDeliveryPluginQuery.data?.compiled_policy])
+
+  const dockerPolicySummary = React.useMemo(() => {
+    const compiled = (dockerComposePluginQuery.data?.compiled_policy as Record<string, unknown> | undefined) || {}
+    const runtime = (compiled.runtime_deploy_health as Record<string, unknown> | undefined) || {}
+    return {
+      runtimeRequired: Boolean(runtime.required),
+      runtimeStack: String(runtime.stack || 'constructos-ws-default'),
+      runtimePort: runtime.port == null ? 'auto' : String(runtime.port),
+      runtimeHealthPath: String(runtime.health_path || '/health'),
+      raw: compiled,
+    }
+  }, [dockerComposePluginQuery.data?.compiled_policy])
+
+  const renderPluginDiffDetails = React.useCallback((diff?: ProjectPluginConfigDiff) => {
+    if (!diff) return null
+    const configChanges = Array.isArray(diff.config_changes) ? diff.config_changes : []
+    const compiledChanges = Array.isArray(diff.compiled_policy_changes) ? diff.compiled_policy_changes : []
+    return (
+      <div className="plugin-diff-panel">
+        {configChanges.length === 0 && compiledChanges.length === 0 ? (
+          <div className="meta">No effective changes.</div>
+        ) : null}
+        {configChanges.length > 0 ? (
+          <div className="plugin-diff-scope">
+            <div className="meta" style={{ fontWeight: 700 }}>Config changes</div>
+            <div className="plugin-diff-list">
+              {configChanges.map((change, idx) => {
+                const entry = (change || {}) as Record<string, unknown>
+                const op = String(entry.op || 'replace')
+                const path = String(entry.path || '/')
+                return (
+                  <div key={`diff-config-${idx}`} className="plugin-diff-item">
+                    <div className="plugin-diff-item-head">
+                      <code>{path}</code>
+                      <span className="badge">{op}</span>
+                    </div>
+                    {'before' in entry ? <div className="meta">before: {prettyCompact(entry.before)}</div> : null}
+                    {'after' in entry ? <div className="meta">after: {prettyCompact(entry.after)}</div> : null}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        ) : null}
+        {compiledChanges.length > 0 ? (
+          <details className="plugin-diff-scope">
+            <summary>Compiled policy changes ({compiledChanges.length})</summary>
+            <div className="plugin-diff-list" style={{ marginTop: 6 }}>
+              {compiledChanges.map((change, idx) => {
+                const entry = (change || {}) as Record<string, unknown>
+                const op = String(entry.op || 'replace')
+                const path = String(entry.path || '/')
+                return (
+                  <div key={`diff-compiled-${idx}`} className="plugin-diff-item">
+                    <div className="plugin-diff-item-head">
+                      <code>{path}</code>
+                      <span className="badge">{op}</span>
+                    </div>
+                    {'before' in entry ? <div className="meta">before: {prettyCompact(entry.before)}</div> : null}
+                    {'after' in entry ? <div className="meta">after: {prettyCompact(entry.after)}</div> : null}
+                  </div>
+                )
+              })}
+            </div>
+          </details>
+        ) : null}
+        {diff.errors?.length ? (
+          <div className="meta">
+            Errors: {diff.errors.map((err) => JSON.stringify(err)).join('; ')}
+          </div>
+        ) : null}
+      </div>
+    )
+  }, [])
+
+  const boardStatusesList = React.useMemo(() => csvToList(editProjectCustomStatusesText), [editProjectCustomStatusesText])
+  const teamModeRequiredChecksSelected = React.useMemo(() => {
+    const requiredChecks = (teamModeDraft?.required_checks as Record<string, unknown> | undefined) || {}
+    const selected = Array.isArray(requiredChecks.team_mode)
+      ? requiredChecks.team_mode.map((item) => String(item || '').trim()).filter(Boolean)
+      : []
+    return selected.length ? selected : teamModePolicySummary.teamModeRequired
+  }, [teamModeDraft, teamModePolicySummary.teamModeRequired])
+  const gitDeliveryRequiredChecksSelected = React.useMemo(() => {
+    return gitDeliveryQuick.deliveryChecks.length ? gitDeliveryQuick.deliveryChecks : gitDeliveryPolicySummary.deliveryRequired
+  }, [gitDeliveryQuick.deliveryChecks, gitDeliveryPolicySummary.deliveryRequired])
+  const teamModeRequiredCheckSet = React.useMemo(
+    () => new Set(teamModeRequiredChecksSelected),
+    [teamModeRequiredChecksSelected]
+  )
+  const gitDeliveryRequiredCheckSet = React.useMemo(
+    () => new Set(gitDeliveryRequiredChecksSelected),
+    [gitDeliveryRequiredChecksSelected]
+  )
+  const teamModeCheckDescriptionById = React.useMemo(() => {
+    const out: Record<string, string> = {}
+    for (const option of teamModePolicySummary.teamModeAvailable) out[option.id] = option.description || ''
+    return out
+  }, [teamModePolicySummary.teamModeAvailable])
+  const gitDeliveryCheckDescriptionById = React.useMemo(() => {
+    const out: Record<string, string> = {}
+    for (const option of gitDeliveryPolicySummary.deliveryAvailable) out[option.id] = option.description || ''
+    return out
+  }, [gitDeliveryPolicySummary.deliveryAvailable])
+
+  const setTeamModeRequiredChecks = React.useCallback(
+    (nextChecks: string[]) => {
+      patchTeamModeDraft((draft) => {
+        const requiredChecks = ((draft.required_checks as Record<string, unknown> | undefined) || {}) as Record<string, unknown>
+        return {
+          ...draft,
+          required_checks: {
+            ...requiredChecks,
+            team_mode: nextChecks,
+          },
+        }
+      })
+    },
+    [patchTeamModeDraft]
+  )
+
+  const setGitDeliveryRequiredChecks = React.useCallback(
+    (nextChecks: string[]) => {
+      patchGitDeliveryDraft((draft) => {
+        const requiredChecks = ((draft.required_checks as Record<string, unknown> | undefined) || {}) as Record<string, unknown>
+        return {
+          ...draft,
+          required_checks: {
+            ...requiredChecks,
+            delivery: nextChecks,
+          },
+        }
+      })
+    },
+    [patchGitDeliveryDraft]
+  )
+
+  const upsertTeamAgent = React.useCallback(
+    (index: number, patch: Record<string, unknown>) => {
+      patchTeamModeDraft((draft) => {
+        const team = ((draft.team as Record<string, unknown> | undefined) || {}) as Record<string, unknown>
+        const agents = Array.isArray(team.agents)
+          ? team.agents
+              .filter((item) => item && typeof item === 'object')
+              .map((item) => ({ ...(item as Record<string, unknown>) }))
+          : []
+        const target = (agents[index] || {}) as Record<string, unknown>
+        agents[index] = { ...target, ...patch }
+        return {
+          ...draft,
+          team: {
+            ...team,
+            agents,
+          },
+        }
+      })
+    },
+    [patchTeamModeDraft]
+  )
+
+  const addTeamAgent = React.useCallback(() => {
+    patchTeamModeDraft((draft) => {
+      const team = ((draft.team as Record<string, unknown> | undefined) || {}) as Record<string, unknown>
+      const agents = Array.isArray(team.agents)
+        ? team.agents
+            .filter((item) => item && typeof item === 'object')
+            .map((item) => ({ ...(item as Record<string, unknown>) }))
+        : []
+      const nextIndex = agents.length + 1
+      agents.push({
+        id: `agent-${nextIndex}`,
+        name: `Agent ${nextIndex}`,
+        authority_role: 'Developer',
+        executor_user_id: '',
+      })
+      return {
+        ...draft,
+        team: {
+          ...team,
+          agents,
+        },
+      }
+    })
+  }, [patchTeamModeDraft])
+
+  const removeTeamAgent = React.useCallback(
+    (index: number) => {
+      patchTeamModeDraft((draft) => {
+        const team = ((draft.team as Record<string, unknown> | undefined) || {}) as Record<string, unknown>
+        const agents = Array.isArray(team.agents)
+          ? team.agents
+              .filter((item) => item && typeof item === 'object')
+              .map((item) => ({ ...(item as Record<string, unknown>) }))
+          : []
+        agents.splice(index, 1)
+        return {
+          ...draft,
+          team: {
+            ...team,
+            agents,
+          },
+        }
+      })
+    },
+    [patchTeamModeDraft]
+  )
+
+  const upsertTransition = React.useCallback(
+    (index: number, patch: Record<string, unknown>) => {
+      patchTeamModeDraft((draft) => {
+        const workflow = ((draft.workflow as Record<string, unknown> | undefined) || {}) as Record<string, unknown>
+        const transitions = Array.isArray(workflow.transitions)
+          ? workflow.transitions
+              .filter((item) => item && typeof item === 'object')
+              .map((item) => ({ ...(item as Record<string, unknown>) }))
+          : []
+        const target = (transitions[index] || {}) as Record<string, unknown>
+        transitions[index] = { ...target, ...patch }
+        return {
+          ...draft,
+          workflow: {
+            ...workflow,
+            transitions,
+          },
+        }
+      })
+    },
+    [patchTeamModeDraft]
+  )
+
+  const removeTransition = React.useCallback(
+    (index: number) => {
+      patchTeamModeDraft((draft) => {
+        const workflow = ((draft.workflow as Record<string, unknown> | undefined) || {}) as Record<string, unknown>
+        const transitions = Array.isArray(workflow.transitions)
+          ? workflow.transitions
+              .filter((item) => item && typeof item === 'object')
+              .map((item) => ({ ...(item as Record<string, unknown>) }))
+          : []
+        transitions.splice(index, 1)
+        return {
+          ...draft,
+          workflow: {
+            ...workflow,
+            transitions,
+          },
+        }
+      })
+    },
+    [patchTeamModeDraft]
+  )
+
+  const addTransition = React.useCallback(() => {
+    patchTeamModeDraft((draft) => {
+      const workflow = ((draft.workflow as Record<string, unknown> | undefined) || {}) as Record<string, unknown>
+      const transitions = Array.isArray(workflow.transitions) ? [...workflow.transitions] : []
+      const statuses = Array.isArray(workflow.statuses)
+        ? workflow.statuses.map((item) => String(item || '').trim()).filter(Boolean)
+        : []
+      const fallback = statuses[0] || 'Dev'
+      transitions.push({
+        from: fallback,
+        to: fallback,
+        allowed_roles: ['Developer'],
+      })
+      return {
+        ...draft,
+        workflow: {
+          ...workflow,
+          transitions,
+        },
+      }
+    })
+  }, [patchTeamModeDraft])
+
+  const runValidatePluginConfig = React.useCallback(
+    async (pluginKey: ProjectPluginKey, rawText: string) => {
+      const parsed = parsePluginConfigText(pluginKey, rawText)
+      if (!parsed) return
+      try {
+        const response = await validatePluginConfigMutation.mutateAsync({
+          pluginKey,
+          draftConfig: parsed,
+        })
+        setPluginValidationByKey((prev) => ({ ...prev, [pluginKey]: response }))
+        const warningCount = Array.isArray(response.warnings) ? response.warnings.length : 0
+        const message = response.blocking
+          ? `${response.errors.length} validation error(s)`
+          : warningCount > 0
+            ? `Valid with ${warningCount} warning(s)`
+            : 'Config is valid.'
+        setPluginUiStatus((prev) => ({
+          ...prev,
+          [pluginKey]: { tone: response.blocking ? 'error' : warningCount > 0 ? 'warning' : 'ok', text: message },
+        }))
+      } catch (err) {
+        setPluginUiStatus((prev) => ({
+          ...prev,
+          [pluginKey]: { tone: 'error', text: toErrorMessage(err, 'Validation failed.') },
+        }))
+      }
+    },
+    [parsePluginConfigText, validatePluginConfigMutation]
+  )
+
+  const runDiffPluginConfig = React.useCallback(
+    async (pluginKey: ProjectPluginKey, rawText: string) => {
+      const parsed = parsePluginConfigText(pluginKey, rawText)
+      if (!parsed) return
+      try {
+        const response = await diffPluginConfigMutation.mutateAsync({
+          pluginKey,
+          draftConfig: parsed,
+        })
+        setPluginDiffByKey((prev) => ({ ...prev, [pluginKey]: response }))
+        const changeCount =
+          Number(response.config_changes?.length || 0) + Number(response.compiled_policy_changes?.length || 0)
+        const message = response.blocking
+          ? `${response.errors.length} diff validation error(s)`
+          : changeCount > 0
+            ? `${changeCount} change(s) detected`
+            : 'No changes.'
+        setPluginUiStatus((prev) => ({
+          ...prev,
+          [pluginKey]: { tone: response.blocking ? 'error' : changeCount > 0 ? 'warning' : 'ok', text: message },
+        }))
+      } catch (err) {
+        setPluginUiStatus((prev) => ({
+          ...prev,
+          [pluginKey]: { tone: 'error', text: toErrorMessage(err, 'Diff failed.') },
+        }))
+      }
+    },
+    [diffPluginConfigMutation, parsePluginConfigText]
+  )
+
+  const runSetPluginEnabled = React.useCallback(
+    async (pluginKey: ProjectPluginKey, enabled: boolean) => {
+      try {
+        await setPluginEnabledMutation.mutateAsync({ pluginKey, enabled })
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ['project-plugin-config', userId, project.id, pluginKey] }),
+          queryClient.invalidateQueries({ queryKey: ['project-checks-verify', userId, project.id] }),
+          queryClient.invalidateQueries({ queryKey: ['project-capabilities', userId, project.id] }),
+        ])
+        setPluginUiStatus((prev) => {
+          const next = { ...prev }
+          delete next[pluginKey]
+          return next
+        })
+        setGlobalSaveStatus({
+          tone: 'ok',
+          text: `${pluginLabel(pluginKey)} ${enabled ? 'enabled' : 'disabled'}.`,
+        })
+      } catch (err) {
+        setPluginUiStatus((prev) => ({
+          ...prev,
+          [pluginKey]: { tone: 'error', text: toErrorMessage(err, 'Failed to update plugin state.') },
+        }))
+        setGlobalSaveStatus({
+          tone: 'error',
+          text: `${pluginLabel(pluginKey)}: ${toErrorMessage(err, 'Failed to update plugin state.')}`,
+        })
+      }
+    },
+    [project.id, queryClient, setPluginEnabledMutation, userId]
+  )
+
+  const savePluginConfigOrThrow = React.useCallback(
+    async (pluginKey: ProjectPluginKey, rawText: string, currentVersion: number | undefined, enabled: boolean | undefined) => {
+      const parsed = parsePluginConfigText(pluginKey, rawText)
+      if (!parsed) throw new Error('Invalid JSON payload.')
+      const normalizedExpectedVersion =
+        Number.isFinite(Number(currentVersion)) && Number(currentVersion) >= 1 ? Number(currentVersion) : undefined
+      const saved = await applyPluginConfigMutation.mutateAsync({
+        pluginKey,
+        config: parsed,
+        expectedVersion: normalizedExpectedVersion,
+        enabled,
+      })
+      if (pluginKey === 'team_mode') {
+        const persisted = prettyJson((saved?.config as Record<string, unknown> | undefined) || parsed)
+        setTeamModeConfigText(persisted)
+        setTeamModePersistedText(persisted)
+        setTeamModeLocalEditLock(false)
+        const hydratedVersion = Number(saved?.version || currentVersion || 0)
+        teamModeHydratedKeyRef.current = `${project.id}:${hydratedVersion}:${persisted}`
+      } else if (pluginKey === 'git_delivery') {
+        const persisted = prettyJson((saved?.config as Record<string, unknown> | undefined) || parsed)
+        setGitDeliveryConfigText(persisted)
+        setGitDeliveryPersistedText(persisted)
+        setGitDeliveryLocalEditLock(false)
+        const hydratedVersion = Number(saved?.version || currentVersion || 0)
+        gitDeliveryHydratedKeyRef.current = `${project.id}:${hydratedVersion}:${persisted}`
+      } else if (pluginKey === 'docker_compose') {
+        const persisted = prettyJson((saved?.config as Record<string, unknown> | undefined) || parsed)
+        setDockerComposeConfigText(persisted)
+        setDockerComposePersistedText(persisted)
+        setDockerComposeLocalEditLock(false)
+        const hydratedVersion = Number(saved?.version || currentVersion || 0)
+        dockerComposeHydratedKeyRef.current = `${project.id}:${hydratedVersion}:${persisted}`
+      }
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['project-plugin-config', userId, project.id, pluginKey] }),
+        queryClient.invalidateQueries({ queryKey: ['project-checks-verify', userId, project.id] }),
+        queryClient.invalidateQueries({ queryKey: ['project-capabilities', userId, project.id] }),
+        queryClient.invalidateQueries({ queryKey: ['project-members-inline', userId, project.id] }),
+        queryClient.invalidateQueries({ queryKey: ['bootstrap', userId] }),
+      ])
+      setPluginDiffByKey((prev) => ({ ...prev, [pluginKey]: undefined }))
+      setPluginUiStatus((prev) => ({
+        ...prev,
+        [pluginKey]: { tone: 'ok', text: 'Configuration saved.' },
+      }))
+    },
+    [applyPluginConfigMutation, parsePluginConfigText, project.id, queryClient, userId]
+  )
+
+  const legacyRuleMutationsPending = Boolean(
+    createProjectRuleMutation.isPending || patchProjectRuleMutation.isPending || deleteProjectRuleMutation.isPending
+  )
+  const saveAllPending = Boolean(
+    saveProjectMutation.isPending ||
+    applyPluginConfigMutation.isPending ||
+    rulesSavePending ||
+    legacyRuleMutationsPending ||
+    importProjectSkillMutation.isPending ||
+    importProjectSkillFileMutation.isPending ||
+    applyProjectSkillMutation.isPending ||
+    attachWorkspaceSkillToProjectMutation.isPending
+  )
+  const unsavedSections = React.useMemo(() => {
+    const sections: string[] = []
+    if (projectIsDirty) sections.push('Overview')
+    if (teamModeConfigDirty) sections.push('Team Mode')
+    if (gitDeliveryConfigDirty) sections.push('Git Delivery')
+    if (dockerComposeConfigDirty) sections.push('Docker Compose')
+    if (rulesDirty || currentRuleEditorDirty) sections.push('Rules')
+    if (skillsDirty) sections.push('Skills')
+    return sections
+  }, [projectIsDirty, teamModeConfigDirty, gitDeliveryConfigDirty, dockerComposeConfigDirty, rulesDirty, currentRuleEditorDirty, skillsDirty])
+  const hasAnyUnsavedChanges = unsavedSections.length > 0
+  const showProjectSaveBar = hasAnyUnsavedChanges || saveAllPending || Boolean(globalSaveStatus)
+
+  React.useEffect(() => {
+    if (typeof onUnsavedChange !== 'function') return
+    onUnsavedChange(hasAnyUnsavedChanges)
+  }, [hasAnyUnsavedChanges, onUnsavedChange])
+
+  React.useEffect(() => {
+    return () => {
+      if (typeof onUnsavedChange === 'function') onUnsavedChange(false)
+    }
+  }, [onUnsavedChange])
+
+  const runSaveAllChanges = React.useCallback(async () => {
+    if (!hasAnyUnsavedChanges) return
+    setGlobalSaveStatus(null)
+    const failedSections: string[] = []
+    const savedSections: string[] = []
+    if (projectIsDirty) {
+      try {
+        if (typeof saveProjectMutation.mutateAsync === 'function') {
+          await saveProjectMutation.mutateAsync()
+        } else {
+          await new Promise<void>((resolve, reject) => {
+            saveProjectMutation.mutate(undefined, {
+              onSuccess: () => resolve(),
+              onError: (err: unknown) => reject(err),
+            })
+          })
+        }
+        savedSections.push('Overview')
+      } catch {
+        failedSections.push('Overview')
+      }
+    }
+    if (teamModeConfigDirty) {
+      try {
+        await savePluginConfigOrThrow('team_mode', teamModeConfigText, teamModePluginQuery.data?.version, teamModePluginQuery.data?.enabled)
+        savedSections.push('Team Mode')
+      } catch {
+        failedSections.push('Team Mode')
+      }
+    }
+    if (gitDeliveryConfigDirty) {
+      try {
+        await savePluginConfigOrThrow(
+          'git_delivery',
+          gitDeliveryConfigText,
+          gitDeliveryPluginQuery.data?.version,
+          gitDeliveryPluginQuery.data?.enabled
+        )
+        savedSections.push('Git Delivery')
+      } catch {
+        failedSections.push('Git Delivery')
+      }
+    }
+    if (dockerComposeConfigDirty) {
+      try {
+        await savePluginConfigOrThrow(
+          'docker_compose',
+          dockerComposeConfigText,
+          dockerComposePluginQuery.data?.version,
+          dockerComposePluginQuery.data?.enabled
+        )
+        savedSections.push('Docker Compose')
+      } catch {
+        failedSections.push('Docker Compose')
+      }
+    }
+    if (rulesDirty || currentRuleEditorDirty) {
+      try {
+        setRulesSavePending(true)
+        const effectiveDeletes = [...stagedRuleDeletes]
+        const effectivePatches: Record<string, { title: string; body: string }> = { ...stagedRulePatches }
+        const effectiveCreates = [...stagedRuleCreates]
+        if (currentRuleEditorDirty) {
+          const selectedId = String(selectedProjectRuleId || '').trim()
+          const editorTitle = String(projectRuleTitle || '')
+          const editorBody = String(projectRuleBody || '')
+          if (!selectedId) {
+            if (editorTitle.trim() || editorBody.trim()) {
+              const clientId = `local-rule-save-${Date.now()}`
+              effectiveCreates.push({ clientId, title: editorTitle, body: editorBody })
+            }
+          } else if (selectedId.startsWith('local-rule-')) {
+            const index = effectiveCreates.findIndex((item) => item.clientId === selectedId)
+            if (index >= 0) {
+              effectiveCreates[index] = { clientId: selectedId, title: editorTitle, body: editorBody }
+            } else if (editorTitle.trim() || editorBody.trim()) {
+              effectiveCreates.push({ clientId: selectedId, title: editorTitle, body: editorBody })
+            }
+          } else {
+            const source = sourceRuleById.get(selectedId)
+            if (source) {
+              const sourceTitle = String(source.title || '')
+              const sourceBody = String(source.body || '')
+              const deleteIndex = effectiveDeletes.indexOf(selectedId)
+              if (deleteIndex >= 0) effectiveDeletes.splice(deleteIndex, 1)
+              if (editorTitle === sourceTitle && editorBody === sourceBody) {
+                delete effectivePatches[selectedId]
+              } else {
+                effectivePatches[selectedId] = { title: editorTitle, body: editorBody }
+              }
+            }
+          }
+        }
+        const deleteIds = [...effectiveDeletes]
+        const patchEntries = Object.entries(effectivePatches).filter(([ruleId]) => !deleteIds.includes(ruleId))
+        const createEntries = [...effectiveCreates]
+        for (const ruleId of deleteIds) {
+          await deleteProjectRule(userId, ruleId)
+        }
+        for (const [ruleId, patch] of patchEntries) {
+          await patchProjectRule(userId, ruleId, {
+            title: String(patch.title || '').trim(),
+            body: String(patch.body || ''),
+          })
+        }
+        const createdByClientId = new Map<string, ProjectRule>()
+        for (const draft of createEntries) {
+          const created = await createProjectRule(userId, {
+            workspace_id: workspaceId,
+            project_id: project.id,
+            title: String(draft.title || '').trim(),
+            body: String(draft.body || ''),
+          })
+          createdByClientId.set(draft.clientId, created)
+        }
+        await queryClient.invalidateQueries({ queryKey: ['project-rules'] })
+        setStagedRuleCreates([])
+        setStagedRulePatches({})
+        setStagedRuleDeletes([])
+        const selectedId = String(selectedProjectRuleId || '').trim()
+        if (selectedId && selectedId.startsWith('local-rule-')) {
+          const created = createdByClientId.get(selectedId)
+          if (created?.id) {
+            setSelectedProjectRuleId(created.id)
+            setProjectRuleTitle(String(created.title || ''))
+            setProjectRuleBody(String(created.body || ''))
+          } else {
+            setSelectedProjectRuleId(null)
+            setProjectRuleTitle('')
+            setProjectRuleBody('')
+          }
+        } else if (selectedId && deleteIds.includes(selectedId)) {
+          setSelectedProjectRuleId(null)
+          setProjectRuleTitle('')
+          setProjectRuleBody('')
+        }
+        savedSections.push('Rules')
+      } catch {
+        failedSections.push('Rules')
+      } finally {
+        setRulesSavePending(false)
+      }
+    }
+    if (skillsDirty) {
+      try {
+        const runSkillMutation = async <T,>(mutation: ProjectMutation, payload: unknown): Promise<T> => {
+          if (typeof mutation.mutateAsync === 'function') {
+            return mutation.mutateAsync(payload) as Promise<T>
+          }
+          return await new Promise<T>((resolve, reject) => {
+            mutation.mutate(payload, {
+              onSuccess: (value: T) => resolve(value),
+              onError: (err: unknown) => reject(err),
+            })
+          })
+        }
+        const importedSkillIds: string[] = []
+        for (const staged of stagedSkillImportUrls) {
+          const imported = await runSkillMutation<ProjectSkill>(importProjectSkillMutation, {
+            source_url: staged.source_url,
+            skill_key: staged.skill_key,
+            mode: staged.mode,
+            trust_level: staged.trust_level,
+          })
+          const skillId = String((imported as ProjectSkill | undefined)?.id || '').trim()
+          if (skillId) importedSkillIds.push(skillId)
+        }
+        for (const staged of stagedSkillImportFiles) {
+          const imported = await runSkillMutation<ProjectSkill>(importProjectSkillFileMutation, {
+            file: staged.file,
+            skill_key: staged.skill_key,
+            mode: staged.mode,
+            trust_level: staged.trust_level,
+          })
+          const skillId = String((imported as ProjectSkill | undefined)?.id || '').trim()
+          if (skillId) importedSkillIds.push(skillId)
+        }
+        for (const workspaceSkillId of stagedSkillAttachIds) {
+          const attached = await runSkillMutation<ProjectSkill>(attachWorkspaceSkillToProjectMutation, {
+            skillId: workspaceSkillId,
+          })
+          const attachedSkillId = String((attached as ProjectSkill | undefined)?.id || '').trim()
+          if (attachedSkillId) importedSkillIds.push(attachedSkillId)
+        }
+        const applyQueue = Array.from(new Set([...stagedSkillApplyIds, ...importedSkillIds]))
+        for (const projectSkillId of applyQueue) {
+          await runSkillMutation(applyProjectSkillMutation, { skillId: projectSkillId })
+        }
+        setStagedSkillImportUrls([])
+        setStagedSkillImportFiles([])
+        setStagedSkillAttachIds([])
+        setStagedSkillApplyIds([])
+        savedSections.push('Skills')
+      } catch {
+        failedSections.push('Skills')
+      }
+    }
+    if (failedSections.length > 0) {
+      setGlobalSaveStatus({
+        tone: savedSections.length > 0 ? 'warning' : 'error',
+        text: savedSections.length > 0
+          ? `Partially saved. Failed: ${failedSections.join(', ')}.`
+          : `Save failed for: ${failedSections.join(', ')}.`,
+      })
+      return
+    }
+    setGlobalSaveStatus({
+      tone: 'ok',
+      text: savedSections.length > 0 ? `Saved: ${savedSections.join(', ')}.` : 'No changes to save.',
+    })
+  }, [
+    dockerComposeConfigDirty,
+    dockerComposeConfigText,
+    dockerComposePluginQuery.data?.enabled,
+    dockerComposePluginQuery.data?.version,
+    gitDeliveryConfigDirty,
+    gitDeliveryConfigText,
+    gitDeliveryPluginQuery.data?.enabled,
+    gitDeliveryPluginQuery.data?.version,
+    hasAnyUnsavedChanges,
+    projectIsDirty,
+    savePluginConfigOrThrow,
+    saveProjectMutation,
+    currentRuleEditorDirty,
+    project.id,
+    queryClient,
+    rulesDirty,
+    rulesSavePending,
+    skillsDirty,
+    selectedProjectRuleId,
+    setProjectRuleBody,
+    setProjectRuleTitle,
+    setSelectedProjectRuleId,
+    stagedRuleCreates,
+    stagedRuleDeletes,
+    stagedRulePatches,
+    stagedSkillApplyIds,
+    stagedSkillAttachIds,
+    stagedSkillImportFiles,
+    stagedSkillImportUrls,
+    sourceRuleById,
+    applyProjectSkillMutation,
+    attachWorkspaceSkillToProjectMutation,
+    importProjectSkillFileMutation,
+    importProjectSkillMutation,
+    teamModeConfigDirty,
+    teamModeConfigText,
+    teamModePluginQuery.data?.enabled,
+    teamModePluginQuery.data?.version,
+    userId,
+    workspaceId,
+  ])
+
+  React.useEffect(() => {
+    if (!globalSaveStatus) return
+    setGlobalSaveStatus(null)
+  }, [
+    dockerComposeConfigText,
+    editProjectDescription,
+    editProjectEmbeddingEnabled,
+    editProjectEmbeddingModel,
+    editProjectEventStormingEnabled,
+    editProjectName,
+    editProjectCustomStatusesText,
+    gitDeliveryConfigText,
+    projectRuleBody,
+    projectRuleTitle,
+    rulesDirty,
+    skillsDirty,
+    selectedProjectRuleId,
+    teamModeConfigText,
+  ])
+  React.useEffect(() => {
+    if (!globalSaveStatus || globalSaveStatus.tone !== 'ok') return
+    const timer = window.setTimeout(() => {
+      setGlobalSaveStatus((current) => {
+        if (!current || current.tone !== 'ok') return current
+        return null
+      })
+    }, 3000)
+    return () => window.clearTimeout(timer)
+  }, [globalSaveStatus])
 
   const skillItems = projectSkills.data?.items ?? []
   const workspaceSkillItems = workspaceSkills.data?.items ?? []
@@ -648,6 +2048,104 @@ export function ProjectsInlineEditor({
     setProjectEditorTab('skills')
     setSelectedProjectSkillId(normalizedSkillId)
   }, [])
+
+  const selectRuleInEditor = React.useCallback((ruleId: string, title: string, body: string) => {
+    setSelectedProjectRuleId(ruleId)
+    setProjectRuleTitle(title)
+    setProjectRuleBody(body)
+    setProjectRuleView('split')
+  }, [setProjectRuleBody, setProjectRuleTitle, setProjectRuleView, setSelectedProjectRuleId])
+
+  const stageCurrentRuleDraft = React.useCallback(() => {
+    const selectedId = String(selectedProjectRuleId || '').trim()
+    const title = String(projectRuleTitle || '')
+    const body = String(projectRuleBody || '')
+    if (!selectedId) {
+      const hasAny = Boolean(title.trim() || body.trim())
+      if (!hasAny) return
+      const clientId = `local-rule-${ruleCreateSeqRef.current++}`
+      setStagedRuleCreates((prev) => [...prev, { clientId, title, body }])
+      selectRuleInEditor(clientId, title, body)
+      setGlobalSaveStatus(null)
+      return
+    }
+    if (selectedId.startsWith('local-rule-')) {
+      setStagedRuleCreates((prev) =>
+        prev.map((item) => (item.clientId === selectedId ? { ...item, title, body } : item))
+      )
+      setGlobalSaveStatus(null)
+      return
+    }
+    const source = sourceRuleById.get(selectedId)
+    if (!source) return
+    const sourceTitle = String(source.title || '')
+    const sourceBody = String(source.body || '')
+    setStagedRuleDeletes((prev) => prev.filter((id) => id !== selectedId))
+    setStagedRulePatches((prev) => {
+      const next = { ...prev }
+      if (title === sourceTitle && body === sourceBody) {
+        delete next[selectedId]
+      } else {
+        next[selectedId] = { title, body }
+      }
+      return next
+    })
+    setGlobalSaveStatus(null)
+  }, [projectRuleBody, projectRuleTitle, selectRuleInEditor, selectedProjectRuleId, sourceRuleById])
+
+  const addNewRuleDraft = React.useCallback(() => {
+    const clientId = `local-rule-${ruleCreateSeqRef.current++}`
+    const next = { clientId, title: '', body: '' }
+    setStagedRuleCreates((prev) => [...prev, next])
+    selectRuleInEditor(clientId, next.title, next.body)
+    setGlobalSaveStatus(null)
+  }, [selectRuleInEditor])
+
+  const stageDeleteRule = React.useCallback((ruleId: string) => {
+    const normalized = String(ruleId || '').trim()
+    if (!normalized) return
+    if (normalized.startsWith('local-rule-')) {
+      setStagedRuleCreates((prev) => prev.filter((item) => item.clientId !== normalized))
+      if (selectedProjectRuleId === normalized) {
+        setSelectedProjectRuleId(null)
+        setProjectRuleTitle('')
+        setProjectRuleBody('')
+      }
+      setGlobalSaveStatus(null)
+      return
+    }
+    setStagedRuleDeletes((prev) => (prev.includes(normalized) ? prev : [...prev, normalized]))
+    setStagedRulePatches((prev) => {
+      if (!(normalized in prev)) return prev
+      const next = { ...prev }
+      delete next[normalized]
+      return next
+    })
+    if (selectedProjectRuleId === normalized) {
+      setSelectedProjectRuleId(null)
+      setProjectRuleTitle('')
+      setProjectRuleBody('')
+    }
+    setGlobalSaveStatus(null)
+  }, [selectedProjectRuleId, setProjectRuleBody, setProjectRuleTitle, setSelectedProjectRuleId])
+
+  const lastSelectedRuleIdRef = React.useRef<string | null>(null)
+  React.useEffect(() => {
+    const selectedId = String(selectedProjectRuleId || '').trim() || null
+    if (lastSelectedRuleIdRef.current === selectedId) return
+    lastSelectedRuleIdRef.current = selectedId
+    if (!selectedId || !selectedRuleListItem) return
+    setProjectRuleTitle(String(selectedRuleListItem.title || ''))
+    setProjectRuleBody(String(selectedRuleListItem.body || ''))
+  }, [selectedProjectRuleId, selectedRuleListItem, setProjectRuleBody, setProjectRuleTitle])
+
+  React.useEffect(() => {
+    if (!currentRuleEditorDirty) return
+    const timer = window.setTimeout(() => {
+      stageCurrentRuleDraft()
+    }, 180)
+    return () => window.clearTimeout(timer)
+  }, [currentRuleEditorDirty, projectRuleBody, projectRuleTitle, selectedProjectRuleId, stageCurrentRuleDraft])
 
   React.useEffect(() => {
     if (skillItems.length === 0) {
@@ -718,6 +2216,10 @@ export function ProjectsInlineEditor({
     () => new Set(skillItems.map((item: ProjectSkill) => String(item.skill_key || '').trim()).filter(Boolean)),
     [skillItems]
   )
+  const stagedSkillAttachSet = React.useMemo(
+    () => new Set(stagedSkillAttachIds.map((id) => String(id || '').trim()).filter(Boolean)),
+    [stagedSkillAttachIds]
+  )
   const filteredWorkspaceSkillItems = React.useMemo(() => {
     const query = String(catalogSearchQ || '').trim().toLowerCase()
     if (!query) return workspaceSkillItems
@@ -733,21 +2235,28 @@ export function ProjectsInlineEditor({
       return haystack.includes(query)
     })
   }, [catalogSearchQ, workspaceSkillItems])
-  const projectRuleCount = projectRules.data?.total ?? projectRules.data?.items?.length ?? 0
+  const projectRuleCount = rulesListItems.length
   const projectSkillCount = projectSkills.data?.total ?? skillItems.length
   const projectResourceCount = projectExternalRefs.length + projectAttachmentRefs.length
   React.useEffect(() => {
     setProjectEditorTab('overview')
+    setPluginUiStatus({})
+    setPluginValidationByKey({})
+    setPluginDiffByKey({})
   }, [project.id])
 
   React.useEffect(() => {
-    if (projectEditorTab === 'gates' && !shouldShowProjectGates) {
+    if (projectEditorTab === 'checks' && !shouldShowProjectChecks) {
       setProjectEditorTab('overview')
     }
-  }, [projectEditorTab, shouldShowProjectGates])
+  }, [projectEditorTab, shouldShowProjectChecks])
 
   return (
-    <div className="project-inline-editor" style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
+    <div
+      className="project-inline-editor"
+      style={{ marginTop: 10, paddingBottom: showProjectSaveBar ? undefined : 12 }}
+      onClick={(e) => e.stopPropagation()}
+    >
       <div className="row wrap" style={{ marginBottom: 10 }}>
         <input
           value={editProjectName}
@@ -755,16 +2264,6 @@ export function ProjectsInlineEditor({
           placeholder="Project name"
           style={{ flex: 1, minWidth: 0 }}
         />
-        {projectIsDirty && <span className="badge unsaved-badge">Unsaved</span>}
-        <button
-          className="action-icon primary"
-          onClick={() => saveProjectMutation.mutate()}
-          disabled={saveProjectMutation.isPending || !editProjectName.trim()}
-          title="Save project"
-          aria-label="Save project"
-        >
-          <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
-        </button>
         <DropdownMenu.Root>
           <DropdownMenu.Trigger asChild>
             <button
@@ -798,7 +2297,10 @@ export function ProjectsInlineEditor({
         onValueChange={(next) => {
           if (
             next === 'overview' ||
-            next === 'gates' ||
+            next === 'checks' ||
+            next === 'team-mode' ||
+            next === 'git-delivery' ||
+            next === 'docker-compose' ||
             next === 'rules' ||
             next === 'skills' ||
             next === 'resources' ||
@@ -810,10 +2312,10 @@ export function ProjectsInlineEditor({
       >
         <Tabs.List className="project-editor-tabs-list" aria-label="Project editor sections">
           <Tabs.Trigger className="project-editor-tab-trigger" value="overview">Overview</Tabs.Trigger>
-          {shouldShowProjectGates && (
-            <Tabs.Trigger className="project-editor-tab-trigger" value="gates">
-              <span>Gates</span>
-              <span className="project-editor-tab-count">{projectGatesQuery.data?.ok ? 'OK' : '!!'}</span>
+          {shouldShowProjectChecks && (
+            <Tabs.Trigger className="project-editor-tab-trigger" value="checks">
+              <span>Checks</span>
+              <span className="project-editor-tab-count">{projectChecksQuery.data?.ok ? 'OK' : '!!'}</span>
             </Tabs.Trigger>
           )}
           <Tabs.Trigger className="project-editor-tab-trigger" value="rules">
@@ -829,6 +2331,25 @@ export function ProjectsInlineEditor({
             <span className="project-editor-tab-count">{projectResourceCount}</span>
           </Tabs.Trigger>
           <Tabs.Trigger className="project-editor-tab-trigger" value="context">Context</Tabs.Trigger>
+          <span className="project-editor-tab-divider" aria-hidden="true" />
+          <Tabs.Trigger className="project-editor-tab-trigger" value="team-mode">
+            <span>Team Mode</span>
+            <span className="project-editor-tab-count">
+              {capabilityByPluginKey.team_mode?.enabled ? 'ON' : 'OFF'}
+            </span>
+          </Tabs.Trigger>
+          <Tabs.Trigger className="project-editor-tab-trigger" value="git-delivery">
+            <span>Git Delivery</span>
+            <span className="project-editor-tab-count">
+              {capabilityByPluginKey.git_delivery?.enabled ? 'ON' : 'OFF'}
+            </span>
+          </Tabs.Trigger>
+          <Tabs.Trigger className="project-editor-tab-trigger" value="docker-compose">
+            <span>Docker Compose</span>
+            <span className="project-editor-tab-count">
+              {capabilityByPluginKey.docker_compose?.enabled ? 'ON' : 'OFF'}
+            </span>
+          </Tabs.Trigger>
         </Tabs.List>
         <Tabs.Content value="overview" className="project-editor-tab-content">
       <div className="md-editor-surface">
@@ -871,7 +2392,18 @@ export function ProjectsInlineEditor({
         <span className="field-label">Board statuses (comma-separated)</span>
         <input
           value={editProjectCustomStatusesText}
-          onChange={(e) => setEditProjectCustomStatusesText(e.target.value)}
+          onChange={(e) => {
+            const next = e.target.value
+            setEditProjectCustomStatusesText(next)
+            if (!teamModeDraft) return
+            patchTeamModeDraft((draft) => ({
+              ...draft,
+              workflow: {
+                ...((draft.workflow as Record<string, unknown> | undefined) || {}),
+                statuses: csvToList(next),
+              },
+            }))
+          }}
           placeholder="To do, In progress, Blocked, Ready for QA, Done"
         />
       </label>
@@ -1127,19 +2659,16 @@ export function ProjectsInlineEditor({
             <div className="meta">Loading projection status...</div>
           )}
         </div>
-        <div className="meta" style={{ marginTop: 6 }}>
-          Save project to persist this setting.
-        </div>
       </div>
         </Tabs.Content>
-        {shouldShowProjectGates && (
-          <Tabs.Content value="gates" className="project-editor-tab-content">
+        {shouldShowProjectChecks && (
+          <Tabs.Content value="checks" className="project-editor-tab-content">
             <div className="gates-panel">
               <div className="gates-panel-head">
                 <div className="gates-panel-title-row">
-                  <h3 style={{ margin: 0 }}>Delivery Gates</h3>
-                  <span className={`badge ${projectGatesSnapshot?.ok ? 'status-done' : 'status-blocked'}`}>
-                    {projectGatesSnapshot?.ok ? 'PASS' : 'FAIL'}
+                  <h3 style={{ margin: 0 }}>Delivery Checks</h3>
+                  <span className={`badge ${projectChecksSnapshot?.ok ? 'status-done' : 'status-blocked'}`}>
+                    {projectChecksSnapshot?.ok ? 'PASS' : 'FAIL'}
                   </span>
                 </div>
                 <div className="gates-panel-summary">
@@ -1148,12 +2677,18 @@ export function ProjectsInlineEditor({
                   <span className="badge">Required checks: {gateSummary.required}</span>
                   {gateSummary.unknown > 0 ? <span className="badge">Unknown: {gateSummary.unknown}</span> : null}
                 </div>
+                {deliveryKickoffRequired ? (
+                  <div className="notice" style={{ marginTop: 8 }}>
+                    <strong>Kickoff required: Yes.</strong>{' '}
+                    <span>{deliveryKickoffHint || 'Execution is not started yet. Start kickoff from chat when you are ready.'}</span>
+                  </div>
+                ) : null}
               </div>
-              {projectGatesQuery.isLoading ? (
-                <div className="meta">Loading gate verification...</div>
-              ) : projectGatesQuery.isError ? (
-                <div className="notice">Gate verification unavailable.</div>
-              ) : projectGatesSnapshot ? (
+              {projectChecksQuery.isLoading ? (
+                <div className="meta">Loading check verification...</div>
+              ) : projectChecksQuery.isError ? (
+                <div className="notice">Check verification unavailable.</div>
+              ) : projectChecksSnapshot ? (
                 <>
                   {gatePolicyPayload ? (
                     <div className="gates-scope-grid" style={{ marginBottom: 10 }}>
@@ -1218,60 +2753,893 @@ export function ProjectsInlineEditor({
                             )
                           })}
                         </div>
-                        <div className="meta">Available checks ({Object.keys(scope.availableDescriptions).length})</div>
-                        <div className="gates-available-tags">
-                          {Object.keys(scope.availableDescriptions).map((checkId) => {
-                            if (!checkId) return null
-                            const description = String(
-                              scope.runtimeScope?.checkDescriptions[checkId] || scope.availableDescriptions[checkId] || ''
-                            ).trim()
-                            return (
-                              <span key={`${scope.scopeKey}-available-${checkId}`} className="gates-available-tag" title={description || undefined}>
-                                {checkId}
-                              </span>
-                            )
-                          })}
-                        </div>
+                        <details style={{ marginTop: 8 }}>
+                          <summary>Show all available checks ({Object.keys(scope.availableDescriptions).length})</summary>
+                          <div className="gates-available-tags" style={{ marginTop: 6 }}>
+                            {Object.keys(scope.availableDescriptions).map((checkId) => {
+                              if (!checkId) return null
+                              const description = String(
+                                scope.runtimeScope?.checkDescriptions[checkId] || scope.availableDescriptions[checkId] || ''
+                              ).trim()
+                              return (
+                                <span
+                                  key={`${scope.scopeKey}-available-${checkId}`}
+                                  className="gates-available-tag"
+                                  title={description || undefined}
+                                >
+                                  {checkId}
+                                </span>
+                              )
+                            })}
+                          </div>
+                        </details>
                       </section>
                     ))}
                   </div>
                   <div className="gates-policy-row">
-                    <span className="badge">Policy source</span>
+                    <span className="badge">Plugin policy source</span>
                     <code>{gatePolicySource}</code>
-                    {gatePolicyRuleId ? (
-                      <button
-                        className="status-chip"
-                        type="button"
-                        onClick={() => openLinkedRule(gatePolicyRuleId)}
-                      >
-                        Open gate policy
-                      </button>
-                    ) : null}
                   </div>
                 </>
               ) : (
-                <div className="notice">No gate verification payload.</div>
+                <div className="notice">No verification payload.</div>
               )}
               <div className="meta" style={{ marginTop: 4 }}>
-                Gate behavior is driven by the <strong>Gate Policy</strong> project rule JSON.
+                Check behavior is derived from enabled project plugin configurations (`team_mode`, `git_delivery`, `docker_compose`).
               </div>
             </div>
           </Tabs.Content>
         )}
+        <Tabs.Content value="team-mode" className="project-editor-tab-content">
+          <div className="field-control" style={{ marginTop: 10 }}>
+            <div className="row wrap" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+              <h3 style={{ margin: 0 }}>Team Mode Configuration</h3>
+              <label className="project-plugin-enabled-row" htmlFor="team-mode-enabled-checkbox">
+                <input
+                  id="team-mode-enabled-checkbox"
+                  type="checkbox"
+                  className="project-plugin-enabled-native-checkbox"
+                  checked={Boolean(teamModePluginQuery.data?.enabled)}
+                  disabled={setPluginEnabledMutation.isPending}
+                  onChange={(e) => void runSetPluginEnabled('team_mode', Boolean(e.target.checked))}
+                />
+                <span className="project-plugin-enabled-label">Enabled</span>
+              </label>
+            </div>
+            <div className="meta" style={{ marginTop: 6 }}>
+              Structured source of truth for team agents, role governance, and allowed task status transitions.
+            </div>
+            <div className="notice plugin-config-shell" style={{ marginTop: 8 }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>Quick configuration</div>
+              <div className="row wrap" style={{ alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                <span className="meta">Team agents</span>
+                <InfoTip text="Virtual agent slots. Multiple agents can use the same executor user (for example one codex-bot user)." />
+              </div>
+              <div className="plugin-config-grid">
+                {teamModeQuick.agents.map((agent, idx) => {
+                  const agentId = String(agent.id || '').trim()
+                  const agentName = String(agent.name || '').trim()
+                  const selectedRole = TEAM_MODE_ROLES.includes(String(agent.authority_role || '').trim() as TeamModeRole)
+                    ? (String(agent.authority_role || '').trim() as TeamModeRole)
+                    : 'Developer'
+                  const selectedExecutor = String(agent.executor_user_id || '').trim() || '__auto__'
+                  return (
+                    <div key={`team-agent-${agentId || idx}`} className="row wrap plugin-config-row plugin-member-row">
+                      <input
+                        className="plugin-compact-select"
+                        value={agentName}
+                        onChange={(e) => upsertTeamAgent(idx, { name: e.target.value })}
+                        placeholder="Agent name"
+                        style={{ minWidth: 180 }}
+                      />
+                      <input
+                        className="plugin-compact-select"
+                        value={agentId}
+                        onChange={(e) => upsertTeamAgent(idx, { id: e.target.value })}
+                        placeholder="Agent id"
+                        style={{ minWidth: 150 }}
+                      />
+                      <Select.Root
+                        value={selectedRole}
+                        onValueChange={(value) =>
+                          upsertTeamAgent(idx, { authority_role: String(value || '').trim() })
+                        }
+                      >
+                        <Select.Trigger
+                          className="quickadd-project-trigger taskdrawer-select-trigger project-inline-select-trigger plugin-compact-select"
+                          aria-label={`Authority role for ${agentName || `agent ${idx + 1}`}`}
+                        >
+                          <Select.Value />
+                          <Select.Icon asChild>
+                            <Icon path="M6 9l6 6 6-6" />
+                          </Select.Icon>
+                        </Select.Trigger>
+                        <Select.Portal>
+                          <Select.Content className="quickadd-project-content" position="popper" sideOffset={6}>
+                            <Select.Viewport className="quickadd-project-viewport">
+                              {TEAM_MODE_ROLES.map((role) => (
+                                <Select.Item key={`team-agent-role-${idx}-${role}`} value={role} className="quickadd-project-item">
+                                  <Select.ItemText>{roleLabel(role)}</Select.ItemText>
+                                </Select.Item>
+                              ))}
+                            </Select.Viewport>
+                          </Select.Content>
+                        </Select.Portal>
+                      </Select.Root>
+                      <Select.Root
+                        value={selectedExecutor}
+                        onValueChange={(value) =>
+                          upsertTeamAgent(idx, {
+                            executor_user_id: value === '__auto__' ? '' : String(value || '').trim(),
+                          })
+                        }
+                      >
+                        <Select.Trigger
+                          className="quickadd-project-trigger taskdrawer-select-trigger project-inline-select-trigger plugin-compact-select"
+                          aria-label={`Executor user for ${agentName || `agent ${idx + 1}`}`}
+                        >
+                          <Select.Value placeholder="Executor user" />
+                          <Select.Icon asChild>
+                            <Icon path="M6 9l6 6 6-6" />
+                          </Select.Icon>
+                        </Select.Trigger>
+                        <Select.Portal>
+                          <Select.Content className="quickadd-project-content" position="popper" sideOffset={6}>
+                            <Select.Viewport className="quickadd-project-viewport">
+                              <Select.Item value="__auto__" className="quickadd-project-item">
+                                <Select.ItemText>Auto (task assignee)</Select.ItemText>
+                              </Select.Item>
+                              {(projectMembersQuery.data?.items || []).map((member) => {
+                                const memberUserId = String(member.user_id || '').trim()
+                                if (!memberUserId) return null
+                                const label = String(member.user?.full_name || '').trim() || memberUserId
+                                return (
+                                  <Select.Item key={`team-agent-executor-${idx}-${memberUserId}`} value={memberUserId} className="quickadd-project-item">
+                                    <Select.ItemText>{label}</Select.ItemText>
+                                  </Select.Item>
+                                )
+                              })}
+                            </Select.Viewport>
+                          </Select.Content>
+                        </Select.Portal>
+                      </Select.Root>
+                      <button className="status-chip" type="button" onClick={() => removeTeamAgent(idx)}>
+                        Remove
+                      </button>
+                    </div>
+                  )
+                })}
+                <div>
+                  <button className="status-chip" type="button" onClick={() => addTeamAgent()}>
+                    Add agent
+                  </button>
+                </div>
+                {teamModeQuick.agents.length === 0 ? (
+                  <div className="meta">
+                    No team agents configured. Recommended default: 2 Developers, 1 QA, 1 Lead.
+                  </div>
+                ) : null}
+              </div>
+              <div className="meta" style={{ marginTop: 6 }}>
+                Project members define access. Team agents define workflow identities.
+              </div>
+              <div className="row wrap plugin-compact-inline">
+                <label className="row" style={{ gap: 6, alignItems: 'center' }}>
+                  <span className="meta">Lead recurring (minutes)</span>
+                  <InfoTip text="Maximum interval for recurring lead oversight checks." />
+                  <input
+                    type="number"
+                    min={1}
+                    max={120}
+                    value={String(teamModeQuick.leadRecurring)}
+                    onChange={(e) => {
+                      const next = Math.max(1, Number(e.target.value || 1))
+                      patchTeamModeDraft((draft) => ({
+                        ...draft,
+                        automation: {
+                          ...((draft.automation as Record<string, unknown> | undefined) || {}),
+                          lead_recurring_max_minutes: next,
+                        },
+                      }))
+                    }}
+                    style={{ width: 100 }}
+                  />
+                </label>
+              </div>
+              <div className="plugin-config-subsection">
+                <div className="row wrap" style={{ alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                  <span className="meta">Required checks</span>
+                  <InfoTip text="Choose Team Mode checks that must pass before delivery is considered valid." />
+                  <Select.Root
+                    key={`tm-check-picker-${teamModeRequiredChecksSelected.join('|')}`}
+                    onValueChange={(value) => {
+                      const next = String(value || '').trim()
+                      if (!next || next === '__none__') return
+                      setTeamModeRequiredChecks(Array.from(new Set([...teamModeRequiredChecksSelected, next])))
+                    }}
+                  >
+                    <Select.Trigger
+                      className="quickadd-project-trigger taskdrawer-select-trigger project-inline-select-trigger plugin-compact-select"
+                      aria-label="Add Team Mode required check"
+                    >
+                      <Select.Value placeholder="Add check" />
+                      <Select.Icon asChild>
+                        <Icon path="M6 9l6 6 6-6" />
+                      </Select.Icon>
+                    </Select.Trigger>
+                    <Select.Portal>
+                      <Select.Content className="quickadd-project-content plugin-check-select-content" position="popper" sideOffset={6}>
+                        <Select.Viewport className="quickadd-project-viewport">
+                          {teamModePolicySummary.teamModeAvailable.filter((option) => !teamModeRequiredCheckSet.has(option.id)).length === 0 ? (
+                            <div className="codex-chat-session-empty">All checks are already selected</div>
+                          ) : (
+                            teamModePolicySummary.teamModeAvailable
+                              .filter((option) => !teamModeRequiredCheckSet.has(option.id))
+                              .map((option) => (
+                                <Select.Item key={`tm-required-check-${option.id}`} value={option.id} className="codex-chat-session-item plugin-check-select-item">
+                                  <Select.ItemText>
+                                    <span className="codex-chat-session-item-title">{option.id}</span>
+                                  </Select.ItemText>
+                                  <span className="codex-chat-session-item-meta">{option.description || 'No description'}</span>
+                                  <Select.ItemIndicator className="codex-chat-session-item-indicator">
+                                    <Icon path="M5 13l4 4L19 7" />
+                                  </Select.ItemIndicator>
+                                </Select.Item>
+                              ))
+                          )}
+                        </Select.Viewport>
+                      </Select.Content>
+                    </Select.Portal>
+                  </Select.Root>
+                </div>
+                <div className="row wrap plugin-required-checks-row">
+                  {teamModeRequiredChecksSelected.map((checkId) => (
+                    <Tooltip.Provider key={`tm-required-chip-${checkId}`} delayDuration={120}>
+                      <Tooltip.Root>
+                        <Tooltip.Trigger asChild>
+                          <button
+                            type="button"
+                            className="status-chip active"
+                            onClick={() => setTeamModeRequiredChecks(teamModeRequiredChecksSelected.filter((item) => item !== checkId))}
+                          >
+                            <code>{checkId}</code>
+                            <Icon path="M6 6l12 12M18 6 6 18" />
+                          </button>
+                        </Tooltip.Trigger>
+                        <Tooltip.Portal>
+                          <Tooltip.Content className="header-tooltip-content" side="top" sideOffset={6}>
+                            {teamModeCheckDescriptionById[checkId] || checkId}
+                            <Tooltip.Arrow className="header-tooltip-arrow" />
+                          </Tooltip.Content>
+                        </Tooltip.Portal>
+                      </Tooltip.Root>
+                    </Tooltip.Provider>
+                  ))}
+                </div>
+              </div>
+              <label className="plugin-wide-field">
+                <span className="meta">Workflow statuses (comma-separated)</span>
+                <InfoTip text="Statuses available to transitions in Team Mode orchestration." />
+                <input
+                  className="plugin-wide-input"
+                  value={teamModeQuick.statusesCsv}
+                  onChange={(e) => {
+                    const next = e.target.value
+                    setEditProjectCustomStatusesText(next)
+                    patchTeamModeDraft((draft) => ({
+                      ...draft,
+                      workflow: {
+                        ...((draft.workflow as Record<string, unknown> | undefined) || {}),
+                        statuses: csvToList(next),
+                      },
+                    }))
+                  }}
+                  placeholder="To do, Dev, QA, Lead, Done, Blocked"
+                />
+              </label>
+              <div className="plugin-config-subsection">
+                <div className="row wrap" style={{ alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                  <span className="meta">Allowed transitions</span>
+                  <InfoTip text="Define allowed status flows and which roles can execute each transition." />
+                </div>
+                <div className="plugin-config-grid">
+                  {teamModeQuick.transitions.map((transition, idx) => {
+                    const transitionFrom = String(transition.from || '').trim()
+                    const transitionTo = String(transition.to || '').trim()
+                    const transitionStatusOptions = Array.from(
+                      new Set(
+                        [
+                          ...csvToList(teamModeQuick.statusesCsv),
+                          transitionFrom,
+                          transitionTo,
+                        ].filter(Boolean)
+                      )
+                    )
+                    const allowedRoles = Array.isArray(transition.allowed_roles)
+                      ? transition.allowed_roles.map((item) => String(item || '').trim()).filter(Boolean)
+                      : []
+                    return (
+                      <div key={`team-transition-${idx}`} className="row wrap plugin-config-row plugin-transition-row">
+                        <Select.Root value={transitionFrom || '__none__'} onValueChange={(value) => upsertTransition(idx, { from: value === '__none__' ? '' : value })}>
+                          <Select.Trigger
+                            className="quickadd-project-trigger taskdrawer-select-trigger project-inline-select-trigger plugin-compact-select"
+                            aria-label={`Transition ${idx + 1} from`}
+                          >
+                            <Select.Value placeholder="From" />
+                            <Select.Icon asChild>
+                              <Icon path="M6 9l6 6 6-6" />
+                            </Select.Icon>
+                          </Select.Trigger>
+                          <Select.Portal>
+                            <Select.Content className="quickadd-project-content" position="popper" sideOffset={6}>
+                              <Select.Viewport className="quickadd-project-viewport">
+                                <Select.Item value="__none__" className="quickadd-project-item">
+                                  <Select.ItemText>No status</Select.ItemText>
+                                </Select.Item>
+                                {transitionStatusOptions.map((status) => (
+                                  <Select.Item key={`transition-from-${idx}-${status}`} value={status} className="quickadd-project-item">
+                                    <Select.ItemText>{status}</Select.ItemText>
+                                  </Select.Item>
+                                ))}
+                              </Select.Viewport>
+                            </Select.Content>
+                          </Select.Portal>
+                        </Select.Root>
+                        <span className="meta">to</span>
+                        <Select.Root value={transitionTo || '__none__'} onValueChange={(value) => upsertTransition(idx, { to: value === '__none__' ? '' : value })}>
+                          <Select.Trigger
+                            className="quickadd-project-trigger taskdrawer-select-trigger project-inline-select-trigger plugin-compact-select"
+                            aria-label={`Transition ${idx + 1} to`}
+                          >
+                            <Select.Value placeholder="To" />
+                            <Select.Icon asChild>
+                              <Icon path="M6 9l6 6 6-6" />
+                            </Select.Icon>
+                          </Select.Trigger>
+                          <Select.Portal>
+                            <Select.Content className="quickadd-project-content" position="popper" sideOffset={6}>
+                              <Select.Viewport className="quickadd-project-viewport">
+                                <Select.Item value="__none__" className="quickadd-project-item">
+                                  <Select.ItemText>No status</Select.ItemText>
+                                </Select.Item>
+                                {transitionStatusOptions.map((status) => (
+                                  <Select.Item key={`transition-to-${idx}-${status}`} value={status} className="quickadd-project-item">
+                                    <Select.ItemText>{status}</Select.ItemText>
+                                  </Select.Item>
+                                ))}
+                              </Select.Viewport>
+                            </Select.Content>
+                          </Select.Portal>
+                        </Select.Root>
+                        <input
+                          className="plugin-transition-roles-input"
+                          value={allowedRoles.join(', ')}
+                          onChange={(e) =>
+                            upsertTransition(idx, {
+                              allowed_roles: csvToList(e.target.value),
+                            })
+                          }
+                          placeholder="Allowed roles (comma-separated)"
+                        />
+                        <button className="status-chip" type="button" onClick={() => removeTransition(idx)}>
+                          Remove
+                        </button>
+                      </div>
+                    )
+                  })}
+                  <div>
+                    <button className="status-chip" type="button" onClick={() => addTransition()}>
+                      Add transition
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div className="plugin-config-subsection">
+                <div className="row wrap" style={{ alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                  <span className="meta">Merge authority roles</span>
+                  <InfoTip text="Roles allowed to finalize merge/close operations for Team Mode." />
+                </div>
+                <div className="row wrap" style={{ gap: 10 }}>
+                  {teamModeQuick.teamRoles.map((role) => {
+                    const checked = teamModeQuick.mergeRoles.includes(role)
+                    return (
+                      <label key={`merge-role-${role}`} className="row" style={{ gap: 6, alignItems: 'center' }}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) =>
+                            patchTeamModeDraft((draft) => {
+                              const governance = ((draft.governance as Record<string, unknown> | undefined) || {}) as Record<string, unknown>
+                              const mergeRoles = Array.isArray(governance.merge_authority_roles)
+                                ? governance.merge_authority_roles.map((item) => String(item || '').trim()).filter(Boolean)
+                                : []
+                              const next = e.target.checked
+                                ? Array.from(new Set([...mergeRoles, role]))
+                                : mergeRoles.filter((candidate) => candidate !== role)
+                              return {
+                                ...draft,
+                                governance: {
+                                  ...governance,
+                                  merge_authority_roles: next,
+                                },
+                              }
+                            })
+                          }
+                        />
+                        <span className="meta">{roleLabel(role)}</span>
+                      </label>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+            <details style={{ marginTop: 8 }} className="plugin-policy-details">
+              <summary>Advanced JSON config</summary>
+              <textarea
+                className="md-textarea plugin-json-textarea"
+                value={teamModeConfigText}
+                onChange={(e) => {
+                  setTeamModeLocalEditLock(true)
+                  setTeamModeConfigText(e.target.value)
+                }}
+                placeholder="{}"
+                style={{ width: '100%', minHeight: 260, marginTop: 8 }}
+              />
+            </details>
+              <div className="plugin-actions-row">
+              <DropdownMenu.Root>
+                <DropdownMenu.Trigger asChild>
+                  <button className="status-chip" type="button">
+                    Config actions
+                  </button>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.Content className="task-group-menu-content" sideOffset={6} align="start">
+                    <DropdownMenu.Item
+                      className="task-group-menu-item"
+                      onSelect={() => {
+                        setTeamModeLocalEditLock(true)
+                        setTeamModeConfigText(prettyJson(teamModeStarterConfig))
+                      }}
+                    >
+                      Use starter config
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item className="task-group-menu-item" onSelect={() => void runValidatePluginConfig('team_mode', teamModeConfigText)}>
+                      Validate
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item className="task-group-menu-item" onSelect={() => void runDiffPluginConfig('team_mode', teamModeConfigText)}>
+                      Preview diff
+                    </DropdownMenu.Item>
+                  </DropdownMenu.Content>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Root>
+              <div className="plugin-actions-meta">
+                <span className="badge">v{teamModePluginQuery.data?.version ?? 0}</span>
+                <span className="badge">
+                  Capability: {projectCapabilitiesQuery.data?.capabilities?.team_mode ? 'enabled' : 'disabled'}
+                </span>
+              </div>
+            </div>
+            {pluginUiStatus.team_mode ? (
+              <div className="meta" style={{ marginTop: 8 }}>
+                [{pluginUiStatus.team_mode.tone.toUpperCase()}] {pluginUiStatus.team_mode.text}
+              </div>
+            ) : null}
+            {pluginValidationByKey.team_mode?.errors?.length ? (
+              <div className="notice" style={{ marginTop: 8 }}>
+                {pluginValidationByKey.team_mode.errors.map((err, idx) => (
+                  <div key={`team-mode-validation-error-${idx}`}>{JSON.stringify(err)}</div>
+                ))}
+              </div>
+            ) : null}
+            {pluginDiffByKey.team_mode ? <div className="notice" style={{ marginTop: 8 }}>{renderPluginDiffDetails(pluginDiffByKey.team_mode)}</div> : null}
+            <details style={{ marginTop: 8 }}>
+              <summary>Effective policy overview</summary>
+              <div className="plugin-policy-summary">
+                <div className="row wrap plugin-policy-badges">
+                  <span className="badge">Required checks: {teamModePolicySummary.teamModeRequired.length}</span>
+                  <span className="badge">Available checks: {teamModePolicySummary.teamModeAvailable.length}</span>
+                  <span className="badge">
+                    Lead recurring: {teamModePolicySummary.recurring == null ? 'default' : `${teamModePolicySummary.recurring} min`}
+                  </span>
+                </div>
+                <div className="meta">
+                  Required: {teamModePolicySummary.teamModeRequired.join(', ') || '(none)'}
+                </div>
+                <details className="plugin-policy-raw">
+                  <summary>Show raw compiled policy JSON</summary>
+                  <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap' }}>{prettyJson(teamModePolicySummary.raw)}</pre>
+                </details>
+              </div>
+            </details>
+          </div>
+        </Tabs.Content>
+        <Tabs.Content value="git-delivery" className="project-editor-tab-content">
+          <div className="field-control" style={{ marginTop: 10 }}>
+            <div className="row wrap" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+              <h3 style={{ margin: 0 }}>Git Delivery Configuration</h3>
+              <label className="project-plugin-enabled-row" htmlFor="git-delivery-enabled-checkbox">
+                <input
+                  id="git-delivery-enabled-checkbox"
+                  type="checkbox"
+                  className="project-plugin-enabled-native-checkbox"
+                  checked={Boolean(gitDeliveryPluginQuery.data?.enabled)}
+                  disabled={setPluginEnabledMutation.isPending}
+                  onChange={(e) => void runSetPluginEnabled('git_delivery', Boolean(e.target.checked))}
+                />
+                <span className="project-plugin-enabled-label">Enabled</span>
+              </label>
+            </div>
+            <div className="meta" style={{ marginTop: 6 }}>
+              Required delivery checks for a strict core delivery contract.
+            </div>
+            <div className="notice plugin-config-shell" style={{ marginTop: 8 }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>Quick configuration</div>
+              <div className="row wrap" style={{ alignItems: 'center', gap: 8 }}>
+                <span className="meta">Required checks</span>
+                <InfoTip text="Keep this list minimal and high-signal. Required checks block successful delivery when failing." />
+                <Select.Root
+                  key={`gd-check-picker-${gitDeliveryRequiredChecksSelected.join('|')}`}
+                  onValueChange={(value) => {
+                    const next = String(value || '').trim()
+                    if (!next || next === '__none__') return
+                    setGitDeliveryRequiredChecks(Array.from(new Set([...gitDeliveryRequiredChecksSelected, next])))
+                  }}
+                >
+                  <Select.Trigger
+                    className="quickadd-project-trigger taskdrawer-select-trigger project-inline-select-trigger plugin-compact-select"
+                    aria-label="Add Git Delivery required check"
+                  >
+                    <Select.Value placeholder="Add check" />
+                    <Select.Icon asChild>
+                      <Icon path="M6 9l6 6 6-6" />
+                    </Select.Icon>
+                  </Select.Trigger>
+                  <Select.Portal>
+                    <Select.Content className="quickadd-project-content plugin-check-select-content" position="popper" sideOffset={6}>
+                      <Select.Viewport className="quickadd-project-viewport">
+                        {gitDeliveryPolicySummary.deliveryAvailable.filter((option) => !gitDeliveryRequiredCheckSet.has(option.id)).length === 0 ? (
+                          <div className="codex-chat-session-empty">All checks are already selected</div>
+                        ) : (
+                          gitDeliveryPolicySummary.deliveryAvailable
+                            .filter((option) => !gitDeliveryRequiredCheckSet.has(option.id))
+                            .map((option) => (
+                              <Select.Item key={`gd-required-check-${option.id}`} value={option.id} className="codex-chat-session-item plugin-check-select-item">
+                                <Select.ItemText>
+                                  <span className="codex-chat-session-item-title">{option.id}</span>
+                                </Select.ItemText>
+                                <span className="codex-chat-session-item-meta">{option.description || 'No description'}</span>
+                                <Select.ItemIndicator className="codex-chat-session-item-indicator">
+                                  <Icon path="M5 13l4 4L19 7" />
+                                </Select.ItemIndicator>
+                              </Select.Item>
+                            ))
+                        )}
+                      </Select.Viewport>
+                    </Select.Content>
+                  </Select.Portal>
+                </Select.Root>
+              </div>
+              <div className="row wrap plugin-required-checks-row" style={{ marginTop: 4 }}>
+                {gitDeliveryRequiredChecksSelected.map((checkId) => (
+                  <Tooltip.Provider key={`gd-required-chip-${checkId}`} delayDuration={120}>
+                    <Tooltip.Root>
+                      <Tooltip.Trigger asChild>
+                        <button
+                          type="button"
+                          className="status-chip active"
+                          onClick={() =>
+                            setGitDeliveryRequiredChecks(gitDeliveryRequiredChecksSelected.filter((item) => item !== checkId))
+                          }
+                        >
+                          <code>{checkId}</code>
+                          <Icon path="M6 6l12 12M18 6 6 18" />
+                        </button>
+                      </Tooltip.Trigger>
+                      <Tooltip.Portal>
+                        <Tooltip.Content className="header-tooltip-content" side="top" sideOffset={6}>
+                          {gitDeliveryCheckDescriptionById[checkId] || checkId}
+                          <Tooltip.Arrow className="header-tooltip-arrow" />
+                        </Tooltip.Content>
+                      </Tooltip.Portal>
+                    </Tooltip.Root>
+                  </Tooltip.Provider>
+                ))}
+              </div>
+            </div>
+            <details style={{ marginTop: 8 }} className="plugin-policy-details">
+              <summary>Advanced JSON config</summary>
+              <textarea
+                className="md-textarea plugin-json-textarea"
+                value={gitDeliveryConfigText}
+                onChange={(e) => {
+                  setGitDeliveryLocalEditLock(true)
+                  setGlobalSaveStatus(null)
+                  setGitDeliveryConfigText(e.target.value)
+                }}
+                placeholder="{}"
+                style={{ width: '100%', minHeight: 260, marginTop: 8 }}
+              />
+            </details>
+            <div className="plugin-actions-row">
+              <DropdownMenu.Root>
+                <DropdownMenu.Trigger asChild>
+                  <button className="status-chip" type="button">
+                    Config actions
+                  </button>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.Content className="task-group-menu-content" sideOffset={6} align="start">
+                    <DropdownMenu.Item
+                      className="task-group-menu-item"
+                      onSelect={() => {
+                        setGitDeliveryLocalEditLock(true)
+                        setGlobalSaveStatus(null)
+                        setGitDeliveryConfigText(prettyJson(GIT_DELIVERY_STARTER_CONFIG))
+                      }}
+                    >
+                      Use starter config
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item className="task-group-menu-item" onSelect={() => void runValidatePluginConfig('git_delivery', gitDeliveryConfigText)}>
+                      Validate
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item className="task-group-menu-item" onSelect={() => void runDiffPluginConfig('git_delivery', gitDeliveryConfigText)}>
+                      Preview diff
+                    </DropdownMenu.Item>
+                  </DropdownMenu.Content>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Root>
+              <div className="plugin-actions-meta">
+                <span className="badge">v{gitDeliveryPluginQuery.data?.version ?? 0}</span>
+                <span className="badge">
+                  Capability: {projectCapabilitiesQuery.data?.capabilities?.git_delivery ? 'enabled' : 'disabled'}
+                </span>
+              </div>
+            </div>
+            {pluginUiStatus.git_delivery ? (
+              <div className="meta" style={{ marginTop: 8 }}>
+                [{pluginUiStatus.git_delivery.tone.toUpperCase()}] {pluginUiStatus.git_delivery.text}
+              </div>
+            ) : null}
+            {pluginValidationByKey.git_delivery?.errors?.length ? (
+              <div className="notice" style={{ marginTop: 8 }}>
+                {pluginValidationByKey.git_delivery.errors.map((err, idx) => (
+                  <div key={`git-delivery-validation-error-${idx}`}>{JSON.stringify(err)}</div>
+                ))}
+              </div>
+            ) : null}
+            {pluginDiffByKey.git_delivery ? <div className="notice" style={{ marginTop: 8 }}>{renderPluginDiffDetails(pluginDiffByKey.git_delivery)}</div> : null}
+            <details style={{ marginTop: 8 }}>
+              <summary>Effective policy overview</summary>
+              <div className="plugin-policy-summary">
+                <div className="row wrap plugin-policy-badges">
+                  <span className="badge">Required checks: {gitDeliveryPolicySummary.deliveryRequired.length}</span>
+                  <span className="badge">Available checks: {gitDeliveryPolicySummary.deliveryAvailable.length}</span>
+                </div>
+                <div className="meta">
+                  Required: {gitDeliveryPolicySummary.deliveryRequired.join(', ') || '(none)'}
+                </div>
+                <details className="plugin-policy-raw">
+                  <summary>Show raw compiled policy JSON</summary>
+                  <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap' }}>{prettyJson(gitDeliveryPolicySummary.raw)}</pre>
+                </details>
+              </div>
+            </details>
+          </div>
+        </Tabs.Content>
+        <Tabs.Content value="docker-compose" className="project-editor-tab-content">
+          <div className="field-control" style={{ marginTop: 10 }}>
+            <div className="row wrap" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+              <h3 style={{ margin: 0 }}>Docker Compose Configuration</h3>
+              <label className="project-plugin-enabled-row" htmlFor="docker-compose-enabled-checkbox">
+                <input
+                  id="docker-compose-enabled-checkbox"
+                  type="checkbox"
+                  className="project-plugin-enabled-native-checkbox"
+                  checked={Boolean(dockerComposePluginQuery.data?.enabled)}
+                  disabled={setPluginEnabledMutation.isPending}
+                  onChange={(e) => void runSetPluginEnabled('docker_compose', Boolean(e.target.checked))}
+                />
+                <span className="project-plugin-enabled-label">Enabled</span>
+              </label>
+            </div>
+            <div className="meta" style={{ marginTop: 6 }}>
+              Compose execution defaults plus runtime deploy-health target used by delivery verification.
+            </div>
+            <div className="notice plugin-config-shell" style={{ marginTop: 8 }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>Quick configuration</div>
+              <div className="plugin-config-subsection">
+                <div className="row wrap" style={{ alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                  <span className="meta">Runtime health policy</span>
+                  <InfoTip text="Controls whether runtime health becomes a required delivery proof and how strict the probe should be." />
+                </div>
+                <div className="plugin-docker-toggle-grid">
+                  <label className="plugin-docker-toggle-item" htmlFor="docker-runtime-required">
+                    <input
+                      id="docker-runtime-required"
+                      type="checkbox"
+                      className="project-plugin-enabled-native-checkbox"
+                      checked={dockerComposeQuick.runtimeRequired}
+                      onChange={(e) =>
+                        patchDockerComposeDraft((draft) => ({
+                          ...draft,
+                          runtime_deploy_health: {
+                            ...((draft.runtime_deploy_health as Record<string, unknown> | undefined) || {}),
+                            required: Boolean(e.target.checked),
+                          },
+                        }))
+                      }
+                    />
+                    <span className="meta">Runtime deploy health required</span>
+                  </label>
+                  <label className="plugin-docker-toggle-item" htmlFor="docker-runtime-http200">
+                    <input
+                      id="docker-runtime-http200"
+                      type="checkbox"
+                      className="project-plugin-enabled-native-checkbox"
+                      checked={dockerComposeQuick.runtimeRequireHttp200}
+                      onChange={(e) =>
+                        patchDockerComposeDraft((draft) => ({
+                          ...draft,
+                          runtime_deploy_health: {
+                            ...((draft.runtime_deploy_health as Record<string, unknown> | undefined) || {}),
+                            require_http_200: Boolean(e.target.checked),
+                          },
+                        }))
+                      }
+                    />
+                    <span className="meta">Require HTTP 200 response</span>
+                  </label>
+                </div>
+              </div>
+              <div className="plugin-config-subsection">
+                <div className="row wrap" style={{ alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                  <span className="meta">Runtime target</span>
+                  <InfoTip text="Set stack and endpoint that delivery verification probes when runtime health is enabled." />
+                </div>
+                <div className="plugin-docker-input-grid">
+                  <label className="plugin-docker-field plugin-docker-field-stack">
+                    <span className="meta">Runtime stack</span>
+                    <input
+                      value={dockerComposeQuick.runtimeStack}
+                      onChange={(e) =>
+                        patchDockerComposeDraft((draft) => ({
+                          ...draft,
+                          runtime_deploy_health: {
+                            ...((draft.runtime_deploy_health as Record<string, unknown> | undefined) || {}),
+                            stack: e.target.value,
+                          },
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="plugin-docker-field plugin-docker-field-port">
+                    <span className="meta">Port</span>
+                    <input
+                      value={dockerComposeQuick.runtimePort}
+                      onChange={(e) =>
+                        patchDockerComposeDraft((draft) => ({
+                          ...draft,
+                          runtime_deploy_health: {
+                            ...((draft.runtime_deploy_health as Record<string, unknown> | undefined) || {}),
+                            port: String(e.target.value || '').trim() === '' ? null : Number(e.target.value),
+                          },
+                        }))
+                      }
+                      placeholder="6768"
+                    />
+                  </label>
+                  <label className="plugin-docker-field">
+                    <span className="meta">Health path</span>
+                    <input
+                      value={dockerComposeQuick.runtimeHealthPath}
+                      onChange={(e) =>
+                        patchDockerComposeDraft((draft) => ({
+                          ...draft,
+                          runtime_deploy_health: {
+                            ...((draft.runtime_deploy_health as Record<string, unknown> | undefined) || {}),
+                            health_path: e.target.value,
+                          },
+                        }))
+                      }
+                      placeholder="/health"
+                    />
+                  </label>
+                </div>
+              </div>
+            </div>
+            <details style={{ marginTop: 8 }} className="plugin-policy-details">
+              <summary>Advanced JSON config</summary>
+              <textarea
+                className="md-textarea plugin-json-textarea"
+                value={dockerComposeConfigText}
+                onChange={(e) => {
+                  setDockerComposeLocalEditLock(true)
+                  setGlobalSaveStatus(null)
+                  setDockerComposeConfigText(e.target.value)
+                }}
+                placeholder="{}"
+                style={{ width: '100%', minHeight: 260, marginTop: 8 }}
+              />
+            </details>
+            <div className="plugin-actions-row">
+              <DropdownMenu.Root>
+                <DropdownMenu.Trigger asChild>
+                  <button className="status-chip" type="button">
+                    Config actions
+                  </button>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.Content className="task-group-menu-content" sideOffset={6} align="start">
+                    <DropdownMenu.Item
+                      className="task-group-menu-item"
+                      onSelect={() => {
+                        setDockerComposeLocalEditLock(true)
+                        setGlobalSaveStatus(null)
+                        setDockerComposeConfigText(prettyJson(DOCKER_COMPOSE_STARTER_CONFIG))
+                      }}
+                    >
+                      Use starter config
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item className="task-group-menu-item" onSelect={() => void runValidatePluginConfig('docker_compose', dockerComposeConfigText)}>
+                      Validate
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item className="task-group-menu-item" onSelect={() => void runDiffPluginConfig('docker_compose', dockerComposeConfigText)}>
+                      Preview diff
+                    </DropdownMenu.Item>
+                  </DropdownMenu.Content>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Root>
+              <div className="plugin-actions-meta">
+                <span className="badge">v{dockerComposePluginQuery.data?.version ?? 0}</span>
+                <span className="badge">
+                  Capability: {projectCapabilitiesQuery.data?.capabilities?.docker_compose ? 'enabled' : 'disabled'}
+                </span>
+              </div>
+            </div>
+            {pluginUiStatus.docker_compose ? (
+              <div className="meta" style={{ marginTop: 8 }}>
+                [{pluginUiStatus.docker_compose.tone.toUpperCase()}] {pluginUiStatus.docker_compose.text}
+              </div>
+            ) : null}
+            {pluginValidationByKey.docker_compose?.errors?.length ? (
+              <div className="notice" style={{ marginTop: 8 }}>
+                {pluginValidationByKey.docker_compose.errors.map((err, idx) => (
+                  <div key={`docker-compose-validation-error-${idx}`}>{JSON.stringify(err)}</div>
+                ))}
+              </div>
+            ) : null}
+            {pluginDiffByKey.docker_compose ? <div className="notice" style={{ marginTop: 8 }}>{renderPluginDiffDetails(pluginDiffByKey.docker_compose)}</div> : null}
+            <details style={{ marginTop: 8 }}>
+              <summary>Effective policy overview</summary>
+              <div className="plugin-policy-summary">
+                <div className="row wrap plugin-policy-badges">
+                  <span className="badge">{dockerPolicySummary.runtimeRequired ? 'Runtime check required' : 'Runtime check optional'}</span>
+                  <span className="badge">Stack: {dockerPolicySummary.runtimeStack}</span>
+                  <span className="badge">Endpoint: gateway:{dockerPolicySummary.runtimePort}{dockerPolicySummary.runtimeHealthPath}</span>
+                </div>
+                <details className="plugin-policy-raw">
+                  <summary>Show raw compiled policy JSON</summary>
+                  <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap' }}>{prettyJson(dockerPolicySummary.raw)}</pre>
+                </details>
+              </div>
+            </details>
+          </div>
+        </Tabs.Content>
         <Tabs.Content value="rules" className="project-editor-tab-content">
       <div
         className="rules-studio"
         style={{ marginTop: 10, marginBottom: 14 }}
       >
         <div className="row wrap rules-head-row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-          <h3 style={{ margin: 0 }}>Project Rules ({projectRules.data?.total ?? 0})</h3>
+          <h3 style={{ margin: 0 }}>Project Rules ({rulesListItems.length})</h3>
         </div>
         <div className="rules-layout">
           <div className="rules-list">
-            {(projectRules.data?.items ?? []).length === 0 ? (
+            {rulesListItems.length === 0 ? (
               <div className="notice">No rules yet for this project.</div>
             ) : (
-              (projectRules.data?.items ?? []).map((rule: ProjectRule) => {
+              rulesListItems.map((rule) => {
                 const isSelected = selectedProjectRuleId === rule.id
                 const linkedSkill = skillByGeneratedRuleId.get(rule.id)
                 return (
@@ -1284,7 +3652,7 @@ export function ProjectsInlineEditor({
                     ]
                       .filter(Boolean)
                       .join(' ')}
-                    onClick={() => setSelectedProjectRuleId(rule.id)}
+                    onClick={() => selectRuleInEditor(rule.id, rule.title, rule.body)}
                     role="button"
                   >
                     <div className="task-main">
@@ -1296,12 +3664,14 @@ export function ProjectsInlineEditor({
                         {isSelected && <span className="badge">Editing</span>}
                       </div>
                       <div className="meta">{(rule.body || '').replace(/\s+/g, ' ').slice(0, 120) || '(empty)'}</div>
+                      {rule.isNew ? <div className="meta">Staged: new rule</div> : null}
+                      {rule.isPatched && !rule.isNew ? <div className="meta">Staged: edited</div> : null}
                       {linkedSkill ? (
                         <div className="meta">
                           Linked skill: {linkedSkill.skillName || linkedSkill.skillKey || linkedSkill.skillId}
                         </div>
                       ) : null}
-                      <div className="meta">Updated: {toUserDateTime(rule.updated_at, userTimezone)}</div>
+                      {!rule.isNew ? <div className="meta">Updated: {toUserDateTime(rule.updatedAt, userTimezone)}</div> : null}
                     </div>
                     <div className="task-item-actions">
                       <DropdownMenu.Root>
@@ -1324,7 +3694,7 @@ export function ProjectsInlineEditor({
                           >
                             <DropdownMenu.Item
                               className="task-group-menu-item task-group-menu-item-danger"
-                              disabled={deleteProjectRuleMutation.isPending}
+                              disabled={saveAllPending}
                               onSelect={() => {
                                 setDeleteRulePrompt({
                                   id: rule.id,
@@ -1347,10 +3717,7 @@ export function ProjectsInlineEditor({
               className="task-item rule-item add-new-rule-item"
               role="button"
               onClick={() => {
-                setSelectedProjectRuleId(null)
-                setProjectRuleTitle('')
-                setProjectRuleBody('')
-                setProjectRuleView('split')
+                addNewRuleDraft()
               }}
             >
               <div className="task-main">
@@ -1385,18 +3752,6 @@ export function ProjectsInlineEditor({
                 onChange={(e) => setProjectRuleTitle(e.target.value)}
                 placeholder="Rule title"
               />
-              <button
-                className="action-icon primary"
-                disabled={!projectRuleTitle.trim() || createProjectRuleMutation.isPending || patchProjectRuleMutation.isPending}
-                onClick={() => {
-                  if (selectedProjectRuleId) patchProjectRuleMutation.mutate()
-                  else createProjectRuleMutation.mutate()
-                }}
-                title={selectedProjectRuleId ? 'Update rule' : 'Create rule'}
-                aria-label={selectedProjectRuleId ? 'Update rule' : 'Create rule'}
-              >
-                <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
-              </button>
             </div>
             <div className="md-editor-surface">
               <MarkdownModeToggle
@@ -1443,7 +3798,12 @@ export function ProjectsInlineEditor({
       >
         <div className="row wrap rules-head-row" style={{ justifyContent: 'space-between', marginBottom: 8, gap: 8 }}>
           <h3 style={{ margin: 0 }}>Project Skills ({projectSkills.data?.total ?? 0})</h3>
-          <div className="meta">Project-local skills. Import adds skill metadata to context; use Apply to include full skill content via linked rule.</div>
+          <div className="meta">
+            Project-local skills. Changes are staged locally and saved only via Save all changes.
+            {(stagedSkillImportUrls.length + stagedSkillImportFiles.length + stagedSkillAttachIds.length + stagedSkillApplyIds.length) > 0
+              ? ` Staged ops: ${stagedSkillImportUrls.length + stagedSkillImportFiles.length + stagedSkillAttachIds.length + stagedSkillApplyIds.length}.`
+              : ''}
+          </div>
         </div>
         <div className="row wrap" style={{ gap: 8, marginBottom: 10, alignItems: 'center' }}>
           <input
@@ -1541,32 +3901,30 @@ export function ProjectsInlineEditor({
               className="action-icon primary"
               type="button"
               disabled={importProjectSkillMutation.isPending || importProjectSkillFileMutation.isPending}
-              title="Import project skill from URL"
-              aria-label="Import project skill from URL"
+              title="Stage project skill import from URL"
+              aria-label="Stage project skill import from URL"
               onClick={() => {
                 const sourceUrl = String(skillImportSourceUrl || '').trim()
                 if (!sourceUrl) {
                   setUiError('Skill source URL is required')
                   return
                 }
-                importProjectSkillMutation.mutate(
+                setStagedSkillImportUrls((prev) => [
+                  ...prev,
                   {
+                    clientId: `staged-skill-url-${stagedSkillSeqRef.current++}`,
                     source_url: sourceUrl,
                     skill_key: String(skillImportKey || '').trim() || undefined,
                     mode: skillImportMode,
                     trust_level: skillImportTrustLevel,
                   },
-                  {
-                    onSuccess: (created: ProjectSkill) => {
-                      setUiError(null)
-                      if (created?.id) setSelectedProjectSkillId(created.id)
-                      setSkillImportSourceUrl('')
-                      setSkillImportKey('')
-                      setSkillImportMode('advisory')
-                      setSkillImportTrustLevel('reviewed')
-                    },
-                  }
-                )
+                ])
+                setGlobalSaveStatus(null)
+                setUiError(null)
+                setSkillImportSourceUrl('')
+                setSkillImportKey('')
+                setSkillImportMode('advisory')
+                setSkillImportTrustLevel('reviewed')
               }}
             >
               {importProjectSkillMutation.isPending ? <Icon path="M12 5v14M5 12h14" /> : <Icon path="M12 5v10m0 0l4-4m-4 4l-4-4M4 21h16" />}
@@ -1610,24 +3968,22 @@ export function ProjectsInlineEditor({
               const file = e.target.files?.[0]
               e.currentTarget.value = ''
               if (!file) return
-              importProjectSkillFileMutation.mutate(
+              setStagedSkillImportFiles((prev) => [
+                ...prev,
                 {
+                  clientId: `staged-skill-file-${stagedSkillSeqRef.current++}`,
                   file,
                   skill_key: String(skillImportKey || '').trim() || undefined,
                   mode: skillImportMode,
                   trust_level: skillImportTrustLevel,
                 },
-                {
-                  onSuccess: (created: ProjectSkill) => {
-                    setUiError(null)
-                    if (created?.id) setSelectedProjectSkillId(created.id)
-                    setSkillImportSourceUrl('')
-                    setSkillImportKey('')
-                    setSkillImportMode('advisory')
-                    setSkillImportTrustLevel('reviewed')
-                  },
-                }
-              )
+              ])
+              setGlobalSaveStatus(null)
+              setUiError(null)
+              setSkillImportSourceUrl('')
+              setSkillImportKey('')
+              setSkillImportMode('advisory')
+              setSkillImportTrustLevel('reviewed')
             }}
           />
         </div>
@@ -1676,7 +4032,12 @@ export function ProjectsInlineEditor({
                                   className="task-group-menu-item"
                                   disabled={applyProjectSkillMutation.isPending}
                                   onSelect={() => {
-                                    applyProjectSkillMutation.mutate({ skillId: skill.id })
+                                    const normalizedSkillId = String(skill.id || '').trim()
+                                    if (!normalizedSkillId) return
+                                    setStagedSkillApplyIds((prev) =>
+                                      prev.includes(normalizedSkillId) ? prev : [...prev, normalizedSkillId]
+                                    )
+                                    setGlobalSaveStatus(null)
                                   }}
                                 >
                                   <Icon path="M5 13l4 4L19 7M5 7h8" />
@@ -1839,7 +4200,15 @@ export function ProjectsInlineEditor({
                           <button
                             className="status-chip"
                             type="button"
-                            onClick={() => applyProjectSkillMutation.mutate({ skillId: skill.id })}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              const normalizedSkillId = String(skill.id || '').trim()
+                              if (!normalizedSkillId) return
+                              setStagedSkillApplyIds((prev) =>
+                                prev.includes(normalizedSkillId) ? prev : [...prev, normalizedSkillId]
+                              )
+                              setGlobalSaveStatus(null)
+                            }}
                           >
                             {hasLinkedRule ? 'Reapply to context' : 'Apply to context'}
                           </button>
@@ -1939,6 +4308,7 @@ export function ProjectsInlineEditor({
               ) : (
                 filteredWorkspaceSkillItems.map((skill: WorkspaceSkill) => {
                   const alreadyAttached = projectSkillKeys.has(String(skill.skill_key || '').trim())
+                  const alreadyStagedAttach = stagedSkillAttachSet.has(String(skill.id || '').trim())
                   const skillLabel = skill.name || skill.skill_key || 'Untitled catalog skill'
                   return (
                     <div key={skill.id} className="task-item rule-item project-create-skill-item catalog-skill-item">
@@ -1962,19 +4332,18 @@ export function ProjectsInlineEditor({
                           <button
                             className={`status-chip ${alreadyAttached ? 'on' : ''}`.trim()}
                             type="button"
-                            disabled={alreadyAttached || attachWorkspaceSkillToProjectMutation.isPending}
+                            disabled={alreadyAttached || alreadyStagedAttach || attachWorkspaceSkillToProjectMutation.isPending}
                             onClick={() => {
-                              attachWorkspaceSkillToProjectMutation.mutate(
-                                { skillId: skill.id },
-                                {
-                                  onSuccess: () => {
-                                    setShowCatalogPicker(false)
-                                  },
-                                }
+                              const workspaceSkillId = String(skill.id || '').trim()
+                              if (!workspaceSkillId || alreadyAttached) return
+                              setStagedSkillAttachIds((prev) =>
+                                prev.includes(workspaceSkillId) ? prev : [...prev, workspaceSkillId]
                               )
+                              setGlobalSaveStatus(null)
+                              setShowCatalogPicker(false)
                             }}
                           >
-                            {alreadyAttached ? 'Attached' : 'Attach'}
+                            {alreadyAttached ? 'Attached' : alreadyStagedAttach ? 'Staged' : 'Stage attach'}
                           </button>
                         </div>
                       </div>
@@ -2134,21 +4503,53 @@ export function ProjectsInlineEditor({
           />
         </Tabs.Content>
       </Tabs.Root>
+      {showProjectSaveBar ? (
+        <div className="project-editor-savebar">
+          <div className="project-editor-savebar-meta">
+            {hasAnyUnsavedChanges ? (
+              <span className="badge unsaved-badge">
+                {unsavedSections.length} unsaved section{unsavedSections.length === 1 ? '' : 's'}
+              </span>
+            ) : (
+              <span className="badge">All changes saved</span>
+            )}
+            {hasAnyUnsavedChanges ? (
+              <span className="meta">Changed: {unsavedSections.join(', ')}</span>
+            ) : null}
+            {globalSaveStatus ? (
+              <span className="meta">
+                [{globalSaveStatus.tone.toUpperCase()}] {globalSaveStatus.text}
+              </span>
+            ) : null}
+          </div>
+          <button
+            className="status-chip on project-editor-savebar-btn"
+            type="button"
+            onClick={() => void runSaveAllChanges()}
+            disabled={!hasAnyUnsavedChanges || saveAllPending || !editProjectName.trim()}
+          >
+            <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+            <span className="project-editor-savebar-btn-label">
+              {saveAllPending ? 'Saving...' : 'Save all changes'}
+            </span>
+          </button>
+        </div>
+      ) : null}
       <AlertDialog.Root open={removeProjectPromptOpen} onOpenChange={setRemoveProjectPromptOpen}>
         <AlertDialog.Portal>
-          <AlertDialog.Overlay className="drawer-backdrop" />
-          <AlertDialog.Content className="dialog-content">
-            <AlertDialog.Title>Remove project</AlertDialog.Title>
-            <AlertDialog.Description className="meta" style={{ marginTop: 6 }}>
+          <AlertDialog.Overlay className="codex-chat-alert-overlay" />
+          <AlertDialog.Content className="codex-chat-alert-content">
+            <AlertDialog.Title className="codex-chat-alert-title">Remove project</AlertDialog.Title>
+            <AlertDialog.Description className="codex-chat-alert-description">
               {`Delete "${project.name}"? This permanently deletes project resources.`}
             </AlertDialog.Description>
-            <div className="dialog-actions">
+            <div className="codex-chat-alert-actions">
               <AlertDialog.Cancel asChild>
-                <button className="status-chip" type="button">Cancel</button>
+                <button className="pill subtle" type="button">Cancel</button>
               </AlertDialog.Cancel>
               <AlertDialog.Action asChild>
                 <button
-                  className="status-chip danger-ghost"
+                  className="status-chip"
                   type="button"
                   disabled={deleteProjectMutation.isPending}
                   onClick={() => {
@@ -2170,26 +4571,26 @@ export function ProjectsInlineEditor({
         }}
       >
         <AlertDialog.Portal>
-          <AlertDialog.Overlay className="drawer-backdrop" />
-          <AlertDialog.Content className="dialog-content">
-            <AlertDialog.Title>Delete rule</AlertDialog.Title>
-            <AlertDialog.Description className="meta" style={{ marginTop: 6 }}>
+          <AlertDialog.Overlay className="codex-chat-alert-overlay" />
+          <AlertDialog.Content className="codex-chat-alert-content">
+            <AlertDialog.Title className="codex-chat-alert-title">Delete rule</AlertDialog.Title>
+            <AlertDialog.Description className="codex-chat-alert-description">
               {deleteRulePrompt
                 ? `Delete "${deleteRulePrompt.title}"?`
                 : 'This action cannot be undone.'}
             </AlertDialog.Description>
-            <div className="dialog-actions">
+            <div className="codex-chat-alert-actions">
               <AlertDialog.Cancel asChild>
-                <button className="status-chip" type="button">Cancel</button>
+                <button className="pill subtle" type="button">Cancel</button>
               </AlertDialog.Cancel>
               <AlertDialog.Action asChild>
                 <button
-                  className="status-chip danger-ghost"
+                  className="status-chip"
                   type="button"
-                  disabled={deleteProjectRuleMutation.isPending}
+                  disabled={saveAllPending}
                   onClick={() => {
                     if (!deleteRulePrompt) return
-                    deleteProjectRuleMutation.mutate(deleteRulePrompt.id)
+                    stageDeleteRule(deleteRulePrompt.id)
                     setDeleteRulePrompt(null)
                   }}
                 >
@@ -2207,21 +4608,21 @@ export function ProjectsInlineEditor({
         }}
       >
         <AlertDialog.Portal>
-          <AlertDialog.Overlay className="drawer-backdrop" />
-          <AlertDialog.Content className="dialog-content">
-            <AlertDialog.Title>Delete skill</AlertDialog.Title>
-            <AlertDialog.Description className="meta" style={{ marginTop: 6 }}>
+          <AlertDialog.Overlay className="codex-chat-alert-overlay" />
+          <AlertDialog.Content className="codex-chat-alert-content">
+            <AlertDialog.Title className="codex-chat-alert-title">Delete skill</AlertDialog.Title>
+            <AlertDialog.Description className="codex-chat-alert-description">
               {deleteSkillPrompt
                 ? `Delete "${deleteSkillPrompt.name}" and its linked rule?`
                 : 'This action cannot be undone.'}
             </AlertDialog.Description>
-            <div className="dialog-actions">
+            <div className="codex-chat-alert-actions">
               <AlertDialog.Cancel asChild>
-                <button className="status-chip" type="button">Cancel</button>
+                <button className="pill subtle" type="button">Cancel</button>
               </AlertDialog.Cancel>
               <AlertDialog.Action asChild>
                 <button
-                  className="status-chip danger-ghost"
+                  className="status-chip"
                   type="button"
                   disabled={deleteProjectSkillMutation.isPending}
                   onClick={() => {

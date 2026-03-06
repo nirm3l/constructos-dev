@@ -19,6 +19,7 @@ CODEX_AUTH_FILE="${CODEX_AUTH_FILE:-${HOME}/.codex/auth.json}"
 CODEX_CONFIG_FILE="${CODEX_CONFIG_FILE:-${ROOT_DIR}/codex.config.toml}"
 OLLAMA_MODELS_MOUNT="${OLLAMA_MODELS_MOUNT:-}"
 AGENT_CODEX_WORKSPACE_MOUNT="${AGENT_CODEX_WORKSPACE_MOUNT:-}"
+DEPLOY_SERVICES_OVERRIDE="${DEPLOY_SERVICES_OVERRIDE:-}"
 
 resolve_compose_env_value() {
   local var_name="$1"
@@ -171,6 +172,9 @@ esac
 DEPLOY_SERVICES=(task-app mcp-tools docker-socket-proxy)
 if [[ "$TARGET_RESOLVED" != "macos-m4" ]]; then
   DEPLOY_SERVICES+=(ollama)
+fi
+if [[ -n "$DEPLOY_SERVICES_OVERRIDE" ]]; then
+  IFS=',' read -r -a DEPLOY_SERVICES <<<"$DEPLOY_SERVICES_OVERRIDE"
 fi
 LICENSE_SERVER_TOKEN_VALUE="$(resolve_compose_env_value "LICENSE_SERVER_TOKEN" || true)"
 

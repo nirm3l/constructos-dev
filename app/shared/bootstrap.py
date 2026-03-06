@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from features.bootstrap.read_models import bootstrap_payload_read_model
 from .eventing import append_event, current_version, get_kurrent_client
 from features.projects.domain import EVENT_CREATED as PROJECT_EVENT_CREATED
+from features.projects.domain import EVENT_UPDATED as PROJECT_EVENT_UPDATED
 from features.rules.domain import EVENT_CREATED as PROJECT_RULE_EVENT_CREATED
 from features.specifications.domain import EVENT_CREATED as SPECIFICATION_EVENT_CREATED
 from features.tasks.domain import EVENT_CREATED as TASK_EVENT_CREATED
@@ -65,6 +66,7 @@ _SEED_SKILL_KEY_SANITIZER_RE = re.compile(r"[^a-z0-9]+")
 _SEED_ALLOWED_MODES = {"advisory", "enforced"}
 _SEED_ALLOWED_TRUST_LEVELS = {"reviewed", "untrusted", "verified"}
 _DEFAULT_WORKSPACE_SKILLS_CACHE: tuple[dict[str, str], ...] | None = None
+_PLUGIN_KEYS_WITHOUT_WORKSPACE_SKILLS = {"team_mode", "git_delivery"}
 
 
 def _enabled_plugin_keys() -> set[str]:
@@ -85,6 +87,8 @@ def _seed_workspace_skill_dirs() -> list[Path]:
     plugin_keys = _enabled_plugin_keys()
     plugins_root = Path(__file__).resolve().parents[1] / "plugins"
     for plugin_key in sorted(plugin_keys):
+        if plugin_key in _PLUGIN_KEYS_WITHOUT_WORKSPACE_SKILLS:
+            continue
         plugin_seed_dir = plugins_root / plugin_key / "workspace_skill_seeds"
         if plugin_seed_dir.is_dir():
             dirs.append(plugin_seed_dir)
@@ -470,10 +474,12 @@ def ensure_task_table_columns(db: Session):
         "external_refs": "ALTER TABLE tasks ADD COLUMN external_refs TEXT DEFAULT '[]'",
         "attachment_refs": "ALTER TABLE tasks ADD COLUMN attachment_refs TEXT DEFAULT '[]'",
         "specification_id": "ALTER TABLE tasks ADD COLUMN specification_id VARCHAR(36)",
+        "assigned_agent_code": "ALTER TABLE tasks ADD COLUMN assigned_agent_code VARCHAR(64)",
     }
     for column, ddl in required_columns.items():
         if column not in existing:
             db.execute(text(ddl))
+    db.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_assigned_agent_code ON tasks(assigned_agent_code)"))
     db.commit()
 
 
@@ -792,12 +798,33 @@ def bootstrap_data():
                     "custom_statuses": DEFAULT_STATUSES,
                     "external_refs": [],
                     "attachment_refs": [],
+                    "embedding_enabled": True,
                     "chat_index_mode": "OFF",
                     "chat_attachment_ingestion_mode": "METADATA_ONLY",
                 },
                 metadata={"actor_id": DEFAULT_USER_ID, "workspace_id": BOOTSTRAP_WORKSPACE_ID, "project_id": BOOTSTRAP_PROJECT_ID},
                 expected_version=0,
             )
+        else:
+            general_project = db.get(Project, BOOTSTRAP_PROJECT_ID)
+            if general_project is not None and not bool(general_project.embedding_enabled):
+                version = current_version(db, "Project", BOOTSTRAP_PROJECT_ID)
+                append_event(
+                    db,
+                    aggregate_type="Project",
+                    aggregate_id=BOOTSTRAP_PROJECT_ID,
+                    event_type=PROJECT_EVENT_UPDATED,
+                    payload={
+                        "embedding_enabled": True,
+                        "updated_fields": ["embedding_enabled"],
+                    },
+                    metadata={
+                        "actor_id": DEFAULT_USER_ID,
+                        "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                        "project_id": BOOTSTRAP_PROJECT_ID,
+                    },
+                    expected_version=version,
+                )
         if current_version(db, "Task", BOOTSTRAP_TASK_ID) == 0:
             append_event(
                 db,

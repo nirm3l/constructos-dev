@@ -1,22 +1,24 @@
 from __future__ import annotations
 
-TEAM_MODE_AGENT_PROJECT_ROLES = {"TeamLeadAgent", "DeveloperAgent", "QAAgent"}
+from .task_roles import canonicalize_role
+
+TEAM_MODE_AGENT_PROJECT_ROLES = {"Lead", "Developer", "QA"}
 
 
 def is_team_mode_agent_project_role(role: str | None) -> bool:
-    return str(role or "").strip() in TEAM_MODE_AGENT_PROJECT_ROLES
+    return canonicalize_role(role) in TEAM_MODE_AGENT_PROJECT_ROLES
 
 
 def is_team_mode_developer_role(role: str | None) -> bool:
-    return str(role or "").strip() == "DeveloperAgent"
+    return canonicalize_role(role) == "Developer"
 
 
 def is_team_mode_qa_role(role: str | None) -> bool:
-    return str(role or "").strip() == "QAAgent"
+    return canonicalize_role(role) == "QA"
 
 
 def is_team_mode_lead_role(role: str | None) -> bool:
-    return str(role or "").strip() == "TeamLeadAgent"
+    return canonicalize_role(role) == "Lead"
 
 
 def is_team_mode_kickoff_instruction(instruction: str) -> bool:

@@ -9,8 +9,8 @@ type SnapshotSourceKey =
   | 'soul'
   | 'rules'
   | 'skills'
-  | 'gate_policy'
-  | 'gate_required_checks'
+  | 'plugin_policy'
+  | 'plugin_required_checks'
   | 'knowledge_graph_context'
   | 'knowledge_graph_summary'
   | 'knowledge_graph_fresh_snapshot'
@@ -93,8 +93,8 @@ const FULL_PROMPT_SCAFFOLD_TEMPLATE = [
   'File: Soul.md (source: project.description)',
   'File: ProjectRules.md (source: project_rules)',
   'File: ProjectSkills.md (source: project_skills)',
-  'File: GatePolicy.json (source: project_rules["Gate Policy"])',
-  'File: GateRequiredChecks.md (source: gate_policy.required_checks)',
+  'File: PluginPolicy.json (source: project_plugin_configs[*].compiled_policy_json)',
+  'File: PluginRequiredChecks.md (source: plugin_policy.required_checks)',
   'File: GraphContext.md (source: knowledge_graph)',
   'File: GraphEvidence.json (source: knowledge_graph.evidence)',
   'File: GraphSummary.md (source: knowledge_graph.summary)',
@@ -113,7 +113,7 @@ const FULL_PROMPT_GUIDANCE_TEMPLATE = [
   '- ProjectSkills.md captures reusable skills configured for this project.',
   '- Apply ProjectSkills with mode=enforced before advisory skills.',
   '- If no enforced skill applies, use advisory skills as guidance alongside project rules.',
-  '- Treat GatePolicy.json + GateRequiredChecks.md as explicit execution constraints for this project.',
+  '- Treat PluginPolicy.json + PluginRequiredChecks.md as explicit execution constraints for this project.',
   '- GraphContext.md captures resource relations and should guide dependency-aware decisions.',
   '- GraphEvidence.json is the canonical evidence source for grounded claims.',
   '- GraphSummary.md can be used as a concise overview, but validate against GraphEvidence.json before acting.',
@@ -307,7 +307,7 @@ function renderRulesMarkdown(projectRules: ProjectRule[]): string {
   const lines: string[] = []
   for (const item of projectRules) {
     const title = String(item.title || '').trim()
-    if (title.toLowerCase() === 'gate policy') continue
+    if (title.toLowerCase() === 'plugin policy') continue
     const body = String(item.body || '').trim()
     if (!title && !body) continue
     const label = title || 'Untitled rule'
@@ -318,19 +318,19 @@ function renderRulesMarkdown(projectRules: ProjectRule[]): string {
   return lines.join('\n')
 }
 
-function renderGatePolicyMarkdown(projectRules: ProjectRule[]): { gatePolicy: string; gateRequiredChecks: string } {
-  const gateRule = projectRules.find((item) => String(item?.title || '').trim().toLowerCase() === 'gate policy')
-  if (!gateRule) {
+function renderPluginPolicyMarkdown(projectRules: ProjectRule[]): { pluginPolicy: string; pluginRequiredChecks: string } {
+  const pluginRule = projectRules.find((item) => String(item?.title || '').trim().toLowerCase() === 'plugin policy')
+  if (!pluginRule) {
     return {
-      gatePolicy: '_(Gate Policy unavailable)_',
-      gateRequiredChecks: '_(none)_',
+      pluginPolicy: '_(Plugin Policy unavailable)_',
+      pluginRequiredChecks: '_(none)_',
     }
   }
-  const rawBody = String(gateRule.body || '').trim()
+  const rawBody = String(pluginRule.body || '').trim()
   if (!rawBody) {
     return {
-      gatePolicy: '_(Gate Policy body is empty)_',
-      gateRequiredChecks: '_(none)_',
+      pluginPolicy: '_(Plugin Policy body is empty)_',
+      pluginRequiredChecks: '_(none)_',
     }
   }
   let body = rawBody
@@ -340,16 +340,16 @@ function renderGatePolicyMarkdown(projectRules: ProjectRule[]): { gatePolicy: st
     const parsed = JSON.parse(body) as unknown
     if (!parsed || typeof parsed !== 'object') {
       return {
-        gatePolicy: rawBody,
-        gateRequiredChecks: '_(required_checks unavailable)_',
+        pluginPolicy: rawBody,
+        pluginRequiredChecks: '_(required_checks unavailable)_',
       }
     }
-    const gatePolicy = JSON.stringify(parsed, null, 2)
+    const pluginPolicy = JSON.stringify(parsed, null, 2)
     const requiredChecksRaw = (parsed as { required_checks?: unknown }).required_checks
     if (!requiredChecksRaw || typeof requiredChecksRaw !== 'object' || Array.isArray(requiredChecksRaw)) {
       return {
-        gatePolicy,
-        gateRequiredChecks: '_(required_checks unavailable)_',
+        pluginPolicy,
+        pluginRequiredChecks: '_(required_checks unavailable)_',
       }
     }
     const requiredChecks = requiredChecksRaw as Record<string, unknown>
@@ -362,13 +362,13 @@ function renderGatePolicyMarkdown(projectRules: ProjectRule[]): { gatePolicy: st
       lines.push(checkNames.length > 0 ? `- ${scopeName}: ${checkNames.join(', ')}` : `- ${scopeName}: _(none)_`)
     }
     return {
-      gatePolicy,
-      gateRequiredChecks: lines.join('\n').trim() || '_(none)_',
+      pluginPolicy,
+      pluginRequiredChecks: lines.join('\n').trim() || '_(none)_',
     }
   } catch {
     return {
-      gatePolicy: rawBody,
-      gateRequiredChecks: '_(required_checks unavailable)_',
+      pluginPolicy: rawBody,
+      pluginRequiredChecks: '_(required_checks unavailable)_',
     }
   }
 }
@@ -529,7 +529,7 @@ export function ProjectContextSnapshotPanel({
   const normalizedChatAttachmentMode = normalizeChatAttachmentIngestionMode(projectChatAttachmentIngestionMode)
   const rulesMarkdown = React.useMemo(() => renderRulesMarkdown(projectRules), [projectRules])
   const skillsMarkdown = React.useMemo(() => renderSkillsMarkdown(projectSkills), [projectSkills])
-  const gatePolicyContext = React.useMemo(() => renderGatePolicyMarkdown(projectRules), [projectRules])
+  const pluginPolicyContext = React.useMemo(() => renderPluginPolicyMarkdown(projectRules), [projectRules])
   const graphSummaryMarkdown = React.useMemo(() => renderGraphSummaryMarkdown(contextPack?.summary), [contextPack?.summary])
   const graphContextMarkdown = String(contextPack?.markdown || '')
   const resumeFreshMemorySnapshot = React.useMemo(
@@ -656,20 +656,22 @@ export function ProjectContextSnapshotPanel({
         lines: activePromptMode === 'resume' ? 0 : countLines(skillsMarkdown),
       },
       {
-        key: 'gate_policy',
+        key: 'plugin_policy',
         group: 'project',
-        label: 'Gate policy (GatePolicy.json)',
+        label: 'Plugin policy (PluginPolicy.json)',
         color: '#8b5e34',
-        chars: observedSegmentChars('gate_policy') ?? gatePolicyContext.gatePolicy.length,
-        lines: countLines(gatePolicyContext.gatePolicy),
+        chars: observedSegmentChars('plugin_policy') ?? pluginPolicyContext.pluginPolicy.length,
+        lines: countLines(pluginPolicyContext.pluginPolicy),
       },
       {
-        key: 'gate_required_checks',
+        key: 'plugin_required_checks',
         group: 'project',
-        label: 'Gate required checks (GateRequiredChecks.md)',
+        label: 'Plugin required checks (PluginRequiredChecks.md)',
         color: '#a16207',
-        chars: observedSegmentChars('gate_required_checks') ?? gatePolicyContext.gateRequiredChecks.length,
-        lines: countLines(gatePolicyContext.gateRequiredChecks),
+        chars:
+          observedSegmentChars('plugin_required_checks') ??
+          pluginPolicyContext.pluginRequiredChecks.length,
+        lines: countLines(pluginPolicyContext.pluginRequiredChecks),
       },
       {
         key: 'knowledge_graph_context',
@@ -869,8 +871,8 @@ export function ProjectContextSnapshotPanel({
     counts.specifications,
     counts.tasks,
     evidenceItems,
-    gatePolicyContext.gatePolicy,
-    gatePolicyContext.gateRequiredChecks,
+    pluginPolicyContext.pluginPolicy,
+    pluginPolicyContext.pluginRequiredChecks,
     graphContextMarkdown,
     graphEvidenceJsonChat,
     graphEvidenceJsonNonChat,

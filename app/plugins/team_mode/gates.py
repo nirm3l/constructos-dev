@@ -3,20 +3,13 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from .task_roles import derive_task_role
 from shared.schedule import parse_recurring_rule
 
 DEFAULT_REQUIRED_TEAM_MODE_CHECKS: list[str] = [
     "role_coverage_present",
-    "dev_self_triggers_to_lead",
-    "lead_external_trigger_from_dev",
-    "qa_external_trigger_from_lead",
-    "lead_external_trigger_from_blocked_work",
-    "lead_recurring_schedule_on_lead",
-    "lead_recurring_cadence_ok",
-    "lead_recurring_next_due_soon",
-    "lead_oversight_not_done_before_delivery_complete",
     "required_triggers_present",
-    "deploy_target_declared",
+    "lead_oversight_not_done_before_delivery_complete",
 ]
 
 TEAM_MODE_CHECK_DESCRIPTIONS: dict[str, str] = {
@@ -39,10 +32,7 @@ TEAM_MODE_CHECK_DESCRIPTIONS: dict[str, str] = {
     "lead_oversight_not_done_before_delivery_complete": "Lead oversight recurring task is not marked Done before delivery handoff completes.",
     "deploy_target_declared": "Deploy task artifacts declare a deploy target port.",
     "deploy_stack_declared": "Deploy task artifacts declare a deploy stack/project name.",
-    "deploy_task_has_evidence": "Deploy task contains deploy intent or evidence artifacts.",
     "handoff_direction_clean": "No contradictory handoff triggers were detected.",
-    "dev_external_trigger_to_qa_conflict": "Conflict flag when Dev tasks incorrectly use external trigger to QA.",
-    "qa_external_trigger_to_done_conflict": "Conflict flag when QA tasks incorrectly use external trigger to Done.",
     "required_triggers_present": "Core Team Mode trigger chain is fully present.",
     "event_storming_matches_expectation": "Project event-storming flag matches expected state.",
 }
@@ -68,21 +58,14 @@ TEAM_MODE_CHECK_EVALUATORS: dict[str, Callable[[dict[str, Any]], bool]] = {
     "lead_oversight_not_done_before_delivery_complete": lambda f: bool(f["lead_oversight_not_done_ok"]),
     "deploy_target_declared": lambda f: bool(f["deploy_target_declared_ok"]),
     "deploy_stack_declared": lambda f: bool(f["deploy_stack_declared_ok"]),
-    "deploy_task_has_evidence": lambda f: bool(f["deploy_target_declared_ok"]),
     "handoff_direction_clean": lambda f: bool(f["handoff_direction_clean"]),
-    "dev_external_trigger_to_qa_conflict": lambda f: bool(f["dev_external_to_qa_conflict"]),
-    "qa_external_trigger_to_done_conflict": lambda f: bool(f["qa_external_to_done_conflict"]),
     "required_triggers_present": lambda f: bool(
         f["dev_self_ok"]
         and f["lead_external_from_dev_ok"]
         and f["qa_external_from_lead_ok"]
         and f["lead_external_from_blocked_work_ok"]
         and (f["deploy_external_from_lead_ok"] if f["deploy_external_required"] else True)
-        and f["lead_recurring_on_lead_ok"]
-        and f["lead_recurring_cadence_ok"]
-        and f["lead_recurring_next_due_soon_ok"]
         and f["handoff_direction_clean"]
-        and f["deploy_target_declared_ok"]
     ),
     "event_storming_matches_expectation": lambda f: bool(f["event_storming_ok"]),
 }
@@ -123,8 +106,8 @@ def evaluate_team_mode_gates(
     workspace_id: str,
     event_storming_enabled: bool,
     expected_event_storming_enabled: bool | None,
-    gate_policy: dict[str, Any],
-    gate_policy_source: str,
+    plugin_policy: dict[str, Any],
+    plugin_policy_source: str,
     tasks: list[dict[str, Any]],
     member_role_by_user_id: dict[str, str],
     notes_by_task: dict[str, list[Any]],
@@ -175,7 +158,7 @@ def evaluate_team_mode_gates(
         return bool(instruction)
 
     def _get_lead_recurring_max_minutes() -> int:
-        team_mode_cfg = gate_policy.get("team_mode") if isinstance(gate_policy.get("team_mode"), dict) else {}
+        team_mode_cfg = plugin_policy.get("team_mode") if isinstance(plugin_policy.get("team_mode"), dict) else {}
         raw = team_mode_cfg.get("lead_recurring_max_minutes") if isinstance(team_mode_cfg, dict) else None
         try:
             parsed = int(raw)
@@ -195,9 +178,21 @@ def evaluate_team_mode_gates(
             return parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
 
-    dev_tasks = [t for t in tasks if member_role_by_user_id.get(str(t.get("assignee_id") or "")) == "DeveloperAgent"]
-    qa_tasks = [t for t in tasks if member_role_by_user_id.get(str(t.get("assignee_id") or "")) == "QAAgent"]
-    lead_tasks = [t for t in tasks if member_role_by_user_id.get(str(t.get("assignee_id") or "")) == "TeamLeadAgent"]
+    dev_tasks = [
+        t
+        for t in tasks
+        if derive_task_role(task_like=t, member_role_by_user_id=member_role_by_user_id) == "Developer"
+    ]
+    qa_tasks = [
+        t
+        for t in tasks
+        if derive_task_role(task_like=t, member_role_by_user_id=member_role_by_user_id) == "QA"
+    ]
+    lead_tasks = [
+        t
+        for t in tasks
+        if derive_task_role(task_like=t, member_role_by_user_id=member_role_by_user_id) == "Lead"
+    ]
     deploy_tasks = [
         t for t in lead_tasks if "deploy" in str(t.get("title") or "").lower() or "docker compose" in str(t.get("title") or "").lower()
     ]
@@ -428,7 +423,7 @@ def evaluate_team_mode_gates(
         "event_storming_ok": event_storming_ok,
     }
     checks = evaluate_check_registry(registry=TEAM_MODE_CHECK_EVALUATORS, facts=facts)
-    required_checks = policy_required_checks(gate_policy, "team_mode", DEFAULT_REQUIRED_TEAM_MODE_CHECKS)
+    required_checks = policy_required_checks(plugin_policy, "team_mode", DEFAULT_REQUIRED_TEAM_MODE_CHECKS)
     checks_ok, required_failed = evaluate_required_checks(checks, required_checks)
     return {
         "project_id": str(project_id),
@@ -438,8 +433,8 @@ def evaluate_team_mode_gates(
         "check_descriptions": dict(TEAM_MODE_CHECK_DESCRIPTIONS),
         "required_checks": required_checks,
         "required_failed_checks": required_failed,
-        "gate_policy": gate_policy,
-        "gate_policy_source": gate_policy_source,
+        "plugin_policy": plugin_policy,
+        "plugin_policy_source": plugin_policy_source,
         "counts": {
             "tasks_total": len(tasks),
             "developer_tasks": len(dev_tasks),

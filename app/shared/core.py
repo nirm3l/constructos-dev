@@ -68,6 +68,7 @@ from .models import (
     Notification,
     Project,
     ProjectMember,
+    ProjectPluginConfig,
     ProjectSkill,
     WorkspaceSkill,
     ProjectionCheckpoint,

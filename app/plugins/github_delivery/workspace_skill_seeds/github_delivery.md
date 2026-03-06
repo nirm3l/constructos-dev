@@ -9,7 +9,7 @@ trust_level: verified
 # GitHub Delivery Skill
 
 Use this skill when a project uses GitHub as the delivery platform.
-Core Git execution rules are enforced by `git_delivery`.
+Core Git execution rules are enforced by the `git_delivery` project plugin.
 
 ## GitHub Scope
 - Manage pull request lifecycle (open/update/rebase/merge).
@@ -23,4 +23,3 @@ Core Git execution rules are enforced by `git_delivery`.
 - If approvals are required: wait for approval and assign the task to a human team member while waiting.
 - If pull requests are required but approval wait is not required: merge automatically after checks and add the PR link as an external reference.
 - If pull requests are not required: follow merge policy from project rules and still keep GitHub issue/label state aligned.
-

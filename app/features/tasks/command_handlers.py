@@ -18,6 +18,12 @@ from sqlalchemy.orm import Session
 
 from plugins import task_policy as plugin_task_policy
 from plugins.registry import list_workflow_plugins
+from plugins.team_mode.task_roles import (
+    canonicalize_role,
+    derive_task_role,
+    ensure_team_mode_labels,
+    normalize_team_agents,
+)
 from shared.core import (
     AggregateEventRepository,
     BulkAction,
@@ -26,7 +32,7 @@ from shared.core import (
     Project,
     ProjectCommandState,
     ProjectMember,
-    ProjectSkill,
+    ProjectPluginConfig,
     Specification,
     ReorderPayload,
     Task,
@@ -139,21 +145,44 @@ def _maybe_cleanup_plugin_worktree(
     if not enabled_plugin_keys:
         return
     has_enabled_workflow_plugin = db.execute(
-        select(ProjectSkill.id).where(
-            ProjectSkill.project_id == normalized_project_id,
-            ProjectSkill.skill_key.in_(enabled_plugin_keys),
-            ProjectSkill.enabled == True,  # noqa: E712
-            ProjectSkill.is_deleted == False,  # noqa: E712
+        select(ProjectPluginConfig.id).where(
+            ProjectPluginConfig.project_id == normalized_project_id,
+            ProjectPluginConfig.plugin_key.in_(enabled_plugin_keys),
+            ProjectPluginConfig.enabled == True,  # noqa: E712
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
         )
     ).first()
     if not has_enabled_workflow_plugin:
         return
-    member_role = db.execute(
-        select(ProjectMember.role).where(
-            ProjectMember.project_id == normalized_project_id,
-            ProjectMember.user_id == normalized_assignee_id,
+    task_row = db.execute(
+        select(Task.status, Task.labels).where(
+            Task.id == task_id,
+            Task.project_id == normalized_project_id,
+            Task.assignee_id == normalized_assignee_id,
+            Task.is_deleted == False,  # noqa: E712
         )
-    ).scalar_one_or_none()
+    ).first()
+    member_role = ""
+    if task_row is not None:
+        task_status, task_labels = task_row
+        member_role = derive_task_role(
+            task_like={
+                "assignee_id": normalized_assignee_id,
+                "labels": task_labels,
+                "status": str(task_status or normalized_status),
+            },
+            member_role_by_user_id={},
+        )
+    if not member_role:
+        member_role = str(
+            db.execute(
+                select(ProjectMember.role).where(
+                    ProjectMember.project_id == normalized_project_id,
+                    ProjectMember.user_id == normalized_assignee_id,
+                )
+            ).scalar_one_or_none()
+            or ""
+        ).strip()
     if not plugin_task_policy.should_cleanup_task_worktree(
         plugin_enabled=True,
         task_status=normalized_status,
@@ -184,6 +213,97 @@ def _normalize_tags(values: list[str] | None) -> list[str]:
         seen.add(tag)
         out.append(tag)
     return out
+
+
+def _load_team_mode_agents_for_project(
+    db: Session,
+    *,
+    workspace_id: str,
+    project_id: str | None,
+) -> list[dict[str, str]]:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return []
+    config_row = db.execute(
+        select(ProjectPluginConfig.config_json).where(
+            ProjectPluginConfig.workspace_id == workspace_id,
+            ProjectPluginConfig.project_id == normalized_project_id,
+            ProjectPluginConfig.plugin_key == "team_mode",
+            ProjectPluginConfig.enabled == True,  # noqa: E712
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    if not config_row:
+        return []
+    try:
+        config_obj = json.loads(str(config_row or "").strip() or "{}")
+    except Exception:
+        return []
+    if not isinstance(config_obj, dict):
+        return []
+    return normalize_team_agents(config_obj.get("team"))
+
+
+def _normalize_assigned_agent_code_for_project(
+    db: Session,
+    *,
+    workspace_id: str,
+    project_id: str | None,
+    assigned_agent_code: str | None,
+) -> str | None:
+    normalized_code = str(assigned_agent_code or "").strip()
+    if not normalized_code:
+        return None
+    agents = _load_team_mode_agents_for_project(
+        db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
+    if not agents:
+        raise HTTPException(status_code=422, detail="assigned_agent_code requires Team Mode plugin enabled with configured agents")
+    valid_codes = {str(item.get("id") or "").strip() for item in agents if str(item.get("id") or "").strip()}
+    if normalized_code not in valid_codes:
+        raise HTTPException(status_code=422, detail=f"assigned_agent_code '{normalized_code}' is not defined in Team Mode config")
+    return normalized_code
+
+
+def _apply_team_mode_agent_labels(
+    db: Session,
+    *,
+    workspace_id: str,
+    project_id: str | None,
+    task_id: str | None,
+    assignee_id: str | None,
+    assigned_agent_code: str | None,
+    status: str | None,
+    labels: list[str] | None,
+) -> tuple[list[str], str | None]:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return list(labels or []), None
+    agents = _load_team_mode_agents_for_project(
+        db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    if not agents:
+        return ensure_team_mode_labels(labels=list(labels or []), role=None, agent_slot=None), None
+    normalized_assignee_id = str(assignee_id or "").strip()
+    normalized_assigned_agent_code = str(assigned_agent_code or "").strip()
+    if not normalized_assignee_id:
+        return ensure_team_mode_labels(labels=list(labels or []), role=None, agent_slot=None), None
+    if not normalized_assigned_agent_code:
+        return ensure_team_mode_labels(labels=list(labels or []), role=None, agent_slot=None), None
+    valid_codes = {str(item.get("id") or "").strip() for item in agents if str(item.get("id") or "").strip()}
+    selected_slot = normalized_assigned_agent_code if normalized_assigned_agent_code in valid_codes else None
+    return (
+        ensure_team_mode_labels(
+            labels=list(labels or []),
+            role=None,
+            agent_slot=None,
+        ),
+        selected_slot,
+    )
 
 
 def _normalize_external_refs(values: list[dict] | None) -> list[dict]:
@@ -361,6 +481,129 @@ def _require_specification_scope(db: Session, *, workspace_id: str, project_id: 
     if specification.archived:
         raise HTTPException(status_code=409, detail="Specification is archived")
     return specification
+
+
+def _is_team_mode_transition_allowed(
+    *,
+    workflow: dict[str, object],
+    from_status: str,
+    to_status: str,
+    actor_role: str | None,
+) -> tuple[bool, str]:
+    if from_status == to_status:
+        return True, "noop"
+    statuses_raw = workflow.get("statuses")
+    statuses = [str(item or "").strip() for item in statuses_raw] if isinstance(statuses_raw, list) else []
+    statuses = [item for item in statuses if item]
+    if statuses and to_status not in set(statuses):
+        return False, "target_status_not_allowed"
+
+    transitions_raw = workflow.get("transitions")
+    transitions = transitions_raw if isinstance(transitions_raw, list) else []
+    if not transitions:
+        return False, "no_transitions_declared"
+
+    normalized_actor_role = canonicalize_role(actor_role)
+    if not normalized_actor_role:
+        return False, "actor_role_missing"
+
+    for item in transitions:
+        if not isinstance(item, dict):
+            continue
+        transition_from = str(item.get("from") or "").strip()
+        transition_to = str(item.get("to") or "").strip()
+        if transition_from != from_status or transition_to != to_status:
+            continue
+        allowed_roles_raw = item.get("allowed_roles")
+        allowed_roles = (
+            {str(role or "").strip() for role in allowed_roles_raw if str(role or "").strip()}
+            if isinstance(allowed_roles_raw, list)
+            else set()
+        )
+        if "*" in allowed_roles or normalized_actor_role in allowed_roles:
+            return True, "allowed"
+        return False, "actor_role_not_permitted"
+
+    return False, "transition_not_declared"
+
+
+def _enforce_team_mode_transition_policy(
+    *,
+    db: Session,
+    workspace_id: str,
+    project_id: str | None,
+    actor_user_id: str,
+    from_status: str,
+    to_status: str,
+    task_id: str | None = None,
+) -> None:
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_project_id:
+        return
+    row = db.execute(
+        select(ProjectPluginConfig).where(
+            ProjectPluginConfig.workspace_id == str(workspace_id),
+            ProjectPluginConfig.project_id == normalized_project_id,
+            ProjectPluginConfig.plugin_key == "team_mode",
+            ProjectPluginConfig.enabled == True,  # noqa: E712
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return
+    try:
+        config = json.loads(str(row.config_json or "").strip() or "{}")
+    except Exception:
+        config = {}
+    if not isinstance(config, dict):
+        config = {}
+    workflow = config.get("workflow")
+    if not isinstance(workflow, dict):
+        workflow = {}
+    actor_role = db.execute(
+        select(ProjectMember.role).where(
+            ProjectMember.project_id == normalized_project_id,
+            ProjectMember.user_id == str(actor_user_id),
+        )
+    ).scalar_one_or_none()
+    normalized_actor_role = str(actor_role or "").strip()
+    if not normalized_actor_role and task_id:
+        task_row = db.execute(
+            select(Task.assignee_id, Task.status, Task.labels).where(
+                Task.id == str(task_id),
+                Task.project_id == normalized_project_id,
+                Task.is_deleted == False,  # noqa: E712
+            )
+        ).first()
+        if task_row is not None:
+            assignee_id, task_status, task_labels = task_row
+            if str(assignee_id or "").strip() == str(actor_user_id):
+                normalized_actor_role = derive_task_role(
+                    task_like={
+                        "assignee_id": str(assignee_id or "").strip(),
+                        "labels": task_labels,
+                        "status": str(task_status or "").strip(),
+                    },
+                    member_role_by_user_id={},
+                )
+    allowed, reason_code = _is_team_mode_transition_allowed(
+        workflow=workflow,
+        from_status=str(from_status or "").strip(),
+        to_status=str(to_status or "").strip(),
+        actor_role=normalized_actor_role or None,
+    )
+    if allowed:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "Team Mode transition policy denied status change. "
+            f"reason_code={reason_code}; "
+            f"from={str(from_status or '').strip()}; "
+            f"to={str(to_status or '').strip()}; "
+            f"actor_role={normalized_actor_role or 'unknown'}"
+        ),
+    )
 
 
 def _require_task_group_scope(db: Session, *, workspace_id: str, project_id: str, task_group_id: str) -> TaskGroup:
@@ -609,6 +852,7 @@ def _task_view_from_aggregate(*, task_id: str, aggregate: TaskAggregate, created
         "priority": getattr(aggregate, "priority", "Med"),
         "due_date": getattr(aggregate, "due_date", None),
         "assignee_id": getattr(aggregate, "assignee_id", None),
+        "assigned_agent_code": (str(getattr(aggregate, "assigned_agent_code", "") or "").strip() or None),
         "labels": getattr(aggregate, "labels", []) or [],
         "subtasks": getattr(aggregate, "subtasks", []) or [],
         "attachments": getattr(aggregate, "attachments", []) or [],
@@ -673,6 +917,14 @@ class CreateTaskHandler:
         specification_id = (self.payload.specification_id or "").strip() or None
         task_group_id = (self.payload.task_group_id or "").strip() or None
         assignee_id = _validate_assignee_id(self.ctx.db, self.payload.assignee_id, project_id=self.payload.project_id)
+        assigned_agent_code = _normalize_assigned_agent_code_for_project(
+            self.ctx.db,
+            workspace_id=self.payload.workspace_id,
+            project_id=self.payload.project_id,
+            assigned_agent_code=self.payload.assigned_agent_code,
+        )
+        if assigned_agent_code and not assignee_id:
+            raise HTTPException(status_code=422, detail="assigned_agent_code requires assignee_id")
 
         if specification_id:
             _require_specification_scope(
@@ -730,6 +982,17 @@ class CreateTaskHandler:
         max_order = self.ctx.db.execute(
             select(func.max(Task.order_index)).where(Task.workspace_id == self.payload.workspace_id, Task.project_id == self.payload.project_id)
         ).scalar() or 0
+        normalized_labels = _normalize_tags(self.payload.labels)
+        normalized_labels, resolved_agent_code = _apply_team_mode_agent_labels(
+            self.ctx.db,
+            workspace_id=self.payload.workspace_id,
+            project_id=self.payload.project_id,
+            task_id=tid,
+            assignee_id=assignee_id,
+            assigned_agent_code=assigned_agent_code,
+            status=initial_status,
+            labels=normalized_labels,
+        )
         aggregate = TaskAggregate(
             id=coerce_originator_id(tid),
             workspace_id=self.payload.workspace_id,
@@ -742,7 +1005,8 @@ class CreateTaskHandler:
             priority=self.payload.priority,
             due_date=to_iso_utc(normalize_datetime_to_utc(self.payload.due_date, user_tz)),
             assignee_id=assignee_id,
-            labels=_normalize_tags(self.payload.labels),
+            assigned_agent_code=resolved_agent_code,
+            labels=normalized_labels,
             subtasks=self.payload.subtasks,
             attachments=attachment_refs,
             external_refs=external_refs,
@@ -842,6 +1106,11 @@ class PatchTaskHandler:
             or (str(current_state.get("task_type")) if current_state else None)
             or "manual"
         )
+        current_status = (
+            str(current_row.status or "").strip()
+            if current_row is not None
+            else str((current_state or {}).get("status") or "").strip()
+        )
         current_instruction = _normalize_instruction(
             (current_row.instruction if current_row is not None else (current_state.get("instruction") if current_state else None))
             or (current_row.scheduled_instruction if current_row is not None else (current_state.get("scheduled_instruction") if current_state else None))
@@ -915,7 +1184,61 @@ class PatchTaskHandler:
                 )
             else:
                 data["specification_id"] = None
+        if "assigned_agent_code" in data:
+            data["assigned_agent_code"] = _normalize_assigned_agent_code_for_project(
+                self.ctx.db,
+                workspace_id=workspace_id,
+                project_id=effective_project_id,
+                assigned_agent_code=data.get("assigned_agent_code"),
+            )
         event_payload = dict(data)
+        existing_labels: list[str] = []
+        raw_existing_labels = (
+            current_row.labels if current_row is not None else (current_state.get("labels") if current_state else [])
+        )
+        if isinstance(raw_existing_labels, list):
+            existing_labels = _normalize_tags([str(item or "") for item in raw_existing_labels])
+        else:
+            try:
+                parsed_existing_labels = json.loads(str(raw_existing_labels or "").strip() or "[]")
+            except Exception:
+                parsed_existing_labels = []
+            if isinstance(parsed_existing_labels, list):
+                existing_labels = _normalize_tags([str(item or "") for item in parsed_existing_labels])
+        effective_assignee_id = str(
+            event_payload.get("assignee_id")
+            if "assignee_id" in event_payload
+            else (current_row.assignee_id if current_row is not None else (current_state.get("assignee_id") if current_state else ""))
+            or ""
+        ).strip() or None
+        effective_assigned_agent_code = str(
+            event_payload.get("assigned_agent_code")
+            if "assigned_agent_code" in event_payload
+            else (
+                current_row.assigned_agent_code
+                if current_row is not None
+                else (current_state.get("assigned_agent_code") if current_state else "")
+            )
+            or ""
+        ).strip() or None
+        effective_status_for_labels = str(event_payload.get("status") or current_status or "").strip()
+        incoming_labels = (
+            _normalize_tags(event_payload.get("labels"))
+            if "labels" in event_payload and isinstance(event_payload.get("labels"), list)
+            else existing_labels
+        )
+        resolved_labels, resolved_agent_code = _apply_team_mode_agent_labels(
+            self.ctx.db,
+            workspace_id=workspace_id,
+            project_id=effective_project_id,
+            task_id=self.task_id,
+            assignee_id=effective_assignee_id,
+            assigned_agent_code=effective_assigned_agent_code,
+            status=effective_status_for_labels,
+            labels=incoming_labels,
+        )
+        event_payload["labels"] = resolved_labels
+        event_payload["assigned_agent_code"] = resolved_agent_code
         if "due_date" in event_payload:
             event_payload["due_date"] = to_iso_utc(normalize_datetime_to_utc(event_payload["due_date"], user_tz))
         if "scheduled_at_utc" in event_payload:
@@ -975,6 +1298,18 @@ class PatchTaskHandler:
             event_payload["last_schedule_error"] = None
         elif "schedule_state" in event_payload and event_payload["schedule_state"] is None:
             event_payload["schedule_state"] = current_schedule_state or "idle"
+
+        requested_status = str(event_payload.get("status") or "").strip()
+        if requested_status and current_status:
+            _enforce_team_mode_transition_policy(
+                db=self.ctx.db,
+                workspace_id=workspace_id,
+                project_id=str(event_payload.get("project_id") or project_id or "").strip() or None,
+                actor_user_id=str(self.ctx.user.id),
+                from_status=current_status,
+                to_status=requested_status,
+                task_id=self.task_id,
+            )
 
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, self.task_id)
@@ -1134,6 +1469,15 @@ class BulkTaskActionHandler:
         if self.payload.action == "complete":
             if status == "Done":
                 return False
+            _enforce_team_mode_transition_policy(
+                db=self.ctx.db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                actor_user_id=str(self.ctx.user.id),
+                from_status=str(status or "").strip(),
+                to_status="Done",
+                task_id=task_id,
+            )
             aggregate.complete(completed_at=to_iso_utc(datetime.now(timezone.utc)))
         elif self.payload.action == "archive":
             if archived:
@@ -1142,11 +1486,31 @@ class BulkTaskActionHandler:
         elif self.payload.action == "delete":
             aggregate.delete()
         elif self.payload.action == "set_status":
-            aggregate.update(changes={"status": self.payload.payload.get("status", status)})
+            target_status = str(self.payload.payload.get("status", status) or "").strip() or str(status or "").strip()
+            _enforce_team_mode_transition_policy(
+                db=self.ctx.db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                actor_user_id=str(self.ctx.user.id),
+                from_status=str(status or "").strip(),
+                to_status=target_status,
+                task_id=task_id,
+            )
+            aggregate.update(changes={"status": target_status})
         elif self.payload.action == "reopen":
             if status != "Done":
                 return False
-            aggregate.reopen(status=self.payload.payload.get("status", "To do"))
+            reopen_status = str(self.payload.payload.get("status", "To do") or "").strip() or "To do"
+            _enforce_team_mode_transition_policy(
+                db=self.ctx.db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                actor_user_id=str(self.ctx.user.id),
+                from_status=str(status or "").strip(),
+                to_status=reopen_status,
+                task_id=task_id,
+            )
+            aggregate.reopen(status=reopen_status)
         else:
             return False
         _persist_task_aggregate(
@@ -1188,6 +1552,17 @@ class ReorderTasksHandler:
             return False
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, task_id)
+        target_status = str(self.payload.status or "").strip()
+        if target_status:
+            _enforce_team_mode_transition_policy(
+                db=self.ctx.db,
+                workspace_id=self.workspace_id,
+                project_id=state.project_id,
+                actor_user_id=str(self.ctx.user.id),
+                from_status=str(state.status or "").strip(),
+                to_status=target_status,
+                task_id=task_id,
+            )
         aggregate.reorder(order_index=order_index, status=self.payload.status)
         _persist_task_aggregate(
             repo,

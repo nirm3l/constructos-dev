@@ -836,6 +836,7 @@ def _task_props_from_event(ev: EventEnvelope) -> dict[str, Any]:
         "priority",
         "due_date",
         "assignee_id",
+        "assigned_agent_code",
         "labels",
         "instruction",
         "execution_triggers",

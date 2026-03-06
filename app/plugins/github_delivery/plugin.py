@@ -7,21 +7,20 @@ from .context_classifier import classify_project_context_signals as classify_git
 
 class GithubDeliveryPlugin:
     key = "github_delivery"
-    _GIT_DELIVERY_SKILL_KEY = "git_delivery"
 
-    def gate_scope(self) -> str | None:
+    def check_scope(self) -> str | None:
         return None
 
     def default_required_checks(self) -> list[str]:
         return []
 
-    def gate_check_descriptions(self) -> dict[str, str]:
+    def check_descriptions(self) -> dict[str, str]:
         return {}
 
-    def default_gate_policy_patch(self) -> dict[str, Any]:
+    def default_plugin_policy_patch(self) -> dict[str, Any]:
         return {}
 
-    def evaluate_gates(self, _ctx, **_kwargs: Any) -> dict[str, Any]:
+    def evaluate_checks(self, _ctx, **_kwargs: Any) -> dict[str, Any]:
         return {"scope": "github_delivery", "checks": [], "required_failed": []}
 
     def service_is_delivery_active(self, *, skill_keys: set[str]) -> bool:
@@ -29,7 +28,7 @@ class GithubDeliveryPlugin:
         return self.key in normalized
 
     def skill_dependencies(self) -> dict[str, tuple[str, ...]]:
-        return {self.key: (self._GIT_DELIVERY_SKILL_KEY,)}
+        return {}
 
     def classify_project_context_signals(
         self,

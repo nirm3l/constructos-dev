@@ -1,8 +1,7 @@
 - Team Mode intent: if instruction mentions `team mode` (or close variants like `team-mode`, `teammode`, `tram mode`, `tim mode`), run Team Mode flow.
-- Prefer `ensure_team_mode_project(project_id, workspace_id, expected_event_storming_enabled=...)` as the primary idempotent Team Mode setup step.
+- Prefer `setup_project_orchestration(...)` as the primary staged setup tool when creating/configuring project setup for Team Mode/Git Delivery/Docker Compose in one flow.
 - Do not set `expected_event_storming_enabled` (and do not toggle project `event_storming_enabled`) unless the user explicitly requested a target value.
-- Use manual Team Mode steps only as fallback when `ensure_team_mode_project` is unavailable or fails.
-- If user asks to create a new project, call `create_project` first, then call `ensure_team_mode_project` on the created project id (or exact project name).
+- If required setup inputs are complete, call `setup_project_orchestration(...)` directly instead of long per-step sequences.
 - If instruction is execution-oriented (for example `start implementation`, `begin implementation`, `finish implementation`, `execute tasks`) and Team Mode is enabled:
   - treat chat request as **dispatch-only kickoff**,
   - queue Team Mode automation runs and stop,
@@ -20,14 +19,11 @@
      - QA evidence must include explicit outcome markers (pass/fail) and at least one verifiable artifact signal.
      - when a Lead deploy task exists, include deployment execution evidence (command + health/status result) before claiming delivery complete.
 - If any item cannot be completed, return `BLOCKED` with concrete missing prerequisite(s).
-- If Team Mode is requested, you MUST execute this setup order.
-- Team Mode required flow (strict order):
-  1) `list_workspace_skills` -> locate `team_mode`
-  2) `attach_workspace_skill_to_project`
-  3) `list_project_skills` -> resolve project skill id
-  4) `apply_project_skill(skill_id=...)`
-  5) `list_project_members` -> resolve agent UUIDs and verify required roles (TeamLeadAgent, 2x DeveloperAgent, QAAgent)
-  6) create/patch workflow and tasks to satisfy request
+- If Team Mode is requested, prefer this setup flow:
+  1) `setup_project_orchestration(...)` as primary staged setup.
+  2) Use `ensure_team_mode_project(...)` only as legacy fallback when orchestration tool is unavailable.
+  3) Use `get_project_plugin_config` -> `validate_project_plugin_config` -> `apply_project_plugin_config` for explicit user overrides after setup.
+  4) Before final response, run `verify_team_mode_workflow` and `verify_delivery_workflow` if orchestration did not already return verification.
 - Honor explicit user constraints first: exact task count, required artifacts (specifications/notes/tasks), and explicitly requested project flags.
 - If the user requests an exact task count, keep that exact count.
 - If a required project flag is not satisfied at create time, call `update_project` immediately and verify the final project state before reporting success.
@@ -36,32 +32,42 @@
 - If creating a `scheduled_instruction` task, include `scheduled_at_utc` in the initial create call.
 - For recurring Team Lead oversight tasks, set `scheduled_at_utc` to near-now (`now_utc + 1 minute`), never midnight/next-day placeholder values.
 - Initial Team Mode task statuses must be explicit (unless user overrides): Dev tasks in `Dev`, QA validation task in `QA`, Lead oversight/deploy tasks in `Lead`.
-- Keep a project rule titled `Gate Policy` (JSON) updated so verification gates are explicit and editable from the UI Rules panel.
-- When using `update_project_rule`, send `patch` with only `title` and/or `body`; for Gate Policy updates set `patch.body` to a valid JSON object string (plain JSON or ```json fenced). Keep `required_checks` as object-of-arrays when present.
-- For setup-only requests set `runtime_deploy_health.required=false` in Gate Policy; for execution requests that include deploy completion set `runtime_deploy_health.required=true`.
+- Staged mutation rule for Team Mode task setup:
+  - create baseline tasks with explicit statuses first,
+  - then apply trigger wiring in patch calls,
+  - run verification only after trigger patching is complete.
+- Avoid post-setup status corrections by policy rewrite. If status alignment fails, fix task wiring/config root cause first; do not broaden transition authority as a workaround.
+- Keep `git_delivery` project plugin config updated so verification checks are explicit and editable from the UI plugin section.
+- Use `get_project_plugin_config` + `validate_project_plugin_config` + `apply_project_plugin_config` for policy changes; do not manage verification policy through project rules.
+- Prefer minimal high-signal required checks (core defaults). Add diagnostic checks only when the user explicitly asks for stricter gates.
+- For setup-only requests set `runtime_deploy_health.required=false` in `docker_compose` plugin config; for execution requests that include deploy completion set `runtime_deploy_health.required=true`.
 - Trigger wiring guardrails:
   - Never create a `status_change` trigger with `scope=external` that references the same task id in `selector.task_ids`.
   - Dev handoff must route into Lead: Dev self `to_statuses=["Lead"]` and Lead external from Dev task ids on `to_statuses=["Lead"]`.
   - QA handoff must route from Lead after integration/deploy readiness: QA external from Lead task ids on `to_statuses=["QA"]`.
   - Lead oversight must include blocked-watch trigger sourced from all Dev/QA task ids on `to_statuses=["Blocked"]`.
   - If there is only one Lead task that also represents deploy readiness, do not add synthetic Lead->Lead external trigger just to satisfy checks; keep Dev->Lead plus Lead->QA with recurring Lead schedule.
-- Assignments: always use `assignee_id` as project-member `user_id` UUID from `list_project_members`.
-- Never use username/display name as `assignee_id`; never silently fallback to random/human assignees.
-- Build a deterministic `member_uuid_by_username` map from `list_project_members` once per run and reuse it for all task mutations.
-- Before every create/patch that includes `assignee_id`, ensure the value is a UUID from project membership (not role label, not username text).
-- If a mutation fails with `assignee_id` validation, refresh `list_project_members`, remap to UUID, and retry once with corrected UUID.
-- If UUID assignment, membership, or trigger wiring fails, treat as incomplete and continue remediation.
+- Assignment and routing rules:
+  - Use `assignee_id` only as a project-member UUID from `list_project_members`.
+  - Never use username/full name as `assignee_id`; never fallback to random/human assignees.
+  - Encode Team Mode routing with fields: `assignee_id` + `assigned_agent_code`.
+  - Never encode agent slot in labels/tags (`tm.agent:*` is deprecated and must not be produced).
+  - Keep only role semantics in labels via `tm.role:<Developer|QA|Lead>` when needed.
+  - Use agent names/slots exactly as defined in the current project's Team Mode config; do not invent alternate names or hardcoded slot mappings.
+  - Keep task titles neutral; do not encode role/slot in title when labels + assignment already define routing.
+  - If `assigned_agent_code` is provided, validate it against Team Mode config slots before sending create/patch.
+  - If `assignee_id` validation fails, refresh members, remap once, retry once; otherwise treat setup as incomplete.
 - Success criteria are write-path facts: required mutations succeeded and returned IDs. Do not claim success based only on read-model timing.
 - Before final response, re-read created/updated tasks (`list_tasks` and/or `get_task`) and report exact persisted statuses/assignees/triggers; if mismatched, patch and verify again.
+- Progress updates to user should be milestone-level and concise (step done + next step), not raw endpoint/schema troubleshooting.
 - For Team Mode setup completion, call `verify_team_mode_workflow` and do not report success while any required check is `FAIL`.
 - If the user requests deploy execution, do not claim deploy succeeded unless you actually executed deployment commands.
 - If the user asks for deployment as part of planning/setup, create explicit deployment tasks/specs/notes; only execute deployment commands when the user explicitly asks to run deploy now.
 - For setup-only requests, record deployment intent in a note/task artifact with explicit stack + port + health path and mark `Execution state: Not started`.
-- Record or preserve canonical runtime probe host in Gate Policy `runtime_deploy_health.host` (default `gateway`) so QA/Lead use one deterministic endpoint.
 - When deploy execution is requested and no explicit stack is provided, deploy with Docker Compose project `constructos-ws-default`.
 - Use `docker compose` (wrapper-enforced project) or explicit `docker compose -p constructos-ws-default ...` for deployment commands unless user overrides stack.
 - Treat delivery as incomplete if post-deploy QA is missing. Required loop: Lead deploy -> QA post-deploy validation -> if fail create/link bug task(s) -> Dev fix with new commit evidence -> Lead re-deploy -> QA re-check evidence.
-- QA and Lead health probes must target `http://<runtime_deploy_health.host>:<port><health_path>` from Gate Policy, not guessed hostnames.
+- QA and Lead health probes must target `http://gateway:<port><health_path>` using `docker_compose` plugin config `port` and `health_path` (host is fixed).
 - Lead execution responsibility is explicit:
   - after each successful Dev branch integration to main, update that Dev task to `Done` with merge evidence.
   - after successful deploy of merged main, set Lead deploy task status to `QA` to trigger QA handoff.
@@ -71,12 +77,7 @@
 - For implementation work, create/use the project repository under `/home/app/workspace/<project-slug>` by default.
 - If Task Workdir / Task Branch are provided, execute implementation from that workdir and commit only on that branch.
 - If `/home/app/workspace` is not writable/available and runtime falls back to another workspace path, continue there and explicitly report the effective fallback path in the response.
-- If Team Mode was requested, end with a compact `Team Mode Verification` checklist with explicit `OK/FAIL` for:
-  - skill attached
-  - skill applied
-  - agent members present
-  - UUID assignments valid
-  - required triggers present
-  - required role coverage present
-  - user-required flags/artifacts satisfied (for example explicit event-storming preference, specs/notes present when requested)
+- If Team Mode was requested, report verification as either `Verification: PASS` or `Verification: Needs attention` and list only plain-language failed requirements.
 - For setup-only requests, include a final line `Execution state: Not started` plus `Deploy target recorded: <stack>:<port>`.
+- For setup-only requests, do not ask for repository URL/path automatically. Ask only if the user explicitly asks to continue with repo linking or execution.
+- For setup-only requests, always include explicit kickoff note: `Kickoff required: Yes`.

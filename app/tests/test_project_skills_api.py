@@ -476,30 +476,22 @@ def test_workspace_skill_catalog_seed_and_attach_to_project(tmp_path: Path):
     catalog = client.get(f"/api/workspace-skills?workspace_id={workspace_id}")
     assert catalog.status_code == 200
     items = catalog.json()["items"]
-    assert any(item["skill_key"] == "git_delivery" for item in items)
     assert any(item["skill_key"] == "github_delivery" for item in items)
     assert any(item["skill_key"] == "jira_execution" for item in items)
-    assert any(item["skill_key"] == "team_mode" for item in items)
+    assert all(item["skill_key"] != "git_delivery" for item in items)
+    assert all(item["skill_key"] != "team_mode" for item in items)
 
     github_skill = next(item for item in items if item["skill_key"] == "github_delivery")
     assert github_skill["source_locator"] == "seed://workspace-skills/github-delivery"
     assert github_skill["is_seeded"] is True
     github_content = str(github_skill["manifest"].get("source_content", ""))
-    assert "Core Git execution rules are enforced by `git_delivery`." in github_content
+    assert "Core Git execution rules are enforced by the `git_delivery` project plugin." in github_content
 
     jira_skill = next(item for item in items if item["skill_key"] == "jira_execution")
     assert jira_skill["source_locator"] == "seed://workspace-skills/jira-execution"
     assert jira_skill["is_seeded"] is True
     jira_content = str(jira_skill["manifest"].get("source_content", ""))
     assert "create one Jira snapshot issue per app task" in jira_content
-
-    team_mode_skill = next(item for item in items if item["skill_key"] == "team_mode")
-    assert team_mode_skill["source_locator"] == "seed://workspace-skills/team-mode"
-    assert team_mode_skill["is_seeded"] is True
-    assert team_mode_skill["mode"] == "enforced"
-    team_mode_content = str(team_mode_skill["manifest"].get("source_content", ""))
-    assert "M0rph3u5" in team_mode_content
-    assert "0r4cl3" in team_mode_content
 
     attached = client.post(
         f"/api/workspace-skills/{github_skill['id']}/attach",
@@ -511,14 +503,12 @@ def test_workspace_skill_catalog_seed_and_attach_to_project(tmp_path: Path):
     assert attached_payload["skill_key"] == "github_delivery"
     assert attached_payload["generated_rule_id"] is None
     assert attached_payload["attached_from_workspace_skill_id"] == github_skill["id"]
-    dependency = attached_payload.get("git_delivery_dependency") or {}
-    assert dependency.get("project_skill_id")
 
     project_skills = client.get(f"/api/project-skills?workspace_id={workspace_id}&project_id={project_id}")
     assert project_skills.status_code == 200
     project_skill_keys = {item["skill_key"] for item in project_skills.json()["items"]}
     assert "github_delivery" in project_skill_keys
-    assert "git_delivery" in project_skill_keys
+    assert "git_delivery" not in project_skill_keys
 
     github_project_skill_id = next(
         item["id"] for item in project_skills.json()["items"] if item["skill_key"] == "github_delivery"
@@ -526,19 +516,12 @@ def test_workspace_skill_catalog_seed_and_attach_to_project(tmp_path: Path):
     applied = client.post(f"/api/project-skills/{github_project_skill_id}/apply")
     assert applied.status_code == 200
     apply_payload = applied.json()
-    apply_dependency = apply_payload.get("git_delivery_dependency") or {}
-    assert apply_dependency.get("project_skill_id")
-    assert apply_dependency.get("applied") is True
+    assert isinstance(apply_payload["generated_rule_id"], str) and apply_payload["generated_rule_id"]
     project_rules = client.get(f"/api/project-rules?workspace_id={workspace_id}&project_id={project_id}")
     assert project_rules.status_code == 200
-    assert not any(
-        str(item.get("title") or "").strip().lower() == "repository context"
+    assert any(
+        str(item.get("id") or "").strip() == str(apply_payload["generated_rule_id"])
         for item in project_rules.json()["items"]
-    )
-    project = next(item for item in client.get("/api/bootstrap").json()["projects"] if item["id"] == project_id)
-    assert not any(
-        str(item.get("title") or "").strip().lower() == "repository context"
-        for item in (project.get("external_refs") or [])
     )
 
 
@@ -564,7 +547,6 @@ def test_apply_team_mode_skill_ensures_agent_users_and_project_roles(tmp_path: P
     assert applied.status_code == 200
     applied_payload = applied.json()
     assert isinstance(applied_payload["generated_rule_id"], str) and applied_payload["generated_rule_id"]
-    assert isinstance(applied_payload.get("gate_policy_rule_id"), str) and applied_payload["gate_policy_rule_id"]
     assert applied_payload["team_mode_contract_complete"] is True
     team_dependencies = applied_payload.get("resolved_dependencies") or []
     git_dependency = next((item for item in team_dependencies if item.get("skill_key") == "git_delivery"), None)
@@ -611,18 +593,6 @@ def test_apply_team_mode_skill_ensures_agent_users_and_project_roles(tmp_path: P
     assert team_rule_id != git_rule_id
     project_rules = client.get(f"/api/project-rules?workspace_id={workspace_id}&project_id={project_id}")
     assert project_rules.status_code == 200
-    gate_rules = [
-        item
-        for item in project_rules.json()["items"]
-        if "gate policy" in str(item.get("title") or "").strip().lower()
-    ]
-    assert len(gate_rules) == 1
-    gate_rule = gate_rules[0]
-    assert str(gate_rule.get("id") or "").strip() == str(applied_payload.get("gate_policy_rule_id") or "").strip()
-    assert "```json" in str(gate_rule.get("body") or "")
-    assert "required_checks" in str(gate_rule.get("body") or "")
-    assert '"evaluation"' in str(gate_rule.get("body") or "")
-    assert '"llm_authoritative"' in str(gate_rule.get("body") or "")
     repo_context_rules = [
         item
         for item in project_rules.json()["items"]
@@ -642,22 +612,11 @@ def test_apply_team_mode_skill_ensures_agent_users_and_project_roles(tmp_path: P
     assert len(repo_refs) == 1
 
 
-def test_apply_team_mode_skill_sets_gate_policy_evaluation_mode_llm_authoritative(tmp_path: Path):
+def test_apply_team_mode_skill_provisions_git_delivery_plugin_config(tmp_path: Path):
     client = build_client(tmp_path)
     bootstrap = client.get("/api/bootstrap").json()
     workspace_id = bootstrap["workspaces"][0]["id"]
     project_id = bootstrap["projects"][0]["id"]
-
-    gate_rule = client.post(
-        "/api/project-rules",
-        json={
-            "workspace_id": workspace_id,
-            "project_id": project_id,
-            "title": "Gate Policy",
-            "body": json.dumps({"required_checks": {"team_mode": [], "delivery": []}}),
-        },
-    )
-    assert gate_rule.status_code == 200
 
     catalog = client.get(f"/api/workspace-skills?workspace_id={workspace_id}")
     assert catalog.status_code == 200
@@ -672,18 +631,13 @@ def test_apply_team_mode_skill_sets_gate_policy_evaluation_mode_llm_authoritativ
     applied = client.post(f"/api/project-skills/{attached.json()['id']}/apply")
     assert applied.status_code == 200
 
-    rules = client.get(f"/api/project-rules?workspace_id={workspace_id}&project_id={project_id}")
-    assert rules.status_code == 200
-    gate_rules = [
-        item
-        for item in rules.json()["items"]
-        if "gate policy" in str(item.get("title") or "").strip().lower()
-    ]
-    assert gate_rules
-    gate_body = str(gate_rules[0].get("body") or "")
-    assert '"evaluation"' in gate_body
-    assert '"mode"' in gate_body
-    assert '"llm_authoritative"' in gate_body
+    plugin = client.get(f"/api/projects/{project_id}/plugins/git_delivery")
+    assert plugin.status_code == 200
+    payload = plugin.json()
+    assert payload.get("enabled") is True
+    config = payload.get("config")
+    assert isinstance(config, dict)
+    assert isinstance(payload.get("compiled_policy"), dict)
 
 
 def test_team_mode_runner_attributes_automation_events_to_assigned_agent(tmp_path: Path, monkeypatch):

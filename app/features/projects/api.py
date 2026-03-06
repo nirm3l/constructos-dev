@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from features.agents.gates import gate_check_catalog_by_scope
+from features.agents.gates import plugin_check_catalog_by_scope
 from features.agents.gateway import build_ui_gateway
 from shared.core import (
     Project,
@@ -69,6 +69,24 @@ class GraphAiLayoutRequest(BaseModel):
     edges: list[GraphLayoutEdgeIn] = Field(default_factory=list)
     node_width: int = Field(default=220, ge=120, le=420)
     node_height: int = Field(default=74, ge=48, le=280)
+
+
+class ProjectPluginConfigValidateRequest(BaseModel):
+    draft_config: dict[str, object] = Field(default_factory=dict)
+
+
+class ProjectPluginConfigApplyRequest(BaseModel):
+    config: dict[str, object] = Field(default_factory=dict)
+    expected_version: int | None = Field(default=None, ge=1)
+    enabled: bool | None = None
+
+
+class ProjectPluginEnabledPatch(BaseModel):
+    enabled: bool
+
+
+class ProjectPluginConfigDiffRequest(BaseModel):
+    draft_config: dict[str, object] = Field(default_factory=dict)
 
 
 def _load_project_with_access(db: Session, user, project_id: str) -> Project:
@@ -159,8 +177,8 @@ def project_members(project_id: str, db: Session = Depends(get_db), user=Depends
     return get_project_members_read_model(db, user, project_id)
 
 
-@router.get("/api/projects/{project_id}/gates/verify")
-def project_gates_verify(
+@router.get("/api/projects/{project_id}/checks/verify")
+def project_checks_verify(
     project_id: str,
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
@@ -172,9 +190,107 @@ def project_gates_verify(
         "project_id": project_id,
         "team_mode": team_mode,
         "delivery": delivery,
-        "catalog": gate_check_catalog_by_scope(),
+        "catalog": plugin_check_catalog_by_scope(),
         "ok": bool(team_mode.get("ok")) and bool(delivery.get("ok")),
     }
+
+
+@router.get("/api/projects/{project_id}/plugins/{plugin_key}")
+def project_plugin_config_get(
+    project_id: str,
+    plugin_key: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    _load_project_with_access(db, user, project_id)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.get_project_plugin_config(
+        project_id=project_id,
+        plugin_key=plugin_key,
+    )
+
+
+@router.post("/api/projects/{project_id}/plugins/{plugin_key}/validate")
+def project_plugin_config_validate(
+    project_id: str,
+    plugin_key: str,
+    payload: ProjectPluginConfigValidateRequest,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    _load_project_with_access(db, user, project_id)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.validate_project_plugin_config(
+        project_id=project_id,
+        plugin_key=plugin_key,
+        draft_config=payload.draft_config,
+    )
+
+
+@router.post("/api/projects/{project_id}/plugins/{plugin_key}/apply")
+def project_plugin_config_apply(
+    project_id: str,
+    plugin_key: str,
+    payload: ProjectPluginConfigApplyRequest,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    _load_project_with_access(db, user, project_id)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.apply_project_plugin_config(
+        project_id=project_id,
+        plugin_key=plugin_key,
+        config=payload.config,
+        expected_version=payload.expected_version,
+        enabled=payload.enabled,
+    )
+
+
+@router.post("/api/projects/{project_id}/plugins/{plugin_key}/enabled")
+def project_plugin_enabled_patch(
+    project_id: str,
+    plugin_key: str,
+    payload: ProjectPluginEnabledPatch,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    _load_project_with_access(db, user, project_id)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.set_project_plugin_enabled(
+        project_id=project_id,
+        plugin_key=plugin_key,
+        enabled=bool(payload.enabled),
+    )
+
+
+@router.post("/api/projects/{project_id}/plugins/{plugin_key}/diff")
+def project_plugin_config_diff(
+    project_id: str,
+    plugin_key: str,
+    payload: ProjectPluginConfigDiffRequest,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    _load_project_with_access(db, user, project_id)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.diff_project_plugin_config(
+        project_id=project_id,
+        plugin_key=plugin_key,
+        draft_config=payload.draft_config,
+    )
+
+
+@router.get("/api/projects/{project_id}/capabilities")
+def project_capabilities_get(
+    project_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    _load_project_with_access(db, user, project_id)
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.get_project_capabilities(
+        project_id=project_id,
+    )
 
 
 @router.get("/api/projects/{project_id}/knowledge-graph/overview")

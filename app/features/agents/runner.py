@@ -24,6 +24,13 @@ from plugins.runner_policy import (
     success_validation_error,
     preflight_error as plugin_preflight_error,
 )
+from plugins.team_mode.task_roles import (
+    canonicalize_role,
+    derive_task_role,
+    normalize_team_agents,
+    parse_labels,
+    pick_agent_for_task,
+)
 from .executor import AutomationOutcome, build_automation_usage_metadata, execute_task_automation_stream
 from .service import AgentTaskService
 from features.tasks.domain import (
@@ -41,7 +48,7 @@ from features.tasks.domain import (
 )
 from shared.contracts import ConcurrencyConflictError
 from shared.eventing import append_event, rebuild_state
-from shared.models import Note, Project, ProjectMember, ProjectRule, ProjectSkill, SessionLocal, Task, User as UserModel
+from shared.models import Note, Project, ProjectMember, ProjectPluginConfig, ProjectRule, SessionLocal, Task, User as UserModel
 from shared.serializers import to_iso_utc
 from shared.typed_notifications import append_notification_created_event
 from shared.settings import (
@@ -185,12 +192,12 @@ def _project_has_git_delivery_skill(*, db, workspace_id: str, project_id: str | 
     if not normalized_project_id:
         return False
     row = db.execute(
-        select(ProjectSkill.id).where(
-            ProjectSkill.workspace_id == workspace_id,
-            ProjectSkill.project_id == normalized_project_id,
-            ProjectSkill.skill_key == "git_delivery",
-            ProjectSkill.enabled == True,  # noqa: E712
-            ProjectSkill.is_deleted == False,  # noqa: E712
+        select(ProjectPluginConfig.id).where(
+            ProjectPluginConfig.workspace_id == workspace_id,
+            ProjectPluginConfig.project_id == normalized_project_id,
+            ProjectPluginConfig.plugin_key == "git_delivery",
+            ProjectPluginConfig.enabled == True,  # noqa: E712
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
         )
     ).scalar_one_or_none()
     return row is not None
@@ -201,62 +208,19 @@ def _project_has_team_mode_skill(*, db, workspace_id: str, project_id: str | Non
     if not normalized_project_id:
         return False
     row = db.execute(
-        select(ProjectSkill.id).where(
-            ProjectSkill.workspace_id == workspace_id,
-            ProjectSkill.project_id == normalized_project_id,
-            ProjectSkill.skill_key == "team_mode",
-            ProjectSkill.enabled == True,  # noqa: E712
-            ProjectSkill.is_deleted == False,  # noqa: E712
+        select(ProjectPluginConfig.id).where(
+            ProjectPluginConfig.workspace_id == workspace_id,
+            ProjectPluginConfig.project_id == normalized_project_id,
+            ProjectPluginConfig.plugin_key == "team_mode",
+            ProjectPluginConfig.enabled == True,  # noqa: E712
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
         )
     ).scalar_one_or_none()
     return row is not None
 
 
-def _extract_json_body(raw: str) -> str:
-    candidate = str(raw or "").strip()
-    if not candidate.startswith("```"):
-        return candidate
-    lines = candidate.splitlines()
-    if len(lines) >= 2 and lines[0].strip().startswith("```"):
-        lines = lines[1:]
-    if lines and lines[-1].strip() == "```":
-        lines = lines[:-1]
-    if lines and lines[0].strip().lower() == "json":
-        lines = lines[1:]
-    return "\n".join(lines).strip()
-
-
 def _project_team_mode_execution_enabled(*, db, workspace_id: str, project_id: str | None) -> bool:
-    normalized_project_id = str(project_id or "").strip()
-    if not workspace_id or not normalized_project_id:
-        return False
-    gate_rules = db.execute(
-        select(ProjectRule)
-        .where(
-            ProjectRule.workspace_id == workspace_id,
-            ProjectRule.project_id == normalized_project_id,
-            ProjectRule.is_deleted == False,  # noqa: E712
-            ProjectRule.title.ilike("Gate Policy"),
-        )
-        .order_by(ProjectRule.updated_at.desc())
-    ).scalars().all()
-    if not gate_rules:
-        return True
-    for rule in gate_rules:
-        parsed = None
-        body = _extract_json_body(str(rule.body or ""))
-        if body:
-            try:
-                parsed = json.loads(body)
-            except Exception:
-                parsed = None
-        if not isinstance(parsed, dict):
-            continue
-        mode = str(parsed.get("mode") or "").strip().lower()
-        if not mode:
-            return True
-        return mode == "execution"
-    return True
+    return _project_has_team_mode_skill(db=db, workspace_id=workspace_id, project_id=project_id)
 
 
 def _project_has_repo_context(*, db, workspace_id: str, project_id: str | None) -> bool:
@@ -302,12 +266,80 @@ def _resolve_task_actor_user_id(
     if not assignee_id:
         return str(fallback_actor_user_id or "").strip() or AGENT_SYSTEM_USER_ID
 
+    def _resolve_team_mode_executor_user_id() -> str | None:
+        if not workspace_id or not project_id:
+            return None
+        config_row = db.execute(
+            select(ProjectPluginConfig.config_json).where(
+                ProjectPluginConfig.workspace_id == workspace_id,
+                ProjectPluginConfig.project_id == project_id,
+                ProjectPluginConfig.plugin_key == "team_mode",
+                ProjectPluginConfig.enabled == True,  # noqa: E712
+                ProjectPluginConfig.is_deleted == False,  # noqa: E712
+            )
+        ).scalar_one_or_none()
+        if not config_row:
+            return None
+        try:
+            config_obj = json.loads(str(config_row or "").strip() or "{}")
+        except Exception:
+            return None
+        if not isinstance(config_obj, dict):
+            return None
+        agents = normalize_team_agents(config_obj.get("team"))
+        if not agents:
+            return None
+        membership_roles = {
+            str(user_id): canonicalize_role(role)
+            for user_id, role in db.execute(
+                select(ProjectMember.user_id, ProjectMember.role).where(
+                    ProjectMember.workspace_id == workspace_id,
+                    ProjectMember.project_id == project_id,
+                )
+            ).all()
+        }
+        task_like = {
+            "id": task_id,
+            "assignee_id": assignee_id,
+            "assigned_agent_code": str(source_state.get("assigned_agent_code") or "").strip(),
+            "labels": source_state.get("labels"),
+            "status": source_state.get("status"),
+        }
+        selected_agent = pick_agent_for_task(
+            agents=agents,
+            task_like=task_like,
+            member_role_by_user_id=membership_roles,
+        )
+        if not selected_agent:
+            return None
+        executor_user_id = str(selected_agent.get("executor_user_id") or "").strip()
+        if not executor_user_id:
+            return None
+        executor_user = db.get(UserModel, executor_user_id)
+        if executor_user is None or not bool(executor_user.is_active):
+            return None
+        if str(executor_user.user_type or "").strip().lower() != "agent":
+            return None
+        return executor_user_id
+
+    team_mode_executor_user_id = _resolve_team_mode_executor_user_id()
+    if team_mode_executor_user_id:
+        return team_mode_executor_user_id
+
     user_row = db.get(UserModel, assignee_id)
     if user_row is None or not bool(user_row.is_active):
         return str(fallback_actor_user_id or "").strip() or AGENT_SYSTEM_USER_ID
     if str(user_row.user_type or "").strip().lower() != "agent":
         return str(fallback_actor_user_id or "").strip() or AGENT_SYSTEM_USER_ID
 
+    declared_task_role = derive_task_role(
+        task_like={
+            "assignee_id": assignee_id,
+            "labels": source_state.get("labels"),
+            "status": source_state.get("status"),
+        },
+        member_role_by_user_id={},
+    )
     if project_id:
         membership = db.execute(
             select(ProjectMember).where(
@@ -316,10 +348,11 @@ def _resolve_task_actor_user_id(
                 ProjectMember.user_id == assignee_id,
             )
         ).scalar_one_or_none()
-        if membership is None:
+        if membership is None and not is_agent_project_role(declared_task_role):
             return str(fallback_actor_user_id or "").strip() or AGENT_SYSTEM_USER_ID
-        project_role = str(membership.role or "").strip()
-        if not is_agent_project_role(project_role):
+        project_role = canonicalize_role(membership.role if membership is not None else "")
+        effective_role = project_role if is_agent_project_role(project_role) else declared_task_role
+        if not is_agent_project_role(effective_role):
             return str(fallback_actor_user_id or "").strip() or AGENT_SYSTEM_USER_ID
     return assignee_id
 
@@ -330,11 +363,24 @@ def _resolve_assignee_project_role(
     workspace_id: str,
     project_id: str | None,
     assignee_id: str,
+    task_labels: object | None = None,
+    task_status: str | None = None,
 ) -> str:
     normalized_project_id = str(project_id or "").strip()
     normalized_assignee_id = str(assignee_id or "").strip()
     if not workspace_id or not normalized_project_id or not normalized_assignee_id:
         return ""
+    declared = derive_task_role(
+        task_like={
+            "assignee_id": normalized_assignee_id,
+            "labels": task_labels,
+            "status": str(task_status or "").strip(),
+        },
+        member_role_by_user_id={},
+        allow_status_fallback=False,
+    )
+    if declared:
+        return declared
     role = db.execute(
         select(ProjectMember.role).where(
             ProjectMember.workspace_id == workspace_id,
@@ -342,7 +388,7 @@ def _resolve_assignee_project_role(
             ProjectMember.user_id == normalized_assignee_id,
         )
     ).scalar_one_or_none()
-    return str(role or "").strip()
+    return canonicalize_role(role)
 
 
 def _extract_commit_shas_from_refs(refs: object) -> set[str]:
@@ -418,15 +464,7 @@ def _normalize_string_list(values: object) -> list[str]:
 
 
 def _parse_task_labels(raw_labels: str | None) -> list[str]:
-    if not raw_labels:
-        return []
-    try:
-        parsed = json.loads(raw_labels)
-    except Exception:
-        return []
-    if not isinstance(parsed, list):
-        return []
-    return [str(item or "").strip() for item in parsed if str(item or "").strip()]
+    return parse_labels(raw_labels)
 
 
 def _task_state_for_selector(task: Task) -> dict[str, object]:
@@ -540,24 +578,38 @@ def _enqueue_team_lead_blocker_escalation(
     lead_role = lead_role_for_escalation(db=db, workspace_id=workspace_id, project_id=normalized_project_id)
     if not str(lead_role or "").strip():
         return 0
-    lead_tasks = db.execute(
-        select(Task)
-        .join(
-            ProjectMember,
-            (ProjectMember.workspace_id == Task.workspace_id)
-            & (ProjectMember.project_id == Task.project_id)
-            & (ProjectMember.user_id == Task.assignee_id),
-        )
-        .where(
+    member_role_by_user_id = {
+        str(user_id): str(role or "").strip()
+        for user_id, role in db.execute(
+            select(ProjectMember.user_id, ProjectMember.role).where(
+                ProjectMember.workspace_id == workspace_id,
+                ProjectMember.project_id == normalized_project_id,
+            )
+        ).all()
+    }
+    all_tasks = db.execute(
+        select(Task).where(
             Task.workspace_id == workspace_id,
             Task.project_id == normalized_project_id,
             Task.is_deleted == False,  # noqa: E712
             Task.archived == False,  # noqa: E712
             Task.status != "Done",
-            ProjectMember.role == str(lead_role),
         )
         .order_by(Task.created_at.asc())
     ).scalars().all()
+    lead_tasks = [
+        task
+        for task in all_tasks
+        if derive_task_role(
+            task_like={
+                "assignee_id": str(task.assignee_id or "").strip(),
+                "labels": task.labels,
+                "status": str(task.status or "").strip(),
+            },
+            member_role_by_user_id=member_role_by_user_id,
+        )
+        == str(lead_role)
+    ]
     queued = 0
     for lead_task in lead_tasks:
         lead_state, _ = rebuild_state(db, "Task", lead_task.id)
@@ -850,6 +902,8 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
             workspace_id=workspace_id,
             project_id=project_id,
             assignee_id=str(state.get("assignee_id") or ""),
+            task_labels=state.get("labels"),
+            task_status=str(state.get("status") or ""),
         )
         git_delivery_enabled = _project_has_git_delivery_skill(db=db, workspace_id=workspace_id, project_id=project_id)
         team_mode_enabled = _project_has_team_mode_skill(db=db, workspace_id=workspace_id, project_id=project_id)
@@ -1082,6 +1136,8 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             workspace_id=workspace_id,
             project_id=project_id,
             assignee_id=str(state.get("assignee_id") or ""),
+            task_labels=state.get("labels"),
+            task_status=str(state.get("status") or ""),
         )
         retry_count = _normalize_nonnegative_int(state.get("runner_recover_retry_count"))
         should_retry = transient_interruption or (recoverable_failure and retry_count < _MAX_RECOVERABLE_RETRIES)
@@ -1237,6 +1293,8 @@ def _preflight_automation_error(run: QueuedAutomationRun) -> str | None:
             workspace_id=workspace_id,
             project_id=project_id,
             assignee_id=str(state.get("assignee_id") or ""),
+            task_labels=state.get("labels"),
+            task_status=str(state.get("status") or ""),
         )
         return plugin_preflight_error(
             db=db,
@@ -1351,6 +1409,7 @@ def _execute_claimed_automation(run: QueuedAutomationRun) -> None:
             allow_mutations=True,
             prompt_instruction_segments={"user_instruction": len(run.instruction)},
             on_event=_on_stream_event,
+            stream_plain_text=True,
         )
         _persist_stream_progress(force=True)
     except Exception as exc:
@@ -1575,6 +1634,10 @@ def _eligible_for_team_mode_auto_queue(state: dict[str, object], *, now_utc: dat
         return False
     if automation_state not in {"idle", "failed", "completed"}:
         return False
+    # Require an explicit kickoff/manual automation signal before background happy-path
+    # queueing is allowed. Fresh setup-only projects should stay idle until user starts execution.
+    if not str(state.get("last_requested_at") or "").strip() and not str(state.get("last_agent_run_at") or "").strip():
+        return False
     last_requested = _parse_iso_timestamp(state.get("last_requested_at"))
     if last_requested is None:
         return True
@@ -1586,11 +1649,11 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
     now_utc = datetime.now(timezone.utc)
     with SessionLocal() as db:
         team_mode_projects = db.execute(
-            select(ProjectSkill.project_id)
+            select(ProjectPluginConfig.project_id)
             .where(
-                ProjectSkill.skill_key == "team_mode",
-                ProjectSkill.enabled == True,  # noqa: E712
-                ProjectSkill.is_deleted == False,  # noqa: E712
+                ProjectPluginConfig.plugin_key == "team_mode",
+                ProjectPluginConfig.enabled == True,  # noqa: E712
+                ProjectPluginConfig.is_deleted == False,  # noqa: E712
             )
             .distinct()
         ).scalars().all()
@@ -1606,24 +1669,26 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
             if not _project_team_mode_execution_enabled(db=db, workspace_id=workspace_id, project_id=project_id):
                 continue
 
+            member_role_by_user_id = {
+                str(user_id): str(role or "").strip()
+                for user_id, role in db.execute(
+                    select(ProjectMember.user_id, ProjectMember.role).where(
+                        ProjectMember.workspace_id == workspace_id,
+                        ProjectMember.project_id == project_id,
+                    )
+                ).all()
+            }
             rows = db.execute(
-                select(Task, ProjectMember.role)
-                .join(
-                    ProjectMember,
-                    (ProjectMember.workspace_id == Task.workspace_id)
-                    & (ProjectMember.project_id == Task.project_id)
-                    & (ProjectMember.user_id == Task.assignee_id),
-                )
+                select(Task)
                 .where(
                     Task.workspace_id == workspace_id,
                     Task.project_id == project_id,
                     Task.is_deleted == False,  # noqa: E712
                     Task.archived == False,  # noqa: E712
                     Task.status != "Done",
-                    ProjectMember.role.in_(["DeveloperAgent", "TeamLeadAgent", "QAAgent"]),
                 )
                 .order_by(Task.created_at.asc())
-            ).all()
+            ).scalars().all()
             if not rows:
                 continue
 
@@ -1632,11 +1697,20 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
             qa_candidates: list[tuple[Task, dict[str, object]]] = []
             lead_tasks_in_lead_status = 0
 
-            for task, role in rows:
+            for task in rows:
                 state, _ = rebuild_state(db, "Task", str(task.id))
-                normalized_role = str(role or "").strip()
+                normalized_role = derive_task_role(
+                    task_like={
+                        "assignee_id": str(task.assignee_id or "").strip(),
+                        "labels": state.get("labels", task.labels),
+                        "status": str(state.get("status") or task.status or "").strip(),
+                    },
+                    member_role_by_user_id=member_role_by_user_id,
+                )
                 normalized_status = str(state.get("status") or task.status or "").strip()
-                if normalized_role == "TeamLeadAgent" and normalized_status == "Lead":
+                if normalized_role not in {"Developer", "Lead", "QA"}:
+                    continue
+                if normalized_role == "Lead" and normalized_status == "Lead":
                     lead_tasks_in_lead_status += 1
 
                 if not _eligible_for_team_mode_auto_queue(state, now_utc=now_utc):
@@ -1647,11 +1721,11 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
                 )
                 if not instruction:
                     continue
-                if normalized_role == "DeveloperAgent" and normalized_status == "Dev":
+                if normalized_role == "Developer" and normalized_status == "Dev":
                     dev_candidates.append((task, state))
-                elif normalized_role == "TeamLeadAgent" and normalized_status == "Lead":
+                elif normalized_role == "Lead" and normalized_status == "Lead":
                     lead_candidates.append((task, state))
-                elif normalized_role == "QAAgent" and normalized_status == "QA":
+                elif normalized_role == "QA" and normalized_status == "QA":
                     qa_candidates.append((task, state))
 
             to_queue: list[tuple[Task, dict[str, object]]] = []
@@ -1703,11 +1777,11 @@ def closeout_team_mode_tasks_once(limit: int = 20) -> int:
     now_utc = datetime.now(timezone.utc)
     with SessionLocal() as db:
         team_mode_projects = db.execute(
-            select(ProjectSkill.project_id)
+            select(ProjectPluginConfig.project_id)
             .where(
-                ProjectSkill.skill_key == "team_mode",
-                ProjectSkill.enabled == True,  # noqa: E712
-                ProjectSkill.is_deleted == False,  # noqa: E712
+                ProjectPluginConfig.plugin_key == "team_mode",
+                ProjectPluginConfig.enabled == True,  # noqa: E712
+                ProjectPluginConfig.is_deleted == False,  # noqa: E712
             )
             .distinct()
         ).scalars().all()
@@ -1740,33 +1814,46 @@ def closeout_team_mode_tasks_once(limit: int = 20) -> int:
             if not bool((verification or {}).get("ok")):
                 continue
 
+            member_role_by_user_id = {
+                str(user_id): str(role or "").strip()
+                for user_id, role in db.execute(
+                    select(ProjectMember.user_id, ProjectMember.role).where(
+                        ProjectMember.workspace_id == workspace_id,
+                        ProjectMember.project_id == project_id,
+                    )
+                ).all()
+            }
             rows = db.execute(
-                select(Task, ProjectMember.role)
-                .join(
-                    ProjectMember,
-                    (ProjectMember.workspace_id == Task.workspace_id)
-                    & (ProjectMember.project_id == Task.project_id)
-                    & (ProjectMember.user_id == Task.assignee_id),
-                )
+                select(Task)
                 .where(
                     Task.workspace_id == workspace_id,
                     Task.project_id == project_id,
                     Task.is_deleted == False,  # noqa: E712
                     Task.archived == False,  # noqa: E712
                     Task.status != "Done",
-                    ProjectMember.role.in_(["DeveloperAgent", "TeamLeadAgent", "QAAgent"]),
                 )
                 .order_by(Task.created_at.asc())
-            ).all()
+            ).scalars().all()
             if not rows:
                 continue
 
-            lead_rows_count = sum(1 for _, role in rows if str(role or "").strip() == "TeamLeadAgent")
+            lead_rows_count = 0
             ordered_candidates: list[tuple[Task, str, dict[str, object]]] = []
-            priority = {"DeveloperAgent": 0, "QAAgent": 1, "TeamLeadAgent": 2}
-            for task, role in rows:
-                normalized_role = str(role or "").strip()
+            priority = {"Developer": 0, "QA": 1, "Lead": 2}
+            for task in rows:
                 state, _ = rebuild_state(db, "Task", str(task.id))
+                normalized_role = derive_task_role(
+                    task_like={
+                        "assignee_id": str(task.assignee_id or "").strip(),
+                        "labels": state.get("labels", task.labels),
+                        "status": str(state.get("status") or task.status or "").strip(),
+                    },
+                    member_role_by_user_id=member_role_by_user_id,
+                )
+                if normalized_role not in {"Developer", "Lead", "QA"}:
+                    continue
+                if normalized_role == "Lead":
+                    lead_rows_count += 1
                 ordered_candidates.append((task, normalized_role, state))
             ordered_candidates.sort(key=lambda item: priority.get(item[1], 99))
 
@@ -1776,7 +1863,7 @@ def closeout_team_mode_tasks_once(limit: int = 20) -> int:
                 task_id = str(task.id or "").strip()
                 if not task_id:
                     continue
-                if role == "TeamLeadAgent" and lead_rows_count > 1 and is_recurring_oversight_task(state):
+                if role == "Lead" and lead_rows_count > 1 and is_recurring_oversight_task(state):
                     # Keep long-running oversight tasks active when there is a dedicated deploy Lead task.
                     continue
                 actor_user_id = _resolve_task_actor_user_id(

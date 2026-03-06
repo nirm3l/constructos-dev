@@ -7,6 +7,7 @@ export function ProjectsHeader({
   showProjectEditForm,
   projectIsDirty,
   confirmDiscardChanges,
+  requestDiscardChanges,
   setShowProjectEditForm,
   setShowProjectCreateForm,
 }: {
@@ -15,6 +16,7 @@ export function ProjectsHeader({
   showProjectEditForm: boolean
   projectIsDirty: boolean
   confirmDiscardChanges: () => boolean
+  requestDiscardChanges?: (message: string, onConfirm: () => void) => void
   setShowProjectEditForm: React.Dispatch<React.SetStateAction<boolean>>
   setShowProjectCreateForm: React.Dispatch<React.SetStateAction<boolean>>
 }) {
@@ -25,7 +27,16 @@ export function ProjectsHeader({
         <button
           className="status-chip project-new-project-btn"
           onClick={() => {
-            if (showProjectEditForm && projectIsDirty && !confirmDiscardChanges()) return
+            if (showProjectEditForm && projectIsDirty) {
+              if (typeof requestDiscardChanges === 'function') {
+                requestDiscardChanges('You have unsaved project changes. Discard them?', () => {
+                  setShowProjectEditForm(false)
+                  setShowProjectCreateForm((v) => !v)
+                })
+                return
+              }
+              if (!confirmDiscardChanges()) return
+            }
             setShowProjectEditForm(false)
             setShowProjectCreateForm((v) => !v)
           }}

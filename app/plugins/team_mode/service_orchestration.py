@@ -5,10 +5,8 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from features.agents.gates import evaluate_required_checks as evaluate_required_gate_checks
-from features.agents.gates import evaluate_team_mode_gates
-from features.agents.gates import filter_gate_policy_scopes
-from features.project_skills.application import ProjectSkillApplicationService
+from features.agents.gates import evaluate_required_checks as evaluate_required_policy_checks
+from features.agents.gates import evaluate_team_mode_checks
 from plugins.github_delivery.service_orchestration import ensure_project_skill_when_github_context
 from features.tasks.read_models import TaskListQuery, list_tasks_read_model
 from shared.core import ensure_project_access
@@ -16,13 +14,13 @@ from shared.deps import ensure_role
 from shared.models import (
     Note,
     ProjectMember,
+    ProjectPluginConfig,
     ProjectRule as ProjectRuleModel,
     ProjectSkill,
     SessionLocal,
     Task,
     TaskComment,
     User as UserModel,
-    WorkspaceSkill,
 )
 
 TEAM_MODE_PLUGIN_KEY = "team_mode"
@@ -81,6 +79,14 @@ def verify_workflow_core(
                 ProjectRuleModel.is_deleted == False,  # noqa: E712
             )
         ).scalars().all()
+        plugin_config = db.execute(
+            select(ProjectPluginConfig).where(
+                ProjectPluginConfig.workspace_id == str(project.workspace_id),
+                ProjectPluginConfig.project_id == project_id,
+                ProjectPluginConfig.plugin_key == TEAM_MODE_PLUGIN_KEY,
+                ProjectPluginConfig.is_deleted == False,  # noqa: E712
+            )
+        ).scalar_one_or_none()
         project_skills = db.execute(
             select(ProjectSkill).where(
                 ProjectSkill.project_id == project_id,
@@ -89,24 +95,26 @@ def verify_workflow_core(
         ).scalars().all()
         tasks = list(tasks_payload.get("items") or [])
         service._enrich_tasks_with_automation_state(db=db, tasks=tasks)
-    gate_policy, gate_policy_source = service._parse_gate_policy_rule(project_rules=project_rules)
-    team_mode_enabled = any(
-        str(getattr(skill, "skill_key", "") or "").strip() == TEAM_MODE_PLUGIN_KEY
-        and bool(getattr(skill, "enabled", True))
-        for skill in project_skills
+    team_mode_enabled = bool(getattr(plugin_config, "enabled", False))
+    plugin_policy_source = (
+        f"project_plugin_config:{getattr(plugin_config, 'id', '')}" if plugin_config is not None else "project_plugin_config:missing"
     )
-    gate_policy = filter_gate_policy_scopes(
-        gate_policy,
-        include_scopes={"team_mode"} if team_mode_enabled else set(),
-    )
-    # Team Mode gates must stay independent from delivery-only gate-policy changes.
-    # Keep Team Mode verification active only when Team Mode skill is enabled.
-    team_mode_active = bool(team_mode_enabled)
-    if not team_mode_active:
-        required_checks = dict((gate_policy.get("required_checks") or {})) if isinstance(gate_policy, dict) else {}
+    if plugin_config is not None:
+        plugin_payload = service.get_project_plugin_config(
+            project_id=project_id,
+            plugin_key=TEAM_MODE_PLUGIN_KEY,
+            workspace_id=str(project.workspace_id),
+            auth_token=auth_token,
+        )
+        plugin_policy = dict(plugin_payload.get("compiled_policy") or {})
+    else:
+        plugin_policy = {}
+    if not team_mode_enabled:
+        required_checks = dict((plugin_policy.get("required_checks") or {})) if isinstance(plugin_policy, dict) else {}
         required_checks["team_mode"] = []
-        gate_policy = dict(gate_policy) if isinstance(gate_policy, dict) else {}
-        gate_policy["required_checks"] = required_checks
+        plugin_policy = dict(plugin_policy) if isinstance(plugin_policy, dict) else {}
+        plugin_policy["required_checks"] = required_checks
+    team_mode_active = bool(team_mode_enabled)
     notes_by_task: dict[str, list[Note]] = {}
     for note in notes:
         task_id = str(note.task_id or "").strip()
@@ -117,13 +125,13 @@ def verify_workflow_core(
         task_id = str(comment.task_id or "").strip()
         if task_id:
             comments_by_task.setdefault(task_id, []).append(comment)
-    verification = evaluate_team_mode_gates(
+    verification = evaluate_team_mode_checks(
         project_id=str(project_id),
         workspace_id=str(project.workspace_id),
         event_storming_enabled=bool(getattr(project, "event_storming_enabled", True)),
         expected_event_storming_enabled=expected_event_storming_enabled,
-        gate_policy=gate_policy,
-        gate_policy_source=gate_policy_source,
+        plugin_policy=plugin_policy,
+        plugin_policy_source=plugin_policy_source,
         tasks=tasks,
         member_role_by_user_id=member_role_by_user_id,
         notes_by_task=notes_by_task,
@@ -131,52 +139,14 @@ def verify_workflow_core(
         extract_deploy_ports=service._extract_deploy_ports,
         has_deploy_stack_marker=service._has_deploy_stack_marker,
     )
-    evaluation_cfg = gate_policy.get("evaluation") if isinstance(gate_policy.get("evaluation"), dict) else {}
-    evaluation_mode = str((evaluation_cfg or {}).get("mode") or "deterministic").strip().lower()
-    use_llm_evaluation = evaluation_mode in {"hybrid", "llm_authoritative"}
-    llm_team_checks: dict[str, bool] = {}
-    llm_team_reasons: dict[str, str] = {}
-    if use_llm_evaluation:
-        llm_eval = service._evaluate_project_gates_with_llm(
-            project_id=str(project_id),
-            workspace_id=str(project.workspace_id),
-            gate_policy=gate_policy,
-            tasks=tasks,
-            member_role_by_user_id=member_role_by_user_id,
-            notes_by_task=notes_by_task,
-            comments_by_task=comments_by_task,
-            project_rules=project_rules,
-            project_skills=project_skills,
-            project_description=str(getattr(project, "description", "") or ""),
-            project_external_refs=getattr(project, "external_refs", "[]"),
-        )
-        llm_team_checks = dict((llm_eval.get("team_mode") or {}).get("checks") or {})
-        llm_team_reasons = dict((llm_eval.get("team_mode") or {}).get("reasons") or {})
-    authoritative = evaluation_mode == "llm_authoritative"
-    if authoritative:
-        available = list(verification.get("available_checks") or [])
-        required = list(verification.get("required_checks") or [])
-        requested = sorted({str(item or "").strip() for item in (available + required) if str(item or "").strip()})
-        baseline_checks = dict(verification.get("checks") or {})
-        authoritative_checks: dict[str, bool] = {}
-        for check_id in requested:
-            if check_id in llm_team_checks:
-                authoritative_checks[check_id] = bool(llm_team_checks.get(check_id))
-            else:
-                authoritative_checks[check_id] = bool(baseline_checks.get(check_id))
-        verification["checks"] = authoritative_checks
-    else:
-        merged_checks = dict(verification.get("checks") or {})
-        merged_checks.update({str(k): bool(v) for k, v in llm_team_checks.items()})
-        verification["checks"] = merged_checks
-    verification["check_reasons"] = llm_team_reasons
+    verification["check_reasons"] = {}
     required_checks = list(verification.get("required_checks") or [])
-    checks_ok, required_failed = evaluate_required_gate_checks(verification["checks"], required_checks)
+    checks_ok, required_failed = evaluate_required_policy_checks(verification["checks"], required_checks)
     verification["required_failed_checks"] = required_failed
     verification["ok"] = bool(checks_ok)
     verification["active"] = team_mode_active
     verification["checks"] = dict(verification.get("checks") or {})
-    verification["checks"]["team_mode_skill_enabled"] = bool(team_mode_enabled)
+    verification["checks"]["team_mode_enabled"] = bool(team_mode_enabled)
     return verification
 
 
@@ -220,87 +190,20 @@ def ensure_project_contract_core(
             project_rules=project_rules,
         )
 
-        def _workspace_skill_or_404(skill_key: str, *, required: bool) -> WorkspaceSkill | None:
-            ws = db.execute(
-                select(WorkspaceSkill).where(
-                    WorkspaceSkill.workspace_id == str(project.workspace_id),
-                    WorkspaceSkill.skill_key == skill_key,
-                    WorkspaceSkill.is_deleted == False,  # noqa: E712
-                )
-            ).scalar_one_or_none()
-            if required and ws is None:
-                raise HTTPException(status_code=404, detail=f"Workspace skill not found: {skill_key}")
-            return ws
-
-        def _ensure_project_skill(ws_skill: WorkspaceSkill, *, attach_prefix: str, apply_prefix: str) -> tuple[ProjectSkill, bool, dict]:
-            project_skill = db.execute(
-                select(ProjectSkill).where(
-                    ProjectSkill.workspace_id == str(project.workspace_id),
-                    ProjectSkill.project_id == str(project.id),
-                    ProjectSkill.skill_key == str(ws_skill.skill_key),
-                    ProjectSkill.is_deleted == False,  # noqa: E712
-                )
-            ).scalar_one_or_none()
-            attached_local = False
-            if project_skill is None:
-                attach_command_id = command_id or service._fallback_command_id(
-                    prefix=attach_prefix,
-                    payload={
-                        "workspace_id": str(project.workspace_id),
-                        "project_ref": str(project.id),
-                        "workspace_skill_id": str(ws_skill.id),
-                        "skill_key": str(ws_skill.skill_key),
-                    },
-                )
-                attached_view = ProjectSkillApplicationService(
-                    db,
-                    user,
-                    command_id=attach_command_id,
-                ).attach_workspace_skill_to_project(
-                    workspace_skill_id=str(ws_skill.id),
-                    workspace_id=str(project.workspace_id),
-                    project_id=str(project.id),
-                )
-                attached_local = True
-                attached_skill_id = str(attached_view.get("id") or "").strip()
-                project_skill = db.get(ProjectSkill, attached_skill_id) if attached_skill_id else None
-            if project_skill is None:
-                raise HTTPException(status_code=500, detail=f"Failed to attach skill: {ws_skill.skill_key}")
-            apply_command_id = command_id or service._fallback_command_id(
-                prefix=apply_prefix,
-                payload={"project_ref": str(project.id), "project_skill_id": str(project_skill.id)},
-            )
-            applied_view_local = ProjectSkillApplicationService(
-                db,
-                user,
-                command_id=apply_command_id,
-            ).apply_project_skill(str(project_skill.id))
-            return project_skill, attached_local, applied_view_local
-
-        team_ws = _workspace_skill_or_404(TEAM_MODE_PLUGIN_KEY, required=True)
-        if team_ws is None:
-            raise HTTPException(status_code=500, detail="Required skills failed to resolve")
-
-        _, team_attached, team_applied_view = _ensure_project_skill(
-            team_ws,
-            attach_prefix="mcp-ensure-team-mode-attach",
-            apply_prefix="mcp-ensure-team-mode-apply",
+        team_mode_plugin_config = service.set_project_plugin_enabled(
+            project_id=str(project.id),
+            plugin_key="team_mode",
+            enabled=True,
+            workspace_id=str(project.workspace_id),
+            auth_token=auth_token,
         )
-        team_dependencies = list(team_applied_view.get("resolved_dependencies") or [])
-        git_dependency_from_team = next(
-            (item for item in team_dependencies if str(item.get("skill_key") or "").strip() == "git_delivery"),
-            None,
+        git_delivery_plugin_config = service.set_project_plugin_enabled(
+            project_id=str(project.id),
+            plugin_key="git_delivery",
+            enabled=True,
+            workspace_id=str(project.workspace_id),
+            auth_token=auth_token,
         )
-        git_project_skill = db.execute(
-            select(ProjectSkill).where(
-                ProjectSkill.workspace_id == str(project.workspace_id),
-                ProjectSkill.project_id == str(project.id),
-                ProjectSkill.skill_key == "git_delivery",
-                ProjectSkill.is_deleted == False,  # noqa: E712
-            )
-        ).scalar_one_or_none()
-        if git_project_skill is None:
-            raise HTTPException(status_code=500, detail="Team Mode dependency git_delivery was not provisioned")
 
         github_delivery = ensure_project_skill_when_github_context(
             db=db,
@@ -332,26 +235,27 @@ def ensure_project_contract_core(
     return {
         "project_id": resolved_project_id,
         "workspace_id": verification["workspace_id"],
-        "attached": bool(
-            team_attached
-            or bool(git_dependency_from_team and git_dependency_from_team.get("attached"))
-            or bool(github_delivery.get("attached"))
-        ),
-        "project_skill_id": str(team_applied_view.get("id") or "").strip(),
-        "generated_rule_id": str(team_applied_view.get("generated_rule_id") or "").strip() or None,
-        "team_mode_contract_complete": bool(team_applied_view.get("team_mode_contract_complete")),
-        "team_mode_roster": list(team_applied_view.get("team_mode_roster") or []),
+        "attached": bool(github_delivery.get("attached")),
+        "project_skill_id": None,
+        "generated_rule_id": None,
+        "team_mode_contract_complete": True,
+        "team_mode_roster": [],
         "git_delivery": {
-            "project_skill_id": str(git_project_skill.id),
-            "attached": bool(git_dependency_from_team and git_dependency_from_team.get("attached")),
-            "applied": bool(git_dependency_from_team and git_dependency_from_team.get("applied")),
-            "generated_rule_id": str(git_project_skill.generated_rule_id or "").strip() or None,
+            "project_skill_id": None,
+            "attached": False,
+            "applied": False,
+            "generated_rule_id": None,
+            "plugin_config_id": str(git_delivery_plugin_config.get("id") or "").strip() or None,
+            "enabled": bool(git_delivery_plugin_config.get("enabled")),
+        },
+        "team_mode_plugin": {
+            "plugin_config_id": str(team_mode_plugin_config.get("id") or "").strip() or None,
+            "enabled": bool(team_mode_plugin_config.get("enabled")),
         },
         "github_delivery": dict(github_delivery),
         "members": members,
         "verification": verification,
         "delivery_verification": delivery_verification,
         "ok": bool(verification.get("ok"))
-        and bool(team_applied_view.get("team_mode_contract_complete"))
         and bool(delivery_verification.get("ok")),
     }

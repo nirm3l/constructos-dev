@@ -2,10 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select
-
-from plugins.base import GateEvaluationContext
-from shared.models import ProjectSkill
+from plugins.base import PolicyEvaluationContext
 from .runner import (
     is_team_lead_recurring_oversight_task,
     is_team_mode_agent_project_role,
@@ -34,41 +31,31 @@ from .api_kickoff import maybe_dispatch_execution_kickoff as maybe_dispatch_team
 
 class TeamModePlugin:
     key = "team_mode"
-    _GIT_DELIVERY_SKILL_KEY = "git_delivery"
-    _LLM_GATE_EVALUATION_MODE = "llm_authoritative"
 
-    def gate_scope(self) -> str | None:
+    def check_scope(self) -> str | None:
         return "team_mode"
 
     def default_required_checks(self) -> list[str]:
         return list(DEFAULT_REQUIRED_TEAM_MODE_CHECKS)
 
-    def gate_check_descriptions(self) -> dict[str, str]:
+    def check_descriptions(self) -> dict[str, str]:
         return dict(TEAM_MODE_CHECK_DESCRIPTIONS)
 
-    def default_gate_policy_patch(self) -> dict[str, Any]:
+    def default_plugin_policy_patch(self) -> dict[str, Any]:
         return {
             "required_checks": {"team_mode": list(DEFAULT_REQUIRED_TEAM_MODE_CHECKS)},
             "available_checks": {"team_mode": dict(TEAM_MODE_CHECK_DESCRIPTIONS)},
             "team_mode": {"lead_recurring_max_minutes": 5},
         }
 
-    def skill_dependencies(self) -> dict[str, tuple[str, ...]]:
-        return {self.key: (self._GIT_DELIVERY_SKILL_KEY,)}
-
-    def gate_policy_patch_for_skill_keys(self, *, skill_keys: set[str]) -> dict[str, Any]:
-        if self.key not in {str(item or "").strip().lower() for item in (skill_keys or set()) if str(item or "").strip()}:
-            return {}
-        return {"evaluation": {"mode": self._LLM_GATE_EVALUATION_MODE}}
-
-    def evaluate_gates(self, ctx: GateEvaluationContext, **kwargs: Any) -> dict[str, Any]:
+    def evaluate_checks(self, ctx: PolicyEvaluationContext, **kwargs: Any) -> dict[str, Any]:
         return evaluate_team_mode_gates(
             project_id=ctx.project_id,
             workspace_id=ctx.workspace_id,
             event_storming_enabled=ctx.event_storming_enabled,
             expected_event_storming_enabled=ctx.expected_event_storming_enabled,
-            gate_policy=ctx.gate_policy,
-            gate_policy_source=ctx.gate_policy_source,
+            plugin_policy=ctx.plugin_policy,
+            plugin_policy_source=ctx.plugin_policy_source,
             tasks=ctx.tasks,
             member_role_by_user_id=ctx.member_role_by_user_id,
             notes_by_task=ctx.notes_by_task,
@@ -79,21 +66,6 @@ class TeamModePlugin:
 
     def available_check_ids(self) -> list[str]:
         return list(TEAM_MODE_CHECK_EVALUATORS.keys())
-
-    def _project_has_team_mode_skill(self, *, db: Any, workspace_id: str, project_id: str | None) -> bool:
-        normalized_project_id = str(project_id or "").strip()
-        if not workspace_id or not normalized_project_id:
-            return False
-        row = db.execute(
-            select(ProjectSkill.id).where(
-                ProjectSkill.workspace_id == workspace_id,
-                ProjectSkill.project_id == normalized_project_id,
-                ProjectSkill.skill_key == "team_mode",
-                ProjectSkill.enabled == True,  # noqa: E712
-                ProjectSkill.is_deleted == False,  # noqa: E712
-            )
-        ).scalar_one_or_none()
-        return row is not None
 
     def runner_is_agent_project_role(self, *, role: str | None) -> bool:
         return is_team_mode_agent_project_role(role)
@@ -111,9 +83,16 @@ class TeamModePlugin:
         return is_team_mode_lead_role(role)
 
     def runner_lead_role_for_project(self, *, db: Any, workspace_id: str, project_id: str | None) -> str | None:
-        if not self._project_has_team_mode_skill(db=db, workspace_id=workspace_id, project_id=project_id):
+        normalized_project_id = str(project_id or "").strip()
+        if not workspace_id or not normalized_project_id:
             return None
-        return "TeamLeadAgent"
+        if not team_mode_project_has_team_mode_enabled(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=normalized_project_id,
+        ):
+            return None
+        return "Lead"
 
     def runner_is_kickoff_instruction(self, *, instruction: str | None) -> bool:
         return is_team_mode_kickoff_instruction(str(instruction or ""))
@@ -316,9 +295,10 @@ class TeamModePlugin:
             intent_flags=intent_flags,
             allow_mutations=allow_mutations,
             command_id=command_id,
-            promote_gate_policy_to_execution_mode_if_needed=context.get(
-                "promote_gate_policy_to_execution_mode_if_needed"
-            ),
+            promote_plugin_policy_to_execution_mode_if_needed=context.get(
+                "promote_plugin_policy_to_execution_mode_if_needed"
+            )
+            or context.get("promote_plugin_policy_to_execution_mode_if_needed"),
             build_team_lead_kickoff_instruction=context.get("build_team_lead_kickoff_instruction"),
             command_id_with_suffix=context.get("command_id_with_suffix"),
         )

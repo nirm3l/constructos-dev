@@ -9,13 +9,13 @@ def _clear_bootstrap_skill_cache() -> None:
     plugin_registry.list_workflow_plugins.cache_clear()
 
 
-def test_workspace_skill_seeds_include_team_mode_when_plugin_enabled(monkeypatch) -> None:
+def test_workspace_skill_seeds_exclude_team_mode_and_git_delivery_even_when_plugin_enabled(monkeypatch) -> None:
     monkeypatch.setattr(plugin_registry, "AGENT_ENABLED_PLUGINS", ["team_mode"])
     _clear_bootstrap_skill_cache()
     loaded = bootstrap_module._load_default_workspace_skills()
     keys = {str(item.get("skill_key") or "").strip() for item in loaded}
-    assert "team_mode" in keys
-    assert "git_delivery" in keys
+    assert "team_mode" not in keys
+    assert "git_delivery" not in keys
     _clear_bootstrap_skill_cache()
 
 

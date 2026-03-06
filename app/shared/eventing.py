@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from features.notifications.domain import EVENT_CREATED as NOTIFICATION_EVENT_CREATED
 from features.notifications.domain import EVENT_MARKED_READ as NOTIFICATION_EVENT_MARKED_READ
+from features.notifications.domain import EVENT_MARKED_UNREAD as NOTIFICATION_EVENT_MARKED_UNREAD
 from features.tasks.domain import EVENT_AUTOMATION_REQUESTED as TASK_EVENT_AUTOMATION_REQUESTED
 from features.users.domain import EVENT_PREFERENCES_UPDATED as USER_EVENT_PREFERENCES_UPDATED
 
@@ -136,7 +137,11 @@ def _queue_realtime_signals(db: Session, env: EventEnvelope) -> None:
     if workspace_id:
         channels.add(f"workspace:{workspace_id}")
 
-    if env.aggregate_type == "Notification" and env.event_type in {NOTIFICATION_EVENT_CREATED, NOTIFICATION_EVENT_MARKED_READ}:
+    if env.aggregate_type == "Notification" and env.event_type in {
+        NOTIFICATION_EVENT_CREATED,
+        NOTIFICATION_EVENT_MARKED_READ,
+        NOTIFICATION_EVENT_MARKED_UNREAD,
+    }:
         user_id = str((env.payload or {}).get("user_id") or "").strip()
         if user_id:
             channels.add(f"user:{user_id}")

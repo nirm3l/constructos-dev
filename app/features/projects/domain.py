@@ -24,7 +24,7 @@ class ProjectAggregate(Aggregate):
         custom_statuses: list[str],
         external_refs: list[dict[str, Any]],
         attachment_refs: list[dict[str, Any]],
-        embedding_enabled: bool = False,
+        embedding_enabled: bool = True,
         embedding_model: str | None = None,
         context_pack_evidence_top_k: int | None = None,
         chat_index_mode: str = "OFF",

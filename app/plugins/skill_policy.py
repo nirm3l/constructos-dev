@@ -41,11 +41,11 @@ def skill_dependencies() -> dict[str, tuple[str, ...]]:
     return merged
 
 
-def build_gate_policy_patch_for_skill_keys(skill_keys: set[str]) -> dict[str, Any]:
+def build_plugin_policy_patch_for_skill_keys(skill_keys: set[str]) -> dict[str, Any]:
     patch: dict[str, Any] = {}
     normalized_keys = {str(item or "").strip().lower() for item in (skill_keys or set()) if str(item or "").strip()}
     for plugin in list_workflow_plugins():
-        fn = getattr(plugin, "gate_policy_patch_for_skill_keys", None)
+        fn = getattr(plugin, "plugin_policy_patch_for_skill_keys", None)
         if not callable(fn):
             continue
         raw_patch = fn(skill_keys=normalized_keys)

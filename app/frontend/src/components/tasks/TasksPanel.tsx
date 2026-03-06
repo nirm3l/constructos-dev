@@ -137,6 +137,7 @@ type BoardTaskCardProps = {
   status: string
   statuses: string[]
   targetGroupId: string | null
+  assigneeLabel?: string
   onTagClick: (tag: string) => void
   onOpenTaskEditor: (taskId: string) => void
   onMoveTaskStatus: (taskId: string, nextStatus: string, nextTaskGroupId?: string | null) => void
@@ -149,6 +150,7 @@ function BoardTaskCard({
   status,
   statuses,
   targetGroupId,
+  assigneeLabel,
   onTagClick,
   onOpenTaskEditor,
   onMoveTaskStatus,
@@ -203,6 +205,12 @@ function BoardTaskCard({
           <span className={`task-schedule-chip task-schedule-state task-schedule-state-${executionStateClass}`}>
             {executionStateLabel}
           </span>
+        </div>
+      )}
+      {assigneeLabel && (
+        <div className="task-assignee-compact" title={`Assigned to ${assigneeLabel}`}>
+          <Icon path="M20 21a8 8 0 0 0-16 0M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8" />
+          <span>{assigneeLabel}</span>
         </div>
       )}
       {(task.labels ?? []).length > 0 && (
@@ -362,11 +370,29 @@ export function TasksPanel({
   onCompleteTask,
   onNewTask,
 }: TasksPanelProps) {
-  const getAssigneeLabel = React.useCallback((task: Task): string => {
+  const getTeamAgentLabel = React.useCallback((task: Task): string => {
     const assigneeId = String(task.assignee_id || '').trim()
     if (!assigneeId) return ''
-    return String(actorNames?.[assigneeId] || assigneeId).trim()
-  }, [actorNames])
+    const slot = String(task.assigned_agent_code || '').trim()
+    if (!slot) return ''
+    const normalizedSlot = slot.toLowerCase()
+    if (normalizedSlot === 'dev-a') return 'Developer A'
+    if (normalizedSlot === 'dev-b') return 'Developer B'
+    if (normalizedSlot === 'qa-a') return 'QA A'
+    if (normalizedSlot === 'lead-a') return 'Lead A'
+    return slot
+      .split('-')
+      .filter(Boolean)
+      .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+      .join(' ')
+  }, [])
+  const getAssigneeLabel = React.useCallback((task: Task): string => {
+    const assigneeId = String(task.assignee_id || '').trim()
+    const assignee = assigneeId ? String(actorNames?.[assigneeId] || assigneeId).trim() : ''
+    const agent = getTeamAgentLabel(task)
+    if (assignee && agent) return `${assignee} (${agent})`
+    return assignee
+  }, [actorNames, getTeamAgentLabel])
 
   const selectedGroupFilter = ''
 
@@ -702,15 +728,17 @@ export function TasksPanel({
         </div>
       </div>
 
-      <div className="row wrap notes-tag-filters task-tag-filters">
-        <PopularTagFilters
-          tags={taskTagSuggestions}
-          selectedTags={searchTags}
-          onToggleTag={toggleSearchTag}
-          onClear={clearSearchTags}
-          idPrefix="project-tag"
-        />
-      </div>
+      {filteredTasks.length > 0 && (
+        <div className="row wrap notes-tag-filters task-tag-filters">
+          <PopularTagFilters
+            tags={taskTagSuggestions}
+            selectedTags={searchTags}
+            onToggleTag={toggleSearchTag}
+            onClear={clearSearchTags}
+            idPrefix="project-tag"
+          />
+        </div>
+      )}
 
       {projectsMode === 'board' && boardData && boardLanes && (
         <>
@@ -748,6 +776,7 @@ export function TasksPanel({
                                 status={status}
                                 statuses={boardData.statuses}
                                 targetGroupId={null}
+                                assigneeLabel={getAssigneeLabel(task)}
                                 onTagClick={toggleSearchTag}
                                 onOpenTaskEditor={onOpenTaskEditor}
                                 onMoveTaskStatus={onMoveTaskStatus}
@@ -845,6 +874,7 @@ export function TasksPanel({
                                       status={status}
                                       statuses={boardData.statuses}
                                       targetGroupId={group.groupId}
+                                      assigneeLabel={getAssigneeLabel(task)}
                                       onTagClick={toggleSearchTag}
                                       onOpenTaskEditor={onOpenTaskEditor}
                                       onMoveTaskStatus={onMoveTaskStatus}
@@ -898,6 +928,7 @@ export function TasksPanel({
                               status={status}
                               statuses={boardData.statuses}
                               targetGroupId={null}
+                              assigneeLabel={getAssigneeLabel(task)}
                               onTagClick={toggleSearchTag}
                               onOpenTaskEditor={onOpenTaskEditor}
                               onMoveTaskStatus={onMoveTaskStatus}

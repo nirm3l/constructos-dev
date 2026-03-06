@@ -34,6 +34,7 @@ class TaskCreate(BaseModel):
     priority: str = "Med"
     due_date: datetime | None = None
     assignee_id: str | None = None
+    assigned_agent_code: str | None = None
     labels: list[str] = Field(default_factory=list)
     subtasks: list[dict[str, Any]] = Field(default_factory=list)
     attachments: list[dict[str, Any]] = Field(default_factory=list)
@@ -55,6 +56,7 @@ class TaskPatch(BaseModel):
     priority: str | None = None
     due_date: datetime | None = None
     assignee_id: str | None = None
+    assigned_agent_code: str | None = None
     labels: list[str] | None = None
     subtasks: list[dict[str, Any]] | None = None
     attachments: list[dict[str, Any]] | None = None
@@ -145,7 +147,7 @@ class ProjectCreate(BaseModel):
     custom_statuses: list[str] | None = None
     external_refs: list[ExternalRef] = Field(default_factory=list)
     attachment_refs: list[AttachmentRef] = Field(default_factory=list)
-    embedding_enabled: bool = False
+    embedding_enabled: bool = True
     embedding_model: str | None = None
     context_pack_evidence_top_k: int | None = Field(default=None, ge=1, le=40)
     chat_index_mode: str = "OFF"
@@ -273,6 +275,7 @@ class TaskDTO:
     priority: str
     due_date: str | None
     assignee_id: str | None
+    assigned_agent_code: str | None
     labels: list[str]
     subtasks: list[dict[str, Any]]
     attachments: list[dict[str, Any]]

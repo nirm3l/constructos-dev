@@ -122,6 +122,7 @@ services:
       AGENT_CODEX_MCP_URL: "http://mcp-tools:8091/mcp"
       EVENT_STORMING_ANALYSIS_WORKER_ENABLED: "true"
     volumes:
+      - ./:/opt/constructos/repo:ro
       - *codex_config_volume
       - *codex_auth_volume
       - *codex_home_volume

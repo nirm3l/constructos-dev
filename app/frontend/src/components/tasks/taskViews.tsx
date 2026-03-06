@@ -98,6 +98,27 @@ const BOTTOM_TAB_ITEMS: Array<{ value: Tab; label: string; shortLabel: string; i
   },
 ]
 
+const DESKTOP_EXTRA_TAB_ITEMS: Array<{ value: Tab; label: string; shortLabel: string; iconPath: string }> = [
+  {
+    value: 'search',
+    label: 'Search',
+    shortLabel: 'Search',
+    iconPath: 'M11 4a7 7 0 1 1 0 14 7 7 0 0 1 0-14m10 17-4.2-4.2',
+  },
+  {
+    value: 'knowledge-graph',
+    label: 'Knowledge graph',
+    shortLabel: 'Knowledge',
+    iconPath: 'M12 3v6m0 6v6M3 12h6m6 0h6M6.5 6.5l4.2 4.2m2.6 2.6 4.2 4.2m0-11-4.2 4.2m-2.6 2.6-4.2 4.2',
+  },
+  {
+    value: 'profile',
+    label: 'Settings',
+    shortLabel: 'Settings',
+    iconPath: 'M19.14 12.94a7.97 7.97 0 0 0 .06-.94 7.97 7.97 0 0 0-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.46 7.46 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.58.23-1.12.55-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.7 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.05.63-.05.94s.01.63.05.94L2.82 14.52a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.51.39 1.05.71 1.63.94l.36 2.54a.5.5 0 0 0 .5.42h3.84a.5.5 0 0 0 .5-.42l.36-2.54c.58-.23 1.12-.55 1.63-.94l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5z',
+  },
+]
+
 function ChipTooltip({
   label,
   children,
@@ -352,10 +373,29 @@ export function BottomTabs({
   onSelectTab: (tab: Tab) => void
 }) {
   const [portalTarget, setPortalTarget] = React.useState<HTMLElement | null>(null)
-  const tabValue = BOTTOM_TAB_ITEMS.some((item) => item.value === tab) ? tab : '__none__'
+  const [showDesktopExtras, setShowDesktopExtras] = React.useState(false)
+  const visibleTabItems = React.useMemo(
+    () => (showDesktopExtras ? [...BOTTOM_TAB_ITEMS, ...DESKTOP_EXTRA_TAB_ITEMS] : BOTTOM_TAB_ITEMS),
+    [showDesktopExtras]
+  )
+  const tabValue = visibleTabItems.some((item) => item.value === tab) ? tab : '__none__'
 
   React.useEffect(() => {
     setPortalTarget(document.body)
+  }, [])
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+    const mediaQuery = window.matchMedia('(min-width: 1200px)')
+    const apply = () => setShowDesktopExtras(mediaQuery.matches)
+    apply()
+    const onChange = () => apply()
+    if (typeof mediaQuery.addEventListener === 'function') {
+      mediaQuery.addEventListener('change', onChange)
+      return () => mediaQuery.removeEventListener('change', onChange)
+    }
+    mediaQuery.addListener(onChange)
+    return () => mediaQuery.removeListener(onChange)
   }, [])
 
   const nav = (
@@ -370,12 +410,18 @@ export function BottomTabs({
         }}
       >
         <Tabs.List className="bottom-tabs-list" aria-label="Primary sections">
-          {BOTTOM_TAB_ITEMS.map((item) => (
-            <Tabs.Trigger key={item.value} value={item.value} className="bottom-tab-trigger" title={item.label} aria-label={item.label}>
-              <Icon path={item.iconPath} />
-              <span className="tab-label">{item.shortLabel}</span>
-            </Tabs.Trigger>
-          ))}
+          {visibleTabItems.map((item, index) => {
+            const isFirstExtra = showDesktopExtras && index === BOTTOM_TAB_ITEMS.length
+            return (
+              <React.Fragment key={item.value}>
+                {isFirstExtra && <span className="bottom-tabs-divider" aria-hidden="true" />}
+                <Tabs.Trigger value={item.value} className="bottom-tab-trigger" title={item.label} aria-label={item.label}>
+                  <Icon path={item.iconPath} />
+                  <span className="tab-label">{item.shortLabel}</span>
+                </Tabs.Trigger>
+              </React.Fragment>
+            )
+          })}
         </Tabs.List>
       </Tabs.Root>
     </nav>

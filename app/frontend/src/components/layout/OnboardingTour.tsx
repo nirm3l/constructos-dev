@@ -5,6 +5,7 @@ import type { Tab } from '../../utils/ui'
 type OnboardingTourProps = {
   userId: string
   workspaceId: string
+  tourPreferencesLoaded: boolean
   quickTourCompleted: boolean
   advancedTourCompleted: boolean
   setTab: (tab: Tab) => void
@@ -259,6 +260,7 @@ function advancedTourSteps(
 export function OnboardingTour({
   userId,
   workspaceId,
+  tourPreferencesLoaded,
   quickTourCompleted,
   advancedTourCompleted,
   setTab,
@@ -269,6 +271,7 @@ export function OnboardingTour({
 }: OnboardingTourProps) {
   const driverRef = React.useRef<Driver | null>(null)
   const prevScrollbarGutterRef = React.useRef<string | null>(null)
+  const autoStartAttemptedRef = React.useRef(false)
 
   const applyTourViewportFix = React.useCallback(() => {
     if (typeof document === 'undefined') return
@@ -346,11 +349,15 @@ export function OnboardingTour({
 
   React.useEffect(() => {
     if (!workspaceId) return
+    if (!tourPreferencesLoaded) return
+    if (autoStartAttemptedRef.current) return
+    autoStartAttemptedRef.current = true
+    if (quickTourCompleted) return
     const timer = window.setTimeout(() => {
       startQuickTour(false)
     }, 450)
     return () => window.clearTimeout(timer)
-  }, [startQuickTour, workspaceId])
+  }, [quickTourCompleted, startQuickTour, tourPreferencesLoaded, workspaceId])
 
   React.useEffect(() => {
     return () => {

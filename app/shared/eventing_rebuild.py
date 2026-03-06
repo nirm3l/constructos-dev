@@ -14,6 +14,7 @@ from .contracts import EventEnvelope
 from features.notifications.domain import (
     EVENT_CREATED as NOTIFICATION_EVENT_CREATED,
     EVENT_MARKED_READ as NOTIFICATION_EVENT_MARKED_READ,
+    EVENT_MARKED_UNREAD as NOTIFICATION_EVENT_MARKED_UNREAD,
 )
 from features.projects.domain import (
     EVENT_CREATED as PROJECT_EVENT_CREATED,
@@ -424,6 +425,7 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "priority": p.get("priority", "Med"),
             "due_date": p.get("due_date"),
             "assignee_id": p.get("assignee_id"),
+            "assigned_agent_code": p.get("assigned_agent_code"),
             "labels": p.get("labels", []),
             "subtasks": p.get("subtasks", []),
             "attachments": p.get("attachments", []),
@@ -1158,6 +1160,7 @@ def project_event(db: Session, ev: EventEnvelope):
         task.priority = p.get("priority", "Med")
         task.due_date = datetime.fromisoformat(p["due_date"]) if p.get("due_date") else None
         task.assignee_id = p.get("assignee_id")
+        task.assigned_agent_code = p.get("assigned_agent_code")
         task.labels = json.dumps(p.get("labels", []))
         task.subtasks = json.dumps(p.get("subtasks", []))
         task.attachments = json.dumps(p.get("attachments", []))
@@ -1663,6 +1666,10 @@ def project_event(db: Session, ev: EventEnvelope):
         n = db.get(Notification, p["notification_id"])
         if n and n.user_id == p["user_id"]:
             n.is_read = True
+    elif ev.event_type == NOTIFICATION_EVENT_MARKED_UNREAD:
+        n = db.get(Notification, p["notification_id"])
+        if n and n.user_id == p["user_id"]:
+            n.is_read = False
     elif ev.event_type == NOTIFICATION_EVENT_CREATED:
         # Idempotent projection: in EventStore mode we can project the same event
         # via write-through append + later catch-up, so inserts must be safe.

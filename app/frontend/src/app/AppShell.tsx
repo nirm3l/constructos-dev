@@ -8,8 +8,10 @@ import {
   authLogout,
   authMe,
   createAdminUser,
+  getProjectPluginConfig,
   getBootstrap,
   getLicenseStatus,
+  triggerLicenseAutoUpdate,
   linkTaskToSpecification,
   listAdminUsers,
   patchMyPreferences,
@@ -182,6 +184,28 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   const [quickTaskType, setQuickTaskType] = React.useState<'manual' | 'scheduled_instruction'>('manual')
   const [quickTaskScheduledInstruction, setQuickTaskScheduledInstruction] = React.useState('')
   const [quickTaskScheduleTimezone, setQuickTaskScheduleTimezone] = React.useState<string>(quickTaskLocalTimezone)
+  const [projectEditorHasUnsavedChanges, setProjectEditorHasUnsavedChanges] = React.useState(false)
+  const [discardDialogOpen, setDiscardDialogOpen] = React.useState(false)
+  const [discardDialogMessage, setDiscardDialogMessage] = React.useState('You have unsaved changes. Discard them?')
+  const discardDialogActionRef = React.useRef<(() => void) | null>(null)
+  const requestDiscardDialog = React.useCallback((message: string, onConfirm: () => void) => {
+    if (discardDialogOpen) return
+    discardDialogActionRef.current = onConfirm
+    setDiscardDialogMessage(message)
+    setDiscardDialogOpen(true)
+  }, [discardDialogOpen])
+
+  const handleDiscardDialogCancel = React.useCallback(() => {
+    discardDialogActionRef.current = null
+    setDiscardDialogOpen(false)
+  }, [])
+
+  const handleDiscardDialogConfirm = React.useCallback(() => {
+    const next = discardDialogActionRef.current
+    discardDialogActionRef.current = null
+    setDiscardDialogOpen(false)
+    if (typeof next === 'function') next()
+  }, [])
   const [quickTaskCreateAnother, setQuickTaskCreateAnother] = React.useState(false)
   const [quickTaskTags, setQuickTaskTags] = React.useState<string[]>([])
   const [quickTaskExternalRefsText, setQuickTaskExternalRefsText] = React.useState('')
@@ -224,7 +248,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   const [noteEditorView, setNoteEditorView] = React.useState<'write' | 'preview' | 'split'>('split')
   const {
     editStatus, setEditStatus, editTitle, setEditTitle, editDescription, setEditDescription, editPriority, setEditPriority,
-    editDueDate, setEditDueDate, editProjectId, setEditProjectId, editTaskGroupId, setEditTaskGroupId, editAssigneeId, setEditAssigneeId, editTaskTags, setEditTaskTags, editTaskExternalRefsText,
+    editDueDate, setEditDueDate, editProjectId, setEditProjectId, editTaskGroupId, setEditTaskGroupId, editAssigneeId, setEditAssigneeId, editAssignedAgentCode, setEditAssignedAgentCode, editTaskTags, setEditTaskTags, editTaskExternalRefsText,
     setEditTaskExternalRefsText, editTaskAttachmentRefsText, setEditTaskAttachmentRefsText, showTaskTagPicker,
     setShowTaskTagPicker, taskTagPickerQuery, setTaskTagPickerQuery, editTaskType, setEditTaskType, editScheduledAtUtc,
     setEditScheduledAtUtc, editScheduleTimezone, setEditScheduleTimezone, editScheduleRunOnStatuses, setEditScheduleRunOnStatuses,
@@ -628,6 +652,222 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     projectsMode,
   })
 
+  const [licenseNotificationReadById, setLicenseNotificationReadById] = React.useState<Record<string, boolean>>({})
+  const licenseStatusNotifications = React.useMemo(() => {
+    const raw = licenseStatus.data?.license?.notifications
+    if (!Array.isArray(raw)) return []
+    return raw
+      .map((item: any) => {
+        if (!item || typeof item !== 'object') return null
+        const id = String(item.id || '').trim()
+        if (!id) return null
+        const isReadOverride = licenseNotificationReadById[id]
+        return {
+          ...item,
+          id,
+          notification_type: String(item.notification_type || 'LicenseInfo'),
+          is_read: typeof isReadOverride === 'boolean' ? isReadOverride : Boolean(item.is_read),
+        }
+      })
+      .filter(Boolean)
+  }, [licenseNotificationReadById, licenseStatus.data?.license?.notifications])
+
+  const mergedNotifications = React.useMemo(() => {
+    const out: any[] = []
+    const seen = new Set<string>()
+    for (const item of [...(notifications.data ?? []), ...licenseStatusNotifications]) {
+      const id = String(item?.id || '').trim()
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      out.push(item)
+    }
+    return out.sort((a: any, b: any) => {
+      const at = Date.parse(String(a?.created_at || ''))
+      const bt = Date.parse(String(b?.created_at || ''))
+      if (Number.isFinite(at) && Number.isFinite(bt)) return bt - at
+      if (Number.isFinite(bt)) return 1
+      if (Number.isFinite(at)) return -1
+      return String(b?.id || '').localeCompare(String(a?.id || ''))
+    })
+  }, [licenseStatusNotifications, notifications.data])
+
+  const autoUpdateEventSourceRef = React.useRef<EventSource | null>(null)
+  const autoUpdateRecoveryActiveRef = React.useRef(false)
+  const autoUpdateRecoveryTimerRef = React.useRef<number | null>(null)
+  const autoUpdateUiFlushTimerRef = React.useRef<number | null>(null)
+  const autoUpdateUiPendingMessageRef = React.useRef('')
+  const autoUpdateUiLastMessageRef = React.useRef('')
+  const closeAutoUpdateEventStream = React.useCallback(() => {
+    if (!autoUpdateEventSourceRef.current) return
+    autoUpdateEventSourceRef.current.close()
+    autoUpdateEventSourceRef.current = null
+  }, [])
+  const clearAutoUpdateRecoveryTimer = React.useCallback(() => {
+    if (autoUpdateRecoveryTimerRef.current == null) return
+    window.clearTimeout(autoUpdateRecoveryTimerRef.current)
+    autoUpdateRecoveryTimerRef.current = null
+  }, [])
+  const clearAutoUpdateUiFlushTimer = React.useCallback(() => {
+    if (autoUpdateUiFlushTimerRef.current == null) return
+    window.clearTimeout(autoUpdateUiFlushTimerRef.current)
+    autoUpdateUiFlushTimerRef.current = null
+  }, [])
+  const normalizeAutoUpdateUiMessage = React.useCallback((value: string) => {
+    const clean = String(value || '')
+      .replace(/\x1b\[[0-9;]*m/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+    if (!clean) return ''
+    return clean.length > 220 ? `${clean.slice(0, 219).trimEnd()}…` : clean
+  }, [])
+  const pushAutoUpdateUiMessage = React.useCallback((rawMessage: string, immediate = false) => {
+    const message = normalizeAutoUpdateUiMessage(rawMessage)
+    if (!message) return
+    autoUpdateUiPendingMessageRef.current = message
+    const flush = () => {
+      const next = autoUpdateUiPendingMessageRef.current
+      autoUpdateUiFlushTimerRef.current = null
+      if (!next || next === autoUpdateUiLastMessageRef.current) return
+      autoUpdateUiLastMessageRef.current = next
+      setUiInfo(`Update: ${next}`)
+    }
+    if (immediate) {
+      clearAutoUpdateUiFlushTimer()
+      flush()
+      return
+    }
+    if (autoUpdateUiFlushTimerRef.current != null) return
+    autoUpdateUiFlushTimerRef.current = window.setTimeout(flush, 220)
+  }, [clearAutoUpdateUiFlushTimer, normalizeAutoUpdateUiMessage, setUiInfo])
+  const waitForAppReadyAndRefresh = React.useCallback((statusMessage: string) => {
+    if (autoUpdateRecoveryActiveRef.current) return
+    autoUpdateRecoveryActiveRef.current = true
+    clearAutoUpdateRecoveryTimer()
+    clearAutoUpdateUiFlushTimer()
+    closeAutoUpdateEventStream()
+    setUiError(null)
+    setUiInfo(statusMessage)
+    const startedAt = Date.now()
+    const timeoutMs = 120_000
+    const probeDelayMs = 1_500
+    const minWaitBeforeReloadMs = 8_000
+    let sawDowntime = false
+
+    const probe = async () => {
+      try {
+        const response = await fetch('/api/auth/me', {
+          method: 'GET',
+          credentials: 'include',
+          cache: 'no-store',
+        })
+        if (response.status >= 500) {
+          sawDowntime = true
+        }
+        const elapsedMs = Date.now() - startedAt
+        if (response.status < 500 && (sawDowntime || elapsedMs >= minWaitBeforeReloadMs)) {
+          window.location.reload()
+          return
+        }
+      } catch {
+        sawDowntime = true
+      }
+      if (Date.now() - startedAt >= timeoutMs) {
+        autoUpdateRecoveryActiveRef.current = false
+        setUiError('Update completed, but app is still unreachable. Please refresh manually.')
+        return
+      }
+      autoUpdateRecoveryTimerRef.current = window.setTimeout(() => {
+        void probe()
+      }, probeDelayMs)
+    }
+
+    void probe()
+  }, [clearAutoUpdateRecoveryTimer, clearAutoUpdateUiFlushTimer, closeAutoUpdateEventStream, setUiError, setUiInfo])
+  const parseAutoUpdateEvent = React.useCallback((event: MessageEvent) => {
+    try {
+      const payload = JSON.parse(String(event.data || '{}'))
+      return payload && typeof payload === 'object' ? payload as Record<string, unknown> : null
+    } catch {
+      return null
+    }
+  }, [])
+  const startAutoUpdateEventStream = React.useCallback((runId: string) => {
+    const normalizedRunId = String(runId || '').trim()
+    if (!normalizedRunId) return
+    closeAutoUpdateEventStream()
+    const streamUrl = `/api/license/auto-update/stream?run_id=${encodeURIComponent(normalizedRunId)}`
+    const source = new EventSource(streamUrl)
+    autoUpdateEventSourceRef.current = source
+
+    const onStatus = (event: MessageEvent) => {
+      const payload = parseAutoUpdateEvent(event)
+      const message = String(payload?.message || '').trim()
+      if (message) pushAutoUpdateUiMessage(message, true)
+    }
+    const onProgress = (event: MessageEvent) => {
+      const payload = parseAutoUpdateEvent(event)
+      const message = String(payload?.message || '').trim()
+      if (message) pushAutoUpdateUiMessage(message, false)
+    }
+    const onFinal = (event: MessageEvent) => {
+      const payload = parseAutoUpdateEvent(event)
+      const result = payload?.result && typeof payload.result === 'object'
+        ? (payload.result as Record<string, unknown>)
+        : null
+      const ok = Boolean(result?.ok)
+      const message = String(result?.message || '').trim()
+      if (ok) {
+        waitForAppReadyAndRefresh(message || 'Update dispatched. Waiting for app to become available...')
+        return
+      }
+      autoUpdateRecoveryActiveRef.current = false
+      clearAutoUpdateRecoveryTimer()
+      clearAutoUpdateUiFlushTimer()
+      closeAutoUpdateEventStream()
+      setUiError(message || 'Application update failed')
+    }
+    const onError = () => {
+      waitForAppReadyAndRefresh('Update in progress. Waiting for app restart...')
+    }
+
+    source.addEventListener('status', onStatus as EventListener)
+    source.addEventListener('progress', onProgress as EventListener)
+    source.addEventListener('final', onFinal as EventListener)
+    source.addEventListener('error', onError as EventListener)
+  }, [clearAutoUpdateRecoveryTimer, clearAutoUpdateUiFlushTimer, closeAutoUpdateEventStream, parseAutoUpdateEvent, pushAutoUpdateUiMessage, setUiError, waitForAppReadyAndRefresh])
+
+  const autoUpdateFromNotificationMutation = useMutation({
+    mutationFn: async (_notificationId: string) => {
+      return triggerLicenseAutoUpdate(userId)
+    },
+    onSuccess: (response) => {
+      autoUpdateRecoveryActiveRef.current = false
+      clearAutoUpdateRecoveryTimer()
+      clearAutoUpdateUiFlushTimer()
+      autoUpdateUiPendingMessageRef.current = ''
+      autoUpdateUiLastMessageRef.current = ''
+      setUiError(null)
+      const runId = String(response?.run_id || '').trim()
+      if (!runId) {
+        setUiError('Update run_id is missing from server response')
+        return
+      }
+      setUiInfo('Application auto-update started (task-app + mcp-tools).')
+      startAutoUpdateEventStream(runId)
+    },
+    onError: (err) => {
+      setUiError(err instanceof Error ? err.message : 'Application auto-update failed to start')
+    },
+  })
+
+  React.useEffect(() => {
+    return () => {
+      clearAutoUpdateRecoveryTimer()
+      clearAutoUpdateUiFlushTimer()
+      closeAutoUpdateEventStream()
+    }
+  }, [clearAutoUpdateRecoveryTimer, clearAutoUpdateUiFlushTimer, closeAutoUpdateEventStream])
+
   useRealtimeEffects({
     qc,
     realtimeRefreshTimerRef,
@@ -662,6 +902,37 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     if (!selectedTaskId) return null
     return selectedTaskQuery.data ?? null
   }, [selectedTaskId, selectedTaskQuery.data])
+  const taskEditorProjectId = React.useMemo(() => {
+    return String(selectedTask?.project_id || selectedProjectId || '').trim()
+  }, [selectedProjectId, selectedTask?.project_id])
+  const taskEditorTeamModeConfigQuery = useQuery({
+    queryKey: ['project-plugin-config', userId, taskEditorProjectId, 'team_mode', 'task-editor'],
+    queryFn: () => getProjectPluginConfig(userId, taskEditorProjectId, 'team_mode'),
+    enabled: Boolean(taskEditorProjectId),
+    staleTime: 10_000,
+  })
+  const taskEditorTeamAgents = React.useMemo(() => {
+    const config = taskEditorTeamModeConfigQuery.data?.config
+    if (!config || typeof config !== 'object') return []
+    const team = (config as Record<string, unknown>).team
+    if (!team || typeof team !== 'object') return []
+    const agents = (team as Record<string, unknown>).agents
+    if (!Array.isArray(agents)) return []
+    return agents
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+        const asObj = item as Record<string, unknown>
+        const id = String(asObj.id || '').trim()
+        if (!id) return null
+        return {
+          id,
+          name: String(asObj.name || '').trim(),
+          authority_role: String(asObj.authority_role || '').trim(),
+          executor_user_id: String(asObj.executor_user_id || '').trim(),
+        }
+      })
+      .filter(Boolean)
+  }, [taskEditorTeamModeConfigQuery.data?.config])
   const selectedNote = React.useMemo(() => {
     const fromList = notes.data?.items.find((n) => n.id === selectedNoteId) ?? null
     return selectedNoteQuery.data ?? fromList
@@ -688,7 +959,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     useBootstrapDerived({
       bootstrapData: bootstrap.data,
       selectedProjectId,
-      notifications: notifications.data ?? [],
+      notifications: mergedNotifications,
     })
 
   React.useEffect(() => {
@@ -1078,6 +1349,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     toggleEditProjectMember,
     projectIsDirty,
     noteIsDirty,
+    specificationIsDirty,
     taskIsDirty,
     confirmDiscardChanges,
     closeTaskEditor,
@@ -1106,6 +1378,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     parseAttachmentRefsText,
     editProjectAttachmentRefsText,
     editProjectMemberIds,
+    projectEditorHasUnsavedChanges,
+    setProjectEditorHasUnsavedChanges,
     selectedNote,
     editNoteTitle,
     editNoteBody,
@@ -1128,6 +1402,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     editProjectId,
     editTaskGroupId,
     editAssigneeId,
+    editAssignedAgentCode,
     editTaskTags,
     editDueDate,
     editTaskType,
@@ -1160,6 +1435,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setShowProjectCreateForm,
     setShowProjectEditForm,
     setSelectedProjectId,
+    requestDiscardChanges: requestDiscardDialog,
   })
 
   const openTask = React.useCallback((taskId: string, projectId?: string | null) => {
@@ -1205,6 +1481,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setEditProjectId,
     setEditTaskGroupId,
     setEditAssigneeId,
+    setEditAssignedAgentCode,
     setEditTaskTags,
     setEditTaskExternalRefsText,
     setEditTaskAttachmentRefsText,
@@ -1321,6 +1598,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     editProjectId,
     editTaskGroupId,
     editAssigneeId,
+    editAssignedAgentCode,
     selectedTask,
     editTaskTags,
     editTaskExternalRefsText,
@@ -1339,6 +1617,67 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     editStatusTriggerExternalFromStatusesText,
     editStatusTriggerExternalToStatusesText,
   })
+
+  const setTabWithGuards = React.useCallback((nextTab: Tab) => {
+    const normalizedNextTab = String(nextTab || '').trim() as Tab
+    if (!normalizedNextTab || normalizedNextTab === tab) return
+    if (discardDialogOpen) return
+
+    if (tab === 'projects' && showProjectEditForm && (projectIsDirty || projectEditorHasUnsavedChanges)) {
+      requestDiscardDialog('You have unsaved project changes. Discard them and switch section?', () => {
+        setShowProjectEditForm(false)
+        setProjectEditorHasUnsavedChanges(false)
+        setTab(normalizedNextTab)
+      })
+      return
+    }
+    if (tab === 'notes' && selectedNoteId && noteIsDirty) {
+      requestDiscardDialog('You have unsaved note changes. Discard them and switch section?', () => {
+        setSelectedNoteId(null)
+        setShowTagPicker(false)
+        setTagPickerQuery('')
+        setTab(normalizedNextTab)
+      })
+      return
+    }
+    if (tab === 'specifications' && selectedSpecificationId && specificationIsDirty) {
+      requestDiscardDialog('You have unsaved specification changes. Discard them and switch section?', () => {
+        setSelectedSpecificationId(null)
+        setTab(normalizedNextTab)
+      })
+      return
+    }
+    if ((tab === 'tasks' || tab === 'inbox') && selectedTaskId && taskIsDirty) {
+      requestDiscardDialog('You have unsaved task changes. Discard them and switch section?', () => {
+        setSelectedTaskId(null)
+        setTaskEditorError(null)
+        setTab(normalizedNextTab)
+      })
+      return
+    }
+    setTab(normalizedNextTab)
+  }, [
+    discardDialogOpen,
+    noteIsDirty,
+    projectEditorHasUnsavedChanges,
+    projectIsDirty,
+    requestDiscardDialog,
+    selectedNoteId,
+    selectedSpecificationId,
+    selectedTaskId,
+    setSelectedNoteId,
+    setSelectedSpecificationId,
+    setSelectedTaskId,
+    setShowProjectEditForm,
+    setShowTagPicker,
+    setTab,
+    setTagPickerQuery,
+    setTaskEditorError,
+    showProjectEditForm,
+    specificationIsDirty,
+    tab,
+    taskIsDirty,
+  ])
 
   const {
     saveProjectMutation,
@@ -1393,6 +1732,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     linkNoteToSpecificationMutation,
     unlinkNoteFromSpecificationMutation,
     markReadMutation,
+    markUnreadMutation,
     markAllReadMutation,
     themeMutation,
     addCommentMutation,
@@ -1534,6 +1874,34 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     editSpecificationAttachmentRefsText,
   })
 
+  const handleMarkNotificationRead = React.useCallback((notificationId: string) => {
+    const id = String(notificationId || '').trim()
+    if (!id) return
+    if (licenseStatusNotifications.some((item: any) => String(item?.id || '') === id)) {
+      setLicenseNotificationReadById((prev) => ({ ...prev, [id]: true }))
+      return
+    }
+    markReadMutation.mutate(id)
+  }, [licenseStatusNotifications, markReadMutation])
+
+  const handleMarkNotificationUnread = React.useCallback((notificationId: string) => {
+    const id = String(notificationId || '').trim()
+    if (!id) return
+    if (licenseStatusNotifications.some((item: any) => String(item?.id || '') === id)) {
+      setLicenseNotificationReadById((prev) => ({ ...prev, [id]: false }))
+      return
+    }
+    markUnreadMutation.mutate(id)
+  }, [licenseStatusNotifications, markUnreadMutation])
+
+  const handleNotificationAction = React.useCallback((notificationId: string, action: string) => {
+    const normalizedAction = String(action || '').trim()
+    if (!normalizedAction) return
+    if (normalizedAction === 'auto_update_app_images') {
+      autoUpdateFromNotificationMutation.mutate(notificationId)
+    }
+  }, [autoUpdateFromNotificationMutation])
+
   const createTaskFromGraphSummary = React.useCallback(async (payload: { title: string; description: string }) => {
     if (!selectedProjectId) throw new Error('No project selected')
     await createTaskMutation.mutateAsync({
@@ -1643,27 +2011,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setSpecificationEditorView('split')
   }, [selectedSpecification])
 
-  const specificationIsDirty = React.useMemo(() => {
-    if (!selectedSpecification) return false
-    return (
-      (editSpecificationTitle || '').trim() !== (selectedSpecification.title || '').trim() ||
-      (editSpecificationBody || '') !== (selectedSpecification.body || '') ||
-      (editSpecificationStatus || 'Draft') !== (selectedSpecification.status || 'Draft') ||
-      parseCommaTags(editSpecificationTags).map((tag) => tag.toLowerCase()).join(',') !==
-        (selectedSpecification.tags ?? []).map((tag) => String(tag || '').toLowerCase()).join(',') ||
-      editSpecificationExternalRefsText.trim() !== externalRefsToText(selectedSpecification.external_refs).trim() ||
-      editSpecificationAttachmentRefsText.trim() !== attachmentRefsToText(selectedSpecification.attachment_refs).trim()
-    )
-  }, [
-    editSpecificationAttachmentRefsText,
-    editSpecificationBody,
-    editSpecificationExternalRefsText,
-    editSpecificationStatus,
-    editSpecificationTags,
-    editSpecificationTitle,
-    selectedSpecification,
-  ])
-
   if (bootstrap.isLoading) return <div className="page"><div className="card skeleton">Loading workspace...</div></div>
   if (bootstrap.isError || !bootstrap.data) return <div className="page"><div className="notice notice-error">Unable to load bootstrap data.</div></div>
 
@@ -1688,7 +2035,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       licenseStatus,
       activateLicenseMutation,
       tab,
-      setTab,
+      setTab: setTabWithGuards,
       searchQ,
       setSearchQ,
       selectedProjectId,
@@ -1696,9 +2043,14 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       showNotificationsPanel,
       setShowNotificationsPanel,
       notifications,
+      notificationsForHeader: mergedNotifications,
       unreadCount,
       markReadMutation,
+      markUnreadMutation,
       markAllReadMutation,
+      handleMarkNotificationRead,
+      handleMarkNotificationUnread,
+      handleNotificationAction,
       uiError,
       setUiError,
       uiInfo,
@@ -1765,6 +2117,12 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       showProjectCreateForm,
       showProjectEditForm,
       projectIsDirty,
+      projectEditorHasUnsavedChanges,
+      requestDiscardChanges: requestDiscardDialog,
+      discardDialogOpen,
+      discardDialogMessage,
+      handleDiscardDialogCancel,
+      handleDiscardDialogConfirm,
       confirmDiscardChanges,
       setShowProjectEditForm,
       setShowProjectCreateForm,
@@ -1853,6 +2211,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       editProjectDescriptionRef,
       editProjectDescription,
       setEditProjectDescription,
+      setProjectEditorHasUnsavedChanges,
       projectRules,
       projectSkills,
       workspaceSkills,
@@ -2084,10 +2443,13 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       setEditTaskGroupId,
       editAssigneeId,
       setEditAssigneeId,
+      editAssignedAgentCode,
+      setEditAssignedAgentCode,
       editTaskTags,
       setShowTaskTagPicker,
       editTaskType,
       setEditTaskType,
+      taskTeamAgents: taskEditorTeamAgents,
       taskEditorError,
       taskEditorTouched,
       setTaskEditorTouched,

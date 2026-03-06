@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from .task_roles import canonicalize_role
+
 
 def is_task_scoped_context_enabled(*, project_team_mode_enabled: bool, assignee_project_role: str | None) -> bool:
     if not project_team_mode_enabled:
         return False
-    role = str(assignee_project_role or "").strip()
-    return role in {"DeveloperAgent", "QAAgent", "TeamLeadAgent"}
+    role = canonicalize_role(assignee_project_role)
+    return role in {"Developer", "QA", "Lead"}
 
 
 def should_prepare_task_worktree(
@@ -20,6 +22,6 @@ def should_prepare_task_worktree(
         return False
     if str(task_status or "").strip() != "Dev":
         return False
-    actor_role = str(actor_project_role or "").strip()
-    assignee_role = str(assignee_project_role or "").strip()
-    return actor_role == "DeveloperAgent" or assignee_role == "DeveloperAgent"
+    actor_role = canonicalize_role(actor_project_role)
+    assignee_role = canonicalize_role(assignee_project_role)
+    return actor_role == "Developer" or assignee_role == "Developer"

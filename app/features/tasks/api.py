@@ -185,6 +185,7 @@ def create_task(
         ),
         schedule_timezone=payload.schedule_timezone if "schedule_timezone" in provided_fields else None,
         assignee_id=payload.assignee_id,
+        assigned_agent_code=payload.assigned_agent_code if "assigned_agent_code" in provided_fields else None,
         labels=payload.labels,
         command_id=command_id,
     )

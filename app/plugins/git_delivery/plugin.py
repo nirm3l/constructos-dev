@@ -42,19 +42,19 @@ def _is_noop_ack_comment(comment: str | None) -> bool:
 class GitDeliveryPlugin:
     key = "git_delivery"
 
-    def gate_scope(self) -> str | None:
+    def check_scope(self) -> str | None:
         return None
 
     def default_required_checks(self) -> list[str]:
         return []
 
-    def gate_check_descriptions(self) -> dict[str, str]:
+    def check_descriptions(self) -> dict[str, str]:
         return {}
 
-    def default_gate_policy_patch(self) -> dict[str, Any]:
+    def default_plugin_policy_patch(self) -> dict[str, Any]:
         return {}
 
-    def evaluate_gates(self, _ctx, **_kwargs: Any) -> dict[str, Any]:
+    def evaluate_checks(self, _ctx, **_kwargs: Any) -> dict[str, Any]:
         return {"scope": "git_delivery", "checks": [], "required_failed": []}
 
     def service_is_delivery_active(self, *, skill_keys: set[str]) -> bool:

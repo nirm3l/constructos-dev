@@ -1,6 +1,15 @@
 import React from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { addComment, deleteComment, markAllNotificationsRead, markNotificationRead, patchMyPreferences, runAgentChatStream, stopAgentChatStream } from '../../api'
+import {
+  addComment,
+  deleteComment,
+  markAllNotificationsRead,
+  markNotificationRead,
+  markNotificationUnread,
+  patchMyPreferences,
+  runAgentChatStream,
+  stopAgentChatStream,
+} from '../../api'
 import type { ChatMcpServer, ChatReasoningEffort } from '../../types'
 
 const ENTITY_ID_SOURCE = '[0-9a-fA-F]{8,}(?:-[0-9a-fA-F]{4,}){0,4}'
@@ -306,6 +315,15 @@ export function useMiscMutations(c: any) {
       await c.invalidateAll()
     },
     onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Mark all read failed')
+  })
+
+  const markUnreadMutation = useMutation({
+    mutationFn: (id: string) => markNotificationUnread(c.userId, id),
+    onSuccess: async () => {
+      c.setUiError(null)
+      await c.invalidateAll()
+    },
+    onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Mark unread failed')
   })
 
   const themeMutation = useMutation({
@@ -686,6 +704,7 @@ export function useMiscMutations(c: any) {
   return {
     markReadMutation,
     markAllReadMutation,
+    markUnreadMutation,
     themeMutation,
     addCommentMutation,
     deleteCommentMutation,

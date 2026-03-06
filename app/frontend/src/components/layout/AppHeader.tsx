@@ -3,12 +3,15 @@ import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Popover from '@radix-ui/react-popover'
 import * as Select from '@radix-ui/react-select'
 import * as Tooltip from '@radix-ui/react-tooltip'
-import type { BootstrapPayload, Notification } from '../../types'
+import type { BootstrapPayload, LicenseStatus, Notification } from '../../types'
 import type { Tab } from '../../utils/ui'
 import { Icon } from '../shared/uiHelpers'
+import { MarkdownModeToggle } from '../shared/uiHelpers'
+import { MarkdownView } from '../../markdown/MarkdownView'
 
 type AppHeaderProps = {
   bootstrapData: BootstrapPayload
+  license?: LicenseStatus | null
   tab: Tab
   setTab: (tab: Tab) => void
   theme: 'light' | 'dark'
@@ -22,8 +25,10 @@ type AppHeaderProps = {
   notifications: Notification[]
   unreadCount: number
   onMarkRead: (notificationId: string) => void
+  onMarkUnread: (notificationId: string) => void
   onMarkAllRead: () => void
   isMarkAllReadPending: boolean
+  onNotificationAction: (notificationId: string, action: string) => void
   onOpenTask: (taskId: string, projectId?: string | null) => boolean
   onOpenNote: (noteId: string, projectId?: string | null) => boolean
   onOpenSpecification: (specificationId: string, projectId?: string | null) => void
@@ -81,6 +86,26 @@ function notificationDisplayMessage(notification: Notification): string {
   }
 }
 
+function notificationMarkdownMessage(notification: Notification): string {
+  const payload = notification.payload
+  if (payload && typeof payload === 'object') {
+    const messageMarkdown = (payload as Record<string, unknown>).message_markdown
+    if (typeof messageMarkdown === 'string' && messageMarkdown.trim()) return messageMarkdown.trim()
+    const markdown = (payload as Record<string, unknown>).markdown
+    if (typeof markdown === 'string' && markdown.trim()) return markdown.trim()
+  }
+  const raw = String(notification.message || '').trim()
+  if (raw) return raw
+  return notificationDisplayMessage(notification)
+}
+
+function truncateMarkdownForNotificationList(value: string, maxChars = 260): string {
+  const normalized = String(value || '').trim()
+  if (!normalized) return ''
+  if (normalized.length <= maxChars) return normalized
+  return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`
+}
+
 function HeaderTooltip({
   content,
   children,
@@ -103,6 +128,7 @@ function HeaderTooltip({
 
 export function AppHeader({
   bootstrapData,
+  license,
   tab,
   setTab,
   theme,
@@ -116,8 +142,10 @@ export function AppHeader({
   notifications,
   unreadCount,
   onMarkRead,
+  onMarkUnread,
   onMarkAllRead,
   isMarkAllReadPending,
+  onNotificationAction,
   onOpenTask,
   onOpenNote,
   onOpenSpecification,
@@ -129,10 +157,39 @@ export function AppHeader({
   const brandSubBottom = 'with context under control...'
   const isDarkTheme = theme === 'dark'
   const themeToggleTooltip = isDarkTheme ? 'Switch to light mode' : 'Switch to dark mode'
+  const licenseStatus = String(license?.status || '').trim().toLowerCase()
+  const licensePlanCode = String(license?.plan_code || '').trim().toLowerCase()
+  const betaSubscription = licenseStatus === 'beta' || licensePlanCode.includes('beta')
   const projectSelectValue = React.useMemo(() => {
     if (!selectedProjectId) return undefined
     return bootstrapData.projects.some((project) => project.id === selectedProjectId) ? selectedProjectId : undefined
   }, [bootstrapData.projects, selectedProjectId])
+  const [notificationPreviewOpen, setNotificationPreviewOpen] = React.useState(false)
+  const [notificationPreviewMarkdown, setNotificationPreviewMarkdown] = React.useState('')
+  const [notificationPreviewTitle, setNotificationPreviewTitle] = React.useState('Notification')
+  const [notificationPreviewId, setNotificationPreviewId] = React.useState('')
+  const [notificationPreviewAction, setNotificationPreviewAction] = React.useState('')
+  const [notificationPreviewActionLabel, setNotificationPreviewActionLabel] = React.useState('')
+  const [notificationPreviewView] = React.useState<'preview'>('preview')
+
+  React.useEffect(() => {
+    if (!notificationPreviewOpen) return
+    document.body.classList.add('md-fullscreen-open')
+    return () => {
+      document.body.classList.remove('md-fullscreen-open')
+    }
+  }, [notificationPreviewOpen])
+
+  React.useEffect(() => {
+    if (!notificationPreviewOpen) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      setNotificationPreviewOpen(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [notificationPreviewOpen])
 
   return (
     <Tooltip.Provider delayDuration={180}>
@@ -197,33 +254,79 @@ export function AppHeader({
                         const noteId = n.note_id || notificationPayloadId(n, 'note_id')
                         const specificationId = n.specification_id || notificationPayloadId(n, 'specification_id')
                         const projectId = n.project_id || notificationPayloadId(n, 'project_id')
+                        const markdownMessage = notificationMarkdownMessage(n)
+                        const markdownPreview = truncateMarkdownForNotificationList(markdownMessage)
+                        const notificationTitle = notificationPayloadText(n, 'title') || 'Notification'
+                        const payload = n.payload && typeof n.payload === 'object' ? (n.payload as Record<string, unknown>) : null
+                        const notificationAction = String(payload?.action || '').trim()
+                        const notificationActionLabel = String(payload?.action_label || '').trim()
+                        const canRunNotificationAction = Boolean(notificationAction)
+                        const inlineNotificationAction = notificationAction === 'auto_update_app_images'
                         const markNotificationRead = () => {
                           if (!n.is_read) onMarkRead(n.id)
+                        }
+                        const openNotificationPreview = () => {
+                          setNotificationPreviewMarkdown(markdownMessage)
+                          setNotificationPreviewTitle(notificationTitle)
+                          setNotificationPreviewId(String(n.id || '').trim())
+                          setNotificationPreviewAction(notificationAction)
+                          setNotificationPreviewActionLabel(notificationActionLabel)
+                          setNotificationPreviewOpen(true)
+                          setShowNotificationsPanel(false)
+                          markNotificationRead()
                         }
                         return (
                           <div
                             key={n.id}
-                            className={`notif ${n.is_read ? 'read' : 'unread'}`}
-                            onClick={!n.is_read ? markNotificationRead : undefined}
-                            onKeyDown={
-                              !n.is_read
-                                ? (event) => {
-                                    if (event.key !== 'Enter' && event.key !== ' ') return
-                                    event.preventDefault()
-                                    markNotificationRead()
-                                  }
-                                : undefined
-                            }
-                            role={!n.is_read ? 'button' : undefined}
-                            tabIndex={!n.is_read ? 0 : undefined}
-                            aria-label={!n.is_read ? 'Mark notification as read' : undefined}
-                            title={!n.is_read ? 'Click to mark as read' : undefined}
+                            className={`notif notif-openable ${n.is_read ? 'read' : 'unread'}`}
+                            onClick={openNotificationPreview}
+                            onKeyDown={(event) => {
+                              if (event.key !== 'Enter' && event.key !== ' ') return
+                              event.preventDefault()
+                              openNotificationPreview()
+                            }}
+                            role="button"
+                            tabIndex={0}
+                            aria-label="Open notification preview"
+                            title="Open notification preview"
                           >
                             <div className="notif-dotline" aria-hidden="true" />
                             <div className="notif-main">
                               <div className="notif-copy">
-                                <div className="notif-message">{notificationDisplayMessage(n)}</div>
-                                {!n.is_read && <div className="notif-hint">Click to mark as read</div>}
+                                <div className="notif-message notif-message-md">
+                                  <MarkdownView value={markdownPreview} />
+                                </div>
+                                <div className="notif-hint-row">
+                                  <div className="notif-hint">
+                                    {!n.is_read ? 'Click to open and mark as read' : 'Click to open'}
+                                  </div>
+                                  <div className="notif-hint-actions">
+                                    {inlineNotificationAction && canRunNotificationAction ? (
+                                      <button
+                                        className="notif-inline-action"
+                                        onClick={(event) => {
+                                          event.stopPropagation()
+                                          onNotificationAction(n.id, notificationAction)
+                                          markNotificationRead()
+                                          setShowNotificationsPanel(false)
+                                        }}
+                                      >
+                                        {notificationActionLabel || 'Update app'}
+                                      </button>
+                                    ) : null}
+                                    {n.is_read ? (
+                                      <button
+                                        className="notif-inline-action"
+                                        onClick={(event) => {
+                                          event.stopPropagation()
+                                          onMarkUnread(n.id)
+                                        }}
+                                      >
+                                        Mark unread
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                </div>
                               </div>
                               <div className="notif-actions">
                                 {taskId && (
@@ -263,6 +366,19 @@ export function AppHeader({
                                     }}
                                   >
                                     Open specification
+                                  </button>
+                                )}
+                                {canRunNotificationAction && !inlineNotificationAction && (
+                                  <button
+                                    className="status-chip"
+                                    onClick={(event) => {
+                                      event.stopPropagation()
+                                      onNotificationAction(n.id, notificationAction)
+                                      markNotificationRead()
+                                      setShowNotificationsPanel(false)
+                                    }}
+                                  >
+                                    {notificationActionLabel || (notificationAction === 'auto_update_app_images' ? 'Update app' : 'Run action')}
                                   </button>
                                 )}
                                 {!taskId && !noteId && !specificationId && projectId && (
@@ -318,44 +434,85 @@ export function AppHeader({
               </button>
             </HeaderTooltip>
 
-            <DropdownMenu.Root>
-              <HeaderTooltip content="Open settings and navigation">
-                <DropdownMenu.Trigger asChild>
-                  <button
-                    className={`top-profile-btn ${tab === 'profile' ? 'active' : ''}`.trim()}
-                    aria-label="Open settings menu"
-                    data-tour-id="header-settings-menu"
-                  >
-                    <Icon path="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7zm8 3.5-1.9.7a6.9 6.9 0 0 1-.6 1.5l.9 1.8-2 2-.6-.3-1.2-.6a6.9 6.9 0 0 1-1.5.6L12 20l-1-.1-1-.2-.7-1.9a6.9 6.9 0 0 1-1.5-.6l-1.8.9-2-2 .9-1.8a6.9 6.9 0 0 1-.6-1.5L4 12l.1-1 .2-1 .6-.2 1.3-.5a6.9 6.9 0 0 1 .6-1.5L5.9 6l2-2 1.8.9a6.9 6.9 0 0 1 1.5-.6L12 4l1 .1 1 .2.7 1.9a6.9 6.9 0 0 1 1.5.6L18 5.9l2 2-.9 1.8a6.9 6.9 0 0 1 .6 1.5L20 12z" />
-                  </button>
-                </DropdownMenu.Trigger>
-              </HeaderTooltip>
-              <DropdownMenu.Portal>
-                <DropdownMenu.Content className="header-settings-menu-content" sideOffset={8} align="end">
-                  <DropdownMenu.Item className="header-settings-menu-item" onSelect={() => setTab('profile')}>
-                    Profile settings
-                  </DropdownMenu.Item>
-                  <DropdownMenu.Item className="header-settings-menu-item" onSelect={() => setTab('projects')}>
-                    Manage projects
-                  </DropdownMenu.Item>
-                  <DropdownMenu.Item className="header-settings-menu-item" onSelect={() => setTab('knowledge-graph')}>
-                    Knowledge Graph
-                  </DropdownMenu.Item>
-                  <DropdownMenu.Separator className="header-settings-menu-separator" />
-                  <DropdownMenu.Item className="header-settings-menu-item" onSelect={onStartQuickTour}>
-                    Start quick tour
-                  </DropdownMenu.Item>
-                  <DropdownMenu.Item className="header-settings-menu-item" onSelect={onStartAdvancedTour}>
-                    Start advanced tour
-                  </DropdownMenu.Item>
-                  <DropdownMenu.Item className="header-settings-menu-item" onSelect={() => setTab('search')}>
-                    Global search
-                  </DropdownMenu.Item>
-                </DropdownMenu.Content>
-              </DropdownMenu.Portal>
-            </DropdownMenu.Root>
+            <div className="top-settings-stack">
+              <DropdownMenu.Root>
+                <HeaderTooltip content="Open settings and navigation">
+                  <DropdownMenu.Trigger asChild>
+                    <button
+                      className={`top-profile-btn ${tab === 'profile' ? 'active' : ''}`.trim()}
+                      aria-label="Open settings menu"
+                      data-tour-id="header-settings-menu"
+                    >
+                      <Icon path="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7zm8 3.5-1.9.7a6.9 6.9 0 0 1-.6 1.5l.9 1.8-2 2-.6-.3-1.2-.6a6.9 6.9 0 0 1-1.5.6L12 20l-1-.1-1-.2-.7-1.9a6.9 6.9 0 0 1-1.5-.6l-1.8.9-2-2 .9-1.8a6.9 6.9 0 0 1-.6-1.5L4 12l.1-1 .2-1 .6-.2 1.3-.5a6.9 6.9 0 0 1 .6-1.5L5.9 6l2-2 1.8.9a6.9 6.9 0 0 1 1.5-.6L12 4l1 .1 1 .2.7 1.9a6.9 6.9 0 0 1 1.5.6L18 5.9l2 2-.9 1.8a6.9 6.9 0 0 1 .6 1.5L20 12z" />
+                    </button>
+                  </DropdownMenu.Trigger>
+                </HeaderTooltip>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.Content className="header-settings-menu-content" sideOffset={8} align="end">
+                    <DropdownMenu.Item className="header-settings-menu-item" onSelect={() => setTab('profile')}>
+                      Profile settings
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item className="header-settings-menu-item" onSelect={() => setTab('projects')}>
+                      Manage projects
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item className="header-settings-menu-item" onSelect={() => setTab('knowledge-graph')}>
+                      Knowledge Graph
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator className="header-settings-menu-separator" />
+                    <DropdownMenu.Item className="header-settings-menu-item" onSelect={onStartQuickTour}>
+                      Start quick tour
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item className="header-settings-menu-item" onSelect={onStartAdvancedTour}>
+                      Start advanced tour
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item className="header-settings-menu-item" onSelect={() => setTab('search')}>
+                      Global search
+                    </DropdownMenu.Item>
+                  </DropdownMenu.Content>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Root>
+              {betaSubscription ? (
+                <HeaderTooltip content="You are using a beta subscription and features may evolve.">
+                  <span className="top-beta-compact" aria-label="Beta subscription">BETA</span>
+                </HeaderTooltip>
+              ) : null}
+            </div>
           </div>
         </div>
+        {notificationPreviewOpen ? (
+          <div
+            className="md-editor-surface md-editor-fullscreen notification-markdown-fullscreen"
+            onClick={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <div className="notification-markdown-header">
+              <strong className="notification-markdown-title">{notificationPreviewTitle}</strong>
+              <MarkdownModeToggle
+                view={notificationPreviewView}
+                onChange={() => {}}
+                ariaLabel="Notification preview view"
+                previewOnly
+                onFullscreenTriggerMode={(_mode, nextFullscreen) => {
+                  if (!nextFullscreen) setNotificationPreviewOpen(false)
+                }}
+              />
+              {notificationPreviewAction ? (
+                <button
+                  className="status-chip"
+                  onClick={() => {
+                    if (!notificationPreviewId) return
+                    onNotificationAction(notificationPreviewId, notificationPreviewAction)
+                  }}
+                >
+                  {notificationPreviewActionLabel || (notificationPreviewAction === 'auto_update_app_images' ? 'Update app' : 'Run action')}
+                </button>
+              ) : null}
+            </div>
+            <div className="md-editor-content notification-markdown-content">
+              <MarkdownView value={notificationPreviewMarkdown} />
+            </div>
+          </div>
+        ) : null}
         <div className="header-lower">
           <div className="top-search-wrap" role="search">
             <Icon path="M20 20l-3.5-3.5M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14z" />

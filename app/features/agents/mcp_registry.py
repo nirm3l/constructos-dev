@@ -13,6 +13,7 @@ import tomllib
 from typing import Any
 
 from shared.settings import AGENT_CODEX_MCP_URL
+from shared.models import ProjectPluginConfig, SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,11 @@ _CACHE_EXPIRES_AT = 0.0
 _CACHE_ROWS: list[dict[str, Any]] = []
 _FALLBACK_SERVER_NAME = "task-management-tools"
 _LEGACY_CORE_SERVER_NAME = "task_management_tools"
+_PLUGIN_SERVER_ALIASES_BY_KEY: dict[str, set[str]] = {
+    "team_mode": {"team-mode", "team_mode", "team-mode-tools", "team_mode_tools"},
+    "git_delivery": {"git-delivery", "git_delivery", "git-delivery-tools", "git_delivery_tools"},
+    "docker_compose": {"docker-compose", "docker_compose", "docker-compose-tools", "docker_compose_tools"},
+}
 
 
 def _load_positive_float_env(name: str, default: float) -> float:
@@ -381,3 +387,38 @@ def build_selected_mcp_config_text(*, selected_servers: list[str], task_manageme
             lines.append(f"{_toml_key(str(key))} = {_toml_value(value)}")
         lines.append("")
     return ("\n".join(lines).strip() + "\n") if lines else ""
+
+
+def filter_mcp_servers_for_project_plugins(
+    *,
+    project_id: str | None,
+    selected_servers: list[str] | None,
+) -> list[str]:
+    normalized_project_id = str(project_id or "").strip()
+    normalized_selected = [str(item or "").strip() for item in (selected_servers or []) if str(item or "").strip()]
+    if not normalized_project_id or not normalized_selected:
+        return normalized_selected
+
+    with SessionLocal() as db:
+        rows = db.query(ProjectPluginConfig.plugin_key, ProjectPluginConfig.enabled).filter(
+            ProjectPluginConfig.project_id == normalized_project_id,
+            ProjectPluginConfig.plugin_key.in_(list(_PLUGIN_SERVER_ALIASES_BY_KEY.keys())),
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
+        ).all()
+    enabled_by_plugin = {
+        str(plugin_key or "").strip().lower(): bool(enabled)
+        for plugin_key, enabled in rows
+        if str(plugin_key or "").strip()
+    }
+    normalized_alias_map: dict[str, str] = {}
+    for plugin_key, aliases in _PLUGIN_SERVER_ALIASES_BY_KEY.items():
+        for alias in aliases:
+            normalized_alias_map[_normalize_lookup_key(alias)] = plugin_key
+
+    out: list[str] = []
+    for server_name in normalized_selected:
+        mapped_plugin = normalized_alias_map.get(_normalize_lookup_key(server_name))
+        if mapped_plugin and not bool(enabled_by_plugin.get(mapped_plugin, False)):
+            continue
+        out.append(server_name)
+    return out

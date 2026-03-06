@@ -38,6 +38,7 @@ export function useTaskNoteEditorEffects(c: any) {
     c.setEditProjectId(c.selectedTask.project_id ?? '')
     c.setEditTaskGroupId(c.selectedTask.task_group_id ?? '')
     c.setEditAssigneeId(c.selectedTask.assignee_id ?? '')
+    c.setEditAssignedAgentCode(c.selectedTask.assigned_agent_code ?? '')
     c.setEditTaskTags(c.selectedTask.labels ?? [])
     c.setEditTaskExternalRefsText(externalRefsToText(c.selectedTask.external_refs))
     c.setEditTaskAttachmentRefsText(attachmentRefsToText(c.selectedTask.attachment_refs))

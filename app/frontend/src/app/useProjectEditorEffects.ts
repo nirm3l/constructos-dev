@@ -58,7 +58,7 @@ export function useProjectEditorEffects(c: any) {
     c.setProjectRuleTitle('')
     c.setProjectRuleBody('')
     c.setProjectRuleView('split')
-  }, [c.selectedProject?.id, c.selectedProjectId, c.setShowProjectEditForm])
+  }, [c.selectedProject?.id, c.selectedProjectId, c.showProjectEditForm, c.setShowProjectEditForm])
 
   React.useEffect(() => {
     if (!c.showProjectCreateForm) return

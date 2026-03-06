@@ -294,6 +294,7 @@ export type Task = {
   priority: string
   due_date: string | null
   assignee_id: string | null
+  assigned_agent_code: string | null
   labels: string[]
   subtasks: Array<Record<string, unknown>>
   attachments: Array<Record<string, unknown>>
@@ -347,11 +348,21 @@ export type LicenseStatus = {
   last_validated_at: string | null
   token_expires_at: string | null
   metadata: Record<string, unknown>
+  notifications?: Notification[]
 }
 
 export type LicenseStatusResponse = {
   ok: boolean
   license: LicenseStatus
+}
+
+export type LicenseAutoUpdateResponse = {
+  ok: boolean
+  queued: boolean
+  running: boolean
+  run_id: string | null
+  started_at: string | null
+  log_path: string | null
 }
 
 export type LicenseActivationSeatUsage = {
@@ -648,36 +659,101 @@ export type EventStormingSubgraph = {
   edges: GraphSubgraphEdge[]
 }
 
-export type ProjectGateVerificationResult = {
+export type ProjectPolicyCheckResult = {
   project_id: string
   active?: boolean
+  kickoff_required?: boolean
+  kickoff_hint?: string
   checks: Record<string, boolean | string | number | null>
   available_checks?: string[]
   check_descriptions?: Record<string, string>
   required_checks?: string[]
   required_failed_checks?: string[]
-  gate_policy?: Record<string, unknown>
-  gate_policy_source?: string
+  plugin_policy?: Record<string, unknown>
+  plugin_policy_source?: string
   counts?: Record<string, number>
   ok: boolean
 }
 
-export type ProjectGateCatalogItem = {
+export type ProjectPolicyCheckCatalogItem = {
   id: string
   label?: string
   description?: string
   default_required?: boolean
 }
 
-export type ProjectGatesVerifyResponse = {
+export type ProjectPolicyChecksVerifyResponse = {
   project_id: string
-  team_mode?: ProjectGateVerificationResult
-  delivery?: ProjectGateVerificationResult & {
+  team_mode?: ProjectPolicyCheckResult
+  delivery?: ProjectPolicyCheckResult & {
     runtime_deploy_health?: Record<string, unknown>
   }
-  catalog?: Record<string, ProjectGateCatalogItem[] | undefined>
+  catalog?: Record<string, ProjectPolicyCheckCatalogItem[] | undefined>
   ok: boolean
 } & Record<string, unknown>
+
+export type ProjectPluginConfig = {
+  workspace_id: string
+  project_id: string
+  plugin_key: 'team_mode' | 'git_delivery' | 'docker_compose' | string
+  enabled: boolean
+  version: number
+  schema_version: number
+  config: Record<string, unknown>
+  compiled_policy: Record<string, unknown>
+  last_validation_errors?: Array<Record<string, unknown>>
+  last_validated_at?: string | null
+  exists?: boolean
+  created?: boolean
+}
+
+export type ProjectPluginConfigValidation = {
+  workspace_id: string
+  project_id: string
+  plugin_key: 'team_mode' | 'git_delivery' | 'docker_compose' | string
+  schema_version: number
+  errors: Array<Record<string, unknown>>
+  warnings: string[]
+  blocking: boolean
+  normalized_config: Record<string, unknown>
+  compiled_policy: Record<string, unknown>
+}
+
+export type ProjectPluginConfigDiff = {
+  workspace_id: string
+  project_id: string
+  plugin_key: 'team_mode' | 'git_delivery' | 'docker_compose' | string
+  current_version: number
+  exists: boolean
+  blocking: boolean
+  errors: Array<Record<string, unknown>>
+  warnings: string[]
+  config_changes: Array<Record<string, unknown>>
+  compiled_policy_changes: Array<Record<string, unknown>>
+  current_config: Record<string, unknown>
+  next_config: Record<string, unknown>
+  current_compiled_policy: Record<string, unknown>
+  next_compiled_policy: Record<string, unknown>
+  changed: boolean
+}
+
+export type ProjectCapabilities = {
+  workspace_id: string
+  project_id: string
+  enabled_plugin_keys: string[]
+  plugins: Array<{
+    plugin_key: string
+    exists: boolean
+    enabled: boolean
+    version: number
+    schema_version: number
+  }>
+  capabilities: {
+    team_mode: boolean
+    git_delivery: boolean
+    docker_compose: boolean
+  }
+}
 
 export type EventStormingLinkReviewResult = {
   project_id: string
