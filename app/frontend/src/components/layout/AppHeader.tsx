@@ -279,16 +279,16 @@ export function AppHeader({
                           <div
                             key={n.id}
                             className={`notif notif-openable ${n.is_read ? 'read' : 'unread'}`}
-                            onClick={openNotificationPreview}
+                            onClick={markNotificationRead}
                             onKeyDown={(event) => {
                               if (event.key !== 'Enter' && event.key !== ' ') return
                               event.preventDefault()
-                              openNotificationPreview()
+                              markNotificationRead()
                             }}
                             role="button"
                             tabIndex={0}
-                            aria-label="Open notification preview"
-                            title="Open notification preview"
+                            aria-label={n.is_read ? 'Notification is read' : 'Mark notification as read'}
+                            title={n.is_read ? 'Notification is read' : 'Mark as read'}
                           >
                             <div className="notif-dotline" aria-hidden="true" />
                             <div className="notif-main">
@@ -298,9 +298,18 @@ export function AppHeader({
                                 </div>
                                 <div className="notif-hint-row">
                                   <div className="notif-hint">
-                                    {!n.is_read ? 'Click to open and mark as read' : 'Click to open'}
+                                    {!n.is_read ? 'Click to mark as read' : 'Read'}
                                   </div>
                                   <div className="notif-hint-actions">
+                                    <button
+                                      className="notif-inline-action"
+                                      onClick={(event) => {
+                                        event.stopPropagation()
+                                        openNotificationPreview()
+                                      }}
+                                    >
+                                      Open full notification
+                                    </button>
                                     {inlineNotificationAction && canRunNotificationAction ? (
                                       <button
                                         className="notif-inline-action"
