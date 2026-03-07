@@ -21,6 +21,8 @@ from features.rules.domain import EVENT_CREATED as PROJECT_RULE_EVENT_CREATED
 from features.notes.domain import EVENT_CREATED as NOTE_EVENT_CREATED
 from features.specifications.domain import EVENT_CREATED as SPECIFICATION_EVENT_CREATED
 from features.tasks.domain import EVENT_CREATED as TASK_EVENT_CREATED
+from features.task_groups.domain import EVENT_CREATED as TASK_GROUP_EVENT_CREATED
+from features.note_groups.domain import EVENT_CREATED as NOTE_GROUP_EVENT_CREATED
 from .auth import generate_temporary_password, hash_password, verify_password
 from .licensing import resolve_license_installation_id
 from . import models as shared_models
@@ -970,57 +972,97 @@ def bootstrap_data():
         # Ensure project row exists before inserting FK-constrained groups.
         db.commit()
 
-        if not db.get(TaskGroup, BOOTSTRAP_TASK_SPRINT_A_ID):
-            db.add(
-                TaskGroup(
-                    id=BOOTSTRAP_TASK_SPRINT_A_ID,
-                    workspace_id=BOOTSTRAP_WORKSPACE_ID,
-                    project_id=BOOTSTRAP_PROJECT_ID,
-                    name="Sprint 1 - Product Core",
-                    description="Core flow and UI baseline for first successful demo.",
-                    color="#14b8a6",
-                    order_index=1,
-                    is_deleted=False,
-                )
+        if current_version(db, "TaskGroup", BOOTSTRAP_TASK_SPRINT_A_ID) == 0:
+            append_event(
+                db,
+                aggregate_type="TaskGroup",
+                aggregate_id=BOOTSTRAP_TASK_SPRINT_A_ID,
+                event_type=TASK_GROUP_EVENT_CREATED,
+                payload={
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "name": "Sprint 1 - Product Core",
+                    "description": "Core flow and UI baseline for first successful demo.",
+                    "color": "#14b8a6",
+                    "order_index": 1,
+                    "is_deleted": False,
+                },
+                metadata={
+                    "actor_id": DEFAULT_USER_ID,
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "task_group_id": BOOTSTRAP_TASK_SPRINT_A_ID,
+                },
+                expected_version=0,
             )
-        if not db.get(TaskGroup, BOOTSTRAP_TASK_SPRINT_B_ID):
-            db.add(
-                TaskGroup(
-                    id=BOOTSTRAP_TASK_SPRINT_B_ID,
-                    workspace_id=BOOTSTRAP_WORKSPACE_ID,
-                    project_id=BOOTSTRAP_PROJECT_ID,
-                    name="Sprint 2 - Delivery and QA",
-                    description="Verification, delivery readiness, and rollout polish.",
-                    color="#f59e0b",
-                    order_index=2,
-                    is_deleted=False,
-                )
+        if current_version(db, "TaskGroup", BOOTSTRAP_TASK_SPRINT_B_ID) == 0:
+            append_event(
+                db,
+                aggregate_type="TaskGroup",
+                aggregate_id=BOOTSTRAP_TASK_SPRINT_B_ID,
+                event_type=TASK_GROUP_EVENT_CREATED,
+                payload={
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "name": "Sprint 2 - Delivery and QA",
+                    "description": "Verification, delivery readiness, and rollout polish.",
+                    "color": "#f59e0b",
+                    "order_index": 2,
+                    "is_deleted": False,
+                },
+                metadata={
+                    "actor_id": DEFAULT_USER_ID,
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "task_group_id": BOOTSTRAP_TASK_SPRINT_B_ID,
+                },
+                expected_version=0,
             )
-        if not db.get(NoteGroup, BOOTSTRAP_NOTE_DISCOVERY_GROUP_ID):
-            db.add(
-                NoteGroup(
-                    id=BOOTSTRAP_NOTE_DISCOVERY_GROUP_ID,
-                    workspace_id=BOOTSTRAP_WORKSPACE_ID,
-                    project_id=BOOTSTRAP_PROJECT_ID,
-                    name="Discovery",
-                    description="Product context and planning notes.",
-                    color="#22c55e",
-                    order_index=1,
-                    is_deleted=False,
-                )
+        if current_version(db, "NoteGroup", BOOTSTRAP_NOTE_DISCOVERY_GROUP_ID) == 0:
+            append_event(
+                db,
+                aggregate_type="NoteGroup",
+                aggregate_id=BOOTSTRAP_NOTE_DISCOVERY_GROUP_ID,
+                event_type=NOTE_GROUP_EVENT_CREATED,
+                payload={
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "name": "Discovery",
+                    "description": "Product context and planning notes.",
+                    "color": "#22c55e",
+                    "order_index": 1,
+                    "is_deleted": False,
+                },
+                metadata={
+                    "actor_id": DEFAULT_USER_ID,
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "note_group_id": BOOTSTRAP_NOTE_DISCOVERY_GROUP_ID,
+                },
+                expected_version=0,
             )
-        if not db.get(NoteGroup, BOOTSTRAP_NOTE_SHIP_GROUP_ID):
-            db.add(
-                NoteGroup(
-                    id=BOOTSTRAP_NOTE_SHIP_GROUP_ID,
-                    workspace_id=BOOTSTRAP_WORKSPACE_ID,
-                    project_id=BOOTSTRAP_PROJECT_ID,
-                    name="Shiproom",
-                    description="Release readiness notes and verification records.",
-                    color="#0ea5e9",
-                    order_index=2,
-                    is_deleted=False,
-                )
+        if current_version(db, "NoteGroup", BOOTSTRAP_NOTE_SHIP_GROUP_ID) == 0:
+            append_event(
+                db,
+                aggregate_type="NoteGroup",
+                aggregate_id=BOOTSTRAP_NOTE_SHIP_GROUP_ID,
+                event_type=NOTE_GROUP_EVENT_CREATED,
+                payload={
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "name": "Shiproom",
+                    "description": "Release readiness notes and verification records.",
+                    "color": "#0ea5e9",
+                    "order_index": 2,
+                    "is_deleted": False,
+                },
+                metadata={
+                    "actor_id": DEFAULT_USER_ID,
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "note_group_id": BOOTSTRAP_NOTE_SHIP_GROUP_ID,
+                },
+                expected_version=0,
             )
 
         if current_version(db, "ProjectRule", BOOTSTRAP_RULE_CONTEXT_ID) == 0:
@@ -1432,6 +1474,8 @@ def bootstrap_data():
 
         # Repair drift: if Kurrent was reset but app.db persisted, backfill streams.
         _backfill_project_streams_from_read_model(db)
+        _backfill_task_group_streams_from_read_model(db)
+        _backfill_note_group_streams_from_read_model(db)
         _backfill_project_rule_streams_from_read_model(db)
         _backfill_specification_streams_from_read_model(db)
         _backfill_task_streams_from_read_model(db)
@@ -1509,6 +1553,70 @@ def _backfill_project_streams_from_read_model(db: Session) -> None:
                 "event_storming_enabled": bool(getattr(p, "event_storming_enabled", True)),
             },
             metadata={"actor_id": DEFAULT_USER_ID, "workspace_id": p.workspace_id, "project_id": p.id},
+            expected_version=0,
+        )
+
+
+def _backfill_task_group_streams_from_read_model(db: Session) -> None:
+    if get_kurrent_client() is None:
+        return
+
+    groups = db.execute(select(TaskGroup).where(TaskGroup.is_deleted == False)).scalars().all()
+    for group in groups:
+        if current_version(db, "TaskGroup", group.id) != 0:
+            continue
+        append_event(
+            db,
+            aggregate_type="TaskGroup",
+            aggregate_id=group.id,
+            event_type=TASK_GROUP_EVENT_CREATED,
+            payload={
+                "workspace_id": group.workspace_id,
+                "project_id": group.project_id,
+                "name": group.name,
+                "description": group.description or "",
+                "color": group.color,
+                "order_index": int(group.order_index or 0),
+                "is_deleted": bool(group.is_deleted),
+            },
+            metadata={
+                "actor_id": DEFAULT_USER_ID,
+                "workspace_id": group.workspace_id,
+                "project_id": group.project_id,
+                "task_group_id": group.id,
+            },
+            expected_version=0,
+        )
+
+
+def _backfill_note_group_streams_from_read_model(db: Session) -> None:
+    if get_kurrent_client() is None:
+        return
+
+    groups = db.execute(select(NoteGroup).where(NoteGroup.is_deleted == False)).scalars().all()
+    for group in groups:
+        if current_version(db, "NoteGroup", group.id) != 0:
+            continue
+        append_event(
+            db,
+            aggregate_type="NoteGroup",
+            aggregate_id=group.id,
+            event_type=NOTE_GROUP_EVENT_CREATED,
+            payload={
+                "workspace_id": group.workspace_id,
+                "project_id": group.project_id,
+                "name": group.name,
+                "description": group.description or "",
+                "color": group.color,
+                "order_index": int(group.order_index or 0),
+                "is_deleted": bool(group.is_deleted),
+            },
+            metadata={
+                "actor_id": DEFAULT_USER_ID,
+                "workspace_id": group.workspace_id,
+                "project_id": group.project_id,
+                "note_group_id": group.id,
+            },
             expected_version=0,
         )
 

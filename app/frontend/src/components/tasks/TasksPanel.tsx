@@ -728,7 +728,7 @@ export function TasksPanel({
         </div>
       </div>
 
-      {(taskTagSuggestions.length > 0 || searchTags.length > 0) && (
+      {taskTagSuggestions.length > 0 && (
         <div className="row wrap notes-tag-filters task-tag-filters">
           <PopularTagFilters
             tags={taskTagSuggestions}

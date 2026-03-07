@@ -291,7 +291,7 @@ export function SpecificationsPanel({ state }: { state: any }) {
               </Select.Content>
             </Select.Portal>
           </Select.Root>
-          {((state.taskTagSuggestions?.length ?? 0) > 0 || (state.specificationTags?.length ?? 0) > 0) && (
+          {(state.taskTagSuggestions?.length ?? 0) > 0 && (
             <PopularTagFilters
               tags={state.taskTagSuggestions ?? []}
               selectedTags={state.specificationTags}

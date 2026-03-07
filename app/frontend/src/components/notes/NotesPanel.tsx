@@ -1036,7 +1036,7 @@ export function NotesPanel({
           </label>
         </div>
 
-        {((state.noteTagSuggestions?.length ?? 0) > 0 || (state.noteTags?.length ?? 0) > 0) && (
+        {(state.noteTagSuggestions?.length ?? 0) > 0 && (
           <div className="row wrap notes-tag-filters">
             <PopularTagFilters
               tags={state.noteTagSuggestions}

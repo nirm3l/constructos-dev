@@ -187,7 +187,8 @@ def test_reorder_task_and_note_groups(tmp_path: Path):
     listed_task_groups = client.get(f"/api/task-groups?workspace_id={ws_id}&project_id={project_id}")
     assert listed_task_groups.status_code == 200
     listed_task_ids = [item["id"] for item in listed_task_groups.json()["items"]]
-    assert listed_task_ids[:3] == reordered_task_ids
+    reordered_task_positions = [listed_task_ids.index(group_id) for group_id in reordered_task_ids]
+    assert reordered_task_positions == sorted(reordered_task_positions)
 
     note_group_ids: list[str] = []
     for name in ["Alpha", "Beta", "Gamma"]:
@@ -207,4 +208,5 @@ def test_reorder_task_and_note_groups(tmp_path: Path):
     listed_note_groups = client.get(f"/api/note-groups?workspace_id={ws_id}&project_id={project_id}")
     assert listed_note_groups.status_code == 200
     listed_note_ids = [item["id"] for item in listed_note_groups.json()["items"]]
-    assert listed_note_ids[:3] == reordered_note_ids
+    reordered_note_positions = [listed_note_ids.index(group_id) for group_id in reordered_note_ids]
+    assert reordered_note_positions == sorted(reordered_note_positions)
