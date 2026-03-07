@@ -5,6 +5,7 @@ import time
 import json
 import hashlib
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from .eventing import append_event, current_version, get_kurrent_client
 from features.projects.domain import EVENT_CREATED as PROJECT_EVENT_CREATED
 from features.projects.domain import EVENT_UPDATED as PROJECT_EVENT_UPDATED
 from features.rules.domain import EVENT_CREATED as PROJECT_RULE_EVENT_CREATED
+from features.notes.domain import EVENT_CREATED as NOTE_EVENT_CREATED
 from features.specifications.domain import EVENT_CREATED as SPECIFICATION_EVENT_CREATED
 from features.tasks.domain import EVENT_CREATED as TASK_EVENT_CREATED
 from .auth import generate_temporary_password, hash_password, verify_password
@@ -69,6 +71,34 @@ _DEFAULT_WORKSPACE_SKILLS_CACHE: tuple[dict[str, str], ...] | None = None
 _PLUGIN_KEYS_WITHOUT_WORKSPACE_SKILLS = {"team_mode", "git_delivery"}
 
 
+def _bootstrap_entity_id(kind: str, key: str) -> str:
+    seed = f"bootstrap:{BOOTSTRAP_PROJECT_ID}:{kind}:{key}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
+
+
+BOOTSTRAP_TASK_BOARD_TOUR_ID = _bootstrap_entity_id("task", "board-tour")
+BOOTSTRAP_TASK_AUTOMATION_TOUR_ID = _bootstrap_entity_id("task", "automation-tour")
+BOOTSTRAP_TASK_KNOWLEDGE_TOUR_ID = _bootstrap_entity_id("task", "knowledge-tour")
+BOOTSTRAP_TASK_SPRINT_A_ID = _bootstrap_entity_id("task-group", "sprint-a")
+BOOTSTRAP_TASK_SPRINT_B_ID = _bootstrap_entity_id("task-group", "sprint-b")
+BOOTSTRAP_NOTE_DISCOVERY_GROUP_ID = _bootstrap_entity_id("note-group", "discovery")
+BOOTSTRAP_NOTE_SHIP_GROUP_ID = _bootstrap_entity_id("note-group", "shipping")
+BOOTSTRAP_SPEC_DEMO_ID = _bootstrap_entity_id("specification", "demo-spec")
+BOOTSTRAP_NOTE_DEMO_ID = _bootstrap_entity_id("note", "demo-note")
+BOOTSTRAP_NOTE_EXECUTION_ID = _bootstrap_entity_id("note", "execution-notes")
+BOOTSTRAP_NOTE_RELEASE_ID = _bootstrap_entity_id("note", "release-notes")
+BOOTSTRAP_RULE_CONTEXT_ID = _bootstrap_entity_id("project-rule", "context-rule")
+BOOTSTRAP_RULE_DELIVERY_ID = _bootstrap_entity_id("project-rule", "delivery-rule")
+DEMO_PROJECT_NAME = "Demo"
+DEMO_PROJECT_STATUSES = ["To do", "In progress", "Done"]
+BOOTSTRAP_ES_BOUNDED_CONTEXT_ID = _bootstrap_entity_id("event-storming", "bounded-context-general")
+BOOTSTRAP_ES_AGGREGATE_ID = _bootstrap_entity_id("event-storming", "aggregate-general")
+BOOTSTRAP_ES_COMMAND_PLAN_ID = _bootstrap_entity_id("event-storming", "command-plan-work")
+BOOTSTRAP_ES_COMMAND_EXECUTE_ID = _bootstrap_entity_id("event-storming", "command-execute-work")
+BOOTSTRAP_ES_POLICY_ID = _bootstrap_entity_id("event-storming", "policy-quality-gate")
+BOOTSTRAP_ES_READ_MODEL_ID = _bootstrap_entity_id("event-storming", "read-model-board")
+
+
 def _enabled_plugin_keys() -> set[str]:
     from plugins.registry import list_workflow_plugins
 
@@ -78,6 +108,94 @@ def _enabled_plugin_keys() -> set[str]:
         if key:
             keys.add(key)
     return keys
+
+
+def _seed_demo_event_storming_scaffold() -> None:
+    try:
+        from .knowledge_graph import graph_enabled, run_graph_query
+    except Exception:
+        return
+    if not graph_enabled():
+        return
+
+    component_labels = ["BoundedContext", "Aggregate", "Command", "DomainEvent", "Policy", "ReadModel"]
+    run_graph_query(
+        """
+        MATCH (n)
+        WHERE coalesce(n.project_id, '') = $project_id
+          AND any(label IN labels(n) WHERE label IN $component_labels)
+        DETACH DELETE n
+        """,
+        {"project_id": BOOTSTRAP_PROJECT_ID, "component_labels": component_labels},
+        write=True,
+    )
+    run_graph_query(
+        """
+        MERGE (p:Project {id:$project_id})
+        SET p.name = coalesce(p.name, $project_name),
+            p.project_id = $project_id
+        """,
+        {"project_id": BOOTSTRAP_PROJECT_ID, "project_name": DEMO_PROJECT_NAME},
+        write=True,
+    )
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    nodes = [
+        ("BoundedContext", BOOTSTRAP_ES_BOUNDED_CONTEXT_ID, "Workspace Delivery Core", "bounded_context"),
+        ("Aggregate", BOOTSTRAP_ES_AGGREGATE_ID, "Demo Project Aggregate", "aggregate"),
+        ("Command", BOOTSTRAP_ES_COMMAND_PLAN_ID, "Plan Work Item", "command"),
+        ("Command", BOOTSTRAP_ES_COMMAND_EXECUTE_ID, "Execute Work Item", "command"),
+        ("Policy", BOOTSTRAP_ES_POLICY_ID, "Quality Gate Policy", "policy"),
+        ("ReadModel", BOOTSTRAP_ES_READ_MODEL_ID, "Board Snapshot", "read_model"),
+    ]
+    for label, node_id, name, component_type in nodes:
+        run_graph_query(
+            f"""
+            MERGE (n:{label} {{id:$id}})
+            SET n.project_id = $project_id,
+                n.workspace_id = $workspace_id,
+                n.name = $name,
+                n.title = $name,
+                n.component_type = $component_type,
+                n.updated_at = $updated_at
+            """,
+            {
+                "id": node_id,
+                "project_id": BOOTSTRAP_PROJECT_ID,
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "name": name,
+                "component_type": component_type,
+                "updated_at": now_iso,
+            },
+            write=True,
+        )
+        run_graph_query(
+            f"""
+            MATCH (p:Project {{id:$project_id}})
+            MATCH (n:{label} {{id:$id}})
+            MERGE (p)-[:CONTAINS_ES]->(n)
+            """,
+            {"project_id": BOOTSTRAP_PROJECT_ID, "id": node_id},
+            write=True,
+        )
+
+    edges = [
+        (BOOTSTRAP_ES_BOUNDED_CONTEXT_ID, "CONTAINS", BOOTSTRAP_ES_AGGREGATE_ID),
+        (BOOTSTRAP_ES_COMMAND_PLAN_ID, "TARGETS", BOOTSTRAP_ES_AGGREGATE_ID),
+        (BOOTSTRAP_ES_COMMAND_EXECUTE_ID, "TARGETS", BOOTSTRAP_ES_AGGREGATE_ID),
+        (BOOTSTRAP_ES_POLICY_ID, "GUARDS", BOOTSTRAP_ES_COMMAND_EXECUTE_ID),
+        (BOOTSTRAP_ES_READ_MODEL_ID, "READS_FROM", BOOTSTRAP_ES_AGGREGATE_ID),
+    ]
+    for source_id, relation, target_id in edges:
+        run_graph_query(
+            f"""
+            MATCH (a {{id:$source_id}})
+            MATCH (b {{id:$target_id}})
+            MERGE (a)-[:{relation}]->(b)
+            """,
+            {"source_id": source_id, "target_id": target_id},
+            write=True,
+        )
 
 
 def _seed_workspace_skill_dirs() -> list[Path]:
@@ -793,12 +911,16 @@ def bootstrap_data():
                 event_type=PROJECT_EVENT_CREATED,
                 payload={
                     "workspace_id": BOOTSTRAP_WORKSPACE_ID,
-                    "name": "General",
-                    "description": "Default project",
-                    "custom_statuses": DEFAULT_STATUSES,
-                    "external_refs": [],
+                    "name": DEMO_PROJECT_NAME,
+                    "description": "Welcome demo project. Explore tasks, notes, specs, context, and delivery checks.",
+                    "custom_statuses": DEMO_PROJECT_STATUSES,
+                    "external_refs": [
+                        {"url": "https://github.com/nirm3l/constructos", "title": "Constructos repository"},
+                        {"url": "https://mermaid.js.org/syntax/flowchart.html", "title": "Mermaid flowchart docs"},
+                    ],
                     "attachment_refs": [],
                     "embedding_enabled": True,
+                    "event_storming_enabled": False,
                     "chat_index_mode": "OFF",
                     "chat_attachment_ingestion_mode": "METADATA_ONLY",
                 },
@@ -807,24 +929,355 @@ def bootstrap_data():
             )
         else:
             general_project = db.get(Project, BOOTSTRAP_PROJECT_ID)
-            if general_project is not None and not bool(general_project.embedding_enabled):
+            if general_project is not None:
                 version = current_version(db, "Project", BOOTSTRAP_PROJECT_ID)
-                append_event(
-                    db,
-                    aggregate_type="Project",
-                    aggregate_id=BOOTSTRAP_PROJECT_ID,
-                    event_type=PROJECT_EVENT_UPDATED,
-                    payload={
-                        "embedding_enabled": True,
-                        "updated_fields": ["embedding_enabled"],
-                    },
-                    metadata={
-                        "actor_id": DEFAULT_USER_ID,
-                        "workspace_id": BOOTSTRAP_WORKSPACE_ID,
-                        "project_id": BOOTSTRAP_PROJECT_ID,
-                    },
-                    expected_version=version,
+                payload: dict[str, Any] = {}
+                updated_fields: list[str] = []
+                if not bool(general_project.embedding_enabled):
+                    payload["embedding_enabled"] = True
+                    updated_fields.append("embedding_enabled")
+                if bool(getattr(general_project, "event_storming_enabled", True)):
+                    payload["event_storming_enabled"] = False
+                    updated_fields.append("event_storming_enabled")
+                if str(general_project.description or "").strip() == "Default project":
+                    payload["description"] = "Welcome demo project. Explore tasks, notes, specs, context, and delivery checks."
+                    updated_fields.append("description")
+                if str(general_project.name or "").strip() == "General":
+                    payload["name"] = DEMO_PROJECT_NAME
+                    updated_fields.append("name")
+                try:
+                    current_statuses = json.loads(general_project.custom_statuses or "[]")
+                except Exception:
+                    current_statuses = []
+                if current_statuses != DEMO_PROJECT_STATUSES:
+                    payload["custom_statuses"] = DEMO_PROJECT_STATUSES
+                    updated_fields.append("custom_statuses")
+                if updated_fields:
+                    payload["updated_fields"] = updated_fields
+                    append_event(
+                        db,
+                        aggregate_type="Project",
+                        aggregate_id=BOOTSTRAP_PROJECT_ID,
+                        event_type=PROJECT_EVENT_UPDATED,
+                        payload=payload,
+                        metadata={
+                            "actor_id": DEFAULT_USER_ID,
+                            "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                            "project_id": BOOTSTRAP_PROJECT_ID,
+                        },
+                        expected_version=version,
+                    )
+        # Ensure project row exists before inserting FK-constrained groups.
+        db.commit()
+
+        if not db.get(TaskGroup, BOOTSTRAP_TASK_SPRINT_A_ID):
+            db.add(
+                TaskGroup(
+                    id=BOOTSTRAP_TASK_SPRINT_A_ID,
+                    workspace_id=BOOTSTRAP_WORKSPACE_ID,
+                    project_id=BOOTSTRAP_PROJECT_ID,
+                    name="Sprint 1 - Product Core",
+                    description="Core flow and UI baseline for first successful demo.",
+                    color="#14b8a6",
+                    order_index=1,
+                    is_deleted=False,
                 )
+            )
+        if not db.get(TaskGroup, BOOTSTRAP_TASK_SPRINT_B_ID):
+            db.add(
+                TaskGroup(
+                    id=BOOTSTRAP_TASK_SPRINT_B_ID,
+                    workspace_id=BOOTSTRAP_WORKSPACE_ID,
+                    project_id=BOOTSTRAP_PROJECT_ID,
+                    name="Sprint 2 - Delivery and QA",
+                    description="Verification, delivery readiness, and rollout polish.",
+                    color="#f59e0b",
+                    order_index=2,
+                    is_deleted=False,
+                )
+            )
+        if not db.get(NoteGroup, BOOTSTRAP_NOTE_DISCOVERY_GROUP_ID):
+            db.add(
+                NoteGroup(
+                    id=BOOTSTRAP_NOTE_DISCOVERY_GROUP_ID,
+                    workspace_id=BOOTSTRAP_WORKSPACE_ID,
+                    project_id=BOOTSTRAP_PROJECT_ID,
+                    name="Discovery",
+                    description="Product context and planning notes.",
+                    color="#22c55e",
+                    order_index=1,
+                    is_deleted=False,
+                )
+            )
+        if not db.get(NoteGroup, BOOTSTRAP_NOTE_SHIP_GROUP_ID):
+            db.add(
+                NoteGroup(
+                    id=BOOTSTRAP_NOTE_SHIP_GROUP_ID,
+                    workspace_id=BOOTSTRAP_WORKSPACE_ID,
+                    project_id=BOOTSTRAP_PROJECT_ID,
+                    name="Shiproom",
+                    description="Release readiness notes and verification records.",
+                    color="#0ea5e9",
+                    order_index=2,
+                    is_deleted=False,
+                )
+            )
+
+        if current_version(db, "ProjectRule", BOOTSTRAP_RULE_CONTEXT_ID) == 0:
+            append_event(
+                db,
+                aggregate_type="ProjectRule",
+                aggregate_id=BOOTSTRAP_RULE_CONTEXT_ID,
+                event_type=PROJECT_RULE_EVENT_CREATED,
+                payload={
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "title": "Keep updates explicit",
+                    "body": "When moving a task to a new status, add one concise comment: what changed and what is next.",
+                },
+                metadata={
+                    "actor_id": DEFAULT_USER_ID,
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "project_rule_id": BOOTSTRAP_RULE_CONTEXT_ID,
+                },
+                expected_version=0,
+            )
+        if current_version(db, "ProjectRule", BOOTSTRAP_RULE_DELIVERY_ID) == 0:
+            append_event(
+                db,
+                aggregate_type="ProjectRule",
+                aggregate_id=BOOTSTRAP_RULE_DELIVERY_ID,
+                event_type=PROJECT_RULE_EVENT_CREATED,
+                payload={
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "title": "Definition of done (demo)",
+                    "body": "Done means acceptance criteria verified, evidence attached, and activity log updated.",
+                },
+                metadata={
+                    "actor_id": DEFAULT_USER_ID,
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "project_rule_id": BOOTSTRAP_RULE_DELIVERY_ID,
+                },
+                expected_version=0,
+            )
+
+        if current_version(db, "Specification", BOOTSTRAP_SPEC_DEMO_ID) == 0:
+            append_event(
+                db,
+                aggregate_type="Specification",
+                aggregate_id=BOOTSTRAP_SPEC_DEMO_ID,
+                event_type=SPECIFICATION_EVENT_CREATED,
+                payload={
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "title": "Demo: Product Delivery Flow",
+                    "body": (
+                        "# Demo specification\n\n"
+                        "This item demonstrates markdown rendering with Mermaid and JSON blocks.\n\n"
+                        "## Delivery flow\n\n"
+                        "```mermaid\n"
+                        "flowchart LR\n"
+                        "  Idea[Idea] --> Spec[Specification]\n"
+                        "  Spec --> Dev[Implementation]\n"
+                        "  Dev --> QA[Verification]\n"
+                        "  QA --> Ship[Release]\n"
+                        "```\n\n"
+                        "## Event storming snapshot (static)\n\n"
+                        "This diagram is pre-seeded markdown content and does not invoke LLM processing.\n\n"
+                        "```mermaid\n"
+                        "flowchart LR\n"
+                        "  classDef cmd fill:#1f2937,color:#f9fafb,stroke:#9ca3af;\n"
+                        "  classDef evt fill:#065f46,color:#ecfdf5,stroke:#34d399;\n"
+                        "  classDef pol fill:#7c2d12,color:#fff7ed,stroke:#fb923c;\n"
+                        "  classDef actor fill:#0c4a6e,color:#e0f2fe,stroke:#38bdf8;\n"
+                        "\n"
+                        "  PM([Product]):::actor --> C1[Define acceptance criteria]:::cmd\n"
+                        "  C1 --> E1((Specification created)):::evt\n"
+                        "  E1 --> C2[Start implementation]:::cmd\n"
+                        "  C2 --> E2((Code committed)):::evt\n"
+                        "  E2 --> P1{Policy: required checks pass}:::pol\n"
+                        "  P1 --> C3[Run QA validation]:::cmd\n"
+                        "  C3 --> E3((QA evidence attached)):::evt\n"
+                        "  E3 --> C4[Approve and release]:::cmd\n"
+                        "  C4 --> E4((Release completed)):::evt\n"
+                        "```\n\n"
+                        "## Structured payload example\n\n"
+                        "```json\n"
+                        "{\n"
+                        "  \"feature\": \"onboarding-demo\",\n"
+                        "  \"priority\": \"high\",\n"
+                        "  \"owner\": \"product\",\n"
+                        "  \"acceptance\": [\n"
+                        "    \"Flow diagram renders\",\n"
+                        "    \"Task evidence visible\",\n"
+                        "    \"Checks panel is understandable\"\n"
+                        "  ]\n"
+                        "}\n"
+                        "```\n"
+                    ),
+                    "status": "Ready",
+                    "tags": ["demo", "onboarding", "architecture"],
+                    "external_refs": [
+                        {"url": "https://mermaid.js.org/", "title": "Mermaid documentation"},
+                        {"url": "https://docs.github.com/en/repositories", "title": "Repository docs"},
+                    ],
+                    "attachment_refs": [],
+                },
+                metadata={
+                    "actor_id": DEFAULT_USER_ID,
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "specification_id": BOOTSTRAP_SPEC_DEMO_ID,
+                },
+                expected_version=0,
+            )
+
+        if current_version(db, "Note", BOOTSTRAP_NOTE_DEMO_ID) == 0:
+            append_event(
+                db,
+                aggregate_type="Note",
+                aggregate_id=BOOTSTRAP_NOTE_DEMO_ID,
+                event_type=NOTE_EVENT_CREATED,
+                payload={
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "note_group_id": BOOTSTRAP_NOTE_DISCOVERY_GROUP_ID,
+                    "task_id": None,
+                    "specification_id": BOOTSTRAP_SPEC_DEMO_ID,
+                    "title": "Welcome: What to try first",
+                    "body": (
+                        "## Quick checklist\n\n"
+                        "- Open **Tasks** and switch list/board views.\n"
+                        "- Open **Specifications** and view Mermaid + JSON blocks.\n"
+                        "- Open **Project > Delivery Checks** and inspect required checks.\n"
+                        "- Use **Chat** to create a new project in one sentence.\n\n"
+                        "## Tip\n\n"
+                        "Use fenced code blocks for logs, payloads, and API snippets."
+                    ),
+                    "tags": ["welcome", "demo", "checklist"],
+                    "external_refs": [
+                        {"url": "https://github.com/nirm3l/constructos/blob/main/README.md", "title": "Quick start README"},
+                    ],
+                    "attachment_refs": [],
+                    "pinned": True,
+                    "archived": False,
+                    "created_at": to_iso_utc(datetime.now(timezone.utc)),
+                },
+                metadata={
+                    "actor_id": DEFAULT_USER_ID,
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "note_id": BOOTSTRAP_NOTE_DEMO_ID,
+                },
+                expected_version=0,
+            )
+        if current_version(db, "Note", BOOTSTRAP_NOTE_EXECUTION_ID) == 0:
+            append_event(
+                db,
+                aggregate_type="Note",
+                aggregate_id=BOOTSTRAP_NOTE_EXECUTION_ID,
+                event_type=NOTE_EVENT_CREATED,
+                payload={
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "note_group_id": BOOTSTRAP_NOTE_DISCOVERY_GROUP_ID,
+                    "task_id": BOOTSTRAP_TASK_AUTOMATION_TOUR_ID,
+                    "specification_id": BOOTSTRAP_SPEC_DEMO_ID,
+                    "title": "Execution notes: demo implementation journal",
+                    "body": (
+                        "## Goal\n\n"
+                        "Capture implementation context while working so handoffs stay explicit.\n\n"
+                        "## Example timeline\n\n"
+                        "1. Parsed the specification and extracted acceptance criteria.\n"
+                        "2. Implemented baseline task flow and verified board transitions.\n"
+                        "3. Ran automation once and captured the output signal.\n"
+                        "4. Documented open risks and concrete next actions.\n\n"
+                        "## What good notes include\n\n"
+                        "- Decision made and why.\n"
+                        "- Scope that was changed and scope that was intentionally skipped.\n"
+                        "- Evidence pointers (task comments, commit IDs, screenshots, logs).\n"
+                        "- Next owner and expected status move.\n\n"
+                        "## Risks template\n\n"
+                        "- **Risk:** unclear dependency ownership.\n"
+                        "- **Impact:** delivery delay.\n"
+                        "- **Mitigation:** assign owner and add visible blocker comment on task."
+                    ),
+                    "tags": ["demo", "execution", "handoff"],
+                    "external_refs": [
+                        {"url": "https://docs.github.com/en/issues/tracking-your-work-with-issues/about-task-lists", "title": "Task tracking guide"},
+                    ],
+                    "attachment_refs": [],
+                    "pinned": False,
+                    "archived": False,
+                    "created_at": to_iso_utc(datetime.now(timezone.utc)),
+                },
+                metadata={
+                    "actor_id": DEFAULT_USER_ID,
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "note_id": BOOTSTRAP_NOTE_EXECUTION_ID,
+                },
+                expected_version=0,
+            )
+        if current_version(db, "Note", BOOTSTRAP_NOTE_RELEASE_ID) == 0:
+            append_event(
+                db,
+                aggregate_type="Note",
+                aggregate_id=BOOTSTRAP_NOTE_RELEASE_ID,
+                event_type=NOTE_EVENT_CREATED,
+                payload={
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "note_group_id": BOOTSTRAP_NOTE_SHIP_GROUP_ID,
+                    "task_id": None,
+                    "specification_id": BOOTSTRAP_SPEC_DEMO_ID,
+                    "title": "Release readiness: checklist and evidence model",
+                    "body": (
+                        "## Release intent\n\n"
+                        "This note shows how a team can document release readiness in one place.\n\n"
+                        "## Readiness checklist\n\n"
+                        "- Scope frozen and linked to specification acceptance criteria.\n"
+                        "- Required delivery checks reviewed.\n"
+                        "- QA execution evidence attached and traceable.\n"
+                        "- Rollback path documented.\n"
+                        "- Post-release observation owner assigned.\n\n"
+                        "## Evidence contract (example)\n\n"
+                        "```json\n"
+                        "{\n"
+                        "  \"release_id\": \"demo-r1\",\n"
+                        "  \"checks\": [\"build\", \"qa\", \"deploy\"],\n"
+                        "  \"artifacts\": {\n"
+                        "    \"qa_report\": \"attached\",\n"
+                        "    \"deploy_log\": \"attached\",\n"
+                        "    \"rollback_plan\": \"documented\"\n"
+                        "  },\n"
+                        "  \"approved_by\": \"lead\"\n"
+                        "}\n"
+                        "```\n\n"
+                        "## Post-release notes\n\n"
+                        "Use this section for incident-free confirmation, observed regressions, and follow-up tasks."
+                    ),
+                    "tags": ["demo", "release", "evidence"],
+                    "external_refs": [
+                        {"url": "https://12factor.net/", "title": "The Twelve-Factor App"},
+                    ],
+                    "attachment_refs": [],
+                    "pinned": False,
+                    "archived": False,
+                    "created_at": to_iso_utc(datetime.now(timezone.utc)),
+                },
+                metadata={
+                    "actor_id": DEFAULT_USER_ID,
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "note_id": BOOTSTRAP_NOTE_RELEASE_ID,
+                },
+                expected_version=0,
+            )
+
         if current_version(db, "Task", BOOTSTRAP_TASK_ID) == 0:
             append_event(
                 db,
@@ -834,13 +1287,16 @@ def bootstrap_data():
                 payload={
                     "workspace_id": BOOTSTRAP_WORKSPACE_ID,
                     "project_id": BOOTSTRAP_PROJECT_ID,
+                    "task_group_id": BOOTSTRAP_TASK_SPRINT_A_ID,
+                    "specification_id": BOOTSTRAP_SPEC_DEMO_ID,
                     "title": "Setup your first task",
-                    "description": "Use FAB + to add tasks quickly.",
+                    "description": "Use FAB + to add tasks quickly, then open board view and move this item across statuses.",
                     "status": "To do",
                     "priority": "Med",
                     "due_date": to_iso_utc(datetime.now(timezone.utc) + timedelta(days=1)),
                     "assignee_id": DEFAULT_USER_ID,
-                    "labels": ["welcome"],
+                    "assigned_agent_code": None,
+                    "labels": ["welcome", "demo", "board"],
                     "subtasks": [],
                     "attachments": [],
                     "external_refs": [],
@@ -856,6 +1312,122 @@ def bootstrap_data():
                 },
                 expected_version=0,
             )
+
+        if current_version(db, "Task", BOOTSTRAP_TASK_BOARD_TOUR_ID) == 0:
+            append_event(
+                db,
+                aggregate_type="Task",
+                aggregate_id=BOOTSTRAP_TASK_BOARD_TOUR_ID,
+                event_type=TASK_EVENT_CREATED,
+                payload={
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "task_group_id": BOOTSTRAP_TASK_SPRINT_A_ID,
+                    "specification_id": BOOTSTRAP_SPEC_DEMO_ID,
+                    "title": "Board demo: move this card to Dev",
+                    "description": "Use drag-and-drop to validate board status transitions and ordering.",
+                    "status": "To do",
+                    "priority": "Low",
+                    "due_date": None,
+                    "assignee_id": DEFAULT_USER_ID,
+                    "assigned_agent_code": None,
+                    "labels": ["demo", "board", "kanban"],
+                    "subtasks": [],
+                    "attachments": [],
+                    "external_refs": [],
+                    "attachment_refs": [],
+                    "recurring_rule": None,
+                    "order_index": 2,
+                },
+                metadata={
+                    "actor_id": DEFAULT_USER_ID,
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "task_id": BOOTSTRAP_TASK_BOARD_TOUR_ID,
+                },
+                expected_version=0,
+            )
+
+        if current_version(db, "Task", BOOTSTRAP_TASK_AUTOMATION_TOUR_ID) == 0:
+            append_event(
+                db,
+                aggregate_type="Task",
+                aggregate_id=BOOTSTRAP_TASK_AUTOMATION_TOUR_ID,
+                event_type=TASK_EVENT_CREATED,
+                payload={
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "task_group_id": BOOTSTRAP_TASK_SPRINT_B_ID,
+                    "specification_id": BOOTSTRAP_SPEC_DEMO_ID,
+                    "title": "Automation demo: run with Codex",
+                    "description": "Open this task and use Run now to see live automation output and execution state.",
+                    "status": "In progress",
+                    "priority": "Med",
+                    "due_date": None,
+                    "assignee_id": DEFAULT_USER_ID,
+                    "assigned_agent_code": None,
+                    "labels": ["demo", "automation", "codex"],
+                    "subtasks": [],
+                    "attachments": [],
+                    "external_refs": [
+                        {"url": "https://platform.openai.com/docs", "title": "OpenAI API docs"},
+                    ],
+                    "attachment_refs": [],
+                    "recurring_rule": None,
+                    "order_index": 3,
+                },
+                metadata={
+                    "actor_id": DEFAULT_USER_ID,
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "task_id": BOOTSTRAP_TASK_AUTOMATION_TOUR_ID,
+                },
+                expected_version=0,
+            )
+
+        if current_version(db, "Task", BOOTSTRAP_TASK_KNOWLEDGE_TOUR_ID) == 0:
+            append_event(
+                db,
+                aggregate_type="Task",
+                aggregate_id=BOOTSTRAP_TASK_KNOWLEDGE_TOUR_ID,
+                event_type=TASK_EVENT_CREATED,
+                payload={
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "task_group_id": BOOTSTRAP_TASK_SPRINT_B_ID,
+                    "specification_id": BOOTSTRAP_SPEC_DEMO_ID,
+                    "title": "Knowledge demo: inspect context snapshot",
+                    "description": "Open Project > Context and review graph context and prompt segment breakdown.",
+                    "status": "Done",
+                    "priority": "Low",
+                    "due_date": None,
+                    "assignee_id": DEFAULT_USER_ID,
+                    "assigned_agent_code": None,
+                    "labels": ["demo", "knowledge-graph", "context"],
+                    "subtasks": [],
+                    "attachments": [],
+                    "external_refs": [],
+                    "attachment_refs": [],
+                    "recurring_rule": None,
+                    "order_index": 4,
+                },
+                metadata={
+                    "actor_id": DEFAULT_USER_ID,
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "task_id": BOOTSTRAP_TASK_KNOWLEDGE_TOUR_ID,
+                },
+                expected_version=0,
+            )
+
+        # Keep bootstrap demo tasks aligned with Demo board statuses.
+        automation_demo_task = db.get(Task, BOOTSTRAP_TASK_AUTOMATION_TOUR_ID)
+        if automation_demo_task is not None and (automation_demo_task.status or "").strip() == "Dev":
+            automation_demo_task.status = "In progress"
+        knowledge_demo_task = db.get(Task, BOOTSTRAP_TASK_KNOWLEDGE_TOUR_ID)
+        if knowledge_demo_task is not None and (knowledge_demo_task.status or "").strip() == "QA":
+            knowledge_demo_task.status = "Done"
+        _seed_demo_event_storming_scaffold()
         db.commit()
 
         # Repair drift: if Kurrent was reset but app.db persisted, backfill streams.

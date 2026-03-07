@@ -92,6 +92,15 @@ export function NotesPanel({
   state: any
   actions: any
 }) {
+  const hiddenPreviewMountStyle: React.CSSProperties = {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    overflow: 'hidden',
+    clipPath: 'inset(50%)',
+    opacity: 0,
+    pointerEvents: 'none',
+  }
   const noteGroups: NoteGroup[] = state.noteGroups?.data?.items ?? []
   const noteItems: Note[] = state.notes.data?.items ?? []
 
@@ -438,7 +447,7 @@ export function NotesPanel({
       <div
         key={n.id}
         id={`note-row-${n.id}`}
-        className={`note-row note-draggable ${isOpen ? 'open selected' : ''}`}
+        className={`note-row note-draggable ${isOpen && !isPreviewOnly ? 'open selected' : ''}`}
         onClick={() => {
           setPreviewOnlyNoteId(null)
           const changed = state.toggleNoteEditor(n.id)
@@ -626,7 +635,13 @@ export function NotesPanel({
         )}
 
         {isOpen && isSelected && state.selectedNote && (
-          <div className="note-accordion" onClick={(e) => e.stopPropagation()} role="region" aria-label="Note editor">
+          <div
+            className="note-accordion"
+            onClick={(e) => e.stopPropagation()}
+            role="region"
+            aria-label="Note editor"
+            style={isPreviewOnly ? hiddenPreviewMountStyle : undefined}
+          >
             <div className="note-editor-head">
               <input
                 className="note-title-input"
@@ -692,7 +707,12 @@ export function NotesPanel({
                 ariaLabel="Note editor view"
                 previewOnlyWhenFullscreen={isPreviewOnly}
                 onFullscreenTriggerMode={(mode, nextFullscreen) => {
-                  if (!nextFullscreen || mode === 'regular') setPreviewOnlyNoteId(null)
+                  if (!nextFullscreen || mode === 'regular') {
+                    if (!nextFullscreen && isPreviewOnly && String(state.selectedNoteId || '') === String(n.id)) {
+                      state.toggleNoteEditor(n.id)
+                    }
+                    setPreviewOnlyNoteId(null)
+                  }
                 }}
               />
               <div className="md-editor-content">
@@ -1016,7 +1036,7 @@ export function NotesPanel({
           </label>
         </div>
 
-        {filteredNotes.length > 0 && (
+        {((state.noteTagSuggestions?.length ?? 0) > 0 || (state.noteTags?.length ?? 0) > 0) && (
           <div className="row wrap notes-tag-filters">
             <PopularTagFilters
               tags={state.noteTagSuggestions}

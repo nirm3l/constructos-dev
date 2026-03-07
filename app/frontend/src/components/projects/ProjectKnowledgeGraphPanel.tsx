@@ -1778,6 +1778,7 @@ export function ProjectKnowledgeGraphPanel({
       if (!targetIsArtifact) supportedComponentIds.add(target)
       if (!sourceIsArtifact) supportedComponentIds.add(source)
     }
+    const hasArtifactComponentLinks = supportedComponentIds.size > 0
     const visibleNodeIds = new Set<string>()
     for (const edge of diagramEdges) {
       const source = String(edge.source_entity_id || '').trim()
@@ -1796,6 +1797,7 @@ export function ProjectKnowledgeGraphPanel({
         typeKey !== 'task' &&
         typeKey !== 'specification' &&
         typeKey !== 'note' &&
+        hasArtifactComponentLinks &&
         !supportedComponentIds.has(nodeId)
       ) {
         return false

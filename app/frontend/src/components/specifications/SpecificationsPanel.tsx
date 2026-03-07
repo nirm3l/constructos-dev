@@ -18,6 +18,15 @@ import {
 } from '../shared/uiHelpers'
 
 export function SpecificationsPanel({ state }: { state: any }) {
+  const hiddenPreviewMountStyle: React.CSSProperties = {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    overflow: 'hidden',
+    clipPath: 'inset(50%)',
+    opacity: 0,
+    pointerEvents: 'none',
+  }
   const items: Specification[] = state.specifications.data?.items ?? []
   const linkedTasks: Task[] = state.specTasks.data?.items ?? []
   const linkedNotes: Note[] = state.specNotes.data?.items ?? []
@@ -282,7 +291,7 @@ export function SpecificationsPanel({ state }: { state: any }) {
               </Select.Content>
             </Select.Portal>
           </Select.Root>
-          {items.length > 0 && (
+          {((state.taskTagSuggestions?.length ?? 0) > 0 || (state.specificationTags?.length ?? 0) > 0) && (
             <PopularTagFilters
               tags={state.taskTagSuggestions ?? []}
               selectedTags={state.specificationTags}
@@ -347,7 +356,7 @@ export function SpecificationsPanel({ state }: { state: any }) {
                   <div
                     key={specification.id}
                     id={`spec-row-${specification.id}`}
-                    className={`note-row ${isOpen ? 'open selected' : ''}`}
+                    className={`note-row ${isOpen && !isPreviewOnly ? 'open selected' : ''}`}
                     onClick={() => {
                       setPreviewOnlySpecificationId(null)
                       state.toggleSpecificationEditor(specification.id)
@@ -496,7 +505,13 @@ export function SpecificationsPanel({ state }: { state: any }) {
                 </div>
 
                 {isOpen && (
-                  <div className="note-accordion" onClick={(e) => e.stopPropagation()} role="region" aria-label="Specification editor">
+                  <div
+                    className="note-accordion"
+                    onClick={(e) => e.stopPropagation()}
+                    role="region"
+                    aria-label="Specification editor"
+                    style={isPreviewOnly ? hiddenPreviewMountStyle : undefined}
+                  >
                     <div className="note-editor-head">
                       <input
                         className="note-title-input"
@@ -633,7 +648,12 @@ export function SpecificationsPanel({ state }: { state: any }) {
                         ariaLabel="Specification editor view"
                         previewOnlyWhenFullscreen={isPreviewOnly}
                         onFullscreenTriggerMode={(mode, nextFullscreen) => {
-                          if (!nextFullscreen || mode === 'regular') setPreviewOnlySpecificationId(null)
+                          if (!nextFullscreen || mode === 'regular') {
+                            if (!nextFullscreen && isPreviewOnly && String(state.selectedSpecificationId || '') === String(specification.id)) {
+                              state.toggleSpecificationEditor(specification.id)
+                            }
+                            setPreviewOnlySpecificationId(null)
+                          }
                         }}
                       />
                       <div className="md-editor-content">

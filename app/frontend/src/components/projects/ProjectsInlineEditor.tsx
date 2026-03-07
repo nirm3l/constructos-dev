@@ -898,6 +898,7 @@ export function ProjectsInlineEditor({
   const [stagedSkillImportFiles, setStagedSkillImportFiles] = React.useState<StagedSkillImportFile[]>([])
   const [stagedSkillAttachIds, setStagedSkillAttachIds] = React.useState<string[]>([])
   const [stagedSkillApplyIds, setStagedSkillApplyIds] = React.useState<string[]>([])
+  const [stagedSkillDeleteIds, setStagedSkillDeleteIds] = React.useState<string[]>([])
   const ruleCreateSeqRef = React.useRef(1)
   const stagedSkillSeqRef = React.useRef(1)
   const teamModeConfigDirty = React.useMemo(
@@ -985,8 +986,9 @@ export function ProjectsInlineEditor({
       stagedSkillImportUrls.length > 0 ||
       stagedSkillImportFiles.length > 0 ||
       stagedSkillAttachIds.length > 0 ||
-      stagedSkillApplyIds.length > 0,
-    [stagedSkillApplyIds.length, stagedSkillAttachIds.length, stagedSkillImportFiles.length, stagedSkillImportUrls.length]
+      stagedSkillApplyIds.length > 0 ||
+      stagedSkillDeleteIds.length > 0,
+    [stagedSkillApplyIds.length, stagedSkillAttachIds.length, stagedSkillDeleteIds.length, stagedSkillImportFiles.length, stagedSkillImportUrls.length]
   )
   const teamModeStarterConfig = React.useMemo(
     () =>
@@ -1009,6 +1011,7 @@ export function ProjectsInlineEditor({
     setStagedSkillImportFiles([])
     setStagedSkillAttachIds([])
     setStagedSkillApplyIds([])
+    setStagedSkillDeleteIds([])
     ruleCreateSeqRef.current = 1
     stagedSkillSeqRef.current = 1
   }, [project.id])
@@ -1686,7 +1689,8 @@ export function ProjectsInlineEditor({
     importProjectSkillMutation.isPending ||
     importProjectSkillFileMutation.isPending ||
     applyProjectSkillMutation.isPending ||
-    attachWorkspaceSkillToProjectMutation.isPending
+    attachWorkspaceSkillToProjectMutation.isPending ||
+    deleteProjectSkillMutation.isPending
   )
   const unsavedSections = React.useMemo(() => {
     const sections: string[] = []
@@ -1868,6 +1872,13 @@ export function ProjectsInlineEditor({
             })
           })
         }
+        for (const projectSkillId of stagedSkillDeleteIds) {
+          await runSkillMutation(deleteProjectSkillMutation, {
+            skillId: projectSkillId,
+            delete_linked_rule: true,
+          })
+          if (selectedProjectSkillId === projectSkillId) setSelectedProjectSkillId(null)
+        }
         const importedSkillIds: string[] = []
         for (const staged of stagedSkillImportUrls) {
           const imported = await runSkillMutation<ProjectSkill>(importProjectSkillMutation, {
@@ -1896,7 +1907,9 @@ export function ProjectsInlineEditor({
           const attachedSkillId = String((attached as ProjectSkill | undefined)?.id || '').trim()
           if (attachedSkillId) importedSkillIds.push(attachedSkillId)
         }
+        const deletedSkillIdSet = new Set(stagedSkillDeleteIds)
         const applyQueue = Array.from(new Set([...stagedSkillApplyIds, ...importedSkillIds]))
+          .filter((projectSkillId) => !deletedSkillIdSet.has(projectSkillId))
         for (const projectSkillId of applyQueue) {
           await runSkillMutation(applyProjectSkillMutation, { skillId: projectSkillId })
         }
@@ -1904,6 +1917,7 @@ export function ProjectsInlineEditor({
         setStagedSkillImportFiles([])
         setStagedSkillAttachIds([])
         setStagedSkillApplyIds([])
+        setStagedSkillDeleteIds([])
         savedSections.push('Skills')
       } catch {
         failedSections.push('Skills')
@@ -1950,17 +1964,21 @@ export function ProjectsInlineEditor({
     stagedRulePatches,
     stagedSkillApplyIds,
     stagedSkillAttachIds,
+    stagedSkillDeleteIds,
     stagedSkillImportFiles,
     stagedSkillImportUrls,
     sourceRuleById,
     applyProjectSkillMutation,
     attachWorkspaceSkillToProjectMutation,
+    deleteProjectSkillMutation,
     importProjectSkillFileMutation,
     importProjectSkillMutation,
     teamModeConfigDirty,
     teamModeConfigText,
     teamModePluginQuery.data?.enabled,
     teamModePluginQuery.data?.version,
+    selectedProjectSkillId,
+    setSelectedProjectSkillId,
     userId,
     workspaceId,
   ])
@@ -1997,6 +2015,43 @@ export function ProjectsInlineEditor({
 
   const skillItems = projectSkills.data?.items ?? []
   const workspaceSkillItems = workspaceSkills.data?.items ?? []
+  const stagedSkillDeleteSet = React.useMemo(
+    () => new Set(stagedSkillDeleteIds.map((id) => String(id || '').trim()).filter(Boolean)),
+    [stagedSkillDeleteIds]
+  )
+  const stagedSkillPreviewItems = React.useMemo(
+    () => [
+      ...stagedSkillImportUrls.map((item) => ({
+        id: item.clientId,
+        name: item.skill_key || item.source_url || 'Imported skill',
+        source: item.source_url,
+        mode: item.mode || 'advisory',
+        trust: item.trust_level || 'reviewed',
+        kind: 'import_url' as const,
+      })),
+      ...stagedSkillImportFiles.map((item) => ({
+        id: item.clientId,
+        name: item.skill_key || item.file.name || 'Imported skill file',
+        source: item.file.name,
+        mode: item.mode || 'advisory',
+        trust: item.trust_level || 'reviewed',
+        kind: 'import_file' as const,
+      })),
+      ...stagedSkillAttachIds.map((workspaceSkillId) => {
+        const match = workspaceSkillItems.find((entry) => String(entry.id || '').trim() === String(workspaceSkillId || '').trim())
+        return {
+          id: `attach:${workspaceSkillId}`,
+          name: String(match?.name || match?.skill_key || workspaceSkillId),
+          source: String(match?.source_locator || '(workspace catalog)'),
+          mode: String(match?.mode || 'advisory'),
+          trust: String(match?.trust_level || 'reviewed'),
+          kind: 'attach' as const,
+        }
+      }),
+    ],
+    [stagedSkillAttachIds, stagedSkillImportFiles, stagedSkillImportUrls, workspaceSkillItems]
+  )
+  const hasSkillRows = stagedSkillPreviewItems.length > 0 || skillItems.length > 0
   const activeProjectRuleIds = React.useMemo(() => {
     const ids = new Set<string>()
     for (const item of projectRules.data?.items ?? []) {
@@ -2029,6 +2084,11 @@ export function ProjectsInlineEditor({
     () => skillItems.find((item: ProjectSkill) => item.id === selectedProjectSkillId) ?? null,
     [selectedProjectSkillId, skillItems]
   )
+  React.useEffect(() => {
+    if (!selectedProjectSkillId) return
+    if (!stagedSkillDeleteSet.has(selectedProjectSkillId)) return
+    setSelectedProjectSkillId(null)
+  }, [selectedProjectSkillId, stagedSkillDeleteSet])
   const selectedRuleLinkedSkill = React.useMemo(() => {
     if (!selectedProjectRuleId) return null
     return skillByGeneratedRuleId.get(selectedProjectRuleId) ?? null
@@ -2213,8 +2273,13 @@ export function ProjectsInlineEditor({
     skillEditorTrustLevel,
   ])
   const projectSkillKeys = React.useMemo(
-    () => new Set(skillItems.map((item: ProjectSkill) => String(item.skill_key || '').trim()).filter(Boolean)),
-    [skillItems]
+    () => new Set(
+      skillItems
+        .filter((item: ProjectSkill) => !stagedSkillDeleteSet.has(String(item.id || '').trim()))
+        .map((item: ProjectSkill) => String(item.skill_key || '').trim())
+        .filter(Boolean)
+    ),
+    [skillItems, stagedSkillDeleteSet]
   )
   const stagedSkillAttachSet = React.useMemo(
     () => new Set(stagedSkillAttachIds.map((id) => String(id || '').trim()).filter(Boolean)),
@@ -3800,8 +3865,8 @@ export function ProjectsInlineEditor({
           <h3 style={{ margin: 0 }}>Project Skills ({projectSkills.data?.total ?? 0})</h3>
           <div className="meta">
             Project-local skills. Changes are staged locally and saved only via Save all changes.
-            {(stagedSkillImportUrls.length + stagedSkillImportFiles.length + stagedSkillAttachIds.length + stagedSkillApplyIds.length) > 0
-              ? ` Staged ops: ${stagedSkillImportUrls.length + stagedSkillImportFiles.length + stagedSkillAttachIds.length + stagedSkillApplyIds.length}.`
+            {(stagedSkillImportUrls.length + stagedSkillImportFiles.length + stagedSkillAttachIds.length + stagedSkillApplyIds.length + stagedSkillDeleteIds.length) > 0
+              ? ` Staged ops: ${stagedSkillImportUrls.length + stagedSkillImportFiles.length + stagedSkillAttachIds.length + stagedSkillApplyIds.length + stagedSkillDeleteIds.length}.`
               : ''}
           </div>
         </div>
@@ -3990,10 +4055,30 @@ export function ProjectsInlineEditor({
         <div className="rules-list">
           {projectSkills.isLoading ? (
             <div className="notice">Loading project skills...</div>
-          ) : skillItems.length === 0 ? (
+          ) : !hasSkillRows ? (
             <div className="notice">No skills imported yet for this project.</div>
           ) : (
-            skillItems.map((skill: ProjectSkill) => {
+            <>
+              {stagedSkillPreviewItems.map((staged) => (
+                <div key={staged.id} className="task-item rule-item">
+                  <div className="task-main">
+                    <div className="task-title rule-item-head">
+                      <strong>{staged.name}</strong>
+                      <div className="row rule-item-head-actions">
+                        <span className="rule-kind-chip">STAGED</span>
+                      </div>
+                    </div>
+                    <div className="meta">
+                      kind: {staged.kind === 'attach' ? 'attach workspace skill' : staged.kind === 'import_file' ? 'import from file' : 'import from URL'}
+                      {' | '}mode: {staged.mode} | trust: {staged.trust}
+                    </div>
+                    <div className="meta">source: {staged.source || '(none)'}</div>
+                  </div>
+                </div>
+              ))}
+            {skillItems.map((skill: ProjectSkill) => {
+              const skillId = String(skill.id || '').trim()
+              const isStagedDelete = stagedSkillDeleteSet.has(skillId)
               const isExpanded = selectedProjectSkillId === skill.id
               const selectedThisSkill = isExpanded && selectedProjectSkill?.id === skill.id
               const linkedRuleId = String(skill.generated_rule_id || '').trim()
@@ -4010,6 +4095,7 @@ export function ProjectsInlineEditor({
                     <div className="task-title rule-item-head">
                         <strong>{skill.name || skill.skill_key || 'Untitled skill'}</strong>
                         <div className="row rule-item-head-actions">
+                          {isStagedDelete ? <span className="rule-kind-chip">STAGED DELETE</span> : null}
                           <DropdownMenu.Root>
                             <DropdownMenu.Trigger asChild>
                               <button
@@ -4044,19 +4130,32 @@ export function ProjectsInlineEditor({
                                   <span>{hasLinkedRule ? 'Reapply to context' : 'Apply to context'}</span>
                                 </DropdownMenu.Item>
                                 <DropdownMenu.Separator className="task-group-menu-separator" />
-                                <DropdownMenu.Item
-                                  className="task-group-menu-item task-group-menu-item-danger"
-                                  disabled={deleteProjectSkillMutation.isPending}
-                                  onSelect={() => {
-                                    setDeleteSkillPrompt({
-                                      id: skill.id,
-                                      name: skill.name || skill.skill_key || 'Untitled skill',
-                                    })
-                                  }}
-                                >
-                                  <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
-                                  <span>Delete skill</span>
-                                </DropdownMenu.Item>
+                                {isStagedDelete ? (
+                                  <DropdownMenu.Item
+                                    className="task-group-menu-item"
+                                    onSelect={() => {
+                                      setStagedSkillDeleteIds((prev) => prev.filter((id) => id !== skillId))
+                                      setGlobalSaveStatus(null)
+                                    }}
+                                  >
+                                    <Icon path="M5 12l4 4L19 7" />
+                                    <span>Undo staged delete</span>
+                                  </DropdownMenu.Item>
+                                ) : (
+                                  <DropdownMenu.Item
+                                    className="task-group-menu-item task-group-menu-item-danger"
+                                    disabled={saveAllPending}
+                                    onSelect={() => {
+                                      setDeleteSkillPrompt({
+                                        id: skill.id,
+                                        name: skill.name || skill.skill_key || 'Untitled skill',
+                                      })
+                                    }}
+                                  >
+                                    <Icon path="M6 7h12M9 7V5h6v2m-7 3v10m4-10v10m4-10v10M8 7l1 14h6l1-14" />
+                                    <span>Delete skill</span>
+                                  </DropdownMenu.Item>
+                                )}
                               </DropdownMenu.Content>
                             </DropdownMenu.Portal>
                           </DropdownMenu.Root>
@@ -4268,7 +4367,8 @@ export function ProjectsInlineEditor({
                   </div>
                 </div>
               )
-            })
+            })}
+            </>
           )}
         </div>
       </div>
@@ -4624,25 +4724,19 @@ export function ProjectsInlineEditor({
                 <button
                   className="status-chip"
                   type="button"
-                  disabled={deleteProjectSkillMutation.isPending}
+                  disabled={saveAllPending}
                   onClick={() => {
                     if (!deleteSkillPrompt) return
-                    const deletingSkillId = deleteSkillPrompt.id
-                    deleteProjectSkillMutation.mutate(
-                      {
-                        skillId: deletingSkillId,
-                        delete_linked_rule: true,
-                      },
-                      {
-                        onSuccess: () => {
-                          if (selectedProjectSkillId === deletingSkillId) setSelectedProjectSkillId(null)
-                        },
-                      }
-                    )
+                    const deletingSkillId = String(deleteSkillPrompt.id || '').trim()
+                    if (!deletingSkillId) return
+                    setStagedSkillDeleteIds((prev) => (prev.includes(deletingSkillId) ? prev : [...prev, deletingSkillId]))
+                    setStagedSkillApplyIds((prev) => prev.filter((id) => id !== deletingSkillId))
+                    if (selectedProjectSkillId === deletingSkillId) setSelectedProjectSkillId(null)
+                    setGlobalSaveStatus(null)
                     setDeleteSkillPrompt(null)
                   }}
                 >
-                  Delete skill
+                  Stage delete
                 </button>
               </AlertDialog.Action>
             </div>
