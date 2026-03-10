@@ -19,6 +19,8 @@ TASK_CREATE_TOOL_DESCRIPTION = (
     "Keep titles neutral; do not encode role/agent in title. "
     "Set status to choose an initial task status at creation time. "
     "execution_triggers accepts JSON string, array, or object. "
+    "If execution_triggers includes non-manual triggers (status_change with scope='external' or schedule), "
+    "provide non-empty instruction in the same create call. "
     "For status watchers use kind='status_change' with scope='self' or scope='external'. "
     "Use selector.task_ids or source_task_ids to listen to specific source tasks. "
     "External without selector.task_ids listens to all source tasks in workspace scope; "
@@ -33,6 +35,8 @@ TASK_UPDATE_TOOL_DESCRIPTION = (
     "Do not set tm.agent:* labels. "
     "Use agent slots already defined in the project's Team Mode configuration; avoid hardcoded mappings. "
     "execution_triggers accepts JSON string, array, or object. "
+    "If patch.execution_triggers includes non-manual triggers (status_change with scope='external' or schedule), "
+    "include non-empty patch.instruction in the same patch call. "
     "For status watchers in patch.execution_triggers: "
     "kind='status_change', scope='self'|'external', match_mode='any'|'all', "
     "to_statuses (required), optional selector.task_ids/source_task_ids, and optional selector.project_id. "
@@ -75,7 +79,8 @@ CREATE_PROJECT_TOOL_DESCRIPTION = (
     "Use when required fields are known and template seeding is not requested. "
     "Chat default profile: embedding_enabled=true, chat_index_mode=KG_AND_VECTOR, "
     "chat_attachment_ingestion_mode=METADATA_ONLY. "
-    "custom_statuses must be an array of strings (for example [\"To do\",\"Dev\",\"QA\",\"Lead\",\"Done\",\"Blocked\"])."
+    "custom_statuses must be an array of strings (for example [\"To do\",\"Dev\",\"QA\",\"Lead\",\"Done\",\"Blocked\"]). "
+    "automation_max_parallel_tasks sets per-project concurrent automation cap (default 4)."
 )
 
 UPDATE_PROJECT_TOOL_DESCRIPTION = (
@@ -119,20 +124,19 @@ CREATE_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION = (
 )
 
 VERIFY_TEAM_MODE_WORKFLOW_TOOL_DESCRIPTION = (
-    "Verify Team Mode workflow wiring for a project (role coverage + required trigger chain). "
+    "Verify Team Mode workflow wiring for a project (role coverage + required topology). "
     "Use this before final success claims for Team Mode setup."
 )
 VERIFY_DELIVERY_WORKFLOW_TOOL_DESCRIPTION = (
     "Verify delivery contract wiring for a project (Git evidence + QA artifacts). "
-    "Checks include git_contract_ok, dev_tasks_have_commit_evidence, and qa_has_verifiable_artifacts."
+    "Checks include repo_context_present, git_contract_ok, qa_has_verifiable_artifacts, "
+    "deploy_execution_evidence_present, and runtime_deploy_health_ok when required."
 )
 
 ENSURE_TEAM_MODE_PROJECT_TOOL_DESCRIPTION = (
-    "[Legacy fallback] Ensure Team Mode is fully ready on a project in one idempotent step: "
-    "enable `team_mode` and `git_delivery` project plugins, "
-    "conditionally attach/apply `github_delivery` when GitHub context exists, and return verification status. "
-    "Accepts project id or exact project name via project_ref. "
-    "Prefer setup_project_orchestration for new setup flows."
+    "[DEPRECATED] Legacy Team Mode setup fallback. "
+    "Use setup_project_orchestration for all new setup flows. "
+    "This tool remains for backward compatibility only."
 )
 
 SETUP_PROJECT_ORCHESTRATION_TOOL_DESCRIPTION = (
@@ -998,6 +1002,7 @@ def create_mcp():
         embedding_enabled: bool = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED,
         embedding_model: str | None = None,
         context_pack_evidence_top_k: int | None = None,
+        automation_max_parallel_tasks: int = 4,
         chat_index_mode: str = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE,
         chat_attachment_ingestion_mode: str = MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE,
         event_storming_enabled: bool = True,
@@ -1013,6 +1018,7 @@ def create_mcp():
             embedding_enabled=embedding_enabled,
             embedding_model=embedding_model,
             context_pack_evidence_top_k=context_pack_evidence_top_k,
+            automation_max_parallel_tasks=automation_max_parallel_tasks,
             chat_index_mode=chat_index_mode,
             chat_attachment_ingestion_mode=chat_attachment_ingestion_mode,
             event_storming_enabled=event_storming_enabled,

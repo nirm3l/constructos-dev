@@ -7529,6 +7529,8 @@ textarea:disabled {
   border-radius: 12px;
   padding: 10px;
   background: color-mix(in srgb, var(--surface), var(--surface-alt) 24%);
+  min-width: 0;
+  max-width: 100%;
 }
 
 .automation-history {
@@ -7537,6 +7539,8 @@ textarea:disabled {
   max-height: 280px;
   overflow: auto;
   margin-bottom: 8px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .automation-history-item {
@@ -7544,6 +7548,8 @@ textarea:disabled {
   border-radius: 10px;
   background: color-mix(in srgb, var(--surface), var(--surface-alt) 14%);
   padding: 8px 10px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .automation-history-item.completed {
@@ -7561,20 +7567,119 @@ textarea:disabled {
 
 .automation-history-head {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  justify-content: flex-start;
+  align-items: flex-start;
+  flex-wrap: wrap;
   gap: 8px;
+  row-gap: 4px;
   margin-bottom: 4px;
+}
+
+.automation-history-head .meta {
+  margin-left: auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.automation-history-body {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .automation-history-body .markdown {
   margin: 0;
   max-height: none;
-  overflow: visible;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: visible;
+}
+
+.automation-history-body .markdown pre {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .automation-history-body .mermaid-diagram-shell {
+  max-width: 100%;
+  overflow-x: auto;
   overflow-y: visible;
+}
+
+.automation-gates {
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 16%);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.automation-gates-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.automation-gates-list {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.automation-gate-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  border: 1px solid color-mix(in srgb, var(--line), var(--surface-alt) 28%);
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 10%);
+}
+
+.automation-gate-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.automation-gate-copy code {
+  font-size: 11px;
+}
+
+.automation-box .badge,
+.automation-box .meta,
+.automation-gate-copy code,
+.automation-box :not(pre) > code {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.automation-box .badge,
+.automation-box :not(pre) > code {
+  white-space: normal;
+}
+
+@media (max-width: 760px) {
+  .automation-gates-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .automation-gate-row {
+    grid-template-columns: 1fr;
+  }
+
+  .automation-history-head .meta {
+    margin-left: 0;
+  }
 }
 
 .codex-progress {

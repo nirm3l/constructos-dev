@@ -27,6 +27,7 @@ class ProjectAggregate(Aggregate):
         embedding_enabled: bool = True,
         embedding_model: str | None = None,
         context_pack_evidence_top_k: int | None = None,
+        automation_max_parallel_tasks: int = 4,
         chat_index_mode: str = "OFF",
         chat_attachment_ingestion_mode: str = "METADATA_ONLY",
         event_storming_enabled: bool = True,
@@ -42,6 +43,7 @@ class ProjectAggregate(Aggregate):
         self.embedding_enabled = embedding_enabled
         self.embedding_model = embedding_model
         self.context_pack_evidence_top_k = context_pack_evidence_top_k
+        self.automation_max_parallel_tasks = max(1, int(automation_max_parallel_tasks or 4))
         self.chat_index_mode = chat_index_mode
         self.chat_attachment_ingestion_mode = chat_attachment_ingestion_mode
         self.event_storming_enabled = event_storming_enabled
@@ -60,6 +62,7 @@ class ProjectAggregate(Aggregate):
         embedding_enabled: bool | None = None,
         embedding_model: str | None = None,
         context_pack_evidence_top_k: int | None = None,
+        automation_max_parallel_tasks: int | None = None,
         chat_index_mode: str | None = None,
         chat_attachment_ingestion_mode: str | None = None,
         event_storming_enabled: bool | None = None,
@@ -84,6 +87,8 @@ class ProjectAggregate(Aggregate):
             self.embedding_model = embedding_model
         if context_pack_evidence_top_k is not None:
             self.context_pack_evidence_top_k = context_pack_evidence_top_k
+        if automation_max_parallel_tasks is not None:
+            self.automation_max_parallel_tasks = max(1, int(automation_max_parallel_tasks))
         if chat_index_mode is not None:
             self.chat_index_mode = chat_index_mode
         if chat_attachment_ingestion_mode is not None:

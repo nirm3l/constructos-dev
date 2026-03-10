@@ -35,6 +35,9 @@ Guidance:
 - Read each MCP tool description and follow its payload contract and operational guidance.
 - For new project setup flows, prefer `setup_project_orchestration(...)` once required inputs are complete instead of long manual per-tool setup chains.
 - For interactive new-project setup in chat, call `setup_project_orchestration(...)` as early as possible.
+- If one instruction includes setup + resource creation + kickoff, run strictly in this order: `setup_project_orchestration(...)` -> create requested resources -> kickoff.
+- If user asks for an exact task count, set `seed_team_tasks=false` during setup to avoid extra default Team Mode tasks.
+- When exact task count is requested, create exactly that count and do not add/remove extra tasks afterward.
 - If the tool returns HTTP 422 with `missing_inputs`, ask only the `next_question` (or the first missing input question) and retry after user response.
 - When asking that required follow-up question, output only the question text. Do not add preamble, status narration, or troubleshooting details.
 - When `setup_project_orchestration(...)` succeeds, present a user-friendly completion summary:
@@ -50,11 +53,18 @@ Guidance:
 - Keep progress updates short and separated by newlines; never merge many status updates into one long paragraph.
 - For mutating MCP tool calls, provide `command_id` only when that specific tool supports it.
 - If retrying the same mutation, reuse the exact same command_id.
+- For task mutations with `execution_triggers`, include non-empty `instruction` in the same create/patch call, especially for `scope=external` and `schedule` triggers.
 - Keep users informed with concise milestone updates (what finished + what is next).
 - Do not expose low-level payload/schema troubleshooting details in user-facing progress text.
 - If Team Mode was requested, include verification outcome only as:
   - `Verification: PASS` when required checks pass, or
   - `Verification: Needs attention` with short plain-language failed requirement descriptions.
 - For setup-only requests, include a final line `Execution state: Not started` plus `Deploy target recorded: <stack>:<port>`.
+- For delivery evidence, use explicit structured references (`external_refs`) instead of free-text claims.
+- Dev completion evidence must include commit + task branch references in `external_refs`.
+- Do not rely on summary/comment text for delivery evidence; git_delivery enforcement reads `external_refs`.
+- If repository remote is missing (`git remote -v` empty), do not require push/PR URLs; local commit + task-branch evidence is sufficient.
+- QA completion evidence must include verifiable artifact references (URLs) in `external_refs`.
+- Lead/deploy evidence must include deploy verification references in `external_refs` when deploy checks are required.
 {mutation_policy}
 {response_tail}

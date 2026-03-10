@@ -14,13 +14,17 @@ from dataclasses import dataclass
 from sqlalchemy import select
 
 from plugins import executor_policy as plugin_executor_policy
-from plugins.team_mode.task_roles import canonicalize_role, derive_task_role
+from plugins.team_mode.task_roles import canonicalize_role, derive_task_role, normalize_team_agents
 from shared.context_frames import build_project_context_frame
 from shared.models import Project, ProjectMember, ProjectPluginConfig, ProjectRule, ProjectSkill, SessionLocal, Task
+from shared.project_repository import (
+    ensure_project_repository_initialized,
+    resolve_task_branch_name,
+    resolve_task_worktree_path,
+)
 from shared.settings import AGENT_CODEX_COMMAND, AGENT_EXECUTOR_MODE, AGENT_EXECUTOR_TIMEOUT_SECONDS
 
 _TIMEOUT_UNSET = object()
-_DEFAULT_CODEX_WORKDIR = "/home/app/workspace"
 _DEFAULT_CODEX_HOME_ROOT = "/tmp/codex-home"
 _TASK_AUTOMATION_SESSION_PREFIX = "task-automation:"
 
@@ -30,6 +34,7 @@ class AutomationOutcome:
     action: str
     summary: str
     comment: str | None = None
+    execution_outcome_contract: dict[str, object] | None = None
     usage: dict[str, object] | None = None
     codex_session_id: str | None = None
     resume_attempted: bool = False
@@ -252,7 +257,7 @@ def _resolve_task_assignee_project_role(*, task_id: str | None, project_id: str 
         return None
     with SessionLocal() as db:
         task_row = db.execute(
-            select(Task.assignee_id, Task.status, Task.labels).where(
+            select(Task.assignee_id, Task.assigned_agent_code, Task.status, Task.labels).where(
                 Task.id == normalized_task_id,
                 Task.project_id == normalized_project_id,
                 Task.is_deleted == False,  # noqa: E712
@@ -260,17 +265,39 @@ def _resolve_task_assignee_project_role(*, task_id: str | None, project_id: str 
         ).first()
         if task_row is None:
             return None
-        assignee_id, status, labels = task_row
+        assignee_id, assigned_agent_code, status, labels = task_row
         normalized_assignee_id = str(assignee_id or "").strip()
         if not normalized_assignee_id:
             return None
+        team_mode_cfg_row = db.execute(
+            select(ProjectPluginConfig.config_json).where(
+                ProjectPluginConfig.project_id == normalized_project_id,
+                ProjectPluginConfig.plugin_key == "team_mode",
+                ProjectPluginConfig.enabled == True,  # noqa: E712
+                ProjectPluginConfig.is_deleted == False,  # noqa: E712
+            )
+        ).scalar_one_or_none()
+        agent_role_by_code: dict[str, str] = {}
+        if team_mode_cfg_row is not None:
+            try:
+                parsed_cfg = json.loads(str(team_mode_cfg_row or "").strip() or "{}")
+            except Exception:
+                parsed_cfg = {}
+            if isinstance(parsed_cfg, dict):
+                for agent in normalize_team_agents(parsed_cfg.get("team")):
+                    code = str(agent.get("id") or "").strip()
+                    role = str(agent.get("authority_role") or "").strip()
+                    if code and role:
+                        agent_role_by_code[code] = role
         declared_role = derive_task_role(
             task_like={
                 "assignee_id": normalized_assignee_id,
+                "assigned_agent_code": str(assigned_agent_code or "").strip(),
                 "labels": labels,
                 "status": str(status or "").strip(),
             },
             member_role_by_user_id={},
+            agent_role_by_code=agent_role_by_code,
             allow_status_fallback=False,
         )
         if declared_role:
@@ -316,13 +343,6 @@ def _is_task_scoped_team_mode_context_enabled(
 def _slugify(value: str, *, fallback: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
     return normalized or fallback
-
-
-def _resolve_workspace_root() -> Path:
-    raw = str(os.getenv("AGENT_CODEX_WORKDIR", _DEFAULT_CODEX_WORKDIR)).strip() or _DEFAULT_CODEX_WORKDIR
-    path = Path(raw).expanduser().resolve()
-    path.mkdir(parents=True, exist_ok=True)
-    return path
 
 
 def _resolve_effective_chat_session_id(
@@ -407,50 +427,75 @@ def _run_git(*, cwd: Path, args: list[str]) -> tuple[int, str, str]:
     return proc.returncode, str(proc.stdout or "").strip(), str(proc.stderr or "").strip()
 
 
-def _ensure_git_repo_initialized(*, repo_root: Path) -> None:
-    if not (repo_root / ".git").exists():
-        repo_root.mkdir(parents=True, exist_ok=True)
-        code, _out, err = _run_git(cwd=repo_root, args=["init", "-b", "main"])
-        if code != 0:
-            raise RuntimeError(f"Failed to initialize repository at {repo_root}: {err[:200]}")
-    code_head, _out_head, _err_head = _run_git(cwd=repo_root, args=["rev-parse", "--verify", "HEAD"])
-    if code_head == 0:
-        return
-    _run_git(cwd=repo_root, args=["config", "user.name", "Constructos Automation"])
-    _run_git(cwd=repo_root, args=["config", "user.email", "automation@constructos.local"])
-    readme_path = repo_root / "README.md"
-    if not readme_path.exists():
-        readme_path.write_text("# Project Workspace\n", encoding="utf-8")
-    code_add, _out_add, err_add = _run_git(cwd=repo_root, args=["add", "README.md"])
-    if code_add != 0:
-        raise RuntimeError(f"Failed to stage bootstrap files at {repo_root}: {err_add[:200]}")
-    code_commit, _out_commit, err_commit = _run_git(
-        cwd=repo_root,
-        args=["commit", "-m", "chore: initialize project workspace"],
+def _collect_git_snapshot(*, cwd: Path | None, task_branch: str | None) -> dict[str, object] | None:
+    if cwd is None:
+        return None
+    if not cwd.exists():
+        return None
+    code_sha, head_sha, _err_sha = _run_git(cwd=cwd, args=["rev-parse", "HEAD"])
+    if code_sha != 0 or not str(head_sha or "").strip():
+        return None
+    code_branch, branch_name, _err_branch = _run_git(cwd=cwd, args=["branch", "--show-current"])
+    normalized_branch = str(branch_name or "").strip() if code_branch == 0 else ""
+    code_status, status_out, _err_status = _run_git(cwd=cwd, args=["status", "--porcelain"])
+    is_dirty = bool(str(status_out or "").strip()) if code_status == 0 else False
+    normalized_task_branch = str(task_branch or "").strip()
+    return {
+        "head_sha": str(head_sha or "").strip().lower(),
+        "branch": normalized_branch or normalized_task_branch or None,
+        "on_task_branch": bool(normalized_task_branch and normalized_branch == normalized_task_branch),
+        "is_dirty": bool(is_dirty),
+    }
+
+
+def _attach_git_evidence_usage(
+    outcome: AutomationOutcome,
+    *,
+    task_workdir: str | None,
+    repo_root: str | None,
+    task_branch: str | None,
+    git_before: dict[str, object] | None,
+    git_after: dict[str, object] | None,
+) -> AutomationOutcome:
+    usage_payload: dict[str, object] = dict(outcome.usage or {})
+    usage_payload["git_evidence"] = {
+        "task_workdir": str(task_workdir or "").strip() or None,
+        "repo_root": str(repo_root or "").strip() or None,
+        "task_branch": str(task_branch or "").strip() or None,
+        "before": dict(git_before or {}),
+        "after": dict(git_after or {}),
+    }
+    return AutomationOutcome(
+        action=outcome.action,
+        summary=outcome.summary,
+        comment=outcome.comment,
+        execution_outcome_contract=outcome.execution_outcome_contract,
+        usage=usage_payload,
+        codex_session_id=outcome.codex_session_id,
+        resume_attempted=outcome.resume_attempted,
+        resume_succeeded=outcome.resume_succeeded,
+        resume_fallback_used=outcome.resume_fallback_used,
     )
-    if code_commit != 0:
-        raise RuntimeError(f"Failed to create bootstrap commit at {repo_root}: {err_commit[:200]}")
 
 
 def _ensure_task_worktree(
     *,
     project_name: str | None,
+    project_id: str | None,
     task_id: str,
     title: str,
 ) -> tuple[Path, str, Path]:
-    workspace_root = _resolve_workspace_root()
-    project_slug = _slugify(str(project_name or "").strip(), fallback="project")
-    repo_root = workspace_root / project_slug
-    _ensure_git_repo_initialized(repo_root=repo_root)
-
-    task_short = _slugify(task_id[:8], fallback="task")
-    title_slug = _slugify(title, fallback="work")
-    branch_name = f"task/{task_short}-{title_slug[:40]}".rstrip("-")
-    if len(branch_name) > 120:
-        branch_name = branch_name[:120].rstrip("-")
-    worktree_root = repo_root / ".constructos" / "worktrees"
-    worktree_root.mkdir(parents=True, exist_ok=True)
-    task_worktree = worktree_root / task_short
+    repo_root = ensure_project_repository_initialized(
+        project_name=project_name,
+        project_id=project_id,
+    )
+    branch_name = resolve_task_branch_name(task_id=task_id, title=title)
+    task_worktree = resolve_task_worktree_path(
+        project_name=project_name,
+        project_id=project_id,
+        task_id=task_id,
+    )
+    task_worktree.parent.mkdir(parents=True, exist_ok=True)
 
     code, _out, _err = _run_git(cwd=repo_root, args=["show-ref", "--verify", f"refs/heads/{branch_name}"])
     branch_exists = code == 0
@@ -487,11 +532,15 @@ def _ensure_task_worktree(
     return task_worktree, branch_name, repo_root
 
 
-def _resolve_project_repo_root_and_branch(*, project_name: str | None) -> tuple[Path, str]:
-    workspace_root = _resolve_workspace_root()
-    project_slug = _slugify(str(project_name or "").strip(), fallback="project")
-    repo_root = workspace_root / project_slug
-    _ensure_git_repo_initialized(repo_root=repo_root)
+def _resolve_project_repo_root_and_branch(
+    *,
+    project_name: str | None,
+    project_id: str | None,
+) -> tuple[Path, str]:
+    repo_root = ensure_project_repository_initialized(
+        project_name=project_name,
+        project_id=project_id,
+    )
     code, branch_out, _err = _run_git(cwd=repo_root, args=["branch", "--show-current"])
     if code == 0 and str(branch_out or "").strip():
         return repo_root, str(branch_out or "").strip()
@@ -499,14 +548,108 @@ def _resolve_project_repo_root_and_branch(*, project_name: str | None) -> tuple[
 
 
 def _placeholder_outcome(*, instruction: str, current_status: str) -> AutomationOutcome:
-    lower_instruction = instruction.lower()
-    should_complete = any(token in lower_instruction for token in ("#complete", "complete task", "mark done"))
+    should_complete = False
     if should_complete and current_status != "Done":
-        return AutomationOutcome(action="complete", summary="Automation runner marked task as completed.")
+        return AutomationOutcome(
+            action="complete",
+            summary="Automation runner marked task as completed.",
+            execution_outcome_contract={
+                "contract_version": 1,
+                "files_changed": [],
+                "commit_sha": None,
+                "branch": None,
+                "tests_run": False,
+                "tests_passed": False,
+                "artifacts": [],
+            },
+        )
     comment = "Codex runner: request accepted, leaving progress note."
     if instruction:
         comment += f"\nInstruction: {instruction}"
-    return AutomationOutcome(action="comment", summary="Automation runner left a task comment.", comment=comment)
+    return AutomationOutcome(
+        action="comment",
+        summary="Automation runner left a task comment.",
+        comment=comment,
+        execution_outcome_contract={
+            "contract_version": 1,
+            "files_changed": [],
+            "commit_sha": None,
+            "branch": None,
+            "tests_run": False,
+            "tests_passed": False,
+            "artifacts": [],
+        },
+    )
+
+
+def _normalize_execution_outcome_contract(raw: object) -> dict[str, object]:
+    if not isinstance(raw, dict):
+        raise RuntimeError('Executor JSON must include object field "execution_outcome_contract"')
+    contract_version = raw.get("contract_version")
+    try:
+        normalized_version = int(contract_version)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("execution_outcome_contract.contract_version must be integer 1") from exc
+    if normalized_version != 1:
+        raise RuntimeError("execution_outcome_contract.contract_version must be 1")
+
+    files_changed_raw = raw.get("files_changed")
+    if not isinstance(files_changed_raw, list):
+        raise RuntimeError("execution_outcome_contract.files_changed must be an array")
+    files_changed: list[str] = []
+    for item in files_changed_raw:
+        value = str(item or "").strip()
+        if not value:
+            continue
+        files_changed.append(value)
+
+    commit_sha_raw = raw.get("commit_sha")
+    commit_sha: str | None = None
+    if commit_sha_raw is not None:
+        normalized_sha = str(commit_sha_raw or "").strip().lower()
+        if normalized_sha:
+            commit_sha = normalized_sha
+
+    branch_raw = raw.get("branch")
+    branch: str | None = None
+    if branch_raw is not None:
+        normalized_branch = str(branch_raw or "").strip()
+        if normalized_branch:
+            branch = normalized_branch
+
+    tests_run_raw = raw.get("tests_run")
+    tests_passed_raw = raw.get("tests_passed")
+    if not isinstance(tests_run_raw, bool):
+        raise RuntimeError("execution_outcome_contract.tests_run must be boolean")
+    if not isinstance(tests_passed_raw, bool):
+        raise RuntimeError("execution_outcome_contract.tests_passed must be boolean")
+
+    artifacts_raw = raw.get("artifacts")
+    if not isinstance(artifacts_raw, list):
+        raise RuntimeError("execution_outcome_contract.artifacts must be an array")
+    artifacts: list[dict[str, object]] = []
+    for item in artifacts_raw:
+        if not isinstance(item, dict):
+            raise RuntimeError("execution_outcome_contract.artifacts items must be objects")
+        kind = str(item.get("kind") or "").strip()
+        ref = str(item.get("ref") or "").strip()
+        if not kind or not ref:
+            raise RuntimeError("execution_outcome_contract.artifacts items require non-empty kind and ref")
+        description_raw = item.get("description")
+        description: str | None = None
+        if description_raw is not None:
+            description = str(description_raw)
+        artifacts.append({"kind": kind, "ref": ref, "description": description})
+
+    return {
+        "contract_version": 1,
+        "files_changed": files_changed,
+        "commit_sha": commit_sha,
+        "branch": branch,
+        "tests_run": tests_run_raw,
+        "tests_passed": tests_passed_raw,
+        "artifacts": artifacts,
+    }
 
 
 def _parse_command_outcome(stdout: str) -> AutomationOutcome:
@@ -521,6 +664,7 @@ def _parse_command_outcome(stdout: str) -> AutomationOutcome:
     action = str(payload.get("action", "")).strip().lower()
     summary = str(payload.get("summary", "")).strip()
     comment = payload.get("comment")
+    execution_outcome_contract = _normalize_execution_outcome_contract(payload.get("execution_outcome_contract"))
     usage_raw = payload.get("usage")
     codex_session_id_raw = str(payload.get("codex_session_id") or "").strip()
     codex_session_id = codex_session_id_raw or None
@@ -572,6 +716,7 @@ def _parse_command_outcome(stdout: str) -> AutomationOutcome:
         action=action,
         summary=summary,
         comment=comment,
+        execution_outcome_contract=execution_outcome_contract,
         usage=usage,
         codex_session_id=codex_session_id,
         resume_attempted=bool(resume_attempted),
@@ -597,6 +742,7 @@ def _attach_context_frame_usage(
         action=outcome.action,
         summary=outcome.summary,
         comment=outcome.comment,
+        execution_outcome_contract=outcome.execution_outcome_contract,
         usage=usage_payload or None,
         codex_session_id=outcome.codex_session_id,
         resume_attempted=outcome.resume_attempted,
@@ -652,6 +798,11 @@ def build_automation_usage_metadata(outcome: AutomationOutcome) -> dict[str, obj
     codex_session_id = str(outcome.codex_session_id or "").strip() or None
     payload: dict[str, object] = {
         "last_agent_usage": usage if usage else None,
+        "last_agent_execution_outcome_contract": (
+            dict(outcome.execution_outcome_contract)
+            if isinstance(outcome.execution_outcome_contract, dict)
+            else None
+        ),
         "last_agent_prompt_mode": prompt_mode,
         "last_agent_prompt_segment_chars": prompt_segment_chars or None,
         "last_agent_codex_session_id": codex_session_id,
@@ -774,6 +925,10 @@ def execute_task_automation(
     trigger_from_status: str | None = None,
     trigger_to_status: str | None = None,
     trigger_timestamp: str | None = None,
+    execution_kickoff_intent: bool = False,
+    workflow_scope: str | None = None,
+    execution_mode: str | None = None,
+    task_completion_requested: bool = False,
     chat_session_id: str | None = None,
     codex_session_id: str | None = None,
     actor_user_id: str | None = None,
@@ -784,12 +939,21 @@ def execute_task_automation(
     prompt_instruction_segments: dict[str, int] | None = None,
     timeout_seconds: float | int | None | object = _TIMEOUT_UNSET,
 ) -> AutomationOutcome:
-    # Deterministic shortcut: users can explicitly complete a task via "#complete".
-    # This should work regardless of executor mode, and avoids reliance on the LLM for a simple directive.
-    lower_instruction = (instruction or "").lower()
-    should_complete = any(token in lower_instruction for token in ("#complete", "complete task", "mark done"))
+    should_complete = bool(task_completion_requested)
     if str(task_id or "").strip() and should_complete and status != "Done" and allow_mutations:
-        return AutomationOutcome(action="complete", summary="Automation runner marked task as completed.")
+        return AutomationOutcome(
+            action="complete",
+            summary="Automation runner marked task as completed.",
+            execution_outcome_contract={
+                "contract_version": 1,
+                "files_changed": [],
+                "commit_sha": None,
+                "branch": None,
+                "tests_run": False,
+                "tests_passed": False,
+                "artifacts": [],
+            },
+        )
 
     if AGENT_EXECUTOR_MODE != "command":
         return _placeholder_outcome(instruction=instruction, current_status=status)
@@ -831,6 +995,7 @@ def execute_task_automation(
     ) and str(task_id or "").strip():
         workdir_path, branch_name, repo_root_path = _ensure_task_worktree(
             project_name=project_name,
+            project_id=project_id,
             task_id=str(task_id),
             title=title,
         )
@@ -838,7 +1003,10 @@ def execute_task_automation(
         task_branch = branch_name
         repo_root = str(repo_root_path)
     elif git_delivery_enabled and not team_mode_enabled:
-        repo_root_path, current_branch = _resolve_project_repo_root_and_branch(project_name=project_name)
+        repo_root_path, current_branch = _resolve_project_repo_root_and_branch(
+            project_name=project_name,
+            project_id=project_id,
+        )
         task_workdir = str(repo_root_path)
         repo_root = str(repo_root_path)
         task_branch = current_branch
@@ -873,6 +1041,10 @@ def execute_task_automation(
         "trigger_from_status": trigger_from_status,
         "trigger_to_status": trigger_to_status,
         "trigger_timestamp": trigger_timestamp,
+        "execution_kickoff_intent": bool(execution_kickoff_intent),
+        "workflow_scope": str(workflow_scope or "").strip() or None,
+        "execution_mode": str(execution_mode or "").strip() or None,
+        "task_completion_requested": bool(task_completion_requested),
         "chat_session_id": effective_chat_session_id,
         "codex_session_id": codex_session_id,
         "actor_user_id": actor_user_id,
@@ -902,6 +1074,8 @@ def execute_task_automation(
         "repo_root": repo_root,
     }
     def _run_once() -> AutomationOutcome:
+        workdir_path = Path(task_workdir) if str(task_workdir or "").strip() else None
+        git_before = _collect_git_snapshot(cwd=workdir_path, task_branch=task_branch)
         try:
             proc = subprocess.run(
                 command,
@@ -918,8 +1092,18 @@ def execute_task_automation(
         if proc.returncode != 0:
             err_text = (proc.stderr or proc.stdout or "").strip()
             raise RuntimeError(f"Executor failed (exit={proc.returncode}): {err_text[:2000]}")
+        parsed_outcome = _parse_command_outcome(proc.stdout)
+        git_after = _collect_git_snapshot(cwd=workdir_path, task_branch=task_branch)
+        parsed_outcome = _attach_git_evidence_usage(
+            parsed_outcome,
+            task_workdir=task_workdir,
+            repo_root=repo_root,
+            task_branch=task_branch,
+            git_before=git_before,
+            git_after=git_after,
+        )
         return _attach_context_frame_usage(
-            _parse_command_outcome(proc.stdout),
+            parsed_outcome,
             frame_mode=frame_mode,
             frame_revision=frame_revision,
         )
@@ -954,6 +1138,10 @@ def execute_task_automation_stream(
     trigger_from_status: str | None = None,
     trigger_to_status: str | None = None,
     trigger_timestamp: str | None = None,
+    execution_kickoff_intent: bool = False,
+    workflow_scope: str | None = None,
+    execution_mode: str | None = None,
+    task_completion_requested: bool = False,
     chat_session_id: str | None = None,
     codex_session_id: str | None = None,
     actor_user_id: str | None = None,
@@ -967,11 +1155,21 @@ def execute_task_automation_stream(
     stream_plain_text: bool = False,
     cancel_event: threading.Event | None = None,
 ) -> AutomationOutcome:
-    # Deterministic shortcut for explicit completion requests.
-    lower_instruction = (instruction or "").lower()
-    should_complete = any(token in lower_instruction for token in ("#complete", "complete task", "mark done"))
+    should_complete = bool(task_completion_requested)
     if str(task_id or "").strip() and should_complete and status != "Done" and allow_mutations:
-        return AutomationOutcome(action="complete", summary="Automation runner marked task as completed.")
+        return AutomationOutcome(
+            action="complete",
+            summary="Automation runner marked task as completed.",
+            execution_outcome_contract={
+                "contract_version": 1,
+                "files_changed": [],
+                "commit_sha": None,
+                "branch": None,
+                "tests_run": False,
+                "tests_passed": False,
+                "artifacts": [],
+            },
+        )
 
     if AGENT_EXECUTOR_MODE != "command":
         return _placeholder_outcome(instruction=instruction, current_status=status)
@@ -1013,6 +1211,7 @@ def execute_task_automation_stream(
     ) and str(task_id or "").strip():
         workdir_path, branch_name, repo_root_path = _ensure_task_worktree(
             project_name=project_name,
+            project_id=project_id,
             task_id=str(task_id),
             title=title,
         )
@@ -1020,7 +1219,10 @@ def execute_task_automation_stream(
         task_branch = branch_name
         repo_root = str(repo_root_path)
     elif git_delivery_enabled and not team_mode_enabled:
-        repo_root_path, current_branch = _resolve_project_repo_root_and_branch(project_name=project_name)
+        repo_root_path, current_branch = _resolve_project_repo_root_and_branch(
+            project_name=project_name,
+            project_id=project_id,
+        )
         task_workdir = str(repo_root_path)
         repo_root = str(repo_root_path)
         task_branch = current_branch
@@ -1058,6 +1260,10 @@ def execute_task_automation_stream(
         "trigger_from_status": trigger_from_status,
         "trigger_to_status": trigger_to_status,
         "trigger_timestamp": trigger_timestamp,
+        "execution_kickoff_intent": bool(execution_kickoff_intent),
+        "workflow_scope": str(workflow_scope or "").strip() or None,
+        "execution_mode": str(execution_mode or "").strip() or None,
+        "task_completion_requested": bool(task_completion_requested),
         "chat_session_id": effective_chat_session_id,
         "codex_session_id": codex_session_id,
         "actor_user_id": actor_user_id,
@@ -1089,6 +1295,8 @@ def execute_task_automation_stream(
         "stream_plain_text": effective_stream_plain_text,
     }
     def _run_once() -> AutomationOutcome:
+        workdir_path = Path(task_workdir) if str(task_workdir or "").strip() else None
+        git_before = _collect_git_snapshot(cwd=workdir_path, task_branch=task_branch)
         try:
             stdout = _run_command_streaming(
                 command=command,
@@ -1104,9 +1312,28 @@ def execute_task_automation_stream(
                 action="comment",
                 summary="Stopped.",
                 comment="Run cancelled by user.",
+                execution_outcome_contract={
+                    "contract_version": 1,
+                    "files_changed": [],
+                    "commit_sha": None,
+                    "branch": None,
+                    "tests_run": False,
+                    "tests_passed": False,
+                    "artifacts": [],
+                },
             )
+        parsed_outcome = _parse_command_outcome(stdout)
+        git_after = _collect_git_snapshot(cwd=workdir_path, task_branch=task_branch)
+        parsed_outcome = _attach_git_evidence_usage(
+            parsed_outcome,
+            task_workdir=task_workdir,
+            repo_root=repo_root,
+            task_branch=task_branch,
+            git_before=git_before,
+            git_after=git_after,
+        )
         return _attach_context_frame_usage(
-            _parse_command_outcome(stdout),
+            parsed_outcome,
             frame_mode=frame_mode,
             frame_revision=frame_revision,
         )

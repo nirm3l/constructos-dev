@@ -173,6 +173,7 @@ def create_task(
         attachment_refs=[item.model_dump() for item in payload.attachment_refs],
         instruction=payload.instruction if "instruction" in provided_fields else None,
         execution_triggers=payload.execution_triggers if "execution_triggers" in provided_fields else None,
+        task_relationships=payload.task_relationships if "task_relationships" in provided_fields else None,
         recurring_rule=payload.recurring_rule if "recurring_rule" in provided_fields else None,
         specification_id=payload.specification_id,
         task_group_id=payload.task_group_id,
@@ -394,6 +395,14 @@ def request_automation_run(
     return gateway.request_task_automation_run(
         task_id=task_id,
         instruction=payload.instruction,
+        source=payload.source,
+        execution_intent=payload.execution_intent,
+        execution_kickoff_intent=payload.execution_kickoff_intent,
+        project_creation_intent=payload.project_creation_intent,
+        workflow_scope=payload.workflow_scope,
+        execution_mode=payload.execution_mode,
+        task_completion_requested=payload.task_completion_requested,
+        classifier_reason=payload.classifier_reason,
         command_id=command_id,
     )
 

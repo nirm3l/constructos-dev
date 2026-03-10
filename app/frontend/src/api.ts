@@ -943,6 +943,7 @@ export const createProject = (
     embedding_enabled?: boolean
     embedding_model?: string | null
     context_pack_evidence_top_k?: number | null
+    automation_max_parallel_tasks?: number
     chat_index_mode?: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'
     chat_attachment_ingestion_mode?: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
     event_storming_enabled?: boolean
@@ -1014,6 +1015,7 @@ export const patchProject = (
       | 'embedding_enabled'
       | 'embedding_model'
       | 'context_pack_evidence_top_k'
+      | 'automation_max_parallel_tasks'
       | 'chat_index_mode'
       | 'chat_attachment_ingestion_mode'
       | 'event_storming_enabled'

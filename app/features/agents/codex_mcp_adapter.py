@@ -513,8 +513,14 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     task_workdir = str(ctx.get("task_workdir") or "").strip() or "_(not available)_"
     task_branch = str(ctx.get("task_branch") or "").strip() or "_(not available)_"
     repo_root = str(ctx.get("repo_root") or "").strip() or "_(not available)_"
-    is_team_mode_kickoff = plugin_runner_policy.is_lead_role(actor_project_role) and plugin_runner_policy.is_kickoff_instruction(
-        str(instruction or "")
+    request_execution_kickoff_intent = bool(ctx.get("execution_kickoff_intent"))
+    request_workflow_scope = str(ctx.get("workflow_scope") or "").strip().lower()
+    request_execution_mode = str(ctx.get("execution_mode") or "").strip().lower()
+    is_team_mode_kickoff = (
+        plugin_runner_policy.is_lead_role(actor_project_role)
+        and request_execution_kickoff_intent
+        and request_workflow_scope == "team_mode"
+        and request_execution_mode in {"kickoff_only", "setup_then_kickoff"}
     )
     project_name = ctx.get("project_name") or ""
     project_description = str(ctx.get("project_description") or "")
@@ -616,6 +622,8 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         "- Return action=complete only if this task should be completed; otherwise return action=comment.\n"
         "- summary must state what was actually done.\n"
         "- comment should be concise and optional; use null when no extra runner comment is needed.\n"
+        "- execution_outcome_contract is mandatory and must be truthful to observed execution state.\n"
+        "- execution_outcome_contract fields are strict: contract_version=1, files_changed[], commit_sha|null, branch|null, tests_run(bool), tests_passed(bool), artifacts[].\n"
         + (
             "- This is a Team Mode kickoff task: return action=comment only and keep task status unchanged (do not complete).\n"
             if is_team_mode_kickoff
@@ -830,8 +838,14 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     task_workdir = str(ctx.get("task_workdir") or "").strip() or "_(not available)_"
     task_branch = str(ctx.get("task_branch") or "").strip() or "_(not available)_"
     repo_root = str(ctx.get("repo_root") or "").strip() or "_(not available)_"
-    is_team_mode_kickoff = plugin_runner_policy.is_lead_role(actor_project_role) and plugin_runner_policy.is_kickoff_instruction(
-        str(instruction or "")
+    request_execution_kickoff_intent = bool(ctx.get("execution_kickoff_intent"))
+    request_workflow_scope = str(ctx.get("workflow_scope") or "").strip().lower()
+    request_execution_mode = str(ctx.get("execution_mode") or "").strip().lower()
+    is_team_mode_kickoff = (
+        plugin_runner_policy.is_lead_role(actor_project_role)
+        and request_execution_kickoff_intent
+        and request_workflow_scope == "team_mode"
+        and request_execution_mode in {"kickoff_only", "setup_then_kickoff"}
     )
     project_name = ctx.get("project_name") or ""
     plugin_policy_json = str(ctx.get("plugin_policy_json") or "").strip()
@@ -881,6 +895,8 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
         "- Return action=complete only if this task should be completed; otherwise return action=comment.\n"
         "- summary must state what was actually done.\n"
         "- comment should be concise and optional; use null when no extra runner comment is needed.\n"
+        "- execution_outcome_contract is mandatory and must be truthful to observed execution state.\n"
+        "- execution_outcome_contract fields are strict: contract_version=1, files_changed[], commit_sha|null, branch|null, tests_run(bool), tests_passed(bool), artifacts[].\n"
         + (
             "- This is a Team Mode kickoff task: return action=comment only and keep task status unchanged (do not complete).\n"
             if is_team_mode_kickoff
@@ -1719,8 +1735,42 @@ def main() -> int:
             "action": {"type": "string", "enum": ["complete", "comment"]},
             "summary": {"type": "string"},
             "comment": {"type": ["string", "null"]},
+            "execution_outcome_contract": {
+                "type": "object",
+                "properties": {
+                    "contract_version": {"type": "integer", "enum": [1]},
+                    "files_changed": {"type": "array", "items": {"type": "string"}},
+                    "commit_sha": {"type": ["string", "null"]},
+                    "branch": {"type": ["string", "null"]},
+                    "tests_run": {"type": "boolean"},
+                    "tests_passed": {"type": "boolean"},
+                    "artifacts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"type": "string"},
+                                "ref": {"type": "string"},
+                                "description": {"type": ["string", "null"]},
+                            },
+                            "required": ["kind", "ref", "description"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": [
+                    "contract_version",
+                    "files_changed",
+                    "commit_sha",
+                    "branch",
+                    "tests_run",
+                    "tests_passed",
+                    "artifacts",
+                ],
+                "additionalProperties": False,
+            },
         },
-        "required": ["action", "summary", "comment"],
+        "required": ["action", "summary", "comment", "execution_outcome_contract"],
         "additionalProperties": False,
     }
     codex_session_id: str | None = None
@@ -1786,6 +1836,17 @@ def main() -> int:
     action = str(out.get("action", "")).strip().lower()
     summary = str(out.get("summary", "")).strip()
     comment = out.get("comment")
+    execution_outcome_contract = out.get("execution_outcome_contract")
+    if not isinstance(execution_outcome_contract, dict):
+        execution_outcome_contract = {
+            "contract_version": 1,
+            "files_changed": [],
+            "commit_sha": None,
+            "branch": None,
+            "tests_run": False,
+            "tests_passed": False,
+            "artifacts": [],
+        }
     if action not in {"complete", "comment"}:
         raise RuntimeError("codex adapter received invalid action")
     if comment is not None:
@@ -1805,6 +1866,7 @@ def main() -> int:
                 "action": action,
                 "summary": summary,
                 "comment": comment,
+                "execution_outcome_contract": execution_outcome_contract,
                 "usage": usage_payload,
                 "codex_session_id": codex_session_id,
                 "resume_attempted": resume_attempted,

@@ -42,6 +42,7 @@ class TaskCreate(BaseModel):
     attachment_refs: list[AttachmentRef] = Field(default_factory=list)
     instruction: str | None = None
     execution_triggers: list[dict[str, Any]] = Field(default_factory=list)
+    task_relationships: list[dict[str, Any]] = Field(default_factory=list)
     recurring_rule: str | None = None
     task_type: str = "manual"
     scheduled_instruction: str | None = None
@@ -64,6 +65,7 @@ class TaskPatch(BaseModel):
     attachment_refs: list[AttachmentRef] | None = None
     instruction: str | None = None
     execution_triggers: list[dict[str, Any]] | None = None
+    task_relationships: list[dict[str, Any]] | None = None
     archived: bool | None = None
     project_id: str | None = None
     task_group_id: str | None = None
@@ -87,6 +89,14 @@ class CommentCreate(BaseModel):
 
 class TaskAutomationRun(BaseModel):
     instruction: str | None = None
+    source: str | None = None
+    execution_intent: bool | None = None
+    execution_kickoff_intent: bool | None = None
+    project_creation_intent: bool | None = None
+    workflow_scope: str | None = None
+    execution_mode: str | None = None
+    task_completion_requested: bool | None = None
+    classifier_reason: str | None = None
 
 
 class AgentChatRun(BaseModel):
@@ -150,6 +160,7 @@ class ProjectCreate(BaseModel):
     embedding_enabled: bool = True
     embedding_model: str | None = None
     context_pack_evidence_top_k: int | None = Field(default=None, ge=1, le=40)
+    automation_max_parallel_tasks: int = Field(default=4, ge=1, le=50)
     chat_index_mode: str = "OFF"
     chat_attachment_ingestion_mode: str = "METADATA_ONLY"
     event_storming_enabled: bool = True
@@ -165,6 +176,7 @@ class ProjectPatch(BaseModel):
     embedding_enabled: bool | None = None
     embedding_model: str | None = None
     context_pack_evidence_top_k: int | None = Field(default=None, ge=1, le=40)
+    automation_max_parallel_tasks: int | None = Field(default=None, ge=1, le=50)
     chat_index_mode: str | None = None
     chat_attachment_ingestion_mode: str | None = None
     event_storming_enabled: bool | None = None
@@ -283,6 +295,7 @@ class TaskDTO:
     attachment_refs: list[dict[str, Any]]
     instruction: str | None
     execution_triggers: list[dict[str, Any]]
+    task_relationships: list[dict[str, Any]]
     recurring_rule: str | None
     task_type: str
     scheduled_instruction: str | None

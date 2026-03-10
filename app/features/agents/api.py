@@ -50,7 +50,7 @@ from shared.settings import (
 )
 
 from .executor import AutomationOutcome, execute_task_automation, execute_task_automation_stream
-from .codex_mcp_adapter import run_structured_codex_prompt
+from .intent_classifier import classify_instruction_intent
 from .mcp_registry import (
     filter_mcp_servers_for_project_plugins as filter_mcp_servers_for_project_plugins_registry,
     normalize_chat_mcp_servers as normalize_chat_mcp_servers_registry,
@@ -140,17 +140,11 @@ def _chat_stream_key(*, workspace_id: str, session_id: str) -> str:
     return f"{str(workspace_id or '').strip()}::{str(session_id or '').strip()}"
 
 
-def _is_project_setup_starter_instruction(instruction: str) -> bool:
-    normalized = str(instruction or "").strip().casefold()
-    if not normalized:
+def _should_prompt_for_project_setup_name(*, intent_flags: dict[str, object], project_id: str | None) -> bool:
+    _ = project_id
+    if not bool(intent_flags.get("project_creation_intent")):
         return False
-    if "setup_project_orchestration" not in normalized:
-        return False
-    return (
-        "set up a new project" in normalized
-        or "create a new project" in normalized
-        or "start project setup" in normalized
-    )
+    return not bool(intent_flags.get("project_name_provided"))
 
 
 def _create_chat_stream_run(*, stream_key: str, preferred_run_id: str | None = None) -> str:
@@ -1270,63 +1264,13 @@ def _classify_chat_instruction_intents(
     workspace_id: str,
     project_id: str | None,
     session_id: str | None,
-) -> dict[str, bool]:
-    normalized_instruction = str(instruction or "").strip()
-    if not normalized_instruction:
-        return {
-            "execution_intent": False,
-            "execution_kickoff_intent": False,
-            "project_creation_intent": False,
-        }
-    payload = {
-        "instruction": normalized_instruction,
-        "workspace_id": str(workspace_id or "").strip() or None,
-        "project_id": str(project_id or "").strip() or None,
-    }
-    output_schema: dict[str, object] = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "execution_intent": {"type": "boolean"},
-            "execution_kickoff_intent": {"type": "boolean"},
-            "project_creation_intent": {"type": "boolean"},
-            "reason": {"type": "string"},
-        },
-        "required": [
-            "execution_intent",
-            "execution_kickoff_intent",
-            "project_creation_intent",
-            "reason",
-        ],
-    }
-    classifier_prompt = _render_prompt_template(
-        "chat_intent_classifier.md",
-        {
-            "payload_json": json.dumps(payload, ensure_ascii=True),
-        },
+) -> dict[str, object]:
+    return classify_instruction_intent(
+        instruction=instruction,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        session_id=session_id,
     )
-    try:
-        parsed = run_structured_codex_prompt(
-            prompt=classifier_prompt,
-            output_schema=output_schema,
-            workspace_id=str(workspace_id or "").strip() or None,
-            session_key=(
-                f"chat-intent-classifier:{str(workspace_id or '').strip()}:{str(project_id or '').strip()}:{hashlib.sha256(normalized_instruction.encode('utf-8')).hexdigest()[:16]}"
-            ),
-            mcp_servers=[],
-            use_cache=True,
-        )
-    except Exception:
-        return {
-            "execution_intent": False,
-            "execution_kickoff_intent": False,
-            "project_creation_intent": False,
-        }
-    return {
-        "execution_intent": bool(parsed.get("execution_intent")),
-        "execution_kickoff_intent": bool(parsed.get("execution_kickoff_intent")),
-        "project_creation_intent": bool(parsed.get("project_creation_intent")),
-    }
 
 
 def _build_execution_intent_mandate() -> str:
@@ -1615,8 +1559,6 @@ def _promote_plugin_policy_to_execution_mode_if_needed(
     )
     required_checks_cfg["delivery"] = normalized_delivery_checks
     git_delivery_config["required_checks"] = required_checks_cfg
-    git_delivery_config["evaluation"] = {"mode": "deterministic"}
-
     build_ui_gateway(actor_user_id=user.id).apply_project_plugin_config(
         project_id=project_id,
         workspace_id=workspace_id,
@@ -2026,6 +1968,14 @@ def _prepare_chat_instruction(
                 "execution_intent": False,
                 "execution_kickoff_intent": False,
                 "project_creation_intent": False,
+                "workflow_scope": "unknown",
+                "execution_mode": "unknown",
+                "deploy_requested": False,
+                "docker_compose_requested": False,
+                "requested_port": None,
+                "exact_task_count": None,
+                "project_name_provided": False,
+                "task_completion_requested": False,
             },
             {"prompt_instruction_segments": {"user_instruction": len(instruction)}},
         )
@@ -2047,19 +1997,24 @@ def _prepare_chat_instruction(
         "execution_intent": False,
         "execution_kickoff_intent": False,
         "project_creation_intent": False,
+        "workflow_scope": "unknown",
+        "execution_mode": "unknown",
+        "deploy_requested": False,
+        "docker_compose_requested": False,
+        "requested_port": None,
+        "exact_task_count": None,
+        "project_name_provided": False,
+        "task_completion_requested": False,
     }
     mandate_text = ""
-    if (
-        payload.allow_mutations
-        and str(payload.project_id or "").strip()
-    ):
+    if payload.allow_mutations:
         intent_flags = _classify_chat_instruction_intents(
             instruction=instruction,
             workspace_id=payload.workspace_id,
             project_id=payload.project_id,
             session_id=payload.session_id,
         )
-        if bool(intent_flags.get("execution_intent")):
+        if bool(intent_flags.get("execution_intent")) and str(payload.project_id or "").strip():
             mandate_text = _build_execution_intent_mandate()
             instruction_with_context = f"{instruction_with_context}\n\n{mandate_text}"
             instruction_segments["intent_mandate"] = len(mandate_text)
@@ -2194,7 +2149,7 @@ def agent_chat(
         )
     )
 
-    if _is_project_setup_starter_instruction(payload.instruction):
+    if _should_prompt_for_project_setup_name(intent_flags=intent_flags, project_id=effective_project_id):
         summary = _PROJECT_SETUP_STARTER_NEXT_QUESTION
         _persist_assistant_message_with_links(
             db=db,
@@ -2502,7 +2457,7 @@ def agent_chat_stream(
         "Connection": "keep-alive",
     }
 
-    if _is_project_setup_starter_instruction(payload.instruction):
+    if _should_prompt_for_project_setup_name(intent_flags=intent_flags, project_id=effective_project_id):
         summary = _PROJECT_SETUP_STARTER_NEXT_QUESTION
         _persist_assistant_message_with_links(
             db=db,

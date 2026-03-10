@@ -150,6 +150,7 @@ export type Project = {
   embedding_enabled: boolean
   embedding_model: string | null
   context_pack_evidence_top_k: number | null
+  automation_max_parallel_tasks: number
   chat_index_mode: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR' | string
   chat_attachment_ingestion_mode: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT' | string
   event_storming_enabled: boolean
@@ -303,6 +304,7 @@ export type Task = {
   linked_note_count?: number
   instruction: string | null
   execution_triggers: TaskExecutionTrigger[]
+  task_relationships?: Array<Record<string, unknown>>
   recurring_rule: string | null
   task_type: 'manual' | 'scheduled_instruction'
   scheduled_instruction: string | null
@@ -468,19 +470,45 @@ export type TaskAutomationStatus = {
   last_agent_codex_resume_succeeded?: boolean | null
   last_agent_codex_resume_fallback_used?: boolean | null
   last_requested_instruction: string | null
-  last_requested_source: 'manual' | 'schedule' | 'status_change' | string | null
+  last_requested_source: 'manual' | 'schedule' | 'status_change' | 'lead_handoff' | string | null
+  last_requested_source_task_id?: string | null
+  last_requested_reason?: string | null
+  last_requested_trigger_link?: string | null
+  last_requested_correlation_id?: string | null
   last_requested_trigger_task_id: string | null
   last_requested_from_status: string | null
   last_requested_to_status: string | null
   last_requested_triggered_at: string | null
+  last_dispatch_decision?: Record<string, unknown> | null
+  last_ignored_request_source?: 'status_change' | string | null
+  last_ignored_request_source_task_id?: string | null
+  last_ignored_request_reason?: string | null
+  last_ignored_request_trigger_link?: string | null
+  last_ignored_request_correlation_id?: string | null
+  last_ignored_request_trigger_task_id?: string | null
+  last_ignored_request_from_status?: string | null
+  last_ignored_request_to_status?: string | null
+  last_ignored_request_triggered_at?: string | null
+  last_lead_handoff_token?: string | null
+  last_lead_handoff_at?: string | null
+  last_lead_handoff_refs?: Array<Record<string, unknown>> | null
+  team_mode_phase?: string | null
   instruction: string | null
   execution_triggers: TaskExecutionTrigger[]
+  task_relationships?: Array<Record<string, unknown>>
   task_type: 'manual' | 'scheduled_instruction'
   schedule_state: 'idle' | 'queued' | 'running' | 'done' | 'failed'
   scheduled_at_utc: string | null
   scheduled_instruction: string | null
   last_schedule_run_at: string | null
   last_schedule_error: string | null
+  execution_gates?: Array<{
+    id: string
+    label: string
+    status: 'pass' | 'fail' | 'waiting' | 'not_applicable' | string
+    blocking: boolean
+    message?: string | null
+  }>
 }
 
 export type ProjectBoard = {
@@ -687,6 +715,46 @@ export type ProjectPolicyChecksVerifyResponse = {
   team_mode?: ProjectPolicyCheckResult
   delivery?: ProjectPolicyCheckResult & {
     runtime_deploy_health?: Record<string, unknown>
+  }
+  execution_gates?: {
+    tasks: Array<{
+      task_id: string
+      title: string
+      status: string
+      gates_total: number
+      blocking_total: number
+      pass: number
+      fail: number
+      waiting: number
+      not_applicable: number
+    }>
+    totals: {
+      tasks_with_gates: number
+      gates_total: number
+      blocking_total: number
+      pass: number
+      fail: number
+      waiting: number
+      not_applicable: number
+    }
+  }
+  workflow_communication?: {
+    events: Array<{
+      delivery?: 'requested' | 'ignored' | string
+      task_id: string
+      title: string
+      status: string
+      source: string
+      source_task_id?: string | null
+      reason?: string | null
+      trigger_link?: string | null
+      correlation_id?: string | null
+      lead_handoff_token?: string | null
+      dispatch_decision?: Record<string, unknown> | null
+      requested_at?: string | null
+    }>
+    totals: Record<string, number>
+    events_total: number
   }
   catalog?: Record<string, ProjectPolicyCheckCatalogItem[] | undefined>
   ok: boolean

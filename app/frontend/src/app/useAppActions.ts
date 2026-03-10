@@ -8,7 +8,13 @@ import {
   removeProjectMember,
   uploadAttachment,
 } from '../api'
-import { parseCommaTags, parseProjectEvidenceTopKInput, parseProjectStatusesText, toErrorMessage } from '../utils/ui'
+import {
+  parseCommaTags,
+  parseProjectAutomationMaxParallelInput,
+  parseProjectEvidenceTopKInput,
+  parseProjectStatusesText,
+  toErrorMessage,
+} from '../utils/ui'
 import {
   buildExecutionTriggersFromEditor,
   buildRecurringRule,
@@ -171,6 +177,9 @@ export function useAppActions(c: any) {
       .filter((value: string) => Boolean(value))
     const memberIds: string[] = Array.from(new Set<string>(rawMemberIds)).sort()
     const contextPackEvidenceTopK = parseProjectEvidenceTopKInput(c.editProjectContextPackEvidenceTopKText)
+    const automationMaxParallelTasks = parseProjectAutomationMaxParallelInput(
+      c.editProjectAutomationMaxParallelTasksText
+    )
     const effectiveChatIndexMode: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR' = Boolean(c.editProjectEmbeddingEnabled)
       ? c.editProjectChatIndexMode
       : 'OFF'
@@ -185,6 +194,7 @@ export function useAppActions(c: any) {
       embedding_enabled: Boolean(c.editProjectEmbeddingEnabled),
       embedding_model: String(c.editProjectEmbeddingModel || '').trim() || null,
       context_pack_evidence_top_k: contextPackEvidenceTopK,
+      automation_max_parallel_tasks: automationMaxParallelTasks,
       chat_index_mode: effectiveChatIndexMode,
       chat_attachment_ingestion_mode: effectiveChatAttachmentMode,
       event_storming_enabled: Boolean(c.editProjectEventStormingEnabled),
@@ -210,6 +220,7 @@ export function useAppActions(c: any) {
     c.editProjectEmbeddingEnabled,
     c.editProjectEmbeddingModel,
     c.editProjectContextPackEvidenceTopKText,
+    c.editProjectAutomationMaxParallelTasksText,
     c.editProjectChatIndexMode,
     c.editProjectChatAttachmentIngestionMode,
     c.editProjectEventStormingEnabled,

@@ -584,6 +584,7 @@ def ensure_task_table_columns(db: Session):
     required_columns = {
         "instruction": "ALTER TABLE tasks ADD COLUMN instruction TEXT",
         "execution_triggers": "ALTER TABLE tasks ADD COLUMN execution_triggers TEXT DEFAULT '[]'",
+        "task_relationships": "ALTER TABLE tasks ADD COLUMN task_relationships TEXT DEFAULT '[]'",
         "task_type": "ALTER TABLE tasks ADD COLUMN task_type VARCHAR(32) DEFAULT 'manual'",
         "scheduled_instruction": "ALTER TABLE tasks ADD COLUMN scheduled_instruction TEXT",
         "scheduled_at_utc": "ALTER TABLE tasks ADD COLUMN scheduled_at_utc TIMESTAMP WITH TIME ZONE",
@@ -646,6 +647,8 @@ def ensure_project_table_columns(db: Session):
         db.execute(text("ALTER TABLE projects ADD COLUMN embedding_model VARCHAR(128)"))
     if "context_pack_evidence_top_k" not in existing:
         db.execute(text("ALTER TABLE projects ADD COLUMN context_pack_evidence_top_k INTEGER"))
+    if "automation_max_parallel_tasks" not in existing:
+        db.execute(text("ALTER TABLE projects ADD COLUMN automation_max_parallel_tasks INTEGER DEFAULT 4"))
     if "chat_index_mode" not in existing:
         db.execute(text("ALTER TABLE projects ADD COLUMN chat_index_mode VARCHAR(32) DEFAULT 'OFF'"))
     if "chat_attachment_ingestion_mode" not in existing:
@@ -663,6 +666,12 @@ def ensure_project_table_columns(db: Session):
         text(
             "UPDATE projects SET event_storming_enabled=TRUE "
             "WHERE event_storming_enabled IS NULL"
+        )
+    )
+    db.execute(
+        text(
+            "UPDATE projects SET automation_max_parallel_tasks=4 "
+            "WHERE automation_max_parallel_tasks IS NULL OR automation_max_parallel_tasks < 1"
         )
     )
     db.commit()

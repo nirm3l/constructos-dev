@@ -22,7 +22,8 @@ def is_team_mode_lead_role(role: str | None) -> bool:
 
 
 def is_team_mode_kickoff_instruction(instruction: str) -> bool:
-    return str(instruction or "").strip().casefold().startswith("team mode kickoff for project ")
+    _ = instruction
+    return False
 
 
 def is_team_lead_recurring_oversight_task(state: dict | None) -> bool:

@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import json
+import re
 
 from fastapi import HTTPException
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from features.agents.gates import run_runtime_deploy_health_check
+from plugins.team_mode.task_roles import derive_task_role, normalize_team_agents
+from plugins.context_policy import classify_project_delivery_context
 from shared.core import (
     Note,
     Task,
@@ -19,11 +24,442 @@ from shared.core import (
     serialize_task,
 )
 from shared.serializers import load_created_by_map
+from shared.project_repository import find_project_compose_manifest
+from shared.models import Project, ProjectMember, ProjectPluginConfig, ProjectRule
 from shared.task_automation import (
     build_legacy_schedule_trigger,
     derive_legacy_schedule_fields,
     normalize_execution_triggers,
 )
+
+_COMMIT_SHA_EXPLICIT_RE = re.compile(
+    r"(?i)(?:\\b(?:commit|sha|changeset|hash)\\s*[:=#]?\\s*|/commit/)([0-9a-f]{7,40})\\b"
+)
+_TASK_BRANCH_RE = re.compile(r"\\btask/[a-z0-9][a-z0-9._/-]*\\b", re.IGNORECASE)
+_MERGE_TO_MAIN_REF_PREFIX = "merge:main:"
+
+
+def _parse_json_list(raw: object) -> list[dict[str, object]]:
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return []
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict)]
+    return []
+
+
+def _extract_commit_shas_from_refs(refs: object) -> set[str]:
+    out: set[str] = set()
+    for item in _parse_json_list(refs):
+        text = f"{item.get('url') or ''} {item.get('label') or ''} {item.get('title') or ''}"
+        for match in _COMMIT_SHA_EXPLICIT_RE.findall(text):
+            out.add(str(match).lower())
+    return out
+
+
+def _has_task_branch_evidence(*, refs: object, task_id: str) -> bool:
+    expected = f"task/{str(task_id or '').strip().lower()[:8]}"
+    if not expected or expected == "task/":
+        return False
+    corpus_parts: list[str] = []
+    for item in _parse_json_list(refs):
+        corpus_parts.append(str(item.get("url") or ""))
+        corpus_parts.append(str(item.get("label") or ""))
+        corpus_parts.append(str(item.get("title") or ""))
+    corpus = "\n".join(corpus_parts).lower()
+    for match in _TASK_BRANCH_RE.findall(corpus):
+        candidate = str(match or "").strip().lower()
+        if candidate.startswith(expected):
+            return True
+    return False
+
+
+def _task_has_main_merge_marker(refs: object) -> bool:
+    for item in _parse_json_list(refs):
+        url = str(item.get("url") or "").strip().casefold()
+        if url.startswith(_MERGE_TO_MAIN_REF_PREFIX):
+            return True
+    return False
+
+
+def _read_plugin_payload(
+    *,
+    db: Session,
+    workspace_id: str,
+    project_id: str,
+    plugin_key: str,
+) -> tuple[bool, dict[str, object], dict[str, object]]:
+    row = db.execute(
+        select(ProjectPluginConfig.enabled, ProjectPluginConfig.config_json, ProjectPluginConfig.compiled_policy_json).where(
+            ProjectPluginConfig.workspace_id == workspace_id,
+            ProjectPluginConfig.project_id == project_id,
+            ProjectPluginConfig.plugin_key == plugin_key,
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
+        )
+    ).first()
+    if row is None:
+        return False, {}, {}
+    enabled = bool(row[0])
+    def _parse_obj(raw: object) -> dict[str, object]:
+        text = str(raw or "").strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return enabled, _parse_obj(row[1]), _parse_obj(row[2])
+
+
+def _task_has_http_artifact(*, refs: object, notes: list[Note]) -> bool:
+    def _has_http(items: list[dict[str, object]]) -> bool:
+        for item in items:
+            url = str(item.get("url") or "").strip().lower()
+            if url.startswith("http://") or url.startswith("https://"):
+                return True
+        return False
+    if _has_http(_parse_json_list(refs)):
+        return True
+    for note in notes:
+        if _has_http(_parse_json_list(getattr(note, "external_refs", "[]"))):
+            return True
+    return False
+
+
+def _resolve_task_role(
+    *,
+    db: Session,
+    workspace_id: str,
+    project_id: str,
+    assignee_id: str,
+    assigned_agent_code: str,
+    labels: object,
+    status: str,
+) -> str:
+    member_role_by_user_id = {
+        str(user_id): str(role or "").strip()
+        for user_id, role in db.execute(
+            select(ProjectMember.user_id, ProjectMember.role).where(
+                ProjectMember.workspace_id == workspace_id,
+                ProjectMember.project_id == project_id,
+            )
+        ).all()
+    }
+    _enabled, team_config, _team_compiled = _read_plugin_payload(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        plugin_key="team_mode",
+    )
+    team_agents = normalize_team_agents(team_config.get("team"))
+    agent_role_by_code = {
+        str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
+        for agent in team_agents
+        if str(agent.get("id") or "").strip()
+    }
+    role = derive_task_role(
+        task_like={
+            "assignee_id": assignee_id,
+            "assigned_agent_code": assigned_agent_code,
+            "labels": labels,
+            "status": status,
+        },
+        member_role_by_user_id=member_role_by_user_id,
+        agent_role_by_code=agent_role_by_code,
+    )
+    return str(role or "").strip()
+
+
+def _build_execution_gates(
+    *,
+    db: Session,
+    task_id: str,
+    state: dict,
+    workspace_id: str,
+    project_id: str | None,
+) -> list[dict[str, object]]:
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_project_id:
+        return []
+    task_row = db.get(Task, task_id)
+    if task_row is None:
+        return []
+    project = db.get(Project, normalized_project_id)
+    if project is None:
+        return []
+    status = str(state.get("status") or task_row.status or "").strip()
+    assignee_id = str(state.get("assignee_id") or task_row.assignee_id or "").strip()
+    assigned_agent_code = str(state.get("assigned_agent_code") or task_row.assigned_agent_code or "").strip()
+    role = _resolve_task_role(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        assignee_id=assignee_id,
+        assigned_agent_code=assigned_agent_code,
+        labels=state.get("labels", task_row.labels),
+        status=status,
+    )
+    task_notes = db.execute(
+        select(Note).where(
+            Note.task_id == task_id,
+            Note.is_deleted == False,  # noqa: E712
+            Note.archived == False,  # noqa: E712
+        )
+    ).scalars().all()
+    git_enabled, git_config, git_compiled = _read_plugin_payload(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        plugin_key="git_delivery",
+    )
+    docker_enabled, docker_config, docker_compiled = _read_plugin_payload(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        plugin_key="docker_compose",
+    )
+    runtime_cfg = docker_compiled.get("runtime_deploy_health")
+    if not isinstance(runtime_cfg, dict):
+        runtime_cfg = docker_config.get("runtime_deploy_health") if isinstance(docker_config.get("runtime_deploy_health"), dict) else {}
+    runtime_required = bool((runtime_cfg or {}).get("required")) if docker_enabled else False
+    runtime_stack = str((runtime_cfg or {}).get("stack") or "constructos-ws-default")
+    runtime_port_raw = (runtime_cfg or {}).get("port")
+    try:
+        runtime_port = int(runtime_port_raw) if runtime_port_raw is not None else None
+    except Exception:
+        runtime_port = None
+    runtime_health_path = str((runtime_cfg or {}).get("health_path") or "/health")
+    runtime_require_http_200 = bool((runtime_cfg or {}).get("require_http_200", True))
+    execution_cfg = git_compiled.get("execution")
+    if not isinstance(execution_cfg, dict):
+        execution_cfg = git_config.get("execution") if isinstance(git_config.get("execution"), dict) else {}
+    require_dev_tests = bool((execution_cfg or {}).get("require_dev_tests", False))
+    external_refs = state.get("external_refs", task_row.external_refs)
+    automation_state = str(state.get("automation_state") or "idle").strip().lower()
+    last_error = str(state.get("last_agent_error") or "").strip()
+    gates: list[dict[str, object]] = []
+
+    if git_enabled and role == "Developer" and status == "Dev":
+        project_rules = db.execute(
+            select(ProjectRule).where(
+                ProjectRule.workspace_id == workspace_id,
+                ProjectRule.project_id == normalized_project_id,
+                ProjectRule.is_deleted == False,  # noqa: E712
+            )
+        ).scalars().all()
+        has_repo_context = bool(
+            classify_project_delivery_context(
+                project_description=str(getattr(project, "description", "") or ""),
+                project_external_refs=getattr(project, "external_refs", "[]"),
+                project_rules=project_rules,
+                parse_json_list=_parse_json_list,
+                allow_llm=False,
+            ).get("has_repo_context")
+        )
+        gates.append(
+            {
+                "id": "repo_context",
+                "label": "Repository context",
+                "status": "pass" if has_repo_context else "fail",
+                "blocking": True,
+                "message": "Project repository context is linked." if has_repo_context else "Link project repository context before Developer execution.",
+            }
+        )
+        has_commit = bool(_extract_commit_shas_from_refs(external_refs))
+        gates.append(
+            {
+                "id": "dev_commit_evidence",
+                "label": "Commit evidence",
+                "status": "pass" if has_commit else "waiting",
+                "blocking": True,
+                "message": "Commit evidence exists in external refs." if has_commit else "Expected external ref like commit:<sha> after implementation run.",
+            }
+        )
+        has_branch = _has_task_branch_evidence(refs=external_refs, task_id=task_id)
+        gates.append(
+            {
+                "id": "dev_task_branch_evidence",
+                "label": "Task branch evidence",
+                "status": "pass" if has_branch else "waiting",
+                "blocking": True,
+                "message": "Task branch evidence is present." if has_branch else "Expected external ref with task/<task-id-prefix>-... evidence.",
+            }
+        )
+        if require_dev_tests:
+            tests_gate_status = "waiting"
+            tests_gate_message = "Tests must run and pass before Developer handoff."
+            if "tests_run=true and tests_passed=true" in last_error:
+                tests_gate_status = "fail"
+                tests_gate_message = "Latest run failed test requirement."
+            elif automation_state == "completed" and "tests_run=true and tests_passed=true" not in last_error and last_error == "":
+                tests_gate_status = "pass"
+                tests_gate_message = "Runner did not report test requirement failure."
+            gates.append(
+                {
+                    "id": "dev_tests_required",
+                    "label": "Developer tests",
+                    "status": tests_gate_status,
+                    "blocking": True,
+                    "message": tests_gate_message,
+                }
+            )
+        else:
+            gates.append(
+                {
+                    "id": "dev_tests_required",
+                    "label": "Developer tests",
+                    "status": "not_applicable",
+                    "blocking": False,
+                    "message": "Tests are optional for this project (git_delivery.execution.require_dev_tests=false).",
+                }
+            )
+
+    if role == "Lead" and status == "Lead" and docker_enabled and runtime_required:
+        has_merge_to_main = False
+        project_task_ids = [
+            str(item or "").strip()
+            for item in db.execute(
+                select(Task.id).where(
+                    Task.workspace_id == workspace_id,
+                    Task.project_id == normalized_project_id,
+                    Task.is_deleted == False,  # noqa: E712
+                    Task.archived == False,  # noqa: E712
+                )
+            ).scalars().all()
+            if str(item or "").strip()
+        ]
+        for project_task_id in project_task_ids:
+            project_task_state, _ = rebuild_state(db, "Task", project_task_id)
+            if _task_has_main_merge_marker(project_task_state.get("external_refs")):
+                has_merge_to_main = True
+                break
+        manifest = find_project_compose_manifest(
+            project_name=str(getattr(project, "name", "") or ""),
+            project_id=normalized_project_id,
+        )
+        has_manifest = manifest is not None
+        gates.append(
+            {
+                "id": "compose_manifest",
+                "label": "Compose manifest",
+                "status": "pass" if has_manifest else ("waiting" if not has_merge_to_main else "fail"),
+                "blocking": True,
+                "message": (
+                    str(manifest)
+                    if has_manifest
+                    else (
+                        "Waiting for merge-ready Developer output before compose/deploy evaluation."
+                        if not has_merge_to_main
+                        else "Project repository is missing docker-compose.yml/compose.yml."
+                    )
+                ),
+            }
+        )
+        if has_manifest:
+            runtime = run_runtime_deploy_health_check(
+                stack=runtime_stack,
+                port=runtime_port,
+                health_path=runtime_health_path,
+                require_http_200=runtime_require_http_200,
+                host=None,
+            )
+            gates.append(
+                {
+                    "id": "runtime_deploy_health",
+                    "label": "Runtime deploy health",
+                    "status": "pass" if bool(runtime.get("ok")) else "fail",
+                    "blocking": True,
+                    "message": (
+                        f"Health check passed at {str(runtime.get('http_url') or f'http://gateway:{runtime_port}{runtime_health_path}')}"
+                        if bool(runtime.get("ok"))
+                        else str(runtime.get("http_error") or "Deploy stack is not running/healthy.")
+                    ),
+                }
+            )
+
+    if role == "QA" and status == "QA":
+        has_lead_handoff_token = bool(str(state.get("last_lead_handoff_token") or "").strip())
+        qa_handoff_deploy = (
+            state.get("last_lead_handoff_deploy_execution")
+            if isinstance(state.get("last_lead_handoff_deploy_execution"), dict)
+            else {}
+        )
+        qa_handoff_deploy_at = str(qa_handoff_deploy.get("executed_at") or "").strip()
+        lead_rows = db.execute(
+            select(Task.id, Task.status).where(
+                Task.workspace_id == workspace_id,
+                Task.project_id == normalized_project_id,
+                Task.is_deleted == False,  # noqa: E712
+                Task.archived == False,  # noqa: E712
+            )
+        ).all()
+        lead_in_progress = False
+        latest_lead_deploy_at = None
+        for lead_task_id, lead_status in lead_rows:
+            lead_state, _ = rebuild_state(db, "Task", str(lead_task_id or "").strip())
+            lead_role = _resolve_task_role(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=normalized_project_id,
+                assignee_id=str(lead_state.get("assignee_id") or ""),
+                assigned_agent_code=str(lead_state.get("assigned_agent_code") or ""),
+                labels=lead_state.get("labels"),
+                status=str(lead_status or ""),
+            )
+            if lead_role == "Lead" and str(lead_status or "").strip() == "Lead":
+                lead_in_progress = True
+            lead_deploy_execution = (
+                lead_state.get("last_deploy_execution")
+                if isinstance(lead_state.get("last_deploy_execution"), dict)
+                else {}
+            )
+            executed_at = str(lead_deploy_execution.get("executed_at") or "").strip()
+            if executed_at and (latest_lead_deploy_at is None or executed_at > latest_lead_deploy_at):
+                latest_lead_deploy_at = executed_at
+        qa_handoff_current_cycle = bool(
+            has_lead_handoff_token
+            and (
+                not latest_lead_deploy_at
+                or qa_handoff_deploy_at == latest_lead_deploy_at
+            )
+        )
+        gates.append(
+            {
+                "id": "qa_handoff_ready",
+                "label": "Lead handoff",
+                "status": "waiting" if ((lead_in_progress and not has_lead_handoff_token) or (has_lead_handoff_token and latest_lead_deploy_at and not qa_handoff_current_cycle)) else "pass",
+                "blocking": bool((lead_in_progress and not has_lead_handoff_token) or (has_lead_handoff_token and latest_lead_deploy_at and not qa_handoff_current_cycle)),
+                "message": (
+                    "Waiting for Lead handoff to QA."
+                    if (lead_in_progress and not has_lead_handoff_token)
+                    else (
+                        "Waiting for Lead handoff for the current deploy cycle."
+                        if (has_lead_handoff_token and latest_lead_deploy_at and not qa_handoff_current_cycle)
+                        else "Lead handoff is complete; QA can execute."
+                    )
+                ),
+            }
+        )
+        has_qa_artifacts = _task_has_http_artifact(refs=external_refs, notes=task_notes)
+        qa_status = "pass" if has_qa_artifacts else ("fail" if automation_state == "completed" else "waiting")
+        gates.append(
+            {
+                "id": "qa_verifiable_artifacts",
+                "label": "QA artifacts",
+                "status": qa_status,
+                "blocking": False,
+                "message": "QA artifacts are present in external refs/linked notes." if has_qa_artifacts else "Add verifiable QA artifacts (links/logs) after QA validation.",
+            }
+        )
+    return gates
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +611,13 @@ def get_task_automation_status_read_model(db: Session, user, task_id: str) -> di
         ensure_role(db, command_state.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
 
     state, _ = rebuild_state(db, "Task", task_id)
+    execution_gates = _build_execution_gates(
+        db=db,
+        task_id=task_id,
+        state=state,
+        workspace_id=str(command_state.workspace_id or ""),
+        project_id=str(command_state.project_id or "") or None,
+    )
     instruction = str(state.get("instruction") or state.get("scheduled_instruction") or "").strip() or None
     execution_triggers = normalize_execution_triggers(state.get("execution_triggers"))
     if not execution_triggers:
@@ -209,10 +652,40 @@ def get_task_automation_status_read_model(db: Session, user, task_id: str) -> di
         "last_agent_codex_resume_fallback_used": state.get("last_agent_codex_resume_fallback_used"),
         "last_requested_instruction": state.get("last_requested_instruction"),
         "last_requested_source": state.get("last_requested_source"),
+        "last_requested_source_task_id": state.get("last_requested_source_task_id"),
+        "last_requested_reason": state.get("last_requested_reason"),
+        "last_requested_trigger_link": state.get("last_requested_trigger_link"),
+        "last_requested_correlation_id": state.get("last_requested_correlation_id"),
         "last_requested_trigger_task_id": state.get("last_requested_trigger_task_id"),
         "last_requested_from_status": state.get("last_requested_from_status"),
         "last_requested_to_status": state.get("last_requested_to_status"),
         "last_requested_triggered_at": state.get("last_requested_triggered_at"),
+        "last_requested_execution_intent": state.get("last_requested_execution_intent"),
+        "last_requested_execution_kickoff_intent": state.get("last_requested_execution_kickoff_intent"),
+        "last_requested_project_creation_intent": state.get("last_requested_project_creation_intent"),
+        "last_requested_workflow_scope": state.get("last_requested_workflow_scope"),
+        "last_requested_execution_mode": state.get("last_requested_execution_mode"),
+        "last_requested_task_completion_requested": state.get("last_requested_task_completion_requested"),
+        "last_requested_classifier_reason": state.get("last_requested_classifier_reason"),
+        "last_dispatch_decision": state.get("last_dispatch_decision"),
+        "last_ignored_request_source": state.get("last_ignored_request_source"),
+        "last_ignored_request_source_task_id": state.get("last_ignored_request_source_task_id"),
+        "last_ignored_request_reason": state.get("last_ignored_request_reason"),
+        "last_ignored_request_trigger_link": state.get("last_ignored_request_trigger_link"),
+        "last_ignored_request_correlation_id": state.get("last_ignored_request_correlation_id"),
+        "last_ignored_request_trigger_task_id": state.get("last_ignored_request_trigger_task_id"),
+        "last_ignored_request_from_status": state.get("last_ignored_request_from_status"),
+        "last_ignored_request_to_status": state.get("last_ignored_request_to_status"),
+        "last_ignored_request_triggered_at": state.get("last_ignored_request_triggered_at"),
+        "last_lead_handoff_token": state.get("last_lead_handoff_token"),
+        "last_lead_handoff_at": state.get("last_lead_handoff_at"),
+        "last_lead_handoff_refs": state.get("last_lead_handoff_refs_json"),
+        "last_lead_handoff_deploy_execution": state.get("last_lead_handoff_deploy_execution"),
+        "last_deploy_execution": state.get("last_deploy_execution"),
+        "team_mode_phase": state.get("team_mode_phase"),
+        "team_mode_blocking_gate": state.get("team_mode_blocking_gate"),
+        "team_mode_blocked_reason": state.get("team_mode_blocked_reason"),
+        "team_mode_blocked_at": state.get("team_mode_blocked_at"),
         "instruction": instruction,
         "execution_triggers": execution_triggers,
         "task_type": str(legacy_schedule.get("task_type") or state.get("task_type") or "manual"),
@@ -221,4 +694,5 @@ def get_task_automation_status_read_model(db: Session, user, task_id: str) -> di
         "scheduled_instruction": legacy_schedule.get("scheduled_instruction"),
         "last_schedule_run_at": state.get("last_schedule_run_at"),
         "last_schedule_error": state.get("last_schedule_error"),
+        "execution_gates": execution_gates,
     }

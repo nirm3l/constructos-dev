@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from shared.auth import generate_session_token, hash_session_token, verify_password
 from shared.core import AuthSession, User, UserPreferencesPatch, WorkspaceMember, get_command_id, get_current_user, get_db
+from shared.settings import BOOTSTRAP_PASSWORD, BOOTSTRAP_USERNAME, DEFAULT_USER_ID
 from shared.settings import AUTH_COOKIE_SECURE, AUTH_SESSION_COOKIE_NAME, AUTH_SESSION_TTL_HOURS
 
 from .application import UserApplicationService
@@ -24,7 +25,7 @@ WORKSPACE_ROLES = {"Owner", "Admin", "Member", "Guest"}
 
 class LoginPayload(BaseModel):
     username: str = Field(min_length=1, max_length=64)
-    password: str = Field(min_length=1, max_length=256)
+    password: str = Field(min_length=0, max_length=256)
 
 
 class ChangePasswordPayload(BaseModel):
@@ -97,6 +98,18 @@ def _normalize_workspace_role(raw: str) -> str:
     return role
 
 
+def _allow_blank_default_admin_password(*, user: User, password: str) -> bool:
+    if str(password or "").strip():
+        return False
+    if str(user.user_type or "").strip().lower() != "human":
+        return False
+    if str(user.id or "").strip() != str(DEFAULT_USER_ID):
+        return False
+    if str(user.username or "").strip().lower() != str(BOOTSTRAP_USERNAME or "").strip().lower():
+        return False
+    return verify_password(str(BOOTSTRAP_PASSWORD or ""), user.password_hash)
+
+
 def _require_workspace_admin(db: Session, workspace_id: str, user_id: str) -> WorkspaceMember:
     membership = db.execute(
         select(WorkspaceMember).where(
@@ -147,7 +160,8 @@ def login(
     if not user or not bool(user.is_active):
         raise HTTPException(status_code=401, detail="Invalid username or password")
     if not verify_password(payload.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid username or password")
+        if not _allow_blank_default_admin_password(user=user, password=payload.password):
+            raise HTTPException(status_code=401, detail="Invalid username or password")
 
     token = generate_session_token()
     expires_at = _now_utc() + timedelta(seconds=_session_ttl_seconds())

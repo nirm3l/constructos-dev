@@ -11,7 +11,13 @@ from importlib import reload
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from shared.models import ProjectMember, SessionLocal, User as UserModel
+
+_MIN_EXECUTION_OUTCOME_CONTRACT_JSON = (
+    '"execution_outcome_contract":{"contract_version":1,"files_changed":[],"commit_sha":null,'
+    '"branch":null,"tests_run":false,"tests_passed":false,"artifacts":[]}'
+)
 
 
 def build_client(tmp_path: Path):
@@ -61,7 +67,11 @@ def test_execute_task_automation_includes_project_description_in_context(tmp_pat
 
     class DummyProcess:
         returncode = 0
-        stdout = '{"action":"comment","summary":"ok","comment":null}'
+        stdout = (
+            '{"action":"comment","summary":"ok","comment":null,'
+            + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+            + "}"
+        )
         stderr = ""
 
     def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
@@ -140,7 +150,11 @@ def test_execute_task_automation_includes_project_skills_in_context(tmp_path, mo
 
     class DummyProcess:
         returncode = 0
-        stdout = '{"action":"comment","summary":"ok","comment":null}'
+        stdout = (
+            '{"action":"comment","summary":"ok","comment":null,'
+            + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+            + "}"
+        )
         stderr = ""
 
     def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
@@ -184,7 +198,11 @@ def test_execute_task_automation_includes_chat_and_codex_session_ids(tmp_path, m
 
     class DummyProcess:
         returncode = 0
-        stdout = '{"action":"comment","summary":"ok","comment":null}'
+        stdout = (
+            '{"action":"comment","summary":"ok","comment":null,'
+            + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+            + "}"
+        )
         stderr = ""
 
     def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
@@ -258,7 +276,11 @@ def test_execute_task_automation_includes_team_mode_actor_role_in_context(tmp_pa
 
     class DummyProcess:
         returncode = 0
-        stdout = '{"action":"comment","summary":"ok","comment":null}'
+        stdout = (
+            '{"action":"comment","summary":"ok","comment":null,'
+            + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+            + "}"
+        )
         stderr = ""
 
     def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
@@ -281,7 +303,7 @@ def test_execute_task_automation_includes_team_mode_actor_role_in_context(tmp_pa
     )
     assert outcome.summary == "ok"
     assert captured["actor_user_id"] == actor_user_id
-    assert captured["actor_project_role"] == "QAAgent"
+    assert captured["actor_project_role"] == "QA"
 
 
 def test_execute_task_automation_sets_task_worktree_context_for_team_mode_developer(tmp_path, monkeypatch):
@@ -348,7 +370,11 @@ def test_execute_task_automation_sets_task_worktree_context_for_team_mode_develo
 
     class DummyProcess:
         returncode = 0
-        stdout = '{"action":"comment","summary":"ok","comment":null}'
+        stdout = (
+            '{"action":"comment","summary":"ok","comment":null,'
+            + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+            + "}"
+        )
         stderr = ""
 
     def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
@@ -370,7 +396,7 @@ def test_execute_task_automation_sets_task_worktree_context_for_team_mode_develo
         allow_mutations=True,
     )
     assert outcome.summary == "ok"
-    assert captured["actor_project_role"] == "DeveloperAgent"
+    assert captured["actor_project_role"] == "Developer"
     assert captured["team_mode_enabled"] is True
     assert captured["task_workdir"] == "/home/app/workspace/team-mode-worktree/.constructos/worktrees/task1234"
     assert captured["task_branch"] == "task/task1234-feature"
@@ -469,7 +495,7 @@ def test_codex_resume_prompt_is_compact_and_turn_focused():
     assert "Instruction: Plan this feature" in resume_prompt
     assert "Current User Project Role: TeamLeadAgent" in resume_prompt
     assert "Fresh Cross-Session Memory Snapshot" in resume_prompt
-    assert "If Team Mode is requested, you MUST execute this setup order" in resume_prompt
+    assert "If Team Mode is requested, prefer this setup flow" in resume_prompt
     assert "Read each MCP tool description and follow its payload contract and operational guidance." in resume_prompt
     assert len(resume_prompt) < len(full_prompt)
 
@@ -654,7 +680,8 @@ def test_mcp_tool_descriptions_include_operation_specific_guidance():
     assert "in-app notification" in mcp_server.SEND_IN_APP_NOTIFICATION_TOOL_DESCRIPTION.lower()
     assert "staged project setup in one call" in mcp_server.SETUP_PROJECT_ORCHESTRATION_TOOL_DESCRIPTION
     assert "missing_inputs" in mcp_server.SETUP_PROJECT_ORCHESTRATION_TOOL_DESCRIPTION
-    assert "legacy fallback" in mcp_server.ENSURE_TEAM_MODE_PROJECT_TOOL_DESCRIPTION.lower()
+    assert "deprecated" in mcp_server.ENSURE_TEAM_MODE_PROJECT_TOOL_DESCRIPTION.lower()
+    assert "backward compatibility" in mcp_server.ENSURE_TEAM_MODE_PROJECT_TOOL_DESCRIPTION.lower()
     source = inspect.getsource(mcp_server)
     assert "embedding_enabled: bool = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED" in source
     assert "chat_index_mode: str = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE" in source
@@ -719,6 +746,193 @@ def test_create_mcp_registers_and_executes_setup_project_orchestration_tool(monk
     assert captured["docker_port"] == 6768
 
 
+def test_create_mcp_setup_project_orchestration_tool_runs_real_service_flow(tmp_path, monkeypatch):
+    from features.agents import mcp_server
+    from features.agents.service import AgentTaskService
+
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    workspace_id = bootstrap["workspaces"][0]["id"]
+    actor_user_id = bootstrap["current_user"]["id"]
+
+    class FakeFastMCP:
+        def __init__(self, name: str):
+            self.name = name
+            self._tools: dict[str, dict[str, object]] = {}
+
+        def tool(self, description: str = ""):
+            def _decorator(fn):
+                self._tools[fn.__name__] = {"fn": fn, "description": description}
+                return fn
+
+            return _decorator
+
+    monkeypatch.setitem(sys.modules, "fastmcp", SimpleNamespace(FastMCP=FakeFastMCP))
+    monkeypatch.setattr(
+        mcp_server,
+        "build_mcp_gateway",
+        lambda: AgentTaskService(
+            require_token=False,
+            actor_user_id=actor_user_id,
+            allowed_workspace_ids={workspace_id},
+            allowed_project_ids=set(),
+            default_workspace_id=workspace_id,
+        ),
+    )
+    monkeypatch.setattr(mcp_server, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(mcp_server, "AGENT_ENABLED_PLUGINS", ["team_mode", "git_delivery", "docker_compose"])
+
+    mcp = mcp_server.create_mcp()
+    setup_tool = mcp._tools.get("setup_project_orchestration")
+    assert setup_tool is not None
+    fn = setup_tool["fn"]
+    payload = fn(
+        name="MCP Integration Project",
+        short_description="Setup via MCP tool layer.",
+        workspace_id=workspace_id,
+        enable_team_mode=True,
+        enable_git_delivery=True,
+        enable_docker_compose=True,
+        docker_port=6768,
+        seed_team_tasks=False,
+        kickoff_after_setup=False,
+        command_id="mcp-e2e-setup-001",
+    )
+
+    assert payload["contract_version"] == 1
+    assert payload["execution_state"] in {"setup_complete", "setup_failed"}
+    assert payload["project"]["id"]
+    assert payload["effective"]["team_mode_enabled"] is True
+    assert payload["effective"]["git_delivery_enabled"] is True
+    assert payload["effective"]["docker_compose_enabled"] is True
+    assert isinstance(payload["steps"], list)
+    assert payload["steps"]
+
+
+def test_create_mcp_setup_project_orchestration_tool_supports_kickoff_after_setup(tmp_path, monkeypatch):
+    from features.agents import mcp_server
+    from features.agents.service import AgentTaskService
+
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    workspace_id = bootstrap["workspaces"][0]["id"]
+    actor_user_id = bootstrap["current_user"]["id"]
+
+    class FakeFastMCP:
+        def __init__(self, name: str):
+            self.name = name
+            self._tools: dict[str, dict[str, object]] = {}
+
+        def tool(self, description: str = ""):
+            def _decorator(fn):
+                self._tools[fn.__name__] = {"fn": fn, "description": description}
+                return fn
+
+            return _decorator
+
+    monkeypatch.setitem(sys.modules, "fastmcp", SimpleNamespace(FastMCP=FakeFastMCP))
+    monkeypatch.setattr(
+        mcp_server,
+        "build_mcp_gateway",
+        lambda: AgentTaskService(
+            require_token=False,
+            actor_user_id=actor_user_id,
+            allowed_workspace_ids={workspace_id},
+            allowed_project_ids=set(),
+            default_workspace_id=workspace_id,
+        ),
+    )
+    monkeypatch.setattr(mcp_server, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(mcp_server, "AGENT_ENABLED_PLUGINS", ["team_mode", "git_delivery", "docker_compose"])
+
+    mcp = mcp_server.create_mcp()
+    setup_tool = mcp._tools.get("setup_project_orchestration")
+    assert setup_tool is not None
+    fn = setup_tool["fn"]
+    payload = fn(
+        name="MCP Integration Project Kickoff",
+        short_description="Setup via MCP tool layer with kickoff.",
+        workspace_id=workspace_id,
+        enable_team_mode=True,
+        enable_git_delivery=True,
+        enable_docker_compose=True,
+        docker_port=6768,
+        seed_team_tasks=True,
+        kickoff_after_setup=True,
+        command_id="mcp-e2e-setup-kickoff-001",
+    )
+
+    assert payload["contract_version"] == 1
+    assert payload["project"]["id"]
+    assert payload["effective"]["team_mode_enabled"] is True
+    assert payload["effective"]["git_delivery_enabled"] is True
+    assert payload["effective"]["docker_compose_enabled"] is True
+    requested = payload.get("requested")
+    assert isinstance(requested, dict)
+    assert requested.get("kickoff_after_setup") is True
+    kickoff = payload.get("kickoff")
+    if isinstance(kickoff, dict):
+        assert isinstance(kickoff.get("ok"), bool)
+        assert isinstance(kickoff.get("summary"), str)
+        assert "kickoff" in str(kickoff.get("summary") or "").lower()
+
+
+def test_create_mcp_setup_project_orchestration_tool_returns_missing_inputs_contract(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+    from features.agents import mcp_server
+    from features.agents.service import AgentTaskService
+
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    workspace_id = bootstrap["workspaces"][0]["id"]
+    actor_user_id = bootstrap["current_user"]["id"]
+
+    class FakeFastMCP:
+        def __init__(self, name: str):
+            self.name = name
+            self._tools: dict[str, dict[str, object]] = {}
+
+        def tool(self, description: str = ""):
+            def _decorator(fn):
+                self._tools[fn.__name__] = {"fn": fn, "description": description}
+                return fn
+
+            return _decorator
+
+    monkeypatch.setitem(sys.modules, "fastmcp", SimpleNamespace(FastMCP=FakeFastMCP))
+    monkeypatch.setattr(
+        mcp_server,
+        "build_mcp_gateway",
+        lambda: AgentTaskService(
+            require_token=False,
+            actor_user_id=actor_user_id,
+            allowed_workspace_ids={workspace_id},
+            allowed_project_ids=set(),
+            default_workspace_id=workspace_id,
+        ),
+    )
+    monkeypatch.setattr(mcp_server, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(mcp_server, "AGENT_ENABLED_PLUGINS", ["team_mode", "git_delivery", "docker_compose"])
+
+    mcp = mcp_server.create_mcp()
+    setup_tool = mcp._tools.get("setup_project_orchestration")
+    assert setup_tool is not None
+    fn = setup_tool["fn"]
+    with pytest.raises(HTTPException) as exc:
+        fn(
+            workspace_id=workspace_id,
+            name="",
+            short_description="",
+            command_id="mcp-missing-inputs-001",
+        )
+    assert exc.value.status_code == 422
+    detail = exc.value.detail
+    assert isinstance(detail, dict)
+    assert detail.get("code") == "missing_setup_inputs"
+    assert isinstance(detail.get("missing_inputs"), list)
+    assert str(detail.get("next_question") or "").strip() != ""
+
+
 def test_codex_usage_extraction_from_json_stream():
     from features.agents.codex_mcp_adapter import _extract_turn_usage
 
@@ -739,7 +953,11 @@ def test_executor_parses_usage_payload():
     from features.agents.executor import _parse_command_outcome
 
     outcome = _parse_command_outcome(
-        '{"action":"comment","summary":"ok","comment":null,"usage":{"input_tokens":25,"cached_input_tokens":9,"output_tokens":7,"context_limit_tokens":4096}}'
+        (
+            '{"action":"comment","summary":"ok","comment":null,'
+            + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+            + ',"usage":{"input_tokens":25,"cached_input_tokens":9,"output_tokens":7,"context_limit_tokens":4096}}'
+        )
     )
     assert outcome.summary == "ok"
     assert outcome.usage is not None
@@ -753,7 +971,11 @@ def test_executor_parses_codex_session_id():
     from features.agents.executor import _parse_command_outcome
 
     outcome = _parse_command_outcome(
-        '{"action":"comment","summary":"ok","comment":null,"codex_session_id":"thread-abc-123"}'
+        (
+            '{"action":"comment","summary":"ok","comment":null,'
+            + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+            + ',"codex_session_id":"thread-abc-123"}'
+        )
     )
     assert outcome.summary == "ok"
     assert outcome.codex_session_id == "thread-abc-123"
@@ -765,6 +987,8 @@ def test_executor_parses_resume_flags():
     outcome = _parse_command_outcome(
         (
             '{"action":"comment","summary":"ok","comment":null,'
+            + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+            + ","
             '"resume_attempted":true,"resume_succeeded":false,"resume_fallback_used":true}'
         )
     )
@@ -963,7 +1187,11 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
         captured["resume_prompt_text"] = str(resume_prompt or "")
         _ = (model, reasoning_effort, model_provider, local_provider)
         return (
-            '{"action":"comment","summary":"ok","comment":null}',
+            (
+                '{"action":"comment","summary":"ok","comment":null,'
+                + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+                + "}"
+            ),
             {"input_tokens": 12, "output_tokens": 3},
             "thread-new-2",
             True,

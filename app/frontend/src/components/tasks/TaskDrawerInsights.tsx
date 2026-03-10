@@ -14,6 +14,14 @@ type AutomationTimelineEntry = {
   createdAt: string | null
 }
 
+type ExecutionGate = {
+  id: string
+  label: string
+  status: 'pass' | 'fail' | 'waiting' | 'not_applicable' | string
+  blocking: boolean
+  message?: string | null
+}
+
 function MetricsTooltip({
   content,
   children,
@@ -240,6 +248,38 @@ export function TaskDrawerInsights({ state }: { state: any }) {
   ])
   const isAutomationRunning = String(state.automationStatus.data?.automation_state || '').toLowerCase() === 'running'
   const isAutomationQueued = String(state.automationStatus.data?.automation_state || '').toLowerCase() === 'queued'
+  const executionGates = React.useMemo<ExecutionGate[]>(() => {
+    const raw = state.automationStatus.data?.execution_gates
+    if (!Array.isArray(raw)) return []
+    return raw
+      .filter((item: unknown) => item && typeof item === 'object')
+      .map((item: unknown) => {
+        const gate = item as Record<string, unknown>
+        return {
+          id: String(gate.id || '').trim(),
+          label: String(gate.label || gate.id || '').trim(),
+          status: String(gate.status || '').trim().toLowerCase() || 'waiting',
+          blocking: Boolean(gate.blocking),
+          message: String(gate.message || '').trim() || null,
+        }
+      })
+      .filter((gate) => Boolean(gate.id) && Boolean(gate.label))
+  }, [state.automationStatus.data?.execution_gates])
+  const executionGateSummary = React.useMemo(() => {
+    let pass = 0
+    let fail = 0
+    let waiting = 0
+    let na = 0
+    let blocking = 0
+    for (const gate of executionGates) {
+      if (gate.blocking) blocking += 1
+      if (gate.status === 'pass') pass += 1
+      else if (gate.status === 'fail') fail += 1
+      else if (gate.status === 'not_applicable') na += 1
+      else waiting += 1
+    }
+    return { pass, fail, waiting, na, blocking, total: executionGates.length }
+  }, [executionGates])
   const isRecoverableLive = !isLocalLiveRun && (isAutomationRunning || isAutomationQueued)
   const [recoveredLiveText, setRecoveredLiveText] = React.useState('')
   const [recoveredLiveSnapshot, setRecoveredLiveSnapshot] = React.useState('')
@@ -575,6 +615,118 @@ export function TaskDrawerInsights({ state }: { state: any }) {
               <div className="meta">No automation responses yet.</div>
             )}
             {state.automationStatus.data?.last_agent_error && <div className="notice notice-error">Runner error: {state.automationStatus.data.last_agent_error}</div>}
+            {(state.automationStatus.data?.last_requested_source || state.automationStatus.data?.last_requested_reason) ? (
+              <div className="automation-gates" style={{ marginTop: 8 }}>
+                <div className="automation-gates-head">
+                  <strong>Workflow communication</strong>
+                </div>
+                <div className="row wrap" style={{ gap: 6, marginBottom: 8 }}>
+                  {state.automationStatus.data?.last_requested_source ? (
+                    <span className="badge">Source: {String(state.automationStatus.data.last_requested_source)}</span>
+                  ) : null}
+                  {state.automationStatus.data?.last_requested_reason ? (
+                    <span className="badge">Reason: {String(state.automationStatus.data.last_requested_reason)}</span>
+                  ) : null}
+                  {state.automationStatus.data?.last_requested_source_task_id ? (
+                    <span className="badge">From task: {String(state.automationStatus.data.last_requested_source_task_id)}</span>
+                  ) : null}
+                </div>
+                <div className="meta">
+                  {state.automationStatus.data?.last_dispatch_decision && typeof state.automationStatus.data.last_dispatch_decision === 'object' ? (
+                    <>
+                      Dispatch: <code>{JSON.stringify(state.automationStatus.data.last_dispatch_decision)}</code><br />
+                    </>
+                  ) : null}
+                  {state.automationStatus.data?.last_requested_trigger_link ? (
+                    <>Trigger link: <code>{String(state.automationStatus.data.last_requested_trigger_link)}</code><br /></>
+                  ) : null}
+                  {state.automationStatus.data?.last_requested_correlation_id ? (
+                    <>Correlation: <code>{String(state.automationStatus.data.last_requested_correlation_id)}</code></>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+            {(state.automationStatus.data?.last_ignored_request_source || state.automationStatus.data?.last_ignored_request_reason) ? (
+              <div className="automation-gates" style={{ marginTop: 8 }}>
+                <div className="automation-gates-head">
+                  <strong>Ignored workflow trigger</strong>
+                </div>
+                <div className="row wrap" style={{ gap: 6, marginBottom: 8 }}>
+                  {state.automationStatus.data?.last_ignored_request_source ? (
+                    <span className="badge">Source: {String(state.automationStatus.data.last_ignored_request_source)}</span>
+                  ) : null}
+                  {state.automationStatus.data?.last_ignored_request_reason ? (
+                    <span className="badge">Reason: {String(state.automationStatus.data.last_ignored_request_reason)}</span>
+                  ) : null}
+                  {state.automationStatus.data?.last_ignored_request_source_task_id ? (
+                    <span className="badge">From task: {String(state.automationStatus.data.last_ignored_request_source_task_id)}</span>
+                  ) : null}
+                </div>
+                <div className="meta">
+                  {state.automationStatus.data?.last_ignored_request_trigger_link ? (
+                    <>Trigger link: <code>{String(state.automationStatus.data.last_ignored_request_trigger_link)}</code><br /></>
+                  ) : null}
+                  {state.automationStatus.data?.last_ignored_request_correlation_id ? (
+                    <>Correlation: <code>{String(state.automationStatus.data.last_ignored_request_correlation_id)}</code></>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+            <div className="automation-gates">
+              <div className="automation-gates-head">
+                <strong>Execution gates</strong>
+                <div className="row wrap" style={{ gap: 6 }}>
+                  {state.automationStatus.data?.team_mode_phase ? (
+                    <span className="badge">Phase: {String(state.automationStatus.data.team_mode_phase)}</span>
+                  ) : null}
+                  {state.automationStatus.data?.last_lead_handoff_token ? (
+                    <span className="badge status-done">Lead handoff token</span>
+                  ) : null}
+                  <span className="badge">Total: {executionGateSummary.total}</span>
+                  <span className="badge">Blocking: {executionGateSummary.blocking}</span>
+                  {executionGateSummary.fail > 0 ? <span className="badge status-blocked">Fail: {executionGateSummary.fail}</span> : null}
+                  {executionGateSummary.waiting > 0 ? <span className="badge">Waiting: {executionGateSummary.waiting}</span> : null}
+                  {executionGateSummary.pass > 0 ? <span className="badge status-done">Pass: {executionGateSummary.pass}</span> : null}
+                  {executionGateSummary.na > 0 ? <span className="badge">N/A: {executionGateSummary.na}</span> : null}
+                </div>
+              </div>
+              <div className="meta" style={{ marginBottom: 8 }}>
+                Deterministic runner gates for this task execution role and status.
+              </div>
+              {executionGates.length > 0 ? (
+                <div className="automation-gates-list">
+                  {executionGates.map((gate) => {
+                    const toneClass =
+                      gate.status === 'pass'
+                        ? 'status-done'
+                        : gate.status === 'fail'
+                          ? 'status-blocked'
+                          : ''
+                    const statusLabel =
+                      gate.status === 'not_applicable'
+                        ? 'N/A'
+                        : gate.status.toUpperCase()
+                    return (
+                      <div key={gate.id} className="automation-gate-row">
+                        <div className="automation-gate-copy">
+                          <code>{gate.id}</code>
+                          <strong>{gate.label}</strong>
+                          {gate.message ? <span className="meta">{gate.message}</span> : null}
+                        </div>
+                        <div className="row wrap" style={{ gap: 6, alignItems: 'center', justifyContent: 'flex-end' }}>
+                          {gate.blocking ? <span className="badge">Blocking</span> : <span className="badge">Info</span>}
+                          <span className={`badge ${toneClass}`.trim()}>{statusLabel}</span>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="meta">
+                  No execution gates apply to this task right now. Gates appear for Team Mode/Git Delivery role tasks (Developer/Lead/QA) based on current status.
+                </div>
+              )}
+            </div>
             <div className="row wrap" style={{ marginTop: 8 }}>
               <textarea
                 value={state.automationInstruction}

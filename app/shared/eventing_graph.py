@@ -798,6 +798,7 @@ def _project_project_event(ev: EventEnvelope, commit_position: int) -> None:
         "embedding_enabled",
         "embedding_model",
         "context_pack_evidence_top_k",
+        "automation_max_parallel_tasks",
         "chat_index_mode",
         "chat_attachment_ingestion_mode",
     ):

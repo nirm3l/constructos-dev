@@ -11,10 +11,10 @@ def main() -> int:
         return 0
 
     ctx = json.loads(raw)
-    instruction = str(ctx.get("instruction") or "").lower()
+    instruction = str(ctx.get("instruction") or "")
     status = str(ctx.get("status") or "To do")
 
-    should_complete = any(token in instruction for token in ("#complete", "complete task", "mark done"))
+    should_complete = bool(ctx.get("task_completion_requested"))
     if should_complete and status != "Done":
         print(json.dumps({"action": "complete", "summary": "Command adapter marked task as completed."}))
         return 0

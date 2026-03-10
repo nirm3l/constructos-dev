@@ -77,34 +77,12 @@ def classify_project_context_signals(
             if has_explicit_github
             else "Explicit Git marker found without GitHub-specific host.",
         }
-    if not any(
-        token in lower_blob
-        for token in (
-            "github",
-            "gitlab",
-            "bitbucket",
-            "repository",
-            "repo",
-            "branch",
-            "commit",
-            "workspace",
-            "file://",
-            "/home/app/workspace/",
-            ".git",
-        )
-    ):
-        return {
-            "has_repo_context": False,
-            "has_github_context": False,
-            "repo_reason": "No repository signals found in project artifacts.",
-            "github_reason": "No GitHub signals found in project artifacts.",
-        }
     if not allow_llm:
         return {
             "has_repo_context": False,
             "has_github_context": False,
-            "repo_reason": "Ambiguous repository signals; LLM disabled for this pass.",
-            "github_reason": "Ambiguous GitHub signals; LLM disabled for this pass.",
+            "repo_reason": "Repository context classification requires explicit markers or LLM evaluation.",
+            "github_reason": "GitHub context classification requires explicit markers or LLM evaluation.",
         }
 
     llm_payload = {

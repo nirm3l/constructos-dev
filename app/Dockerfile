@@ -34,7 +34,7 @@ ARG APP_BUNDLE_KDF_ITERATIONS=200000
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends dumb-init ca-certificates openssl bash git docker-cli docker-compose \
+    && apt-get install -y --no-install-recommends dumb-init ca-certificates openssl bash git curl ripgrep docker-cli docker-compose \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=codex-builder /usr/local/bin/node /usr/local/bin/node

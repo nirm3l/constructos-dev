@@ -137,6 +137,8 @@ export function useEditorGuards(c: any) {
       String(c.editProjectEmbeddingModel || '').trim() !== String(c.selectedProject.embedding_model || '').trim() ||
       String(c.editProjectContextPackEvidenceTopKText || '').trim() !==
         String(c.selectedProject.context_pack_evidence_top_k ?? '').trim() ||
+      String(c.editProjectAutomationMaxParallelTasksText || '').trim() !==
+        String(c.selectedProject.automation_max_parallel_tasks ?? 4).trim() ||
       String(c.editProjectChatIndexMode || 'OFF').trim().toUpperCase() !==
         String(c.selectedProject.chat_index_mode || 'OFF').trim().toUpperCase() ||
       normalizeChatAttachmentIngestionModeForDirty(c.editProjectChatAttachmentIngestionMode || 'METADATA_ONLY') !==
@@ -155,6 +157,7 @@ export function useEditorGuards(c: any) {
     c.editProjectEmbeddingEnabled,
     c.editProjectEmbeddingModel,
     c.editProjectContextPackEvidenceTopKText,
+    c.editProjectAutomationMaxParallelTasksText,
     c.editProjectChatIndexMode,
     c.editProjectChatAttachmentIngestionMode,
     c.editProjectEventStormingEnabled,

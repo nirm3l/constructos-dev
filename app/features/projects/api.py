@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from features.agents.gates import plugin_check_catalog_by_scope
@@ -35,8 +36,144 @@ from .read_models import (
     get_project_members_read_model,
     get_project_tags_read_model,
 )
+from features.tasks.read_models import get_task_automation_status_read_model
+from shared.models import Task
 
 router = APIRouter()
+
+
+def _project_execution_gate_snapshot(*, db: Session, user, project_id: str) -> dict[str, object]:
+    rows = db.execute(
+        select(Task.id, Task.title, Task.status)
+        .where(
+            Task.project_id == project_id,
+            Task.is_deleted == False,  # noqa: E712
+            Task.archived == False,  # noqa: E712
+        )
+        .order_by(Task.created_at.asc())
+        .limit(300)
+    ).all()
+    tasks: list[dict[str, object]] = []
+    communication_events: list[dict[str, object]] = []
+    totals = {
+        "tasks_with_gates": 0,
+        "gates_total": 0,
+        "blocking_total": 0,
+        "pass": 0,
+        "fail": 0,
+        "waiting": 0,
+        "not_applicable": 0,
+    }
+    communication_totals: dict[str, int] = {}
+    for task_id, title, status in rows:
+        task_id_text = str(task_id or "").strip()
+        if not task_id_text:
+            continue
+        try:
+            automation_status = get_task_automation_status_read_model(db, user, task_id_text)
+        except Exception:
+            continue
+        requested_source = str(automation_status.get("last_requested_source") or "").strip()
+        if requested_source:
+            requested_at = (
+                str(automation_status.get("last_requested_triggered_at") or "").strip()
+                or str(automation_status.get("last_agent_run_at") or "").strip()
+                or None
+            )
+            communication_events.append(
+                {
+                    "delivery": "requested",
+                    "task_id": task_id_text,
+                    "title": str(title or "").strip(),
+                    "status": str(status or "").strip(),
+                    "source": requested_source,
+                    "source_task_id": str(automation_status.get("last_requested_source_task_id") or "").strip() or None,
+                    "reason": str(automation_status.get("last_requested_reason") or "").strip() or None,
+                    "trigger_link": str(automation_status.get("last_requested_trigger_link") or "").strip() or None,
+                    "correlation_id": str(automation_status.get("last_requested_correlation_id") or "").strip() or None,
+                    "lead_handoff_token": str(automation_status.get("last_lead_handoff_token") or "").strip() or None,
+                    "dispatch_decision": (
+                        automation_status.get("last_dispatch_decision")
+                        if isinstance(automation_status.get("last_dispatch_decision"), dict)
+                        else None
+                    ),
+                    "requested_at": requested_at,
+                }
+            )
+            communication_totals[requested_source] = int(communication_totals.get(requested_source) or 0) + 1
+        ignored_source = str(automation_status.get("last_ignored_request_source") or "").strip()
+        if ignored_source:
+            ignored_at = str(automation_status.get("last_ignored_request_triggered_at") or "").strip() or None
+            communication_events.append(
+                {
+                    "delivery": "ignored",
+                    "task_id": task_id_text,
+                    "title": str(title or "").strip(),
+                    "status": str(status or "").strip(),
+                    "source": ignored_source,
+                    "source_task_id": str(automation_status.get("last_ignored_request_source_task_id") or "").strip() or None,
+                    "reason": str(automation_status.get("last_ignored_request_reason") or "").strip() or None,
+                    "trigger_link": str(automation_status.get("last_ignored_request_trigger_link") or "").strip() or None,
+                    "correlation_id": str(automation_status.get("last_ignored_request_correlation_id") or "").strip() or None,
+                    "lead_handoff_token": None,
+                    "dispatch_decision": (
+                        automation_status.get("last_dispatch_decision")
+                        if isinstance(automation_status.get("last_dispatch_decision"), dict)
+                        else None
+                    ),
+                    "requested_at": ignored_at,
+                }
+            )
+            communication_totals[f"ignored:{ignored_source}"] = int(
+                communication_totals.get(f"ignored:{ignored_source}") or 0
+            ) + 1
+        execution_gates = list(automation_status.get("execution_gates") or [])
+        if not execution_gates:
+            continue
+        totals["tasks_with_gates"] = int(totals["tasks_with_gates"]) + 1
+        per_task = {
+            "task_id": task_id_text,
+            "title": str(title or "").strip(),
+            "status": str(status or "").strip(),
+            "gates_total": 0,
+            "blocking_total": 0,
+            "pass": 0,
+            "fail": 0,
+            "waiting": 0,
+            "not_applicable": 0,
+        }
+        for gate in execution_gates:
+            if not isinstance(gate, dict):
+                continue
+            gate_status = str(gate.get("status") or "").strip().lower()
+            blocking = bool(gate.get("blocking"))
+            per_task["gates_total"] = int(per_task["gates_total"]) + 1
+            totals["gates_total"] = int(totals["gates_total"]) + 1
+            if blocking:
+                per_task["blocking_total"] = int(per_task["blocking_total"]) + 1
+                totals["blocking_total"] = int(totals["blocking_total"]) + 1
+            if gate_status in {"pass", "fail", "waiting", "not_applicable"}:
+                per_task[gate_status] = int(per_task[gate_status]) + 1
+                totals[gate_status] = int(totals[gate_status]) + 1
+        tasks.append(per_task)
+    communication_events.sort(
+        key=lambda event: (
+            str(event.get("requested_at") or ""),
+            str(event.get("task_id") or ""),
+        ),
+        reverse=True,
+    )
+    return {
+        "execution_gates": {
+            "tasks": tasks,
+            "totals": totals,
+        },
+        "workflow_communication": {
+            "events": communication_events,
+            "totals": communication_totals,
+            "events_total": len(communication_events),
+        },
+    }
 
 
 class EventStormingLinkReviewPatch(BaseModel):
@@ -115,6 +252,7 @@ def create_project(
         embedding_enabled=payload.embedding_enabled,
         embedding_model=payload.embedding_model,
         context_pack_evidence_top_k=payload.context_pack_evidence_top_k,
+        automation_max_parallel_tasks=payload.automation_max_parallel_tasks,
         chat_index_mode=payload.chat_index_mode,
         chat_attachment_ingestion_mode=payload.chat_attachment_ingestion_mode,
         event_storming_enabled=payload.event_storming_enabled,
@@ -186,10 +324,14 @@ def project_checks_verify(
     gateway = build_ui_gateway(actor_user_id=user.id)
     team_mode = gateway.verify_team_mode_workflow(project_id=project_id)
     delivery = gateway.verify_delivery_workflow(project_id=project_id)
+    project_execution_snapshot = _project_execution_gate_snapshot(db=db, user=user, project_id=project_id)
     return {
         "project_id": project_id,
         "team_mode": team_mode,
         "delivery": delivery,
+        "execution_gates": project_execution_snapshot.get("execution_gates") or {"tasks": [], "totals": {}},
+        "workflow_communication": project_execution_snapshot.get("workflow_communication")
+        or {"events": [], "totals": {}, "events_total": 0},
         "catalog": plugin_check_catalog_by_scope(),
         "ok": bool(team_mode.get("ok")) and bool(delivery.get("ok")),
     }

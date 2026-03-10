@@ -156,6 +156,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     projectExternalRefsText, setProjectExternalRefsText, projectAttachmentRefsText, setProjectAttachmentRefsText,
     projectEmbeddingEnabled, setProjectEmbeddingEnabled, projectEmbeddingModel, setProjectEmbeddingModel,
     projectContextPackEvidenceTopKText, setProjectContextPackEvidenceTopKText,
+    projectAutomationMaxParallelTasksText, setProjectAutomationMaxParallelTasksText,
     projectChatIndexMode, setProjectChatIndexMode, projectChatAttachmentIngestionMode, setProjectChatAttachmentIngestionMode,
     projectEventStormingEnabled, setProjectEventStormingEnabled,
     projectTemplateParametersText, setProjectTemplateParametersText,
@@ -165,6 +166,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setEditProjectExternalRefsText, editProjectAttachmentRefsText, setEditProjectAttachmentRefsText,
     editProjectEmbeddingEnabled, setEditProjectEmbeddingEnabled, editProjectEmbeddingModel, setEditProjectEmbeddingModel,
     editProjectContextPackEvidenceTopKText, setEditProjectContextPackEvidenceTopKText,
+    editProjectAutomationMaxParallelTasksText, setEditProjectAutomationMaxParallelTasksText,
     editProjectChatIndexMode, setEditProjectChatIndexMode,
     editProjectChatAttachmentIngestionMode, setEditProjectChatAttachmentIngestionMode,
     editProjectEventStormingEnabled, setEditProjectEventStormingEnabled,
@@ -1370,6 +1372,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     editProjectEmbeddingEnabled,
     editProjectEmbeddingModel,
     editProjectContextPackEvidenceTopKText,
+    editProjectAutomationMaxParallelTasksText,
     editProjectChatIndexMode,
     editProjectChatAttachmentIngestionMode,
     editProjectEventStormingEnabled,
@@ -1573,6 +1576,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     editProjectEmbeddingEnabled,
     editProjectEmbeddingModel,
     editProjectContextPackEvidenceTopKText,
+    editProjectAutomationMaxParallelTasksText,
     editProjectChatIndexMode,
     editProjectChatAttachmentIngestionMode,
     editProjectEventStormingEnabled,
@@ -1794,6 +1798,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     projectEmbeddingEnabled,
     projectEmbeddingModel,
     projectContextPackEvidenceTopKText,
+    projectAutomationMaxParallelTasksText,
     projectChatIndexMode,
     projectChatAttachmentIngestionMode,
     projectEventStormingEnabled,
@@ -1811,6 +1816,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setProjectEmbeddingEnabled,
     setProjectEmbeddingModel,
     setProjectContextPackEvidenceTopKText,
+    setProjectAutomationMaxParallelTasksText,
     setProjectChatIndexMode,
     setProjectChatAttachmentIngestionMode,
     setProjectEventStormingEnabled,
@@ -1947,6 +1953,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setEditProjectEmbeddingEnabled,
     setEditProjectEmbeddingModel,
     setEditProjectContextPackEvidenceTopKText,
+    setEditProjectAutomationMaxParallelTasksText,
     setEditProjectChatIndexMode,
     setEditProjectChatAttachmentIngestionMode,
     setEditProjectEventStormingEnabled,
@@ -2256,6 +2263,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       setEditProjectEmbeddingModel,
       editProjectContextPackEvidenceTopKText,
       setEditProjectContextPackEvidenceTopKText,
+      editProjectAutomationMaxParallelTasksText,
+      setEditProjectAutomationMaxParallelTasksText,
       editProjectChatIndexMode,
       setEditProjectChatIndexMode,
       editProjectChatAttachmentIngestionMode,
@@ -2611,6 +2620,18 @@ function AuthGate() {
     window.localStorage.removeItem('ui_projects_mode')
   }, [])
 
+  const routeToDefaultPostLoginTab = React.useCallback(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem('ui_tab', 'tasks')
+    const params = new URLSearchParams(window.location.search)
+    params.set('tab', 'tasks')
+    params.delete('task')
+    params.delete('note')
+    params.delete('specification')
+    const next = `${window.location.pathname}?${params.toString()}${window.location.hash || ''}`
+    window.history.replaceState({}, '', next)
+  }, [])
+
   const checkAuth = React.useCallback(async () => {
     setAuthError(null)
     setPhase('checking')
@@ -2641,6 +2662,7 @@ function AuthGate() {
       const payload = await authLogin({ username: username.trim(), password })
       queryClient.clear()
       clearClientSessionState()
+      routeToDefaultPostLoginTab()
       setSessionUserId(String(payload.user?.id || '').trim() || 'session')
       setCurrentPassword(password)
       setPassword('')
@@ -2655,7 +2677,7 @@ function AuthGate() {
     } finally {
       setPending(false)
     }
-  }, [clearClientSessionState, password, pending, username])
+  }, [clearClientSessionState, password, pending, routeToDefaultPostLoginTab, username])
 
   const handleChangePassword = React.useCallback(async () => {
     if (pending) return
@@ -2675,6 +2697,7 @@ function AuthGate() {
         new_password: newPassword,
       })
       queryClient.clear()
+      routeToDefaultPostLoginTab()
       setNewPassword('')
       setConfirmPassword('')
       setPhase('ready')
@@ -2684,7 +2707,7 @@ function AuthGate() {
     } finally {
       setPending(false)
     }
-  }, [confirmPassword, currentPassword, newPassword, pending])
+  }, [confirmPassword, currentPassword, newPassword, pending, routeToDefaultPostLoginTab])
 
   const handleLogout = React.useCallback(() => {
     void authLogout().finally(() => {
@@ -2730,7 +2753,7 @@ function AuthGate() {
               type="password"
               autoComplete="current-password"
             />
-            <button type="submit" disabled={pending || !username.trim() || !password}>
+            <button type="submit" disabled={pending || !username.trim()}>
               {pending ? 'Logging in...' : 'Login'}
             </button>
           </form>

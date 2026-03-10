@@ -6,6 +6,7 @@ from plugins import skill_policy as plugin_skill_policy
 from plugins import task_policy as plugin_task_policy
 from plugins.registry import list_workflow_plugins
 from features.agents import gates as gates_module
+from plugins.team_mode.plugin import TeamModePlugin
 
 
 def _clear_plugin_registry_cache() -> None:
@@ -27,7 +28,7 @@ def test_default_plugin_policy_and_catalog_include_team_mode_plugin_scope() -> N
 
     catalog = gates_module.plugin_check_catalog_by_scope()
     assert "team_mode" in catalog
-    assert any(item["id"] == "dev_self_triggers_to_lead" for item in catalog["team_mode"])
+    assert any(item["id"] == "required_topology_present" for item in catalog["team_mode"])
     _clear_plugin_registry_cache()
 
 
@@ -116,3 +117,39 @@ def test_skill_policy_dispatches_no_team_mode_or_git_delivery_dependency() -> No
     patch = plugin_skill_policy.build_plugin_policy_patch_for_skill_keys({"team_mode"})
     assert patch == {}
     _clear_plugin_registry_cache()
+
+
+def test_team_mode_plugin_does_not_use_instruction_text_for_kickoff_detection() -> None:
+    plugin = TeamModePlugin()
+
+    assert (
+        plugin.runner_normalize_success_outcome(
+            action="complete",
+            summary="Completed",
+            comment=None,
+            instruction="Kickoff execution for project in lead-first mode",
+            assignee_role="Lead",
+            task_state={
+                "last_requested_execution_kickoff_intent": True,
+                "last_requested_workflow_scope": "team_mode",
+                "last_requested_execution_mode": "kickoff_only",
+            },
+        )["action"]
+        == "comment"
+    )
+    assert (
+        plugin.runner_normalize_success_outcome(
+            action="complete",
+            summary="Completed",
+            comment=None,
+            instruction="Kickoff execution for project in lead-first mode",
+            assignee_role="Lead",
+            task_state={
+                "last_requested_execution_kickoff_intent": False,
+                "last_requested_workflow_scope": "unknown",
+                "last_requested_execution_mode": "unknown",
+            },
+        )["action"]
+        == "complete"
+    )
+    assert plugin.runner_is_kickoff_instruction(instruction="Kickoff execution for project in lead-first mode") is False

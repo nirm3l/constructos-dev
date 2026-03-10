@@ -12,6 +12,7 @@ export function useProjectState() {
   const [projectEmbeddingEnabled, setProjectEmbeddingEnabled] = React.useState(true)
   const [projectEmbeddingModel, setProjectEmbeddingModel] = React.useState('')
   const [projectContextPackEvidenceTopKText, setProjectContextPackEvidenceTopKText] = React.useState('')
+  const [projectAutomationMaxParallelTasksText, setProjectAutomationMaxParallelTasksText] = React.useState('4')
   const [projectChatIndexMode, setProjectChatIndexMode] = React.useState<'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'>(
     'KG_AND_VECTOR'
   )
@@ -31,6 +32,7 @@ export function useProjectState() {
   const [editProjectEmbeddingEnabled, setEditProjectEmbeddingEnabled] = React.useState(false)
   const [editProjectEmbeddingModel, setEditProjectEmbeddingModel] = React.useState('')
   const [editProjectContextPackEvidenceTopKText, setEditProjectContextPackEvidenceTopKText] = React.useState('')
+  const [editProjectAutomationMaxParallelTasksText, setEditProjectAutomationMaxParallelTasksText] = React.useState('4')
   const [editProjectChatIndexMode, setEditProjectChatIndexMode] = React.useState<'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'>(
     'OFF'
   )
@@ -90,6 +92,8 @@ export function useProjectState() {
     setProjectEmbeddingModel,
     projectContextPackEvidenceTopKText,
     setProjectContextPackEvidenceTopKText,
+    projectAutomationMaxParallelTasksText,
+    setProjectAutomationMaxParallelTasksText,
     projectChatIndexMode,
     setProjectChatIndexMode,
     projectChatAttachmentIngestionMode,
@@ -120,6 +124,8 @@ export function useProjectState() {
     setEditProjectEmbeddingModel,
     editProjectContextPackEvidenceTopKText,
     setEditProjectContextPackEvidenceTopKText,
+    editProjectAutomationMaxParallelTasksText,
+    setEditProjectAutomationMaxParallelTasksText,
     editProjectChatIndexMode,
     setEditProjectChatIndexMode,
     editProjectChatAttachmentIngestionMode,

@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from shared.models import Project, ProjectMember, ProjectRule, User as UserModel, WorkspaceMember
+from shared.project_repository import ensure_project_repository_initialized
 
 TEAM_MODE_SKILL_KEY = "team_mode"
 TEAM_MODE_WORKSPACE_ROLE = "Admin"
@@ -186,12 +185,14 @@ def ensure_team_mode_repository_context(
     repository_context_rule_title: str,
     ensure_local_repository_bootstrap_fn: Any,
 ) -> None:
-    workspace_root_raw = str(os.getenv("AGENT_CODEX_WORKDIR", default_codex_workdir)).strip() or default_codex_workdir
-    workspace_root = Path(workspace_root_raw).expanduser()
     project_slug = _slugify_project_name(str(project.name or "").strip(), fallback=str(project.id)[:8] or "project")
-    repo_path = str(workspace_root / project_slug)
+    repo_root = ensure_project_repository_initialized(
+        project_name=str(project.name or "").strip(),
+        project_id=str(project.id or "").strip(),
+    )
+    repo_path = str(repo_root)
     repo_url = f"file://{repo_path}"
-    ensure_local_repository_bootstrap_fn(repo_path=Path(repo_path))
+    ensure_local_repository_bootstrap_fn(repo_path=repo_root)
 
     parsed_refs: list[dict[str, str]] = []
     try:

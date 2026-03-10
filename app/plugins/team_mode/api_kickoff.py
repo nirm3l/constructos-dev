@@ -1,14 +1,75 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Callable
 
 from fastapi import HTTPException
 from sqlalchemy import select
 
 from shared.core import User, append_event
-from shared.models import ProjectMember, ProjectPluginConfig, Task
+from shared.eventing import rebuild_state
+from shared.models import Project, ProjectMember, ProjectPluginConfig, SessionLocal, Task
+from shared.settings import AGENT_RUNNER_MAX_CONCURRENCY
+from shared.task_automation import normalize_execution_triggers
+from shared.task_relationships import normalize_task_relationships
 from shared.typed_notifications import append_notification_created_event
 from .task_roles import derive_task_role
+from .task_roles import normalize_team_agents
+from .gates import evaluate_team_mode_gates
+from .workflow_orchestrator import TEAM_MODE_WORKFLOW_ROLES, plan_kickoff_targets
+
+
+def _collect_team_mode_developer_dispatch_state(
+    *,
+    db: Any,
+    workspace_id: str,
+    project_id: str,
+    member_role_by_user_id: dict[str, str],
+    agent_role_by_code: dict[str, str],
+) -> dict[str, Any]:
+    tasks = db.execute(
+        select(Task).where(
+            Task.workspace_id == workspace_id,
+            Task.project_id == project_id,
+            Task.is_deleted == False,  # noqa: E712
+            Task.archived == False,  # noqa: E712
+            Task.status != "Done",
+        )
+        .order_by(Task.created_at.asc())
+    ).scalars().all()
+    developer_task_ids: list[str] = []
+    active_task_ids: list[str] = []
+    idle_task_ids: list[str] = []
+    for task in tasks:
+        task_id = str(task.id or "").strip()
+        if not task_id:
+            continue
+        role = derive_task_role(
+            task_like={
+                "id": task_id,
+                "assignee_id": str(task.assignee_id or "").strip(),
+                "assigned_agent_code": str(task.assigned_agent_code or "").strip(),
+                "labels": task.labels,
+                "status": str(task.status or "").strip(),
+            },
+            member_role_by_user_id=member_role_by_user_id,
+            agent_role_by_code=agent_role_by_code,
+        )
+        if role != "Developer":
+            continue
+        developer_task_ids.append(task_id)
+        state, _version = rebuild_state(db, "Task", task_id)
+        automation_state = str(state.get("automation_state") or "idle").strip().lower()
+        if automation_state == "idle":
+            idle_task_ids.append(task_id)
+        else:
+            active_task_ids.append(task_id)
+    return {
+        "developer_task_ids": developer_task_ids,
+        "developer_active_task_ids": active_task_ids,
+        "developer_idle_task_ids": idle_task_ids,
+        "developer_dispatch_confirmed": bool(active_task_ids),
+    }
 
 
 def maybe_dispatch_execution_kickoff(
@@ -40,17 +101,37 @@ def maybe_dispatch_execution_kickoff(
     if not should_dispatch_kickoff:
         return None
 
-    team_mode_plugin_enabled = db.execute(
-        select(ProjectPluginConfig.id).where(
+    team_mode_plugin_row = db.execute(
+        select(ProjectPluginConfig.id, ProjectPluginConfig.config_json).where(
             ProjectPluginConfig.workspace_id == workspace_id,
             ProjectPluginConfig.project_id == normalized_project_id,
             ProjectPluginConfig.plugin_key == "team_mode",
             ProjectPluginConfig.enabled == True,  # noqa: E712
             ProjectPluginConfig.is_deleted == False,  # noqa: E712
         )
-    ).scalar_one_or_none()
-    if team_mode_plugin_enabled is None:
+    ).first()
+    if team_mode_plugin_row is None:
         return None
+    team_mode_config_obj: dict[str, Any] = {}
+    try:
+        parsed = json.loads(str(team_mode_plugin_row[1] or "").strip() or "{}")
+        if isinstance(parsed, dict):
+            team_mode_config_obj = parsed
+    except Exception:
+        team_mode_config_obj = {}
+    team_agents = normalize_team_agents(team_mode_config_obj.get("team"))
+    project_row = db.get(Project, normalized_project_id)
+    raw_parallel_limit = getattr(project_row, "automation_max_parallel_tasks", None) if project_row is not None else None
+    try:
+        max_parallel_dispatch = int(raw_parallel_limit or 4)
+    except Exception:
+        max_parallel_dispatch = 4
+    max_parallel_dispatch = max(1, min(max_parallel_dispatch, int(AGENT_RUNNER_MAX_CONCURRENCY)))
+    agent_role_by_code = {
+        str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
+        for agent in team_agents
+        if str(agent.get("id") or "").strip()
+    }
 
     promote_plugin_policy_to_execution_mode_if_needed(
         db=db,
@@ -83,30 +164,167 @@ def maybe_dispatch_execution_kickoff(
         return str(task.instruction or "").strip() or str(task.scheduled_instruction or "").strip()
 
     candidates_dev: list[tuple[Task, str]] = []
-    candidates_lead: list[tuple[Task, str]] = []
     candidates_qa: list[tuple[Task, str]] = []
+    orchestration_rows: list[dict[str, str]] = []
+    task_by_id: dict[str, Task] = {}
+    task_state_by_id: dict[str, dict[str, Any]] = {}
+    active_task_ids_before_dispatch: list[str] = []
     for task in tasks:
+        task_id = str(task.id or "").strip()
+        if not task_id:
+            continue
+        try:
+            state, _version = rebuild_state(db, "Task", task_id)
+        except Exception:
+            state = {}
+        task_state_by_id[task_id] = dict(state) if isinstance(state, dict) else {}
+        automation_state = str((task_state_by_id.get(task_id) or {}).get("automation_state") or "idle").strip().lower()
+        if automation_state in {"queued", "running"}:
+            active_task_ids_before_dispatch.append(task_id)
+
         normalized_role = derive_task_role(
             task_like={
                 "assignee_id": str(task.assignee_id or "").strip(),
+                "assigned_agent_code": str(task.assigned_agent_code or "").strip(),
                 "labels": task.labels,
                 "status": str(task.status or "").strip(),
             },
             member_role_by_user_id=member_role_by_user_id,
+            agent_role_by_code=agent_role_by_code,
         )
-        if normalized_role not in {"Developer", "Lead", "QA"}:
+        if normalized_role not in TEAM_MODE_WORKFLOW_ROLES:
             continue
         normalized_status = str(task.status or "").strip()
+        task_by_id[task_id] = task
+        orchestration_rows.append(
+            {
+                "id": task_id,
+                "role": normalized_role,
+                "status": normalized_status,
+                "instruction": str(task.instruction or "").strip(),
+                "scheduled_instruction": str(task.scheduled_instruction or "").strip(),
+            }
+        )
         if normalized_role == "Developer" and normalized_status == "Dev" and _task_instruction(task):
             candidates_dev.append((task, normalized_role))
-        elif normalized_role == "Lead" and normalized_status == "Lead" and _task_instruction(task):
-            candidates_lead.append((task, normalized_role))
         elif normalized_role == "QA" and normalized_status in {"QA", "Blocked"} and _task_instruction(task):
             candidates_qa.append((task, normalized_role))
 
-    # Kickoff is Lead-first: dispatch only Team Lead oversight task(s).
-    # Dev/QA should start from Team Mode trigger flow after Lead orchestration.
-    kickoff_targets: list[tuple[Task, str]] = list(candidates_lead)
+    active_count = len(active_task_ids_before_dispatch)
+    available_slots_before_dispatch = max(0, max_parallel_dispatch - active_count)
+    if available_slots_before_dispatch <= 0:
+        return {
+            "ok": True,
+            "action": "comment",
+            "summary": "Team Mode kickoff already in progress.",
+            "comment": (
+                "Maximum parallel kickoff capacity is reached for this project. "
+                "Wait for active automation tasks to finish before retrying."
+            ),
+            "kickoff_dispatched": False,
+            "already_in_progress": True,
+            "queued_task_ids": list(active_task_ids_before_dispatch),
+            "queued_by_role": {"Developer": 0, "Lead": 0, "QA": 0},
+            "failed": [],
+            "parallel_limit": max_parallel_dispatch,
+            "active_count_before_dispatch": active_count,
+        }
+
+    kickoff_plan = plan_kickoff_targets(
+        orchestration_rows,
+        max_parallel_dispatch=available_slots_before_dispatch,
+    )
+    kickoff_task_ids_by_role = kickoff_plan.get("kickoff_task_ids_by_role")
+    kickoff_ids_by_role = kickoff_task_ids_by_role if isinstance(kickoff_task_ids_by_role, dict) else {}
+    task_role_by_id: dict[str, str] = {}
+    for role_name in ("Lead", "Developer", "QA"):
+        role_task_ids = kickoff_ids_by_role.get(role_name)
+        if not isinstance(role_task_ids, list):
+            continue
+        for item in role_task_ids:
+            task_id = str(item or "").strip()
+            if task_id:
+                task_role_by_id[task_id] = role_name
+
+    kickoff_targets: list[tuple[Task, str]] = [
+        (task_by_id[task_id], str(task_role_by_id.get(task_id) or "Lead"))
+        for task_id in list(kickoff_plan.get("kickoff_task_ids") or [])
+        if task_id in task_by_id
+    ]
+
+    if not kickoff_targets:
+        blocked_reasons = [str(item or "").strip() for item in (kickoff_plan.get("blocked_reasons") or []) if str(item or "").strip()]
+        if not blocked_reasons:
+            blocked_reasons = ["no runnable kickoff target matched deterministic kickoff criteria"]
+        return {
+            "ok": False,
+            "action": "comment",
+            "summary": "Team Mode kickoff blocked.",
+            "comment": "Missing kickoff prerequisites: " + "; ".join(blocked_reasons) + ".",
+            "kickoff_dispatched": False,
+            "queued_task_ids": [],
+            "queued_by_role": {"Developer": 0, "Lead": 0, "QA": 0},
+            "failed": [],
+            "blocked_reasons": blocked_reasons,
+            "parallel_limit": max_parallel_dispatch,
+            "active_count_before_dispatch": active_count,
+        }
+
+    # For projects that already have Dev/QA workload, enforce topology completeness before kickoff.
+    if candidates_dev or candidates_qa:
+        topology_tasks: list[dict[str, object]] = []
+        for task in tasks:
+            topology_tasks.append(
+                {
+                    "id": str(task.id or "").strip(),
+                    "assignee_id": str(task.assignee_id or "").strip(),
+                    "assigned_agent_code": str(task.assigned_agent_code or "").strip(),
+                    "labels": task.labels,
+                    "status": str(task.status or "").strip(),
+                    "title": str(task.title or "").strip(),
+                    "instruction": str(task.instruction or "").strip(),
+                    "scheduled_instruction": str(task.scheduled_instruction or "").strip(),
+                    "execution_triggers": normalize_execution_triggers(task.execution_triggers),
+                    "task_relationships": normalize_task_relationships(task.task_relationships),
+                    "scheduled_at_utc": task.scheduled_at_utc,
+                    "recurring_rule": task.recurring_rule,
+                    "task_type": str(task.task_type or "").strip() or "manual",
+                }
+            )
+        team_mode_gate_eval = evaluate_team_mode_gates(
+            project_id=normalized_project_id,
+            workspace_id=workspace_id,
+            event_storming_enabled=False,
+            expected_event_storming_enabled=None,
+            plugin_policy={"team_mode": {"lead_recurring_max_minutes": 5}, "team": {"agents": team_agents}},
+            plugin_policy_source="team_mode_kickoff_readiness",
+            tasks=topology_tasks,
+            member_role_by_user_id=member_role_by_user_id,
+            notes_by_task={},
+            comments_by_task={},
+            extract_deploy_ports=lambda _text: set(),
+            has_deploy_stack_marker=lambda _text: False,
+        )
+        topology_checks = dict(team_mode_gate_eval.get("checks") or {})
+        if not bool(topology_checks.get("role_coverage_present")) or not bool(topology_checks.get("required_topology_present")):
+            missing_bits: list[str] = []
+            if not bool(topology_checks.get("role_coverage_present")):
+                missing_bits.append("role coverage (need at least one Developer, one Lead, and one QA task)")
+            if not bool(topology_checks.get("required_topology_present")):
+                missing_bits.append("required Team Mode topology (Dev delivers_to Lead, Lead depends_on Dev/Blocked, QA hands_off_to Lead)")
+            summary = "Team Mode kickoff blocked: execution topology is incomplete."
+            comment = "Missing: " + "; ".join(missing_bits)
+            return {
+                "ok": False,
+                "action": "comment",
+                "summary": summary,
+                "comment": comment,
+                "kickoff_dispatched": False,
+                "queued_task_ids": [],
+                "queued_by_role": {"Developer": 0, "Lead": 0, "QA": 0},
+                "failed": [],
+                "blocked_reasons": missing_bits,
+            }
 
     kickoff_instruction = build_team_lead_kickoff_instruction(
         project_id=normalized_project_id,
@@ -114,6 +332,35 @@ def maybe_dispatch_execution_kickoff(
     )
     from features.tasks.application import TaskApplicationService
     from shared.core import TaskAutomationRun
+
+    active_kickoff_task_ids: list[str] = []
+    for task, _role in kickoff_targets:
+        task_id = str(getattr(task, "id", "") or "").strip()
+        if not task_id:
+            continue
+        state = task_state_by_id.get(task_id) or {}
+        automation_state = str(state.get("automation_state") or "idle").strip().lower()
+        if automation_state in {"queued", "running"}:
+            active_kickoff_task_ids.append(task_id)
+    if active_kickoff_task_ids:
+        summary = "Team Mode kickoff already in progress."
+        comment = (
+            "Lead kickoff task is already queued/running. "
+            "Wait for current kickoff execution to finish before retrying."
+        )
+        return {
+            "ok": True,
+            "action": "comment",
+            "summary": summary,
+            "comment": comment,
+            "kickoff_dispatched": False,
+            "already_in_progress": True,
+            "queued_task_ids": active_kickoff_task_ids,
+            "queued_by_role": {"Developer": 0, "Lead": len(active_kickoff_task_ids), "QA": 0},
+            "failed": [],
+            "parallel_limit": max_parallel_dispatch,
+            "active_count_before_dispatch": active_count,
+        }
 
     queued_task_ids: list[str] = []
     queued_by_role: dict[str, int] = {"Developer": 0, "Lead": 0, "QA": 0}
@@ -129,7 +376,15 @@ def maybe_dispatch_execution_kickoff(
         try:
             TaskApplicationService(db, user, command_id=task_command_id).request_automation_run(
                 task_id,
-                TaskAutomationRun(instruction=instruction),
+                TaskAutomationRun(
+                    instruction=instruction,
+                    execution_intent=bool(flags.get("execution_intent")),
+                    execution_kickoff_intent=bool(flags.get("execution_kickoff_intent")),
+                    project_creation_intent=bool(flags.get("project_creation_intent")),
+                    workflow_scope=str(flags.get("workflow_scope") or "").strip() or "team_mode",
+                    execution_mode=str(flags.get("execution_mode") or "").strip() or "kickoff_only",
+                    classifier_reason=str(flags.get("reason") or "").strip() or None,
+                ),
                 wake_runner=False,
             )
             queued_task_ids.append(task_id)
@@ -177,20 +432,48 @@ def maybe_dispatch_execution_kickoff(
     )
     db.commit()
 
-    if not kickoff_targets:
-        return {
-            "ok": False,
-            "action": "comment",
-            "summary": "Team Mode kickoff blocked: no runnable Team Mode tasks found.",
-            "comment": "Ensure at least one Lead task is in Lead status with an automation instruction, then retry kickoff.",
-            "kickoff_dispatched": False,
-            "queued_task_ids": [],
-            "queued_by_role": queued_by_role,
-            "failed": [],
-        }
+    developer_dispatch_state = {
+        "developer_task_ids": [],
+        "developer_active_task_ids": [],
+        "developer_idle_task_ids": [],
+        "developer_dispatch_confirmed": False,
+    }
+    kickoff_processing_error: str | None = None
+    if kickoff_ok and queued_task_ids:
+        try:
+            from features.agents.runner import run_queued_automation_once
+
+            run_queued_automation_once(limit=max(1, len(queued_task_ids)), allow_fresh_kickoff=True)
+            with SessionLocal() as verify_db:
+                developer_dispatch_state = _collect_team_mode_developer_dispatch_state(
+                    db=verify_db,
+                    workspace_id=workspace_id,
+                    project_id=normalized_project_id,
+                    member_role_by_user_id=member_role_by_user_id,
+                    agent_role_by_code=agent_role_by_code,
+                )
+        except Exception as exc:  # pragma: no cover
+            kickoff_processing_error = str(exc)[:300]
+
     if kickoff_ok:
-        summary = "Team Mode kickoff dispatched to task automation."
-        comment = f"Queued tasks: {len(queued_task_ids)} (Dev={queued_dev}, Lead={queued_lead}, QA={queued_qa})."
+        if kickoff_processing_error:
+            summary = "Team Mode kickoff queued, but immediate dispatch verification failed."
+            comment = kickoff_processing_error
+            kickoff_ok = False
+        elif not bool(developer_dispatch_state.get("developer_dispatch_confirmed")):
+            summary = "Team Mode kickoff queued, but no Developer task started."
+            comment = (
+                "Lead kickoff ran, but all Developer tasks remained idle after immediate kickoff processing. "
+                "Kickoff is incomplete."
+            )
+            kickoff_ok = False
+        else:
+            active_dev = len(developer_dispatch_state.get("developer_active_task_ids") or [])
+            summary = "Team Mode kickoff dispatched to task automation."
+            comment = (
+                f"Queued tasks: {len(queued_task_ids)} (Dev={queued_dev}, Lead={queued_lead}, QA={queued_qa}). "
+                f"Developer tasks started: {active_dev}."
+            )
     else:
         summary = "Team Mode kickoff partially failed."
         comment = (
@@ -206,4 +489,11 @@ def maybe_dispatch_execution_kickoff(
         "queued_task_ids": queued_task_ids,
         "queued_by_role": queued_by_role,
         "failed": failed,
+        "parallel_limit": max_parallel_dispatch,
+        "active_count_before_dispatch": active_count,
+        "available_slots_before_dispatch": available_slots_before_dispatch,
+        "developer_dispatch_confirmed": bool(developer_dispatch_state.get("developer_dispatch_confirmed")),
+        "developer_task_ids": list(developer_dispatch_state.get("developer_task_ids") or []),
+        "developer_active_task_ids": list(developer_dispatch_state.get("developer_active_task_ids") or []),
+        "developer_idle_task_ids": list(developer_dispatch_state.get("developer_idle_task_ids") or []),
     }

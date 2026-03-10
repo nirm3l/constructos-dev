@@ -17,6 +17,21 @@ def test_derive_task_role_accepts_lowercase_tm_role_label() -> None:
     assert role == "Developer"
 
 
+def test_derive_task_role_prefers_assigned_agent_code_mapping() -> None:
+    role = derive_task_role(
+        task_like={
+            "labels": [],
+            "status": "Blocked",
+            "assignee_id": "u-owner",
+            "assigned_agent_code": "dev-a",
+        },
+        member_role_by_user_id={"u-owner": "Owner"},
+        agent_role_by_code={"dev-a": "Developer", "qa-a": "QA"},
+        allow_status_fallback=True,
+    )
+    assert role == "Developer"
+
+
 def test_pick_agent_for_task_selects_matching_slot() -> None:
     agents = normalize_team_agents(
         {

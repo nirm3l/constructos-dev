@@ -130,6 +130,7 @@ def _project_view_from_aggregate(aggregate: ProjectAggregate, *, created_by: str
         "embedding_enabled": bool(aggregate.embedding_enabled),
         "embedding_model": aggregate.embedding_model,
         "context_pack_evidence_top_k": aggregate.context_pack_evidence_top_k,
+        "automation_max_parallel_tasks": int(getattr(aggregate, "automation_max_parallel_tasks", 4) or 4),
         "chat_index_mode": str(aggregate.chat_index_mode or "OFF"),
         "chat_attachment_ingestion_mode": str(aggregate.chat_attachment_ingestion_mode or "METADATA_ONLY"),
         "event_storming_enabled": bool(getattr(aggregate, "event_storming_enabled", True)),
@@ -182,6 +183,15 @@ def _normalize_context_pack_evidence_top_k(value: int | None) -> int | None:
     out = int(value)
     if out < 1 or out > 40:
         raise HTTPException(status_code=422, detail="context_pack_evidence_top_k must be between 1 and 40")
+    return out
+
+
+def _normalize_automation_max_parallel_tasks(value: int | None) -> int:
+    if value is None:
+        return 4
+    out = int(value)
+    if out < 1 or out > 50:
+        raise HTTPException(status_code=422, detail="automation_max_parallel_tasks must be between 1 and 50")
     return out
 
 
@@ -265,6 +275,9 @@ class CreateProjectHandler:
             embedding_enabled=embedding_enabled,
             embedding_model=embedding_model,
             context_pack_evidence_top_k=_normalize_context_pack_evidence_top_k(self.payload.context_pack_evidence_top_k),
+            automation_max_parallel_tasks=_normalize_automation_max_parallel_tasks(
+                self.payload.automation_max_parallel_tasks
+            ),
             chat_index_mode=_normalize_chat_index_mode(self.payload.chat_index_mode),
             chat_attachment_ingestion_mode=_normalize_chat_attachment_ingestion_mode(
                 self.payload.chat_attachment_ingestion_mode
@@ -461,6 +474,10 @@ class PatchProjectHandler:
         if "context_pack_evidence_top_k" in data:
             event_payload["context_pack_evidence_top_k"] = _normalize_context_pack_evidence_top_k(
                 data.get("context_pack_evidence_top_k")
+            )
+        if "automation_max_parallel_tasks" in data:
+            event_payload["automation_max_parallel_tasks"] = _normalize_automation_max_parallel_tasks(
+                data.get("automation_max_parallel_tasks")
             )
         if "chat_index_mode" in data and data["chat_index_mode"] is not None:
             event_payload["chat_index_mode"] = _normalize_chat_index_mode(data.get("chat_index_mode"))

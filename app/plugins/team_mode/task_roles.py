@@ -62,8 +62,15 @@ def derive_task_role(
     *,
     task_like: dict[str, Any],
     member_role_by_user_id: dict[str, str] | None = None,
+    agent_role_by_code: dict[str, str] | None = None,
     allow_status_fallback: bool = True,
 ) -> str:
+    assigned_agent_code = str(task_like.get("assigned_agent_code") or "").strip()
+    if assigned_agent_code and isinstance(agent_role_by_code, dict):
+        assigned_agent_role = str(agent_role_by_code.get(assigned_agent_code) or "").strip()
+        assigned_agent_role_canonical = _LEGACY_ROLE_ALIASES.get(assigned_agent_role.casefold()) or assigned_agent_role
+        if assigned_agent_role_canonical in TEAM_MODE_ROLES:
+            return assigned_agent_role_canonical
     labels_role = extract_role_from_labels(task_like.get("labels"))
     if labels_role:
         return labels_role

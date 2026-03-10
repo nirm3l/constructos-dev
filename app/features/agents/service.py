@@ -79,8 +79,12 @@ from shared.core import (
 )
 from features.project_templates.schemas import ProjectFromTemplateCreate, ProjectFromTemplatePreview
 from features.agents.codex_mcp_adapter import run_structured_codex_prompt
+from features.agents.intent_classifier import classify_instruction_intent
 from features.agents.gates import (
     DEFAULT_REQUIRED_DELIVERY_CHECKS,
+    DELIVERY_CORE_CHECK_DESCRIPTIONS,
+    DELIVERY_CORE_CHECK_IDS,
+    DELIVERY_CORE_CHECK_SET,
     DELIVERY_CHECK_DESCRIPTIONS,
     evaluate_delivery_checks,
     evaluate_required_checks as evaluate_required_policy_checks,
@@ -91,9 +95,20 @@ from features.agents.gates import (
 from plugins import context_policy as plugin_context_policy
 from plugins import service_policy as plugin_service_policy
 from plugins.runner_policy import is_lead_role
-from plugins.team_mode.gates import DEFAULT_REQUIRED_TEAM_MODE_CHECKS, TEAM_MODE_CHECK_DESCRIPTIONS
+from plugins.team_mode.gates import (
+    DEFAULT_REQUIRED_TEAM_MODE_CHECKS,
+    TEAM_MODE_CHECK_DESCRIPTIONS,
+    TEAM_MODE_CORE_CHECK_DESCRIPTIONS,
+    TEAM_MODE_CORE_CHECK_IDS,
+    TEAM_MODE_CORE_CHECK_SET,
+)
 from plugins.team_mode.task_roles import TEAM_MODE_ROLES, derive_task_role, normalize_team_agents
 from shared.deps import ensure_role
+from shared.project_repository import (
+    ensure_project_repository_initialized,
+    resolve_project_repository_path,
+)
+from shared.task_relationships import normalize_task_relationships
 from shared.knowledge_graph import (
     build_graph_context_pack,
     graph_context_pack as graph_context_pack_query,
@@ -291,7 +306,10 @@ def _git_delivery_default_config() -> dict[str, Any]:
     return {
         "required_checks": {
             "delivery": list(DEFAULT_REQUIRED_DELIVERY_CHECKS),
-        }
+        },
+        "execution": {
+            "require_dev_tests": False,
+        },
     }
 
 
@@ -305,7 +323,7 @@ def _docker_compose_default_config(*, port: int | None = None) -> dict[str, Any]
         except Exception:
             normalized_port = None
     return {
-        "compose_project_name": "constructos-app",
+        "compose_project_name": "constructos-ws-default",
         "workspace_root": "/workspace",
         "allowed_services": [],
         "protected_services": ["license-control-plane", "license-control-plane-backup"],
@@ -333,7 +351,7 @@ def _default_plugin_config(plugin_key: str) -> dict[str, Any]:
 def _validate_team_mode_config(config: dict[str, Any]) -> tuple[list[dict[str, str]], list[str]]:
     errors: list[dict[str, str]] = []
     warnings: list[str] = []
-    allowed_checks = set(TEAM_MODE_CHECK_DESCRIPTIONS.keys())
+    allowed_checks = set(TEAM_MODE_CORE_CHECK_IDS)
 
     required_checks = config.get("required_checks")
     if required_checks is not None and not isinstance(required_checks, dict):
@@ -622,6 +640,7 @@ def _compile_plugin_policy(plugin_key: str, config: dict[str, Any]) -> dict[str,
             if isinstance(team_mode_required_raw, list)
             else list(DEFAULT_REQUIRED_TEAM_MODE_CHECKS)
         )
+        team_mode_required = [item for item in team_mode_required if item in TEAM_MODE_CORE_CHECK_SET]
         raw_minutes = automation.get("lead_recurring_max_minutes") if isinstance(automation, dict) else None
         try:
             lead_recurring_max_minutes = max(1, int(raw_minutes))
@@ -630,7 +649,7 @@ def _compile_plugin_policy(plugin_key: str, config: dict[str, Any]) -> dict[str,
         compiled = {
             "version": 1,
             "required_checks": {"team_mode": team_mode_required},
-            "available_checks": {"team_mode": dict(TEAM_MODE_CHECK_DESCRIPTIONS)},
+            "available_checks": {"team_mode": dict(TEAM_MODE_CORE_CHECK_DESCRIPTIONS)},
             "team_mode": {"lead_recurring_max_minutes": lead_recurring_max_minutes},
             "team": {
                 "agents": agents,
@@ -649,10 +668,14 @@ def _compile_plugin_policy(plugin_key: str, config: dict[str, Any]) -> dict[str,
             if isinstance(delivery_required_raw, list)
             else list(DEFAULT_REQUIRED_DELIVERY_CHECKS)
         )
+        delivery_required = [item for item in delivery_required if item in DELIVERY_CORE_CHECK_SET]
+        execution_cfg = config.get("execution") if isinstance(config.get("execution"), dict) else {}
+        require_dev_tests = bool(execution_cfg.get("require_dev_tests", False))
         compiled = {
             "version": 1,
             "required_checks": {"delivery": delivery_required},
-            "available_checks": {"delivery": dict(DELIVERY_CHECK_DESCRIPTIONS)},
+            "available_checks": {"delivery": dict(DELIVERY_CORE_CHECK_DESCRIPTIONS)},
+            "execution": {"require_dev_tests": require_dev_tests},
         }
         return compiled
     if plugin_key == "docker_compose":
@@ -661,7 +684,7 @@ def _compile_plugin_policy(plugin_key: str, config: dict[str, Any]) -> dict[str,
         return {
             "version": 1,
             "docker_compose": {
-                "compose_project_name": str(config.get("compose_project_name") or "constructos-app"),
+                "compose_project_name": str(config.get("compose_project_name") or "constructos-ws-default"),
                 "workspace_root": str(config.get("workspace_root") or "/workspace"),
                 "allowed_services": [
                     str(item or "").strip()
@@ -703,13 +726,10 @@ def _validate_plugin_config(plugin_key: str, config: dict[str, Any]) -> tuple[li
     if plugin_key == "git_delivery":
         errors: list[dict[str, str]] = []
         warnings: list[str] = []
-        allowed_keys = {"required_checks"}
+        allowed_keys = {"required_checks", "execution"}
         for key in sorted(config.keys()):
             normalized = str(key or "").strip()
             if not normalized:
-                continue
-            if normalized == "evaluation":
-                warnings.append("evaluation configuration is deprecated for core mode and will be ignored")
                 continue
             if normalized not in allowed_keys:
                 errors.append(
@@ -719,7 +739,7 @@ def _validate_plugin_config(plugin_key: str, config: dict[str, Any]) -> tuple[li
                         "message": f"unknown field for git_delivery config: {normalized}",
                     }
                 )
-        allowed_checks = set(DELIVERY_CHECK_DESCRIPTIONS.keys())
+        allowed_checks = set(DELIVERY_CORE_CHECK_IDS)
         required_checks = config.get("required_checks")
         if required_checks is not None and not isinstance(required_checks, dict):
             errors.append(
@@ -764,6 +784,34 @@ def _validate_plugin_config(plugin_key: str, config: dict[str, Any]) -> tuple[li
                     if check_id in seen:
                         warnings.append(f"required_checks.delivery contains duplicate value: {check_id}")
                     seen.add(check_id)
+        execution = config.get("execution")
+        if execution is not None and not isinstance(execution, dict):
+            errors.append(
+                {
+                    "path": "execution",
+                    "code": "invalid_type",
+                    "message": "execution must be an object",
+                }
+            )
+        elif isinstance(execution, dict):
+            for key in sorted(execution.keys()):
+                normalized = str(key or "").strip()
+                if normalized != "require_dev_tests":
+                    errors.append(
+                        {
+                            "path": f"execution.{normalized}" if normalized else "execution",
+                            "code": "unknown_field",
+                            "message": f"unknown field for execution config: {normalized}",
+                        }
+                    )
+            if "require_dev_tests" in execution and not isinstance(execution.get("require_dev_tests"), bool):
+                errors.append(
+                    {
+                        "path": "execution.require_dev_tests",
+                        "code": "invalid_type",
+                        "message": "execution.require_dev_tests must be a boolean",
+                    }
+                )
         return errors, warnings
     if plugin_key == "docker_compose":
         errors: list[dict[str, str]] = []
@@ -1024,6 +1072,77 @@ class AgentTaskService:
             return
         if self._allowed_project_ids and project_id not in self._allowed_project_ids:
             raise HTTPException(status_code=403, detail="Project is outside MCP allowlist")
+
+    @staticmethod
+    def _resolve_task_assignee_role(
+        *,
+        db,
+        workspace_id: str,
+        project_id: str | None,
+        assignee_id: str | None,
+        assigned_agent_code: str | None = None,
+        task_labels: object | None = None,
+        task_status: str | None = None,
+    ) -> str:
+        normalized_workspace_id = str(workspace_id or "").strip()
+        normalized_project_id = str(project_id or "").strip()
+        normalized_assignee_id = str(assignee_id or "").strip()
+        normalized_assigned_agent_code = str(assigned_agent_code or "").strip().lower()
+        if not normalized_workspace_id or not normalized_project_id:
+            return ""
+
+        agent_role_by_code: dict[str, str] = {}
+        if normalized_assigned_agent_code:
+            plugin_row = db.execute(
+                select(ProjectPluginConfig.config_json).where(
+                    ProjectPluginConfig.workspace_id == normalized_workspace_id,
+                    ProjectPluginConfig.project_id == normalized_project_id,
+                    ProjectPluginConfig.plugin_key == "team_mode",
+                    ProjectPluginConfig.is_deleted == False,  # noqa: E712
+                )
+            ).scalar_one_or_none()
+            plugin_config: dict[str, Any] = {}
+            if isinstance(plugin_row, str) and plugin_row.strip():
+                try:
+                    parsed = json.loads(plugin_row)
+                except Exception:
+                    parsed = {}
+                if isinstance(parsed, dict):
+                    plugin_config = parsed
+            elif isinstance(plugin_row, dict):
+                plugin_config = dict(plugin_row)
+            agent_role_by_code = {
+                str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
+                for agent in normalize_team_agents(plugin_config.get("team"))
+                if str(agent.get("id") or "").strip()
+            }
+
+        member_role_by_user_id: dict[str, str] = {}
+        if normalized_assignee_id:
+            member_role = db.execute(
+                select(ProjectMember.role).where(
+                    ProjectMember.workspace_id == normalized_workspace_id,
+                    ProjectMember.project_id == normalized_project_id,
+                    ProjectMember.user_id == normalized_assignee_id,
+                )
+            ).scalar_one_or_none()
+            if str(member_role or "").strip():
+                member_role_by_user_id[normalized_assignee_id] = str(member_role or "").strip()
+
+        return str(
+            derive_task_role(
+                task_like={
+                    "assignee_id": normalized_assignee_id,
+                    "assigned_agent_code": normalized_assigned_agent_code,
+                    "labels": task_labels,
+                    "status": str(task_status or "").strip(),
+                },
+                member_role_by_user_id=member_role_by_user_id,
+                agent_role_by_code=agent_role_by_code,
+                allow_status_fallback=False,
+            )
+            or ""
+        ).strip()
 
     @staticmethod
     def _parse_json_string(value: str, *, field_name: str) -> Any:
@@ -2777,6 +2896,7 @@ class AgentTaskService:
 
     @staticmethod
     def _has_qa_artifact_text(text: str) -> bool:
+        # Evidence extraction only. This is not allowed to classify user workflow intent.
         normalized = str(text or "").strip().lower()
         if not normalized:
             return False
@@ -2811,6 +2931,7 @@ class AgentTaskService:
 
     @staticmethod
     def _has_deploy_artifact_text(text: str) -> bool:
+        # Evidence extraction only. This is not allowed to classify user workflow intent.
         normalized = str(text or "").strip().lower()
         if not normalized:
             return False
@@ -2841,6 +2962,7 @@ class AgentTaskService:
 
     @staticmethod
     def _extract_deploy_ports(text: str) -> set[str]:
+        # Deterministic artifact parsing only. Missing/ambiguous input must fail closed.
         normalized = str(text or "").strip().lower()
         if not normalized:
             return set()
@@ -2977,6 +3099,12 @@ class AgentTaskService:
             task["last_agent_run_at"] = state.get("last_agent_run_at")
             task["last_requested_source"] = state.get("last_requested_source")
             task["last_requested_triggered_at"] = state.get("last_requested_triggered_at")
+            if str(state.get("last_lead_handoff_token") or "").strip():
+                task["last_lead_handoff_token"] = str(state.get("last_lead_handoff_token") or "").strip()
+            if isinstance(state.get("last_lead_handoff_deploy_execution"), dict):
+                task["last_lead_handoff_deploy_execution"] = state.get("last_lead_handoff_deploy_execution")
+            if isinstance(state.get("last_deploy_execution"), dict):
+                task["last_deploy_execution"] = state.get("last_deploy_execution")
             if not str(task.get("instruction") or "").strip():
                 instruction = str(state.get("instruction") or state.get("scheduled_instruction") or "").strip()
                 if instruction:
@@ -3116,6 +3244,7 @@ class AgentTaskService:
             task_id = str(task.get("id") or "").strip()
             if not task_id:
                 continue
+            task_state, _ = rebuild_state(db, "Task", task_id)
             serialized_tasks.append(
                 {
                     "id": task_id,
@@ -3128,6 +3257,21 @@ class AgentTaskService:
                     "scheduled_instruction": str(task.get("scheduled_instruction") or "")[:4000],
                     "execution_triggers": task.get("execution_triggers") if isinstance(task.get("execution_triggers"), list) else [],
                     "external_refs": cls._parse_json_list(task.get("external_refs")),
+                    "last_lead_handoff_token": str(task_state.get("last_lead_handoff_token") or "").strip() or None,
+                    "last_lead_handoff_deploy_execution": (
+                        task_state.get("last_lead_handoff_deploy_execution")
+                        if isinstance(task_state.get("last_lead_handoff_deploy_execution"), dict)
+                        else None
+                    ),
+                    "last_deploy_execution": (
+                        task.get("last_deploy_execution")
+                        if isinstance(task.get("last_deploy_execution"), dict)
+                        else (
+                            task_state.get("last_deploy_execution")
+                            if isinstance(task_state.get("last_deploy_execution"), dict)
+                            else None
+                        )
+                    ),
                     "last_agent_run_at": str(task.get("last_agent_run_at") or "").strip(),
                 }
             )
@@ -3454,11 +3598,8 @@ class AgentTaskService:
             project_external_refs=getattr(project, "external_refs", "[]"),
             team_mode_enabled=team_mode_enabled,
             extract_commit_shas_from_refs=self._extract_commit_shas_from_refs,
-            extract_commit_shas_from_text=self._extract_commit_shas_from_text,
             parse_json_list=self._parse_json_list,
             has_http_external_ref=self._has_http_external_ref,
-            has_qa_artifact_text=self._has_qa_artifact_text,
-            has_deploy_artifact_text=self._has_deploy_artifact_text,
             resolve_deploy_target_from_artifacts=self._resolve_deploy_target_from_artifacts,
             run_runtime_deploy_health_check_fn=self._run_runtime_deploy_health_check,
             project_has_repo_context=lambda **kwargs: self._project_has_repo_context(allow_llm=False, **kwargs),
@@ -3471,16 +3612,26 @@ class AgentTaskService:
         verification["active"] = delivery_active
         verification["checks"] = dict(verification.get("checks") or {})
         verification["checks"]["git_delivery_enabled"] = bool(git_delivery_enabled)
+        team_agents = normalize_team_agents(
+            (plugin_policy.get("team") if isinstance(plugin_policy.get("team"), dict) else {})
+        )
+        agent_role_by_code = {
+            str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
+            for agent in team_agents
+            if str(agent.get("id") or "").strip()
+        }
         role_scoped_tasks = [
             task
             for task in tasks
             if derive_task_role(
                 task_like={
                     "assignee_id": str(task.get("assignee_id") or "").strip(),
+                    "assigned_agent_code": str(task.get("assigned_agent_code") or "").strip(),
                     "labels": task.get("labels"),
                     "status": str(task.get("status") or "").strip(),
                 },
                 member_role_by_user_id=member_role_by_user_id,
+                agent_role_by_code=agent_role_by_code,
             )
             in {"Developer", "Lead", "QA"}
         ]
@@ -3706,25 +3857,38 @@ class AgentTaskService:
             "dev-a": {
                 "title": "Core implementation",
                 "status": "Dev",
-                "instruction": "Implement assigned feature scope and move task to Lead when ready.",
+                "instruction": (
+                    "Implement assigned feature scope on the task branch, run validation tests, "
+                    "record commit and task-branch evidence in external_refs, then move task to Lead."
+                ),
                 "labels": ["tm.seed:team-mode-core", "tm.role:Developer"],
             },
             "dev-b": {
                 "title": "Integration work",
                 "status": "Dev",
-                "instruction": "Implement assigned feature scope and move task to Lead when ready.",
+                "instruction": (
+                    "Implement assigned feature scope on the task branch, run validation tests, "
+                    "record commit and task-branch evidence in external_refs, then move task to Lead."
+                ),
                 "labels": ["tm.seed:team-mode-core", "tm.role:Developer"],
             },
             "qa-a": {
                 "title": "Validation",
                 "status": "QA",
-                "instruction": "Validate Lead handoff and record pass/fail evidence before closing.",
+                "instruction": (
+                    "Validate Lead handoff with explicit PASS/FAIL outcome and verifiable artifacts "
+                    "in external_refs. If validation fails, set Blocked and include exact failure evidence."
+                ),
                 "labels": ["tm.seed:team-mode-core", "tm.role:QA"],
             },
             "lead-a": {
                 "title": "Integration and deploy oversight",
                 "status": "Lead",
-                "instruction": "Review Developer handoff, manage deploy readiness, and move work to QA.",
+                "instruction": (
+                    "Integrate merged main, execute deployment, verify runtime health, write deploy "
+                    "and health evidence to external_refs, then move task to QA. If deploy/health fails, "
+                    "set Blocked with exact failure evidence."
+                ),
                 "labels": ["tm.seed:team-mode-core", "tm.role:Lead"],
             },
         }
@@ -3836,13 +4000,13 @@ class AgentTaskService:
             patch={
                 "instruction": str(defaults["dev-a"]["instruction"]),
                 **_slot_assignee_patch("dev-a"),
-                "execution_triggers": [
+                "execution_triggers": [],
+                "task_relationships": [
                     {
-                        "kind": "status_change",
-                        "scope": "self",
-                        "enabled": True,
-                        "to_statuses": ["Lead"],
-                        "action": "request_automation",
+                        "kind": "delivers_to",
+                        "task_ids": [lead_a_id],
+                        "match_mode": "all",
+                        "statuses": ["Lead"],
                     }
                 ],
             },
@@ -3854,13 +4018,13 @@ class AgentTaskService:
             patch={
                 "instruction": str(defaults["dev-b"]["instruction"]),
                 **_slot_assignee_patch("dev-b"),
-                "execution_triggers": [
+                "execution_triggers": [],
+                "task_relationships": [
                     {
-                        "kind": "status_change",
-                        "scope": "self",
-                        "enabled": True,
-                        "to_statuses": ["Lead"],
-                        "action": "request_automation",
+                        "kind": "delivers_to",
+                        "task_ids": [lead_a_id],
+                        "match_mode": "all",
+                        "statuses": ["Lead"],
                     }
                 ],
             },
@@ -3874,28 +4038,26 @@ class AgentTaskService:
                 **_slot_assignee_patch("lead-a"),
                 "execution_triggers": [
                     {
-                        "kind": "status_change",
-                        "scope": "external",
-                        "enabled": True,
-                        "selector": {"task_ids": [dev_a_id, dev_b_id]},
-                        "to_statuses": ["Lead"],
-                        "action": "request_automation",
-                    },
-                    {
-                        "kind": "status_change",
-                        "scope": "external",
-                        "enabled": True,
-                        "selector": {"task_ids": [dev_a_id, dev_b_id, qa_a_id]},
-                        "to_statuses": ["Blocked"],
-                        "action": "request_automation",
-                    },
-                    {
                         "kind": "schedule",
                         "enabled": True,
                         "run_on_statuses": ["Lead"],
                         "scheduled_at_utc": schedule_iso,
                         "recurring_rule": "every:5m",
                         "action": "request_automation",
+                    },
+                ],
+                "task_relationships": [
+                    {
+                        "kind": "depends_on",
+                        "task_ids": [dev_a_id, dev_b_id],
+                        "match_mode": "all",
+                        "statuses": ["Lead"],
+                    },
+                    {
+                        "kind": "depends_on",
+                        "task_ids": [dev_a_id, dev_b_id, qa_a_id],
+                        "match_mode": "any",
+                        "statuses": ["Blocked"],
                     },
                 ],
             },
@@ -3907,15 +4069,20 @@ class AgentTaskService:
             patch={
                 "instruction": str(defaults["qa-a"]["instruction"]),
                 **_slot_assignee_patch("qa-a"),
-                "execution_triggers": [
+                "execution_triggers": [],
+                "task_relationships": [
                     {
-                        "kind": "status_change",
-                        "scope": "external",
-                        "enabled": True,
-                        "selector": {"task_ids": [lead_a_id]},
-                        "to_statuses": ["QA"],
-                        "action": "request_automation",
-                    }
+                        "kind": "hands_off_to",
+                        "task_ids": [lead_a_id],
+                        "match_mode": "all",
+                        "statuses": ["QA"],
+                    },
+                    {
+                        "kind": "escalates_to",
+                        "task_ids": [lead_a_id],
+                        "match_mode": "any",
+                        "statuses": ["Lead", "Blocked"],
+                    },
                 ],
             },
             auth_token=auth_token,
@@ -3933,6 +4100,138 @@ class AgentTaskService:
         }
 
     @staticmethod
+    def _build_exact_three_task_team_mode_topology(
+        *,
+        dev_task_id: str,
+        lead_task_id: str,
+        qa_task_id: str,
+    ) -> dict[str, list[dict[str, Any]]]:
+        return {
+            dev_task_id: normalize_task_relationships(
+                [
+                    {
+                        "kind": "delivers_to",
+                        "task_ids": [lead_task_id],
+                        "match_mode": "all",
+                        "statuses": ["Lead"],
+                    }
+                ]
+            ),
+            lead_task_id: normalize_task_relationships(
+                [
+                    {
+                        "kind": "depends_on",
+                        "task_ids": [dev_task_id],
+                        "match_mode": "all",
+                        "statuses": ["Lead"],
+                    },
+                    {
+                        "kind": "depends_on",
+                        "task_ids": [dev_task_id, qa_task_id],
+                        "match_mode": "any",
+                        "statuses": ["Blocked"],
+                    },
+                ]
+            ),
+            qa_task_id: normalize_task_relationships(
+                [
+                    {
+                        "kind": "hands_off_to",
+                        "task_ids": [lead_task_id],
+                        "match_mode": "all",
+                        "statuses": ["QA"],
+                    },
+                    {
+                        "kind": "escalates_to",
+                        "task_ids": [lead_task_id],
+                        "match_mode": "any",
+                        "statuses": ["Lead", "Blocked"],
+                    },
+                ]
+            ),
+        }
+
+    def _maybe_backfill_exact_three_task_team_mode_topology(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        specification_id: str | None,
+        auth_token: str | None,
+        command_id: str | None,
+    ) -> None:
+        specification_scope = str(specification_id or "").strip()
+        if not specification_scope:
+            return
+        with SessionLocal() as db:
+            if not self._project_has_team_mode_enabled(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            ):
+                return
+
+        items = list(
+            (
+                self.list_tasks(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    specification_id=specification_scope,
+                    archived=False,
+                    limit=20,
+                    offset=0,
+                    auth_token=auth_token,
+                ).get("items")
+                or []
+            )
+        )
+        if len(items) != 3:
+            return
+
+        role_buckets: dict[str, list[dict[str, Any]]] = {"Developer": [], "Lead": [], "QA": []}
+        for item in items:
+            role = derive_task_role(task_like=item, allow_status_fallback=True)
+            if role in role_buckets:
+                role_buckets[role].append(item)
+        if any(len(role_buckets[role]) != 1 for role in ("Developer", "Lead", "QA")):
+            return
+
+        relationships_by_task_id = {
+            str(item.get("id") or "").strip(): normalize_task_relationships(item.get("task_relationships"))
+            for item in items
+        }
+        if any(not task_id for task_id in relationships_by_task_id):
+            return
+        if any(relationships_by_task_id.values()):
+            return
+
+        dev_task_id = str(role_buckets["Developer"][0].get("id") or "").strip()
+        lead_task_id = str(role_buckets["Lead"][0].get("id") or "").strip()
+        qa_task_id = str(role_buckets["QA"][0].get("id") or "").strip()
+        if not dev_task_id or not lead_task_id or not qa_task_id:
+            return
+
+        topology_by_task_id = self._build_exact_three_task_team_mode_topology(
+            dev_task_id=dev_task_id,
+            lead_task_id=lead_task_id,
+            qa_task_id=qa_task_id,
+        )
+
+        def _command_id_with_suffix(base: str | None, suffix: str) -> str | None:
+            normalized = str(base or "").strip()
+            if not normalized:
+                return None
+            return f"{normalized}:{suffix}"[:64]
+
+        for task_id, task_relationships in topology_by_task_id.items():
+            self.update_task(
+                task_id=task_id,
+                patch={"task_relationships": task_relationships},
+                auth_token=auth_token,
+                command_id=_command_id_with_suffix(command_id, f"tm-topology-{task_id[:8]}"),
+            )
+
+    @staticmethod
     def _slugify_project_name(value: str, *, fallback: str) -> str:
         normalized = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
         return normalized or fallback
@@ -3946,9 +4245,17 @@ class AgentTaskService:
         auth_token: str | None,
         command_id: str | None,
     ) -> dict[str, Any]:
-        workspace_root = str(os.getenv("AGENT_CODEX_WORKDIR", "/home/app/workspace") or "").strip() or "/home/app/workspace"
-        project_slug = self._slugify_project_name(str(project_name or "").strip(), fallback=str(project_id)[:8] or "project")
-        repo_path = f"{workspace_root.rstrip('/')}/{project_slug}"
+        try:
+            repo_root = ensure_project_repository_initialized(
+                project_name=str(project_name or "").strip(),
+                project_id=str(project_id or "").strip(),
+            )
+        except Exception:
+            repo_root = resolve_project_repository_path(
+                project_name=str(project_name or "").strip(),
+                project_id=str(project_id or "").strip(),
+            )
+        repo_path = str(repo_root)
         repo_url = f"file://{repo_path}"
 
         with SessionLocal() as db:
@@ -3956,6 +4263,7 @@ class AgentTaskService:
             ensure_role(db, project.workspace_id, self._resolve_actor_user().id, {"Owner", "Admin", "Member"})
             refs = self._parse_json_list(getattr(project, "external_refs", "[]"))
 
+        project_slug = self._slugify_project_name(str(project_name or "").strip(), fallback=str(project_id)[:8] or "project")
         existing_idx: int | None = None
         for idx, item in enumerate(refs):
             if not isinstance(item, dict):
@@ -4019,6 +4327,19 @@ class AgentTaskService:
         normalized_name = str(name or "").strip()
         normalized_project_id = str(project_id or "").strip()
         is_new_project_setup = not bool(normalized_project_id)
+        normalized_docker_port: int | None
+        if docker_port is None:
+            normalized_docker_port = None
+        else:
+            try:
+                normalized_docker_port = int(docker_port)
+            except Exception:
+                raise HTTPException(status_code=422, detail="docker_port must be an integer")
+            if normalized_docker_port < 1 or normalized_docker_port > 65535:
+                raise HTTPException(status_code=422, detail="docker_port must be between 1 and 65535")
+        docker_port = normalized_docker_port
+        if docker_port is not None and enable_docker_compose is None:
+            enable_docker_compose = True
 
         missing_inputs: list[dict[str, Any]] = []
 
@@ -4391,13 +4712,18 @@ class AgentTaskService:
 
         if not blocking_errors and requested_docker:
             docker_default = _docker_compose_default_config(port=docker_port)
+            runtime_default = docker_default.get("runtime_deploy_health")
+            if isinstance(runtime_default, dict):
+                runtime_default["required"] = True
             if normalized_docker_cfg:
                 runtime = normalized_docker_cfg.get("runtime_deploy_health")
-                if isinstance(runtime, dict) and docker_port is not None:
-                    runtime["port"] = int(docker_port)
+                if isinstance(runtime, dict):
+                    runtime["required"] = True
+                    if docker_port is not None:
+                        runtime["port"] = int(docker_port)
                 elif docker_port is not None:
                     normalized_docker_cfg["runtime_deploy_health"] = {
-                        "required": False,
+                        "required": True,
                         "stack": "constructos-ws-default",
                         "port": int(docker_port),
                         "health_path": "/health",
@@ -4418,11 +4744,26 @@ class AgentTaskService:
                     auth_token=auth_token,
                 ),
             )
+            self._append_skipped_setup_step(
+                steps=steps,
+                step_id="ensure_default_docker_compose_manifest",
+                title="Ensure default docker compose manifest",
+                reason=(
+                    "Disabled by policy: Lead deploy automation must synthesize compose "
+                    "from repository evidence instead of using starter manifests."
+                ),
+            )
         else:
             self._append_skipped_setup_step(
                 steps=steps,
                 step_id="apply_config_docker_compose",
                 title="Apply Docker Compose config",
+                reason="Docker Compose is disabled",
+            )
+            self._append_skipped_setup_step(
+                steps=steps,
+                step_id="ensure_default_docker_compose_manifest",
+                title="Ensure default docker compose manifest",
                 reason="Docker Compose is disabled",
             )
 
@@ -4450,6 +4791,28 @@ class AgentTaskService:
                 step_id="seed_team_mode_tasks",
                 title="Seed Team Mode default tasks",
                 reason="Team Mode is disabled or task seeding is disabled",
+            )
+
+        if not blocking_errors and requested_docker and bool(kickoff_after_setup):
+            self._run_setup_step(
+                steps=steps,
+                blocking_errors=blocking_errors,
+                step_id="validate_runtime_deploy_health_contract",
+                title="Validate runtime deploy health contract",
+                blocking=True,
+                max_attempts=1,
+                action=lambda: self._validate_setup_runtime_deploy_health_contract(
+                    project_id=resolved_project_id,
+                    workspace_id=resolved_workspace_id,
+                    auth_token=auth_token,
+                ),
+            )
+        else:
+            self._append_skipped_setup_step(
+                steps=steps,
+                step_id="validate_runtime_deploy_health_contract",
+                title="Validate runtime deploy health contract",
+                reason="Docker Compose is disabled or kickoff_after_setup is disabled",
             )
 
         kickoff_result: dict[str, Any] | None = None
@@ -4529,6 +4892,7 @@ class AgentTaskService:
             )
 
         final_configs: dict[str, Any] = {}
+        docker_runtime_target: dict[str, Any] | None = None
         for key in ("team_mode", "git_delivery", "docker_compose"):
             payload = self.get_project_plugin_config(
                 project_id=resolved_project_id,
@@ -4541,6 +4905,28 @@ class AgentTaskService:
                 "version": int(payload.get("version") or 0),
                 "exists": bool(payload.get("exists")),
             }
+            if key == "docker_compose":
+                config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+                runtime = config.get("runtime_deploy_health") if isinstance(config.get("runtime_deploy_health"), dict) else {}
+                stack = str(runtime.get("stack") or "").strip() or "constructos-ws-default"
+                health_path = str(runtime.get("health_path") or "").strip() or "/health"
+                if not health_path.startswith("/"):
+                    health_path = f"/{health_path}"
+                raw_port = runtime.get("port")
+                try:
+                    runtime_port = int(raw_port) if raw_port is not None else None
+                except Exception:
+                    runtime_port = None
+                docker_runtime_target = {
+                    "stack": stack,
+                    "port": runtime_port,
+                    "health_path": health_path,
+                    "endpoint": (
+                        f"http://gateway:{runtime_port}{health_path}"
+                        if runtime_port is not None
+                        else None
+                    ),
+                }
 
         blocking = bool(blocking_errors)
         workflow_ok = True
@@ -4566,6 +4952,35 @@ class AgentTaskService:
         team_verification = verification.get("team_mode") if isinstance(verification.get("team_mode"), dict) else {}
         delivery_verification = verification.get("delivery") if isinstance(verification.get("delivery"), dict) else {}
 
+        kickoff_dispatched = bool((kickoff_result or {}).get("kickoff_dispatched"))
+        developer_dispatch_confirmed = bool((kickoff_result or {}).get("developer_dispatch_confirmed"))
+        kickoff_queued_by_role = (
+            dict(kickoff_result.get("queued_by_role") or {})
+            if isinstance(kickoff_result, dict) and isinstance(kickoff_result.get("queued_by_role"), dict)
+            else {"Developer": 0, "Lead": 0, "QA": 0}
+        )
+        queued_dev = int(kickoff_queued_by_role.get("Developer", 0) or 0)
+        queued_lead = int(kickoff_queued_by_role.get("Lead", 0) or 0)
+        queued_qa = int(kickoff_queued_by_role.get("QA", 0) or 0)
+        kickoff_required = (
+            (not bool(kickoff_after_setup))
+            or (bool(kickoff_after_setup) and (not kickoff_dispatched or not developer_dispatch_confirmed))
+        )
+        kickoff_hint = (
+            "Kickoff was dispatched and Developer execution started as part of setup."
+            if (bool(kickoff_after_setup) and kickoff_dispatched and developer_dispatch_confirmed)
+            else str((kickoff_result or {}).get("comment") or "").strip()
+            if (bool(kickoff_after_setup) and kickoff_result is not None)
+            else "Start execution only when ready by running kickoff from chat."
+        )
+        kickoff_state_message = (
+            "Lead-first kickoff is running and Developer execution started; QA waits for explicit Lead handoff."
+            if (kickoff_dispatched and developer_dispatch_confirmed)
+            else "Lead kickoff was requested, but no Developer task started yet."
+            if kickoff_dispatched
+            else "Kickoff has not started yet."
+        )
+
         user_facing_summary = {
             "project_link": f"?tab=projects&project={resolved_project_id}",
             "configured": {
@@ -4578,13 +4993,24 @@ class AgentTaskService:
                     if isinstance(repository_context_result, dict)
                     else None
                 ),
+                "runtime_deploy_target": docker_runtime_target,
             },
-            "kickoff_required": False if bool(kickoff_after_setup) else True,
-            "kickoff_hint": (
-                "Kickoff was dispatched as part of setup."
-                if bool(kickoff_after_setup)
-                else "Start execution only when ready by running kickoff from chat."
-            ),
+            "kickoff_required": kickoff_required,
+            "kickoff_hint": kickoff_hint or "Start execution only when ready by running kickoff from chat.",
+            "kickoff_state": {
+                "mode": "lead_first",
+                "dispatched": kickoff_dispatched,
+                "queued_by_role": {
+                    "Developer": queued_dev,
+                    "Lead": queued_lead,
+                    "QA": queued_qa,
+                },
+                "developer_dispatch_confirmed": developer_dispatch_confirmed,
+                "qa_waiting_for_lead_handoff": bool(
+                    kickoff_dispatched and developer_dispatch_confirmed and queued_qa == 0 and queued_lead > 0
+                ),
+                "message": kickoff_state_message,
+            },
             "verification": {
                 "team_mode_ok": bool(team_verification.get("ok")) if requested_team else None,
                 "team_mode_failed_requirements": _failed_checks_with_descriptions(team_verification),
@@ -4592,10 +5018,12 @@ class AgentTaskService:
                 "delivery_failed_requirements": _failed_checks_with_descriptions(delivery_verification),
             },
             "next_action_hint": (
-                "Setup is complete and kickoff was dispatched."
-                if (bool(kickoff_after_setup) and (not blocking and workflow_ok))
+                "Setup is complete and kickoff dispatched Developer execution."
+                if (bool(kickoff_after_setup) and kickoff_dispatched and developer_dispatch_confirmed and (not blocking and workflow_ok))
+                else "Setup is complete, but kickoff did not start Developer execution. Review the kickoff blocker before treating execution as started."
+                if (bool(kickoff_after_setup) and kickoff_dispatched and not developer_dispatch_confirmed)
                 else "Setup is complete. Execution is not started automatically; run kickoff when you want the team to start implementation."
-                if (not blocking and workflow_ok)
+                if ((not blocking and workflow_ok) and (not bool(kickoff_after_setup) or not kickoff_dispatched))
                 else "Some required checks failed. Review failed requirements and apply the suggested fixes before execution."
             ),
         }
@@ -4606,6 +5034,8 @@ class AgentTaskService:
                 "comment": str(kickoff_result.get("comment") or "").strip() or None,
                 "queued_task_ids": list(kickoff_result.get("queued_task_ids") or []),
                 "queued_by_role": dict(kickoff_result.get("queued_by_role") or {}),
+                "developer_dispatch_confirmed": developer_dispatch_confirmed,
+                "developer_active_task_ids": list(kickoff_result.get("developer_active_task_ids") or []),
             }
 
         return {
@@ -4646,6 +5076,59 @@ class AgentTaskService:
     ) -> dict[str, Any]:
         self._require_token(auth_token)
         user = self._resolve_actor_user()
+        stack = "constructos-ws-default"
+        port: int | None = None
+        health_path = "/health"
+
+        with SessionLocal() as _db:
+            docker_row = _db.execute(
+                select(ProjectPluginConfig.config_json).where(
+                    ProjectPluginConfig.workspace_id == workspace_id,
+                    ProjectPluginConfig.project_id == project_id,
+                    ProjectPluginConfig.plugin_key == "docker_compose",
+                    ProjectPluginConfig.enabled == True,  # noqa: E712
+                    ProjectPluginConfig.is_deleted == False,  # noqa: E712
+                )
+            ).first()
+            if docker_row is not None:
+                try:
+                    docker_cfg = json.loads(str(docker_row[0] or "").strip() or "{}")
+                except Exception:
+                    docker_cfg = {}
+                runtime_cfg = docker_cfg.get("runtime_deploy_health") if isinstance(docker_cfg, dict) else {}
+                if not isinstance(runtime_cfg, dict):
+                    runtime_cfg = {}
+                stack_candidate = str(runtime_cfg.get("stack") or "").strip()
+                if stack_candidate:
+                    stack = stack_candidate
+                health_candidate = str(runtime_cfg.get("health_path") or "").strip()
+                if health_candidate:
+                    health_path = health_candidate if health_candidate.startswith("/") else f"/{health_candidate}"
+                raw_port = runtime_cfg.get("port")
+                try:
+                    candidate = int(raw_port) if raw_port is not None else None
+                except Exception:
+                    candidate = None
+                if candidate is not None and 1 <= candidate <= 65535:
+                    port = candidate
+
+        endpoint = (
+            f"http://gateway:{port}{health_path}"
+            if port is not None
+            else f"http://gateway:<port>{health_path}"
+        )
+        kickoff_instruction = (
+            f"Team Mode kickoff for project {project_id}.\n"
+            "Act as Lead and coordinate execution asynchronously.\n"
+            "Kickoff run must be dispatch-only: never implement code, run tests, or run deploy commands in kickoff.\n"
+            "Do not complete the Lead task in kickoff.\n"
+            "During oversight cycles, enforce deterministic handoff: Dev -> Lead -> QA.\n"
+            "Require Dev completion evidence before merge: commit + task branch in external_refs.\n"
+            f"Canonical deploy target: stack={stack}, endpoint={endpoint}.\n"
+            "Lead may move to QA only after deploy evidence exists and runtime health is HTTP 200.\n"
+            "If deploy/health fails, set Blocked and record exact failure evidence in external_refs.\n"
+            f"If unresolved after one cycle, assign to human and notify requester user_id={str(user.id)}."
+        )
 
         def _command_id_with_suffix(base: str | None, suffix: str) -> str | None:
             normalized = str(base or "").strip()
@@ -4661,20 +5144,87 @@ class AgentTaskService:
                 user=user,
                 workspace_id=workspace_id,
                 project_id=project_id,
-                intent_flags={"execution_kickoff_intent": True},
+                intent_flags={
+                    "execution_intent": True,
+                    "execution_kickoff_intent": True,
+                    "project_creation_intent": False,
+                    "workflow_scope": "team_mode",
+                    "execution_mode": "kickoff_only",
+                },
                 allow_mutations=True,
                 command_id=command_id,
                 promote_plugin_policy_to_execution_mode_if_needed=lambda **_kwargs: None,
-                build_team_lead_kickoff_instruction=lambda **kwargs: (
-                    f"Team Mode kickoff for project {str(kwargs.get('project_id') or '').strip()}.\n\n"
-                    "Primary objective: start execution with Lead-first orchestration.\n"
-                    "Keep this kickoff dispatch-only and do not complete the Lead task in kickoff.\n"
-                ),
+                build_team_lead_kickoff_instruction=lambda **_kwargs: kickoff_instruction,
                 command_id_with_suffix=_command_id_with_suffix,
             )
             if not isinstance(result, dict):
                 raise HTTPException(status_code=409, detail="Team Mode kickoff could not be dispatched")
             return result
+
+    def _validate_setup_runtime_deploy_health_contract(
+        self,
+        *,
+        project_id: str,
+        workspace_id: str,
+        auth_token: str | None,
+    ) -> dict[str, Any]:
+        payload = self.get_project_plugin_config(
+            project_id=project_id,
+            plugin_key="docker_compose",
+            workspace_id=workspace_id,
+            auth_token=auth_token,
+        )
+        config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+        runtime = config.get("runtime_deploy_health") if isinstance(config.get("runtime_deploy_health"), dict) else {}
+        required = bool(runtime.get("required"))
+        stack = str(runtime.get("stack") or "").strip()
+        health_path = str(runtime.get("health_path") or "").strip()
+        raw_port = runtime.get("port")
+        port: int | None = None
+        try:
+            port = int(raw_port) if raw_port is not None else None
+        except Exception:
+            port = None
+
+        if not required:
+            return {
+                "required": False,
+                "stack": stack or None,
+                "port": port,
+                "health_path": health_path or None,
+            }
+
+        if port is None or port < 1 or port > 65535:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Runtime deploy health is required for kickoff_after_setup, "
+                    "but docker_compose.runtime_deploy_health.port is missing or invalid."
+                ),
+            )
+        if not stack:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Runtime deploy health is required for kickoff_after_setup, "
+                    "but docker_compose.runtime_deploy_health.stack is empty."
+                ),
+            )
+        if not health_path or not health_path.startswith("/"):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Runtime deploy health is required for kickoff_after_setup, "
+                    "but docker_compose.runtime_deploy_health.health_path is invalid."
+                ),
+            )
+        return {
+            "required": True,
+            "stack": stack,
+            "port": port,
+            "health_path": health_path,
+            "endpoint": f"http://gateway:{port}{health_path}",
+        }
 
     def ensure_team_mode_project(
         self,
@@ -4696,9 +5246,15 @@ class AgentTaskService:
             command_id=command_id,
             ensure_project_contract_core=self._ensure_team_mode_project_core,
         )
+        deprecation_payload = {
+            "deprecated": True,
+            "deprecated_tool": "ensure_team_mode_project",
+            "replacement_tool": "setup_project_orchestration",
+            "message": "ensure_team_mode_project is deprecated; use setup_project_orchestration.",
+        }
         if isinstance(plugin_result, dict):
-            return plugin_result
-        return self._ensure_team_mode_project_core(
+            return {**plugin_result, **deprecation_payload}
+        result = self._ensure_team_mode_project_core(
             project_id=project_id,
             project_ref=project_ref,
             workspace_id=workspace_id,
@@ -4706,6 +5262,9 @@ class AgentTaskService:
             expected_event_storming_enabled=expected_event_storming_enabled,
             command_id=command_id,
         )
+        if isinstance(result, dict):
+            return {**result, **deprecation_payload}
+        return deprecation_payload
 
     def _ensure_team_mode_project_core(
         self,
@@ -4849,6 +5408,7 @@ class AgentTaskService:
         attachment_refs: list[dict[str, Any]] | None = None,
         instruction: str | None = None,
         execution_triggers: Any | None = None,
+        task_relationships: Any | None = None,
         recurring_rule: str | None = None,
         specification_id: str | None = None,
         task_group_id: str | None = None,
@@ -4864,6 +5424,7 @@ class AgentTaskService:
         self._require_token(auth_token)
         user = self._resolve_actor_user()
         normalized_execution_triggers = self._normalize_execution_triggers_input(execution_triggers)
+        normalized_task_relationships = normalize_task_relationships(task_relationships)
         normalized_labels = self._normalize_string_list_input(labels, field_name="labels")
         normalized_task_type = str(task_type or "").strip() or None
         normalized_recurring_rule = str(recurring_rule or "").strip() or None
@@ -4875,6 +5436,8 @@ class AgentTaskService:
             normalized_task_type = "scheduled_instruction"
             if scheduled_instruction is None and instruction is not None:
                 scheduled_instruction = instruction
+        resolved_workspace_id = ""
+        resolved_project_id = str(project_id or "").strip()
         with SessionLocal() as db:
             resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_create(
                 db=db,
@@ -4903,6 +5466,7 @@ class AgentTaskService:
                     "attachment_refs": attachment_refs or [],
                     "instruction": instruction,
                     "execution_triggers": normalized_execution_triggers or [],
+                    "task_relationships": normalized_task_relationships or [],
                     "recurring_rule": normalized_recurring_rule,
                     "specification_id": specification_id,
                     "task_type": normalized_task_type,
@@ -4934,6 +5498,8 @@ class AgentTaskService:
                 payload_kwargs["instruction"] = instruction
             if normalized_execution_triggers is not None:
                 payload_kwargs["execution_triggers"] = normalized_execution_triggers
+            if normalized_task_relationships:
+                payload_kwargs["task_relationships"] = normalized_task_relationships
             if normalized_recurring_rule is not None:
                 payload_kwargs["recurring_rule"] = normalized_recurring_rule
             if normalized_task_type is not None:
@@ -4945,7 +5511,19 @@ class AgentTaskService:
             if schedule_timezone is not None:
                 payload_kwargs["schedule_timezone"] = schedule_timezone
             payload = TaskCreate(**payload_kwargs)
-            return TaskApplicationService(db, user, command_id=effective_command_id).create_task(payload)
+            created = TaskApplicationService(db, user, command_id=effective_command_id).create_task(payload)
+
+        self._maybe_backfill_exact_three_task_team_mode_topology(
+            workspace_id=resolved_workspace_id,
+            project_id=resolved_project_id,
+            specification_id=specification_id,
+            auth_token=auth_token,
+            command_id=effective_command_id,
+        )
+        created_id = str(created.get("id") or "").strip()
+        if created_id:
+            return self.get_task(task_id=created_id, auth_token=auth_token)
+        return created
 
     def create_note(
         self,
@@ -5244,6 +5822,7 @@ class AgentTaskService:
         embedding_enabled: bool = False,
         embedding_model: str | None = None,
         context_pack_evidence_top_k: int | None = None,
+        automation_max_parallel_tasks: int = 4,
         chat_index_mode: str = "OFF",
         chat_attachment_ingestion_mode: str = "METADATA_ONLY",
         event_storming_enabled: bool = True,
@@ -5268,6 +5847,7 @@ class AgentTaskService:
                 embedding_enabled=bool(embedding_enabled),
                 embedding_model=embedding_model,
                 context_pack_evidence_top_k=context_pack_evidence_top_k,
+                automation_max_parallel_tasks=int(automation_max_parallel_tasks or 4),
                 chat_index_mode=chat_index_mode,
                 chat_attachment_ingestion_mode=chat_attachment_ingestion_mode,
                 event_storming_enabled=bool(event_storming_enabled),
@@ -6109,21 +6689,39 @@ class AgentTaskService:
             requested_status = str(normalized_patch.get("status") or "").strip()
             if requested_status == "Done":
                 current_task_row = db.get(Task, task_id)
+                automation_state, _ = rebuild_state(db, "Task", task_id)
+                current_automation_state = str(automation_state.get("automation_state") or "idle").strip().lower()
+                if current_automation_state in {"queued", "running"}:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Done transition blocked while automation is still active. "
+                            f"automation_state={current_automation_state}"
+                        ),
+                    )
                 effective_assignee_id = str(
                     normalized_patch.get("assignee_id")
                     or (getattr(current_task_row, "assignee_id", None) if current_task_row is not None else None)
                     or getattr(state, "assignee_id", None)
                     or ""
                 ).strip()
-                assignee_role = ""
-                if effective_assignee_id:
-                    member = db.execute(
-                        select(ProjectMember).where(
-                            ProjectMember.project_id == str(state.project_id),
-                            ProjectMember.user_id == effective_assignee_id,
-                        )
-                    ).scalar_one_or_none()
-                    assignee_role = str(getattr(member, "role", "") or "").strip()
+                effective_assigned_agent_code = str(
+                    normalized_patch.get("assigned_agent_code")
+                    or (getattr(current_task_row, "assigned_agent_code", None) if current_task_row is not None else None)
+                    or ""
+                ).strip()
+                effective_labels = normalized_patch.get("labels")
+                if effective_labels is None and current_task_row is not None:
+                    effective_labels = getattr(current_task_row, "labels", None)
+                assignee_role = self._resolve_task_assignee_role(
+                    db=db,
+                    workspace_id=str(state.workspace_id),
+                    project_id=str(state.project_id),
+                    assignee_id=effective_assignee_id,
+                    assigned_agent_code=effective_assigned_agent_code,
+                    task_labels=effective_labels,
+                    task_status=requested_status or str(getattr(state, "status", "") or ""),
+                )
                 self._enforce_team_mode_done_transition(
                     db=db,
                     state=state,
@@ -6172,19 +6770,34 @@ class AgentTaskService:
             self._assert_project_allowed(state.project_id)
             assignee_role = ""
             current_task_row = db.get(Task, task_id)
+            automation_state, _ = rebuild_state(db, "Task", task_id)
+            current_automation_state = str(automation_state.get("automation_state") or "idle").strip().lower()
+            if current_automation_state in {"queued", "running"}:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Done transition blocked while automation is still active. "
+                        f"automation_state={current_automation_state}"
+                    ),
+                )
             effective_assignee_id = str(
                 (getattr(current_task_row, "assignee_id", None) if current_task_row is not None else None)
                 or getattr(state, "assignee_id", None)
                 or ""
             ).strip()
-            if effective_assignee_id:
-                member = db.execute(
-                    select(ProjectMember).where(
-                        ProjectMember.project_id == str(state.project_id),
-                        ProjectMember.user_id == effective_assignee_id,
-                    )
-                ).scalar_one_or_none()
-                assignee_role = str(getattr(member, "role", "") or "").strip()
+            assignee_role = self._resolve_task_assignee_role(
+                db=db,
+                workspace_id=str(state.workspace_id),
+                project_id=str(state.project_id),
+                assignee_id=effective_assignee_id,
+                assigned_agent_code=(
+                    str(getattr(current_task_row, "assigned_agent_code", None) or "").strip()
+                    if current_task_row is not None
+                    else ""
+                ),
+                task_labels=(getattr(current_task_row, "labels", None) if current_task_row is not None else None),
+                task_status=str(getattr(current_task_row, "status", None) or getattr(state, "status", "") or ""),
+            )
             self._enforce_team_mode_done_transition(
                 db=db,
                 state=state,
@@ -6249,6 +6862,14 @@ class AgentTaskService:
         *,
         task_id: str,
         instruction: str | None = None,
+        source: str | None = None,
+        execution_intent: bool | None = None,
+        execution_kickoff_intent: bool | None = None,
+        project_creation_intent: bool | None = None,
+        workflow_scope: str | None = None,
+        execution_mode: str | None = None,
+        task_completion_requested: bool | None = None,
+        classifier_reason: str | None = None,
         auth_token: str | None = None,
         command_id: str | None = None,
     ) -> dict:
@@ -6260,10 +6881,56 @@ class AgentTaskService:
                 raise HTTPException(status_code=404, detail="Task not found")
             self._assert_workspace_allowed(state.workspace_id)
             self._assert_project_allowed(state.project_id)
-            payload = TaskAutomationRun(instruction=instruction)
+            resolved_execution_intent = execution_intent
+            resolved_execution_kickoff_intent = execution_kickoff_intent
+            resolved_project_creation_intent = project_creation_intent
+            resolved_workflow_scope = str(workflow_scope or "").strip() or None
+            resolved_execution_mode = str(execution_mode or "").strip() or None
+            resolved_task_completion_requested = task_completion_requested
+            resolved_classifier_reason = str(classifier_reason or "").strip() or None
+            if instruction and (
+                resolved_execution_intent is None
+                or resolved_execution_kickoff_intent is None
+                or resolved_project_creation_intent is None
+                or resolved_workflow_scope is None
+                or resolved_execution_mode is None
+                or resolved_task_completion_requested is None
+                or not resolved_classifier_reason
+            ):
+                classification = classify_instruction_intent(
+                    instruction=instruction,
+                    workspace_id=str(state.workspace_id or ""),
+                    project_id=str(state.project_id or "").strip() or None,
+                    session_id=None,
+                )
+                if resolved_execution_intent is None:
+                    resolved_execution_intent = bool(classification.get("execution_intent"))
+                if resolved_execution_kickoff_intent is None:
+                    resolved_execution_kickoff_intent = bool(classification.get("execution_kickoff_intent"))
+                if resolved_project_creation_intent is None:
+                    resolved_project_creation_intent = bool(classification.get("project_creation_intent"))
+                if resolved_workflow_scope is None:
+                    resolved_workflow_scope = str(classification.get("workflow_scope") or "").strip() or None
+                if resolved_execution_mode is None:
+                    resolved_execution_mode = str(classification.get("execution_mode") or "").strip() or None
+                if resolved_task_completion_requested is None:
+                    resolved_task_completion_requested = bool(classification.get("task_completion_requested"))
+                if not resolved_classifier_reason:
+                    resolved_classifier_reason = str(classification.get("reason") or "").strip() or None
+            payload = TaskAutomationRun(
+                instruction=instruction,
+                source=source,
+                execution_intent=resolved_execution_intent,
+                execution_kickoff_intent=resolved_execution_kickoff_intent,
+                project_creation_intent=resolved_project_creation_intent,
+                workflow_scope=resolved_workflow_scope,
+                execution_mode=resolved_execution_mode,
+                task_completion_requested=resolved_task_completion_requested,
+                classifier_reason=resolved_classifier_reason,
+            )
             effective_command_id = command_id or self._fallback_command_id(
                 prefix="mcp-task-run",
-                payload={"task_id": task_id, "instruction": instruction},
+                payload={"task_id": task_id, "instruction": instruction, "source": source},
             )
             return TaskApplicationService(db, user, command_id=effective_command_id).request_automation_run(task_id, payload)
 

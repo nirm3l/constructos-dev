@@ -80,6 +80,16 @@ type CodexResumeStateLike = {
 
 type ProjectPluginKey = 'team_mode' | 'git_delivery' | 'docker_compose'
 type TeamModeRole = 'Developer' | 'QA' | 'Lead'
+type ProjectEditorTab =
+  | 'overview'
+  | 'checks'
+  | 'team-mode'
+  | 'git-delivery'
+  | 'docker-compose'
+  | 'rules'
+  | 'skills'
+  | 'resources'
+  | 'context'
 type StagedRuleCreate = { clientId: string; title: string; body: string }
 type StagedSkillImportUrl = {
   clientId: string
@@ -121,6 +131,25 @@ function prettyCompact(value: unknown): string {
 }
 
 const TEAM_MODE_ROLES: TeamModeRole[] = ['Developer', 'QA', 'Lead']
+const PROJECT_EDITOR_TAB_VALUES: readonly ProjectEditorTab[] = [
+  'overview',
+  'checks',
+  'team-mode',
+  'git-delivery',
+  'docker-compose',
+  'rules',
+  'skills',
+  'resources',
+  'context',
+]
+
+function resolveProjectEditorTabFromUrl(): ProjectEditorTab | null {
+  if (typeof window === 'undefined') return null
+  const params = new URLSearchParams(window.location.search)
+  const raw = String(params.get('project_editor_tab') || '').trim()
+  if (!raw) return null
+  return (PROJECT_EDITOR_TAB_VALUES as readonly string[]).includes(raw) ? (raw as ProjectEditorTab) : null
+}
 
 function buildTeamModeStarterConfig(args: {
   statuses: string[]
@@ -149,7 +178,7 @@ function buildTeamModeStarterConfig(args: {
       ].filter(Boolean)
   return {
     required_checks: {
-      team_mode: ['role_coverage_present', 'required_triggers_present', 'lead_oversight_not_done_before_delivery_complete'],
+      team_mode: ['role_coverage_present', 'required_topology_present', 'lead_oversight_not_done_before_delivery_complete'],
     },
     team: {
       agents: [
@@ -196,7 +225,16 @@ function isTeamModeMinimalDefaultConfig(config: unknown): boolean {
 
 const GIT_DELIVERY_STARTER_CONFIG: Record<string, unknown> = {
   required_checks: {
-    delivery: ['repo_context_present', 'git_contract_ok', 'dev_tasks_have_commit_evidence', 'qa_has_verifiable_artifacts'],
+    delivery: [
+      'repo_context_present',
+      'git_contract_ok',
+      'qa_has_verifiable_artifacts',
+      'deploy_execution_evidence_present',
+      'runtime_deploy_health_ok',
+    ],
+  },
+  execution: {
+    require_dev_tests: false,
   },
 }
 
@@ -289,6 +327,8 @@ export function ProjectsInlineEditor({
   setEditProjectEmbeddingModel,
   editProjectContextPackEvidenceTopKText,
   setEditProjectContextPackEvidenceTopKText,
+  editProjectAutomationMaxParallelTasksText,
+  setEditProjectAutomationMaxParallelTasksText,
   editProjectChatIndexMode,
   setEditProjectChatIndexMode,
   editProjectChatAttachmentIngestionMode,
@@ -365,6 +405,8 @@ export function ProjectsInlineEditor({
   setEditProjectEmbeddingModel: React.Dispatch<React.SetStateAction<string>>
   editProjectContextPackEvidenceTopKText: string
   setEditProjectContextPackEvidenceTopKText: React.Dispatch<React.SetStateAction<string>>
+  editProjectAutomationMaxParallelTasksText: string
+  setEditProjectAutomationMaxParallelTasksText: React.Dispatch<React.SetStateAction<string>>
   editProjectChatIndexMode: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'
   setEditProjectChatIndexMode: React.Dispatch<React.SetStateAction<'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'>>
   editProjectChatAttachmentIngestionMode: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
@@ -747,6 +789,7 @@ export function ProjectsInlineEditor({
       scopeKey: string
       scopeTitle: string
       requiredChecks: string[]
+      diagnosticChecks: string[]
       availableDescriptions: Record<string, string>
       runtimeScope?: (typeof gateScopeEntries)[number]
     }>
@@ -775,6 +818,9 @@ export function ProjectsInlineEditor({
         scopeKey: scope.scopeKey,
         scopeTitle: scope.scopeTitle,
         requiredChecks: scope.requiredChecks,
+        diagnosticChecks: Object.keys(scope.checkDescriptions)
+          .map((item) => String(item || '').trim())
+          .filter((item) => Boolean(item) && !scope.requiredChecks.includes(item)),
         availableDescriptions: scope.checkDescriptions,
         runtimeScope: scope,
       }))
@@ -802,6 +848,17 @@ export function ProjectsInlineEditor({
         scopeKey,
         scopeTitle: toTitle(scopeKey),
         requiredChecks,
+        diagnosticChecks: Array.from(
+          new Set(
+            [
+              ...Object.keys(availableDescriptions),
+              ...Object.keys(runtimeScope.checkDescriptions || {}),
+              ...Object.keys(runtimeScope.checks || {}),
+            ]
+              .map((item) => String(item || '').trim())
+              .filter((item) => Boolean(item) && !requiredChecks.includes(item))
+          )
+        ),
         availableDescriptions,
         runtimeScope,
       }
@@ -826,8 +883,130 @@ export function ProjectsInlineEditor({
     () => gateScopeEntries.find((scope) => scope.gatePolicySource !== 'default')?.gatePolicySource || 'default',
     [gateScopeEntries]
   )
+  const teamModeVerificationScope = React.useMemo(
+    () => gateConfigScopes.find((scope) => scope.scopeKey === 'team_mode'),
+    [gateConfigScopes]
+  )
+  const deliveryVerificationScope = React.useMemo(
+    () => gateConfigScopes.find((scope) => scope.scopeKey === 'delivery'),
+    [gateConfigScopes]
+  )
   const deliveryKickoffRequired = Boolean(projectChecksSnapshot?.delivery?.kickoff_required)
   const deliveryKickoffHint = String(projectChecksSnapshot?.delivery?.kickoff_hint || '').trim()
+  const deliveryRuntimeDeployHealth = React.useMemo(() => {
+    const raw = projectChecksSnapshot?.delivery?.runtime_deploy_health
+    if (!raw || typeof raw !== 'object') return null
+    const value = raw as Record<string, unknown>
+    const stack = String(value.stack || '').trim() || 'constructos-ws-default'
+    const healthPathRaw = String(value.health_path || '').trim() || '/health'
+    const healthPath = healthPathRaw.startsWith('/') ? healthPathRaw : `/${healthPathRaw}`
+    const rawPort = value.port
+    let port: number | null = null
+    if (typeof rawPort === 'number' && Number.isFinite(rawPort)) {
+      port = rawPort
+    } else if (typeof rawPort === 'string' && rawPort.trim()) {
+      const parsed = Number(rawPort)
+      if (Number.isFinite(parsed)) port = parsed
+    }
+    const endpoint = port != null ? `http://gateway:${port}${healthPath}` : null
+    return {
+      stack,
+      port,
+      healthPath,
+      endpoint,
+      ok: Boolean(value.ok),
+      skipped: Boolean(value.skipped),
+      required: !Boolean(value.skipped),
+      stackRunning: Boolean(value.stack_running),
+      portMapped: Boolean(value.port_mapped),
+      http200: Boolean(value.http_200),
+    }
+  }, [projectChecksSnapshot?.delivery?.runtime_deploy_health])
+  const deliveryKickoffSummaryLine = React.useMemo(() => {
+    if (deliveryKickoffRequired) {
+      return `Kickoff state: waiting (Lead-first kickoff has not been requested yet).`
+    }
+    return 'Kickoff state: started (Lead-first orchestration active; QA runs after explicit Lead handoff).'
+  }, [deliveryKickoffRequired])
+  const executionGateSnapshot = React.useMemo(() => {
+    const raw = projectChecksSnapshot?.execution_gates
+    if (!raw || typeof raw !== 'object') return null
+    const totalsRaw = raw.totals && typeof raw.totals === 'object' ? (raw.totals as Record<string, unknown>) : {}
+    const tasksRaw = Array.isArray(raw.tasks) ? raw.tasks : []
+    const totals = {
+      tasks_with_gates: Number(totalsRaw.tasks_with_gates || 0),
+      gates_total: Number(totalsRaw.gates_total || 0),
+      blocking_total: Number(totalsRaw.blocking_total || 0),
+      pass: Number(totalsRaw.pass || 0),
+      fail: Number(totalsRaw.fail || 0),
+      waiting: Number(totalsRaw.waiting || 0),
+      not_applicable: Number(totalsRaw.not_applicable || 0),
+    }
+    const tasks = tasksRaw
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+        const row = item as Record<string, unknown>
+        const task_id = String(row.task_id || '').trim()
+        if (!task_id) return null
+        return {
+          task_id,
+          title: String(row.title || '').trim() || task_id,
+          status: String(row.status || '').trim(),
+          gates_total: Number(row.gates_total || 0),
+          blocking_total: Number(row.blocking_total || 0),
+          pass: Number(row.pass || 0),
+          fail: Number(row.fail || 0),
+          waiting: Number(row.waiting || 0),
+          not_applicable: Number(row.not_applicable || 0),
+        }
+      })
+      .filter((item): item is NonNullable<typeof item> => Boolean(item))
+    return { totals, tasks }
+  }, [projectChecksSnapshot?.execution_gates])
+  const workflowCommunicationSnapshot = React.useMemo(() => {
+    const raw = projectChecksSnapshot?.workflow_communication
+    if (!raw || typeof raw !== 'object') return null
+    const value = raw as Record<string, unknown>
+    const totalsRaw = value.totals && typeof value.totals === 'object' ? (value.totals as Record<string, unknown>) : {}
+    const eventsRaw = Array.isArray(value.events) ? value.events : []
+    const totals: Record<string, number> = {}
+    for (const [key, count] of Object.entries(totalsRaw)) {
+      const normalizedKey = String(key || '').trim()
+      if (!normalizedKey) continue
+      totals[normalizedKey] = Number(count || 0)
+    }
+    const events = eventsRaw
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+        const row = item as Record<string, unknown>
+        const taskId = String(row.task_id || '').trim()
+        const source = String(row.source || '').trim()
+        if (!taskId || !source) return null
+        return {
+          delivery: String(row.delivery || '').trim() || 'requested',
+          task_id: taskId,
+          title: String(row.title || '').trim() || taskId,
+          status: String(row.status || '').trim(),
+          source,
+          source_task_id: String(row.source_task_id || '').trim() || null,
+          reason: String(row.reason || '').trim() || null,
+          trigger_link: String(row.trigger_link || '').trim() || null,
+          correlation_id: String(row.correlation_id || '').trim() || null,
+          lead_handoff_token: String(row.lead_handoff_token || '').trim() || null,
+          dispatch_decision:
+            row.dispatch_decision && typeof row.dispatch_decision === 'object'
+              ? (row.dispatch_decision as Record<string, unknown>)
+              : null,
+          requested_at: String(row.requested_at || '').trim() || null,
+        }
+      })
+      .filter((item): item is NonNullable<typeof item> => Boolean(item))
+    return {
+      totals,
+      events,
+      events_total: Number(value.events_total || events.length || 0),
+    }
+  }, [projectChecksSnapshot?.workflow_communication])
   const effectiveEventStormingEnabled = Boolean(editProjectEventStormingEnabled ?? true)
   const projectExternalRefs = React.useMemo(
     () => parseExternalRefsText(editProjectExternalRefsText),
@@ -841,17 +1020,9 @@ export function ProjectsInlineEditor({
   const [selectedProjectSkillId, setSelectedProjectSkillId] = React.useState<string | null>(null)
   const [skillImportSourceUrl, setSkillImportSourceUrl] = React.useState('')
   const skillImportFileInputRef = React.useRef<HTMLInputElement | null>(null)
-  const [projectEditorTab, setProjectEditorTab] = React.useState<
-    | 'overview'
-    | 'checks'
-    | 'team-mode'
-    | 'git-delivery'
-    | 'docker-compose'
-    | 'rules'
-    | 'skills'
-    | 'resources'
-    | 'context'
-  >('overview')
+  const [projectEditorTab, setProjectEditorTab] = React.useState<ProjectEditorTab>(
+    () => resolveProjectEditorTabFromUrl() || 'overview'
+  )
   const [skillImportKey, setSkillImportKey] = React.useState('')
   const [skillImportMode, setSkillImportMode] = React.useState<'advisory' | 'enforced'>('advisory')
   const [skillImportTrustLevel, setSkillImportTrustLevel] = React.useState<'verified' | 'reviewed' | 'untrusted'>(
@@ -1189,11 +1360,13 @@ export function ProjectsInlineEditor({
 
   const gitDeliveryQuick = React.useMemo(() => {
     const requiredChecks = (gitDeliveryDraft?.required_checks as Record<string, unknown> | undefined) || {}
+    const execution = (gitDeliveryDraft?.execution as Record<string, unknown> | undefined) || {}
     const deliveryChecks = Array.isArray(requiredChecks.delivery)
       ? requiredChecks.delivery.map((item) => String(item || '').trim()).filter(Boolean)
       : []
     return {
       deliveryChecks,
+      requireDevTests: Boolean(execution.require_dev_tests),
     }
   }, [gitDeliveryDraft])
 
@@ -1390,6 +1563,22 @@ export function ProjectsInlineEditor({
           required_checks: {
             ...requiredChecks,
             delivery: nextChecks,
+          },
+        }
+      })
+    },
+    [patchGitDeliveryDraft]
+  )
+
+  const setGitDeliveryRequireDevTests = React.useCallback(
+    (nextValue: boolean) => {
+      patchGitDeliveryDraft((draft) => {
+        const execution = ((draft.execution as Record<string, unknown> | undefined) || {}) as Record<string, unknown>
+        return {
+          ...draft,
+          execution: {
+            ...execution,
+            require_dev_tests: Boolean(nextValue),
           },
         }
       })
@@ -2304,7 +2493,8 @@ export function ProjectsInlineEditor({
   const projectSkillCount = projectSkills.data?.total ?? skillItems.length
   const projectResourceCount = projectExternalRefs.length + projectAttachmentRefs.length
   React.useEffect(() => {
-    setProjectEditorTab('overview')
+    const nextTabFromUrl = resolveProjectEditorTabFromUrl()
+    setProjectEditorTab(nextTabFromUrl || 'overview')
     setPluginUiStatus({})
     setPluginValidationByKey({})
     setPluginDiffByKey({})
@@ -2542,6 +2732,22 @@ export function ProjectsInlineEditor({
             inputMode="numeric"
           />
         </label>
+        <label className="field-control" style={{ marginTop: 8 }}>
+          <span className="field-label">Project automation max parallel tasks</span>
+          <input
+            type="number"
+            min={1}
+            max={50}
+            step={1}
+            value={editProjectAutomationMaxParallelTasksText}
+            onChange={(e) => setEditProjectAutomationMaxParallelTasksText(e.target.value)}
+            placeholder="4"
+            inputMode="numeric"
+          />
+        </label>
+        <div className="meta" style={{ marginTop: 6 }}>
+          Per-project limit for concurrent automation runs. Lead kickoff dispatch is capped by this value.
+        </div>
         <div className="meta" style={{ marginTop: 6 }}>
           Leave empty to use global default ({contextPackEvidenceTopKDefault || 10}).
         </div>
@@ -2731,7 +2937,7 @@ export function ProjectsInlineEditor({
             <div className="gates-panel">
               <div className="gates-panel-head">
                 <div className="gates-panel-title-row">
-                  <h3 style={{ margin: 0 }}>Delivery Checks</h3>
+                  <h3 style={{ margin: 0 }}>Delivery Verification</h3>
                   <span className={`badge ${projectChecksSnapshot?.ok ? 'status-done' : 'status-blocked'}`}>
                     {projectChecksSnapshot?.ok ? 'PASS' : 'FAIL'}
                   </span>
@@ -2746,6 +2952,43 @@ export function ProjectsInlineEditor({
                   <div className="notice" style={{ marginTop: 8 }}>
                     <strong>Kickoff required: Yes.</strong>{' '}
                     <span>{deliveryKickoffHint || 'Execution is not started yet. Start kickoff from chat when you are ready.'}</span>
+                  </div>
+                ) : null}
+                {executionGateSnapshot ? (
+                  <div className="notice plugin-config-shell" style={{ marginTop: 8 }}>
+                    <div style={{ fontWeight: 600, marginBottom: 6 }}>Execution Gates (hard runtime)</div>
+                    <div className="row wrap" style={{ gap: 6 }}>
+                      <span className="badge">Tasks: {executionGateSnapshot.totals.tasks_with_gates}</span>
+                      <span className="badge">Total gates: {executionGateSnapshot.totals.gates_total}</span>
+                      <span className="badge">Blocking: {executionGateSnapshot.totals.blocking_total}</span>
+                      {executionGateSnapshot.totals.fail > 0 ? (
+                        <span className="badge status-blocked">Fail: {executionGateSnapshot.totals.fail}</span>
+                      ) : null}
+                      {executionGateSnapshot.totals.waiting > 0 ? (
+                        <span className="badge">Waiting: {executionGateSnapshot.totals.waiting}</span>
+                      ) : null}
+                      {executionGateSnapshot.totals.pass > 0 ? (
+                        <span className="badge status-done">Pass: {executionGateSnapshot.totals.pass}</span>
+                      ) : null}
+                    </div>
+                    {executionGateSnapshot.tasks.length > 0 ? (
+                      <div className="gates-check-list" style={{ marginTop: 8 }}>
+                        {executionGateSnapshot.tasks.slice(0, 12).map((row) => (
+                          <div key={`exec-gate-task-${row.task_id}`} className="gates-check-row">
+                            <div className="gates-check-copy">
+                              <a href={`?tab=tasks&project=${selectedProject.id}&task=${row.task_id}`}>{row.title}</a>
+                              <span className="meta">
+                                status={row.status || 'Unknown'}; blocking={row.blocking_total}; pass={row.pass}; fail={row.fail}; waiting={row.waiting}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="meta" style={{ marginTop: 8 }}>
+                        No task-level execution gates are active right now.
+                      </div>
+                    )}
                   </div>
                 ) : null}
               </div>
@@ -2818,26 +3061,37 @@ export function ProjectsInlineEditor({
                             )
                           })}
                         </div>
-                        <details style={{ marginTop: 8 }}>
-                          <summary>Show all available checks ({Object.keys(scope.availableDescriptions).length})</summary>
-                          <div className="gates-available-tags" style={{ marginTop: 6 }}>
-                            {Object.keys(scope.availableDescriptions).map((checkId) => {
-                              if (!checkId) return null
-                              const description = String(
-                                scope.runtimeScope?.checkDescriptions[checkId] || scope.availableDescriptions[checkId] || ''
-                              ).trim()
-                              return (
-                                <span
-                                  key={`${scope.scopeKey}-available-${checkId}`}
-                                  className="gates-available-tag"
-                                  title={description || undefined}
-                                >
-                                  {checkId}
-                                </span>
-                              )
-                            })}
-                          </div>
-                        </details>
+                        {scope.diagnosticChecks.length > 0 ? (
+                          <details style={{ marginTop: 8 }}>
+                            <summary>Show diagnostic checks ({scope.diagnosticChecks.length})</summary>
+                            <div className="gates-check-list" style={{ marginTop: 8 }}>
+                              {scope.diagnosticChecks.map((checkId) => {
+                                if (!checkId) return null
+                                const description = String(
+                                  scope.runtimeScope?.checkDescriptions[checkId] || scope.availableDescriptions[checkId] || ''
+                                ).trim()
+                                const runtimeValue = scope.runtimeScope?.checks?.[checkId]
+                                const hasRuntimeResult = typeof runtimeValue === 'boolean'
+                                const failed = hasRuntimeResult && !Boolean(runtimeValue)
+                                return (
+                                  <div key={`${scope.scopeKey}-diagnostic-${checkId}`} className="gates-check-row">
+                                    <div className="gates-check-copy">
+                                      <code>{checkId}</code>
+                                      {description ? <span className="meta">{description}</span> : null}
+                                    </div>
+                                    {hasRuntimeResult ? (
+                                      <span className={`badge ${failed ? 'status-blocked' : 'status-done'}`}>
+                                        {failed ? 'FAIL' : 'PASS'}
+                                      </span>
+                                    ) : (
+                                      <span className="badge">N/A</span>
+                                    )}
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          </details>
+                        ) : null}
                       </section>
                     ))}
                   </div>
@@ -2850,7 +3104,7 @@ export function ProjectsInlineEditor({
                 <div className="notice">No verification payload.</div>
               )}
               <div className="meta" style={{ marginTop: 4 }}>
-                Check behavior is derived from enabled project plugin configurations (`team_mode`, `git_delivery`, `docker_compose`).
+                These are project-level verification checks derived from enabled plugins (`team_mode`, `git_delivery`, `docker_compose`). Hard runner execution gates are shown per-task in the Automation tab.
               </div>
             </div>
           </Tabs.Content>
@@ -2873,6 +3127,112 @@ export function ProjectsInlineEditor({
             </div>
             <div className="meta" style={{ marginTop: 6 }}>
               Structured source of truth for team agents, role governance, and allowed task status transitions.
+            </div>
+            <div className="notice plugin-config-shell" style={{ marginTop: 8 }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>Execution gates overview</div>
+              {teamModeVerificationScope?.requiredChecks?.length ? (
+                <div className="gates-check-list">
+                  {teamModeVerificationScope.requiredChecks.map((checkId) => {
+                    const runtimeFailed = teamModeVerificationScope.runtimeScope?.failedChecks ?? []
+                    const failed = runtimeFailed.includes(checkId)
+                    const description = String(
+                      teamModeVerificationScope.runtimeScope?.checkDescriptions?.[checkId] ||
+                        teamModeVerificationScope.availableDescriptions?.[checkId] ||
+                        ''
+                    ).trim()
+                    const hasRuntimeResult = Boolean(teamModeVerificationScope.runtimeScope)
+                    return (
+                      <div key={`tm-overview-check-${checkId}`} className="gates-check-row">
+                        <div className="gates-check-copy">
+                          <code>{checkId}</code>
+                          {description ? <span className="meta">{description}</span> : null}
+                        </div>
+                        {hasRuntimeResult ? (
+                          <span className={`badge ${failed ? 'status-blocked' : 'status-done'}`}>{failed ? 'FAIL' : 'PASS'}</span>
+                        ) : (
+                          <span className="badge">N/A</span>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="meta">No Team Mode execution checks are currently active.</div>
+              )}
+              <div className="meta" style={{ marginTop: 6 }}>
+                Task-level deterministic execution gates are visible in each task Automation tab.
+              </div>
+              <div className="meta" style={{ marginTop: 6 }}>{deliveryKickoffSummaryLine}</div>
+              {deliveryRuntimeDeployHealth ? (
+                <div className="row wrap" style={{ marginTop: 6, gap: 8 }}>
+                  <span className="badge">Stack: {deliveryRuntimeDeployHealth.stack}</span>
+                  <span className="badge">
+                    Port: {deliveryRuntimeDeployHealth.port == null ? 'not configured' : deliveryRuntimeDeployHealth.port}
+                  </span>
+                  <span className="badge">Path: {deliveryRuntimeDeployHealth.healthPath}</span>
+                  <span className={`badge ${deliveryRuntimeDeployHealth.ok ? 'status-done' : 'status-blocked'}`}>
+                    Runtime health: {deliveryRuntimeDeployHealth.ok ? 'PASS' : 'FAIL'}
+                  </span>
+                  {deliveryRuntimeDeployHealth.endpoint ? <code>{deliveryRuntimeDeployHealth.endpoint}</code> : null}
+                </div>
+              ) : null}
+              {workflowCommunicationSnapshot ? (
+                <details style={{ marginTop: 8 }}>
+                  <summary>
+                    Workflow communication ({workflowCommunicationSnapshot.events_total})
+                  </summary>
+                  <div className="row wrap" style={{ marginTop: 8, gap: 8 }}>
+                    {Object.entries(workflowCommunicationSnapshot.totals).map(([source, count]) => (
+                      <span key={`tm-workflow-source-${source}`} className="badge">
+                        {source}: {count}
+                      </span>
+                    ))}
+                  </div>
+                  {workflowCommunicationSnapshot.events.length > 0 ? (
+                    <div className="gates-check-list" style={{ marginTop: 8 }}>
+                      {workflowCommunicationSnapshot.events.slice(0, 6).map((event) => (
+                        <div key={`tm-workflow-event-${event.task_id}-${event.requested_at || event.source}`} className="gates-check-row">
+                          <div className="gates-check-copy">
+                            <a className="status-chip" href={`?tab=tasks&project=${selectedProject.id}&task=${event.task_id}`}>
+                              {event.title}
+                            </a>
+                            <span className="meta">
+                              Delivery: <code>{event.delivery || 'requested'}</code> | Source: <code>{event.source}</code> | Status: <code>{event.status || 'n/a'}</code>
+                              {event.reason ? <> | Reason: {event.reason}</> : null}
+                              {event.source_task_id ? <> | From task: <code>{event.source_task_id}</code></> : null}
+                              {event.dispatch_decision?.priority ? <> | Priority: <code>{String(event.dispatch_decision.priority)}</code></> : null}
+                              {event.dispatch_decision?.slot ? <> | Slot: <code>{String(event.dispatch_decision.slot)}</code></> : null}
+                              {event.correlation_id ? <> | Correlation: <code>{event.correlation_id}</code></> : null}
+                            </span>
+                          </div>
+                          {event.requested_at ? (
+                            <span className="badge">
+                              {new Date(event.requested_at).toLocaleString()}
+                            </span>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="meta" style={{ marginTop: 8 }}>
+                      No workflow communication events recorded yet.
+                    </div>
+                  )}
+                </details>
+              ) : null}
+              <div className="row wrap" style={{ marginTop: 6, gap: 8 }}>
+                <a className="status-chip" href={`?tab=tasks&project=${selectedProject.id}`}>Open project tasks</a>
+                <a
+                  className="status-chip"
+                  href={`?tab=projects&project=${selectedProject.id}&project_editor_tab=checks`}
+                  onClick={(event) => {
+                    event.preventDefault()
+                    setProjectEditorTab('checks')
+                  }}
+                >
+                  Open Delivery Verification
+                </a>
+              </div>
             </div>
             <div className="notice plugin-config-shell" style={{ marginTop: 8 }}>
               <div style={{ fontWeight: 600, marginBottom: 6 }}>Quick configuration</div>
@@ -3339,6 +3699,112 @@ export function ProjectsInlineEditor({
               Required delivery checks for a strict core delivery contract.
             </div>
             <div className="notice plugin-config-shell" style={{ marginTop: 8 }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>Execution gates overview</div>
+              {deliveryVerificationScope?.requiredChecks?.length ? (
+                <div className="gates-check-list">
+                  {deliveryVerificationScope.requiredChecks.map((checkId) => {
+                    const runtimeFailed = deliveryVerificationScope.runtimeScope?.failedChecks ?? []
+                    const failed = runtimeFailed.includes(checkId)
+                    const description = String(
+                      deliveryVerificationScope.runtimeScope?.checkDescriptions?.[checkId] ||
+                        deliveryVerificationScope.availableDescriptions?.[checkId] ||
+                        ''
+                    ).trim()
+                    const hasRuntimeResult = Boolean(deliveryVerificationScope.runtimeScope)
+                    return (
+                      <div key={`gd-overview-check-${checkId}`} className="gates-check-row">
+                        <div className="gates-check-copy">
+                          <code>{checkId}</code>
+                          {description ? <span className="meta">{description}</span> : null}
+                        </div>
+                        {hasRuntimeResult ? (
+                          <span className={`badge ${failed ? 'status-blocked' : 'status-done'}`}>{failed ? 'FAIL' : 'PASS'}</span>
+                        ) : (
+                          <span className="badge">N/A</span>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="meta">No Git Delivery execution checks are currently active.</div>
+              )}
+              <div className="meta" style={{ marginTop: 6 }}>
+                Detailed task-level deterministic gates are shown in each task Automation tab.
+              </div>
+              <div className="meta" style={{ marginTop: 6 }}>{deliveryKickoffSummaryLine}</div>
+              {deliveryRuntimeDeployHealth ? (
+                <div className="row wrap" style={{ marginTop: 6, gap: 8 }}>
+                  <span className="badge">Stack: {deliveryRuntimeDeployHealth.stack}</span>
+                  <span className="badge">
+                    Port: {deliveryRuntimeDeployHealth.port == null ? 'not configured' : deliveryRuntimeDeployHealth.port}
+                  </span>
+                  <span className="badge">Path: {deliveryRuntimeDeployHealth.healthPath}</span>
+                  <span className={`badge ${deliveryRuntimeDeployHealth.ok ? 'status-done' : 'status-blocked'}`}>
+                    Runtime health: {deliveryRuntimeDeployHealth.ok ? 'PASS' : 'FAIL'}
+                  </span>
+                  {deliveryRuntimeDeployHealth.endpoint ? <code>{deliveryRuntimeDeployHealth.endpoint}</code> : null}
+                </div>
+              ) : null}
+              {workflowCommunicationSnapshot ? (
+                <details style={{ marginTop: 8 }}>
+                  <summary>
+                    Workflow communication ({workflowCommunicationSnapshot.events_total})
+                  </summary>
+                  <div className="row wrap" style={{ marginTop: 8, gap: 8 }}>
+                    {Object.entries(workflowCommunicationSnapshot.totals).map(([source, count]) => (
+                      <span key={`gd-workflow-source-${source}`} className="badge">
+                        {source}: {count}
+                      </span>
+                    ))}
+                  </div>
+                  {workflowCommunicationSnapshot.events.length > 0 ? (
+                    <div className="gates-check-list" style={{ marginTop: 8 }}>
+                      {workflowCommunicationSnapshot.events.slice(0, 6).map((event) => (
+                        <div key={`gd-workflow-event-${event.task_id}-${event.requested_at || event.source}`} className="gates-check-row">
+                          <div className="gates-check-copy">
+                            <a className="status-chip" href={`?tab=tasks&project=${selectedProject.id}&task=${event.task_id}`}>
+                              {event.title}
+                            </a>
+                            <span className="meta">
+                              Delivery: <code>{event.delivery || 'requested'}</code> | Source: <code>{event.source}</code> | Status: <code>{event.status || 'n/a'}</code>
+                              {event.reason ? <> | Reason: {event.reason}</> : null}
+                              {event.source_task_id ? <> | From task: <code>{event.source_task_id}</code></> : null}
+                              {event.dispatch_decision?.priority ? <> | Priority: <code>{String(event.dispatch_decision.priority)}</code></> : null}
+                              {event.dispatch_decision?.slot ? <> | Slot: <code>{String(event.dispatch_decision.slot)}</code></> : null}
+                              {event.correlation_id ? <> | Correlation: <code>{event.correlation_id}</code></> : null}
+                            </span>
+                          </div>
+                          {event.requested_at ? (
+                            <span className="badge">
+                              {new Date(event.requested_at).toLocaleString()}
+                            </span>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="meta" style={{ marginTop: 8 }}>
+                      No workflow communication events recorded yet.
+                    </div>
+                  )}
+                </details>
+              ) : null}
+              <div className="row wrap" style={{ marginTop: 6, gap: 8 }}>
+                <a className="status-chip" href={`?tab=tasks&project=${selectedProject.id}`}>Open project tasks</a>
+                <a
+                  className="status-chip"
+                  href={`?tab=projects&project=${selectedProject.id}&project_editor_tab=checks`}
+                  onClick={(event) => {
+                    event.preventDefault()
+                    setProjectEditorTab('checks')
+                  }}
+                >
+                  Open Delivery Verification
+                </a>
+              </div>
+            </div>
+            <div className="notice plugin-config-shell" style={{ marginTop: 8 }}>
               <div style={{ fontWeight: 600, marginBottom: 6 }}>Quick configuration</div>
               <div className="row wrap" style={{ alignItems: 'center', gap: 8 }}>
                 <span className="meta">Required checks</span>
@@ -3410,6 +3876,19 @@ export function ProjectsInlineEditor({
                     </Tooltip.Root>
                   </Tooltip.Provider>
                 ))}
+              </div>
+              <div className="row wrap" style={{ marginTop: 8, alignItems: 'center', gap: 8 }}>
+                <label className="project-plugin-enabled-row" htmlFor="git-delivery-require-dev-tests-checkbox">
+                  <input
+                    id="git-delivery-require-dev-tests-checkbox"
+                    type="checkbox"
+                    className="project-plugin-enabled-native-checkbox"
+                    checked={Boolean(gitDeliveryQuick.requireDevTests)}
+                    onChange={(e) => setGitDeliveryRequireDevTests(Boolean(e.target.checked))}
+                  />
+                  <span className="project-plugin-enabled-label">Require developer tests</span>
+                </label>
+                <InfoTip text="When enabled, Developer automation must report tests_run=true and tests_passed=true." />
               </div>
             </div>
             <details style={{ marginTop: 8 }} className="plugin-policy-details">

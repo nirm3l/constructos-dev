@@ -19,7 +19,13 @@ import {
   patchWorkspaceSkill,
   previewProjectFromTemplate,
 } from '../../api'
-import { parseProjectEvidenceTopKInput, parseProjectStatusesText, parseTemplateParametersInput, toErrorMessage } from '../../utils/ui'
+import {
+  parseProjectAutomationMaxParallelInput,
+  parseProjectEvidenceTopKInput,
+  parseProjectStatusesText,
+  parseTemplateParametersInput,
+  toErrorMessage,
+} from '../../utils/ui'
 
 function resolveProjectChatPolicy(
   embeddingEnabled: boolean,
@@ -95,6 +101,7 @@ export function useProjectMutations(c: any) {
         c.projectChatAttachmentIngestionMode
       )
       const contextPackEvidenceTopK = parseProjectEvidenceTopKInput(c.projectContextPackEvidenceTopKText)
+      const automationMaxParallelTasks = parseProjectAutomationMaxParallelInput(c.projectAutomationMaxParallelTasksText)
       const normalizedTemplateKey = String(c.projectTemplateKey || '').trim()
       const hasCustomStatuses = Boolean(String(c.projectCustomStatusesText || '').trim())
       const customStatuses = hasCustomStatuses ? parseProjectStatusesText(c.projectCustomStatusesText) : undefined
@@ -124,6 +131,7 @@ export function useProjectMutations(c: any) {
         embedding_enabled: embeddingEnabled,
         embedding_model: String(c.projectEmbeddingModel || '').trim() || null,
         context_pack_evidence_top_k: contextPackEvidenceTopK,
+        automation_max_parallel_tasks: automationMaxParallelTasks,
         event_storming_enabled: Boolean(c.projectEventStormingEnabled),
         ...chatPolicy,
         member_user_ids: Array.from(new Set(c.createProjectMemberIds)),

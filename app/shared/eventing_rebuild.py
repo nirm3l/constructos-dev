@@ -151,6 +151,7 @@ from .task_automation import (
     derive_legacy_schedule_fields,
     normalize_execution_triggers,
 )
+from .task_relationships import normalize_task_relationships
 from .event_upcasters import upcast_event, upcast_snapshot
 from .eventing_store import StreamState, get_kurrent_client, kurrent_read_stream, snapshot_stream_id, stream_id, NotFoundError, serialize_snapshot_event
 
@@ -177,6 +178,7 @@ def _parse_tag_list(raw: str | None) -> list[str]:
 def _normalize_task_row_automation_fields(task: Task) -> None:
     instruction = str(task.instruction or task.scheduled_instruction or "").strip() or None
     execution_triggers = normalize_execution_triggers(task.execution_triggers)
+    task_relationships = normalize_task_relationships(task.task_relationships)
     if str(task.task_type or "").strip().lower() == "manual":
         execution_triggers = [
             trigger
@@ -197,6 +199,7 @@ def _normalize_task_row_automation_fields(task: Task) -> None:
     )
     task.instruction = instruction
     task.execution_triggers = json.dumps(execution_triggers)
+    task.task_relationships = json.dumps(task_relationships)
     task.task_type = str(legacy.get("task_type") or "manual")
     task.scheduled_instruction = legacy.get("scheduled_instruction")
     raw_scheduled_at = legacy.get("scheduled_at_utc")
@@ -370,8 +373,26 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
         s_local.setdefault("last_requested_from_status", None)
         s_local.setdefault("last_requested_to_status", None)
         s_local.setdefault("last_requested_triggered_at", None)
+        s_local.setdefault("last_requested_execution_intent", None)
+        s_local.setdefault("last_requested_execution_kickoff_intent", None)
+        s_local.setdefault("last_requested_project_creation_intent", None)
+        s_local.setdefault("last_requested_workflow_scope", None)
+        s_local.setdefault("last_requested_execution_mode", None)
+        s_local.setdefault("last_requested_task_completion_requested", None)
+        s_local.setdefault("last_requested_classifier_reason", None)
+        s_local.setdefault("last_dispatch_decision", None)
+        s_local.setdefault("last_ignored_request_source", None)
+        s_local.setdefault("last_ignored_request_source_task_id", None)
+        s_local.setdefault("last_ignored_request_reason", None)
+        s_local.setdefault("last_ignored_request_trigger_link", None)
+        s_local.setdefault("last_ignored_request_correlation_id", None)
+        s_local.setdefault("last_ignored_request_trigger_task_id", None)
+        s_local.setdefault("last_ignored_request_from_status", None)
+        s_local.setdefault("last_ignored_request_to_status", None)
+        s_local.setdefault("last_ignored_request_triggered_at", None)
         instruction = str(s_local.get("instruction") or s_local.get("scheduled_instruction") or "").strip() or None
         execution_triggers = normalize_execution_triggers(s_local.get("execution_triggers"))
+        task_relationships = normalize_task_relationships(s_local.get("task_relationships"))
         if str(s_local.get("task_type") or "").strip().lower() == "manual":
             execution_triggers = [
                 trigger
@@ -392,6 +413,7 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
         )
         s_local["instruction"] = instruction
         s_local["execution_triggers"] = execution_triggers
+        s_local["task_relationships"] = task_relationships
         s_local["task_type"] = legacy.get("task_type") or "manual"
         s_local["scheduled_instruction"] = legacy.get("scheduled_instruction")
         s_local["scheduled_at_utc"] = legacy.get("scheduled_at_utc")
@@ -433,6 +455,7 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "attachment_refs": p.get("attachment_refs", p.get("attachments", [])),
             "instruction": instruction,
             "execution_triggers": execution_triggers,
+            "task_relationships": normalize_task_relationships(p.get("task_relationships")),
             "recurring_rule": legacy.get("recurring_rule"),
             "task_type": legacy.get("task_type", "manual"),
             "scheduled_instruction": legacy.get("scheduled_instruction"),
@@ -455,6 +478,23 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "last_requested_from_status": None,
             "last_requested_to_status": None,
             "last_requested_triggered_at": None,
+            "last_requested_execution_intent": None,
+            "last_requested_execution_kickoff_intent": None,
+            "last_requested_project_creation_intent": None,
+            "last_requested_workflow_scope": None,
+            "last_requested_execution_mode": None,
+            "last_requested_task_completion_requested": None,
+            "last_requested_classifier_reason": None,
+            "last_dispatch_decision": None,
+            "last_ignored_request_source": None,
+            "last_ignored_request_source_task_id": None,
+            "last_ignored_request_reason": None,
+            "last_ignored_request_trigger_link": None,
+            "last_ignored_request_correlation_id": None,
+            "last_ignored_request_trigger_task_id": None,
+            "last_ignored_request_from_status": None,
+            "last_ignored_request_to_status": None,
+            "last_ignored_request_triggered_at": None,
             "automation_pending_requests": 0,
         }
     elif event.event_type in {TASK_EVENT_UPDATED, TASK_EVENT_REORDERED}:
@@ -479,10 +519,29 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
         s["last_agent_error"] = None
         s["last_requested_instruction"] = p.get("instruction")
         s["last_requested_source"] = p.get("source")
+        s["last_requested_source_task_id"] = p.get("source_task_id")
+        s["last_requested_reason"] = p.get("reason")
+        s["last_requested_trigger_link"] = p.get("trigger_link")
+        s["last_requested_correlation_id"] = p.get("correlation_id")
         s["last_requested_trigger_task_id"] = p.get("trigger_task_id")
         s["last_requested_from_status"] = p.get("from_status")
         s["last_requested_to_status"] = p.get("to_status")
         s["last_requested_triggered_at"] = p.get("triggered_at")
+        s["last_requested_execution_intent"] = p.get("execution_intent")
+        s["last_requested_execution_kickoff_intent"] = p.get("execution_kickoff_intent")
+        s["last_requested_project_creation_intent"] = p.get("project_creation_intent")
+        s["last_requested_workflow_scope"] = p.get("workflow_scope")
+        s["last_requested_execution_mode"] = p.get("execution_mode")
+        s["last_requested_task_completion_requested"] = p.get("task_completion_requested")
+        s["last_requested_classifier_reason"] = p.get("classifier_reason")
+        if p.get("lead_handoff_token") is not None:
+            s["last_lead_handoff_token"] = p.get("lead_handoff_token")
+        if p.get("lead_handoff_at") is not None:
+            s["last_lead_handoff_at"] = p.get("lead_handoff_at")
+        if p.get("lead_handoff_refs") is not None:
+            s["last_lead_handoff_refs_json"] = p.get("lead_handoff_refs")
+        if p.get("lead_handoff_deploy_execution") is not None:
+            s["last_lead_handoff_deploy_execution"] = p.get("lead_handoff_deploy_execution")
     elif event.event_type == TASK_EVENT_AUTOMATION_STARTED:
         s["automation_state"] = "running"
         s["last_agent_error"] = None
@@ -560,6 +619,7 @@ def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str
             "embedding_enabled": bool(p.get("embedding_enabled", False)),
             "embedding_model": p.get("embedding_model"),
             "context_pack_evidence_top_k": p.get("context_pack_evidence_top_k"),
+            "automation_max_parallel_tasks": max(1, int(p.get("automation_max_parallel_tasks") or 4)),
             "chat_index_mode": str(p.get("chat_index_mode") or "OFF"),
             "chat_attachment_ingestion_mode": str(
                 p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
@@ -587,6 +647,8 @@ def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str
             s["embedding_model"] = p.get("embedding_model")
         if touched("context_pack_evidence_top_k"):
             s["context_pack_evidence_top_k"] = p.get("context_pack_evidence_top_k")
+        if touched("automation_max_parallel_tasks"):
+            s["automation_max_parallel_tasks"] = max(1, int(p.get("automation_max_parallel_tasks") or 4))
         if touched("chat_index_mode"):
             s["chat_index_mode"] = str(p.get("chat_index_mode") or "OFF")
         if touched("chat_attachment_ingestion_mode"):
@@ -1003,6 +1065,7 @@ def project_event(db: Session, ev: EventEnvelope):
         project.embedding_enabled = bool(p.get("embedding_enabled", False))
         project.embedding_model = p.get("embedding_model")
         project.context_pack_evidence_top_k = p.get("context_pack_evidence_top_k")
+        project.automation_max_parallel_tasks = max(1, int(p.get("automation_max_parallel_tasks") or 4))
         project.chat_index_mode = str(p.get("chat_index_mode") or "OFF")
         project.chat_attachment_ingestion_mode = str(
             p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
@@ -1034,6 +1097,8 @@ def project_event(db: Session, ev: EventEnvelope):
                 project.embedding_model = p.get("embedding_model")
             if touched("context_pack_evidence_top_k"):
                 project.context_pack_evidence_top_k = p.get("context_pack_evidence_top_k")
+            if touched("automation_max_parallel_tasks"):
+                project.automation_max_parallel_tasks = max(1, int(p.get("automation_max_parallel_tasks") or 4))
             if touched("chat_index_mode"):
                 project.chat_index_mode = str(p.get("chat_index_mode") or "OFF")
             if touched("chat_attachment_ingestion_mode"):
@@ -1138,6 +1203,7 @@ def project_event(db: Session, ev: EventEnvelope):
             db.add(task)
         instruction = str(p.get("instruction") or p.get("scheduled_instruction") or "").strip() or None
         execution_triggers = normalize_execution_triggers(p.get("execution_triggers"))
+        task_relationships = normalize_task_relationships(p.get("task_relationships"))
         if not execution_triggers:
             legacy_trigger = build_legacy_schedule_trigger(
                 scheduled_at_utc=p.get("scheduled_at_utc"),
@@ -1168,6 +1234,7 @@ def project_event(db: Session, ev: EventEnvelope):
         task.attachment_refs = json.dumps(p.get("attachment_refs", p.get("attachments", [])))
         task.instruction = instruction
         task.execution_triggers = json.dumps(execution_triggers)
+        task.task_relationships = json.dumps(task_relationships)
         task.recurring_rule = legacy_schedule.get("recurring_rule")
         task.task_type = legacy_schedule.get("task_type", "manual")
         task.scheduled_instruction = legacy_schedule.get("scheduled_instruction")

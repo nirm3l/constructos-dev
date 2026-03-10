@@ -43,6 +43,7 @@ from .task_automation import (
     derive_legacy_schedule_fields,
     normalize_execution_triggers,
 )
+from .task_relationships import normalize_task_relationships
 from .vector_store import project_embedding_index_snapshot
 
 
@@ -115,6 +116,7 @@ def serialize_task(
 ) -> dict[str, Any]:
     instruction = str(task.instruction or task.scheduled_instruction or "").strip() or None
     execution_triggers = normalize_execution_triggers(task.execution_triggers)
+    task_relationships = normalize_task_relationships(task.task_relationships)
     if not execution_triggers:
         legacy_trigger = build_legacy_schedule_trigger(
             scheduled_at_utc=to_iso_utc(task.scheduled_at_utc),
@@ -147,6 +149,7 @@ def serialize_task(
         attachment_refs=json.loads(task.attachment_refs or "[]"),
         instruction=instruction,
         execution_triggers=execution_triggers,
+        task_relationships=task_relationships,
         recurring_rule=legacy_schedule.get("recurring_rule") or task.recurring_rule,
         task_type=str(legacy_schedule.get("task_type") or "manual"),
         scheduled_instruction=legacy_schedule.get("scheduled_instruction"),
@@ -285,6 +288,7 @@ def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
         created_by = str(state.get("created_by") or "") or load_created_by(db, "Task", task_id)
         instruction = str(state.get("instruction") or state.get("scheduled_instruction") or "").strip() or None
         execution_triggers = normalize_execution_triggers(state.get("execution_triggers"))
+        task_relationships = normalize_task_relationships(state.get("task_relationships"))
         if not execution_triggers:
             legacy_trigger = build_legacy_schedule_trigger(
                 scheduled_at_utc=state.get("scheduled_at_utc"),
@@ -317,6 +321,7 @@ def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
             "attachment_refs": state.get("attachment_refs", state.get("attachments", [])),
             "instruction": instruction,
             "execution_triggers": execution_triggers,
+            "task_relationships": task_relationships,
             "recurring_rule": legacy_schedule.get("recurring_rule") or state.get("recurring_rule"),
             "task_type": str(legacy_schedule.get("task_type") or state.get("task_type") or "manual"),
             "scheduled_instruction": legacy_schedule.get("scheduled_instruction"),
@@ -564,6 +569,7 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
             "embedding_enabled": bool(project.embedding_enabled),
             "embedding_model": project.embedding_model,
             "context_pack_evidence_top_k": project.context_pack_evidence_top_k,
+            "automation_max_parallel_tasks": int(getattr(project, "automation_max_parallel_tasks", 4) or 4),
             "chat_index_mode": str(project.chat_index_mode or "OFF"),
             "chat_attachment_ingestion_mode": str(
                 project.chat_attachment_ingestion_mode or "METADATA_ONLY"
@@ -607,6 +613,7 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
         "embedding_enabled": bool(state.get("embedding_enabled", False)),
         "embedding_model": state.get("embedding_model"),
         "context_pack_evidence_top_k": state.get("context_pack_evidence_top_k"),
+        "automation_max_parallel_tasks": int(state.get("automation_max_parallel_tasks") or 4),
         "chat_index_mode": str(state.get("chat_index_mode") or "OFF"),
         "chat_attachment_ingestion_mode": str(
             state.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"

@@ -7,10 +7,11 @@ from typing import Any
 _COMMIT_SHA_EXPLICIT_RE = re.compile(
     r"(?i)(?:\b(?:commit|sha|changeset|hash)\s*[:=#]?\s*|/commit/)([0-9a-f]{7,40})\b"
 )
+_TASK_BRANCH_RE = re.compile(r"\btask/[a-z0-9][a-z0-9._/-]*\b", re.IGNORECASE)
 
 
 def _is_team_mode_developer_role(role: str | None) -> bool:
-    return str(role or "").strip().lower() == "developeragent"
+    return str(role or "").strip().casefold() == "developer"
 
 
 def _extract_commit_shas_from_refs(refs: object) -> set[str]:
@@ -27,17 +28,18 @@ def _extract_commit_shas_from_refs(refs: object) -> set[str]:
     return out
 
 
-def _extract_commit_shas_from_text(text: str | None) -> set[str]:
-    raw = str(text or "")
-    return {str(match).lower() for match in _COMMIT_SHA_EXPLICIT_RE.findall(raw)}
-
-
-def _is_noop_ack_comment(comment: str | None) -> bool:
-    normalized = str(comment or "").strip().casefold()
-    if not normalized:
-        return False
-    return normalized.startswith("codex runner: request accepted, leaving progress note.")
-
+def _extract_task_branch_evidence_from_refs(refs: object) -> set[str]:
+    out: set[str] = set()
+    if not isinstance(refs, list):
+        return out
+    for item in refs:
+        if isinstance(item, dict):
+            text = f"{item.get('url') or ''} {item.get('label') or ''}"
+        else:
+            text = str(item or "")
+        for match in _TASK_BRANCH_RE.findall(text):
+            out.add(str(match).lower())
+    return out
 
 class GitDeliveryPlugin:
     key = "git_delivery"
@@ -97,7 +99,7 @@ class GitDeliveryPlugin:
         comment: str | None,
         has_git_delivery_skill: bool,
     ) -> str | None:
-        del db, workspace_id, project_id, task_id, action
+        del db, workspace_id, project_id, task_id, action, summary, comment
         if not has_git_delivery_skill:
             return None
         if not _is_team_mode_developer_role(assignee_role):
@@ -105,11 +107,18 @@ class GitDeliveryPlugin:
         state = dict(task_state or {})
         if str(state.get("status") or "").strip() != "Dev":
             return None
-        ref_commit_shas = _extract_commit_shas_from_refs(state.get("external_refs"))
-        comment_commit_shas = _extract_commit_shas_from_text(comment) | _extract_commit_shas_from_text(summary)
-        has_commit_evidence = bool(ref_commit_shas or comment_commit_shas)
-        if has_commit_evidence:
+        refs = state.get("external_refs")
+        has_commit_evidence = bool(_extract_commit_shas_from_refs(refs))
+        has_branch_evidence = bool(_extract_task_branch_evidence_from_refs(refs))
+        if has_commit_evidence and has_branch_evidence:
             return None
-        if _is_noop_ack_comment(comment):
-            return "Developer automation produced acknowledgement only and no commit evidence (git_delivery)."
-        return "Developer automation completed without commit evidence (git_delivery)."
+        missing_parts: list[str] = []
+        if not has_commit_evidence:
+            missing_parts.append("commit")
+        if not has_branch_evidence:
+            missing_parts.append("task branch")
+        missing_label = " + ".join(missing_parts) if missing_parts else "required"
+        return (
+            "Developer automation completed without required git_delivery evidence in external_refs "
+            f"({missing_label})."
+        )

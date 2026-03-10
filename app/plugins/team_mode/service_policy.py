@@ -85,8 +85,9 @@ def enforce_done_transition(
         required_checks = [
             "repo_context_present",
             "git_contract_ok",
-            "dev_tasks_have_commit_evidence",
-            "dev_tasks_have_unique_commit_evidence",
+            "compose_manifest_present",
+            "lead_deploy_decision_evidence_present",
+            "deploy_serves_application_root",
             "qa_has_verifiable_artifacts",
         ]
         failing = [check for check in required_checks if not bool((delivery.get("checks") or {}).get(check))]
@@ -121,11 +122,9 @@ def enforce_done_transition(
         required_checks = [
             "repo_context_present",
             "git_contract_ok",
-            "dev_tasks_have_commit_evidence",
-            "dev_tasks_have_task_branch_evidence",
-            "dev_tasks_have_unique_commit_evidence",
-            "dev_tasks_have_automation_run_evidence",
-            "qa_tasks_have_automation_run_evidence",
+            "compose_manifest_present",
+            "lead_deploy_decision_evidence_present",
+            "deploy_serves_application_root",
             "qa_has_verifiable_artifacts",
             "deploy_execution_evidence_present",
         ]

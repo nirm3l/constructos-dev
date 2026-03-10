@@ -73,6 +73,10 @@ def _normalize_nonnegative_int(value: Any) -> int:
     return max(0, parsed)
 
 
+def _normalize_casefold(value: Any) -> str:
+    return str(value or "").strip().casefold()
+
+
 def _parse_task_labels(raw_labels: str | None) -> list[str]:
     if not raw_labels:
         return []
@@ -297,6 +301,52 @@ def emit_task_automation_triggers_for_event(
         )
         if not effective_instruction:
             return False
+        # Direct handoff request (Lead -> QA) has higher runtime priority than
+        # derived status-change trigger dispatch. Keep trigger topology for graph,
+        # but skip duplicate queueing for the same source edge and target status.
+        if (
+            _normalize_casefold(trigger_to_status) == "qa"
+            and _normalize_casefold(task_state.get("last_requested_source")) == "lead_handoff"
+            and _normalize_casefold(task_state.get("last_requested_source_task_id"))
+            == _normalize_casefold(trigger_task_id)
+            and _normalize_casefold(task_state.get("last_requested_to_status")) == "qa"
+        ):
+            trigger_link = (
+                f"{str(trigger_task_id or '').strip()}->{task_id}:"
+                f"{str(trigger_to_status or '').strip() or 'unknown'}"
+            )
+            correlation_id = (
+                f"status-change:{str(trigger_task_id or '').strip()}:{task_id}:"
+                f"{str(trigger_to_status or '').strip() or 'unknown'}:{str(triggered_at or now_iso).strip()}"
+            )
+            append_event_fn(
+                db,
+                aggregate_type="Task",
+                aggregate_id=task_id,
+                event_type=TASK_EVENT_UPDATED,
+                payload={
+                    "last_ignored_request_source": "status_change",
+                    "last_ignored_request_source_task_id": trigger_task_id,
+                    "last_ignored_request_reason": "ignored_due_to_direct_request",
+                    "last_ignored_request_trigger_link": trigger_link,
+                    "last_ignored_request_correlation_id": correlation_id,
+                    "last_ignored_request_trigger_task_id": trigger_task_id,
+                    "last_ignored_request_from_status": trigger_from_status,
+                    "last_ignored_request_to_status": trigger_to_status,
+                    "last_ignored_request_triggered_at": triggered_at,
+                },
+                metadata={
+                    "actor_id": AGENT_SYSTEM_USER_ID,
+                    "workspace_id": workspace_id,
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "trigger_task_id": trigger_task_id,
+                    "trigger_from_status": trigger_from_status,
+                    "trigger_to_status": trigger_to_status,
+                    "triggered_at": triggered_at,
+                },
+            )
+            return False
 
         if str(task_state.get("automation_state") or "idle") in {"queued", "running"}:
             pending_requests = _normalize_nonnegative_int(task_state.get("automation_pending_requests"))
@@ -309,6 +359,12 @@ def emit_task_automation_triggers_for_event(
                     "automation_pending_requests": pending_requests + 1,
                     "last_requested_instruction": effective_instruction,
                     "last_requested_source": "status_change",
+                    "last_requested_source_task_id": trigger_task_id,
+                    "last_requested_reason": "status_change_trigger",
+                    "last_requested_trigger_link": f"{str(trigger_task_id or '').strip()}->{task_id}:{str(trigger_to_status or '').strip() or 'unknown'}",
+                    "last_requested_correlation_id": (
+                        f"status-change:{str(trigger_task_id or '').strip()}:{task_id}:{str(trigger_to_status or '').strip() or 'unknown'}:{str(triggered_at or now_iso).strip()}"
+                    ),
                     "last_requested_trigger_task_id": trigger_task_id,
                     "last_requested_from_status": trigger_from_status,
                     "last_requested_to_status": trigger_to_status,
@@ -336,10 +392,21 @@ def emit_task_automation_triggers_for_event(
                 "requested_at": now_iso,
                 "instruction": effective_instruction,
                 "source": "status_change",
+                "source_task_id": trigger_task_id,
+                "reason": "status_change_trigger",
+                "trigger_link": f"{str(trigger_task_id or '').strip()}->{task_id}:{str(trigger_to_status or '').strip() or 'unknown'}",
+                "correlation_id": (
+                    f"status-change:{str(trigger_task_id or '').strip()}:{task_id}:{str(trigger_to_status or '').strip() or 'unknown'}:{str(triggered_at or now_iso).strip()}"
+                ),
                 "trigger_task_id": trigger_task_id,
                 "from_status": trigger_from_status,
                 "to_status": trigger_to_status,
                 "triggered_at": triggered_at,
+                "lead_handoff_token": (
+                    f"lead:{str(trigger_task_id or '').strip()}:{str(triggered_at or now_iso).strip()}"
+                    if str(trigger_to_status or "").strip() == "QA"
+                    else None
+                ),
             },
             metadata={
                 "actor_id": AGENT_SYSTEM_USER_ID,

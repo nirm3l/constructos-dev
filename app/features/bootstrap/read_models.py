@@ -140,6 +140,7 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
                 "embedding_enabled": bool(p.embedding_enabled),
                 "embedding_model": p.embedding_model,
                 "context_pack_evidence_top_k": p.context_pack_evidence_top_k,
+                "automation_max_parallel_tasks": int(getattr(p, "automation_max_parallel_tasks", 4) or 4),
                 "chat_index_mode": str(p.chat_index_mode or "OFF"),
                 "chat_attachment_ingestion_mode": str(
                     p.chat_attachment_ingestion_mode or "METADATA_ONLY"

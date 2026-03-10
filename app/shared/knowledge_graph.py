@@ -32,7 +32,8 @@ from .settings import (
     NEO4J_USERNAME,
     logger,
 )
-from .task_automation import normalize_execution_triggers
+from .task_relationships import normalize_task_relationships
+from plugins.team_mode.task_roles import derive_task_role, normalize_team_agents
 from .vector_store import resolve_project_embedding_runtime, search_project_chunks
 
 try:  # pragma: no cover - exercised in integration only
@@ -542,7 +543,8 @@ def graph_get_project_subgraph(
     task_ids = [str(node.get("entity_id") or "") for node in nodes if str(node.get("entity_type") or "").lower() == "task"]
     remaining_node_slots = max(0, safe_nodes - len(nodes))
     if task_ids:
-        from .models import SessionLocal, Task, TaskComment
+        from .models import ProjectMember, ProjectPluginConfig, SessionLocal, Task, TaskComment
+        from .eventing import rebuild_state
 
         if remaining_node_slots:
             thread_previews: dict[str, str] = {}
@@ -615,44 +617,182 @@ def graph_get_project_subgraph(
         task_id_set = {tid for tid in task_ids if tid}
         task_dependency_keys: set[tuple[str, str, str]] = set()
         with SessionLocal() as db:
+            member_role_by_user_id = {
+                str(user_id or "").strip(): str(role or "").strip()
+                for user_id, role in (
+                    db.query(ProjectMember.user_id, ProjectMember.role)
+                    .filter(ProjectMember.project_id == project_id)
+                    .all()
+                )
+                if str(user_id or "").strip()
+            }
+            team_mode_config_row = (
+                db.query(ProjectPluginConfig.config_json)
+                .filter(ProjectPluginConfig.project_id == project_id)
+                .filter(ProjectPluginConfig.plugin_key == "team_mode")
+                .filter(ProjectPluginConfig.enabled.is_(True))
+                .filter(ProjectPluginConfig.is_deleted.is_(False))
+                .first()
+            )
+            team_mode_agents: list[dict[str, str]] = []
+            if team_mode_config_row is not None:
+                try:
+                    parsed_team_mode = json.loads(str(team_mode_config_row[0] or "").strip() or "{}")
+                except Exception:
+                    parsed_team_mode = {}
+                if isinstance(parsed_team_mode, dict):
+                    team_mode_agents = normalize_team_agents(parsed_team_mode.get("team"))
+            agent_role_by_code = {
+                str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
+                for agent in team_mode_agents
+                if str(agent.get("id") or "").strip()
+            }
+            task_role_rows_sql = (
+                db.query(Task.id, Task.assignee_id, Task.assigned_agent_code, Task.labels, Task.status)
+                .filter(Task.id.in_(task_ids))
+                .filter(Task.project_id == project_id)
+                .filter(Task.is_deleted.is_(False))
+                .all()
+            )
             task_rows_sql = (
-                db.query(Task.id, Task.execution_triggers)
+                db.query(Task.id, Task.execution_triggers, Task.task_relationships)
                 .filter(Task.id.in_(task_ids))
                 .filter(Task.project_id == project_id)
                 .filter(Task.is_deleted.is_(False))
                 .all()
             )
 
-        for dependent_task_raw, execution_triggers_raw in task_rows_sql:
+        if team_mode_agents:
+            task_role_by_id: dict[str, str] = {}
+            for task_id_raw, assignee_id_raw, assigned_agent_code_raw, labels_raw, status_raw in task_role_rows_sql:
+                task_id = str(task_id_raw or "").strip()
+                if not task_id:
+                    continue
+                task_role_by_id[task_id] = derive_task_role(
+                    task_like={
+                        "id": task_id,
+                        "assignee_id": str(assignee_id_raw or "").strip(),
+                        "assigned_agent_code": str(assigned_agent_code_raw or "").strip(),
+                        "labels": labels_raw,
+                        "status": str(status_raw or "").strip(),
+                    },
+                    member_role_by_user_id=member_role_by_user_id,
+                    agent_role_by_code=agent_role_by_code,
+                )
+
+            for dependent_task_raw, _execution_triggers_raw, task_relationships_raw in task_rows_sql:
+                task_id = str(dependent_task_raw or "").strip()
+                if not task_id:
+                    continue
+                relationships = normalize_task_relationships(task_relationships_raw)
+                task_role = str(task_role_by_id.get(task_id) or "").strip()
+                for relationship in relationships:
+                    kind = str(relationship.get("kind") or "").strip().lower()
+                    statuses = {
+                        str(item or "").strip()
+                        for item in (relationship.get("statuses") or [])
+                        if str(item or "").strip()
+                    }
+                    linked_task_ids = [
+                        str(source_raw or "").strip()
+                        for source_raw in (relationship.get("task_ids") or [])
+                        if str(source_raw or "").strip() and str(source_raw or "").strip() in task_id_set
+                    ]
+                    if kind == "delivers_to":
+                        for target_task_id in linked_task_ids:
+                            dep_key = (task_id, target_task_id, "TEAM_MODE_DELIVERS_TO")
+                            if dep_key in task_dependency_keys:
+                                continue
+                            task_dependency_keys.add(dep_key)
+                            synthetic_edges.append(
+                                {
+                                    "source_entity_id": task_id,
+                                    "target_entity_id": target_task_id,
+                                    "relationship": "TEAM_MODE_DELIVERS_TO",
+                                }
+                            )
+                    elif kind == "hands_off_to":
+                        for source_task_id in linked_task_ids:
+                            dep_key = (source_task_id, task_id, "TEAM_MODE_HANDS_OFF_TO")
+                            if dep_key in task_dependency_keys:
+                                continue
+                            task_dependency_keys.add(dep_key)
+                            synthetic_edges.append(
+                                {
+                                    "source_entity_id": source_task_id,
+                                    "target_entity_id": task_id,
+                                    "relationship": "TEAM_MODE_HANDS_OFF_TO",
+                                }
+                            )
+                    elif kind == "escalates_to":
+                        for target_task_id in linked_task_ids:
+                            dep_key = (task_id, target_task_id, "TEAM_MODE_ESCALATES_TO")
+                            if dep_key in task_dependency_keys:
+                                continue
+                            task_dependency_keys.add(dep_key)
+                            synthetic_edges.append(
+                                {
+                                    "source_entity_id": task_id,
+                                    "target_entity_id": target_task_id,
+                                    "relationship": "TEAM_MODE_ESCALATES_TO",
+                                }
+                            )
+                    elif kind == "depends_on" and task_role == "Lead" and "Blocked" in statuses:
+                        for source_task_id in linked_task_ids:
+                            dep_key = (source_task_id, task_id, "TEAM_MODE_ESCALATES_TO")
+                            if dep_key in task_dependency_keys:
+                                continue
+                            task_dependency_keys.add(dep_key)
+                            synthetic_edges.append(
+                                {
+                                    "source_entity_id": source_task_id,
+                                    "target_entity_id": task_id,
+                                    "relationship": "TEAM_MODE_ESCALATES_TO",
+                                }
+                            )
+
+        for task_id in task_ids:
+            try:
+                with SessionLocal() as db:
+                    state, _version = rebuild_state(db, "Task", task_id)
+            except Exception:
+                state = {}
+            source_task_id = str(state.get("last_requested_source_task_id") or "").strip()
+            if not source_task_id or source_task_id not in task_id_set or source_task_id == task_id:
+                continue
+            request_source = str(state.get("last_requested_source") or "").strip().lower()
+            if request_source == "lead_handoff":
+                relationship = "TEAM_MODE_RUNTIME_HANDOFF"
+            else:
+                relationship = "REQUESTED_AUTOMATION_FOR"
+            dep_key = (source_task_id, task_id, relationship)
+            if dep_key in task_dependency_keys:
+                continue
+            task_dependency_keys.add(dep_key)
+            synthetic_edges.append(
+                {
+                    "source_entity_id": source_task_id,
+                    "target_entity_id": task_id,
+                    "relationship": relationship,
+                }
+            )
+
+        for dependent_task_raw, _execution_triggers_raw, task_relationships_raw in task_rows_sql:
             dependent_task_id = str(dependent_task_raw or "").strip()
             if not dependent_task_id:
                 continue
-            triggers = normalize_execution_triggers(execution_triggers_raw)
-            for trigger in triggers:
-                if not isinstance(trigger, dict):
+            relationships = normalize_task_relationships(task_relationships_raw)
+            for relationship in relationships:
+                if str(relationship.get("kind") or "").strip().lower() != "depends_on":
                     continue
-                if str(trigger.get("kind") or "").strip().lower() != "status_change":
-                    continue
-                if not bool(trigger.get("enabled", True)):
-                    continue
-                if str(trigger.get("scope") or "").strip().lower() != "external":
-                    continue
-                selector_raw = trigger.get("selector")
-                selector = selector_raw if isinstance(selector_raw, dict) else {}
-                source_ids_raw = [
-                    *(selector.get("task_ids") or []),
-                    *(trigger.get("source_task_ids") or []),
-                ]
                 source_ids = []
                 seen_source_ids: set[str] = set()
-                for source_raw in source_ids_raw:
+                for source_raw in (relationship.get("task_ids") or []):
                     source_id = str(source_raw or "").strip()
                     if not source_id or source_id in seen_source_ids:
                         continue
                     seen_source_ids.add(source_id)
-                    if source_id == dependent_task_id:
-                        continue
-                    if source_id not in task_id_set:
+                    if source_id == dependent_task_id or source_id not in task_id_set:
                         continue
                     source_ids.append(source_id)
                 for source_id in source_ids:
@@ -721,7 +861,14 @@ def graph_get_project_subgraph(
     dedup: set[tuple[str, str, str]] = set()
     edges: list[dict[str, str]] = []
     degree_map: dict[str, int] = {node_id: 0 for node_id in node_ids}
-    directional_relationships = {"DEPENDS_ON_TASK_STATUS"}
+    directional_relationships = {
+        "DEPENDS_ON_TASK_STATUS",
+        "REQUESTED_AUTOMATION_FOR",
+        "TEAM_MODE_DELIVERS_TO",
+        "TEAM_MODE_HANDS_OFF_TO",
+        "TEAM_MODE_RUNTIME_HANDOFF",
+        "TEAM_MODE_ESCALATES_TO",
+    }
 
     for row in edge_rows:
         source = str(row.get("source_entity_id") or "").strip()

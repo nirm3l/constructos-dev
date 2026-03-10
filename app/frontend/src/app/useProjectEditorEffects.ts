@@ -27,6 +27,7 @@ export function useProjectEditorEffects(c: any) {
       c.setEditProjectEmbeddingEnabled(false)
       c.setEditProjectEmbeddingModel('')
       c.setEditProjectContextPackEvidenceTopKText('')
+      c.setEditProjectAutomationMaxParallelTasksText('4')
       c.setEditProjectChatIndexMode('OFF')
       c.setEditProjectChatAttachmentIngestionMode('METADATA_ONLY')
       c.setEditProjectEventStormingEnabled(true)
@@ -47,6 +48,9 @@ export function useProjectEditorEffects(c: any) {
     c.setEditProjectEmbeddingModel(String(c.selectedProject.embedding_model || ''))
     c.setEditProjectContextPackEvidenceTopKText(
       c.selectedProject.context_pack_evidence_top_k == null ? '' : String(c.selectedProject.context_pack_evidence_top_k)
+    )
+    c.setEditProjectAutomationMaxParallelTasksText(
+      String(c.selectedProject.automation_max_parallel_tasks ?? 4)
     )
     c.setEditProjectChatIndexMode(normalizeChatIndexMode(c.selectedProject.chat_index_mode))
     c.setEditProjectChatAttachmentIngestionMode(
