@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import threading
 import time
@@ -61,7 +62,7 @@ from features.tasks.domain import (
 )
 from shared.contracts import ConcurrencyConflictError
 from shared.eventing import append_event, rebuild_state
-from shared.models import Note, Project, ProjectMember, ProjectPluginConfig, ProjectRule, SessionLocal, Task, User as UserModel
+from shared.models import Note, Project, ProjectMember, ProjectPluginConfig, ProjectRule, SessionLocal, Task, User as UserModel, WorkspaceMember
 from shared.serializers import to_iso_utc
 from shared.typed_notifications import append_notification_created_event
 from shared.project_repository import (
@@ -84,6 +85,7 @@ from shared.settings import (
     AGENT_RUNNER_INTERVAL_SECONDS,
     AGENT_RUNNER_MAX_CONCURRENCY,
     AGENT_SYSTEM_USER_ID,
+    DEFAULT_USER_ID,
     MCP_AUTH_TOKEN,
     logger,
 )
@@ -993,7 +995,39 @@ def _queue_team_mode_dispatches(
         last_requested_source = str(state.get("last_requested_source") or "").strip()
         last_requested_source_task_id = str(state.get("last_requested_source_task_id") or "").strip()
         normalized_source_task_id = str(source_task_id or "").strip()
-        if current_automation_state in {"queued", "running"}:
+        if not normalized_source_task_id and str(source or "").strip() == "runner_orchestrator":
+            normalized_source_task_id = str(
+                _infer_team_mode_dispatch_source_task_id(
+                    db=db,
+                    workspace_id=workspace_id,
+                    project_id=normalized_project_id,
+                    task_id=task_id,
+                    assignee_role=_resolve_assignee_project_role(
+                        db=db,
+                        workspace_id=workspace_id,
+                        project_id=normalized_project_id,
+                        assignee_id=str(state.get("assignee_id") or getattr(task, "assignee_id", "") or ""),
+                        assigned_agent_code=str(state.get("assigned_agent_code") or getattr(task, "assigned_agent_code", "") or ""),
+                        task_labels=state.get("labels") if state.get("labels") is not None else getattr(task, "labels", None),
+                        task_status=str(state.get("status") or getattr(task, "status", "") or ""),
+                    ),
+                )
+                or ""
+            ).strip()
+        active_same_request = (
+            current_automation_state in {"queued", "running"}
+            and last_requested_source == str(source or "").strip()
+            and last_requested_source_task_id == normalized_source_task_id
+        )
+        if active_same_request:
+            continue
+        if current_automation_state in {"queued", "running"} and str(source or "").strip() not in {
+            "runner_orchestrator",
+            "developer_handoff",
+            "lead_kickoff_dispatch",
+            "lead_handoff",
+            "blocker_escalation",
+        }:
             continue
         if (
             source in {"runner_orchestrator", "developer_handoff", "lead_kickoff_dispatch"}
@@ -1013,7 +1047,7 @@ def _queue_team_mode_dispatches(
                 TaskAutomationRun(
                     instruction=instruction,
                     source=source,
-                    source_task_id=str(source_task_id or "").strip() or None,
+                    source_task_id=normalized_source_task_id or None,
                 ),
                 wake_runner=False,
             )
@@ -1055,6 +1089,98 @@ def _queue_team_mode_dispatches(
     return queued
 
 
+def _rearm_blocked_team_mode_lead_tasks(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+) -> int:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return 0
+
+    tasks = db.execute(
+        select(Task).where(
+            Task.workspace_id == workspace_id,
+            Task.project_id == normalized_project_id,
+            Task.is_deleted == False,  # noqa: E712
+            Task.archived == False,  # noqa: E712
+            Task.status == "Blocked",
+        )
+    ).scalars().all()
+
+    rearmed = 0
+    for task in tasks:
+        task_id = str(task.id or "").strip()
+        if not task_id:
+            continue
+        task_state, _ = rebuild_state(db, "Task", task_id)
+        task_status = str(task_state.get("status") or getattr(task, "status", "") or "").strip()
+        if task_status != "Blocked":
+            continue
+        task_role = _resolve_assignee_project_role(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=normalized_project_id,
+            assignee_id=str(task_state.get("assignee_id") or getattr(task, "assignee_id", "") or ""),
+            assigned_agent_code=str(task_state.get("assigned_agent_code") or getattr(task, "assigned_agent_code", "") or ""),
+            task_labels=task_state.get("labels") if task_state.get("labels") is not None else getattr(task, "labels", None),
+            task_status=task_status,
+        )
+        if not is_lead_role(task_role):
+            continue
+        deploy_snapshot = derive_deploy_execution_snapshot(
+            refs=task_state.get("external_refs"),
+            current_snapshot=(
+                task_state.get("last_deploy_execution")
+                if isinstance(task_state.get("last_deploy_execution"), dict)
+                else {}
+            ),
+        )
+        if (
+            str(deploy_snapshot.get("command") or "").strip()
+            and deploy_snapshot.get("runtime_ok") is False
+        ):
+            continue
+        dispatch_ready, _dispatch_reason = _team_mode_dispatch_dependency_ready(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=normalized_project_id,
+            task_id=task_id,
+            state=task_state,
+        )
+        if not dispatch_ready:
+            continue
+        actor_user_id = _resolve_task_actor_user_id(db=db, task_id=task_id, state=task_state)
+        transitioned = _append_task_status_transition_if_allowed(
+            db=db,
+            task_id=task_id,
+            workspace_id=workspace_id,
+            project_id=normalized_project_id,
+            actor_user_id=actor_user_id,
+            actor_role="Lead",
+            from_status="Blocked",
+            to_status="Lead",
+        )
+        if not transitioned:
+            continue
+        append_event(
+            db,
+            aggregate_type="Task",
+            aggregate_id=task_id,
+            event_type=TASK_EVENT_UPDATED,
+            payload={"last_agent_error": None},
+            metadata={
+                "actor_id": actor_user_id,
+                "workspace_id": workspace_id,
+                "project_id": normalized_project_id,
+                "task_id": task_id,
+            },
+        )
+        rearmed += 1
+    return rearmed
+
+
 def _status_change_trigger_action_type(trigger: dict[str, object]) -> str:
     action = trigger.get("action")
     if isinstance(action, dict):
@@ -1072,7 +1198,7 @@ def _team_mode_dispatch_dependency_ready(
 ) -> tuple[bool, str | None]:
     task_relationships = normalize_task_relationships(state.get("task_relationships"))
     if task_relationships:
-        blocked_reasons: list[str] = []
+        dependency_clauses: list[tuple[bool, str]] = []
         for relationship in task_relationships:
             if str(relationship.get("kind") or "").strip().lower() != "depends_on":
                 continue
@@ -1105,14 +1231,22 @@ def _team_mode_dispatch_dependency_ready(
                 continue
             if match_mode == STATUS_MATCH_ALL:
                 if matched_sources == total_sources:
+                    dependency_clauses.append((True, "relationship dependency satisfied"))
                     continue
             elif matched_sources > 0:
+                dependency_clauses.append((True, "relationship dependency satisfied"))
                 continue
-            blocked_reasons.append(
-                f"waiting for relationship dependency: {matched_sources}/{total_sources} source tasks reached {sorted(statuses)}"
+            dependency_clauses.append(
+                (
+                    False,
+                    f"waiting for relationship dependency: {matched_sources}/{total_sources} source tasks reached {sorted(statuses)}",
+                )
             )
-        if blocked_reasons:
-            return False, blocked_reasons[0]
+        if dependency_clauses:
+            for satisfied, _reason in dependency_clauses:
+                if satisfied:
+                    return True, None
+            return False, dependency_clauses[0][1]
         return True, None
 
     triggers = normalize_execution_triggers(state.get("execution_triggers"))
@@ -1270,7 +1404,12 @@ def _infer_team_mode_dispatch_source_task_id(
             if is_lead_role(candidate_role) and candidate_status == "Lead":
                 candidate_rank = 0
         elif normalized_role == "Lead":
-            if is_developer_role(candidate_role) and candidate_status == "Lead" and candidate_automation_state == "completed":
+            candidate_has_merge_evidence = has_merge_to_main_ref(candidate_state.get("external_refs"))
+            if (
+                is_developer_role(candidate_role)
+                and candidate_status in {"Lead", "Done"}
+                and (candidate_automation_state == "completed" or candidate_has_merge_evidence)
+            ):
                 candidate_rank = 0
             elif is_developer_role(candidate_role) and candidate_status == "Blocked":
                 candidate_rank = 1
@@ -1629,14 +1768,21 @@ def _run_git_command(*, cwd: Path, args: list[str]) -> tuple[int, str]:
 
 
 def _derive_files_changed_from_git_evidence(git_evidence: dict[str, object]) -> list[str]:
-    repo_path = str(git_evidence.get("repo_root") or git_evidence.get("task_workdir") or "").strip()
-    if not repo_path:
+    repo_path = str(git_evidence.get("repo_root") or "").strip()
+    task_workdir_path = str(git_evidence.get("task_workdir") or "").strip()
+    if not repo_path and not task_workdir_path:
         return []
-    cwd = Path(repo_path)
-    if not cwd.exists() or not cwd.is_dir():
+    repo_cwd = Path(repo_path) if repo_path else None
+    task_cwd = Path(task_workdir_path) if task_workdir_path else None
+    if repo_cwd is not None and (not repo_cwd.exists() or not repo_cwd.is_dir()):
+        repo_cwd = None
+    if task_cwd is not None and (not task_cwd.exists() or not task_cwd.is_dir()):
+        task_cwd = None
+    if repo_cwd is None and task_cwd is None:
         return []
     before_head_sha = str(git_evidence.get("before_head_sha") or "").strip().lower()
     after_head_sha = str(git_evidence.get("after_head_sha") or "").strip().lower()
+    after_is_dirty = bool(git_evidence.get("after_is_dirty"))
     files: list[str] = []
     seen: set[str] = set()
 
@@ -1648,15 +1794,82 @@ def _derive_files_changed_from_git_evidence(git_evidence: dict[str, object]) -> 
             seen.add(path)
             files.append(path)
 
-    if before_head_sha and after_head_sha and before_head_sha != after_head_sha:
-        code, out = _run_git_command(cwd=cwd, args=["diff", "--name-only", before_head_sha, after_head_sha])
+    if repo_cwd is not None and before_head_sha and after_head_sha and before_head_sha != after_head_sha:
+        code, out = _run_git_command(cwd=repo_cwd, args=["diff", "--name-only", before_head_sha, after_head_sha])
         if code == 0:
             _append_from_output(out)
-    if (not files) and after_head_sha:
-        code, out = _run_git_command(cwd=cwd, args=["show", "--pretty=format:", "--name-only", after_head_sha])
+    if (not files) and task_cwd is not None:
+        code, out = _run_git_command(cwd=task_cwd, args=["diff", "--name-only", "HEAD"])
+        if code == 0:
+            _append_from_output(out)
+    if (not files) and task_cwd is not None:
+        code, out = _run_git_command(cwd=task_cwd, args=["status", "--porcelain"])
+        if code == 0:
+            for line in str(out or "").splitlines():
+                raw = str(line or "").rstrip()
+                if not raw:
+                    continue
+                path = raw[3:] if len(raw) > 3 else raw
+                if path.startswith('"') and path.endswith('"'):
+                    path = path[1:-1]
+                if " -> " in path:
+                    path = path.split(" -> ", 1)[1]
+                normalized = path.strip()
+                if not normalized or normalized in seen:
+                    continue
+                seen.add(normalized)
+                files.append(normalized)
+    if (not files) and repo_cwd is not None and after_head_sha and not after_is_dirty:
+        code, out = _run_git_command(cwd=repo_cwd, args=["show", "--pretty=format:", "--name-only", after_head_sha])
         if code == 0:
             _append_from_output(out)
     return files
+
+
+def _inspect_committed_task_branch_handoff(git_evidence: dict[str, object]) -> dict[str, object]:
+    repo_path = str(git_evidence.get("repo_root") or "").strip()
+    task_workdir_path = str(git_evidence.get("task_workdir") or "").strip()
+    branch_name = str(git_evidence.get("task_branch") or "").strip()
+    after_head_sha = str(git_evidence.get("after_head_sha") or "").strip().lower()
+    after_on_task_branch = bool(git_evidence.get("after_on_task_branch"))
+    after_is_dirty = bool(git_evidence.get("after_is_dirty"))
+    result: dict[str, object] = {
+        "branch_name": branch_name,
+        "branch_exists": False,
+        "branch_head_sha": "",
+        "main_head_sha": "",
+        "branch_differs_from_main": False,
+        "after_on_task_branch": after_on_task_branch,
+        "after_is_dirty": after_is_dirty,
+    }
+    repo_cwd = Path(repo_path) if repo_path else None
+    task_cwd = Path(task_workdir_path) if task_workdir_path else None
+    if repo_cwd is not None and (not repo_cwd.exists() or not repo_cwd.is_dir()):
+        repo_cwd = None
+    if task_cwd is not None and (not task_cwd.exists() or not task_cwd.is_dir()):
+        task_cwd = None
+    if not branch_name or repo_cwd is None:
+        return result
+    code_branch, out_branch = _run_git_command(cwd=repo_cwd, args=["rev-parse", "--verify", f"refs/heads/{branch_name}"])
+    if code_branch != 0 or not str(out_branch or "").strip():
+        return result
+    branch_head_sha = str(out_branch or "").strip().lower()
+    result["branch_exists"] = True
+    result["branch_head_sha"] = branch_head_sha
+    code_main, out_main = _run_git_command(cwd=repo_cwd, args=["rev-parse", "--verify", "refs/heads/main"])
+    if code_main == 0 and str(out_main or "").strip():
+        main_head_sha = str(out_main or "").strip().lower()
+        result["main_head_sha"] = main_head_sha
+        result["branch_differs_from_main"] = bool(branch_head_sha and main_head_sha and branch_head_sha != main_head_sha)
+    if task_cwd is not None:
+        code_current, out_current = _run_git_command(cwd=task_cwd, args=["branch", "--show-current"])
+        if code_current == 0:
+            result["after_on_task_branch"] = str(out_current or "").strip() == branch_name
+    if not after_head_sha:
+        result["after_head_sha"] = branch_head_sha
+    else:
+        result["after_head_sha"] = after_head_sha
+    return result
 
 
 def _is_nontrivial_dev_path(path: str) -> bool:
@@ -1745,7 +1958,12 @@ def _validate_execution_outcome_contract(
     branch = str(contract.get("branch") or "").strip()
     after_head_sha = str(git_evidence.get("after_head_sha") or "").strip().lower()
     task_branch = str(git_evidence.get("task_branch") or "").strip()
-    if developer_git_delivery_run and not commit_sha and after_head_sha:
+    committed_handoff = _inspect_committed_task_branch_handoff(git_evidence)
+    branch_head_sha = str(committed_handoff.get("branch_head_sha") or "").strip().lower()
+    branch_differs_from_main = bool(committed_handoff.get("branch_differs_from_main"))
+    if developer_git_delivery_run and not commit_sha and branch_head_sha and branch_differs_from_main:
+        commit_sha = branch_head_sha
+    elif developer_git_delivery_run and not commit_sha and after_head_sha and branch_differs_from_main:
         commit_sha = after_head_sha
     if developer_git_delivery_run and not branch and task_branch:
         branch = task_branch
@@ -1759,7 +1977,7 @@ def _validate_execution_outcome_contract(
     if task_branch and branch and task_branch != branch:
         return "Runner error: execution outcome contract branch mismatches task branch evidence."
 
-    if developer_git_delivery_run and not files_changed:
+    if developer_git_delivery_run and not files_changed and (commit_sha or branch):
         files_changed = _derive_files_changed_from_git_evidence(git_evidence)
 
     # Deterministic recovery path: if Dev+GitDelivery run omitted artifacts,
@@ -1791,6 +2009,14 @@ def _validate_execution_outcome_contract(
             )
 
     if developer_git_delivery_run:
+        if not bool(committed_handoff.get("branch_exists")):
+            return "Runner error: Developer automation requires a real task branch handoff before Lead review."
+        if bool(committed_handoff.get("after_is_dirty")):
+            return "Runner error: Developer handoff is not committed on the task branch yet."
+        if not bool(committed_handoff.get("after_on_task_branch")):
+            return "Runner error: Developer automation must finalize from the task branch before Lead review."
+        if not branch_differs_from_main:
+            return "Runner error: Developer handoff is not committed on a task branch ahead of main yet."
         if not files_changed:
             return "Runner error: Developer automation requires files_changed in execution outcome contract."
         if require_nontrivial_dev_changes and not any(_is_nontrivial_dev_path(item) for item in files_changed):
@@ -1802,6 +2028,8 @@ def _validate_execution_outcome_contract(
             return "Runner error: Developer automation requires commit_sha in execution outcome contract."
         if not branch:
             return "Runner error: Developer automation requires branch in execution outcome contract."
+        if branch_head_sha and commit_sha and branch_head_sha != commit_sha:
+            return "Runner error: Developer automation commit_sha must match the current task branch HEAD."
         if require_dev_tests and (not tests_run or not tests_passed):
             return "Runner error: Developer automation requires tests_run=true and tests_passed=true."
         if not normalized_artifacts:
@@ -2131,12 +2359,57 @@ def _derive_runtime_deploy_markers(
     return "unknown", compose_marker
 
 
+def _build_lead_deploy_instruction_contract(
+    *,
+    stack: str,
+    port_text: str,
+    health_path: str,
+    has_merge_to_main: bool,
+) -> str:
+    if not has_merge_to_main:
+        return (
+            "Lead deployment execution contract:\n"
+            f"1) Probe runtime health at `http://gateway:{port_text}{health_path}` for observability only.\n"
+            "2) No merge-to-main evidence exists yet: do NOT create compose and do NOT deploy.\n"
+            "3) Coordinate Developer completion and deterministic merge-to-main first.\n"
+            "4) Record deferred state evidence in external_refs and keep Lead task active."
+        )
+    return (
+        "Lead deployment execution contract:\n"
+        f"1) Probe runtime health at `http://gateway:{port_text}{health_path}`.\n"
+        "2) If health is failing OR there is new merge-to-main evidence since last deploy evidence, prepare deterministic deployment assets before deploy:\n"
+        "   - Ensure repository contains one compose manifest (`docker-compose.yml|docker-compose.yaml|compose.yml|compose.yaml`).\n"
+        "   - If manifest is missing, Lead must create it from concrete repository evidence (no guessing):\n"
+        "     a) If `Dockerfile` exists, compose must use `build: .` and expose configured runtime port.\n"
+        "     b) Else if Node runtime files exist (`package.json` with a valid start script), create deterministic Dockerfile + compose for Node.\n"
+        "     c) Else if Python runtime files exist (`pyproject.toml` or `requirements.txt` with runnable entrypoint), create deterministic Dockerfile + compose for Python.\n"
+        "     d) Else if only static web assets exist (`index.html`), create deterministic nginx-based compose.\n"
+        "     e) If none of the supported deterministic runtime signals exist, set task to Blocked with exact missing prerequisites (do not invent runtime).\n"
+        f"3) Do NOT run `docker compose` manually from the task environment. The runner owns actual deploy execution for stack `{stack}` after deterministic asset preparation succeeds.\n"
+        "4) Do NOT block this Lead response merely because runner-controlled deploy has not happened yet. "
+        "If deterministic deploy prerequisites are ready, return a normal success/comment outcome and let the runner execute deploy + health evaluation.\n"
+        "5) Only set Blocked when deterministic prerequisites for runner deploy are missing or ambiguous before deploy execution can begin.\n"
+        "6) Record full evidence in external_refs: compose manifest path, runtime decision basis, and any concrete deploy prerequisites or blockers you identified.\n"
+        "7) QA handoff is runner-controlled after successful deploy health. Do not request QA manually before runner deploy reaches HTTP 200."
+    )
+
+
 def _write_file_if_changed(*, path: Path, content: str) -> bool:
     existing = path.read_text(encoding="utf-8") if path.exists() else None
     if existing == content:
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+    return True
+
+
+def _remove_path_if_exists(*, path: Path) -> bool:
+    if not path.exists():
+        return False
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
     return True
 
 
@@ -2299,6 +2572,10 @@ def _synthesize_runtime_deploy_assets(
                 created_files.append("nginx.constructos.conf")
             if _write_file_if_changed(path=manifest_path, content=_build_static_compose_manifest(port=port)):
                 created_files.append(Path(manifest_path).name)
+            if _remove_path_if_exists(path=repo_root / "nginx-conf"):
+                created_files.append("nginx-conf (removed)")
+            if _remove_path_if_exists(path=repo_root / "health"):
+                created_files.append("health (removed)")
             commit_sha = _commit_repo_changes_if_any(
                 cwd=repo_root,
                 message="chore: repair static deploy assets",
@@ -2367,12 +2644,51 @@ def _synthesize_runtime_deploy_assets(
         return {"ok": False, "error": str(exc)}
 
 
-def _run_docker_compose_up_with_error(*, cwd: Path, stack: str) -> tuple[int, str, str]:
+def _translate_compose_manifest_for_host_runtime(
+    *,
+    manifest_path: Path,
+    repo_root_host: Path,
+) -> Path:
+    content = manifest_path.read_text(encoding="utf-8")
+    host_root_text = str(repo_root_host).rstrip("/")
+
+    def _replace_relative_bind_source(match: re.Match[str]) -> str:
+        prefix = str(match.group("prefix") or "")
+        source = str(match.group("source") or "").strip()
+        suffix = str(match.group("suffix") or "")
+        normalized_source = source[2:] if source.startswith("./") else ""
+        if normalized_source in {"", "/"}:
+            translated_source = f"{host_root_text}/"
+        else:
+            translated_source = f"{host_root_text}/{normalized_source.lstrip('/')}"
+        return f"{prefix}{translated_source}{suffix}"
+
+    translated = re.sub(
+        r"(?m)^(?P<prefix>\s*-\s*)(?P<source>\./[^:\n]*|\./)(?P<suffix>:[^\n]+)$",
+        _replace_relative_bind_source,
+        content,
+    )
+    translated = re.sub(
+        r"(?m)^(?P<prefix>\s*source:\s*)(?P<source>\./[^\s#]+|\./)(?P<suffix>\s*(?:#.*)?)$",
+        _replace_relative_bind_source,
+        translated,
+    )
+
+    translated_manifest_path = manifest_path.parent / ".constructos.host.compose.yml"
+    translated_manifest_path.write_text(translated, encoding="utf-8")
+    return translated_manifest_path
+
+
+def _run_docker_compose_up_with_error(*, cwd: Path, stack: str, manifest_path: Path | None = None) -> tuple[int, str, str]:
     wrapper = Path(__file__).resolve().parents[2] / "scripts" / "docker_wrapper.sh"
     env = dict(os.environ)
     env["AGENT_DOCKER_PROJECT_NAME"] = str(stack or "").strip()
+    args = ["sh", str(wrapper), "compose", "-p", str(stack or "").strip()]
+    if manifest_path is not None:
+        args.extend(["-f", str(manifest_path)])
+    args.extend(["up", "-d"])
     proc = subprocess.run(
-        ["sh", str(wrapper), "compose", "-p", str(stack or "").strip(), "up", "-d"],
+        args,
         cwd=str(cwd),
         text=True,
         capture_output=True,
@@ -2486,7 +2802,13 @@ def _queue_qa_handoff_requests(
         if task_role != "QA":
             continue
         current_automation_state = str(task_state.get("automation_state") or "").strip().lower()
-        if current_automation_state in {"queued", "running"}:
+        active_same_request = (
+            current_automation_state in {"queued", "running"}
+            and str(task_state.get("last_requested_source") or "").strip() == "lead_handoff"
+            and str(task_state.get("last_requested_correlation_id") or "").strip() == lead_handoff_token
+            and str(task_state.get("last_requested_source_task_id") or "").strip() == str(lead_task_id or "").strip()
+        )
+        if active_same_request:
             continue
         if (
             str(task_state.get("last_requested_source") or "").strip() == "lead_handoff"
@@ -2628,6 +2950,7 @@ def _merge_ready_developer_branches_to_main(
     ).all()
 
     merged_task_ids: list[str] = []
+    merged_at = to_iso_utc(datetime.now(timezone.utc))
     for task_id, assignee_id, assigned_agent_code, labels, status, external_refs_raw in candidates:
         task_id_text = str(task_id or "").strip()
         task_state = {
@@ -2675,6 +2998,32 @@ def _merge_ready_developer_branches_to_main(
                         "task_id": task_id_text,
                     },
                 )
+                append_event(
+                    db,
+                    aggregate_type="Task",
+                    aggregate_id=task_id_text,
+                    event_type=TASK_EVENT_COMPLETED,
+                    payload={"completed_at": merged_at},
+                    metadata={
+                        "actor_id": actor_user_id,
+                        "workspace_id": workspace_id,
+                        "project_id": project_id,
+                        "task_id": task_id_text,
+                    },
+                )
+                append_event(
+                    db,
+                    aggregate_type="Task",
+                    aggregate_id=task_id_text,
+                    event_type=TASK_EVENT_UPDATED,
+                    payload=_team_mode_progress_payload(phase="done"),
+                    metadata={
+                        "actor_id": actor_user_id,
+                        "workspace_id": workspace_id,
+                        "project_id": project_id,
+                        "task_id": task_id_text,
+                    },
+                )
                 merged_task_ids.append(task_id_text)
             continue
 
@@ -2696,6 +3045,32 @@ def _merge_ready_developer_branches_to_main(
             aggregate_id=task_id_text,
             event_type=TASK_EVENT_UPDATED,
             payload={"external_refs": merged_refs, **_team_mode_progress_payload(phase="merge")},
+            metadata={
+                "actor_id": actor_user_id,
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "task_id": task_id_text,
+            },
+        )
+        append_event(
+            db,
+            aggregate_type="Task",
+            aggregate_id=task_id_text,
+            event_type=TASK_EVENT_COMPLETED,
+            payload={"completed_at": merged_at},
+            metadata={
+                "actor_id": actor_user_id,
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "task_id": task_id_text,
+            },
+        )
+        append_event(
+            db,
+            aggregate_type="Task",
+            aggregate_id=task_id_text,
+            event_type=TASK_EVENT_UPDATED,
+            payload=_team_mode_progress_payload(phase="done"),
             metadata={
                 "actor_id": actor_user_id,
                 "workspace_id": workspace_id,
@@ -2834,6 +3209,38 @@ def _resolve_project_human_member_user_ids(*, db, workspace_id: str, project_id:
     return out
 
 
+def _resolve_notification_human_user_ids(*, db, workspace_id: str, project_id: str | None) -> list[str]:
+    project_humans = _resolve_project_human_member_user_ids(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
+    if project_humans:
+        return project_humans
+
+    workspace_humans = [
+        str(user_id or "").strip()
+        for user_id in db.execute(
+            select(WorkspaceMember.user_id)
+            .join(UserModel, UserModel.id == WorkspaceMember.user_id)
+            .where(
+                WorkspaceMember.workspace_id == workspace_id,
+                UserModel.is_active == True,  # noqa: E712
+                UserModel.user_type != "agent",
+            )
+            .order_by(WorkspaceMember.id.asc())
+        ).scalars().all()
+        if str(user_id or "").strip()
+    ]
+    if workspace_humans:
+        return list(dict.fromkeys(workspace_humans))
+
+    fallback_user = db.get(UserModel, DEFAULT_USER_ID)
+    if fallback_user is not None and bool(fallback_user.is_active) and str(fallback_user.user_type or "").strip().lower() != "agent":
+        return [DEFAULT_USER_ID]
+    return []
+
+
 def _handoff_failed_task_to_human(
     *,
     db,
@@ -2894,6 +3301,8 @@ def _handoff_failed_task_to_human(
         f"- New assignee: `{target_human_id}`\n"
         f"- Reason: {str(failure_reason or '').strip()[:400]}"
     )
+    normalized_reason = str(failure_reason or "").strip()
+    reason_hash = hashlib.sha1(normalized_reason.encode("utf-8")).hexdigest()[:12] if normalized_reason else "none"
     append_notification_created_event(
         db,
         append_event_fn=append_event,
@@ -2905,7 +3314,7 @@ def _handoff_failed_task_to_human(
         task_id=task_id,
         notification_type="ManualMessage",
         severity="warning",
-        dedupe_key=f"runner-human-handoff:{task_id}:{failed_at_iso[:19]}",
+        dedupe_key=f"runner-human-handoff:{task_id}:{reason_hash}",
         payload={
             "kind": "automation_human_handoff",
             "task_id": task_id,
@@ -2968,19 +3377,21 @@ def _notify_humans_blocked(
     task_status: str,
     summary: str,
     comment: str | None,
+    blocking_gate: str | None = None,
+    phase: str | None = None,
 ) -> None:
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return
-    human_ids = _resolve_project_human_member_user_ids(
+    human_ids = _resolve_notification_human_user_ids(
         db=db,
         workspace_id=workspace_id,
         project_id=normalized_project_id,
     )
     if not human_ids:
         return
-    text = str(comment or "").strip() or str(summary or "").strip()
-    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12] if text else "none"
+    normalized_gate = str(blocking_gate or "").strip() or "unspecified"
+    normalized_phase = str(phase or "").strip() or "active"
     for human_id in human_ids:
         append_notification_created_event(
             db,
@@ -2996,10 +3407,12 @@ def _notify_humans_blocked(
             task_id=task_id,
             notification_type="ManualMessage",
             severity="warning",
-            dedupe_key=f"automation-blocked:{task_id}:{digest}",
+            dedupe_key=f"automation-blocked:{task_id}:{normalized_phase}:{normalized_gate}",
             payload={
                 "kind": "automation_blocked",
                 "task_id": task_id,
+                "blocking_gate": normalized_gate,
+                "phase": normalized_phase,
                 "summary": str(summary or "").strip(),
                 "comment": str(comment or "").strip() or None,
             },
@@ -3022,7 +3435,7 @@ def _notify_humans_project_completed(
         return
     task_ids = list(snapshot.get("task_ids") or [])
     digest = hashlib.sha1(",".join(task_ids).encode("utf-8")).hexdigest()[:12] if task_ids else "none"
-    human_ids = _resolve_project_human_member_user_ids(
+    human_ids = _resolve_notification_human_user_ids(
         db=db,
         workspace_id=workspace_id,
         project_id=normalized_project_id,
@@ -3047,6 +3460,25 @@ def _notify_humans_project_completed(
             },
             source_event="agents.runner.project_completed",
         )
+
+
+def _notify_humans_project_completed_post_commit(
+    *,
+    workspace_id: str,
+    project_id: str | None,
+    actor_user_id: str,
+) -> None:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return
+    with SessionLocal() as db:
+        _notify_humans_project_completed(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=normalized_project_id,
+            actor_user_id=actor_user_id,
+        )
+        db.commit()
 
 
 def _enqueue_team_lead_blocker_escalation(
@@ -3102,7 +3534,13 @@ def _enqueue_team_lead_blocker_escalation(
     queued = 0
     for lead_task in lead_tasks:
         lead_state, _ = rebuild_state(db, "Task", lead_task.id)
-        if str(lead_state.get("automation_state") or "").strip() in {"queued", "running"}:
+        current_automation_state = str(lead_state.get("automation_state") or "").strip().lower()
+        active_same_request = (
+            current_automation_state in {"queued", "running"}
+            and str(lead_state.get("last_requested_source") or "").strip() == "blocker_escalation"
+            and str(lead_state.get("last_requested_source_task_id") or "").strip() == str(blocked_task_id or "").strip()
+        )
+        if active_same_request:
             continue
         instruction = (
             str(lead_state.get("instruction") or "").strip()
@@ -3119,6 +3557,7 @@ def _enqueue_team_lead_blocker_escalation(
                 "requested_at": requested_at,
                 "instruction": instruction,
                 "source": "blocker_escalation",
+                "source_task_id": blocked_task_id,
                 "trigger_task_id": blocked_task_id,
                 "to_status": blocked_status or "Blocked",
                 "from_status": None,
@@ -3145,6 +3584,7 @@ def _enqueue_team_lead_blocker_escalation(
                     "slot": str(lead_state.get("assigned_agent_code") or getattr(lead_task, "assigned_agent_code", "") or "").strip() or None,
                     "selected_at": requested_at,
                     "available_slots": None,
+                    "source_task_id": blocked_task_id,
                     "blocked_task_id": blocked_task_id,
                     "blocked_status": blocked_status or "Blocked",
                 },
@@ -3162,8 +3602,11 @@ def _enqueue_team_lead_blocker_escalation(
     if not lead_assignee:
         lead_assignee = AGENT_SYSTEM_USER_ID
     blocked_summary = str(blocked_error or "").strip()[:300]
-    dedupe_hash = hashlib.sha1(blocked_summary.encode("utf-8")).hexdigest()[:12] if blocked_summary else "none"
-    human_ids = _resolve_project_human_member_user_ids(
+    blocked_gate = _classify_team_mode_failure_gate(
+        assignee_role=blocked_role,
+        error=str(blocked_error or "").strip(),
+    )
+    human_ids = _resolve_notification_human_user_ids(
         db=db,
         workspace_id=workspace_id,
         project_id=normalized_project_id,
@@ -3196,13 +3639,14 @@ def _enqueue_team_lead_blocker_escalation(
             task_id=blocked_task_id,
             notification_type="ManualMessage",
             severity="warning",
-            dedupe_key=f"{dedupe_prefix}:{blocked_task_id}:{blocked_status or 'Blocked'}:{dedupe_hash}",
+            dedupe_key=f"{dedupe_prefix}:{blocked_task_id}:{blocked_status or 'Blocked'}:{blocked_gate or 'unspecified'}",
             payload={
                 "kind": kind,
                 "blocked_task_id": blocked_task_id,
                 "blocked_role": blocked_role,
                 "blocked_status": blocked_status,
                 "queued_lead_tasks": queued,
+                "blocking_gate": blocked_gate or None,
                 "error": blocked_summary,
             },
             source_event=source_event,
@@ -3444,31 +3888,12 @@ def _claim_queued_task(task_id: str, *, allow_fresh_kickoff: bool = False) -> Qu
                 workspace_id=workspace_id,
                 project_id=project_id,
             )
-            if not has_merge_to_main:
-                deploy_steps = (
-                    "Lead deployment execution contract:\n"
-                    f"1) Probe runtime health at `http://gateway:{port_text}{health_path}` for observability only.\n"
-                    "2) No merge-to-main evidence exists yet: do NOT create compose and do NOT deploy.\n"
-                    "3) Coordinate Developer completion and deterministic merge-to-main first.\n"
-                    "4) Record deferred state evidence in external_refs and keep Lead task active."
-                )
-            else:
-                deploy_steps = (
-                    "Lead deployment execution contract:\n"
-                    f"1) Probe runtime health at `http://gateway:{port_text}{health_path}`.\n"
-                    "2) If health is failing OR there is new merge-to-main evidence since last deploy evidence, prepare deployment assets before deploy:\n"
-                    "   - Ensure repository contains one compose manifest (`docker-compose.yml|docker-compose.yaml|compose.yml|compose.yaml`).\n"
-                    "   - If manifest is missing, Lead must create it from concrete repository evidence (no guessing):\n"
-                    "     a) If `Dockerfile` exists, compose must use `build: .` and expose configured runtime port.\n"
-                    "     b) Else if Node runtime files exist (`package.json` with a valid start script), create deterministic Dockerfile + compose for Node.\n"
-                    "     c) Else if Python runtime files exist (`pyproject.toml` or `requirements.txt` with runnable entrypoint), create deterministic Dockerfile + compose for Python.\n"
-                    "     d) Else if only static web assets exist (`index.html`), create deterministic nginx-based compose.\n"
-                    "     e) If none of the supported deterministic runtime signals exist, set task to Blocked with exact missing prerequisites (do not invent runtime).\n"
-                    f"3) Execute deploy for stack `{stack}` (`docker compose -p {stack} up -d`).\n"
-                    "4) Re-probe health endpoint and require HTTP 200 before QA handoff.\n"
-                    "5) Record full evidence in external_refs: compose manifest path, deploy command result, health probe result, and runtime decision basis.\n"
-                    "6) If final health is OK after required actions, request QA automation handoff explicitly and keep the Lead task in Lead; if not, set Blocked with exact failure evidence."
-                )
+            deploy_steps = _build_lead_deploy_instruction_contract(
+                stack=stack,
+                port_text=port_text,
+                health_path=health_path,
+                has_merge_to_main=has_merge_to_main,
+            )
             instruction = f"{str(instruction or '').strip()}\n\n{deploy_steps}".strip()
     if not instruction:
         return None
@@ -3503,6 +3928,9 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
     completed_at = to_iso_utc(datetime.now(timezone.utc))
     now_utc = datetime.now(timezone.utc)
     queued_followup_developer_dispatches = 0
+    completion_check_workspace_id: str | None = None
+    completion_check_project_id: str | None = None
+    completion_check_actor_user_id: str | None = None
     with SessionLocal() as db:
         state, _ = rebuild_state(db, "Task", run.task_id)
         workspace_id = str(state.get("workspace_id") or run.workspace_id or "").strip()
@@ -3882,6 +4310,11 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
             if transitioned:
                 state = dict(state)
                 state["status"] = "Lead"
+                _rearm_blocked_team_mode_lead_tasks(
+                    db=db,
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                )
                 queued_followup_lead_dispatches = _queue_team_mode_dispatches(
                     db=db,
                     workspace_id=workspace_id,
@@ -3971,15 +4404,60 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 )
                 state["last_deploy_execution"] = deploy_snapshot
             if runtime_required and manifest_path is not None:
-                repo_root = resolve_project_repository_host_path(
+                repo_root = resolve_project_repository_path(
                     project_name=str(project_name or "").strip() or None,
                     project_id=str(project_id or "").strip() or None,
+                )
+                repo_root_host = resolve_project_repository_host_path(
+                    project_name=str(project_name or "").strip() or None,
+                    project_id=str(project_id or "").strip() or None,
+                )
+                translated_manifest_path = _translate_compose_manifest_for_host_runtime(
+                    manifest_path=Path(manifest_path),
+                    repo_root_host=repo_root_host,
                 )
                 code_deploy, _out_deploy, err_deploy = _run_docker_compose_up_with_error(
                     cwd=repo_root,
                     stack=stack,
+                    manifest_path=translated_manifest_path,
                 )
                 if code_deploy != 0:
+                    deploy_snapshot = derive_deploy_execution_snapshot(
+                        refs=state.get("external_refs"),
+                        current_snapshot=state.get("last_deploy_execution") if isinstance(state.get("last_deploy_execution"), dict) else {},
+                    )
+                    deploy_snapshot.update(
+                        {
+                            "executed_at": completed_at,
+                            "stack": stack,
+                            "port": int(port) if port is not None else None,
+                            "health_path": health_path,
+                            "command": f"docker compose -f {translated_manifest_path} -p {stack} up -d",
+                            "manifest_path": str(manifest_path),
+                            "runtime_type": deploy_snapshot.get("runtime_type")
+                            or _derive_runtime_deploy_markers(
+                                project_name=str(project_name or "").strip() or None,
+                                project_id=str(project_id or "").strip() or None,
+                            )[0],
+                            "runtime_ok": False,
+                            "error": str(err_deploy or "").strip()[:500] or None,
+                        }
+                    )
+                    append_event(
+                        db,
+                        aggregate_type="Task",
+                        aggregate_id=run.task_id,
+                        event_type=TASK_EVENT_UPDATED,
+                        payload={"last_deploy_execution": deploy_snapshot},
+                        metadata={
+                            "actor_id": actor_user_id,
+                            "workspace_id": workspace_id,
+                            "project_id": project_id,
+                            "task_id": run.task_id,
+                        },
+                    )
+                    state = dict(state)
+                    state["last_deploy_execution"] = deploy_snapshot
                     raise RuntimeError(
                         "Lead deploy execution failed: docker compose up -d did not succeed. "
                         + str(err_deploy or "")[:240]
@@ -4134,15 +4612,26 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 task_status=str(state.get("status") or run.status or ""),
                 summary=summary,
                 comment=comment,
+                blocking_gate=str(state.get("team_mode_blocking_gate") or "").strip() or None,
+                phase=str(state.get("team_mode_phase") or "").strip()
+                or _derive_team_mode_phase(
+                    assignee_role=assignee_role,
+                    status=str(state.get("status") or run.status or ""),
+                ),
             )
-        if action == "complete":
-            _notify_humans_project_completed(
-                db=db,
-                workspace_id=workspace_id,
-                project_id=project_id,
-                actor_user_id=actor_user_id,
-            )
+        completion_check_workspace_id = workspace_id
+        completion_check_project_id = project_id
+        completion_check_actor_user_id = actor_user_id
         db.commit()
+    if (
+        completion_check_workspace_id
+        and completion_check_actor_user_id
+    ):
+        _notify_humans_project_completed_post_commit(
+            workspace_id=completion_check_workspace_id,
+            project_id=completion_check_project_id,
+            actor_user_id=completion_check_actor_user_id,
+        )
     if (
         queued_blocker_escalations > 0
         or queued_qa_handoffs > 0
@@ -4252,6 +4741,10 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 state = dict(state)
                 state["status"] = "Blocked"
         queued_blocker_escalations = 0
+        failure_gate = _classify_team_mode_failure_gate(
+            assignee_role=assignee_role,
+            error=str(error),
+        )
         append_event(
             db,
             aggregate_type="Task",
@@ -4278,7 +4771,10 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                     or _derive_team_mode_phase(
                         assignee_role=assignee_role,
                         status=str(state.get("status") or run.status or ""),
-                    )
+                    ),
+                    blocking_gate=failure_gate,
+                    blocked_reason=str(error),
+                    blocked_at=failed_at,
                 ),
             },
             metadata={
@@ -4405,6 +4901,12 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 task_status=str(state.get("status") or run.status or ""),
                 summary="Automation runner failed.",
                 comment=f"{str(error)}{handoff_suffix}",
+                blocking_gate=failure_gate,
+                phase=str(state.get("team_mode_phase") or "").strip()
+                or _derive_team_mode_phase(
+                    assignee_role=assignee_role,
+                    status=str(state.get("status") or run.status or ""),
+                ),
             )
         db.commit()
     if queued_blocker_escalations > 0:
@@ -4465,8 +4967,8 @@ def _preflight_automation_error(run: QueuedAutomationRun) -> str | None:
             )
             if gate_key == "lead_waiting_merge_ready_developer":
                 return (
-                    "Lead automation is gated until merge-ready Developer output exists; "
-                    "do not evaluate compose/deploy gates before a Developer handoff produces merge-to-main evidence."
+                    "Lead automation is gated until the Developer handoff is committed on a task branch and becomes merge-ready; "
+                    "do not evaluate compose/deploy gates before a committed Developer handoff produces merge-to-main evidence."
                 )
         if (
             is_lead_role(assignee_role)
@@ -4496,6 +4998,39 @@ def _preflight_automation_error(run: QueuedAutomationRun) -> str | None:
             has_git_delivery_skill=_project_has_git_delivery_skill(db=db, workspace_id=workspace_id, project_id=project_id),
             has_repo_context=_project_has_repo_context(db=db, workspace_id=workspace_id, project_id=project_id),
         )
+
+
+def _classify_team_mode_failure_gate(
+    *,
+    assignee_role: str | None,
+    error: str | None,
+) -> str | None:
+    normalized_role = canonicalize_role(assignee_role)
+    normalized_error = str(error or "").strip().lower()
+    if not normalized_error:
+        return None
+    if normalized_role == "Lead":
+        if (
+            "developer handoff is not committed on the task branch yet" in normalized_error
+            or "developer handoff is not committed on a task branch ahead of main yet" in normalized_error
+            or "real task branch handoff before lead review" in normalized_error
+        ):
+            return "lead_waiting_committed_developer_handoff"
+        if "merge-to-main evidence is missing" in normalized_error:
+            return "lead_waiting_committed_developer_handoff"
+        if "compose manifest is missing" in normalized_error:
+            return "lead_compose_manifest_missing"
+        if "runtime health check did not pass" in normalized_error or "curl(56)" in normalized_error:
+            return "lead_runtime_health_failed"
+        if "no such file or directory" in normalized_error and "repos/" in normalized_error:
+            return "lead_repository_path_resolution_failed"
+    if normalized_role == "Developer" and (
+        "developer handoff is not committed on the task branch yet" in normalized_error
+        or "developer handoff is not committed on a task branch ahead of main yet" in normalized_error
+        or "real task branch handoff before lead review" in normalized_error
+    ):
+        return "developer_handoff_not_committed"
+    return None
 
 
 def _execute_claimed_automation(run: QueuedAutomationRun) -> None:
@@ -4884,6 +5419,12 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
                 continue
             if not _project_team_mode_execution_enabled(db=db, workspace_id=workspace_id, project_id=project_id):
                 continue
+
+            _rearm_blocked_team_mode_lead_tasks(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
 
             member_role_by_user_id = {
                 str(user_id): str(role or "").strip()

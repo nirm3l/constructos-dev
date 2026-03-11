@@ -52,6 +52,14 @@ export function useRealtimeEffects(c: any) {
       qc.invalidateQueries({ queryKey: ['project-tags'] })
       qc.invalidateQueries({ queryKey: ['board'] })
       qc.invalidateQueries({ queryKey: ['bootstrap'] })
+      if (selectedProjectId) {
+        qc.invalidateQueries({ queryKey: ['project-graph-overview', userId, selectedProjectId] })
+        qc.invalidateQueries({ queryKey: ['project-graph-context-pack', userId, selectedProjectId] })
+        qc.invalidateQueries({ queryKey: ['project-graph-subgraph', userId, selectedProjectId] })
+        qc.invalidateQueries({ queryKey: ['project-event-storming-overview', userId, selectedProjectId] })
+        qc.invalidateQueries({ queryKey: ['project-event-storming-subgraph', userId, selectedProjectId] })
+        qc.invalidateQueries({ queryKey: ['project-task-dependency-graph', userId, selectedProjectId] })
+      }
       if (selectedTaskId) {
         qc.invalidateQueries({ queryKey: ['comments', userId, selectedTaskId] })
         qc.invalidateQueries({ queryKey: ['activity', userId, selectedTaskId] })
@@ -59,7 +67,7 @@ export function useRealtimeEffects(c: any) {
       }
       realtimeRefreshTimerRef.current = null
     }, 250)
-  }, [qc, realtimeRefreshTimerRef, selectedTaskId, userId])
+  }, [qc, realtimeRefreshTimerRef, selectedProjectId, selectedTaskId, userId])
 
   const parseTimestampMs = React.useCallback((value: string | null | undefined, fallback: number): number => {
     const parsed = Date.parse(String(value || ''))

@@ -223,7 +223,15 @@ export function useEditorGuards(c: any) {
   const taskIsDirty = React.useMemo(() => {
     const baselineTask = c.taskEditorBaselineTask ?? c.selectedTask
     if (!baselineTask) return false
-    if (String(c.taskEditorHydratedTaskId || '') !== String(baselineTask.id || '')) {
+    const hydratedTaskId = String(c.taskEditorHydratedTaskId || '')
+    const baselineTaskId = String(baselineTask.id || '')
+    const selectedTaskId = String(c.selectedTask?.id || '')
+    if (hydratedTaskId !== baselineTaskId) {
+      return false
+    }
+    // Prevent stale dirty state from the previously opened task from leaking into
+    // the next task before the editor hydration effect finishes for the new task.
+    if (selectedTaskId && hydratedTaskId !== selectedTaskId) {
       return false
     }
     const selectedTaskScheduleTimezone = String(baselineTask.schedule_timezone || '').trim()

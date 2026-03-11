@@ -15,12 +15,14 @@ _DEPLOY_COMMAND_REF_PREFIX = "deploy:command:"
 _DEPLOY_COMPOSE_REF_PREFIX = "deploy:compose:"
 _DEPLOY_RUNTIME_REF_PREFIX = "deploy:runtime:"
 _DEPLOY_HEALTH_REF_PREFIX = "deploy:health:"
+_LEGACY_COMPOSE_PREFIX = "compose:"
+_LEGACY_RUNTIME_BASIS_PREFIX = "runtime-basis:"
 _LEGACY_RUNTIME_DECISION_PREFIXES = ("decision:runtime_signal_", "runtime-decision://", "runtime_decision:")
 _LEGACY_COMPOSE_DECISION_PREFIXES = ("compose_decision:", "compose-decision://")
 _LEGACY_DEPLOY_COMMAND_PREFIXES = ("command:", "deploy-command://", "deploy:docker-compose:")
 _LEGACY_HEALTH_PREFIXES = ("health:", "runtime-root:")
 _TASK_BRANCH_RE = re.compile(r"\btask/[a-z0-9][a-z0-9._/-]*\b", re.IGNORECASE)
-_HTTP_STATUS_RE = re.compile(r"http[_-](\d{3})", re.IGNORECASE)
+_HTTP_STATUS_RE = re.compile(r"http(?:[_=-])(\d{3})", re.IGNORECASE)
 _ISO_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z")
 
 
@@ -88,8 +90,20 @@ def derive_deploy_execution_snapshot(
                 snapshot.setdefault("manifest_path", manifest_path)
             continue
 
+        if url_lower.startswith(_LEGACY_COMPOSE_PREFIX):
+            manifest_path = url[len(_LEGACY_COMPOSE_PREFIX):].strip()
+            if manifest_path:
+                snapshot.setdefault("manifest_path", manifest_path)
+            continue
+
         if url_lower.startswith(_DEPLOY_RUNTIME_REF_PREFIX):
             runtime_type = url[len(_DEPLOY_RUNTIME_REF_PREFIX):].strip()
+            if runtime_type:
+                snapshot.setdefault("runtime_type", runtime_type)
+            continue
+
+        if url_lower.startswith(_LEGACY_RUNTIME_BASIS_PREFIX):
+            runtime_type = url[len(_LEGACY_RUNTIME_BASIS_PREFIX):].strip()
             if runtime_type:
                 snapshot.setdefault("runtime_type", runtime_type)
             continue
@@ -116,6 +130,13 @@ def derive_deploy_execution_snapshot(
 
         if url_lower.startswith(_LEGACY_DEPLOY_COMMAND_PREFIXES):
             command = _normalize_legacy_command(url)
+            if command:
+                snapshot.setdefault("command", command)
+                _maybe_set_stack_from_command(snapshot, command)
+            continue
+
+        if url_lower.startswith("deploy:docker compose "):
+            command = _normalize_inline_deploy_command(url)
             if command:
                 snapshot.setdefault("command", command)
                 _maybe_set_stack_from_command(snapshot, command)
@@ -159,6 +180,19 @@ def _normalize_legacy_command(value: str) -> str | None:
         if compact:
             return f"docker compose {compact.replace('-', ' ')}"
     return None
+
+
+def _normalize_inline_deploy_command(value: str) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    lowered = raw.casefold()
+    if not lowered.startswith("deploy:docker compose "):
+        return None
+    command = raw[len("deploy:"):].strip()
+    if ":exit=" in command:
+        command = command.split(":exit=", 1)[0].strip()
+    return command or None
 
 
 def _maybe_set_stack_from_command(snapshot: dict[str, Any], command: str) -> None:
@@ -221,7 +255,7 @@ def _split_health_payload(value: str) -> tuple[str, int | None]:
     payload = str(value or "").strip()
     if not payload:
         return "", None
-    match = re.search(r":http_(\d{3})(?::|$)", payload, re.IGNORECASE)
+    match = re.search(r":http(?:[_=-])(\d{3})(?::|$)", payload, re.IGNORECASE)
     if match:
         url = payload[: match.start()].strip()
         return url, int(match.group(1))

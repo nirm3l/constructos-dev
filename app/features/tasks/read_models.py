@@ -371,7 +371,7 @@ def _build_execution_gates(
                     str(manifest)
                     if has_manifest
                     else (
-                        "Waiting for merge-ready Developer output before compose/deploy evaluation."
+                        "Waiting for a committed Developer handoff before compose/deploy evaluation."
                         if not has_merge_to_main
                         else "Project repository is missing docker-compose.yml/compose.yml."
                     )

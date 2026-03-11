@@ -1,4 +1,6 @@
 import React from 'react'
+import * as AlertDialog from '@radix-ui/react-alert-dialog'
+import { useQuery } from '@tanstack/react-query'
 import {
   applyNodeChanges,
   Background,
@@ -14,9 +16,13 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 
+import { getProjectTaskDependencyEventDetail } from '../../api'
+import { MarkdownView } from '../../markdown/MarkdownView'
 import type {
   ProjectTaskDependencyGraph,
   TaskDependencyGraphEdge,
+  TaskDependencyGraphEventDetail,
+  TaskDependencyGraphRuntimeEvent,
   TaskDependencyGraphNode,
 } from '../../types'
 import { Icon } from '../shared/uiHelpers'
@@ -43,6 +49,18 @@ type TaskFlowNodeData = {
 }
 
 type TaskFlowFilterMode = 'all' | 'runtime' | 'structural'
+
+type GroupedRuntimeEvent = {
+  key: string
+  source: string
+  reason: string | null
+  triggerLink: string | null
+  correlationId: string | null
+  active: boolean
+  firstAt: string | null
+  latestAt: string | null
+  records: TaskDependencyGraphRuntimeEvent[]
+}
 
 const TASK_FLOW_FIT_VIEW_OPTIONS = Object.freeze({ padding: 0.18, maxZoom: 1.1, duration: 240 })
 const TASK_FLOW_PRO_OPTIONS = Object.freeze({ hideAttribution: true })
@@ -235,6 +253,72 @@ function edgeColor(edge: TaskDependencyGraphEdge): string {
   if (edge.runtime_dependency) return '#2563eb'
   if (edge.trigger_dependency) return '#d97706'
   return '#64748b'
+}
+
+function formatEventTimestamp(value: string | null | undefined): string {
+  const raw = String(value || '').trim()
+  if (!raw) return 'No timestamp'
+  const parsed = new Date(raw)
+  if (Number.isNaN(parsed.getTime())) return raw
+  return parsed.toLocaleString()
+}
+
+function buildEventResponseMarkdown(detail: TaskDependencyGraphEventDetail): string {
+  return String(
+    detail.response_markdown
+    || detail.response_comment_body
+    || detail.response_error
+    || detail.response_summary
+    || '_No stored response summary_',
+  )
+}
+
+function runtimeEventsForEdge(edge: TaskDependencyGraphEdge): TaskDependencyGraphRuntimeEvent[] {
+  const rows = Array.isArray(edge.runtime_events) ? edge.runtime_events : []
+  return [...rows].sort((left, right) => String(right?.at || '').localeCompare(String(left?.at || '')))
+}
+
+function eventHistoryKey(edge: TaskDependencyGraphEdge, event: TaskDependencyGraphRuntimeEvent): string {
+  return [
+    String(edge.source_entity_id || '').trim(),
+    String(edge.target_entity_id || '').trim(),
+    String(event.source || '').trim(),
+    String(event.at || '').trim(),
+    String(event.correlation_id || '').trim(),
+  ].join('::')
+}
+
+function groupedRuntimeEventsForEdge(edge: TaskDependencyGraphEdge): GroupedRuntimeEvent[] {
+  const rows = runtimeEventsForEdge(edge)
+  const grouped = new Map<string, GroupedRuntimeEvent>()
+  for (const event of rows) {
+    const source = String(event.source || '').trim()
+    const reason = String(event.reason || '').trim() || null
+    const triggerLink = String(event.trigger_link || '').trim() || null
+    const correlationId = String(event.correlation_id || '').trim() || null
+    const key = correlationId || [source, reason || '', triggerLink || ''].join('::')
+    const existing = grouped.get(key)
+    if (!existing) {
+      grouped.set(key, {
+        key,
+        source,
+        reason,
+        triggerLink,
+        correlationId,
+        active: Boolean(event.active),
+        firstAt: String(event.at || '').trim() || null,
+        latestAt: String(event.at || '').trim() || null,
+        records: [event],
+      })
+      continue
+    }
+    existing.records.push(event)
+    existing.active = existing.active || Boolean(event.active)
+    const eventAt = String(event.at || '').trim() || null
+    if (eventAt && (!existing.latestAt || eventAt > existing.latestAt)) existing.latestAt = eventAt
+    if (eventAt && (!existing.firstAt || eventAt < existing.firstAt)) existing.firstAt = eventAt
+  }
+  return Array.from(grouped.values()).sort((left, right) => String(right.latestAt || '').localeCompare(String(left.latestAt || '')))
 }
 
 function edgeWidth(edge: TaskDependencyGraphEdge): number {
@@ -492,22 +576,123 @@ function edgeListNodeTitle(
   return nodes.find((node) => String(node.entity_id || '') === entityId)?.title || fallback
 }
 
+function EdgeRuntimeTimeline({
+  edge,
+  onSelectEvent,
+}: {
+  edge: TaskDependencyGraphEdge
+  onSelectEvent: (edge: TaskDependencyGraphEdge, event: TaskDependencyGraphRuntimeEvent) => void
+}) {
+  const groups = groupedRuntimeEventsForEdge(edge)
+  const [expandedKeys, setExpandedKeys] = React.useState<Set<string>>(() => new Set())
+  React.useEffect(() => {
+    setExpandedKeys(new Set())
+  }, [edge.source_entity_id, edge.target_entity_id])
+  if (groups.length === 0) return null
+  return (
+    <div className="task-flow-runtime-timeline">
+      {groups.map((group) => {
+        const isExpanded = expandedKeys.has(group.key)
+        const latestEvent = group.records[0] || null
+        return (
+          <div key={`runtime-group-${group.key}`} className="task-flow-runtime-group">
+            <button
+              type="button"
+              className="task-flow-runtime-event"
+              onClick={(triggerEvent) => {
+                triggerEvent.preventDefault()
+                triggerEvent.stopPropagation()
+                if (latestEvent) onSelectEvent(edge, latestEvent)
+              }}
+            >
+              <div className="task-flow-runtime-event-head">
+                <span className={`task-flow-channel-chip runtime ${group.active ? 'active' : ''}`.trim()}>
+                  {formatChannelLabel(group.source)}
+                </span>
+                {group.records.length > 1 ? (
+                  <span className="task-flow-runtime-count">{group.records.length} records</span>
+                ) : null}
+                <span className="task-flow-runtime-event-time">{formatEventTimestamp(group.latestAt)}</span>
+              </div>
+              {group.reason ? <div className="task-flow-runtime-event-detail">Reason: {group.reason}</div> : null}
+              {group.triggerLink ? <div className="task-flow-runtime-event-detail">Trigger: {group.triggerLink}</div> : null}
+              {group.correlationId ? <div className="task-flow-runtime-event-detail">Correlation: {group.correlationId}</div> : null}
+              {group.records.length > 1 ? (
+                <div className="task-flow-runtime-event-detail">
+                  First seen: {formatEventTimestamp(group.firstAt)} · Latest: {formatEventTimestamp(group.latestAt)}
+                </div>
+              ) : null}
+            </button>
+            {group.records.length > 1 ? (
+              <button
+                type="button"
+                className="task-flow-runtime-toggle"
+                onClick={(triggerEvent) => {
+                  triggerEvent.preventDefault()
+                  triggerEvent.stopPropagation()
+                  setExpandedKeys((current) => {
+                    const next = new Set(current)
+                    if (next.has(group.key)) next.delete(group.key)
+                    else next.add(group.key)
+                    return next
+                  })
+                }}
+              >
+                {isExpanded ? 'Hide raw event log' : 'Show raw event log'}
+              </button>
+            ) : null}
+            {isExpanded ? (
+              <div className="task-flow-runtime-raw-list">
+                {group.records.map((event, index) => (
+                  <button
+                    key={`runtime-event-${eventHistoryKey(edge, event)}-${index}`}
+                    type="button"
+                    className="task-flow-runtime-raw-item"
+                    onClick={(triggerEvent) => {
+                      triggerEvent.preventDefault()
+                      triggerEvent.stopPropagation()
+                      onSelectEvent(edge, event)
+                    }}
+                  >
+                    <span className="task-flow-runtime-event-time">{formatEventTimestamp(event.at)}</span>
+                    <span className={`task-flow-channel-chip runtime ${event.active ? 'active' : ''}`.trim()}>
+                      {event.active ? 'Current' : 'Recorded'}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 export function ProjectTaskDependencyGraphPanel({
   projectId,
+  userId,
   projectName,
   graphQuery,
   showHeader = true,
+  fitSignal,
 }: {
   projectId: string
+  userId: string
   projectName: string
   graphQuery: QueryLike<ProjectTaskDependencyGraph>
   showHeader?: boolean
+  fitSignal?: number
 }) {
   const [filterMode, setFilterMode] = React.useState<TaskFlowFilterMode>('all')
   const [searchQuery, setSearchQuery] = React.useState('')
   const [selectedRole, setSelectedRole] = React.useState('all')
   const [showOnlyConnected, setShowOnlyConnected] = React.useState(false)
   const [selectedTaskId, setSelectedTaskId] = React.useState<string | null>(null)
+  const [selectedRuntimeEvent, setSelectedRuntimeEvent] = React.useState<{
+    edge: TaskDependencyGraphEdge
+    event: TaskDependencyGraphRuntimeEvent
+  } | null>(null)
   const [canvasNodes, setCanvasNodes] = React.useState<FlowNode<TaskFlowNodeData>[]>([])
   const flowRef = React.useRef<ReactFlowInstance<FlowNode<TaskFlowNodeData>, FlowEdge> | null>(null)
 
@@ -601,6 +786,13 @@ export function ProjectTaskDependencyGraphPanel({
     })
   }, [])
 
+  React.useEffect(() => {
+    if (!flowRef.current || flowNodes.length === 0) return
+    window.requestAnimationFrame(() => {
+      flowRef.current?.fitView(TASK_FLOW_FIT_VIEW_OPTIONS)
+    })
+  }, [fitSignal, flowNodes.length])
+
   const handleNodeClick = React.useCallback((_event: React.MouseEvent, node: FlowNode<TaskFlowNodeData>) => {
     setSelectedTaskId(String(node.id || ''))
   }, [])
@@ -667,6 +859,36 @@ export function ProjectTaskDependencyGraphPanel({
         .slice(0, 6),
     [graph?.relationship_counts]
   )
+
+  const eventDetailQuery = useQuery({
+    queryKey: [
+      'project-task-dependency-event-detail',
+      userId,
+      projectId,
+      selectedRuntimeEvent?.edge?.source_entity_id,
+      selectedRuntimeEvent?.edge?.target_entity_id,
+      selectedRuntimeEvent?.event?.source,
+      selectedRuntimeEvent?.event?.at,
+      selectedRuntimeEvent?.event?.correlation_id,
+    ],
+    queryFn: () =>
+      getProjectTaskDependencyEventDetail(userId, projectId, {
+        source_task_id: String(selectedRuntimeEvent?.edge?.source_entity_id || ''),
+        target_task_id: String(selectedRuntimeEvent?.edge?.target_entity_id || ''),
+        source: String(selectedRuntimeEvent?.event?.source || ''),
+        at: String(selectedRuntimeEvent?.event?.at || '') || undefined,
+        correlation_id: String(selectedRuntimeEvent?.event?.correlation_id || '') || undefined,
+      }),
+    enabled: Boolean(
+      userId &&
+      projectId &&
+      selectedRuntimeEvent?.edge?.source_entity_id &&
+      selectedRuntimeEvent?.edge?.target_entity_id &&
+      selectedRuntimeEvent?.event?.source
+    ),
+  })
+
+  const selectedEventDetail: TaskDependencyGraphEventDetail | undefined = eventDetailQuery.data
 
   if (isLoading) {
     return <div className="meta">Loading task flow graph...</div>
@@ -852,40 +1074,42 @@ export function ProjectTaskDependencyGraphPanel({
             <div className="meta">Select a task node to inspect its dependency context.</div>
           ) : (
             <>
-              <div className="task-flow-inspector-head">
-                <div>
-                  <div className="meta">Selected task</div>
-                  <div className="task-flow-inspector-title">{selectedNode.title}</div>
+              <div className="task-flow-inspector-summary">
+                <div className="task-flow-inspector-head">
+                  <div className="task-flow-inspector-head-copy">
+                    <div className="meta">Selected task</div>
+                    <div className="task-flow-inspector-title">{selectedNode.title}</div>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn secondary"
+                    onClick={() => navigateToTask(projectId, selectedNode.entity_id)}
+                  >
+                    Open task
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  className="btn secondary"
-                  onClick={() => navigateToTask(projectId, selectedNode.entity_id)}
-                >
-                  Open task
-                </button>
-              </div>
 
-              <div className="task-flow-selected-badges">
-                <span className={`task-flow-role-pill role-${normalizeRoleKey(selectedNode.role)}`.trim()}>{selectedNode.role}</span>
-                <span className={`task-flow-status-pill status-${normalizeStatusKey(selectedNode.status)}`.trim()}>{selectedNode.status}</span>
-                <span className={`task-flow-automation-pill automation-${normalizeAutomationKey(selectedNode.automation_state)}`.trim()}>
-                  {selectedNode.automation_state}
-                </span>
-                {selectedNode.priority ? <span className="task-flow-meta-chip">Priority {selectedNode.priority}</span> : null}
-                {selectedNode.assigned_agent_code ? <span className="task-flow-meta-chip">{selectedNode.assigned_agent_code}</span> : null}
-              </div>
-
-              <div className="task-flow-inspector-grid">
-                <div className="task-flow-inspector-card">
-                  <span className="meta">Incoming</span>
-                  <strong>{selectedNode.inbound_count}</strong>
-                  <span className="meta">runtime {selectedNode.runtime_inbound_count} · structural {selectedNode.structural_inbound_count}</span>
+                <div className="task-flow-selected-badges">
+                  <span className={`task-flow-role-pill role-${normalizeRoleKey(selectedNode.role)}`.trim()}>{selectedNode.role}</span>
+                  <span className={`task-flow-status-pill status-${normalizeStatusKey(selectedNode.status)}`.trim()}>{selectedNode.status}</span>
+                  <span className={`task-flow-automation-pill automation-${normalizeAutomationKey(selectedNode.automation_state)}`.trim()}>
+                    {selectedNode.automation_state}
+                  </span>
+                  {selectedNode.priority ? <span className="task-flow-meta-chip">Priority {selectedNode.priority}</span> : null}
+                  {selectedNode.assigned_agent_code ? <span className="task-flow-meta-chip">{selectedNode.assigned_agent_code}</span> : null}
                 </div>
-                <div className="task-flow-inspector-card">
-                  <span className="meta">Outgoing</span>
-                  <strong>{selectedNode.outbound_count}</strong>
-                  <span className="meta">runtime {selectedNode.runtime_outbound_count} · structural {selectedNode.structural_outbound_count}</span>
+
+                <div className="task-flow-inspector-grid">
+                  <div className="task-flow-inspector-card">
+                    <span className="meta">Incoming</span>
+                    <strong>{selectedNode.inbound_count}</strong>
+                    <span className="meta">runtime {selectedNode.runtime_inbound_count} · structural {selectedNode.structural_inbound_count}</span>
+                  </div>
+                  <div className="task-flow-inspector-card">
+                    <span className="meta">Outgoing</span>
+                    <strong>{selectedNode.outbound_count}</strong>
+                    <span className="meta">runtime {selectedNode.runtime_outbound_count} · structural {selectedNode.structural_outbound_count}</span>
+                  </div>
                 </div>
               </div>
 
@@ -905,11 +1129,18 @@ export function ProjectTaskDependencyGraphPanel({
                     {selectedIncomingEdges.map((edge) => {
                       const sourceId = String(edge.source_entity_id || '')
                       return (
-                        <button
+                        <div
                           key={`incoming-${sourceId}-${edge.target_entity_id}`}
-                          type="button"
                           className="task-flow-edge-item"
                           onClick={() => setSelectedTaskId(sourceId)}
+                          onKeyDown={(keyboardEvent) => {
+                            if (keyboardEvent.key === 'Enter' || keyboardEvent.key === ' ') {
+                              keyboardEvent.preventDefault()
+                              setSelectedTaskId(sourceId)
+                            }
+                          }}
+                          role="button"
+                          tabIndex={0}
                         >
                           <div className="task-flow-edge-item-head">
                             <span className="task-flow-edge-pill incoming">From</span>
@@ -921,7 +1152,8 @@ export function ProjectTaskDependencyGraphPanel({
                           <div className="task-flow-edge-meta">
                             {edge.latest_runtime_at ? <span>Latest {new Date(edge.latest_runtime_at).toLocaleString()}</span> : <span>No runtime timestamp</span>}
                           </div>
-                        </button>
+                          <EdgeRuntimeTimeline edge={edge} onSelectEvent={(selectedEdge, event) => setSelectedRuntimeEvent({ edge: selectedEdge, event })} />
+                        </div>
                       )
                     })}
                   </div>
@@ -937,11 +1169,18 @@ export function ProjectTaskDependencyGraphPanel({
                     {selectedOutgoingEdges.map((edge) => {
                       const targetId = String(edge.target_entity_id || '')
                       return (
-                        <button
+                        <div
                           key={`outgoing-${edge.source_entity_id}-${targetId}`}
-                          type="button"
                           className="task-flow-edge-item"
                           onClick={() => setSelectedTaskId(targetId)}
+                          onKeyDown={(keyboardEvent) => {
+                            if (keyboardEvent.key === 'Enter' || keyboardEvent.key === ' ') {
+                              keyboardEvent.preventDefault()
+                              setSelectedTaskId(targetId)
+                            }
+                          }}
+                          role="button"
+                          tabIndex={0}
                         >
                           <div className="task-flow-edge-item-head">
                             <span className="task-flow-edge-pill outgoing">To</span>
@@ -953,7 +1192,8 @@ export function ProjectTaskDependencyGraphPanel({
                           <div className="task-flow-edge-meta">
                             {edge.active_runtime ? <span>Active runtime chain</span> : <span>{Number(edge.runtime_requests_total || 0)} runtime requests</span>}
                           </div>
-                        </button>
+                          <EdgeRuntimeTimeline edge={edge} onSelectEvent={(selectedEdge, event) => setSelectedRuntimeEvent({ edge: selectedEdge, event })} />
+                        </div>
                       )
                     })}
                   </div>
@@ -963,6 +1203,103 @@ export function ProjectTaskDependencyGraphPanel({
           )}
         </aside>
       </div>
+
+      <AlertDialog.Root open={Boolean(selectedRuntimeEvent)} onOpenChange={(open) => { if (!open) setSelectedRuntimeEvent(null) }}>
+        <AlertDialog.Portal>
+          <AlertDialog.Overlay className="codex-chat-alert-overlay" />
+          <AlertDialog.Content className="codex-chat-alert-content task-flow-event-dialog">
+            <div className="task-flow-event-dialog-head">
+              <div className="task-flow-event-dialog-heading">
+                <AlertDialog.Title className="codex-chat-alert-title">Runtime Event Detail</AlertDialog.Title>
+                <AlertDialog.Description className="codex-chat-alert-description">
+                  {selectedEventDetail?.source_task_title && selectedEventDetail?.target_task_title
+                    ? `${selectedEventDetail.source_task_title} -> ${selectedEventDetail.target_task_title}`
+                    : 'Task-to-task communication detail'}
+                </AlertDialog.Description>
+              </div>
+              <AlertDialog.Cancel asChild>
+                <button className="task-flow-event-dismiss" type="button" aria-label="Close runtime event detail">
+                  <Icon path="M18.3 5.71a1 1 0 0 0-1.41 0L12 10.59 7.11 5.7A1 1 0 0 0 5.7 7.11L10.59 12 5.7 16.89a1 1 0 1 0 1.41 1.41L12 13.41l4.89 4.89a1 1 0 0 0 1.41-1.41L13.41 12l4.89-4.89a1 1 0 0 0 0-1.4Z" />
+                </button>
+              </AlertDialog.Cancel>
+            </div>
+            <div className="task-flow-event-meta-row">
+              {selectedRuntimeEvent?.event?.source ? <span className="task-flow-channel-chip runtime">{formatChannelLabel(selectedRuntimeEvent.event.source)}</span> : null}
+              <span className="task-flow-event-meta-pill">{formatEventTimestamp(selectedRuntimeEvent?.event?.at)}</span>
+              {selectedRuntimeEvent?.event?.correlation_id ? <span className="task-flow-event-meta-pill">Correlation: {selectedRuntimeEvent.event.correlation_id}</span> : null}
+            </div>
+            {eventDetailQuery.isLoading ? (
+              <div className="meta">Loading runtime event detail...</div>
+            ) : eventDetailQuery.isError ? (
+              <div className="notice error">Unable to load runtime event detail.</div>
+            ) : !selectedEventDetail ? (
+              <div className="notice">No stored detail was found for this runtime event.</div>
+            ) : (
+              <div className="task-flow-event-detail-layout">
+                <div className="task-flow-event-detail-main">
+                  <div className="task-flow-event-detail-card">
+                    <div className="task-flow-event-card-head">
+                      <div className="meta">Prompt request</div>
+                      {selectedEventDetail.requested_at ? <span className="meta">{formatEventTimestamp(selectedEventDetail.requested_at)}</span> : null}
+                    </div>
+                    <div className="task-flow-event-markdown md-editor-surface">
+                      <div className="task-flow-event-scroll-viewport">
+                        <div className="md-editor-content">
+                          <MarkdownView value={String(selectedEventDetail.request_markdown || '_No stored instruction_')} />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="task-flow-event-detail-card">
+                    <div className="task-flow-event-card-head">
+                      <div className="meta">Response</div>
+                      {selectedEventDetail.response_status ? (
+                        <span className={`task-flow-status-pill ${selectedEventDetail.response_status === 'failed' ? 'is-failed' : 'is-completed'}`}>
+                          {selectedEventDetail.response_status}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="task-flow-event-markdown md-editor-surface">
+                      <div className="task-flow-event-scroll-viewport">
+                        <div className="md-editor-content">
+                          <MarkdownView value={buildEventResponseMarkdown(selectedEventDetail)} />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="task-flow-event-separator" />
+                <div className="task-flow-event-facts">
+                  {selectedEventDetail.response_at ? (
+                    <div className="task-flow-event-fact">
+                      <span className="meta">Response time</span>
+                      <strong>{formatEventTimestamp(selectedEventDetail.response_at)}</strong>
+                    </div>
+                  ) : null}
+                  {selectedEventDetail.reason ? (
+                    <div className="task-flow-event-fact">
+                      <span className="meta">Reason</span>
+                      <strong>{selectedEventDetail.reason}</strong>
+                    </div>
+                  ) : null}
+                  {selectedEventDetail.trigger_link ? (
+                    <div className="task-flow-event-fact">
+                      <span className="meta">Trigger link</span>
+                      <strong>{selectedEventDetail.trigger_link}</strong>
+                    </div>
+                  ) : null}
+                  {selectedEventDetail.correlation_id ? (
+                    <div className="task-flow-event-fact">
+                      <span className="meta">Correlation</span>
+                      <strong>{selectedEventDetail.correlation_id}</strong>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            )}
+          </AlertDialog.Content>
+        </AlertDialog.Portal>
+      </AlertDialog.Root>
     </div>
   )
 }

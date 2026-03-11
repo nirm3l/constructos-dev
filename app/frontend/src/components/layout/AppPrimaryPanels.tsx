@@ -263,6 +263,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
 
       {state.tab === 'task-flow' && (
         <ProjectTaskFlowPage
+          userId={state.userId}
           selectedProjectId={state.selectedProjectId}
           selectedProjectName={state.selectedProject?.name || ''}
           taskDependencyGraphQuery={state.projectTaskDependencyGraph}

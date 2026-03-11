@@ -7,12 +7,183 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from features.tasks.domain import EVENT_AUTOMATION_REQUESTED
+from features.tasks.domain import (
+    EVENT_AUTOMATION_COMPLETED,
+    EVENT_AUTOMATION_FAILED,
+    EVENT_AUTOMATION_REQUESTED,
+    EVENT_COMMENT_ADDED,
+)
 from plugins.team_mode.task_roles import derive_task_role, normalize_team_agents
 from shared.eventing_rebuild import load_events_after, rebuild_state
 from shared.models import Project, ProjectMember, ProjectPluginConfig, Task
 from shared.task_automation import TRIGGER_KIND_STATUS_CHANGE, normalize_execution_triggers
 from shared.task_relationships import normalize_task_relationships
+
+
+def _build_runtime_event_response_markdown(
+    *,
+    latest_comment_body: str | None,
+    terminal_status: str | None,
+    terminal_summary: str | None,
+    terminal_error: str | None,
+) -> str | None:
+    if latest_comment_body:
+        return latest_comment_body
+    normalized_summary = str(terminal_summary or "").strip() or None
+    normalized_error = str(terminal_error or "").strip() or None
+    if terminal_status == "failed" and normalized_error:
+        if normalized_summary and normalized_summary != normalized_error:
+            return (
+                "**Error**\n\n"
+                f"```text\n{normalized_error}\n```\n\n"
+                "**Summary**\n\n"
+                f"{normalized_summary}"
+            )
+        return f"```text\n{normalized_error}\n```"
+    return normalized_summary or normalized_error or None
+
+
+def get_project_task_dependency_event_detail(
+    *,
+    db: Session,
+    project_id: str,
+    target_task_id: str,
+    source_task_id: str,
+    source: str,
+    requested_at: str | None = None,
+    correlation_id: str | None = None,
+) -> dict[str, Any] | None:
+    normalized_project_id = str(project_id or "").strip()
+    normalized_target_task_id = str(target_task_id or "").strip()
+    normalized_source_task_id = str(source_task_id or "").strip()
+    normalized_source = str(source or "").strip()
+    normalized_requested_at = str(requested_at or "").strip() or None
+    normalized_correlation_id = str(correlation_id or "").strip() or None
+    if not normalized_project_id or not normalized_target_task_id or not normalized_source_task_id or not normalized_source:
+        return None
+
+    target_task = db.get(Task, normalized_target_task_id)
+    source_task = db.get(Task, normalized_source_task_id)
+    if (
+        target_task is None
+        or source_task is None
+        or bool(target_task.is_deleted)
+        or bool(source_task.is_deleted)
+        or str(target_task.project_id or "").strip() != normalized_project_id
+        or str(source_task.project_id or "").strip() != normalized_project_id
+    ):
+        return None
+
+    events = load_events_after(db, "Task", normalized_target_task_id, 0)
+    request_candidates: list[tuple[int, int, Any]] = []
+    for index, event in enumerate(events):
+        if str(event.event_type or "").strip() != EVENT_AUTOMATION_REQUESTED:
+            continue
+        payload = dict(event.payload or {})
+        if str(payload.get("source") or "").strip() != normalized_source:
+            continue
+        if str(payload.get("source_task_id") or "").strip() != normalized_source_task_id:
+            continue
+        payload_correlation = str(payload.get("correlation_id") or "").strip() or None
+        payload_requested_at = _max_iso_timestamp(
+            [
+                payload.get("requested_at"),
+                payload.get("triggered_at"),
+                payload.get("lead_handoff_at"),
+            ]
+        )
+        score = 0
+        if normalized_correlation_id and payload_correlation == normalized_correlation_id:
+            score += 4
+        if normalized_requested_at and payload_requested_at == normalized_requested_at:
+            score += 3
+        if normalized_correlation_id is None and normalized_requested_at is None:
+            score += 1
+        request_candidates.append((score, index, event))
+
+    if not request_candidates:
+        return None
+
+    request_candidates.sort(
+        key=lambda item: (
+            item[0],
+            str(_max_iso_timestamp(
+                [
+                    dict(item[2].payload or {}).get("requested_at"),
+                    dict(item[2].payload or {}).get("triggered_at"),
+                    dict(item[2].payload or {}).get("lead_handoff_at"),
+                ]
+            ) or ""),
+            int(getattr(item[2], "version", 0) or 0),
+        ),
+        reverse=True,
+    )
+    _score, request_index, request_event = request_candidates[0]
+    request_payload = dict(request_event.payload or {})
+
+    next_request_index = len(events)
+    for later_index in range(request_index + 1, len(events)):
+        if str(events[later_index].event_type or "").strip() == EVENT_AUTOMATION_REQUESTED:
+            next_request_index = later_index
+            break
+
+    terminal_status: str | None = None
+    terminal_at: str | None = None
+    terminal_summary: str | None = None
+    terminal_error: str | None = None
+    latest_comment_body: str | None = None
+    latest_comment_at: str | None = None
+    for event in events[request_index + 1:next_request_index]:
+        event_type = str(event.event_type or "").strip()
+        payload = dict(event.payload or {})
+        if event_type == EVENT_COMMENT_ADDED:
+            latest_comment_body = str(payload.get("body") or "").strip() or None
+            latest_comment_at = _max_iso_timestamp([payload.get("created_at"), payload.get("commented_at")])
+            continue
+        if event_type == EVENT_AUTOMATION_COMPLETED and terminal_status is None:
+            terminal_status = "completed"
+            terminal_at = _max_iso_timestamp([payload.get("completed_at")])
+            terminal_summary = str(payload.get("summary") or "").strip() or None
+            continue
+        if event_type == EVENT_AUTOMATION_FAILED and terminal_status is None:
+            terminal_status = "failed"
+            terminal_at = _max_iso_timestamp([payload.get("failed_at")])
+            terminal_summary = str(payload.get("summary") or "").strip() or None
+            terminal_error = str(payload.get("error") or "").strip() or None
+
+    response_markdown = _build_runtime_event_response_markdown(
+        latest_comment_body=latest_comment_body,
+        terminal_status=terminal_status,
+        terminal_summary=terminal_summary,
+        terminal_error=terminal_error,
+    )
+    request_markdown = str(request_payload.get("instruction") or "").strip() or None
+    return {
+        "project_id": normalized_project_id,
+        "target_task_id": normalized_target_task_id,
+        "target_task_title": str(target_task.title or normalized_target_task_id),
+        "source_task_id": normalized_source_task_id,
+        "source_task_title": str(source_task.title or normalized_source_task_id),
+        "source": normalized_source,
+        "requested_at": _max_iso_timestamp(
+            [
+                request_payload.get("requested_at"),
+                request_payload.get("triggered_at"),
+                request_payload.get("lead_handoff_at"),
+            ]
+        ),
+        "correlation_id": str(request_payload.get("correlation_id") or "").strip() or None,
+        "trigger_link": str(request_payload.get("trigger_link") or "").strip() or None,
+        "reason": str(request_payload.get("reason") or "").strip() or None,
+        "request_markdown": request_markdown,
+        "response_markdown": response_markdown,
+        "response_status": terminal_status,
+        "response_at": terminal_at,
+        "response_summary": terminal_summary,
+        "response_error": terminal_error,
+        "response_comment_body": latest_comment_body,
+        "response_comment_at": latest_comment_at,
+    }
 
 
 def get_project_task_dependency_graph(
@@ -169,6 +340,7 @@ def get_project_task_dependency_graph(
             "trigger_conditions": [],
             "runtime_sources": {},
             "channels": [],
+            "runtime_events": [],
         }
         edge_map[key] = edge
         return edge
@@ -239,6 +411,17 @@ def get_project_task_dependency_graph(
                     "active": False,
                 },
             )
+            _merge_runtime_event(
+                edge=edge,
+                payload={
+                    "at": requested_at,
+                    "source": request_source,
+                    "reason": str(payload.get("reason") or "").strip() or None,
+                    "trigger_link": str(payload.get("trigger_link") or "").strip() or None,
+                    "correlation_id": str(payload.get("correlation_id") or "").strip() or None,
+                    "active": False,
+                },
+            )
 
     for task_id, state in states_by_task_id.items():
         source_task_id = str(state.get("last_requested_source_task_id") or "").strip()
@@ -250,33 +433,45 @@ def get_project_task_dependency_graph(
             [
                 state.get("last_requested_triggered_at"),
                 state.get("last_lead_handoff_at"),
-                state.get("last_activity_at"),
+                state.get("last_agent_run_at"),
+                state.get("completed_at"),
+                state.get("last_schedule_run_at"),
             ]
         )
-        if not bool(edge.get("runtime_dependency")):
-            edge["runtime_dependency"] = True
-            edge["runtime_requests_total"] = max(1, int(edge.get("runtime_requests_total") or 0))
-            if request_source == "lead_handoff":
-                edge["lead_handoffs_total"] = max(1, int(edge.get("lead_handoffs_total") or 0))
-            runtime_sources = dict(edge.get("runtime_sources") or {})
-            runtime_sources[request_source] = max(1, int(runtime_sources.get(request_source) or 0))
-            edge["runtime_sources"] = runtime_sources
-            if _iso_greater(requested_at, edge.get("latest_runtime_at")):
-                edge["latest_runtime_at"] = requested_at
-                edge["latest_runtime_source"] = request_source
-            _merge_channel(
-                edge=edge,
-                key=f"runtime:{request_source}",
-                payload={
-                    "kind": "runtime_request",
-                    "label": "lead handoff" if request_source == "lead_handoff" else request_source.replace("_", " "),
-                    "source": request_source,
-                    "count": 1,
-                    "latest_at": requested_at,
-                    "correlation_ids": _compact_unique([state.get("last_requested_correlation_id")]),
-                    "active": True,
-                },
-            )
+        edge["runtime_dependency"] = True
+        edge["runtime_requests_total"] = max(1, int(edge.get("runtime_requests_total") or 0))
+        if request_source == "lead_handoff":
+            edge["lead_handoffs_total"] = max(1, int(edge.get("lead_handoffs_total") or 0))
+        runtime_sources = dict(edge.get("runtime_sources") or {})
+        runtime_sources[request_source] = max(1, int(runtime_sources.get(request_source) or 0))
+        edge["runtime_sources"] = runtime_sources
+        if _iso_greater(requested_at, edge.get("latest_runtime_at")):
+            edge["latest_runtime_at"] = requested_at
+            edge["latest_runtime_source"] = request_source
+        _merge_channel(
+            edge=edge,
+            key=f"runtime:{request_source}",
+            payload={
+                "kind": "runtime_request",
+                "label": "lead handoff" if request_source == "lead_handoff" else request_source.replace("_", " "),
+                "source": request_source,
+                "count": 1,
+                "latest_at": requested_at,
+                "correlation_ids": _compact_unique([state.get("last_requested_correlation_id")]),
+                "active": True,
+            },
+        )
+        _merge_runtime_event(
+            edge=edge,
+            payload={
+                "at": requested_at,
+                "source": request_source,
+                "reason": str(state.get("last_requested_reason") or "").strip() or None,
+                "trigger_link": str(state.get("last_requested_trigger_link") or "").strip() or None,
+                "correlation_id": str(state.get("last_requested_correlation_id") or "").strip() or None,
+                "active": True,
+            },
+        )
         edge["active_runtime"] = True
         for channel in edge.get("channels") or []:
             if not isinstance(channel, dict):
@@ -369,6 +564,144 @@ def get_project_task_dependency_graph(
         "runtime_source_counts": dict(sorted(runtime_source_counts.items())),
         "nodes": nodes,
         "edges": edges,
+    }
+
+
+def get_project_task_dependency_event_detail(
+    *,
+    db: Session,
+    project_id: str,
+    source_task_id: str,
+    target_task_id: str,
+    runtime_source: str,
+    occurred_at: str | None = None,
+    correlation_id: str | None = None,
+) -> dict[str, Any]:
+    project = db.get(Project, project_id)
+    if project is None or bool(project.is_deleted):
+        return {"project_id": project_id, "found": False, "detail": "Project not found"}
+
+    source_task = db.get(Task, source_task_id)
+    target_task = db.get(Task, target_task_id)
+    if (
+        source_task is None
+        or target_task is None
+        or bool(source_task.is_deleted)
+        or bool(target_task.is_deleted)
+        or str(source_task.project_id or "").strip() != project_id
+        or str(target_task.project_id or "").strip() != project_id
+    ):
+        return {"project_id": project_id, "found": False, "detail": "Task edge not found"}
+
+    normalized_source = str(runtime_source or "").strip()
+    normalized_correlation_id = str(correlation_id or "").strip() or None
+    normalized_occurred_at = str(occurred_at or "").strip() or None
+    events = load_events_after(db, "Task", str(target_task.id), 0)
+
+    best_request_index: int | None = None
+    best_request = None
+    best_score: tuple[int, int, str] | None = None
+
+    for index, event in enumerate(events):
+        if str(event.event_type or "").strip() != EVENT_AUTOMATION_REQUESTED:
+            continue
+        payload = dict(event.payload or {})
+        if str(payload.get("source_task_id") or "").strip() != str(source_task.id):
+            continue
+        if str(payload.get("source") or "").strip() != normalized_source:
+            continue
+        event_correlation_id = str(payload.get("correlation_id") or "").strip() or None
+        event_at = _max_iso_timestamp(
+            [
+                payload.get("requested_at"),
+                payload.get("triggered_at"),
+                payload.get("lead_handoff_at"),
+            ]
+        )
+        score = (
+            0 if normalized_correlation_id and event_correlation_id == normalized_correlation_id else 1,
+            0 if normalized_occurred_at and event_at == normalized_occurred_at else 1,
+            str(event_at or ""),
+        )
+        if best_score is None or score[:2] < best_score[:2] or (score[:2] == best_score[:2] and score[2] > best_score[2]):
+            best_score = score
+            best_request_index = index
+            best_request = event
+
+    if best_request_index is None or best_request is None:
+        return {
+            "project_id": project_id,
+            "found": False,
+            "detail": "Runtime event detail not found",
+        }
+
+    next_request_index = len(events)
+    for next_index in range(best_request_index + 1, len(events)):
+        if str(events[next_index].event_type or "").strip() == EVENT_AUTOMATION_REQUESTED:
+            next_request_index = next_index
+            break
+
+    request_payload = dict(best_request.payload or {})
+    request_at = _max_iso_timestamp(
+        [
+            request_payload.get("requested_at"),
+            request_payload.get("triggered_at"),
+            request_payload.get("lead_handoff_at"),
+        ]
+    )
+    terminal_status: str | None = None
+    terminal_at: str | None = None
+    terminal_summary: str | None = None
+    terminal_error: str | None = None
+    latest_comment_body: str | None = None
+    latest_comment_at: str | None = None
+
+    for event in events[best_request_index + 1 : next_request_index]:
+        event_type = str(event.event_type or "").strip()
+        payload = dict(event.payload or {})
+        if event_type == EVENT_COMMENT_ADDED:
+            latest_comment_body = str(payload.get("body") or "").strip() or None
+            latest_comment_at = _max_iso_timestamp([payload.get("created_at"), payload.get("added_at")])
+            continue
+        if event_type == EVENT_AUTOMATION_COMPLETED and terminal_status is None:
+            terminal_status = "completed"
+            terminal_at = _max_iso_timestamp([payload.get("completed_at")])
+            terminal_summary = str(payload.get("summary") or "").strip() or None
+            continue
+        if event_type == EVENT_AUTOMATION_FAILED and terminal_status is None:
+            terminal_status = "failed"
+            terminal_at = _max_iso_timestamp([payload.get("failed_at")])
+            terminal_summary = str(payload.get("summary") or "").strip() or None
+            terminal_error = str(payload.get("error") or "").strip() or None
+
+    response_markdown = _build_runtime_event_response_markdown(
+        latest_comment_body=latest_comment_body,
+        terminal_status=terminal_status,
+        terminal_summary=terminal_summary,
+        terminal_error=terminal_error,
+    )
+    request_markdown = str(request_payload.get("instruction") or "").strip() or None
+    return {
+        "project_id": project_id,
+        "project_name": str(project.name or ""),
+        "found": True,
+        "target_task_id": str(target_task.id),
+        "target_task_title": str(target_task.title or target_task.id),
+        "source_task_id": str(source_task.id),
+        "source_task_title": str(source_task.title or source_task.id),
+        "source": normalized_source,
+        "requested_at": request_at,
+        "correlation_id": str(request_payload.get("correlation_id") or "").strip() or None,
+        "trigger_link": str(request_payload.get("trigger_link") or "").strip() or None,
+        "reason": str(request_payload.get("reason") or "").strip() or None,
+        "request_markdown": request_markdown,
+        "response_markdown": response_markdown,
+        "response_status": terminal_status,
+        "response_at": terminal_at,
+        "response_summary": terminal_summary,
+        "response_error": terminal_error,
+        "response_comment_body": latest_comment_body,
+        "response_comment_at": latest_comment_at,
     }
 
 
@@ -530,6 +863,43 @@ def _merge_channel(*, edge: dict[str, Any], key: str, payload: dict[str, Any]) -
         return
     channels.append({"_key": key, **payload})
     edge["channels"] = channels
+
+
+def _merge_runtime_event(*, edge: dict[str, Any], payload: dict[str, Any]) -> None:
+    events = list(edge.get("runtime_events") or [])
+    incoming_at = str(payload.get("at") or "").strip() or None
+    incoming_source = str(payload.get("source") or "").strip() or "runtime"
+    incoming_reason = str(payload.get("reason") or "").strip() or None
+    incoming_trigger_link = str(payload.get("trigger_link") or "").strip() or None
+    incoming_correlation_id = str(payload.get("correlation_id") or "").strip() or None
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("at") or "").strip() != str(incoming_at or ""):
+            continue
+        if str(event.get("source") or "").strip() != incoming_source:
+            continue
+        if str(event.get("reason") or "").strip() != str(incoming_reason or ""):
+            continue
+        if str(event.get("trigger_link") or "").strip() != str(incoming_trigger_link or ""):
+            continue
+        if str(event.get("correlation_id") or "").strip() != str(incoming_correlation_id or ""):
+            continue
+        if payload.get("active"):
+            event["active"] = True
+        return
+    events.append(
+        {
+            "at": incoming_at,
+            "source": incoming_source,
+            "reason": incoming_reason,
+            "trigger_link": incoming_trigger_link,
+            "correlation_id": incoming_correlation_id,
+            "active": bool(payload.get("active")),
+        }
+    )
+    events.sort(key=lambda item: str((item or {}).get("at") or ""), reverse=True)
+    edge["runtime_events"] = events
 
 
 def _load_team_mode_agents(*, db: Session, workspace_id: str, project_id: str) -> list[dict[str, Any]]:

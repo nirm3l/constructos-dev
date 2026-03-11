@@ -2661,19 +2661,6 @@ export function ProjectKnowledgeGraphPanel({
         <h3 style={{ margin: 0 }}>Knowledge Graph</h3>
         <div className="row" style={{ gap: 6 }}>
           {isRefreshing && <span className="badge">Refreshing</span>}
-          <button
-            className="action-icon graph-refresh-btn"
-            type="button"
-            title="Refresh graph insights"
-            aria-label="Refresh graph insights"
-            onClick={() => {
-              overviewQuery.refetch?.()
-              contextPackQuery.refetch?.()
-              subgraphQuery.refetch?.()
-            }}
-          >
-            <Icon path="M20 11a8 8 0 1 0 2.3 5.6M20 4v7h-7" />
-          </button>
         </div>
       </div>
 

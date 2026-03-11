@@ -28,6 +28,7 @@ import type {
   GraphProjectOverview,
   GraphProjectSubgraph,
   ProjectTaskDependencyGraph,
+  TaskDependencyGraphEventDetail,
   Notification,
   Note,
   NoteGroup,
@@ -1117,6 +1118,28 @@ export const getProjectTaskDependencyGraph = (
     `/api/projects/${projectId}/task-dependency-graph${queryString({
       limit_nodes: params?.limit_nodes ?? 240,
       limit_edges: params?.limit_edges ?? 1600,
+    })}`,
+    userId
+  )
+
+export const getProjectTaskDependencyEventDetail = (
+  userId: string,
+  projectId: string,
+  params: {
+    source_task_id: string
+    target_task_id: string
+    source: string
+    at?: string | null
+    correlation_id?: string | null
+  }
+) =>
+  api<TaskDependencyGraphEventDetail>(
+    `/api/projects/${projectId}/task-dependency-graph/event-detail${queryString({
+      source_task_id: params.source_task_id,
+      target_task_id: params.target_task_id,
+      source: params.source,
+      at: params.at || undefined,
+      correlation_id: params.correlation_id || undefined,
     })}`,
     userId
   )

@@ -132,6 +132,7 @@ from shared.models import (
     ProjectSkill,
     Task,
     TaskComment,
+    WorkspaceMember,
     WorkspaceSkill,
     User as UserModel,
 )
@@ -1388,6 +1389,50 @@ class AgentTaskService:
             status_code=400,
             detail="workspace_id is required for project creation when MCP default workspace is not configured",
         )
+
+    def _augment_project_member_user_ids_for_human_visibility(
+        self,
+        *,
+        db,
+        workspace_id: str,
+        actor_user: UserModel,
+        member_user_ids: list[str] | None,
+    ) -> list[str]:
+        normalized_ids: list[str] = []
+        seen: set[str] = set()
+        for raw in list(member_user_ids or []):
+            user_id = str(raw or "").strip()
+            if not user_id or user_id in seen:
+                continue
+            seen.add(user_id)
+            normalized_ids.append(user_id)
+
+        actor_user_type = str(getattr(actor_user, "user_type", "") or "").strip().lower()
+        if actor_user_type != "agent":
+            return normalized_ids
+
+        workspace_human_ids = [
+            str(user_id or "").strip()
+            for user_id in db.execute(
+                select(WorkspaceMember.user_id)
+                .join(UserModel, UserModel.id == WorkspaceMember.user_id)
+                .where(
+                    WorkspaceMember.workspace_id == workspace_id,
+                    UserModel.is_active == True,  # noqa: E712
+                    UserModel.user_type != "agent",
+                )
+                .order_by(WorkspaceMember.id.asc())
+            ).scalars().all()
+            if str(user_id or "").strip()
+        ]
+        preferred_human_id = None
+        if DEFAULT_USER_ID in workspace_human_ids:
+            preferred_human_id = DEFAULT_USER_ID
+        elif workspace_human_ids:
+            preferred_human_id = workspace_human_ids[0]
+        if preferred_human_id and preferred_human_id not in seen:
+            normalized_ids.append(preferred_human_id)
+        return normalized_ids
 
     def _normalize_command_payload(self, value: Any) -> Any:
         if isinstance(value, str):
@@ -5434,6 +5479,12 @@ class AgentTaskService:
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             resolved_workspace_id = self._resolve_workspace_for_project_create(explicit_workspace_id=workspace_id)
+            effective_member_user_ids = self._augment_project_member_user_ids_for_human_visibility(
+                db=db,
+                workspace_id=resolved_workspace_id,
+                actor_user=user,
+                member_user_ids=member_user_ids,
+            )
             effective_command_id = command_id or self._fallback_project_template_create_command_id(
                 workspace_id=resolved_workspace_id,
                 template_key=template_key,
@@ -5445,7 +5496,7 @@ class AgentTaskService:
                 name=name,
                 description=description,
                 custom_statuses=self._normalize_custom_statuses(custom_statuses),
-                member_user_ids=member_user_ids or [],
+                member_user_ids=effective_member_user_ids,
                 embedding_enabled=embedding_enabled,
                 embedding_model=embedding_model,
                 context_pack_evidence_top_k=context_pack_evidence_top_k,
@@ -5899,6 +5950,12 @@ class AgentTaskService:
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             resolved_workspace_id = self._resolve_workspace_for_project_create(explicit_workspace_id=workspace_id)
+            effective_member_user_ids = self._augment_project_member_user_ids_for_human_visibility(
+                db=db,
+                workspace_id=resolved_workspace_id,
+                actor_user=user,
+                member_user_ids=member_user_ids,
+            )
             effective_command_id = command_id or self._fallback_project_create_command_id(
                 workspace_id=resolved_workspace_id,
                 name=name,
@@ -5917,7 +5974,7 @@ class AgentTaskService:
                 chat_index_mode=chat_index_mode,
                 chat_attachment_ingestion_mode=chat_attachment_ingestion_mode,
                 event_storming_enabled=bool(event_storming_enabled),
-                member_user_ids=member_user_ids or [],
+                member_user_ids=effective_member_user_ids,
             )
             return ProjectApplicationService(db, user, command_id=effective_command_id).create_project(payload)
 

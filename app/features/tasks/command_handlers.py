@@ -706,7 +706,7 @@ def _infer_team_mode_request_origin(
         member_role_by_user_id=member_role_by_user_id,
         agent_role_by_code=agent_role_by_code,
     )
-    if workflow_role not in {"Lead", "QA"}:
+    if workflow_role not in {"Developer", "Lead", "QA"}:
         return None, None
 
     def _candidate_timestamp(source_state: dict[str, object], created_at: object) -> float:
@@ -753,7 +753,17 @@ def _infer_team_mode_request_origin(
         source_automation_state = str(source_state.get("automation_state") or "idle").strip().lower()
         candidate_source: str | None = None
         candidate_rank: int | None = None
-        if workflow_role == "Lead":
+        if workflow_role == "Developer":
+            source_execution_mode = str(source_state.get("last_requested_execution_mode") or "").strip().lower()
+            if (
+                source_role == "Lead"
+                and source_status == "Lead"
+                and bool(source_state.get("last_requested_execution_kickoff_intent"))
+                and source_execution_mode in {"kickoff_only", "setup_then_kickoff"}
+            ):
+                candidate_source = "lead_kickoff_dispatch"
+                candidate_rank = 0
+        elif workflow_role == "Lead":
             if source_role == "Developer" and source_status == "Lead" and source_automation_state == "completed":
                 candidate_source = "developer_handoff"
                 candidate_rank = 0
@@ -1955,11 +1965,24 @@ class RequestAutomationRunHandler:
 
         fallback_instruction = _normalize_instruction(task_view.get("instruction") if task_view else None)
         effective_instruction = _normalize_instruction(self.instruction)
+        explicit_execution_classification = any(
+            value is not None
+            for value in (
+                self.execution_intent,
+                self.execution_kickoff_intent,
+                self.project_creation_intent,
+                self.workflow_scope,
+                self.execution_mode,
+                self.task_completion_requested,
+                self.classifier_reason,
+            )
+        )
+        should_default_to_team_mode_kickoff = False
         if (
-            not effective_instruction
-            and requested_source in {"manual", "manual_stream"}
+            requested_source in {"manual", "manual_stream"}
             and project_id
             and str(state_snapshot.get("status") or "").strip() == "Lead"
+            and not explicit_execution_classification
         ):
             team_mode_enabled = self.ctx.db.execute(
                 select(ProjectPluginConfig.id).where(
@@ -1975,7 +1998,9 @@ class RequestAutomationRunHandler:
                 project_id=str(project_id),
                 exclude_task_id=self.task_id,
             ):
-                effective_instruction = f"Team Mode kickoff for project {project_id}. Dispatch-only run."
+                should_default_to_team_mode_kickoff = True
+        if should_default_to_team_mode_kickoff:
+            effective_instruction = f"Team Mode kickoff for project {project_id}. Dispatch-only run."
         effective_instruction = effective_instruction or fallback_instruction
         if not effective_instruction:
             raise HTTPException(status_code=422, detail="instruction is required")
@@ -2005,6 +2030,16 @@ class RequestAutomationRunHandler:
                 classify_fn=classify_instruction_intent,
                 required_fields=AUTOMATION_REQUEST_INTENT_FIELDS,
             )
+        if should_default_to_team_mode_kickoff:
+            classification = {
+                **classification,
+                "execution_intent": True,
+                "execution_kickoff_intent": True,
+                "project_creation_intent": bool(classification.get("project_creation_intent")),
+                "workflow_scope": "team_mode",
+                "execution_mode": "kickoff_only",
+                "reason": str(classification.get("reason") or "").strip() or "Defaulted to kickoff for fresh Team Mode Lead run.",
+            }
 
         if project_id:
             plugin_row = self.ctx.db.execute(

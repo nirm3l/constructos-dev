@@ -29,7 +29,10 @@ from shared.knowledge_graph import (
     search_project_knowledge,
 )
 from shared.eventing_event_storming import enqueue_event_storming_project_backfill
-from .task_dependency_graph import get_project_task_dependency_graph
+from .task_dependency_graph import (
+    get_project_task_dependency_event_detail,
+    get_project_task_dependency_graph,
+)
 from .application import ProjectApplicationService
 from .read_models import (
     get_project_activity_read_model,
@@ -500,6 +503,32 @@ def project_task_dependency_graph(
         limit_nodes=limit_nodes,
         limit_edges=limit_edges,
     )
+
+
+@router.get("/api/projects/{project_id}/task-dependency-graph/event-detail")
+def project_task_dependency_graph_event_detail(
+    project_id: str,
+    source_task_id: str = Query(min_length=1),
+    target_task_id: str = Query(min_length=1),
+    source: str = Query(min_length=1),
+    at: str | None = None,
+    correlation_id: str | None = None,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    project = _load_project_with_access(db, user, project_id)
+    payload = get_project_task_dependency_event_detail(
+        db=db,
+        project_id=project.id,
+        source_task_id=source_task_id,
+        target_task_id=target_task_id,
+        runtime_source=source,
+        occurred_at=at,
+        correlation_id=correlation_id,
+    )
+    if not bool(payload.get("found")):
+        raise HTTPException(status_code=404, detail=str(payload.get("detail") or "Task flow event detail not found"))
+    return payload
 
 
 @router.post("/api/projects/{project_id}/knowledge-graph/layout")

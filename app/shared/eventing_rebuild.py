@@ -151,6 +151,7 @@ from .task_automation import (
     derive_legacy_schedule_fields,
     normalize_execution_triggers,
 )
+from .delivery_evidence import derive_deploy_execution_snapshot
 from .task_relationships import normalize_task_relationships
 from .event_upcasters import upcast_event, upcast_snapshot
 from .eventing_store import StreamState, get_kurrent_client, kurrent_read_stream, snapshot_stream_id, stream_id, NotFoundError, serialize_snapshot_event
@@ -419,6 +420,11 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
         s_local["scheduled_at_utc"] = legacy.get("scheduled_at_utc")
         s_local["schedule_timezone"] = legacy.get("schedule_timezone")
         s_local["recurring_rule"] = legacy.get("recurring_rule")
+        current_snapshot = s_local.get("last_deploy_execution")
+        s_local["last_deploy_execution"] = derive_deploy_execution_snapshot(
+            refs=s_local.get("external_refs"),
+            current_snapshot=current_snapshot if isinstance(current_snapshot, dict) else {},
+        ) or None
         return s_local
 
     s = dict(state)

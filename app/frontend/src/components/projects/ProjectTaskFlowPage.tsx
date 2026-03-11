@@ -13,16 +13,48 @@ type QueryLike<T> = {
 }
 
 type ProjectTaskFlowPageProps = {
+  userId: string
   selectedProjectId: string
   selectedProjectName: string
   taskDependencyGraphQuery: QueryLike<ProjectTaskDependencyGraph>
 }
 
 export function ProjectTaskFlowPage({
+  userId,
   selectedProjectId,
   selectedProjectName,
   taskDependencyGraphQuery,
 }: ProjectTaskFlowPageProps) {
+  const shellRef = React.useRef<HTMLElement | null>(null)
+  const [isFullscreen, setIsFullscreen] = React.useState(false)
+  const [fitSignal, setFitSignal] = React.useState(0)
+
+  React.useEffect(() => {
+    const onFullscreenChange = () => {
+      setIsFullscreen(Boolean(shellRef.current && document.fullscreenElement === shellRef.current))
+      setFitSignal((current) => current + 1)
+    }
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange)
+  }, [])
+
+  const toggleFullscreen = React.useCallback(async () => {
+    const shell = shellRef.current
+    if (!shell) return
+    try {
+      if (document.fullscreenElement === shell) {
+        await document.exitFullscreen()
+        return
+      }
+      if (document.fullscreenElement) {
+        await document.exitFullscreen()
+      }
+      await shell.requestFullscreen()
+    } catch {
+      // Ignore fullscreen API failures and keep the page usable.
+    }
+  }, [])
+
   if (!selectedProjectId) {
     return (
       <section className="card">
@@ -38,7 +70,7 @@ export function ProjectTaskFlowPage({
   const runningTasks = Number(graph?.counts?.running_tasks || 0)
 
   return (
-    <section className="card">
+    <section ref={shellRef} className="card task-flow-page-shell">
       <div className="row wrap graph-insights-head">
         <h3 style={{ margin: 0 }}>Task Flow</h3>
         <div className="row" style={{ gap: 6 }}>
@@ -46,11 +78,15 @@ export function ProjectTaskFlowPage({
           <button
             className="action-icon graph-refresh-btn"
             type="button"
-            title="Refresh task flow"
-            aria-label="Refresh task flow"
-            onClick={() => taskDependencyGraphQuery.refetch?.()}
+            title={isFullscreen ? 'Exit fullscreen task flow' : 'Open task flow fullscreen'}
+            aria-label={isFullscreen ? 'Exit fullscreen task flow' : 'Open task flow fullscreen'}
+            onClick={() => { void toggleFullscreen() }}
           >
-            <Icon path="M20 11a8 8 0 1 0 2.3 5.6M20 4v7h-7" />
+            {isFullscreen ? (
+              <Icon path="M8 3H5a2 2 0 0 0-2 2v3h2V5h3V3zm11 0h-3v2h3v3h2V5a2 2 0 0 0-2-2zM3 16v3a2 2 0 0 0 2 2h3v-2H5v-3H3zm16 3h-3v2h3a2 2 0 0 0 2-2v-3h-2v3z" />
+            ) : (
+              <Icon path="M9 3H5a2 2 0 0 0-2 2v4h2V5h4V3zm10 0h-4v2h4v4h2V5a2 2 0 0 0-2-2zM3 15v4a2 2 0 0 0 2 2h4v-2H5v-4H3zm16 4h-4v2h4a2 2 0 0 0 2-2v-4h-2v4z" />
+            )}
           </button>
         </div>
       </div>
@@ -66,9 +102,11 @@ export function ProjectTaskFlowPage({
       </div>
       <ProjectTaskDependencyGraphPanel
         projectId={selectedProjectId}
+        userId={userId}
         projectName={selectedProjectName || 'Selected project'}
         graphQuery={taskDependencyGraphQuery}
         showHeader={false}
+        fitSignal={fitSignal}
       />
     </section>
   )

@@ -683,6 +683,36 @@ export type TaskDependencyGraphEdgeChannel = {
   active?: boolean
 }
 
+export type TaskDependencyGraphRuntimeEvent = {
+  at?: string | null
+  source: string
+  reason?: string | null
+  trigger_link?: string | null
+  correlation_id?: string | null
+  active?: boolean
+}
+
+export type TaskDependencyGraphEventDetail = {
+  project_id: string
+  source_task_id: string
+  source_task_title: string
+  target_task_id: string
+  target_task_title: string
+  source: string
+  requested_at?: string | null
+  correlation_id?: string | null
+  trigger_link?: string | null
+  reason?: string | null
+  request_markdown?: string | null
+  response_markdown?: string | null
+  response_status?: string | null
+  response_at?: string | null
+  response_summary?: string | null
+  response_error?: string | null
+  response_comment_body?: string | null
+  response_comment_at?: string | null
+}
+
 export type TaskDependencyGraphEdge = {
   source_entity_id: string
   target_entity_id: string
@@ -699,6 +729,7 @@ export type TaskDependencyGraphEdge = {
   trigger_conditions?: Array<Record<string, unknown>>
   runtime_sources?: Record<string, number>
   channels: TaskDependencyGraphEdgeChannel[]
+  runtime_events?: TaskDependencyGraphRuntimeEvent[]
 }
 
 export type ProjectTaskDependencyGraph = {

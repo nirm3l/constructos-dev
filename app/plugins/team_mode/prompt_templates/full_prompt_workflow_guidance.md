@@ -93,7 +93,8 @@
 - If the user asks for deployment as part of planning/setup, create explicit deployment tasks/specs/notes; only execute deployment commands when the user explicitly asks to run deploy now.
 - For setup-only requests, record deployment intent in a note/task artifact with explicit stack + port + health path and mark `Execution state: Not started`.
 - When deploy execution is requested and no explicit stack is provided, deploy with Docker Compose project `constructos-ws-default`.
-- Use `docker compose` (wrapper-enforced project) or explicit `docker compose -p constructos-ws-default ...` for deployment commands unless user overrides stack.
+- For deterministic Team Mode Lead deploy flow, do not run `docker compose` manually from the task environment. Lead prepares/verifies deploy assets and the runner executes the actual compose deploy against the configured stack. Use manual `docker compose` commands only for direct user-requested deployment work outside that managed Lead flow.
+- Do not block a Lead response only because runner-controlled deploy has not happened yet. If deterministic deploy prerequisites are ready, return a normal success/comment outcome and let the runner perform deploy + health evaluation after the response.
 - Treat delivery as incomplete if post-deploy QA is missing. Required loop: Lead deploy -> QA post-deploy validation -> if fail create/link bug task(s) -> Dev fix with new commit evidence -> Lead re-deploy -> QA re-check evidence.
 - QA and Lead health probes must target `http://gateway:<port><health_path>` using `docker_compose` plugin config `port` and `health_path` (host is fixed).
 - Lead execution responsibility is explicit:
@@ -101,8 +102,9 @@
   - after each successful Dev branch integration to main, update that Dev task to `Done` with merge evidence.
   - never merge a branch with known failing validation/tests; require successful validation evidence before merge.
   - when deploy execution is required and compose manifest is missing, Lead must create compose deterministically from repository evidence (Dockerfile first, then supported runtime signals); if unsupported/ambiguous, set `Blocked` with explicit prerequisites instead of guessing.
+  - do not execute `docker compose` manually from the Lead task environment for managed Team Mode deploys; the runner owns the actual deploy command after deterministic asset preparation.
   - forbidden fallback: do not create starter/placeholder compose that serves only `/health` or directory listing from `/srv`; this is invalid deployment evidence.
-  - after successful deploy of merged main, request QA automation handoff explicitly and keep the Lead task in `Lead` until QA completes.
+  - after successful deploy of merged main, runner-controlled QA handoff will be emitted automatically; do not block the Lead response waiting for that post-deploy handoff in the same cycle.
 - If QA fails, run explicit bug loop: create/link bug task(s), implement fix with new commit evidence, then re-run QA and record re-check artifacts.
   - For each new bug-fix Dev task created after QA is already `Blocked`, add external status trigger from failing QA task IDs on `to_statuses=["Blocked"]` and `action="request_automation"` so execution can start without waiting for another status flip.
   - Immediately request automation on that bug-fix Dev task once (`run_task_with_codex`) as a fallback in case trigger reconciliation has not run yet.
@@ -113,6 +115,7 @@
 - Do not report `Verification: PASS` while any Team Mode task is still `idle` after kickoff, or while QA has no verifiable artifacts for a claimed completed cycle.
 - After kickoff, re-read persisted automation state for Dev/Lead/QA before summarizing progress. Report persisted task state, not the Lead task's self-reported deferred text, because Lead may defer after Developer dispatch has already started.
 - For kickoff progress reporting, do not rely on one stale read. If any bounded re-read shows a Developer task as `queued`, `running`, or `completed`, report kickoff as propagated to Developer execution.
+- Do not manually queue a Developer task after Lead kickoff just to repair missing provenance. If kickoff propagation is uncertain, report the incomplete state; backend runtime must normalize kickoff-origin Developer requests from persisted Lead kickoff state.
 - Do not manually queue QA in Team Mode. QA must start only from explicit Lead handoff state, and reporting must treat any manual QA queue attempt without Lead handoff as invalid workflow state.
 - For setup-only requests, include a final line `Execution state: Not started` plus `Deploy target recorded: <stack>:<port>`.
 - For setup-only requests, do not ask for repository URL/path automatically. Ask only if the user explicitly asks to continue with repo linking or execution.

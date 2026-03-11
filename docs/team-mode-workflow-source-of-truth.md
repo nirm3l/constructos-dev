@@ -76,6 +76,11 @@ The classification policy in this document also applies to adjacent workflow plu
   - `commit_sha`
   - `branch` (`task/...`)
   - `artifacts` (at least one object with `kind` and `ref`)
+- If executor output omits `files_changed`, runtime may deterministically derive it from concrete task-branch/worktree git evidence; missing executor bookkeeping may not by itself invalidate real implementation work.
+- Dirty or uncommitted worktree changes are not sufficient for Developer completion. Team Mode Developer success requires a real committed task-branch handoff:
+  - a real `task/...` branch must exist,
+  - the handoff `commit_sha` must match the current task-branch `HEAD`,
+  - the task branch must differ from `main` at handoff time.
 - If `git_delivery.execution.require_dev_tests=true`, Developer must return `tests_run=true` and `tests_passed=true`.
 - If tests are reported as run, they may not be failing.
 - On success, task transitions `Dev -> Lead`.
@@ -83,8 +88,10 @@ The classification policy in this document also applies to adjacent workflow plu
 ### 3) Lead integration + merge + deploy cycle
 - Lead inspects completed Developer outputs.
 - Lead merges ready Developer task branches into `main` deterministically.
+- If a Lead task is currently `Blocked` and a Developer handoff later produces merge-ready output that satisfies the Lead task's dependency topology, runtime must deterministically rearm that Lead task by transitioning `Blocked -> Lead` before dispatch. This re-entry may not wait for the recurring Lead schedule.
 - If Docker Compose plugin is enabled and `docker-compose.yml` is missing, Lead must create it from actual repository contents, commit it on a task branch, and merge that branch to `main`.
-- Lead performs deploy (`docker compose`) against the runtime stack defined by the `docker_compose` plugin config. The default app-managed runtime stack is `constructos-ws-default`, not `constructos-app`.
+- Lead decides deploy readiness and prepares deterministic deploy assets, but managed Team Mode deploy execution is runner-controlled. Lead must not invoke `docker compose` manually from the task environment for managed Team Mode deploys.
+- Runner performs deploy (`docker compose`) against the runtime stack defined by the `docker_compose` plugin config. The default app-managed runtime stack is `constructos-ws-default`, not `constructos-app`.
 - Lead performs runtime health check (`/health` with configured port) against that same runtime stack.
 - Lead writes structured deploy evidence to `external_refs`.
 
@@ -105,10 +112,12 @@ The classification policy in this document also applies to adjacent workflow plu
 ### 6) Failure loop
 - If QA fails, QA task transitions to `Blocked` with artifacted defect evidence.
 - Lead is queued for triage and dispatches corrective Developer work.
+- If Developer or QA corrective work resolves the previously blocking prerequisite, runtime must clear the stale blocked Lead cycle by rearming the Lead task to `Lead` and dispatching it through the normal handoff path.
 - Cycle repeats until QA PASS.
 
 ### 7) Completion
 - Project completion notification to human user is emitted only when all active project tasks are `Done` and blocking delivery gates are satisfied.
+- Team Mode/project setup must ensure at least one human project-visible recipient exists for completion/blocker notifications. If a project has no human project member, runtime must fall back to a human workspace member instead of silently dropping notifications.
 
 ## Deterministic Communication Model
 
@@ -124,7 +133,12 @@ The classification policy in this document also applies to adjacent workflow plu
 - Runtime must treat `TaskAutomationRequested` as authoritative when equivalent communication already exists for the same handoff edge/correlation window.
 - Runtime must ignore or deduplicate equivalent status-change-trigger automation requests when the target task already has a matching direct `TaskAutomationRequested` communication for that handoff.
 - Runtime must deduplicate equivalent signals so one handoff edge does not produce duplicate queue events.
+- Runtime must still persist a distinct cross-task `TaskAutomationRequested` when the target task is already `queued` or `running`; it may coalesce only an exact duplicate active request, but it must not drop a new Lead/Developer/QA handoff simply because the receiver is busy.
 - Every direct request should carry `source_task_id`, `reason`, `trigger_link`, and `correlation_id` for auditability and graph alignment.
+- Task Flow should keep one edge per `(source_task_id, target_task_id)` pair and surface repeated communication as edge-level runtime history/timeline, not by multiplying duplicate edges.
+- Task Flow runtime history should support drill-down to the concrete request/response pair for each recorded runtime event without inventing additional graph edges.
+- If an upstream kickoff-to-Developer request loses direct provenance, runtime must normalize the source-less Team Mode Developer request from persisted Lead kickoff state instead of preserving it as generic `manual`.
+- For `task_relationships.kind="depends_on"`, each relationship object is an alternative activation clause, not an implicit global `AND` across all `depends_on` entries. `match_mode` applies within one relationship object; runtime may rearm/dispatch the task when any declared `depends_on` clause is satisfied.
 
 ## Hard Gates (Authoritative)
 
@@ -138,10 +152,15 @@ The classification policy in this document also applies to adjacent workflow plu
 
 ### G3 Lead merge gate
 - Lead deploy phase may not proceed without at least one merge-ready Developer output.
+- For Lead merge/deploy decisions, current repository state is authoritative over stale task commentary or legacy refs when they disagree.
+- All Lead merge/deploy/runtime paths must use canonical repository path resolution for the current execution environment; container-local and host-docker path handling must not diverge across Lead code paths.
 
 ### G4 Lead deploy gate
 - Lead must record deploy command evidence and health evidence.
 - Runtime health gate (`runtime_deploy_health_ok`) must pass when configured as required.
+- Lead runtime paths must use canonical repository-path resolution consistently, regardless of whether code is running inside the app container or executing against the host Docker daemon.
+- Managed Team Mode deploy execution must remain runner-controlled so Docker Compose executes from the canonical host-safe repository context. Prompt guidance may not require the Lead agent to run `docker compose` manually from inside the task container.
+- Lead may prepare deterministic deploy assets and runtime-basis evidence, but may not block solely because runner-controlled deploy/health has not happened yet in the same Lead response cycle. Once prerequisites are ready, the runner owns deploy execution and post-deploy health gating.
 
 ### G5 QA handoff gate
 - QA run is blocked unless:
@@ -155,6 +174,7 @@ The classification policy in this document also applies to adjacent workflow plu
 
 ### G7 Completion gate
 - Human completion notification emitted only after all active tasks reach `Done`.
+- Human blocked/completion notifications may not be skipped merely because the project actor is an agent account; notification routing must resolve a human recipient from project membership first, then workspace membership as fallback.
 
 ## Ownership Matrix
 - Developer: implementation + commit + branch evidence.
