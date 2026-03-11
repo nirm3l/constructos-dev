@@ -10,7 +10,7 @@ Required actions:
    - ensure Dev work runs on isolated task branches (`task/<task-id-prefix>-...`) with unique commit evidence per Dev task,
    - integrate/merge ready Dev branches to main,
    - deploy merged main artifact,
-   - move Lead deploy task to QA and run QA against canonical endpoint `http://gateway:<port><health_path>` from `docker_compose` plugin config (`port`, `health_path`).
+   - request QA automation handoff explicitly after successful deploy, keep the Lead task in `Lead`, and run QA against canonical endpoint `http://gateway:<port><health_path>` from `docker_compose` plugin config (`port`, `health_path`).
 4) If QA fails, enforce bug loop:
    - create/link Dev bug task with new commit target,
    - add external trigger from blocked QA task on `to_statuses=["Blocked"]` with `action="request_automation"`,

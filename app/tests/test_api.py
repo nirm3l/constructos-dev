@@ -2592,6 +2592,248 @@ def test_agent_service_can_request_automation_run(tmp_path, monkeypatch):
     assert status['automation_state'] == 'queued'
 
 
+def test_instruction_intent_classifier_uses_application_cache(monkeypatch):
+    import features.agents.intent_classifier as intent_classifier_module
+
+    intent_classifier_module.clear_instruction_intent_cache()
+    intent_classifier_module.reset_instruction_intent_stats()
+    calls = {"count": 0}
+
+    def _fake_prompt(**_kwargs):
+        calls["count"] += 1
+        return {
+            "execution_intent": True,
+            "execution_kickoff_intent": False,
+            "project_creation_intent": False,
+            "workflow_scope": "unknown",
+            "execution_mode": "resume_execution",
+            "deploy_requested": False,
+            "docker_compose_requested": False,
+            "requested_port": None,
+            "exact_task_count": None,
+            "project_name_provided": False,
+            "task_completion_requested": False,
+            "reason": "cached",
+        }
+
+    monkeypatch.setattr(intent_classifier_module, "run_structured_codex_prompt", _fake_prompt)
+
+    first = intent_classifier_module.classify_instruction_intent(
+        instruction="Implement task automation now.",
+        workspace_id="ws-1",
+        project_id="project-1",
+        session_id="session-1",
+    )
+    second = intent_classifier_module.classify_instruction_intent(
+        instruction="Implement task automation now.",
+        workspace_id="ws-1",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert first == second
+    assert calls["count"] == 1
+    stats = intent_classifier_module.get_instruction_intent_stats()
+    assert stats["classify_calls"] == 2
+    assert stats["cache_hits"] == 1
+    assert stats["cache_misses"] == 1
+
+
+def test_agent_service_request_automation_run_classifies_once_for_manual_request(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    created = client.post('/api/tasks', json={'title': 'Single classification task', 'workspace_id': ws_id, 'project_id': project_id}).json()
+
+    from features.agents.service import AgentTaskService
+    import features.agents.intent_classifier as intent_classifier_module
+    import features.agents.service as svc_module
+
+    intent_classifier_module.clear_instruction_intent_cache()
+    intent_classifier_module.reset_instruction_intent_stats()
+    calls = {"count": 0}
+
+    def _fake_prompt(**_kwargs):
+        calls["count"] += 1
+        return {
+            "execution_intent": True,
+            "execution_kickoff_intent": False,
+            "project_creation_intent": False,
+            "workflow_scope": "unknown",
+            "execution_mode": "resume_execution",
+            "deploy_requested": False,
+            "docker_compose_requested": False,
+            "requested_port": None,
+            "exact_task_count": None,
+            "project_name_provided": False,
+            "task_completion_requested": False,
+            "reason": "single-call",
+        }
+
+    monkeypatch.setattr(intent_classifier_module, "run_structured_codex_prompt", _fake_prompt)
+
+    service = AgentTaskService()
+    run = service.request_task_automation_run(
+        task_id=created['id'],
+        instruction='Please implement the requested change.',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+
+    assert run['automation_state'] == 'queued'
+    assert calls["count"] == 1
+    stats = intent_classifier_module.get_instruction_intent_stats()
+    assert stats["cache_misses"] == 1
+    assert stats["resolve_reused_envelope"] >= 1
+
+
+def test_task_automation_run_prefers_provided_intent_envelope_without_reclassification(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    created = client.post('/api/tasks', json={'title': 'Preclassified task', 'workspace_id': ws_id, 'project_id': project_id}).json()
+
+    import features.agents.intent_classifier as intent_classifier_module
+
+    intent_classifier_module.clear_instruction_intent_cache()
+    intent_classifier_module.reset_instruction_intent_stats()
+
+    def _should_not_run(**_kwargs):
+        raise AssertionError("classifier should not run when the full intent envelope is provided")
+
+    monkeypatch.setattr(intent_classifier_module, "run_structured_codex_prompt", _should_not_run)
+
+    run = client.post(
+        f"/api/tasks/{created['id']}/automation/run",
+        json={
+            'instruction': 'Continue the existing execution.',
+            'execution_intent': True,
+            'execution_kickoff_intent': False,
+            'project_creation_intent': False,
+            'workflow_scope': 'unknown',
+            'execution_mode': 'resume_execution',
+            'task_completion_requested': False,
+            'classifier_reason': 'provided-upstream',
+        },
+    )
+    assert run.status_code == 200
+    assert run.json()['automation_state'] == 'queued'
+    stats = intent_classifier_module.get_instruction_intent_stats()
+    assert stats["cache_hits"] == 0
+    assert stats["cache_misses"] == 0
+    assert stats["resolve_reused_envelope"] >= 1
+
+
+def test_task_automation_stream_classifies_once_and_persists_intent_envelope(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    created = client.post('/api/tasks', json={'title': 'Stream classify once', 'workspace_id': ws_id, 'project_id': project_id}).json()
+    task_id = created['id']
+
+    import features.agents.intent_classifier as intent_classifier_module
+    from features.tasks import api as tasks_api
+    from features.agents.executor import AutomationOutcome
+
+    intent_classifier_module.clear_instruction_intent_cache()
+    intent_classifier_module.reset_instruction_intent_stats()
+    calls = {"count": 0}
+    captured: dict[str, object] = {}
+
+    def _fake_prompt(**_kwargs):
+        calls["count"] += 1
+        return {
+            "execution_intent": True,
+            "execution_kickoff_intent": False,
+            "project_creation_intent": False,
+            "workflow_scope": "unknown",
+            "execution_mode": "resume_execution",
+            "deploy_requested": False,
+            "docker_compose_requested": False,
+            "requested_port": None,
+            "exact_task_count": None,
+            "project_name_provided": False,
+            "task_completion_requested": False,
+            "reason": "stream-classified",
+        }
+
+    def _fake_execute_task_automation_stream(**kwargs):
+        captured.update(kwargs)
+        return AutomationOutcome(action='comment', summary='ok', comment='done', usage={})
+
+    monkeypatch.setattr(intent_classifier_module, "run_structured_codex_prompt", _fake_prompt)
+    monkeypatch.setattr(tasks_api, "execute_task_automation_stream", _fake_execute_task_automation_stream)
+
+    run = client.post(
+        f'/api/tasks/{task_id}/automation/stream',
+        json={'instruction': 'Stream execution should classify once.'},
+    )
+    assert run.status_code == 200
+    assert calls["count"] == 1
+    assert captured["execution_kickoff_intent"] is False
+    assert captured["workflow_scope"] == "unknown"
+    assert captured["execution_mode"] == "resume_execution"
+    assert captured["task_completion_requested"] is False
+
+    status = client.get(f"/api/tasks/{task_id}/automation")
+    assert status.status_code == 200
+    payload = status.json()
+    assert payload["last_requested_execution_intent"] is True
+    assert payload["last_requested_execution_mode"] == "resume_execution"
+    stats = intent_classifier_module.get_instruction_intent_stats()
+    assert stats["cache_misses"] == 1
+
+
+def test_task_automation_stream_prefers_provided_intent_envelope_without_reclassification(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    created = client.post('/api/tasks', json={'title': 'Stream preclassified', 'workspace_id': ws_id, 'project_id': project_id}).json()
+    task_id = created['id']
+
+    import features.agents.intent_classifier as intent_classifier_module
+    from features.tasks import api as tasks_api
+    from features.agents.executor import AutomationOutcome
+
+    intent_classifier_module.clear_instruction_intent_cache()
+    intent_classifier_module.reset_instruction_intent_stats()
+    captured: dict[str, object] = {}
+
+    def _should_not_run(**_kwargs):
+        raise AssertionError("classifier should not run when the stream request already includes the full intent envelope")
+
+    def _fake_execute_task_automation_stream(**kwargs):
+        captured.update(kwargs)
+        return AutomationOutcome(action='comment', summary='ok', comment='done', usage={})
+
+    monkeypatch.setattr(intent_classifier_module, "run_structured_codex_prompt", _should_not_run)
+    monkeypatch.setattr(tasks_api, "execute_task_automation_stream", _fake_execute_task_automation_stream)
+
+    run = client.post(
+        f'/api/tasks/{task_id}/automation/stream',
+        json={
+            'instruction': 'Continue the existing stream execution.',
+            'execution_intent': True,
+            'execution_kickoff_intent': False,
+            'project_creation_intent': False,
+            'workflow_scope': 'unknown',
+            'execution_mode': 'resume_execution',
+            'task_completion_requested': False,
+            'classifier_reason': 'provided-upstream',
+        },
+    )
+    assert run.status_code == 200
+    assert captured["execution_mode"] == "resume_execution"
+    assert captured["workflow_scope"] == "unknown"
+    stats = intent_classifier_module.get_instruction_intent_stats()
+    assert stats["cache_hits"] == 0
+    assert stats["cache_misses"] == 0
+    assert stats["resolve_reused_envelope"] >= 1
+
+
 def test_agent_service_request_automation_run_classifies_team_mode_kickoff(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -3350,6 +3592,58 @@ def test_runner_contract_validation_uses_repo_state_fallback_for_task_worktree_c
     assert error is None
 
 
+def test_project_has_merge_to_main_evidence_uses_repo_branch_merge_fallback(tmp_path, monkeypatch):
+    import subprocess
+
+    import features.agents.runner as runner_module
+    from shared.project_repository import ensure_project_repository_initialized
+    from shared.models import SessionLocal
+
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    patched_project = client.patch(
+        f'/api/projects/{project_id}',
+        json={'name': 'Merge Evidence Repo Fallback Demo'},
+    )
+    assert patched_project.status_code == 200
+    project_name = str(patched_project.json().get('name') or '')
+
+    repo_root = ensure_project_repository_initialized(project_name=project_name, project_id=project_id)
+    branch_name = 'task/abc12345-dev-implementation'
+
+    subprocess.run(['git', 'checkout', '-b', branch_name], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    (repo_root / 'index.html').write_text('<!doctype html><title>demo</title>\n', encoding='utf-8')
+    subprocess.run(['git', 'add', 'index.html'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    subprocess.run(['git', 'commit', '-m', 'Implement feature branch work'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    subprocess.run(['git', 'checkout', 'main'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    subprocess.run(['git', 'merge', '--no-ff', branch_name, '-m', 'Merge feature branch'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+
+    task = client.post(
+        '/api/tasks',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'title': 'Developer delivery branch',
+            'status': 'Lead',
+            'external_refs': [
+                {'url': f'branch:{branch_name}', 'title': 'Task branch'},
+            ],
+        },
+    )
+    assert task.status_code == 200
+
+    with SessionLocal() as db:
+        assert runner_module._project_has_merge_to_main_evidence(
+            db=db,
+            workspace_id=ws_id,
+            project_id=project_id,
+        ) is True
+
+
 def _seed_team_mode_topology_for_dev_handoff(
     client: TestClient,
     *,
@@ -3864,6 +4158,61 @@ def test_runner_blocks_dev_task_when_repo_context_missing_before_execution(tmp_p
     assert task_payload['status'] == 'Blocked'
 
 
+def test_synthesize_runtime_deploy_assets_repairs_legacy_static_manifest(tmp_path, monkeypatch):
+    import features.agents.runner as runner_module
+
+    repo_root = tmp_path / "static-runtime-repair"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    (repo_root / "index.html").write_text("<!doctype html><html><body>Tetris</body></html>\n", encoding="utf-8")
+    manifest_path = repo_root / "docker-compose.yml"
+    manifest_path.write_text(
+        "services:\n"
+        "  app:\n"
+        "    image: nginx:1.27-alpine\n"
+        "    ports:\n"
+        "      - \"6768:80\"\n"
+        "    volumes:\n"
+        "      - ./:/usr/share/nginx/html:ro\n"
+        "      - ./nginx/conf.d:/etc/nginx/conf.d:ro\n"
+        "    restart: unless-stopped\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        runner_module,
+        "resolve_project_repository_path",
+        lambda **_kwargs: repo_root,
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "find_project_compose_manifest",
+        lambda **_kwargs: manifest_path,
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "_commit_repo_changes_if_any",
+        lambda **_kwargs: "repair-sha-1234",
+    )
+
+    result = runner_module._synthesize_runtime_deploy_assets(
+        project_name="Static runtime repair",
+        project_id="static-runtime-repair",
+        port=6768,
+        health_path="/health",
+    )
+
+    assert result["ok"] is True
+    assert result["runtime_type"] == "static_web"
+    assert result["commit_sha"] == "repair-sha-1234"
+    assert set(result["created_files"]) >= {"docker-compose.yml", "nginx.constructos.conf"}
+    manifest_after = manifest_path.read_text(encoding="utf-8")
+    assert "./nginx.constructos.conf:/etc/nginx/conf.d/default.conf:ro" in manifest_after
+    assert "./nginx/conf.d:/etc/nginx/conf.d:ro" not in manifest_after
+    nginx_conf_path = repo_root / "nginx.constructos.conf"
+    assert nginx_conf_path.exists()
+    assert "location = /health" in nginx_conf_path.read_text(encoding="utf-8")
+
+
 def test_runner_blocks_qa_task_until_lead_handoff_is_complete(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -4039,6 +4388,88 @@ def test_runner_blocks_qa_task_when_handoff_is_stale_for_current_deploy_cycle(tm
     handoff_gate = next(item for item in gates if item.get('id') == 'qa_handoff_ready')
     assert handoff_gate['status'] == 'waiting'
     assert 'current deploy cycle' in str(handoff_gate.get('message') or '').lower()
+
+
+def test_task_automation_status_derives_qa_handoff_from_structured_request_and_lead_refs(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    team = _enable_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+
+    lead_task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Lead deploy cycle',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'Done',
+            'assignee_id': team['lead'],
+            'assigned_agent_code': 'lead-a',
+            'external_refs': [
+                {'url': 'file:/home/app/workspace/.constructos/repos/tetris/docker-compose.yml', 'title': 'Compose manifest path'},
+                {'url': 'decision:runtime_signal_static_assets_index_html', 'title': 'Runtime decision'},
+                {'url': 'command:docker compose -p constructos-ws-default up -d --build:success', 'title': 'Deploy command'},
+                {'url': 'http://gateway:6768/health#post-deploy-http-200-2026-03-10T15:09:54Z', 'title': 'Deploy health: pass'},
+            ],
+        },
+    )
+    assert lead_task.status_code == 200
+    lead_task_id = lead_task.json()['id']
+
+    qa_task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'QA validation',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'QA',
+            'assignee_id': team['qa'],
+            'assigned_agent_code': 'qa-a',
+            'instruction': 'Run QA checks.',
+        },
+    )
+    assert qa_task.status_code == 200
+    qa_task_id = qa_task.json()['id']
+
+    from shared.core import append_event
+    from shared.models import SessionLocal
+    from shared.settings import AGENT_SYSTEM_USER_ID
+
+    with SessionLocal() as db:
+        append_event(
+            db,
+            aggregate_type='Task',
+            aggregate_id=qa_task_id,
+            event_type='TaskAutomationRequested',
+            payload={
+                'requested_at': '2026-03-10T15:10:00Z',
+                'instruction': 'Run QA checks.',
+                'source': 'lead_handoff',
+                'source_task_id': lead_task_id,
+                'reason': 'lead_handoff',
+                'workflow_scope': 'team_mode',
+                'execution_intent': True,
+                'correlation_id': 'lead:derived-handoff',
+                'trigger_task_id': lead_task_id,
+                'from_status': 'Lead',
+                'to_status': 'QA',
+                'triggered_at': '2026-03-10T15:10:00Z',
+            },
+            metadata={'actor_id': AGENT_SYSTEM_USER_ID, 'workspace_id': ws_id, 'project_id': project_id, 'task_id': qa_task_id},
+        )
+        db.commit()
+
+    lead_status = client.get(f"/api/tasks/{lead_task_id}/automation").json()
+    assert lead_status['last_deploy_execution']['runtime_ok'] is True
+    assert lead_status['last_deploy_execution']['http_status'] == 200
+
+    qa_status = client.get(f"/api/tasks/{qa_task_id}/automation").json()
+    assert qa_status['last_lead_handoff_token'] == 'lead:derived-handoff'
+    assert qa_status['last_lead_handoff_deploy_execution']['runtime_ok'] is True
+    handoff_gate = next(item for item in (qa_status.get('execution_gates') or []) if item.get('id') == 'qa_handoff_ready')
+    assert handoff_gate['status'] == 'pass'
 
 
 def test_runner_blocks_lead_task_until_merge_ready_developer_output_exists(tmp_path, monkeypatch):
@@ -4317,6 +4748,32 @@ def test_team_mode_transition_uses_task_workflow_role_not_owner_membership_role(
     moved = client.patch(f'/api/tasks/{task_id}', json={'status': 'Lead'})
     assert moved.status_code == 200
     assert moved.json()['status'] == 'Lead'
+
+
+def test_team_mode_rejects_lead_status_change_to_qa(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    team = _enable_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Lead deploy task',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'Lead',
+            'assignee_id': team['lead'],
+            'assigned_agent_code': 'lead-a',
+            'instruction': 'Coordinate deploy and QA handoff.',
+        },
+    )
+    assert created.status_code == 200
+
+    blocked = client.patch(f"/api/tasks/{created.json()['id']}", json={'status': 'QA'})
+    assert blocked.status_code == 409
+    assert "Lead must hand off to QA via automation request" in str(blocked.json().get('detail') or '')
 
 
 def test_runner_can_complete_task_from_instruction(tmp_path):
@@ -6756,6 +7213,12 @@ def test_agent_service_verify_team_mode_workflow_detects_missing_dev_triggers_an
     monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
     monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
     monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
 
     service = AgentTaskService()
     service.archive_all_tasks(workspace_id=ws_id, project_id=project_id)
@@ -6923,6 +7386,8 @@ def test_agent_service_verify_team_mode_workflow_single_lead_deploy_task_does_no
     monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
     monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
     monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
 
     service = AgentTaskService()
     service.archive_all_tasks(workspace_id=ws_id, project_id=project_id)
@@ -7383,6 +7848,7 @@ def test_agent_service_verify_delivery_workflow_requires_commit_and_qa_evidence(
     monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
     monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
     monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
 
     # Ensure repo context exists for git contract checks.
     patched_project = client.patch(
@@ -7392,6 +7858,7 @@ def test_agent_service_verify_delivery_workflow_requires_commit_and_qa_evidence(
         },
     )
     assert patched_project.status_code == 200
+    project_name = str(patched_project.json().get("name") or "")
 
     service = AgentTaskService()
     service.archive_all_tasks(workspace_id=ws_id, project_id=project_id)
@@ -7489,10 +7956,29 @@ def test_agent_service_verify_delivery_workflow_requires_commit_and_qa_evidence(
             "task_id": deploy_task.json()["id"],
             "title": "Deploy execution",
             "body": "Ran docker compose up -d and verified http://localhost:6768/health status 200. Service is running.",
-            "external_refs": [{"url": "https://example.com/deploy/run/1", "title": "Deploy verification"}],
+            "external_refs": [
+                {"url": "https://example.com/deploy/run/1", "title": "Deploy verification"},
+                {"url": "deploy:runtime:static_assets", "title": "Runtime decision"},
+                {"url": "deploy:compose:docker-compose.yml", "title": "Compose manifest"},
+                {"url": "deploy:command:docker compose -p constructos-ws-default up -d", "title": "Deploy command"},
+                {"url": "deploy:health:http://gateway:6768/health:http_200", "title": "Health probe"},
+            ],
         },
     )
     assert deploy_note.status_code == 200
+
+    from shared.project_repository import resolve_project_repository_path
+
+    repo_root = resolve_project_repository_path(project_name=project_name, project_id=project_id)
+    repo_root.mkdir(parents=True, exist_ok=True)
+    (repo_root / "docker-compose.yml").write_text(
+        "services:\n"
+        "  web:\n"
+        "    image: nginx:alpine\n"
+        "    ports:\n"
+        "      - \"6768:80\"\n",
+        encoding="utf-8",
+    )
 
     from shared.core import append_event
     from shared.models import SessionLocal
@@ -7537,6 +8023,8 @@ def test_agent_service_verify_delivery_workflow_rejects_duplicate_commit_evidenc
     monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
     monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
     monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
 
     patched_project = client.patch(
         f"/api/projects/{project_id}",
@@ -7545,6 +8033,8 @@ def test_agent_service_verify_delivery_workflow_rejects_duplicate_commit_evidenc
         },
     )
     assert patched_project.status_code == 200
+    project_name = str(patched_project.json().get("name") or "")
+    project_name = str(patched_project.json().get("name") or "")
 
     service = AgentTaskService()
     service.archive_all_tasks(workspace_id=ws_id, project_id=project_id)
@@ -7658,10 +8148,29 @@ def test_agent_service_verify_delivery_workflow_rejects_duplicate_commit_evidenc
             "task_id": deploy_task.json()["id"],
             "title": "Deploy execution",
             "body": "Deploy completed via docker compose and /health returned status 200.",
-            "external_refs": [{"url": "https://example.com/deploy/run/2", "title": "Deploy verification"}],
+            "external_refs": [
+                {"url": "https://example.com/deploy/run/2", "title": "Deploy verification"},
+                {"url": "deploy:runtime:static_assets", "title": "Runtime decision"},
+                {"url": "deploy:compose:docker-compose.yml", "title": "Compose manifest"},
+                {"url": "deploy:command:docker compose -p constructos-ws-default up -d", "title": "Deploy command"},
+                {"url": "deploy:health:http://gateway:6768/health:http_200", "title": "Health probe"},
+            ],
         },
     )
     assert deploy_note.status_code == 200
+
+    from shared.project_repository import resolve_project_repository_path
+
+    repo_root = resolve_project_repository_path(project_name=project_name, project_id=project_id)
+    repo_root.mkdir(parents=True, exist_ok=True)
+    (repo_root / "docker-compose.yml").write_text(
+        "services:\n"
+        "  web:\n"
+        "    image: nginx:alpine\n"
+        "    ports:\n"
+        "      - \"6768:80\"\n",
+        encoding="utf-8",
+    )
 
     from shared.core import append_event
     from shared.models import SessionLocal
@@ -7709,6 +8218,7 @@ def test_verify_delivery_workflow_accepts_structured_lead_deploy_snapshot(tmp_pa
     monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
     monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
     monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
 
     patched_project = client.patch(
         f"/api/projects/{project_id}",
@@ -7717,6 +8227,7 @@ def test_verify_delivery_workflow_accepts_structured_lead_deploy_snapshot(tmp_pa
         },
     )
     assert patched_project.status_code == 200
+    project_name = str(patched_project.json().get("name") or "")
 
     service = AgentTaskService()
     service.archive_all_tasks(workspace_id=ws_id, project_id=project_id)
@@ -7809,6 +8320,40 @@ def test_verify_delivery_workflow_accepts_structured_lead_deploy_snapshot(tmp_pa
                 "task_id": deploy_task.json()["id"],
             },
         )
+        append_event(
+            db,
+            aggregate_type="Task",
+            aggregate_id=qa_task.json()["id"],
+            event_type="TaskAutomationRequested",
+            payload={
+                "requested_at": completed_at,
+                "instruction": "Run QA checks.",
+                "source": "lead_handoff",
+                "source_task_id": deploy_task.json()["id"],
+                "reason": "lead_handoff",
+                "trigger_link": f"{deploy_task.json()['id']}->{qa_task.json()['id']}:QA",
+                "correlation_id": f"lead:{deploy_task.json()['id']}:{completed_at}",
+                "trigger_task_id": deploy_task.json()["id"],
+                "from_status": "Lead",
+                "to_status": "QA",
+                "triggered_at": completed_at,
+                "lead_handoff_token": f"lead:{deploy_task.json()['id']}:{completed_at}",
+                "lead_handoff_at": completed_at,
+                "lead_handoff_refs": [],
+                "lead_handoff_deploy_execution": {
+                    "executed_at": completed_at,
+                    "stack": "constructos-ws-default",
+                    "port": 6768,
+                    "health_path": "/health",
+                },
+            },
+            metadata={
+                "actor_id": AGENT_SYSTEM_USER_ID,
+                "workspace_id": ws_id,
+                "project_id": project_id,
+                "task_id": qa_task.json()["id"],
+            },
+        )
         for task_id in (dev_task.json()["id"], qa_task.json()["id"], deploy_task.json()["id"]):
             append_event(
                 db,
@@ -7825,6 +8370,19 @@ def test_verify_delivery_workflow_accepts_structured_lead_deploy_snapshot(tmp_pa
             )
         db.commit()
 
+    from shared.project_repository import resolve_project_repository_path
+
+    repo_root = resolve_project_repository_path(project_name=project_name, project_id=project_id)
+    repo_root.mkdir(parents=True, exist_ok=True)
+    (repo_root / "docker-compose.yml").write_text(
+        "services:\n"
+        "  web:\n"
+        "    build: .\n"
+        "    ports:\n"
+        "      - \"6768:80\"\n",
+        encoding="utf-8",
+    )
+
     monkeypatch.setattr(
         AgentTaskService,
         "_run_runtime_deploy_health_check",
@@ -7836,6 +8394,7 @@ def test_verify_delivery_workflow_accepts_structured_lead_deploy_snapshot(tmp_pa
                 "stack_running": True,
                 "port_mapped": True,
                 "http_200": True,
+                "serves_application_root": True,
                 "ok": True,
                 "error": None,
             }
@@ -7879,10 +8438,536 @@ def test_verify_delivery_workflow_accepts_structured_lead_deploy_snapshot(tmp_pa
     assert docker_configured["enabled"] is True
 
     verification = service.verify_delivery_workflow(project_id=project_id, workspace_id=ws_id)
+    assert "compose_manifest_present" in verification["required_checks"]
+    assert "qa_handoff_current_cycle_ok" in verification["required_checks"]
+    assert verification["checks"]["compose_manifest_present"] is True
     assert verification["checks"]["lead_deploy_decision_evidence_present"] is True
+    assert verification["checks"]["qa_handoff_current_cycle_ok"] is True
     assert verification["checks"]["deploy_execution_evidence_present"] is True
     assert verification["checks"]["runtime_deploy_health_ok"] is True
     assert verification["ok"] is True
+
+
+def test_verify_delivery_workflow_accepts_legacy_lead_deploy_evidence(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+    from shared.project_repository import resolve_project_repository_path
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
+
+    patched_project = client.patch(
+        f"/api/projects/{project_id}",
+        json={
+            "name": "Legacy Delivery Demo",
+            "external_refs": [{"url": "https://github.com/example/delivery-demo", "title": "Repo"}],
+        },
+    )
+    assert patched_project.status_code == 200
+    project_name = str(patched_project.json().get("name") or "")
+
+    service = AgentTaskService()
+    service.archive_all_tasks(workspace_id=ws_id, project_id=project_id)
+    service.set_project_plugin_enabled(
+        project_id=project_id,
+        workspace_id=ws_id,
+        plugin_key="team_mode",
+        enabled=True,
+    )
+    service.set_project_plugin_enabled(
+        project_id=project_id,
+        workspace_id=ws_id,
+        plugin_key="git_delivery",
+        enabled=True,
+    )
+    service.apply_project_plugin_config(
+        project_id=project_id,
+        workspace_id=ws_id,
+        plugin_key="git_delivery",
+        enabled=True,
+        config={
+            "required_checks": {
+                "delivery": [
+                    "repo_context_present",
+                    "git_contract_ok",
+                ]
+            },
+        },
+    )
+
+    team = _ensure_team_mode_member_roles(workspace_id=ws_id, project_id=project_id)
+    dev_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Developer delivery",
+            "status": "Dev",
+            "assignee_id": team["dev1"],
+            "external_refs": [
+                {"url": "commit:abc1234", "title": "Commit"},
+                {"url": "branch:task/abcdefgh-implementation", "title": "Task branch"},
+            ],
+        },
+    )
+    assert dev_task.status_code == 200
+    qa_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "QA report",
+            "status": "QA",
+            "assignee_id": team["qa"],
+            "external_refs": [{"url": "https://example.com/qa/report/legacy", "title": "QA report"}],
+        },
+    )
+    assert qa_task.status_code == 200
+    deploy_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Lead deploy cycle",
+            "status": "Lead",
+            "assignee_id": team["lead"],
+            "external_refs": [
+                {"url": "file:/home/app/workspace/.constructos/repos/legacy-delivery-demo/docker-compose.yml", "title": "Compose manifest path"},
+                {"url": "decision:runtime_signal_static_assets_index_html", "title": "Runtime decision"},
+                {"url": "command:docker compose -p constructos-ws-default up -d --build:success", "title": "Deploy command"},
+                {"url": "probe:postdeploy:http://gateway:6768/health:http_200", "title": "Post-deploy health probe"},
+            ],
+        },
+    )
+    assert deploy_task.status_code == 200
+
+    repo_root = resolve_project_repository_path(project_name=project_name, project_id=project_id)
+    repo_root.mkdir(parents=True, exist_ok=True)
+    (repo_root / "docker-compose.yml").write_text(
+        "services:\n"
+        "  web:\n"
+        "    image: nginx:alpine\n"
+        "    ports:\n"
+        "      - \"6768:80\"\n",
+        encoding="utf-8",
+    )
+
+    verification = service.verify_delivery_workflow(project_id=project_id, workspace_id=ws_id)
+    assert "compose_manifest_present" in verification["required_checks"]
+    assert verification["checks"]["compose_manifest_present"] is True
+    assert verification["checks"]["lead_deploy_decision_evidence_present"] is True
+    assert verification["checks"]["deploy_execution_evidence_present"] is True
+    assert verification["ok"] is True
+
+
+def test_verify_delivery_workflow_accepts_direct_runner_health_refs(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+    from shared.project_repository import resolve_project_repository_path
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
+
+    patched_project = client.patch(
+        f"/api/projects/{project_id}",
+        json={
+            "name": "Direct Health Ref Delivery Demo",
+            "external_refs": [{"url": "https://github.com/example/direct-health-demo", "title": "Repo"}],
+        },
+    )
+    assert patched_project.status_code == 200
+    project_name = str(patched_project.json().get("name") or "")
+
+    service = AgentTaskService()
+    service.archive_all_tasks(workspace_id=ws_id, project_id=project_id)
+    team = _ensure_team_mode_member_roles(workspace_id=ws_id, project_id=project_id)
+
+    dev_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Developer delivery",
+            "status": "Dev",
+            "assignee_id": team["dev1"],
+            "external_refs": [
+                {"url": "commit:abc1234", "title": "Commit"},
+                {"url": "branch:task/abcdefgh-implementation", "title": "Task branch"},
+            ],
+        },
+    )
+    assert dev_task.status_code == 200
+    deploy_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Lead deploy cycle",
+            "status": "Lead",
+            "assignee_id": team["lead"],
+            "external_refs": [
+                {"url": "file:/home/app/workspace/.constructos/repos/direct-health-ref-delivery-demo/docker-compose.yml", "title": "Compose manifest path"},
+                {"url": "decision:runtime_signal_static_assets_index_html", "title": "Runtime decision"},
+                {"url": "command:docker compose -p constructos-ws-default up -d --build:success", "title": "Deploy command"},
+                {"url": "http://gateway:6768/health#post-deploy-http-200-2026-03-10T15:09:54Z", "title": "Deploy health: pass"},
+            ],
+        },
+    )
+    assert deploy_task.status_code == 200
+
+    repo_root = resolve_project_repository_path(project_name=project_name, project_id=project_id)
+    repo_root.mkdir(parents=True, exist_ok=True)
+    (repo_root / "docker-compose.yml").write_text(
+        "services:\n"
+        "  web:\n"
+        "    image: nginx:alpine\n"
+        "    ports:\n"
+        "      - \"6768:80\"\n",
+        encoding="utf-8",
+    )
+
+    verification = service.verify_delivery_workflow(project_id=project_id, workspace_id=ws_id)
+    assert verification["checks"]["lead_deploy_decision_evidence_present"] is True
+    assert verification["checks"]["deploy_execution_evidence_present"] is True
+
+
+def test_project_task_dependency_graph_includes_structural_trigger_and_runtime_channels(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    project = client.post(
+        '/api/projects',
+        json={
+            'workspace_id': ws_id,
+            'name': 'Task Flow Demo',
+            'description': 'Task dependency graph demo.',
+        },
+    )
+    assert project.status_code == 200
+    project_id = project.json()['id']
+
+    team = _enable_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+
+    dev_task = client.post(
+        '/api/tasks',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'title': 'Developer implementation',
+            'status': 'Dev',
+            'assignee_id': team['dev1'],
+            'assigned_agent_code': 'dev-a',
+            'instruction': 'Implement the feature.',
+            'task_relationships': [
+                {'kind': 'delivers_to', 'task_ids': []},
+            ],
+        },
+    )
+    assert dev_task.status_code == 200
+    dev_task_id = dev_task.json()['id']
+
+    lead_task = client.post(
+        '/api/tasks',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'title': 'Lead integration',
+            'status': 'Lead',
+            'assignee_id': team['lead'],
+            'assigned_agent_code': 'lead-a',
+            'instruction': 'Merge and deploy.',
+            'task_relationships': [
+                {'kind': 'depends_on', 'task_ids': [dev_task_id], 'statuses': ['Lead']},
+            ],
+        },
+    )
+    assert lead_task.status_code == 200
+    lead_task_id = lead_task.json()['id']
+
+    patched_dev = client.patch(
+        f'/api/tasks/{dev_task_id}',
+        json={
+            'task_relationships': [
+                {'kind': 'delivers_to', 'task_ids': [lead_task_id]},
+            ],
+        },
+    )
+    assert patched_dev.status_code == 200
+
+    qa_task = client.post(
+        '/api/tasks',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'title': 'QA validation',
+            'status': 'QA',
+            'assignee_id': team['qa'],
+            'assigned_agent_code': 'qa-a',
+            'instruction': 'Run QA checks.',
+            'execution_triggers': [
+                {
+                    'kind': 'status_change',
+                    'scope': 'external',
+                    'selector': {'task_ids': [lead_task_id]},
+                    'to_statuses': ['Done'],
+                }
+            ],
+            'task_relationships': [
+                {'kind': 'hands_off_to', 'task_ids': [lead_task_id]},
+            ],
+        },
+    )
+    assert qa_task.status_code == 200
+    qa_task_id = qa_task.json()['id']
+
+    from shared.core import append_event
+    from shared.models import SessionLocal
+    from shared.settings import AGENT_SYSTEM_USER_ID
+
+    with SessionLocal() as db:
+        append_event(
+            db,
+            aggregate_type='Task',
+            aggregate_id=lead_task_id,
+            event_type='TaskAutomationRequested',
+            payload={
+                'requested_at': '2026-03-10T15:50:00Z',
+                'instruction': 'Run Lead cycle.',
+                'source': 'runner_orchestrator',
+                'source_task_id': dev_task_id,
+                'reason': 'developer_handoff',
+                'trigger_link': f'{dev_task_id}->{lead_task_id}:Lead',
+                'correlation_id': 'run-1',
+            },
+            metadata={'actor_id': AGENT_SYSTEM_USER_ID, 'workspace_id': ws_id, 'project_id': project_id, 'task_id': lead_task_id},
+        )
+        append_event(
+            db,
+            aggregate_type='Task',
+            aggregate_id=qa_task_id,
+            event_type='TaskAutomationRequested',
+            payload={
+                'requested_at': '2026-03-10T15:55:00Z',
+                'instruction': 'Run QA checks.',
+                'source': 'lead_handoff',
+                'source_task_id': lead_task_id,
+                'reason': 'lead_handoff',
+                'workflow_scope': 'team_mode',
+                'trigger_link': f'{lead_task_id}->{qa_task_id}:QA',
+                'correlation_id': 'lead-handoff-1',
+            },
+            metadata={'actor_id': AGENT_SYSTEM_USER_ID, 'workspace_id': ws_id, 'project_id': project_id, 'task_id': qa_task_id},
+        )
+        db.commit()
+
+    graph_res = client.get(f'/api/projects/{project_id}/task-dependency-graph')
+    assert graph_res.status_code == 200
+    payload = graph_res.json()
+
+    assert payload['project_id'] == project_id
+    assert payload['node_count'] == 3
+    assert payload['counts']['structural_edges'] >= 2
+    assert payload['counts']['status_trigger_edges'] >= 1
+    assert payload['counts']['runtime_edges'] >= 2
+
+    edge_map = {
+        (str(item.get('source_entity_id') or ''), str(item.get('target_entity_id') or '')): item
+        for item in (payload.get('edges') or [])
+    }
+    dev_to_lead = edge_map[(dev_task_id, lead_task_id)]
+    assert dev_to_lead['structural'] is True
+    assert dev_to_lead['runtime_dependency'] is True
+    assert dev_to_lead['runtime_requests_total'] >= 1
+    assert any(str(channel.get('kind') or '') == 'relationship' for channel in (dev_to_lead.get('channels') or []))
+    assert any(str(channel.get('kind') or '') == 'runtime_request' for channel in (dev_to_lead.get('channels') or []))
+
+    lead_to_qa = edge_map[(lead_task_id, qa_task_id)]
+    assert lead_to_qa['structural'] is True
+    assert lead_to_qa['trigger_dependency'] is True
+    assert lead_to_qa['runtime_dependency'] is True
+    assert int(lead_to_qa['lead_handoffs_total']) == 1
+    assert any(str(channel.get('kind') or '') == 'status_trigger' for channel in (lead_to_qa.get('channels') or []))
+    assert any(str(channel.get('source') or '') == 'lead_handoff' for channel in (lead_to_qa.get('channels') or []))
+
+
+def test_task_dependency_graph_creates_runtime_edge_from_request_source_task_id(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    lead_task = client.post(
+        '/api/tasks',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'title': 'Lead dispatch',
+            'status': 'Lead',
+            'instruction': 'Coordinate handoffs.',
+        },
+    )
+    assert lead_task.status_code == 200
+    lead_task_id = lead_task.json()['id']
+
+    dev_task = client.post(
+        '/api/tasks',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'title': 'Developer implementation',
+            'status': 'Dev',
+            'instruction': 'Implement feature changes.',
+        },
+    )
+    assert dev_task.status_code == 200
+    dev_task_id = dev_task.json()['id']
+
+    run_res = client.post(
+        f'/api/tasks/{dev_task_id}/automation/run',
+        json={
+            'instruction': 'Implement feature changes.',
+            'source': 'runner_orchestrator',
+            'source_task_id': lead_task_id,
+        },
+    )
+    assert run_res.status_code == 200
+
+    graph_res = client.get(f'/api/projects/{project_id}/task-dependency-graph')
+    assert graph_res.status_code == 200
+    payload = graph_res.json()
+
+    edge_map = {
+        (str(item.get('source_entity_id') or ''), str(item.get('target_entity_id') or '')): item
+        for item in (payload.get('edges') or [])
+    }
+    runtime_edge = edge_map[(lead_task_id, dev_task_id)]
+    assert runtime_edge['runtime_dependency'] is True
+    assert runtime_edge['runtime_requests_total'] >= 1
+    assert runtime_edge['runtime_sources']['runner_orchestrator'] >= 1
+    assert any(str(channel.get('source') or '') == 'runner_orchestrator' for channel in (runtime_edge.get('channels') or []))
+
+
+def test_verify_delivery_workflow_ignores_bare_task_http_refs_for_deploy_execution(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+    from shared.project_repository import resolve_project_repository_path
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
+
+    patched_project = client.patch(
+        f"/api/projects/{project_id}",
+        json={
+            "name": "Deferred Lead Evidence Demo",
+            "external_refs": [{"url": "https://github.com/example/delivery-demo", "title": "Repo"}],
+        },
+    )
+    assert patched_project.status_code == 200
+    project_name = str(patched_project.json().get("name") or "")
+
+    service = AgentTaskService()
+    service.archive_all_tasks(workspace_id=ws_id, project_id=project_id)
+    service.set_project_plugin_enabled(
+        project_id=project_id,
+        workspace_id=ws_id,
+        plugin_key="team_mode",
+        enabled=True,
+    )
+    service.set_project_plugin_enabled(
+        project_id=project_id,
+        workspace_id=ws_id,
+        plugin_key="git_delivery",
+        enabled=True,
+    )
+
+    team = _ensure_team_mode_member_roles(workspace_id=ws_id, project_id=project_id)
+    dev_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Developer delivery",
+            "status": "Dev",
+            "assignee_id": team["dev1"],
+            "external_refs": [
+                {"url": "commit:abc1234", "title": "Commit"},
+                {"url": "branch:task/abcdefgh-implementation", "title": "Task branch"},
+            ],
+        },
+    )
+    assert dev_task.status_code == 200
+    qa_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "QA report",
+            "status": "QA",
+            "assignee_id": team["qa"],
+            "external_refs": [{"url": "https://example.com/qa/report/deferred", "title": "QA report"}],
+        },
+    )
+    assert qa_task.status_code == 200
+    deploy_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Lead deploy cycle",
+            "status": "Lead",
+            "assignee_id": team["lead"],
+            "external_refs": [
+                {"url": "http://gateway:6768/health", "title": "Health endpoint"},
+                {
+                    "url": "http://gateway:6768/health?observed_at=2026-03-10T13:40:39Z&http_status=000&probe=connect_failed",
+                    "title": "Observability-only probe",
+                },
+                {"url": "https://evidence.local/deploy-deferred?reason=no-merge-to-main-evidence", "title": "Deferred evidence"},
+            ],
+        },
+    )
+    assert deploy_task.status_code == 200
+
+    repo_root = resolve_project_repository_path(project_name=project_name, project_id=project_id)
+    repo_root.mkdir(parents=True, exist_ok=True)
+    (repo_root / "docker-compose.yml").write_text(
+        "services:\n"
+        "  web:\n"
+        "    image: nginx:alpine\n"
+        "    ports:\n"
+        "      - \"6768:80\"\n",
+        encoding="utf-8",
+    )
+
+    verification = service.verify_delivery_workflow(project_id=project_id, workspace_id=ws_id)
+    assert verification["checks"]["deploy_execution_evidence_present"] is False
+    assert verification["checks"]["lead_deploy_decision_evidence_present"] is False
+    assert verification["ok"] is False
 
 
 def test_verify_delivery_workflow_requires_current_cycle_qa_handoff(tmp_path, monkeypatch):
@@ -7901,6 +8986,7 @@ def test_verify_delivery_workflow_requires_current_cycle_qa_handoff(tmp_path, mo
     monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
     monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
     monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
 
     patched_project = client.patch(
         f"/api/projects/{project_id}",
@@ -7909,6 +8995,7 @@ def test_verify_delivery_workflow_requires_current_cycle_qa_handoff(tmp_path, mo
         },
     )
     assert patched_project.status_code == 200
+    project_name = str(patched_project.json().get("name") or "")
 
     service = AgentTaskService()
     service.archive_all_tasks(workspace_id=ws_id, project_id=project_id)
@@ -8049,6 +9136,19 @@ def test_verify_delivery_workflow_requires_current_cycle_qa_handoff(tmp_path, mo
             )
         db.commit()
 
+    from shared.project_repository import resolve_project_repository_path
+
+    repo_root = resolve_project_repository_path(project_name=project_name, project_id=project_id)
+    repo_root.mkdir(parents=True, exist_ok=True)
+    (repo_root / "docker-compose.yml").write_text(
+        "services:\n"
+        "  web:\n"
+        "    build: .\n"
+        "    ports:\n"
+        "      - \"6768:80\"\n",
+        encoding="utf-8",
+    )
+
     monkeypatch.setattr(
         AgentTaskService,
         "_run_runtime_deploy_health_check",
@@ -8060,6 +9160,7 @@ def test_verify_delivery_workflow_requires_current_cycle_qa_handoff(tmp_path, mo
                 "stack_running": True,
                 "port_mapped": True,
                 "http_200": True,
+                "serves_application_root": True,
                 "ok": True,
                 "error": None,
             }
@@ -8254,12 +9355,14 @@ def test_agent_service_verify_delivery_workflow_respects_plugin_policy_runtime_d
     monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
     monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
     monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
 
     patched_project = client.patch(
         f"/api/projects/{project_id}",
         json={"external_refs": [{"url": "https://github.com/example/delivery-demo", "title": "Repo"}]},
     )
     assert patched_project.status_code == 200
+    project_name = str(patched_project.json().get("name") or "")
 
     service = AgentTaskService()
     ensured = service.ensure_team_mode_project(project_id=project_id, workspace_id=ws_id)
@@ -8338,10 +9441,29 @@ def test_agent_service_verify_delivery_workflow_respects_plugin_policy_runtime_d
             "task_id": deploy_task.json()["id"],
             "title": "Deploy note",
             "body": "docker compose up -d done; service healthy and running.",
-            "external_refs": [{"url": "https://example.com/deploy/run/3", "title": "Deploy verification"}],
+            "external_refs": [
+                {"url": "https://example.com/deploy/run/3", "title": "Deploy verification"},
+                {"url": "deploy:runtime:static_assets", "title": "Runtime decision"},
+                {"url": "deploy:compose:docker-compose.yml", "title": "Compose manifest"},
+                {"url": "deploy:command:docker compose -p constructos-ws-default up -d", "title": "Deploy command"},
+                {"url": "deploy:health:http://gateway:6768/health:http_200", "title": "Health probe"},
+            ],
         },
     )
     assert deploy_note.status_code == 200
+
+    from shared.project_repository import resolve_project_repository_path
+
+    repo_root = resolve_project_repository_path(project_name=project_name, project_id=project_id)
+    repo_root.mkdir(parents=True, exist_ok=True)
+    (repo_root / "docker-compose.yml").write_text(
+        "services:\n"
+        "  web:\n"
+        "    image: nginx:alpine\n"
+        "    ports:\n"
+        "      - \"6768:80\"\n",
+        encoding="utf-8",
+    )
 
     configured = service.apply_project_plugin_config(
         project_id=project_id,
@@ -8410,6 +9532,7 @@ def test_agent_service_verify_delivery_workflow_respects_plugin_policy_runtime_d
                 "stack_running": True,
                 "port_mapped": True,
                 "http_200": True,
+                "serves_application_root": True,
                 "ok": True,
                 "error": None,
             }
@@ -8796,6 +9919,118 @@ def test_agent_service_setup_project_orchestration_can_dispatch_kickoff_after_se
     assert user_summary.get("kickoff_required") is False
     kickoff_state = user_summary.get("kickoff_state") if isinstance(user_summary.get("kickoff_state"), dict) else {}
     assert kickoff_state.get("developer_dispatch_confirmed") is True
+
+
+def test_agent_service_setup_project_orchestration_honors_explicit_event_storming_setting(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+    from shared.models import Project, SessionLocal
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", set())
+
+    service = AgentTaskService()
+    payload = service.setup_project_orchestration(
+        name="Event Storming Disabled Setup",
+        short_description="Project created with Event Storming disabled.",
+        workspace_id=ws_id,
+        enable_team_mode=True,
+        enable_docker_compose=True,
+        docker_port=6768,
+        seed_team_tasks=False,
+        kickoff_after_setup=False,
+        expected_event_storming_enabled=False,
+        command_id="setup-event-storming-disabled",
+    )
+
+    assert payload["blocking"] is False
+    project_id = str((payload.get("project") or {}).get("id") or "").strip()
+    assert project_id
+    steps = {str(item.get("id") or "").strip(): item for item in (payload.get("steps") or [])}
+    assert steps["apply_project_event_storming_setting"]["status"] in {"ok", "skipped"}
+    summary = payload.get("user_facing_summary") if isinstance(payload.get("user_facing_summary"), dict) else {}
+    configured = summary.get("configured") if isinstance(summary.get("configured"), dict) else {}
+    assert configured.get("event_storming_enabled") is False
+
+    with SessionLocal() as db:
+        project_row = db.get(Project, project_id)
+        assert project_row is not None
+        assert bool(getattr(project_row, "event_storming_enabled", True)) is False
+
+
+def test_agent_service_setup_project_orchestration_skips_seeded_team_tasks_when_project_already_has_tasks(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", {project_id})
+
+    before_list = client.get(
+        "/api/tasks",
+        params={"workspace_id": ws_id, "project_id": project_id, "limit": 100, "offset": 0},
+    )
+    assert before_list.status_code == 200
+    before_items = before_list.json().get("items") if isinstance(before_list.json(), dict) else []
+    before_task_ids = {
+        str(item.get("id") or "").strip()
+        for item in (before_items or [])
+        if isinstance(item, dict)
+    }
+
+    preexisting = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Preexisting requested task",
+            "status": "Todo",
+            "instruction": "Keep the requested task set intact.",
+        },
+    )
+    assert preexisting.status_code == 200
+    preexisting_task_id = str(preexisting.json().get("id") or "").strip()
+    assert preexisting_task_id
+
+    service = AgentTaskService()
+    payload = service.setup_project_orchestration(
+        project_id=project_id,
+        workspace_id=ws_id,
+        enable_team_mode=True,
+        enable_git_delivery=True,
+        enable_docker_compose=True,
+        docker_port=6768,
+        seed_team_tasks=True,
+        kickoff_after_setup=False,
+        command_id="setup-skip-seed-existing-tasks",
+    )
+
+    assert payload["blocking"] is False
+    steps = {str(item.get("id") or "").strip(): item for item in (payload.get("steps") or [])}
+    assert steps["seed_team_mode_tasks"]["status"] == "skipped"
+    assert "preserve the requested task set" in str(steps["seed_team_mode_tasks"].get("reason") or "")
+
+    listed = client.get(
+        "/api/tasks",
+        params={"workspace_id": ws_id, "project_id": project_id, "limit": 100, "offset": 0},
+    )
+    assert listed.status_code == 200
+    items = listed.json().get("items") if isinstance(listed.json(), dict) else []
+    task_ids = {str(item.get("id") or "").strip() for item in (items or []) if isinstance(item, dict)}
+    assert preexisting_task_id in task_ids
+    assert task_ids == before_task_ids | {preexisting_task_id}
 
 
 def test_agent_service_create_task_backfills_exact_three_task_team_mode_topology(tmp_path, monkeypatch):
@@ -11356,6 +12591,475 @@ def test_team_mode_developer_completion_backfills_next_developer_task(tmp_path):
     assert waiting_dispatch.get("slot") == "dev-b"
 
 
+def test_team_mode_developer_completion_dispatches_lead_with_runtime_source(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    team = _enable_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+
+    lead_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Lead integration task",
+            "status": "Lead",
+            "priority": "High",
+            "assignee_id": team["lead"],
+            "assigned_agent_code": "lead-a",
+            "instruction": "Review the Developer handoff and continue the Lead cycle.",
+            "task_relationships": [
+                {"kind": "depends_on", "task_ids": [], "statuses": ["Lead"]},
+            ],
+        },
+    )
+    assert lead_task.status_code == 200
+    lead_task_id = lead_task.json()["id"]
+
+    dev_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Developer implementation task",
+            "status": "Dev",
+            "priority": "High",
+            "assignee_id": team["dev1"],
+            "assigned_agent_code": "dev-a",
+            "instruction": "Implement the gameplay changes on the task branch.",
+            "task_relationships": [
+                {"kind": "delivers_to", "task_ids": [lead_task_id], "statuses": ["Lead"]},
+            ],
+        },
+    )
+    assert dev_task.status_code == 200
+    dev_task_id = dev_task.json()["id"]
+
+    patched_lead = client.patch(
+        f"/api/tasks/{lead_task_id}",
+        json={
+            "task_relationships": [
+                {"kind": "depends_on", "task_ids": [dev_task_id], "statuses": ["Lead"]},
+            ],
+        },
+    )
+    assert patched_lead.status_code == 200
+
+    from features.agents.executor import AutomationOutcome
+    from features.agents.runner import QueuedAutomationRun, _record_automation_success
+
+    _record_automation_success(
+        QueuedAutomationRun(
+            task_id=dev_task_id,
+            workspace_id=ws_id,
+            project_id=project_id,
+            title="Developer implementation task",
+            description="",
+            status="Dev",
+            instruction="Implement the gameplay changes on the task branch.",
+            request_source="manual",
+            is_scheduled_run=False,
+            trigger_task_id=None,
+            trigger_from_status=None,
+            trigger_to_status=None,
+            triggered_at=None,
+            actor_user_id=team["dev1"],
+        ),
+        outcome=AutomationOutcome(
+            action="comment",
+            summary="Implemented on task branch task/dev-gameplay with commit abc1234.",
+            comment=None,
+            execution_outcome_contract={
+                "contract_version": 1,
+                "files_changed": ["src/gameplay/tetris.ts"],
+                "tests_run": False,
+                "tests_passed": False,
+                "commit_sha": "abc1234",
+                "branch": "task/dev-gameplay",
+                "artifacts": [],
+            },
+        ),
+    )
+
+    lead_status = client.get(f"/api/tasks/{lead_task_id}/automation")
+    assert lead_status.status_code == 200
+    lead_payload = lead_status.json()
+    assert lead_payload["automation_state"] in {"queued", "running", "completed"}
+
+    graph_res = client.get(f"/api/projects/{project_id}/task-dependency-graph")
+    assert graph_res.status_code == 200
+    payload = graph_res.json()
+    edge_map = {
+        (str(item.get("source_entity_id") or ""), str(item.get("target_entity_id") or "")): item
+        for item in (payload.get("edges") or [])
+    }
+    dev_to_lead = edge_map[(dev_task_id, lead_task_id)]
+    assert dev_to_lead["runtime_dependency"] is True
+    assert dev_to_lead["runtime_sources"]["developer_handoff"] >= 1
+    assert any(str(channel.get("source") or "") == "developer_handoff" for channel in (dev_to_lead.get("channels") or []))
+
+
+def test_manual_team_mode_lead_request_infers_developer_handoff_source(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    team = _enable_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+
+    lead_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Lead review task",
+            "status": "Lead",
+            "assignee_id": team["lead"],
+            "assigned_agent_code": "lead-a",
+            "instruction": "Review the completed Developer handoff.",
+            "task_relationships": [
+                {"kind": "depends_on", "task_ids": [], "statuses": ["Lead"]},
+            ],
+        },
+    )
+    assert lead_task.status_code == 200
+    lead_task_id = lead_task.json()["id"]
+
+    dev_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Developer completed handoff",
+            "status": "Lead",
+            "assignee_id": team["dev1"],
+            "assigned_agent_code": "dev-a",
+            "instruction": "Developer handoff is ready for review.",
+            "task_relationships": [
+                {"kind": "delivers_to", "task_ids": [lead_task_id], "statuses": ["Lead"]},
+            ],
+        },
+    )
+    assert dev_task.status_code == 200
+    dev_task_id = dev_task.json()["id"]
+
+    patched_lead = client.patch(
+        f"/api/tasks/{lead_task_id}",
+        json={
+            "task_relationships": [
+                {"kind": "depends_on", "task_ids": [dev_task_id], "statuses": ["Lead"]},
+            ],
+        },
+    )
+    assert patched_lead.status_code == 200
+
+    from shared.core import append_event
+    from shared.models import SessionLocal
+    from shared.settings import AGENT_SYSTEM_USER_ID
+
+    completed_at = datetime.now(timezone.utc).isoformat()
+    with SessionLocal() as db:
+        append_event(
+            db,
+            aggregate_type="Task",
+            aggregate_id=dev_task_id,
+            event_type="TaskAutomationCompleted",
+            payload={"completed_at": completed_at},
+            metadata={
+                "actor_id": AGENT_SYSTEM_USER_ID,
+                "workspace_id": ws_id,
+                "project_id": project_id,
+                "task_id": dev_task_id,
+            },
+        )
+        db.commit()
+
+    run_res = client.post(
+        f"/api/tasks/{lead_task_id}/automation/run",
+        json={"instruction": "Review the completed Developer handoff."},
+    )
+    assert run_res.status_code == 200
+
+    lead_status = client.get(f"/api/tasks/{lead_task_id}/automation")
+    assert lead_status.status_code == 200
+    payload = lead_status.json()
+    assert payload["last_requested_source"] == "developer_handoff"
+    assert payload["last_requested_source_task_id"] == dev_task_id
+
+
+def test_manual_team_mode_qa_request_infers_lead_handoff_source(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    team = _enable_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+
+    lead_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Lead release handoff",
+            "status": "Lead",
+            "assignee_id": team["lead"],
+            "assigned_agent_code": "lead-a",
+            "instruction": "Hand off the validated release to QA.",
+        },
+    )
+    assert lead_task.status_code == 200
+    lead_task_id = lead_task.json()["id"]
+
+    qa_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "QA release validation",
+            "status": "QA",
+            "assignee_id": team["qa"],
+            "assigned_agent_code": "qa-a",
+            "instruction": "Validate the Lead handoff.",
+            "task_relationships": [
+                {"kind": "hands_off_to", "task_ids": [lead_task_id], "statuses": ["QA"]},
+            ],
+        },
+    )
+    assert qa_task.status_code == 200
+    qa_task_id = qa_task.json()["id"]
+
+    from shared.core import append_event
+    from shared.models import SessionLocal
+    from shared.settings import AGENT_SYSTEM_USER_ID
+
+    handoff_at = datetime.now(timezone.utc).isoformat()
+    with SessionLocal() as db:
+        append_event(
+            db,
+            aggregate_type="Task",
+            aggregate_id=lead_task_id,
+            event_type="TaskUpdated",
+            payload={
+                "last_lead_handoff_token": f"lead:{lead_task_id}:{handoff_at}",
+                "last_lead_handoff_at": handoff_at,
+                "last_deploy_execution": {
+                    "executed_at": handoff_at,
+                    "stack": "constructos-ws-default",
+                    "port": 6768,
+                    "health_path": "/health",
+                    "runtime_ok": True,
+                },
+            },
+            metadata={
+                "actor_id": AGENT_SYSTEM_USER_ID,
+                "workspace_id": ws_id,
+                "project_id": project_id,
+                "task_id": lead_task_id,
+            },
+        )
+        db.commit()
+
+    run_res = client.post(
+        f"/api/tasks/{qa_task_id}/automation/run",
+        json={"instruction": "Validate the Lead handoff."},
+    )
+    assert run_res.status_code == 200
+
+    qa_status = client.get(f"/api/tasks/{qa_task_id}/automation")
+    assert qa_status.status_code == 200
+    payload = qa_status.json()
+    assert payload["last_requested_source"] == "lead_handoff"
+    assert payload["last_requested_source_task_id"] == lead_task_id
+
+    graph_res = client.get(f"/api/projects/{project_id}/task-dependency-graph")
+    assert graph_res.status_code == 200
+    graph_payload = graph_res.json()
+    edge_map = {
+        (str(item.get("source_entity_id") or ""), str(item.get("target_entity_id") or "")): item
+        for item in (graph_payload.get("edges") or [])
+    }
+    lead_to_qa = edge_map[(lead_task_id, qa_task_id)]
+    assert lead_to_qa["runtime_dependency"] is True
+    assert int(lead_to_qa["lead_handoffs_total"]) >= 1
+    assert any(str(channel.get("source") or "") == "lead_handoff" for channel in (lead_to_qa.get("channels") or []))
+
+
+def test_manual_team_mode_qa_request_without_lead_handoff_is_skipped(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    team = _enable_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+
+    lead_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Lead release handoff",
+            "status": "Lead",
+            "assignee_id": team["lead"],
+            "assigned_agent_code": "lead-a",
+            "instruction": "Hand off the validated release to QA.",
+        },
+    )
+    assert lead_task.status_code == 200
+    lead_task_id = str(lead_task.json()["id"])
+
+    qa_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "QA release validation",
+            "status": "QA",
+            "assignee_id": team["qa"],
+            "assigned_agent_code": "qa-a",
+            "instruction": "Validate the Lead handoff.",
+            "task_relationships": [
+                {"kind": "hands_off_to", "task_ids": [lead_task_id], "statuses": ["QA"]},
+            ],
+        },
+    )
+    assert qa_task.status_code == 200
+    qa_task_id = str(qa_task.json()["id"])
+
+    run_res = client.post(
+        f"/api/tasks/{qa_task_id}/automation/run",
+        json={"instruction": "Validate the Lead handoff."},
+    )
+    assert run_res.status_code == 200
+    payload = run_res.json()
+    assert payload.get("skipped") is True
+    assert "explicit Lead handoff" in str(payload.get("reason") or "")
+
+    qa_status = client.get(f"/api/tasks/{qa_task_id}/automation")
+    assert qa_status.status_code == 200
+    automation = qa_status.json()
+    assert automation["automation_state"] == "idle"
+    assert automation.get("last_requested_source_task_id") in {None, ""}
+
+
+def test_team_mode_orchestrator_skips_duplicate_completed_handoff_request(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    team = _enable_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+
+    lead_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Lead follow-up task",
+            "status": "Lead",
+            "priority": "High",
+            "assignee_id": team["lead"],
+            "assigned_agent_code": "lead-a",
+            "instruction": "Continue the Lead cycle.",
+        },
+    )
+    assert lead_task.status_code == 200
+    lead_task_id = str(lead_task.json()["id"])
+
+    dev_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Developer handoff",
+            "status": "Lead",
+            "priority": "High",
+            "assignee_id": team["dev1"],
+            "assigned_agent_code": "dev-a",
+            "instruction": "Developer handoff is ready.",
+            "task_relationships": [
+                {"kind": "delivers_to", "task_ids": [lead_task_id], "statuses": ["Lead"]},
+            ],
+        },
+    )
+    assert dev_task.status_code == 200
+    dev_task_id = str(dev_task.json()["id"])
+
+    client.patch(
+        f"/api/tasks/{lead_task_id}",
+        json={
+            "task_relationships": [
+                {"kind": "depends_on", "task_ids": [dev_task_id], "statuses": ["Lead"]},
+            ],
+        },
+    )
+
+    from shared.core import append_event
+    from shared.models import SessionLocal
+    from shared.settings import AGENT_SYSTEM_USER_ID
+    from features.agents.runner import _queue_team_mode_dispatches
+
+    requested_at = datetime.now(timezone.utc).isoformat()
+    with SessionLocal() as db:
+        append_event(
+            db,
+            aggregate_type="Task",
+            aggregate_id=lead_task_id,
+            event_type="TaskAutomationRequested",
+            payload={
+                "requested_at": requested_at,
+                "instruction": "Continue the Lead cycle.",
+                "source": "runner_orchestrator",
+                "source_task_id": dev_task_id,
+                "workflow_scope": "team_mode",
+                "execution_intent": True,
+            },
+            metadata={
+                "actor_id": AGENT_SYSTEM_USER_ID,
+                "workspace_id": ws_id,
+                "project_id": project_id,
+                "task_id": lead_task_id,
+            },
+        )
+        append_event(
+            db,
+            aggregate_type="Task",
+            aggregate_id=lead_task_id,
+            event_type="TaskAutomationCompleted",
+            payload={"completed_at": requested_at},
+            metadata={
+                "actor_id": AGENT_SYSTEM_USER_ID,
+                "workspace_id": ws_id,
+                "project_id": project_id,
+                "task_id": lead_task_id,
+            },
+        )
+        db.commit()
+
+    from shared.models import SessionLocal as SessionLocal2
+
+    with SessionLocal2() as db:
+        queued = _queue_team_mode_dispatches(
+            db=db,
+            workspace_id=ws_id,
+            project_id=project_id,
+            source="runner_orchestrator",
+            source_task_id=dev_task_id,
+            allowed_roles={"Lead"},
+        )
+        db.commit()
+
+    assert queued == 0
+
+    lead_status = client.get(f"/api/tasks/{lead_task_id}/automation")
+    assert lead_status.status_code == 200
+    payload = lead_status.json()
+    assert payload["automation_state"] == "completed"
+    assert payload["last_requested_source"] == "runner_orchestrator"
+    assert payload["last_requested_source_task_id"] == dev_task_id
+
+
 def test_team_mode_kickoff_skips_dependency_gated_developer_task(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -11866,6 +13570,48 @@ def test_runtime_deploy_target_resolver_parses_markdown_backtick_port(tmp_path):
     assert stack == "constructos-ws-default"
     assert port == 6768
     assert health_path == "/health"
+
+
+def test_resolve_project_repository_host_path_translates_task_app_workspace_bind(monkeypatch):
+    from shared import project_repository as project_repo
+
+    project_repo._resolve_container_bind_source.cache_clear()
+    monkeypatch.setattr(project_repo, "resolve_workspace_root", lambda: Path("/home/app/workspace"))
+
+    def fake_check_output(cmd, env=None, text=None, stderr=None):
+        assert cmd[:3] == ["/usr/bin/docker-real", "inspect", "task-app"]
+        return json.dumps(
+            [
+                {
+                    "Destination": "/home/app/workspace",
+                    "Source": "/srv/constructos/workspace",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(project_repo.subprocess, "check_output", fake_check_output)
+
+    host_repo = project_repo.resolve_project_repository_host_path(project_name="Tetris", project_id=None)
+
+    assert host_repo == Path("/srv/constructos/workspace/.constructos/repos/tetris")
+    project_repo._resolve_container_bind_source.cache_clear()
+
+
+def test_resolve_project_repository_host_path_falls_back_when_bind_lookup_fails(monkeypatch):
+    from shared import project_repository as project_repo
+
+    project_repo._resolve_container_bind_source.cache_clear()
+    monkeypatch.setattr(project_repo, "resolve_workspace_root", lambda: Path("/home/app/workspace"))
+
+    def fake_check_output(*_args, **_kwargs):
+        raise project_repo.subprocess.CalledProcessError(returncode=1, cmd=["docker", "inspect"])
+
+    monkeypatch.setattr(project_repo.subprocess, "check_output", fake_check_output)
+
+    host_repo = project_repo.resolve_project_repository_host_path(project_name="Tetris", project_id=None)
+
+    assert host_repo == Path("/home/app/workspace/.constructos/repos/tetris")
+    project_repo._resolve_container_bind_source.cache_clear()
 
 
 def test_agents_chat_kickoff_is_processed_immediately_without_schedule_tick(tmp_path, monkeypatch):
@@ -13390,6 +15136,7 @@ def test_team_mode_closeout_completes_remaining_tasks_when_delivery_is_green(tmp
                 "git_contract_ok": True,
                 "compose_manifest_present": True,
                 "lead_deploy_decision_evidence_present": True,
+                "qa_handoff_current_cycle_ok": True,
                 "deploy_serves_application_root": True,
                 "qa_has_verifiable_artifacts": True,
                 "deploy_execution_evidence_present": True,
@@ -13457,6 +15204,7 @@ def test_closeout_team_mode_tasks_once_skips_running_qa_task(tmp_path, monkeypat
                 'git_contract_ok': True,
                 'compose_manifest_present': True,
                 'lead_deploy_decision_evidence_present': True,
+                'qa_handoff_current_cycle_ok': True,
                 'deploy_serves_application_root': True,
                 'qa_has_verifiable_artifacts': True,
                 'deploy_execution_evidence_present': True,

@@ -1,5 +1,6 @@
 import React from 'react'
 import { ProjectKnowledgeGraphPage } from '../projects/ProjectKnowledgeGraphPage'
+import { ProjectTaskFlowPage } from '../projects/ProjectTaskFlowPage'
 import { ProjectsPanel } from '../projects/ProjectsPanel'
 import { SpecificationsPanel } from '../specifications/SpecificationsPanel'
 import { NotesPanel } from '../notes/NotesPanel'
@@ -260,6 +261,14 @@ export function AppPrimaryPanels({ state }: { state: any }) {
         />
       )}
 
+      {state.tab === 'task-flow' && (
+        <ProjectTaskFlowPage
+          selectedProjectId={state.selectedProjectId}
+          selectedProjectName={state.selectedProject?.name || ''}
+          taskDependencyGraphQuery={state.projectTaskDependencyGraph}
+        />
+      )}
+
       {state.tab === 'specifications' && (
         <SpecificationsPanel
           state={{
@@ -438,6 +447,9 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             backendVersion={state.backendVersion}
             backendBuild={state.backendBuild}
             deployedAtUtc={state.backendDeployedAtUtc}
+            codexAuthStatus={state.codexAuthStatus?.data ?? null}
+            codexAuthLoading={Boolean(state.codexAuthStatus?.isLoading || state.codexAuthStatus?.isFetching)}
+            canManageCodexAuth={state.canManageUsers}
             license={state.licenseStatus?.data?.license ?? null}
             licenseLoading={Boolean(state.licenseStatus?.isLoading)}
             licenseError={state.licenseStatus?.isError ? 'Unable to load license status.' : null}
@@ -452,6 +464,12 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             }}
             changePassword={state.changeMyPassword}
             passwordChangePending={state.changeMyPasswordPending}
+            onStartCodexDeviceAuth={state.startCodexDeviceAuth}
+            startCodexDeviceAuthPending={state.startCodexDeviceAuthPending}
+            onCancelCodexDeviceAuth={state.cancelCodexDeviceAuth}
+            cancelCodexDeviceAuthPending={state.cancelCodexDeviceAuthPending}
+            onDeleteCodexAuthOverride={state.deleteCodexAuthOverride}
+            deleteCodexAuthOverridePending={state.deleteCodexAuthOverridePending}
             submitFeedback={state.submitFeedback}
             feedbackSubmitting={state.submitFeedbackPending}
           />

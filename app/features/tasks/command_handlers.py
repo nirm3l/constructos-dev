@@ -73,7 +73,12 @@ from shared.task_automation import (
 from shared.task_relationships import normalize_task_relationships
 from shared.project_repository import resolve_project_repository_path
 from features.notifications.domain import NotificationAggregate
-from features.agents.intent_classifier import classify_instruction_intent, is_team_mode_kickoff_classification
+from features.agents.intent_classifier import (
+    AUTOMATION_REQUEST_INTENT_FIELDS,
+    classify_instruction_intent,
+    is_team_mode_kickoff_classification,
+    resolve_instruction_intent,
+)
 from .domain import TaskAggregate
 
 MENTION_PATTERN = re.compile(r"@([A-Za-z0-9_\-]+)")
@@ -582,6 +587,19 @@ def _enforce_team_mode_transition_policy(
             if task_workflow_role in {"Developer", "Lead", "QA"}:
                 # Team Mode workflow transitions are governed by task role, not human project membership role.
                 normalized_actor_role = task_workflow_role
+            if (
+                task_workflow_role == "Lead"
+                and str(from_status or "").strip() == "Lead"
+                and str(to_status or "").strip() == "QA"
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Team Mode transition policy denied status change. "
+                        "Lead must hand off to QA via automation request; "
+                        "do not change the Lead task status to QA."
+                    ),
+                )
     allowed, reason_code = evaluate_team_mode_transition(
         workflow=workflow,
         from_status=str(from_status or "").strip(),
@@ -616,6 +634,145 @@ def _require_task_group_scope(db: Session, *, workspace_id: str, project_id: str
 def _normalize_instruction(value: str | None) -> str | None:
     normalized = str(value or "").strip()
     return normalized or None
+
+
+def _parse_handler_iso_timestamp(value: object) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _infer_team_mode_request_origin(
+    *,
+    db: Session,
+    workspace_id: str,
+    project_id: str | None,
+    task_id: str,
+    task_view: dict | None,
+    state_snapshot: dict[str, object],
+) -> tuple[str | None, str | None]:
+    normalized_project_id = str(project_id or "").strip()
+    normalized_task_id = str(task_id or "").strip()
+    if not workspace_id or not normalized_project_id or not normalized_task_id:
+        return None, None
+
+    team_mode_row = db.execute(
+        select(ProjectPluginConfig.config_json).where(
+            ProjectPluginConfig.workspace_id == str(workspace_id),
+            ProjectPluginConfig.project_id == normalized_project_id,
+            ProjectPluginConfig.plugin_key == "team_mode",
+            ProjectPluginConfig.enabled == True,  # noqa: E712
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    if team_mode_row is None:
+        return None, None
+    try:
+        config_obj = json.loads(str(team_mode_row or "").strip() or "{}")
+    except Exception:
+        config_obj = {}
+    if not isinstance(config_obj, dict):
+        config_obj = {}
+
+    member_role_by_user_id = {
+        str(user_id): str(role or "").strip()
+        for user_id, role in db.execute(
+            select(ProjectMember.user_id, ProjectMember.role).where(
+                ProjectMember.workspace_id == str(workspace_id),
+                ProjectMember.project_id == normalized_project_id,
+            )
+        ).all()
+    }
+    team_agents = normalize_team_agents(config_obj.get("team"))
+    agent_role_by_code = {
+        str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
+        for agent in team_agents
+        if str(agent.get("id") or "").strip()
+    }
+    workflow_role = derive_task_role(
+        task_like={
+            "assignee_id": str(state_snapshot.get("assignee_id") or (task_view or {}).get("assignee_id") or "").strip(),
+            "assigned_agent_code": str(state_snapshot.get("assigned_agent_code") or (task_view or {}).get("assigned_agent_code") or "").strip(),
+            "labels": state_snapshot.get("labels") if state_snapshot.get("labels") is not None else (task_view or {}).get("labels"),
+            "status": str(state_snapshot.get("status") or (task_view or {}).get("status") or "").strip(),
+        },
+        member_role_by_user_id=member_role_by_user_id,
+        agent_role_by_code=agent_role_by_code,
+    )
+    if workflow_role not in {"Lead", "QA"}:
+        return None, None
+
+    def _candidate_timestamp(source_state: dict[str, object], created_at: object) -> float:
+        for value in (
+            source_state.get("last_requested_triggered_at"),
+            source_state.get("last_activity_at"),
+            source_state.get("last_requested_at"),
+            source_state.get("last_agent_run_at"),
+            created_at,
+        ):
+            parsed = _parse_handler_iso_timestamp(value)
+            if parsed is not None:
+                return parsed.timestamp()
+            if isinstance(value, datetime):
+                dt_value = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+                return dt_value.astimezone(timezone.utc).timestamp()
+        return 0.0
+
+    candidates: list[tuple[int, float, str, str]] = []
+    rows = db.execute(
+        select(Task.id, Task.assignee_id, Task.assigned_agent_code, Task.status, Task.labels, Task.created_at).where(
+            Task.workspace_id == str(workspace_id),
+            Task.project_id == normalized_project_id,
+            Task.is_deleted == False,  # noqa: E712
+            Task.archived == False,  # noqa: E712
+        )
+    ).all()
+    for candidate_id, assignee_id, assigned_agent_code, status, labels, created_at in rows:
+        source_task_id = str(candidate_id or "").strip()
+        if not source_task_id or source_task_id == normalized_task_id:
+            continue
+        source_state, _ = rebuild_state(db, "Task", source_task_id)
+        source_status = str(source_state.get("status") or status or "").strip()
+        source_role = derive_task_role(
+            task_like={
+                "assignee_id": str(source_state.get("assignee_id") or assignee_id or "").strip(),
+                "assigned_agent_code": str(source_state.get("assigned_agent_code") or assigned_agent_code or "").strip(),
+                "labels": source_state.get("labels") if source_state.get("labels") is not None else labels,
+                "status": source_status,
+            },
+            member_role_by_user_id=member_role_by_user_id,
+            agent_role_by_code=agent_role_by_code,
+        )
+        source_automation_state = str(source_state.get("automation_state") or "idle").strip().lower()
+        candidate_source: str | None = None
+        candidate_rank: int | None = None
+        if workflow_role == "Lead":
+            if source_role == "Developer" and source_status == "Lead" and source_automation_state == "completed":
+                candidate_source = "developer_handoff"
+                candidate_rank = 0
+            elif source_role in {"Developer", "QA"} and source_status == "Blocked":
+                candidate_source = "blocker_escalation"
+                candidate_rank = 1
+        elif workflow_role == "QA":
+            if source_role == "Lead" and str(source_state.get("last_lead_handoff_token") or "").strip():
+                candidate_source = "lead_handoff"
+                candidate_rank = 0
+        if candidate_source is None or candidate_rank is None:
+            continue
+        candidates.append((candidate_rank, -_candidate_timestamp(source_state, created_at), candidate_source, source_task_id))
+
+    candidates.sort()
+    if not candidates:
+        return None, None
+    _rank, _neg_ts, source, source_task_id = candidates[0]
+    return source, source_task_id
 
 
 def _fallback_task_instruction(*, title: str, description: str | None) -> str | None:
@@ -1712,6 +1869,7 @@ class RequestAutomationRunHandler:
     task_id: str
     instruction: str | None = None
     source: str | None = None
+    source_task_id: str | None = None
     execution_intent: bool | None = None
     execution_kickoff_intent: bool | None = None
     project_creation_intent: bool | None = None
@@ -1744,22 +1902,56 @@ class RequestAutomationRunHandler:
                 "reason": "Task automation is already in progress with the same instruction.",
             }
         requested_source = str(self.source or "").strip().lower()
+        requested_source_task_id = str(self.source_task_id or "").strip() or None
+        if requested_source_task_id == str(self.task_id or "").strip():
+            requested_source_task_id = None
         if not requested_source:
             requested_source = "manual"
         elif requested_source not in {
             "manual",
             "manual_stream",
             "lead_kickoff_dispatch",
+            "developer_handoff",
+            "lead_handoff",
             "runner_orchestrator",
             "trigger_reconcile",
             "status_change",
             "schedule",
             "auto_retry",
             "blocker_escalation",
+            "setup_orchestration_default",
             "runner_recover_after_interrupt",
             "runner_recover_after_failure",
         }:
             requested_source = "manual"
+        if requested_source in {"manual", "manual_stream"} and not requested_source_task_id and project_id:
+            inferred_source, inferred_source_task_id = _infer_team_mode_request_origin(
+                db=self.ctx.db,
+                workspace_id=str(workspace_id),
+                project_id=str(project_id),
+                task_id=self.task_id,
+                task_view=task_view,
+                state_snapshot=state_snapshot,
+            )
+            if inferred_source_task_id:
+                requested_source_task_id = inferred_source_task_id
+                if inferred_source:
+                    requested_source = inferred_source
+        if (
+            actor_is_agent
+            and current_automation_state == "completed"
+            and requested_source in {"runner_orchestrator", "developer_handoff", "lead_kickoff_dispatch"}
+            and str(state_snapshot.get("last_requested_source") or "").strip() == requested_source
+            and str(state_snapshot.get("last_requested_source_task_id") or "").strip() == str(requested_source_task_id or "").strip()
+        ):
+            return {
+                "ok": True,
+                "task_id": self.task_id,
+                "automation_state": current_automation_state,
+                "requested_at": requested_at,
+                "skipped": True,
+                "reason": "Task automation request skipped because the same Team Mode handoff is already recorded.",
+            }
 
         fallback_instruction = _normalize_instruction(task_view.get("instruction") if task_view else None)
         effective_instruction = _normalize_instruction(self.instruction)
@@ -1794,31 +1986,25 @@ class RequestAutomationRunHandler:
             "project_creation_intent": self.project_creation_intent,
             "workflow_scope": str(self.workflow_scope or "").strip().lower() or None,
             "execution_mode": str(self.execution_mode or "").strip().lower() or None,
+            "deploy_requested": None,
+            "docker_compose_requested": None,
+            "requested_port": None,
+            "exact_task_count": None,
+            "project_name_provided": None,
             "task_completion_requested": self.task_completion_requested,
             "reason": str(self.classifier_reason or "").strip(),
         }
 
         if requested_source in {"manual", "manual_stream"}:
-            inferred = classify_instruction_intent(
+            classification = resolve_instruction_intent(
                 instruction=effective_instruction,
                 workspace_id=workspace_id,
                 project_id=project_id,
                 session_id=None,
+                current=classification,
+                classify_fn=classify_instruction_intent,
+                required_fields=AUTOMATION_REQUEST_INTENT_FIELDS,
             )
-            for key in (
-                "execution_intent",
-                "execution_kickoff_intent",
-                "project_creation_intent",
-                "task_completion_requested",
-            ):
-                if classification.get(key) is None:
-                    classification[key] = inferred.get(key)
-            if classification["workflow_scope"] is None:
-                classification["workflow_scope"] = inferred.get("workflow_scope")
-            if classification["execution_mode"] is None:
-                classification["execution_mode"] = inferred.get("execution_mode")
-            if not classification["reason"]:
-                classification["reason"] = str(inferred.get("reason") or "").strip()
 
         if project_id:
             plugin_row = self.ctx.db.execute(
@@ -1895,12 +2081,30 @@ class RequestAutomationRunHandler:
                             f"assigned Team Mode role ({workflow_role} expects {expected_status}, got {current_status})."
                         ),
                     }
+                if str(workflow_role or "").strip() == "QA":
+                    valid_lead_handoff = (
+                        requested_source == "lead_handoff"
+                        and bool(str(requested_source_task_id or "").strip())
+                    )
+                    if not valid_lead_handoff:
+                        return {
+                            "ok": True,
+                            "task_id": self.task_id,
+                            "automation_state": current_automation_state or "idle",
+                            "requested_at": requested_at,
+                            "skipped": True,
+                            "reason": (
+                                "Team Mode QA automation requires an explicit Lead handoff with source_task_id. "
+                                "Manual or orchestrator QA queueing is not allowed."
+                            ),
+                        }
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, self.task_id)
         aggregate.request_automation(
             requested_at=requested_at,
             instruction=effective_instruction,
             source=requested_source,
+            source_task_id=requested_source_task_id,
             execution_intent=bool(classification.get("execution_intent")),
             execution_kickoff_intent=bool(classification.get("execution_kickoff_intent")),
             project_creation_intent=bool(classification.get("project_creation_intent")),

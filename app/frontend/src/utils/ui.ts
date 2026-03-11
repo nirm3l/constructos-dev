@@ -2,9 +2,9 @@ import type { AttachmentRef, ExternalRef } from '../types'
 
 const DEFAULT_USER_ID = '00000000-0000-0000-0000-000000000001'
 
-export type Tab = 'inbox' | 'tasks' | 'notes' | 'specifications' | 'projects' | 'knowledge-graph' | 'search' | 'profile' | 'admin'
+export type Tab = 'inbox' | 'tasks' | 'notes' | 'specifications' | 'projects' | 'task-flow' | 'knowledge-graph' | 'search' | 'profile' | 'admin'
 
-export const TAB_ORDER: Tab[] = ['inbox', 'tasks', 'notes', 'specifications', 'projects', 'knowledge-graph', 'search', 'profile', 'admin']
+export const TAB_ORDER: Tab[] = ['inbox', 'tasks', 'notes', 'specifications', 'projects', 'task-flow', 'knowledge-graph', 'search', 'profile', 'admin']
 
 const LEGACY_TAB_REDIRECTS: Record<string, Tab> = {
   admin: 'profile',

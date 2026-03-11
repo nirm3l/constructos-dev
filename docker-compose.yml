@@ -1,7 +1,7 @@
 name: constructos-app
 
 x-codex-config-volume: &codex_config_volume "${CODEX_CONFIG_FILE}:/home/app/.codex/config.toml:ro"
-x-codex-auth-volume: &codex_auth_volume "${CODEX_AUTH_FILE}:/home/app/.codex/auth.json:ro"
+x-codex-auth-volume: &codex_auth_volume "${CODEX_AUTH_FILE:-./codex.auth.placeholder.json}:/home/app/.codex/auth.json:ro"
 x-codex-home-volume: &codex_home_volume "codex-home-data:/home/app/codex-home"
 x-codex-workspace-volume: &codex_workspace_volume "${AGENT_CODEX_WORKSPACE_MOUNT:-./data/workspace}:/home/app/workspace"
 x-agent-common-extra-hosts: &agent_common_extra_hosts

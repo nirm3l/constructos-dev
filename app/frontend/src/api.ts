@@ -16,6 +16,7 @@ import type {
   ChatMcpServer,
   ChatReasoningEffort,
   ChatSessionRecord,
+  CodexAuthStatus,
   EventStormingOverview,
   EventStormingEntityLinks,
   EventStormingComponentLinks,
@@ -26,6 +27,7 @@ import type {
   ProjectKnowledgeSearchResult,
   GraphProjectOverview,
   GraphProjectSubgraph,
+  ProjectTaskDependencyGraph,
   Notification,
   Note,
   NoteGroup,
@@ -922,6 +924,24 @@ export const stopAgentChatStream = async (
     { method: 'POST', body: JSON.stringify(payload) }
   )
 
+export const getCodexAuthStatus = (userId: string) =>
+  api<CodexAuthStatus>('/api/agents/codex-auth', userId)
+
+export const startCodexDeviceAuth = (userId: string) =>
+  api<CodexAuthStatus>('/api/agents/codex-auth/device/start', userId, {
+    method: 'POST',
+  })
+
+export const cancelCodexDeviceAuth = (userId: string) =>
+  api<CodexAuthStatus>('/api/agents/codex-auth/device/cancel', userId, {
+    method: 'POST',
+  })
+
+export const deleteCodexAuthOverride = (userId: string) =>
+  api<CodexAuthStatus>('/api/agents/codex-auth/override', userId, {
+    method: 'DELETE',
+  })
+
 export const getNotifications = (userId: string) => api<Notification[]>('/api/notifications', userId)
 
 export const markNotificationRead = (userId: string, id: string) =>
@@ -1081,6 +1101,22 @@ export const getProjectGraphSubgraph = (
     `/api/projects/${projectId}/knowledge-graph/subgraph${queryString({
       limit_nodes: params?.limit_nodes ?? 48,
       limit_edges: params?.limit_edges ?? 160,
+    })}`,
+    userId
+  )
+
+export const getProjectTaskDependencyGraph = (
+  userId: string,
+  projectId: string,
+  params?: {
+    limit_nodes?: number
+    limit_edges?: number
+  }
+) =>
+  api<ProjectTaskDependencyGraph>(
+    `/api/projects/${projectId}/task-dependency-graph${queryString({
+      limit_nodes: params?.limit_nodes ?? 240,
+      limit_edges: params?.limit_edges ?? 1600,
     })}`,
     userId
   )

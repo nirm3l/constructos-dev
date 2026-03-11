@@ -11,6 +11,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from features.agents.intent_classifier import (
+    AUTOMATION_REQUEST_INTENT_FIELDS,
+    classify_instruction_intent,
+    resolve_instruction_intent,
+)
 from features.agents.executor import build_automation_usage_metadata, execute_task_automation_stream
 from features.agents.gateway import build_ui_gateway
 from shared.core import (
@@ -396,6 +401,7 @@ def request_automation_run(
         task_id=task_id,
         instruction=payload.instruction,
         source=payload.source,
+        source_task_id=payload.source_task_id,
         execution_intent=payload.execution_intent,
         execution_kickoff_intent=payload.execution_kickoff_intent,
         project_creation_intent=payload.project_creation_intent,
@@ -463,6 +469,23 @@ def run_automation_stream(
     instruction = str(payload.instruction or "").strip() or str(state.get("instruction") or state.get("scheduled_instruction") or "").strip()
     if not instruction:
         raise HTTPException(status_code=422, detail="instruction is required")
+    classification = resolve_instruction_intent(
+        instruction=instruction,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        session_id=None,
+        current={
+            "execution_intent": payload.execution_intent,
+            "execution_kickoff_intent": payload.execution_kickoff_intent,
+            "project_creation_intent": payload.project_creation_intent,
+            "workflow_scope": payload.workflow_scope,
+            "execution_mode": payload.execution_mode,
+            "task_completion_requested": payload.task_completion_requested,
+            "reason": payload.classifier_reason,
+        },
+        classify_fn=classify_instruction_intent,
+        required_fields=AUTOMATION_REQUEST_INTENT_FIELDS,
+    )
     existing_codex_session_id = str(state.get("last_agent_codex_session_id") or "").strip()
     resume_attempted = _coerce_bool(state.get("last_agent_codex_resume_attempted"))
     resume_last_succeeded = _coerce_bool(state.get("last_agent_codex_resume_succeeded"))
@@ -480,7 +503,18 @@ def run_automation_stream(
         aggregate_type="Task",
         aggregate_id=task_id,
         event_type=EVENT_AUTOMATION_REQUESTED,
-        payload={"requested_at": now_iso, "instruction": instruction, "source": "manual_stream"},
+        payload={
+            "requested_at": now_iso,
+            "instruction": instruction,
+            "source": "manual_stream",
+            "execution_intent": bool(classification.get("execution_intent")),
+            "execution_kickoff_intent": bool(classification.get("execution_kickoff_intent")),
+            "project_creation_intent": bool(classification.get("project_creation_intent")),
+            "workflow_scope": str(classification.get("workflow_scope") or "").strip() or None,
+            "execution_mode": str(classification.get("execution_mode") or "").strip() or None,
+            "task_completion_requested": bool(classification.get("task_completion_requested")),
+            "classifier_reason": str(classification.get("reason") or "").strip() or None,
+        },
         metadata={
             "actor_id": user.id,
             "workspace_id": workspace_id,
@@ -633,6 +667,10 @@ def run_automation_stream(
                     instruction=instruction,
                     workspace_id=workspace_id,
                     project_id=project_id,
+                    execution_kickoff_intent=bool(classification.get("execution_kickoff_intent")),
+                    workflow_scope=str(classification.get("workflow_scope") or "").strip() or None,
+                    execution_mode=str(classification.get("execution_mode") or "").strip() or None,
+                    task_completion_requested=bool(classification.get("task_completion_requested")),
                     codex_session_id=resume_codex_session_id,
                     actor_user_id=user.id,
                     allow_mutations=True,

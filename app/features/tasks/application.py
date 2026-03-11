@@ -156,6 +156,7 @@ class TaskApplicationService:
                 task_id,
                 payload.instruction,
                 payload.source,
+                payload.source_task_id,
                 payload.execution_intent,
                 payload.execution_kickoff_intent,
                 payload.project_creation_intent,

@@ -29,6 +29,7 @@ from shared.knowledge_graph import (
     search_project_knowledge,
 )
 from shared.eventing_event_storming import enqueue_event_storming_project_backfill
+from .task_dependency_graph import get_project_task_dependency_graph
 from .application import ProjectApplicationService
 from .read_models import (
     get_project_activity_read_model,
@@ -482,6 +483,23 @@ def project_knowledge_graph_subgraph(
         )
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Knowledge graph is unavailable: {exc}") from exc
+
+
+@router.get("/api/projects/{project_id}/task-dependency-graph")
+def project_task_dependency_graph(
+    project_id: str,
+    limit_nodes: int = Query(default=240, ge=8, le=600),
+    limit_edges: int = Query(default=1600, ge=8, le=4000),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    project = _load_project_with_access(db, user, project_id)
+    return get_project_task_dependency_graph(
+        db=db,
+        project_id=project.id,
+        limit_nodes=limit_nodes,
+        limit_edges=limit_edges,
+    )
 
 
 @router.post("/api/projects/{project_id}/knowledge-graph/layout")

@@ -1,5 +1,6 @@
 import React from 'react'
 import * as Accordion from '@radix-ui/react-accordion'
+import * as AlertDialog from '@radix-ui/react-alert-dialog'
 import * as Checkbox from '@radix-ui/react-checkbox'
 import * as Collapsible from '@radix-ui/react-collapsible'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
@@ -10,6 +11,7 @@ import * as Tooltip from '@radix-ui/react-tooltip'
 import type {
   AdminWorkspaceUser,
   ChatReasoningEffort,
+  CodexAuthStatus,
   LicenseStatus,
   Note,
   Specification,
@@ -40,6 +42,13 @@ function normalizeChatReasoningEffort(value: unknown): ChatReasoningEffort {
   const normalized = String(value || '').trim().toLowerCase()
   if (normalized === 'low' || normalized === 'high' || normalized === 'xhigh') return normalized
   return 'medium'
+}
+
+function codexAuthSourceLabel(value: CodexAuthStatus['effective_source'] | string | null | undefined): string {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'system_override') return 'Connected for codex-bot'
+  if (normalized === 'host_mount') return 'Using host-mounted auth'
+  return 'Not configured'
 }
 
 const PROFILE_FEEDBACK_TYPE_OPTIONS: Array<{
@@ -385,6 +394,9 @@ export function ProfilePanel({
   backendVersion,
   backendBuild,
   deployedAtUtc,
+  codexAuthStatus,
+  codexAuthLoading,
+  canManageCodexAuth,
   license,
   licenseLoading,
   licenseError,
@@ -395,6 +407,12 @@ export function ProfilePanel({
   saveChatExecutionPreferencesPending,
   changePassword,
   passwordChangePending,
+  onStartCodexDeviceAuth,
+  startCodexDeviceAuthPending,
+  onCancelCodexDeviceAuth,
+  cancelCodexDeviceAuthPending,
+  onDeleteCodexAuthOverride,
+  deleteCodexAuthOverridePending,
   submitFeedback,
   feedbackSubmitting,
 }: {
@@ -410,6 +428,9 @@ export function ProfilePanel({
   backendVersion: string
   backendBuild: string | null
   deployedAtUtc: string | null
+  codexAuthStatus: CodexAuthStatus | null
+  codexAuthLoading: boolean
+  canManageCodexAuth: boolean
   license: LicenseStatus | null | undefined
   licenseLoading: boolean
   licenseError: string | null
@@ -423,6 +444,12 @@ export function ProfilePanel({
   saveChatExecutionPreferencesPending: boolean
   changePassword: (payload: { current_password: string; new_password: string }) => Promise<unknown>
   passwordChangePending: boolean
+  onStartCodexDeviceAuth: () => Promise<unknown>
+  startCodexDeviceAuthPending: boolean
+  onCancelCodexDeviceAuth: () => Promise<unknown>
+  cancelCodexDeviceAuthPending: boolean
+  onDeleteCodexAuthOverride: () => Promise<unknown>
+  deleteCodexAuthOverridePending: boolean
   submitFeedback: (payload: {
     title: string
     description: string
@@ -477,6 +504,10 @@ export function ProfilePanel({
   const voiceSelectTriggerRef = React.useRef<HTMLButtonElement | null>(null)
   const chatExecutionFactRef = React.useRef<HTMLDivElement | null>(null)
   const chatExecutionModelTriggerRef = React.useRef<HTMLButtonElement | null>(null)
+  const codexAuthFactRef = React.useRef<HTMLDivElement | null>(null)
+  const codexAuthPrimaryButtonRef = React.useRef<HTMLButtonElement | null>(null)
+  const [codexAuthDialogOpen, setCodexAuthDialogOpen] = React.useState(false)
+  const [codexAuthFeedback, setCodexAuthFeedback] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
   const [chatModelInput, setChatModelInput] = React.useState(() => String(agentChatModel || '').trim())
   const [chatReasoningInput, setChatReasoningInput] = React.useState<ChatReasoningEffort>(() =>
     normalizeChatReasoningEffort(agentChatReasoningEffort)
@@ -533,6 +564,23 @@ export function ProfilePanel({
   const selectedFeedbackTypeLabel = React.useMemo(() => {
     return PROFILE_FEEDBACK_TYPE_OPTIONS.find((item) => item.value === feedbackTypeInput)?.label || 'General'
   }, [feedbackTypeInput])
+  const codexAuthSource = String(codexAuthStatus?.effective_source || '').trim().toLowerCase()
+  const codexAuthLoginSession = codexAuthStatus?.login_session ?? null
+  const codexAuthStatusLabel = codexAuthSourceLabel(codexAuthStatus?.effective_source)
+  const codexAuthSessionStatusLabel = (() => {
+    const status = String(codexAuthLoginSession?.status || '').trim().toLowerCase()
+    if (status === 'pending') return 'Awaiting browser confirmation'
+    if (status === 'succeeded') return 'Connected'
+    if (status === 'failed') return 'Sign-in failed'
+    if (status === 'cancelled') return 'Sign-in cancelled'
+    return null
+  })()
+  const codexAuthHasSystemOverride = codexAuthSource === 'system_override'
+  const codexAuthHasPendingSignIn = String(codexAuthLoginSession?.status || '').trim().toLowerCase() === 'pending'
+  const codexAuthCanConnect = canManageCodexAuth && !startCodexDeviceAuthPending && !cancelCodexDeviceAuthPending
+  const codexAuthCanRemoveOverride = canManageCodexAuth
+    && Boolean(codexAuthStatus?.override_available)
+    && !deleteCodexAuthOverridePending
   const runtimeSnapshotText = React.useMemo(() => {
     return [
       `Frontend version: ${frontendVersion || 'n/a'}`,
@@ -648,6 +696,52 @@ export function ProfilePanel({
     window.setTimeout(scrollNearestContainer, 120)
     window.setTimeout(scrollNearestContainer, 300)
     window.setTimeout(focusModelInput, 340)
+  }, [])
+
+  const scrollCodexAuthIntoView = React.useCallback(() => {
+    if (typeof window === 'undefined') return
+
+    const scrollNearestContainer = () => {
+      const target = codexAuthFactRef.current
+      if (!target) return
+
+      const findScrollableParent = (node: HTMLElement | null): HTMLElement | null => {
+        let current = node?.parentElement ?? null
+        while (current) {
+          const styles = window.getComputedStyle(current)
+          const overflowY = styles.overflowY
+          const isScrollable =
+            (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') &&
+            current.scrollHeight > current.clientHeight + 1
+          if (isScrollable) return current
+          current = current.parentElement
+        }
+        return null
+      }
+
+      target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })
+
+      const parent = findScrollableParent(target)
+      if (parent) {
+        const targetRect = target.getBoundingClientRect()
+        const parentRect = parent.getBoundingClientRect()
+        const nextTop = parent.scrollTop + (targetRect.top - parentRect.top) - parent.clientHeight * 0.35
+        parent.scrollTo({ top: Math.max(0, nextTop), behavior: 'smooth' })
+      }
+    }
+
+    const focusPrimaryAction = () => {
+      try {
+        codexAuthPrimaryButtonRef.current?.focus({ preventScroll: true })
+      } catch {
+        codexAuthPrimaryButtonRef.current?.focus()
+      }
+    }
+
+    scrollNearestContainer()
+    window.setTimeout(scrollNearestContainer, 120)
+    window.setTimeout(scrollNearestContainer, 300)
+    window.setTimeout(focusPrimaryAction, 340)
   }, [])
 
   React.useEffect(() => {
@@ -771,6 +865,41 @@ export function ProfilePanel({
     }
   }, [scrollChatExecutionIntoView])
 
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return
+    const handleCodexAuthFocus = () => {
+      setProfileTab('security')
+      window.setTimeout(() => {
+        scrollCodexAuthIntoView()
+      }, 80)
+    }
+
+    window.addEventListener('ui:focus-codex-auth', handleCodexAuthFocus)
+
+    let shouldScroll = false
+    try {
+      shouldScroll = window.sessionStorage.getItem('ui_profile_scroll_target') === 'codex_auth'
+      if (shouldScroll) {
+        window.sessionStorage.removeItem('ui_profile_scroll_target')
+      }
+    } catch {
+      shouldScroll = false
+    }
+    if (!shouldScroll) {
+      return () => {
+        window.removeEventListener('ui:focus-codex-auth', handleCodexAuthFocus)
+      }
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      handleCodexAuthFocus()
+    })
+    return () => {
+      window.cancelAnimationFrame(frameId)
+      window.removeEventListener('ui:focus-codex-auth', handleCodexAuthFocus)
+    }
+  }, [scrollCodexAuthIntoView])
+
   const resetPasswordForm = React.useCallback(() => {
     setCurrentPasswordInput('')
     setNewPasswordInput('')
@@ -891,6 +1020,56 @@ export function ProfilePanel({
       window.setTimeout(() => setRuntimeCopyState('idle'), 1800)
     }
   }, [runtimeSnapshotText])
+
+  const handleStartCodexDeviceAuth = React.useCallback(async () => {
+    try {
+      await onStartCodexDeviceAuth()
+      setCodexAuthFeedback(null)
+      setCodexAuthDialogOpen(true)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to start Codex sign-in.'
+      setCodexAuthFeedback({ tone: 'error', message })
+    }
+  }, [onStartCodexDeviceAuth])
+
+  const handleCancelCodexDeviceAuth = React.useCallback(async () => {
+    try {
+      await onCancelCodexDeviceAuth()
+      setCodexAuthFeedback({ tone: 'success', message: 'Codex sign-in was cancelled.' })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to cancel Codex sign-in.'
+      setCodexAuthFeedback({ tone: 'error', message })
+    }
+  }, [onCancelCodexDeviceAuth])
+
+  const handleDeleteCodexAuthOverride = React.useCallback(async () => {
+    try {
+      await onDeleteCodexAuthOverride()
+      setCodexAuthFeedback({ tone: 'success', message: 'Shared Codex authentication was removed.' })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to remove shared Codex authentication.'
+      setCodexAuthFeedback({ tone: 'error', message })
+    }
+  }, [onDeleteCodexAuthOverride])
+
+  React.useEffect(() => {
+    if (
+      canManageCodexAuth
+      && codexAuthLoginSession?.status === 'pending'
+      && (codexAuthLoginSession.user_code || codexAuthLoginSession.verification_uri)
+    ) {
+      setCodexAuthDialogOpen(true)
+      return
+    }
+    if (codexAuthLoginSession?.status === 'succeeded') {
+      setCodexAuthDialogOpen(false)
+    }
+  }, [
+    canManageCodexAuth,
+    codexAuthLoginSession?.status,
+    codexAuthLoginSession?.user_code,
+    codexAuthLoginSession?.verification_uri,
+  ])
 
   return (
     <Tooltip.Provider delayDuration={180}>
@@ -1173,85 +1352,284 @@ export function ProfilePanel({
           </Tabs.Content>
 
           <Tabs.Content className="profile-tab-content" value="security">
-            <section className="profile-pane-card profile-password" aria-label="Password settings">
-              <Accordion.Root className="profile-accordion" type="single" collapsible defaultValue="change-password">
-                <Accordion.Item className="profile-accordion-item" value="change-password">
-                  <Accordion.Header className="profile-accordion-header">
-                    <Accordion.Trigger className="profile-accordion-trigger">
-                      <span className="profile-accordion-head">
-                        <span className="profile-accordion-title">Change password</span>
-                        <span className="profile-accordion-meta">Current password required · minimum 8 chars</span>
+            <div className="profile-pane-grid">
+              <section
+                className="profile-pane-card profile-codex-auth"
+                aria-label="Codex authentication"
+                id="profile-codex-auth"
+                ref={codexAuthFactRef}
+              >
+                <div className="profile-pane-head">
+                  <h3>
+                    <span className="profile-pane-head-icon" aria-hidden="true">
+                      <Icon path="M12 3l7 4v6c0 5-3.5 9-7 10-3.5-1-7-5-7-10V7l7-4zM8 12h8M8 16h5" />
+                    </span>
+                    <span>Codex authentication</span>
+                  </h3>
+                  <span className="status-chip">Codex</span>
+                </div>
+                {codexAuthLoading ? (
+                  <p className="meta">Loading Codex authentication status...</p>
+                ) : (
+                  <>
+                    <div className="profile-codex-auth-status-row">
+                      <span className={`status-chip ${codexAuthSource === 'none' ? 'is-error' : ''}`.trim()}>
+                        {codexAuthStatusLabel}
                       </span>
-                      <span className="status-chip">Security</span>
-                      <span className="profile-accordion-chevron" aria-hidden="true">
-                        <Icon path="M6 9l6 6 6-6" />
-                      </span>
-                    </Accordion.Trigger>
-                  </Accordion.Header>
-                  <Accordion.Content className="profile-accordion-content">
-                    <form className="profile-bug-form" onSubmit={handleSubmitPasswordChange}>
-                      <label className="field-control">
-                        <span className="field-label">Current password</span>
-                        <input
-                          type="password"
-                          value={currentPasswordInput}
-                          onChange={(event) => setCurrentPasswordInput(event.target.value)}
-                          autoComplete="current-password"
-                          placeholder="Current password"
-                        />
-                      </label>
-                      <label className="field-control">
-                        <span className="field-label">New password</span>
-                        <input
-                          type="password"
-                          value={newPasswordInput}
-                          onChange={(event) => setNewPasswordInput(event.target.value)}
-                          autoComplete="new-password"
-                          placeholder="New password"
-                        />
-                      </label>
-                      <label className="field-control">
-                        <span className="field-label">Confirm new password</span>
-                        <input
-                          type="password"
-                          value={confirmPasswordInput}
-                          onChange={(event) => setConfirmPasswordInput(event.target.value)}
-                          autoComplete="new-password"
-                          placeholder="Confirm new password"
-                        />
-                      </label>
-                      <div className="row wrap profile-actions">
-                        <button
-                          className="primary"
-                          type="submit"
-                          disabled={
-                            passwordChangePending ||
-                            !currentPasswordInput.trim() ||
-                            !newPasswordInput.trim() ||
-                            !confirmPasswordInput.trim()
-                          }
-                        >
-                          {passwordChangePending ? 'Saving...' : 'Save new password'}
-                        </button>
-                        <button
-                          className="button-secondary"
-                          type="button"
-                          onClick={resetPasswordForm}
-                          disabled={passwordChangePending}
-                        >
-                          Reset
-                        </button>
+                      {codexAuthSessionStatusLabel ? <span className="status-chip">{codexAuthSessionStatusLabel}</span> : null}
+                    </div>
+                    <dl className="profile-facts profile-runtime-facts">
+                      <div className="profile-fact">
+                        <dt>Effective source</dt>
+                        <dd>{codexAuthStatusLabel}</dd>
                       </div>
-                    </form>
-                    {passwordFeedback ? (
-                      <div className={`notice ${passwordFeedback.tone === 'error' ? 'notice-error' : ''}`.trim()}>
-                        {passwordFeedback.message}
+                      <div className="profile-fact">
+                        <dt>Host auth</dt>
+                        <dd>{codexAuthStatus?.host_auth_available ? 'Available' : 'Not available'}</dd>
+                      </div>
+                      <div className="profile-fact">
+                        <dt>Shared system auth</dt>
+                        <dd>{codexAuthStatus?.override_available ? 'Available' : 'Not configured'}</dd>
+                      </div>
+                      <div className="profile-fact">
+                        <dt>Auth scope</dt>
+                        <dd>{String(codexAuthStatus?.scope || 'system').trim() || 'system'}</dd>
+                      </div>
+                      <div className="profile-fact">
+                        <dt>Auth target</dt>
+                        <dd>{String(codexAuthStatus?.target_actor_username || 'codex-bot').trim() || 'codex-bot'}</dd>
+                      </div>
+                      <div className="profile-fact">
+                        <dt>Override updated</dt>
+                        <dd>{formatDateTime(codexAuthStatus?.override_updated_at || null)}</dd>
+                      </div>
+                    </dl>
+                    <p className="meta">
+                      This shared connection is used by codex-bot for chat and task automation inside this container only.
+                    </p>
+                    {canManageCodexAuth ? (
+                      <div className="row wrap profile-actions">
+                        {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn ? (
+                          <button
+                            ref={codexAuthPrimaryButtonRef}
+                            className="button-secondary"
+                            type="button"
+                            onClick={() => setCodexAuthDialogOpen(true)}
+                          >
+                            Manage connection
+                          </button>
+                        ) : (
+                          <>
+                            <button
+                              ref={codexAuthPrimaryButtonRef}
+                              className="primary"
+                              type="button"
+                              onClick={() => {
+                                void handleStartCodexDeviceAuth()
+                              }}
+                              disabled={!codexAuthCanConnect}
+                            >
+                              {startCodexDeviceAuthPending
+                                ? 'Starting...'
+                                : codexAuthHasPendingSignIn
+                                  ? 'Continue sign-in'
+                                  : 'Connect Codex'}
+                            </button>
+                            {codexAuthLoginSession ? (
+                              <button
+                                className="button-secondary"
+                                type="button"
+                                onClick={() => setCodexAuthDialogOpen(true)}
+                              >
+                                Show sign-in details
+                              </button>
+                            ) : null}
+                          </>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="meta">
+                        Only workspace owners and admins can update the shared Codex connection.
+                      </p>
+                    )}
+                    {codexAuthFeedback ? (
+                      <div className={`notice ${codexAuthFeedback.tone === 'error' ? 'notice-error' : ''}`.trim()}>
+                        {codexAuthFeedback.message}
                       </div>
                     ) : null}
-                  </Accordion.Content>
-                </Accordion.Item>
-              </Accordion.Root>
-            </section>
+                  </>
+                )}
+              </section>
+
+              <section className="profile-pane-card profile-password" aria-label="Password settings">
+                <Accordion.Root className="profile-accordion" type="single" collapsible defaultValue="change-password">
+                  <Accordion.Item className="profile-accordion-item" value="change-password">
+                    <Accordion.Header className="profile-accordion-header">
+                      <Accordion.Trigger className="profile-accordion-trigger">
+                        <span className="profile-accordion-head">
+                          <span className="profile-accordion-title">Change password</span>
+                          <span className="profile-accordion-meta">Current password required · minimum 8 chars</span>
+                        </span>
+                        <span className="status-chip">Security</span>
+                        <span className="profile-accordion-chevron" aria-hidden="true">
+                          <Icon path="M6 9l6 6 6-6" />
+                        </span>
+                      </Accordion.Trigger>
+                    </Accordion.Header>
+                    <Accordion.Content className="profile-accordion-content">
+                      <form className="profile-bug-form" onSubmit={handleSubmitPasswordChange}>
+                        <label className="field-control">
+                          <span className="field-label">Current password</span>
+                          <input
+                            type="password"
+                            value={currentPasswordInput}
+                            onChange={(event) => setCurrentPasswordInput(event.target.value)}
+                            autoComplete="current-password"
+                            placeholder="Current password"
+                          />
+                        </label>
+                        <label className="field-control">
+                          <span className="field-label">New password</span>
+                          <input
+                            type="password"
+                            value={newPasswordInput}
+                            onChange={(event) => setNewPasswordInput(event.target.value)}
+                            autoComplete="new-password"
+                            placeholder="New password"
+                          />
+                        </label>
+                        <label className="field-control">
+                          <span className="field-label">Confirm new password</span>
+                          <input
+                            type="password"
+                            value={confirmPasswordInput}
+                            onChange={(event) => setConfirmPasswordInput(event.target.value)}
+                            autoComplete="new-password"
+                            placeholder="Confirm new password"
+                          />
+                        </label>
+                        <div className="row wrap profile-actions">
+                          <button
+                            className="primary"
+                            type="submit"
+                            disabled={
+                              passwordChangePending ||
+                              !currentPasswordInput.trim() ||
+                              !newPasswordInput.trim() ||
+                              !confirmPasswordInput.trim()
+                            }
+                          >
+                            {passwordChangePending ? 'Saving...' : 'Save new password'}
+                          </button>
+                          <button
+                            className="button-secondary"
+                            type="button"
+                            onClick={resetPasswordForm}
+                            disabled={passwordChangePending}
+                          >
+                            Reset
+                          </button>
+                        </div>
+                      </form>
+                      {passwordFeedback ? (
+                        <div className={`notice ${passwordFeedback.tone === 'error' ? 'notice-error' : ''}`.trim()}>
+                          {passwordFeedback.message}
+                        </div>
+                      ) : null}
+                    </Accordion.Content>
+                  </Accordion.Item>
+                </Accordion.Root>
+              </section>
+            </div>
+
+            <AlertDialog.Root open={codexAuthDialogOpen} onOpenChange={setCodexAuthDialogOpen}>
+              <AlertDialog.Portal>
+                <AlertDialog.Overlay className="codex-chat-alert-overlay" />
+                <AlertDialog.Content className="codex-chat-alert-content profile-codex-auth-dialog">
+                  <AlertDialog.Title className="codex-chat-alert-title">
+                    {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn ? 'Codex connection' : 'Connect Codex'}
+                  </AlertDialog.Title>
+                  <AlertDialog.Description className="codex-chat-alert-description">
+                    {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn
+                      ? 'This shared codex-bot connection is active and overrides the host-mounted auth file inside this runtime.'
+                      : 'Finish the browser sign-in and the shared codex-bot connection will be stored inside this runtime only.'}
+                  </AlertDialog.Description>
+                  <div className="profile-codex-auth-dialog-body">
+                    {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn ? (
+                      <div className="profile-codex-auth-dialog-block">
+                        <div className="field-label">Connection</div>
+                        <span className="status-chip">Connected for codex-bot</span>
+                      </div>
+                    ) : null}
+                    {codexAuthLoginSession?.verification_uri ? (
+                      <div className="profile-codex-auth-dialog-block">
+                        <div className="field-label">Verification URL</div>
+                        <a
+                          className="profile-codex-auth-link"
+                          href={codexAuthLoginSession.verification_uri}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {codexAuthLoginSession.verification_uri}
+                        </a>
+                      </div>
+                    ) : null}
+                    {codexAuthLoginSession?.user_code ? (
+                      <div className="profile-codex-auth-dialog-block">
+                        <div className="field-label">One-time code</div>
+                        <code className="profile-codex-auth-code">{codexAuthLoginSession.user_code}</code>
+                      </div>
+                    ) : null}
+                    {codexAuthSessionStatusLabel ? (
+                      <div className="profile-codex-auth-dialog-block">
+                        <div className="field-label">Status</div>
+                        <span className="status-chip">{codexAuthSessionStatusLabel}</span>
+                      </div>
+                    ) : null}
+                    {codexAuthLoginSession?.error ? (
+                      <div className="notice notice-error">{codexAuthLoginSession.error}</div>
+                    ) : null}
+                    {Array.isArray(codexAuthLoginSession?.output_excerpt) && codexAuthLoginSession.output_excerpt.length > 0 ? (
+                      <div className="profile-codex-auth-dialog-block">
+                        <div className="field-label">Recent output</div>
+                        <div className="notice profile-codex-auth-output">
+                          {codexAuthLoginSession.output_excerpt.join('\n')}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="row wrap profile-actions">
+                    {canManageCodexAuth && codexAuthLoginSession?.status === 'pending' ? (
+                      <button
+                        type="button"
+                        className="button-secondary"
+                        onClick={() => {
+                          void handleCancelCodexDeviceAuth()
+                        }}
+                        disabled={cancelCodexDeviceAuthPending}
+                      >
+                        {cancelCodexDeviceAuthPending ? 'Cancelling...' : 'Cancel sign-in'}
+                      </button>
+                    ) : null}
+                    {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn && codexAuthCanRemoveOverride ? (
+                      <button
+                        type="button"
+                        className="button-secondary"
+                        onClick={() => {
+                          void handleDeleteCodexAuthOverride()
+                        }}
+                        disabled={!codexAuthCanRemoveOverride}
+                      >
+                        {deleteCodexAuthOverridePending ? 'Removing...' : 'Remove override'}
+                      </button>
+                    ) : null}
+                    <AlertDialog.Cancel asChild>
+                      <button type="button" className="button-secondary">Close</button>
+                    </AlertDialog.Cancel>
+                  </div>
+                </AlertDialog.Content>
+              </AlertDialog.Portal>
+            </AlertDialog.Root>
           </Tabs.Content>
 
           <Tabs.Content className="profile-tab-content" value="feedback">

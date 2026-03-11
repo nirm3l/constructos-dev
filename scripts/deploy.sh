@@ -17,6 +17,7 @@ TASK_APP_IMAGE="${TASK_APP_IMAGE:-}"
 MCP_TOOLS_IMAGE="${MCP_TOOLS_IMAGE:-}"
 CODEX_AUTH_FILE="${CODEX_AUTH_FILE:-${HOME}/.codex/auth.json}"
 CODEX_CONFIG_FILE="${CODEX_CONFIG_FILE:-${ROOT_DIR}/codex.config.toml}"
+CODEX_AUTH_PLACEHOLDER_FILE="${ROOT_DIR}/codex.auth.placeholder.json"
 OLLAMA_MODELS_MOUNT="${OLLAMA_MODELS_MOUNT:-}"
 AGENT_CODEX_WORKSPACE_MOUNT="${AGENT_CODEX_WORKSPACE_MOUNT:-}"
 DEPLOY_SERVICES_OVERRIDE="${DEPLOY_SERVICES_OVERRIDE:-}"
@@ -210,9 +211,9 @@ if [[ "$CODEX_CONFIG_FILE" != /* ]]; then
 fi
 
 if [[ ! -f "$CODEX_AUTH_FILE" ]]; then
-  echo "Missing Codex auth file: $CODEX_AUTH_FILE"
-  echo "Run codex login on host or set CODEX_AUTH_FILE before deploy."
-  exit 1
+  echo "Host Codex auth file not found: $CODEX_AUTH_FILE"
+  echo "Falling back to placeholder auth mount so Codex can be configured from the UI."
+  CODEX_AUTH_FILE="$CODEX_AUTH_PLACEHOLDER_FILE"
 fi
 if ! chmod a+r "$CODEX_AUTH_FILE" 2>/dev/null; then
   echo "Warning: unable to adjust read permissions for $CODEX_AUTH_FILE"

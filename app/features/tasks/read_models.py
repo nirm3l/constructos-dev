@@ -12,6 +12,11 @@ from sqlalchemy.orm import Session
 from features.agents.gates import run_runtime_deploy_health_check
 from plugins.team_mode.task_roles import derive_task_role, normalize_team_agents
 from plugins.context_policy import classify_project_delivery_context
+from shared.delivery_evidence import (
+    derive_deploy_execution_snapshot,
+    extract_task_branches_from_refs,
+    has_merge_to_main_ref,
+)
 from shared.core import (
     Note,
     Task,
@@ -24,7 +29,7 @@ from shared.core import (
     serialize_task,
 )
 from shared.serializers import load_created_by_map
-from shared.project_repository import find_project_compose_manifest
+from shared.project_repository import branch_is_merged_to_main, find_project_compose_manifest
 from shared.models import Project, ProjectMember, ProjectPluginConfig, ProjectRule
 from shared.task_automation import (
     build_legacy_schedule_trigger,
@@ -338,8 +343,18 @@ def _build_execution_gates(
         ]
         for project_task_id in project_task_ids:
             project_task_state, _ = rebuild_state(db, "Task", project_task_id)
-            if _task_has_main_merge_marker(project_task_state.get("external_refs")):
+            if has_merge_to_main_ref(project_task_state.get("external_refs")):
                 has_merge_to_main = True
+                break
+            for branch_name in extract_task_branches_from_refs(project_task_state.get("external_refs")):
+                if branch_is_merged_to_main(
+                    project_name=str(getattr(project, "name", "") or ""),
+                    project_id=normalized_project_id,
+                    branch_name=branch_name,
+                ):
+                    has_merge_to_main = True
+                    break
+            if has_merge_to_main:
                 break
         manifest = find_project_compose_manifest(
             project_name=str(getattr(project, "name", "") or ""),
@@ -386,12 +401,32 @@ def _build_execution_gates(
             )
 
     if role == "QA" and status == "QA":
-        has_lead_handoff_token = bool(str(state.get("last_lead_handoff_token") or "").strip())
+        structured_lead_handoff = bool(
+            str(state.get("last_requested_workflow_scope") or "").strip() == "team_mode"
+            and str(state.get("last_requested_source_task_id") or "").strip()
+            and (
+                str(state.get("last_requested_source") or "").strip() == "lead_handoff"
+                or str(state.get("last_requested_reason") or "").strip() == "lead_handoff"
+            )
+        )
+        has_lead_handoff_token = bool(str(state.get("last_lead_handoff_token") or "").strip()) or structured_lead_handoff
         qa_handoff_deploy = (
             state.get("last_lead_handoff_deploy_execution")
             if isinstance(state.get("last_lead_handoff_deploy_execution"), dict)
             else {}
         )
+        if not qa_handoff_deploy and structured_lead_handoff:
+            source_task_id = str(state.get("last_requested_source_task_id") or "").strip()
+            if source_task_id:
+                lead_source_state, _ = rebuild_state(db, "Task", source_task_id)
+                qa_handoff_deploy = derive_deploy_execution_snapshot(
+                    refs=lead_source_state.get("external_refs"),
+                    current_snapshot=(
+                        lead_source_state.get("last_deploy_execution")
+                        if isinstance(lead_source_state.get("last_deploy_execution"), dict)
+                        else {}
+                    ),
+                )
         qa_handoff_deploy_at = str(qa_handoff_deploy.get("executed_at") or "").strip()
         lead_rows = db.execute(
             select(Task.id, Task.status).where(
@@ -416,10 +451,13 @@ def _build_execution_gates(
             )
             if lead_role == "Lead" and str(lead_status or "").strip() == "Lead":
                 lead_in_progress = True
-            lead_deploy_execution = (
-                lead_state.get("last_deploy_execution")
-                if isinstance(lead_state.get("last_deploy_execution"), dict)
-                else {}
+            lead_deploy_execution = derive_deploy_execution_snapshot(
+                refs=lead_state.get("external_refs"),
+                current_snapshot=(
+                    lead_state.get("last_deploy_execution")
+                    if isinstance(lead_state.get("last_deploy_execution"), dict)
+                    else {}
+                ),
             )
             executed_at = str(lead_deploy_execution.get("executed_at") or "").strip()
             if executed_at and (latest_lead_deploy_at is None or executed_at > latest_lead_deploy_at):
@@ -632,6 +670,35 @@ def get_task_automation_status_read_model(db: Session, user, task_id: str) -> di
         instruction=instruction,
         execution_triggers=execution_triggers,
     )
+    derived_deploy_execution = derive_deploy_execution_snapshot(
+        refs=state.get("external_refs"),
+        current_snapshot=state.get("last_deploy_execution") if isinstance(state.get("last_deploy_execution"), dict) else {},
+    )
+    structured_lead_handoff = bool(
+        str(state.get("last_requested_workflow_scope") or "").strip() == "team_mode"
+        and str(state.get("last_requested_source_task_id") or "").strip()
+        and (
+            str(state.get("last_requested_source") or "").strip() == "lead_handoff"
+            or str(state.get("last_requested_reason") or "").strip() == "lead_handoff"
+        )
+    )
+    derived_handoff_deploy_execution = (
+        state.get("last_lead_handoff_deploy_execution")
+        if isinstance(state.get("last_lead_handoff_deploy_execution"), dict)
+        else {}
+    )
+    if not derived_handoff_deploy_execution and structured_lead_handoff:
+        source_task_id = str(state.get("last_requested_source_task_id") or "").strip()
+        if source_task_id:
+            lead_source_state, _ = rebuild_state(db, "Task", source_task_id)
+            derived_handoff_deploy_execution = derive_deploy_execution_snapshot(
+                refs=lead_source_state.get("external_refs"),
+                current_snapshot=(
+                    lead_source_state.get("last_deploy_execution")
+                    if isinstance(lead_source_state.get("last_deploy_execution"), dict)
+                    else {}
+                ),
+            )
     return {
         "task_id": task_id,
         "automation_state": state.get("automation_state", "idle"),
@@ -677,11 +744,11 @@ def get_task_automation_status_read_model(db: Session, user, task_id: str) -> di
         "last_ignored_request_from_status": state.get("last_ignored_request_from_status"),
         "last_ignored_request_to_status": state.get("last_ignored_request_to_status"),
         "last_ignored_request_triggered_at": state.get("last_ignored_request_triggered_at"),
-        "last_lead_handoff_token": state.get("last_lead_handoff_token"),
+        "last_lead_handoff_token": state.get("last_lead_handoff_token") or (state.get("last_requested_correlation_id") if structured_lead_handoff else None),
         "last_lead_handoff_at": state.get("last_lead_handoff_at"),
         "last_lead_handoff_refs": state.get("last_lead_handoff_refs_json"),
-        "last_lead_handoff_deploy_execution": state.get("last_lead_handoff_deploy_execution"),
-        "last_deploy_execution": state.get("last_deploy_execution"),
+        "last_lead_handoff_deploy_execution": derived_handoff_deploy_execution or None,
+        "last_deploy_execution": derived_deploy_execution or None,
         "team_mode_phase": state.get("team_mode_phase"),
         "team_mode_blocking_gate": state.get("team_mode_blocking_gate"),
         "team_mode_blocked_reason": state.get("team_mode_blocked_reason"),

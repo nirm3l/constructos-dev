@@ -147,6 +147,7 @@ class TaskAggregate(Aggregate):
         requested_at: str,
         instruction: str | None = None,
         source: str | None = None,
+        source_task_id: str | None = None,
         trigger_task_id: str | None = None,
         from_status: str | None = None,
         to_status: str | None = None,
@@ -163,6 +164,7 @@ class TaskAggregate(Aggregate):
         self.automation_requested_at = requested_at
         self.last_requested_instruction = instruction
         self.last_requested_source = source
+        self.last_requested_source_task_id = source_task_id
         self.last_requested_trigger_task_id = trigger_task_id
         self.last_requested_from_status = from_status
         self.last_requested_to_status = to_status

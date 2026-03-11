@@ -642,6 +642,87 @@ export type GraphProjectSubgraph = {
   edges: GraphSubgraphEdge[]
 }
 
+export type TaskDependencyGraphNode = {
+  entity_type: 'Task' | string
+  entity_id: string
+  title: string
+  status: string
+  priority: string
+  automation_state: string
+  role: string
+  assigned_agent_code?: string | null
+  assignee_id?: string | null
+  specification_id?: string | null
+  team_mode_phase?: string | null
+  team_mode_blocking_gate?: string | null
+  last_requested_source?: string | null
+  last_requested_source_task_id?: string | null
+  last_requested_triggered_at?: string | null
+  last_activity_at?: string | null
+  inbound_count: number
+  outbound_count: number
+  runtime_inbound_count: number
+  runtime_outbound_count: number
+  structural_inbound_count: number
+  structural_outbound_count: number
+  status_trigger_inbound_count: number
+  status_trigger_outbound_count: number
+}
+
+export type TaskDependencyGraphEdgeChannel = {
+  kind: 'relationship' | 'status_trigger' | 'runtime_request' | string
+  label: string
+  source: string
+  statuses?: string[]
+  to_statuses?: string[]
+  scope?: string | null
+  match_mode?: string | null
+  count?: number
+  latest_at?: string | null
+  correlation_ids?: string[]
+  active?: boolean
+}
+
+export type TaskDependencyGraphEdge = {
+  source_entity_id: string
+  target_entity_id: string
+  relationship: string
+  structural: boolean
+  trigger_dependency: boolean
+  runtime_dependency: boolean
+  active_runtime: boolean
+  runtime_requests_total: number
+  lead_handoffs_total: number
+  latest_runtime_at?: string | null
+  latest_runtime_source?: string | null
+  relationship_kinds?: string[]
+  trigger_conditions?: Array<Record<string, unknown>>
+  runtime_sources?: Record<string, number>
+  channels: TaskDependencyGraphEdgeChannel[]
+}
+
+export type ProjectTaskDependencyGraph = {
+  project_id: string
+  project_name: string
+  node_count: number
+  edge_count: number
+  counts: {
+    tasks: number
+    structural_edges: number
+    status_trigger_edges: number
+    runtime_edges: number
+    active_runtime_edges: number
+    running_tasks: number
+    queued_tasks: number
+    blocked_tasks: number
+    done_tasks: number
+  }
+  relationship_counts?: Record<string, number>
+  runtime_source_counts?: Record<string, number>
+  nodes: TaskDependencyGraphNode[]
+  edges: TaskDependencyGraphEdge[]
+}
+
 export type GraphLayoutPosition = {
   entity_id: string
   x: number
@@ -991,6 +1072,31 @@ export type AgentChatResponse = {
   resume_attempted?: boolean
   resume_succeeded?: boolean
   resume_fallback_used?: boolean
+}
+
+export type CodexAuthEffectiveSource = 'system_override' | 'host_mount' | 'none'
+
+export type CodexAuthLoginSession = {
+  id: string
+  status: 'pending' | 'succeeded' | 'failed' | 'cancelled'
+  started_at: string
+  updated_at: string
+  verification_uri?: string | null
+  user_code?: string | null
+  error?: string | null
+  output_excerpt?: string[]
+}
+
+export type CodexAuthStatus = {
+  configured: boolean
+  effective_source: CodexAuthEffectiveSource
+  host_auth_available: boolean
+  override_available: boolean
+  override_updated_at?: string | null
+  scope?: 'system' | string
+  target_actor_user_id?: string | null
+  target_actor_username?: string | null
+  login_session?: CodexAuthLoginSession | null
 }
 
 export type ChatMcpServer = string

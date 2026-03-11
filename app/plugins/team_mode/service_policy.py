@@ -87,6 +87,8 @@ def enforce_done_transition(
             "git_contract_ok",
             "compose_manifest_present",
             "lead_deploy_decision_evidence_present",
+            "deploy_execution_evidence_present",
+            "qa_handoff_current_cycle_ok",
             "deploy_serves_application_root",
             "qa_has_verifiable_artifacts",
         ]
@@ -124,6 +126,7 @@ def enforce_done_transition(
             "git_contract_ok",
             "compose_manifest_present",
             "lead_deploy_decision_evidence_present",
+            "qa_handoff_current_cycle_ok",
             "deploy_serves_application_root",
             "qa_has_verifiable_artifacts",
             "deploy_execution_evidence_present",

@@ -90,6 +90,7 @@ class CommentCreate(BaseModel):
 class TaskAutomationRun(BaseModel):
     instruction: str | None = None
     source: str | None = None
+    source_task_id: str | None = None
     execution_intent: bool | None = None
     execution_kickoff_intent: bool | None = None
     project_creation_intent: bool | None = None

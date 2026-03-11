@@ -18,6 +18,7 @@ from plugins.team_mode.gates import (
     TEAM_MODE_CORE_CHECK_SET,
 )
 from plugins.team_mode.task_roles import normalize_team_agents
+from shared.delivery_evidence import derive_deploy_execution_snapshot
 from shared.project_repository import find_project_compose_manifest
 
 COMMIT_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
@@ -439,6 +440,7 @@ def evaluate_team_mode_gates(
 def evaluate_delivery_gates(
     *,
     project_id: str,
+    project_name: str | None,
     workspace_id: str,
     plugin_policy: dict[str, Any],
     plugin_policy_source: str,
@@ -503,20 +505,51 @@ def evaluate_delivery_gates(
     dev_tasks = role_dev_tasks or [t for t in tasks if str(t.get("status") or "").strip() == "Dev"]
     qa_tasks = role_qa_tasks or [t for t in tasks if str(t.get("status") or "").strip() == "QA"]
 
-    def _task_has_explicit_deploy_signal(task: dict[str, Any]) -> bool:
-        deploy_snapshot = task.get("last_deploy_execution") if isinstance(task.get("last_deploy_execution"), dict) else {}
-        if str(deploy_snapshot.get("executed_at") or "").strip():
-            return True
-        refs = task.get("external_refs")
-        if not isinstance(refs, list):
-            return False
-        for item in refs:
-            if not isinstance(item, dict):
-                continue
+    compose_manifest_suffixes = (
+        "/docker-compose.yml",
+        "/docker-compose.yaml",
+        "/compose.yml",
+        "/compose.yaml",
+    )
+
+    def _iter_task_refs(task: dict[str, Any]) -> list[dict[str, Any]]:
+        task_id = str(task.get("id") or "").strip()
+        refs: list[dict[str, Any]] = []
+        if isinstance(task.get("external_refs"), list):
+            refs.extend([item for item in task.get("external_refs") if isinstance(item, dict)])
+        if task_id:
+            for note in notes_by_task.get(task_id, []):
+                refs.extend(
+                    [item for item in parse_json_list(note.external_refs) if isinstance(item, dict)]
+                )
+        return refs
+
+    def _iter_task_ref_urls(task: dict[str, Any]) -> list[str]:
+        urls: list[str] = []
+        for item in _iter_task_refs(task):
             url = str(item.get("url") or "").strip().casefold()
+            if url:
+                urls.append(url)
+        return urls
+
+    def _task_has_explicit_deploy_signal(task: dict[str, Any]) -> bool:
+        deploy_snapshot = derive_deploy_execution_snapshot(
+            refs=task.get("external_refs"),
+            current_snapshot=task.get("last_deploy_execution") if isinstance(task.get("last_deploy_execution"), dict) else {},
+        )
+        if (
+            str(deploy_snapshot.get("executed_at") or "").strip()
+            or str(deploy_snapshot.get("command") or "").strip()
+            or str(deploy_snapshot.get("http_url") or "").strip()
+            or str(deploy_snapshot.get("stack") or "").strip()
+        ):
+            return True
+        for url in _iter_task_ref_urls(task):
             if url.startswith("deploy:stack:") or url.startswith("deploy:command:") or url.startswith("deploy:health:"):
                 return True
             if url.startswith("deploy:compose:") or url.startswith("deploy:runtime:"):
+                return True
+            if url.startswith("command:docker compose") or url.startswith("probe:postdeploy:"):
                 return True
         return False
 
@@ -535,7 +568,7 @@ def evaluate_delivery_gates(
 
     def _compose_manifest_path() -> str | None:
         manifest = find_project_compose_manifest(
-            project_name=None,
+            project_name=project_name,
             project_id=str(project_id or "").strip(),
         )
         if manifest is None:
@@ -581,12 +614,40 @@ def evaluate_delivery_gates(
     def _task_has_current_cycle_qa_handoff(task: dict[str, Any], *, latest_deploy_at: str | None) -> bool:
         if not str(latest_deploy_at or "").strip():
             return False
+        structured_handoff = bool(
+            str(task.get("last_requested_workflow_scope") or "").strip() == "team_mode"
+            and str(task.get("last_requested_source_task_id") or "").strip()
+            and (
+                str(task.get("last_requested_source") or "").strip() == "lead_handoff"
+                or str(task.get("last_requested_reason") or "").strip() == "lead_handoff"
+            )
+        )
         handoff_token = str(task.get("last_lead_handoff_token") or "").strip()
+        if not handoff_token and structured_handoff:
+            handoff_token = str(task.get("last_requested_correlation_id") or "").strip() or "derived:lead_handoff"
         handoff_snapshot = (
             task.get("last_lead_handoff_deploy_execution")
             if isinstance(task.get("last_lead_handoff_deploy_execution"), dict)
             else {}
         )
+        if not handoff_snapshot and structured_handoff:
+            source_task = next(
+                (
+                    candidate
+                    for candidate in tasks
+                    if str(candidate.get("id") or "").strip() == str(task.get("last_requested_source_task_id") or "").strip()
+                ),
+                None,
+            )
+            if isinstance(source_task, dict):
+                handoff_snapshot = derive_deploy_execution_snapshot(
+                    refs=source_task.get("external_refs"),
+                    current_snapshot=(
+                        source_task.get("last_deploy_execution")
+                        if isinstance(source_task.get("last_deploy_execution"), dict)
+                        else {}
+                    ),
+                )
         handoff_executed_at = str(handoff_snapshot.get("executed_at") or "").strip()
         return bool(handoff_token and handoff_executed_at and handoff_executed_at == latest_deploy_at)
 
@@ -594,32 +655,43 @@ def evaluate_delivery_gates(
         task_id = str(task.get("id") or "").strip()
         if not task_id:
             return False
-        deploy_snapshot = task.get("last_deploy_execution") if isinstance(task.get("last_deploy_execution"), dict) else {}
-        if str(deploy_snapshot.get("executed_at") or "").strip():
-            return True
-        if has_http_external_ref(task.get("external_refs")):
+        deploy_snapshot = derive_deploy_execution_snapshot(
+            refs=task.get("external_refs"),
+            current_snapshot=task.get("last_deploy_execution") if isinstance(task.get("last_deploy_execution"), dict) else {},
+        )
+        if (
+            str(deploy_snapshot.get("executed_at") or "").strip()
+            or str(deploy_snapshot.get("command") or "").strip()
+            or str(deploy_snapshot.get("http_url") or "").strip()
+        ):
             return True
         for note in notes_by_task.get(task_id, []):
             if has_http_external_ref(parse_json_list(note.external_refs)):
                 return True
+        for url in _iter_task_ref_urls(task):
+            if url.startswith("deploy:command:") or url.startswith("deploy:health:"):
+                return True
+            if url.startswith("command:docker compose") or url.startswith("probe:postdeploy:"):
+                return True
         return False
 
     def _task_has_lead_deploy_decision_evidence(task: dict[str, Any]) -> bool:
-        deploy_snapshot = task.get("last_deploy_execution") if isinstance(task.get("last_deploy_execution"), dict) else {}
+        deploy_snapshot = derive_deploy_execution_snapshot(
+            refs=task.get("external_refs"),
+            current_snapshot=task.get("last_deploy_execution") if isinstance(task.get("last_deploy_execution"), dict) else {},
+        )
         if str(deploy_snapshot.get("runtime_type") or "").strip() and str(deploy_snapshot.get("manifest_path") or "").strip():
             return True
-        refs = task.get("external_refs")
-        if not isinstance(refs, list):
-            return False
         has_runtime = False
         has_compose = False
-        for item in refs:
-            if not isinstance(item, dict):
-                continue
-            url = str(item.get("url") or "").strip().casefold()
+        for url in _iter_task_ref_urls(task):
             if url.startswith("deploy:runtime:"):
                 has_runtime = True
             if url.startswith("deploy:compose:"):
+                has_compose = True
+            if url.startswith("decision:runtime_signal_"):
+                has_runtime = True
+            if url.startswith("file:") and url.endswith(compose_manifest_suffixes):
                 has_compose = True
         return bool(has_runtime and has_compose)
 
@@ -693,10 +765,21 @@ def evaluate_delivery_gates(
     serves_application_root_ok = bool((not runtime_required_effective) or runtime_check.get("serves_application_root"))
     latest_lead_deploy_at = max(
         (
-            str((task.get("last_deploy_execution") or {}).get("executed_at") or "").strip()
+            str(
+                derive_deploy_execution_snapshot(
+                    refs=task.get("external_refs"),
+                    current_snapshot=task.get("last_deploy_execution") if isinstance(task.get("last_deploy_execution"), dict) else {},
+                ).get("executed_at")
+                or ""
+            ).strip()
             for task in lead_deploy_tasks
-            if isinstance(task.get("last_deploy_execution"), dict)
-            and str((task.get("last_deploy_execution") or {}).get("executed_at") or "").strip()
+            if str(
+                derive_deploy_execution_snapshot(
+                    refs=task.get("external_refs"),
+                    current_snapshot=task.get("last_deploy_execution") if isinstance(task.get("last_deploy_execution"), dict) else {},
+                ).get("executed_at")
+                or ""
+            ).strip()
         ),
         default="",
     )
@@ -751,6 +834,11 @@ def evaluate_delivery_gates(
         required_checks,
         team_mode_enabled=team_mode_enabled,
     )
+    if team_mode_enabled:
+        required_checks = normalize_delivery_required_checks(
+            [*required_checks, *_TEAM_MODE_DELIVERY_REQUIRED_CHECKS],
+            team_mode_enabled=True,
+        )
     if runtime_required_effective or (not team_mode_enabled and bool(standalone_deploy_tasks)):
         required_checks = normalize_delivery_required_checks(
             [*required_checks, "runtime_deploy_health_ok"],
@@ -833,6 +921,7 @@ def evaluate_team_mode_checks(
 def evaluate_delivery_checks(
     *,
     project_id: str,
+    project_name: str | None,
     workspace_id: str,
     plugin_policy: dict[str, Any],
     plugin_policy_source: str,
@@ -854,6 +943,7 @@ def evaluate_delivery_checks(
 ) -> dict[str, Any]:
     return evaluate_delivery_gates(
         project_id=project_id,
+        project_name=project_name,
         workspace_id=workspace_id,
         plugin_policy=plugin_policy,
         plugin_policy_source=plugin_policy_source,

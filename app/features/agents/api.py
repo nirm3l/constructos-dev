@@ -39,6 +39,7 @@ from shared.models import (
     Project,
     ProjectPluginConfig,
     Task,
+    WorkspaceMember,
 )
 from shared.in_memory_stream_broker import InMemoryStreamBroker
 from shared.settings import (
@@ -54,6 +55,13 @@ from .intent_classifier import classify_instruction_intent
 from .mcp_registry import (
     filter_mcp_servers_for_project_plugins as filter_mcp_servers_for_project_plugins_registry,
     normalize_chat_mcp_servers as normalize_chat_mcp_servers_registry,
+)
+from .codex_auth import (
+    cancel_device_auth_session,
+    delete_system_override_auth,
+    get_codex_auth_status,
+    resolve_effective_auth_source,
+    start_device_auth_session,
 )
 from .gateway import build_ui_gateway
 from features.chat.application import ChatApplicationService
@@ -134,6 +142,39 @@ _CHAT_STREAM_CANCEL_EVENTS: dict[str, threading.Event] = {}
 _CHAT_STREAM_CANCEL_BY_KEY: dict[str, tuple[str, threading.Event]] = {}
 _CHAT_STREAM_STOP_REQUESTED_BY_KEY: dict[str, bool] = {}
 _PROJECT_SETUP_STARTER_NEXT_QUESTION = "What should the new project be named?"
+_CODEX_AUTH_REQUIRED_SUMMARY = "Codex authentication is not configured."
+_CODEX_AUTH_REQUIRED_COMMENT = "Open Profile > Security to configure Codex, or ask a workspace admin to do it."
+
+
+def _user_can_manage_codex_auth(db: Session, user_id: str) -> bool:
+    membership = db.execute(
+        select(WorkspaceMember.id).where(
+            WorkspaceMember.user_id == user_id,
+            WorkspaceMember.role.in_(("Owner", "Admin")),
+        ).limit(1)
+    ).scalar_one_or_none()
+    return membership is not None
+
+
+def _ensure_codex_auth_manage_allowed(db: Session, user_id: str) -> None:
+    if _user_can_manage_codex_auth(db, user_id):
+        return
+    raise HTTPException(status_code=403, detail="Only workspace owners and admins can configure Codex authentication.")
+
+
+def _build_codex_auth_required_response(*, session_id: str) -> dict[str, object]:
+    return {
+        "ok": False,
+        "action": "comment",
+        "summary": _CODEX_AUTH_REQUIRED_SUMMARY,
+        "comment": _CODEX_AUTH_REQUIRED_COMMENT,
+        "session_id": session_id,
+        "codex_session_id": None,
+        "usage": None,
+        "resume_attempted": False,
+        "resume_succeeded": False,
+        "resume_fallback_used": False,
+    }
 
 
 def _chat_stream_key(*, workspace_id: str, session_id: str) -> str:
@@ -1264,12 +1305,14 @@ def _classify_chat_instruction_intents(
     workspace_id: str,
     project_id: str | None,
     session_id: str | None,
+    actor_user_id: str | None,
 ) -> dict[str, object]:
     return classify_instruction_intent(
         instruction=instruction,
         workspace_id=workspace_id,
         project_id=project_id,
         session_id=session_id,
+        actor_user_id=actor_user_id,
     )
 
 
@@ -2013,6 +2056,7 @@ def _prepare_chat_instruction(
             workspace_id=payload.workspace_id,
             project_id=payload.project_id,
             session_id=payload.session_id,
+            actor_user_id=user.id,
         )
         if bool(intent_flags.get("execution_intent")) and str(payload.project_id or "").strip():
             mandate_text = _build_execution_intent_mandate()
@@ -2083,6 +2127,43 @@ def _prepare_chat_instruction(
     )
 
 
+@router.get("/api/agents/codex-auth")
+def codex_auth_status(
+    user: User = Depends(get_current_user),
+):
+    return get_codex_auth_status(user.id)
+
+
+@router.post("/api/agents/codex-auth/device/start")
+def codex_auth_device_start(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    _ensure_codex_auth_manage_allowed(db, user.id)
+    try:
+        return start_device_auth_session(user.id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Failed to start Codex authentication.") from exc
+
+
+@router.post("/api/agents/codex-auth/device/cancel")
+def codex_auth_device_cancel(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    _ensure_codex_auth_manage_allowed(db, user.id)
+    return cancel_device_auth_session(user.id)
+
+
+@router.delete("/api/agents/codex-auth/override")
+def codex_auth_override_delete(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    _ensure_codex_auth_manage_allowed(db, user.id)
+    return delete_system_override_auth(user.id)
+
+
 @router.post("/api/agents/chat")
 def agent_chat(
     payload: AgentChatRun,
@@ -2100,11 +2181,47 @@ def agent_chat(
         session_id=session_id,
         instruction=payload.instruction,
     )
-    model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
     mcp_servers = _normalize_chat_mcp_servers(
         payload.mcp_servers,
         project_id=effective_project_id,
     )
+    if resolve_effective_auth_source() == "none":
+        attachment_refs = [item.model_dump() for item in payload.attachment_refs or []]
+        session_attachment_refs = [item.model_dump() for item in payload.session_attachment_refs or []]
+        ChatApplicationService(
+            db,
+            user,
+            command_id=_command_id_with_suffix(command_id, "chat-user"),
+        ).append_user_message(
+            AppendUserMessagePayload(
+                workspace_id=payload.workspace_id,
+                project_id=effective_project_id,
+                session_id=session_id,
+                message_id=None,
+                content=(payload.instruction or "").strip(),
+                mcp_servers=mcp_servers,
+                attachment_refs=attachment_refs,
+                session_attachment_refs=session_attachment_refs,
+            )
+        )
+        response = _build_codex_auth_required_response(session_id=session_id)
+        _persist_assistant_message_with_links(
+            db=db,
+            user=user,
+            command_id=command_id,
+            workspace_id=payload.workspace_id,
+            project_id=effective_project_id,
+            session_id=session_id,
+            mcp_servers=mcp_servers,
+            content=_assistant_text(
+                str(response.get("summary") or ""),
+                str(response.get("comment") or ""),
+            ),
+            usage={},
+            codex_session_id=None,
+        )
+        return response
+    model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
     existing_codex_session_id, resume_last_succeeded = _load_chat_session_codex_state(
         db=db,
         workspace_id=payload.workspace_id,
@@ -2402,11 +2519,56 @@ def agent_chat_stream(
         session_id=session_id,
         instruction=payload.instruction,
     )
-    model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
     mcp_servers = _normalize_chat_mcp_servers(
         payload.mcp_servers,
         project_id=effective_project_id,
     )
+    stream_headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    }
+    if resolve_effective_auth_source() == "none":
+        attachment_refs = [item.model_dump() for item in payload.attachment_refs or []]
+        session_attachment_refs = [item.model_dump() for item in payload.session_attachment_refs or []]
+        ChatApplicationService(
+            db,
+            user,
+            command_id=_command_id_with_suffix(command_id, "chat-user"),
+        ).append_user_message(
+            AppendUserMessagePayload(
+                workspace_id=payload.workspace_id,
+                project_id=effective_project_id,
+                session_id=session_id,
+                message_id=None,
+                content=(payload.instruction or "").strip(),
+                mcp_servers=mcp_servers,
+                attachment_refs=attachment_refs,
+                session_attachment_refs=session_attachment_refs,
+            )
+        )
+        response = _build_codex_auth_required_response(session_id=session_id)
+        _persist_assistant_message_with_links(
+            db=db,
+            user=user,
+            command_id=command_id,
+            workspace_id=payload.workspace_id,
+            project_id=effective_project_id,
+            session_id=session_id,
+            mcp_servers=mcp_servers,
+            content=_assistant_text(
+                str(response.get("summary") or ""),
+                str(response.get("comment") or ""),
+            ),
+            usage={},
+            codex_session_id=None,
+        )
+
+        def _auth_required_stream():
+            yield json.dumps({"type": "final", "response": response}, ensure_ascii=True) + "\n"
+
+        return StreamingResponse(_auth_required_stream(), media_type="application/x-ndjson", headers=stream_headers)
+    model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
     existing_codex_session_id, resume_last_succeeded = _load_chat_session_codex_state(
         db=db,
         workspace_id=payload.workspace_id,
@@ -2450,12 +2612,6 @@ def agent_chat_stream(
             session_attachment_refs=session_attachment_refs,
         )
     )
-
-    stream_headers = {
-        "Cache-Control": "no-cache, no-transform",
-        "X-Accel-Buffering": "no",
-        "Connection": "keep-alive",
-    }
 
     if _should_prompt_for_project_setup_name(intent_flags=intent_flags, project_id=effective_project_id):
         summary = _PROJECT_SETUP_STARTER_NEXT_QUESTION

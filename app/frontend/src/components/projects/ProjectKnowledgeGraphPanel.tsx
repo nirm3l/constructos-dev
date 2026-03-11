@@ -624,7 +624,7 @@ export function ProjectKnowledgeGraphPanel({
   const [isEventStormingPortraitMobile, setIsEventStormingPortraitMobile] = React.useState(false)
   const [isEventStormingInspectorOpen, setIsEventStormingInspectorOpen] = React.useState(true)
   const [selectedEvidenceId, setSelectedEvidenceId] = React.useState<string | null>(null)
-  const [activeTab, setActiveTab] = React.useState<KnowledgeGraphTab>('explore')
+  const [activeTab, setActiveTab] = React.useState<KnowledgeGraphTab>('overview')
   const [overviewTab, setOverviewTab] = React.useState<'summary' | 'composition'>('summary')
   const [packTab, setPackTab] = React.useState<'composition' | 'markdown'>('composition')
   const [selectedOverviewSourceKey, setSelectedOverviewSourceKey] = React.useState<string | null>(null)
@@ -2318,8 +2318,8 @@ export function ProjectKnowledgeGraphPanel({
   }, [knowledgeSearchActive])
 
   React.useEffect(() => {
-    setActiveTab('explore')
-  }, [projectId])
+    if (!knowledgeSearchActive) setActiveTab('overview')
+  }, [projectId, knowledgeSearchActive])
 
   const focusNodeOnCanvas = React.useCallback((nodeId: string, zoomTarget = 2.2) => {
     setSelectedNodeId(nodeId)

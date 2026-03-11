@@ -160,6 +160,7 @@ export function AppHeader({
   const licenseStatus = String(license?.status || '').trim().toLowerCase()
   const licensePlanCode = String(license?.plan_code || '').trim().toLowerCase()
   const betaSubscription = licenseStatus === 'beta' || licensePlanCode.includes('beta')
+  const graphPagesActive = tab === 'knowledge-graph' || tab === 'task-flow'
   const projectSelectValue = React.useMemo(() => {
     if (!selectedProjectId) return undefined
     return bootstrapData.projects.some((project) => project.id === selectedProjectId) ? selectedProjectId : undefined
@@ -417,7 +418,7 @@ export function AppHeader({
 
             <HeaderTooltip content="Open Knowledge Graph">
               <button
-                className={`top-graph-btn ${tab === 'knowledge-graph' ? 'active' : ''}`.trim()}
+                className={`top-graph-btn ${graphPagesActive ? 'active' : ''}`.trim()}
                 onClick={() => setTab('knowledge-graph')}
                 aria-label="Knowledge Graph"
                 data-tour-id="header-knowledge-graph"
@@ -467,15 +468,18 @@ export function AppHeader({
                     <DropdownMenu.Item className="header-settings-menu-item" onSelect={() => setTab('knowledge-graph')}>
                       Knowledge Graph
                     </DropdownMenu.Item>
+                    <DropdownMenu.Item className="header-settings-menu-item" onSelect={() => setTab('search')}>
+                      Global search
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item className="header-settings-menu-item" onSelect={() => setTab('task-flow')}>
+                      Task Flow
+                    </DropdownMenu.Item>
                     <DropdownMenu.Separator className="header-settings-menu-separator" />
                     <DropdownMenu.Item className="header-settings-menu-item" onSelect={onStartQuickTour}>
                       Start quick tour
                     </DropdownMenu.Item>
                     <DropdownMenu.Item className="header-settings-menu-item" onSelect={onStartAdvancedTour}>
                       Start advanced tour
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item className="header-settings-menu-item" onSelect={() => setTab('search')}>
-                      Global search
                     </DropdownMenu.Item>
                   </DropdownMenu.Content>
                 </DropdownMenu.Portal>

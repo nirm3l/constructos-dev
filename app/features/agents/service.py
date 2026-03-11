@@ -79,7 +79,11 @@ from shared.core import (
 )
 from features.project_templates.schemas import ProjectFromTemplateCreate, ProjectFromTemplatePreview
 from features.agents.codex_mcp_adapter import run_structured_codex_prompt
-from features.agents.intent_classifier import classify_instruction_intent
+from features.agents.intent_classifier import (
+    AUTOMATION_REQUEST_INTENT_FIELDS,
+    classify_instruction_intent,
+    resolve_instruction_intent,
+)
 from features.agents.gates import (
     DEFAULT_REQUIRED_DELIVERY_CHECKS,
     DELIVERY_CORE_CHECK_DESCRIPTIONS,
@@ -260,7 +264,6 @@ def _team_mode_default_config() -> dict[str, Any]:
     default_transitions = [
         {"from": "To do", "to": "Dev", "allowed_roles": ["Developer", "Lead"]},
         {"from": "Dev", "to": "Lead", "allowed_roles": ["Developer"]},
-        {"from": "Lead", "to": "QA", "allowed_roles": ["Lead"]},
         {"from": "QA", "to": "Done", "allowed_roles": ["QA"]},
         {"from": "To do", "to": "Blocked", "allowed_roles": ["Developer", "QA", "Lead"]},
         {"from": "Dev", "to": "Blocked", "allowed_roles": ["Developer", "Lead"]},
@@ -3585,6 +3588,7 @@ class AgentTaskService:
             plugin_policy["required_checks"] = required_checks
         verification = evaluate_delivery_checks(
             project_id=str(project_id),
+            project_name=str(getattr(project, "name", "") or "").strip(),
             workspace_id=str(project.workspace_id),
             plugin_policy=plugin_policy,
             plugin_policy_source=plugin_policy_source,
@@ -3886,8 +3890,9 @@ class AgentTaskService:
                 "status": "Lead",
                 "instruction": (
                     "Integrate merged main, execute deployment, verify runtime health, write deploy "
-                    "and health evidence to external_refs, then move task to QA. If deploy/health fails, "
-                    "set Blocked with exact failure evidence."
+                    "and health evidence to external_refs, then request explicit QA automation handoff. "
+                    "Do not change the Lead task status to QA; keep the Lead task active until QA "
+                    "completes. If deploy/health fails, set Blocked with exact failure evidence."
                 ),
                 "labels": ["tm.seed:team-mode-core", "tm.role:Lead"],
             },
@@ -4478,6 +4483,11 @@ class AgentTaskService:
                     workspace_id=workspace_id,
                     auth_token=auth_token,
                     command_id=command_id,
+                    event_storming_enabled=(
+                        bool(expected_event_storming_enabled)
+                        if expected_event_storming_enabled is not None
+                        else True
+                    ),
                 ),
             )
             if isinstance(created, dict):
@@ -4524,6 +4534,44 @@ class AgentTaskService:
                 "verification": {},
                 "errors": [item.get("error") for item in blocking_errors if isinstance(item.get("error"), dict)],
             }
+
+        current_event_storming_enabled: bool | None = None
+        with SessionLocal() as db:
+            project_row = self._load_project_scope(db=db, project_id=resolved_project_id)
+            current_event_storming_enabled = bool(getattr(project_row, "event_storming_enabled", True))
+
+        if not blocking_errors and expected_event_storming_enabled is not None:
+            if current_event_storming_enabled != bool(expected_event_storming_enabled):
+                updated_project = self._run_setup_step(
+                    steps=steps,
+                    blocking_errors=blocking_errors,
+                    step_id="apply_project_event_storming_setting",
+                    title="Apply Event Storming setting",
+                    blocking=True,
+                    max_attempts=1,
+                    action=lambda: self.update_project(
+                        project_id=resolved_project_id,
+                        patch={"event_storming_enabled": bool(expected_event_storming_enabled)},
+                        auth_token=auth_token,
+                        command_id=command_id,
+                    ),
+                )
+                if isinstance(updated_project, dict):
+                    current_event_storming_enabled = bool(updated_project.get("event_storming_enabled"))
+            else:
+                self._append_skipped_setup_step(
+                    steps=steps,
+                    step_id="apply_project_event_storming_setting",
+                    title="Apply Event Storming setting",
+                    reason="Project already matches requested Event Storming setting",
+                )
+        else:
+            self._append_skipped_setup_step(
+                steps=steps,
+                step_id="apply_project_event_storming_setting",
+                title="Apply Event Storming setting",
+                reason="No explicit Event Storming target was requested",
+            )
 
         capabilities = self._run_setup_step(
             steps=steps,
@@ -4768,23 +4816,40 @@ class AgentTaskService:
             )
 
         seeded_entities: dict[str, Any] = {}
+        existing_project_tasks = self.list_tasks(
+            workspace_id=resolved_workspace_id,
+            project_id=resolved_project_id,
+            auth_token=auth_token,
+            archived=False,
+            limit=10,
+            offset=0,
+        )
+        existing_task_count = len(existing_project_tasks.get("items") or []) if isinstance(existing_project_tasks, dict) else 0
         if not blocking_errors and requested_team and bool(seed_team_tasks):
-            seeded = self._run_setup_step(
-                steps=steps,
-                blocking_errors=blocking_errors,
-                step_id="seed_team_mode_tasks",
-                title="Seed Team Mode default tasks",
-                blocking=True,
-                max_attempts=1,
-                action=lambda: self._seed_team_mode_default_tasks(
-                    workspace_id=resolved_workspace_id,
-                    project_id=resolved_project_id,
-                    auth_token=auth_token,
-                    command_id=command_id,
-                ),
-            )
-            if isinstance(seeded, dict):
-                seeded_entities["team_mode_tasks"] = seeded
+            if existing_task_count > 0:
+                self._append_skipped_setup_step(
+                    steps=steps,
+                    step_id="seed_team_mode_tasks",
+                    title="Seed Team Mode default tasks",
+                    reason="Project already contains tasks; default Team Mode seeding was skipped to preserve the requested task set",
+                )
+            else:
+                seeded = self._run_setup_step(
+                    steps=steps,
+                    blocking_errors=blocking_errors,
+                    step_id="seed_team_mode_tasks",
+                    title="Seed Team Mode default tasks",
+                    blocking=True,
+                    max_attempts=1,
+                    action=lambda: self._seed_team_mode_default_tasks(
+                        workspace_id=resolved_workspace_id,
+                        project_id=resolved_project_id,
+                        auth_token=auth_token,
+                        command_id=command_id,
+                    ),
+                )
+                if isinstance(seeded, dict):
+                    seeded_entities["team_mode_tasks"] = seeded
         else:
             self._append_skipped_setup_step(
                 steps=steps,
@@ -4993,6 +5058,7 @@ class AgentTaskService:
                     if isinstance(repository_context_result, dict)
                     else None
                 ),
+                "event_storming_enabled": current_event_storming_enabled,
                 "runtime_deploy_target": docker_runtime_target,
             },
             "kickoff_required": kickoff_required,
@@ -5125,7 +5191,7 @@ class AgentTaskService:
             "During oversight cycles, enforce deterministic handoff: Dev -> Lead -> QA.\n"
             "Require Dev completion evidence before merge: commit + task branch in external_refs.\n"
             f"Canonical deploy target: stack={stack}, endpoint={endpoint}.\n"
-            "Lead may move to QA only after deploy evidence exists and runtime health is HTTP 200.\n"
+            "After successful deploy, request QA automation handoff explicitly and keep the Lead task in Lead until QA completes.\n"
             "If deploy/health fails, set Blocked and record exact failure evidence in external_refs.\n"
             f"If unresolved after one cycle, assign to human and notify requester user_id={str(user.id)}."
         )
@@ -6863,6 +6929,7 @@ class AgentTaskService:
         task_id: str,
         instruction: str | None = None,
         source: str | None = None,
+        source_task_id: str | None = None,
         execution_intent: bool | None = None,
         execution_kickoff_intent: bool | None = None,
         project_creation_intent: bool | None = None,
@@ -6881,56 +6948,38 @@ class AgentTaskService:
                 raise HTTPException(status_code=404, detail="Task not found")
             self._assert_workspace_allowed(state.workspace_id)
             self._assert_project_allowed(state.project_id)
-            resolved_execution_intent = execution_intent
-            resolved_execution_kickoff_intent = execution_kickoff_intent
-            resolved_project_creation_intent = project_creation_intent
-            resolved_workflow_scope = str(workflow_scope or "").strip() or None
-            resolved_execution_mode = str(execution_mode or "").strip() or None
-            resolved_task_completion_requested = task_completion_requested
-            resolved_classifier_reason = str(classifier_reason or "").strip() or None
-            if instruction and (
-                resolved_execution_intent is None
-                or resolved_execution_kickoff_intent is None
-                or resolved_project_creation_intent is None
-                or resolved_workflow_scope is None
-                or resolved_execution_mode is None
-                or resolved_task_completion_requested is None
-                or not resolved_classifier_reason
-            ):
-                classification = classify_instruction_intent(
-                    instruction=instruction,
-                    workspace_id=str(state.workspace_id or ""),
-                    project_id=str(state.project_id or "").strip() or None,
-                    session_id=None,
-                )
-                if resolved_execution_intent is None:
-                    resolved_execution_intent = bool(classification.get("execution_intent"))
-                if resolved_execution_kickoff_intent is None:
-                    resolved_execution_kickoff_intent = bool(classification.get("execution_kickoff_intent"))
-                if resolved_project_creation_intent is None:
-                    resolved_project_creation_intent = bool(classification.get("project_creation_intent"))
-                if resolved_workflow_scope is None:
-                    resolved_workflow_scope = str(classification.get("workflow_scope") or "").strip() or None
-                if resolved_execution_mode is None:
-                    resolved_execution_mode = str(classification.get("execution_mode") or "").strip() or None
-                if resolved_task_completion_requested is None:
-                    resolved_task_completion_requested = bool(classification.get("task_completion_requested"))
-                if not resolved_classifier_reason:
-                    resolved_classifier_reason = str(classification.get("reason") or "").strip() or None
+            classification = resolve_instruction_intent(
+                instruction=instruction,
+                workspace_id=str(state.workspace_id or ""),
+                project_id=str(state.project_id or "").strip() or None,
+                session_id=None,
+                current={
+                    "execution_intent": execution_intent,
+                    "execution_kickoff_intent": execution_kickoff_intent,
+                    "project_creation_intent": project_creation_intent,
+                    "workflow_scope": str(workflow_scope or "").strip() or None,
+                    "execution_mode": str(execution_mode or "").strip() or None,
+                    "task_completion_requested": task_completion_requested,
+                    "reason": str(classifier_reason or "").strip() or None,
+                },
+                classify_fn=classify_instruction_intent,
+                required_fields=AUTOMATION_REQUEST_INTENT_FIELDS,
+            )
             payload = TaskAutomationRun(
                 instruction=instruction,
                 source=source,
-                execution_intent=resolved_execution_intent,
-                execution_kickoff_intent=resolved_execution_kickoff_intent,
-                project_creation_intent=resolved_project_creation_intent,
-                workflow_scope=resolved_workflow_scope,
-                execution_mode=resolved_execution_mode,
-                task_completion_requested=resolved_task_completion_requested,
-                classifier_reason=resolved_classifier_reason,
+                source_task_id=str(source_task_id or "").strip() or None,
+                execution_intent=classification.get("execution_intent"),
+                execution_kickoff_intent=classification.get("execution_kickoff_intent"),
+                project_creation_intent=classification.get("project_creation_intent"),
+                workflow_scope=str(classification.get("workflow_scope") or "").strip() or None,
+                execution_mode=str(classification.get("execution_mode") or "").strip() or None,
+                task_completion_requested=classification.get("task_completion_requested"),
+                classifier_reason=str(classification.get("reason") or "").strip() or None,
             )
             effective_command_id = command_id or self._fallback_command_id(
                 prefix="mcp-task-run",
-                payload={"task_id": task_id, "instruction": instruction, "source": source},
+                payload={"task_id": task_id, "instruction": instruction, "source": source, "source_task_id": source_task_id},
             )
             return TaskApplicationService(db, user, command_id=effective_command_id).request_automation_run(task_id, payload)
 

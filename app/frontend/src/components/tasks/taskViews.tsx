@@ -106,6 +106,12 @@ const DESKTOP_EXTRA_TAB_ITEMS: Array<{ value: Tab; label: string; shortLabel: st
     iconPath: 'M11 4a7 7 0 1 1 0 14 7 7 0 0 1 0-14m10 17-4.2-4.2',
   },
   {
+    value: 'task-flow',
+    label: 'Task Flow',
+    shortLabel: 'Flow',
+    iconPath: 'M5 6h5v5H5zm9 0h5v5h-5zM9 16h6v5H9zM10 8.5h4M12 11v5',
+  },
+  {
     value: 'knowledge-graph',
     label: 'Knowledge graph',
     shortLabel: 'Knowledge',

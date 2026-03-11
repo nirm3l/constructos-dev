@@ -14,6 +14,7 @@ import threading
 import time
 from collections import OrderedDict
 
+from features.agents.codex_auth import resolve_effective_auth_path, resolve_host_config_path
 from features.agents.mcp_registry import build_selected_mcp_config_text, normalize_chat_mcp_servers
 from plugins import runner_policy as plugin_runner_policy
 from shared.settings import (
@@ -423,11 +424,12 @@ def _prepare_codex_home(
     *,
     mcp_config_text: str,
     runtime_config_text: str = "",
+    actor_user_id: str | None = None,
 ) -> None:
     codex_dir = home_path / ".codex"
     codex_dir.mkdir(parents=True, exist_ok=True)
     config_path = codex_dir / "config.toml"
-    source_config_path = Path.home() / ".codex" / "config.toml"
+    source_config_path = resolve_host_config_path()
     source_config_text = ""
     if source_config_path.exists() and source_config_path.is_file():
         try:
@@ -442,18 +444,20 @@ def _prepare_codex_home(
     config_path.write_text(f"{merged_config_text}\n" if merged_config_text else "", encoding="utf-8")
 
     target_auth_path = codex_dir / "auth.json"
-    source_auth_path = Path.home() / ".codex" / "auth.json"
+    source_auth_path = resolve_effective_auth_path(actor_user_id)
+    if source_auth_path is None:
+        try:
+            target_auth_path.unlink()
+        except FileNotFoundError:
+            pass
+        return
     if source_auth_path.exists() and source_auth_path.is_file():
         try:
-            # Keep per-session auth.json in sync with the primary Codex auth source.
+            # Keep per-session auth.json in sync with the effective Codex auth source.
             shutil.copy2(source_auth_path, target_auth_path)
         except Exception as exc:
-            # If OPENAI_API_KEY is present, Codex can still authenticate from env.
-            if str(os.getenv("OPENAI_API_KEY") or "").strip():
-                return
             raise RuntimeError(
-                "Failed to prepare Codex auth.json for session home. "
-                "No OPENAI_API_KEY fallback is available."
+                "Failed to prepare Codex auth.json for the session home."
             ) from exc
 
 
@@ -464,6 +468,7 @@ def _codex_home_env(
     runtime_config_text: str = "",
     workspace_id: str | None = None,
     chat_session_id: str | None = None,
+    actor_user_id: str | None = None,
 ):
     normalized_workspace_id = str(workspace_id or "").strip()
     normalized_chat_session_id = str(chat_session_id or "").strip()
@@ -478,6 +483,7 @@ def _codex_home_env(
                 persistent_home,
                 mcp_config_text=mcp_config_text,
                 runtime_config_text=runtime_config_text,
+                actor_user_id=actor_user_id,
             )
         except Exception:
             # Fall back to a temporary home so chat remains available even if persistent storage fails.
@@ -494,6 +500,7 @@ def _codex_home_env(
             temp_home_path,
             mcp_config_text=mcp_config_text,
             runtime_config_text=runtime_config_text,
+            actor_user_id=actor_user_id,
         )
         env = os.environ.copy()
         env["HOME"] = str(temp_home_path)
@@ -1591,6 +1598,7 @@ def run_structured_codex_prompt(
     output_schema: dict[str, object],
     workspace_id: str | None = None,
     session_key: str | None = None,
+    actor_user_id: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
     timeout_seconds: float | None = None,
@@ -1603,6 +1611,7 @@ def run_structured_codex_prompt(
         output_schema=output_schema,
         workspace_id=workspace_id,
         session_key=session_key,
+        actor_user_id=actor_user_id,
         model=model,
         reasoning_effort=reasoning_effort,
         timeout_seconds=timeout_seconds,
@@ -1619,6 +1628,7 @@ def run_structured_codex_prompt_with_usage(
     output_schema: dict[str, object],
     workspace_id: str | None = None,
     session_key: str | None = None,
+    actor_user_id: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
     timeout_seconds: float | None = None,
@@ -1665,6 +1675,7 @@ def run_structured_codex_prompt_with_usage(
             runtime_config_text="",
             workspace_id=normalized_workspace_id,
             chat_session_id=normalized_session_key,
+            actor_user_id=actor_user_id,
         ) as codex_env:
             final_message, usage, _, _, _ = _run_codex_app_server_with_optional_stream(
                 start_prompt=prompt,
@@ -1703,6 +1714,7 @@ def main() -> int:
     workspace_id = str(ctx.get("workspace_id") or "").strip() or None
     chat_session_id = str(ctx.get("chat_session_id") or "").strip() or None
     preferred_codex_session_id = str(ctx.get("codex_session_id") or "").strip() or None
+    actor_user_id = str(ctx.get("actor_user_id") or "").strip() or None
     mcp_url = AGENT_CODEX_MCP_URL
     selected_mcp_servers = normalize_chat_mcp_servers(
         ctx.get("mcp_servers"),
@@ -1786,6 +1798,7 @@ def main() -> int:
             mcp_config_text=mcp_config_text,
             workspace_id=workspace_id,
             chat_session_id=chat_session_id,
+            actor_user_id=actor_user_id,
         ) as codex_env:
             if stream_events:
                 run_kwargs = {

@@ -65,10 +65,17 @@ from shared.models import Note, Project, ProjectMember, ProjectPluginConfig, Pro
 from shared.serializers import to_iso_utc
 from shared.typed_notifications import append_notification_created_event
 from shared.project_repository import (
+    branch_is_merged_to_main,
     find_project_compose_manifest,
+    resolve_project_repository_host_path,
     resolve_project_repository_path,
     resolve_task_branch_name,
     resolve_task_worktree_path,
+)
+from shared.delivery_evidence import (
+    derive_deploy_execution_snapshot,
+    extract_task_branches_from_refs,
+    has_merge_to_main_ref,
 )
 from shared.settings import (
     AGENT_EXECUTOR_TIMEOUT_SECONDS,
@@ -937,6 +944,7 @@ def _queue_team_mode_dispatches(
     workspace_id: str,
     project_id: str | None,
     source: str,
+    source_task_id: str | None = None,
     exclude_task_ids: set[str] | None = None,
     allowed_roles: set[str] | None = None,
 ) -> int:
@@ -981,6 +989,19 @@ def _queue_team_mode_dispatches(
             str(state.get("instruction") or "").strip()
             or str(state.get("scheduled_instruction") or "").strip()
         )
+        current_automation_state = str(state.get("automation_state") or "idle").strip().lower()
+        last_requested_source = str(state.get("last_requested_source") or "").strip()
+        last_requested_source_task_id = str(state.get("last_requested_source_task_id") or "").strip()
+        normalized_source_task_id = str(source_task_id or "").strip()
+        if current_automation_state in {"queued", "running"}:
+            continue
+        if (
+            source in {"runner_orchestrator", "developer_handoff", "lead_kickoff_dispatch"}
+            and current_automation_state == "completed"
+            and last_requested_source == str(source or "").strip()
+            and last_requested_source_task_id == normalized_source_task_id
+        ):
+            continue
         actor_user_id = _resolve_task_actor_user_id(db=db, task_id=task_id, state=state)
         actor = db.get(UserModel, actor_user_id)
         if actor is None or not bool(getattr(actor, "is_active", False)):
@@ -989,7 +1010,11 @@ def _queue_team_mode_dispatches(
         try:
             TaskApplicationService(db, actor, command_id=command_id).request_automation_run(
                 task_id,
-                TaskAutomationRun(instruction=instruction, source=source),
+                TaskAutomationRun(
+                    instruction=instruction,
+                    source=source,
+                    source_task_id=str(source_task_id or "").strip() or None,
+                ),
                 wake_runner=False,
             )
         except Exception:
@@ -1016,6 +1041,7 @@ def _queue_team_mode_dispatches(
                     "slot": target_slot or None,
                     "selected_at": requested_at_iso,
                     "available_slots": int((plan.get("counts") or {}).get("available_slots") or 0),
+                    "source_task_id": normalized_source_task_id or None,
                 },
             },
             metadata={
@@ -1172,9 +1198,95 @@ def _queue_initial_team_mode_developer_tasks_after_kickoff(
         workspace_id=workspace_id,
         project_id=project_id,
         source="lead_kickoff_dispatch",
+        source_task_id=kickoff_task_id,
         exclude_task_ids={kickoff_task_id},
         allowed_roles={"Developer"},
     )
+
+
+def _infer_team_mode_dispatch_source_task_id(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+    task_id: str,
+    assignee_role: str | None,
+) -> str | None:
+    normalized_project_id = str(project_id or "").strip()
+    normalized_task_id = str(task_id or "").strip()
+    normalized_role = canonicalize_role(assignee_role)
+    if (
+        not workspace_id
+        or not normalized_project_id
+        or not normalized_task_id
+        or normalized_role not in TEAM_MODE_WORKFLOW_ROLES
+    ):
+        return None
+
+    def _candidate_timestamp(task_row: Task, state: dict[str, object]) -> float:
+        for value in (
+            state.get("last_requested_triggered_at"),
+            state.get("last_activity_at"),
+            state.get("last_requested_at"),
+            state.get("last_agent_run_at"),
+            getattr(task_row, "updated_at", None),
+            getattr(task_row, "created_at", None),
+        ):
+            parsed = _parse_iso_timestamp(value)
+            if parsed is not None:
+                return parsed.timestamp()
+            if isinstance(value, datetime):
+                dt_value = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+                return dt_value.astimezone(timezone.utc).timestamp()
+        return 0.0
+
+    candidates: list[tuple[int, float, str]] = []
+    tasks = db.execute(
+        select(Task).where(
+            Task.workspace_id == workspace_id,
+            Task.project_id == normalized_project_id,
+            Task.is_deleted == False,  # noqa: E712
+            Task.archived == False,  # noqa: E712
+        )
+    ).scalars().all()
+    for task in tasks:
+        candidate_task_id = str(task.id or "").strip()
+        if not candidate_task_id or candidate_task_id == normalized_task_id:
+            continue
+        candidate_state, _ = rebuild_state(db, "Task", candidate_task_id)
+        candidate_status = str(candidate_state.get("status") or getattr(task, "status", "") or "").strip()
+        candidate_role = _resolve_assignee_project_role(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=normalized_project_id,
+            assignee_id=str(candidate_state.get("assignee_id") or getattr(task, "assignee_id", "") or ""),
+            assigned_agent_code=str(candidate_state.get("assigned_agent_code") or getattr(task, "assigned_agent_code", "") or ""),
+            task_labels=candidate_state.get("labels") if candidate_state.get("labels") is not None else getattr(task, "labels", None),
+            task_status=candidate_status,
+        )
+        candidate_automation_state = str(candidate_state.get("automation_state") or "idle").strip().lower()
+        candidate_rank: int | None = None
+        if normalized_role == "Developer":
+            if is_lead_role(candidate_role) and candidate_status == "Lead":
+                candidate_rank = 0
+        elif normalized_role == "Lead":
+            if is_developer_role(candidate_role) and candidate_status == "Lead" and candidate_automation_state == "completed":
+                candidate_rank = 0
+            elif is_developer_role(candidate_role) and candidate_status == "Blocked":
+                candidate_rank = 1
+            elif is_qa_role(candidate_role) and candidate_status == "Blocked":
+                candidate_rank = 2
+        elif normalized_role == "QA":
+            if is_lead_role(candidate_role) and str(candidate_state.get("last_lead_handoff_token") or "").strip():
+                candidate_rank = 0
+            elif is_lead_role(candidate_role) and candidate_status == "Lead":
+                candidate_rank = 1
+        if candidate_rank is None:
+            continue
+        candidates.append((candidate_rank, -_candidate_timestamp(task, candidate_state), candidate_task_id))
+
+    candidates.sort()
+    return candidates[0][2] if candidates else None
 
 
 def _project_has_lead_task_in_lead_status(
@@ -1232,6 +1344,8 @@ def _project_has_merge_to_main_evidence(
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return False
+    project_row = db.get(Project, normalized_project_id)
+    project_name = str(getattr(project_row, "name", "") or "").strip() or None
     task_ids = [
         str(item or "").strip()
         for item in db.execute(
@@ -1246,8 +1360,16 @@ def _project_has_merge_to_main_evidence(
     ]
     for task_id in task_ids:
         state, _ = rebuild_state(db, "Task", task_id)
-        if _task_has_main_merge_marker(state.get("external_refs")):
+        external_refs = state.get("external_refs")
+        if has_merge_to_main_ref(external_refs):
             return True
+        for branch_name in extract_task_branches_from_refs(external_refs):
+            if branch_is_merged_to_main(
+                project_name=project_name,
+                project_id=normalized_project_id,
+                branch_name=branch_name,
+            ):
+                return True
     return False
 
 
@@ -1762,10 +1884,6 @@ def _append_task_status_transition_if_allowed(
             )
         ),
     }
-    if canonicalize_role(actor_role) == "Lead" and str(to_status or "").strip() == "QA":
-        payload["last_lead_handoff_token"] = (
-            f"lead:{task_id}:{to_iso_utc(datetime.now(timezone.utc))}"
-        )
     append_event(
         db,
         aggregate_type="Task",
@@ -2140,6 +2258,17 @@ def _build_static_compose_manifest(*, port: int) -> str:
     )
 
 
+def _looks_like_managed_static_compose_manifest(content: str) -> bool:
+    normalized = str(content or "").strip().lower().replace(" ", "")
+    if "image:nginx:1.27-alpine" not in normalized:
+        return False
+    return (
+        "./nginx.constructos.conf:/etc/nginx/conf.d/default.conf:ro" in normalized
+        or "./nginx/conf.d:/etc/nginx/conf.d:ro" in normalized
+        or "/etc/nginx/conf.d" in normalized
+    )
+
+
 def _synthesize_runtime_deploy_assets(
     *,
     project_name: str | None,
@@ -2150,15 +2279,39 @@ def _synthesize_runtime_deploy_assets(
     repo_root = resolve_project_repository_path(project_name=project_name, project_id=project_id)
     if not repo_root.exists() or not repo_root.is_dir():
         return {"ok": False, "error": f"repository root is missing: {repo_root}"}
-    manifest_path = find_project_compose_manifest(project_name=project_name, project_id=project_id)
-    if manifest_path is not None:
-        return {"ok": True, "manifest_path": str(manifest_path), "created_files": [], "runtime_type": _derive_runtime_deploy_markers(project_name=project_name, project_id=project_id)[0]}
-
     dockerfile = repo_root / "Dockerfile"
     package_json = repo_root / "package.json"
     pyproject = repo_root / "pyproject.toml"
     requirements = repo_root / "requirements.txt"
     index_html = repo_root / "index.html"
+    manifest_path = find_project_compose_manifest(project_name=project_name, project_id=project_id)
+    if manifest_path is not None:
+        created_files: list[str] = []
+        commit_sha: str | None = None
+        runtime_type = _derive_runtime_deploy_markers(project_name=project_name, project_id=project_id)[0]
+        try:
+            manifest_content = manifest_path.read_text(encoding="utf-8")
+        except Exception:
+            manifest_content = ""
+        if index_html.exists() and _looks_like_managed_static_compose_manifest(manifest_content):
+            nginx_conf = repo_root / "nginx.constructos.conf"
+            if _write_file_if_changed(path=nginx_conf, content=_build_static_nginx_conf(health_path=health_path)):
+                created_files.append("nginx.constructos.conf")
+            if _write_file_if_changed(path=manifest_path, content=_build_static_compose_manifest(port=port)):
+                created_files.append(Path(manifest_path).name)
+            commit_sha = _commit_repo_changes_if_any(
+                cwd=repo_root,
+                message="chore: repair static deploy assets",
+            )
+            runtime_type = "static_web"
+        return {
+            "ok": True,
+            "manifest_path": str(manifest_path),
+            "created_files": created_files,
+            "commit_sha": commit_sha,
+            "runtime_type": runtime_type,
+        }
+
     created_files: list[str] = []
 
     try:
@@ -2332,7 +2485,14 @@ def _queue_qa_handoff_requests(
         )
         if task_role != "QA":
             continue
-        if str(task_state.get("automation_state") or "").strip() in {"queued", "running"}:
+        current_automation_state = str(task_state.get("automation_state") or "").strip().lower()
+        if current_automation_state in {"queued", "running"}:
+            continue
+        if (
+            str(task_state.get("last_requested_source") or "").strip() == "lead_handoff"
+            and str(task_state.get("last_requested_correlation_id") or "").strip() == lead_handoff_token
+            and current_automation_state == "completed"
+        ):
             continue
         instruction = (
             str(task_state.get("instruction") or "").strip()
@@ -3307,7 +3467,7 @@ def _claim_queued_task(task_id: str, *, allow_fresh_kickoff: bool = False) -> Qu
                     f"3) Execute deploy for stack `{stack}` (`docker compose -p {stack} up -d`).\n"
                     "4) Re-probe health endpoint and require HTTP 200 before QA handoff.\n"
                     "5) Record full evidence in external_refs: compose manifest path, deploy command result, health probe result, and runtime decision basis.\n"
-                    "6) If final health is OK after required actions, move Lead task to QA; if not, set Blocked with exact failure evidence."
+                    "6) If final health is OK after required actions, request QA automation handoff explicitly and keep the Lead task in Lead; if not, set Blocked with exact failure evidence."
                 )
             instruction = f"{str(instruction or '').strip()}\n\n{deploy_steps}".strip()
     if not instruction:
@@ -3722,11 +3882,21 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
             if transitioned:
                 state = dict(state)
                 state["status"] = "Lead"
+                queued_followup_lead_dispatches = _queue_team_mode_dispatches(
+                    db=db,
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    source="developer_handoff",
+                    source_task_id=run.task_id,
+                    exclude_task_ids={run.task_id},
+                    allowed_roles={"Lead"},
+                )
                 queued_followup_developer_dispatches = _queue_team_mode_dispatches(
                     db=db,
                     workspace_id=workspace_id,
                     project_id=project_id,
                     source="runner_orchestrator",
+                    source_task_id=run.task_id,
                     exclude_task_ids={run.task_id},
                     allowed_roles={"Developer"},
                 )
@@ -3767,7 +3937,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 project_name=project_name,
                 project_id=str(project_id or "").strip() or None,
             )
-            if runtime_required and manifest_path is None:
+            if runtime_required:
                 synthesis = _synthesize_runtime_deploy_assets(
                     project_name=project_name,
                     project_id=str(project_id or "").strip() or None,
@@ -3786,15 +3956,22 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                     )
                 manifest_path = Path(manifest_path_raw)
                 state = dict(state)
-                state["last_deploy_execution"] = {
-                    "manifest_path": manifest_path_raw,
-                    "runtime_type": str(synthesis.get("runtime_type") or "").strip() or None,
-                    "synthesized": True,
-                    "synthesized_files": list(synthesis.get("created_files") or []),
-                    "synthesis_commit_sha": str(synthesis.get("commit_sha") or "").strip() or None,
-                }
+                deploy_snapshot = derive_deploy_execution_snapshot(
+                    refs=state.get("external_refs"),
+                    current_snapshot=state.get("last_deploy_execution") if isinstance(state.get("last_deploy_execution"), dict) else {},
+                )
+                deploy_snapshot.update(
+                    {
+                        "manifest_path": manifest_path_raw,
+                        "runtime_type": str(synthesis.get("runtime_type") or "").strip() or None,
+                        "synthesized": bool(list(synthesis.get("created_files") or [])),
+                        "synthesized_files": list(synthesis.get("created_files") or []),
+                        "synthesis_commit_sha": str(synthesis.get("commit_sha") or "").strip() or None,
+                    }
+                )
+                state["last_deploy_execution"] = deploy_snapshot
             if runtime_required and manifest_path is not None:
-                repo_root = resolve_project_repository_path(
+                repo_root = resolve_project_repository_host_path(
                     project_name=str(project_name or "").strip() or None,
                     project_id=str(project_id or "").strip() or None,
                 )
@@ -3826,7 +4003,10 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                     project_name=str(project_name or "").strip() or None,
                     project_id=str(project_id or "").strip() or None,
                 )
-                deploy_snapshot = dict(state.get("last_deploy_execution") or {})
+                deploy_snapshot = derive_deploy_execution_snapshot(
+                    refs=state.get("external_refs"),
+                    current_snapshot=state.get("last_deploy_execution") if isinstance(state.get("last_deploy_execution"), dict) else {},
+                )
                 deploy_snapshot.update(
                     {
                         "executed_at": completed_at,
@@ -4728,7 +4908,7 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
             if not rows:
                 continue
 
-            runnable_by_id: dict[str, tuple[Task, dict[str, object]]] = {}
+            runnable_by_id: dict[str, tuple[Task, dict[str, object], str, str]] = {}
             orchestrator_rows: list[dict[str, str]] = []
 
             for task in rows:
@@ -4764,7 +4944,7 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
                 task_id = str(task.id or "").strip()
                 if not task_id:
                     continue
-                runnable_by_id[task_id] = (task, state)
+                runnable_by_id[task_id] = (task, state, normalized_role, normalized_status)
                 orchestrator_rows.append(
                     {
                         "id": task_id,
@@ -4776,7 +4956,7 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
                 )
 
             plan = plan_next_runnable_tasks(orchestrator_rows)
-            to_queue: list[tuple[Task, dict[str, object]]] = [
+            to_queue: list[tuple[Task, dict[str, object], str, str]] = [
                 runnable_by_id[task_id]
                 for task_id in list(plan.get("queue_task_ids") or [])
                 if task_id in runnable_by_id
@@ -4785,7 +4965,7 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
             from features.tasks.application import TaskApplicationService
             from shared.core import TaskAutomationRun
 
-            for task, state in to_queue:
+            for task, state, normalized_role, _normalized_status in to_queue:
                 if queued >= limit:
                     break
                 task_id = str(task.id or "").strip()
@@ -4802,10 +4982,30 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
                 if not instruction:
                     continue
                 command_id = f"tm-orch-{project_id[:8]}-{task_id[:8]}-{int(now_utc.timestamp())}"
+                inferred_source_task_id = _infer_team_mode_dispatch_source_task_id(
+                    db=db,
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    task_id=task_id,
+                    assignee_role=normalized_role,
+                )
+                current_automation_state = str(state.get("automation_state") or "idle").strip().lower()
+                if current_automation_state in {"queued", "running"}:
+                    continue
+                if (
+                    current_automation_state == "completed"
+                    and str(state.get("last_requested_source") or "").strip() == "runner_orchestrator"
+                    and str(state.get("last_requested_source_task_id") or "").strip() == str(inferred_source_task_id or "").strip()
+                ):
+                    continue
                 try:
                     TaskApplicationService(db, actor, command_id=command_id).request_automation_run(
                         task_id,
-                        TaskAutomationRun(instruction=instruction, source="runner_orchestrator"),
+                        TaskAutomationRun(
+                            instruction=instruction,
+                            source="runner_orchestrator",
+                            source_task_id=inferred_source_task_id,
+                        ),
                         wake_runner=False,
                     )
                 except Exception:

@@ -7,15 +7,19 @@ import {
   authLogin,
   authLogout,
   authMe,
+  cancelCodexDeviceAuth,
   createAdminUser,
+  deleteCodexAuthOverride,
   getProjectPluginConfig,
   getBootstrap,
+  getCodexAuthStatus,
   getLicenseStatus,
   triggerLicenseAutoUpdate,
   linkTaskToSpecification,
   listAdminUsers,
   patchMyPreferences,
   resetAdminUserPassword,
+  startCodexDeviceAuth,
   submitFeedback,
   updateAdminUserRole,
 } from '../api'
@@ -373,6 +377,16 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     enabled: Boolean(bootstrap.data),
     retry: 1,
   })
+  const codexAuthStatus = useQuery({
+    queryKey: ['codex-auth-status', userId],
+    queryFn: () => getCodexAuthStatus(userId),
+    enabled: Boolean(bootstrap.data),
+    retry: 1,
+    refetchInterval: (query) => {
+      const data = query.state.data as { login_session?: { status?: string | null } } | undefined
+      return data?.login_session?.status === 'pending' ? 2000 : false
+    },
+  })
   const activateLicenseMutation = useMutation({
     mutationFn: (activationCode: string) =>
       activateLicense(userId, {
@@ -442,6 +456,36 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     },
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: ['bootstrap', userId] })
+    },
+  })
+  const startCodexDeviceAuthMutation = useMutation({
+    mutationFn: () => startCodexDeviceAuth(userId),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['codex-auth-status', userId] })
+      setUiError(null)
+    },
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Codex sign-in could not be started'))
+    },
+  })
+  const cancelCodexDeviceAuthMutation = useMutation({
+    mutationFn: () => cancelCodexDeviceAuth(userId),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['codex-auth-status', userId] })
+      setUiError(null)
+    },
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Codex sign-in could not be cancelled'))
+    },
+  })
+  const deleteCodexAuthOverrideMutation = useMutation({
+    mutationFn: () => deleteCodexAuthOverride(userId),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['codex-auth-status', userId] })
+      setUiError(null)
+    },
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Shared Codex authentication could not be removed'))
     },
   })
   const { frontendVersion, backendVersion, backendBuild, backendDeployedAtUtc } = useAppVersion()
@@ -620,6 +664,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     projectGraphSubgraph,
     projectEventStormingOverview,
     projectEventStormingSubgraph,
+    projectTaskDependencyGraph,
     projectTaskCountQueries,
     projectNoteCountQueries,
     projectRuleCountQueries,
@@ -2228,6 +2273,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       projectGraphSubgraph,
       projectEventStormingOverview,
       projectEventStormingSubgraph,
+      projectTaskDependencyGraph,
       selectedProjectRuleId,
       setSelectedProjectRuleId,
       projectRuleTitle,
@@ -2547,6 +2593,13 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       backendVersion,
       backendBuild,
       backendDeployedAtUtc,
+      codexAuthStatus,
+      startCodexDeviceAuth: startCodexDeviceAuthMutation.mutateAsync,
+      startCodexDeviceAuthPending: startCodexDeviceAuthMutation.isPending,
+      cancelCodexDeviceAuth: cancelCodexDeviceAuthMutation.mutateAsync,
+      cancelCodexDeviceAuthPending: cancelCodexDeviceAuthMutation.isPending,
+      deleteCodexAuthOverride: deleteCodexAuthOverrideMutation.mutateAsync,
+      deleteCodexAuthOverridePending: deleteCodexAuthOverrideMutation.isPending,
       showCodexChat,
       codexChatSessions,
       codexChatProjectSessions,

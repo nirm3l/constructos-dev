@@ -514,6 +514,19 @@ export function CodexChatDrawer({ state }: { state: any }) {
     state.agentChatReasoningEffort || state.agentChatDefaultReasoningEffort
   )
   const effectiveReasoningLabel = reasoningEffortLabel(effectiveReasoningEffort)
+  const codexAuthStatus = state.codexAuthStatus?.data ?? null
+  const codexAuthMissing = !Boolean(state.codexAuthStatus?.isLoading || state.codexAuthStatus?.isFetching)
+    && String(codexAuthStatus?.effective_source || '').trim().toLowerCase() === 'none'
+  const canManageCodexAuth = Boolean(state.canManageUsers)
+  const codexAuthMissingGuidance = canManageCodexAuth
+    ? 'Codex authentication is not configured. Open Profile > Security and connect Codex before using chat or task automation.'
+    : 'Codex authentication is not configured. Ask a workspace admin to open Profile > Security and connect Codex before using chat or task automation.'
+  const codexAuthMissingBannerText = canManageCodexAuth
+    ? 'Codex authentication is not configured. Open settings and connect Codex before sending messages.'
+    : 'Codex authentication is not configured. Ask a workspace admin to connect Codex in settings before sending messages.'
+  const codexAuthMissingPlaceholder = canManageCodexAuth
+    ? 'Connect Codex in Profile > Security before starting a chat session.'
+    : 'Ask a workspace admin to connect Codex in Profile > Security before starting a chat session.'
 
   const stopVoiceInput = () => {
     const recognition = recognitionRef.current
@@ -721,6 +734,37 @@ export function CodexChatDrawer({ state }: { state: any }) {
     state.setShowCodexChat?.(false)
   }
 
+  const openCodexAuthSettings = () => {
+    stopVoiceInput()
+    try {
+      window.sessionStorage.setItem('ui_profile_scroll_target', 'codex_auth')
+      window.dispatchEvent(new Event('ui:focus-codex-auth'))
+    } catch {
+      // Ignore storage failures and still navigate.
+    }
+    state.setTab?.('profile')
+    state.setShowCodexChat?.(false)
+  }
+
+  const appendLocalCodexAuthGuidance = () => {
+    const content = codexAuthMissingGuidance
+    state.setCodexChatTurns((prev: any[]) => {
+      const lastTurn = Array.isArray(prev) && prev.length > 0 ? prev[prev.length - 1] : null
+      if (lastTurn?.role === 'assistant' && String(lastTurn?.content || '').trim() === content) {
+        return prev
+      }
+      return [
+        ...(Array.isArray(prev) ? prev : []),
+        {
+          id: globalThis.crypto?.randomUUID?.() ?? `a-local-${Date.now()}`,
+          role: 'assistant',
+          content,
+          createdAt: Date.now(),
+        },
+      ]
+    })
+  }
+
   const persistSessionAttachmentRefs = async (nextRefs: AttachmentRef[]) => {
     if (!state.workspaceId || !state.codexChatSessionId || !state.userId) return
     if (typeof state.setCodexChatSessionAttachmentRefs !== 'function') return
@@ -760,6 +804,10 @@ export function CodexChatDrawer({ state }: { state: any }) {
       || isUploadingAttachments
       || isUpdatingSessionAttachments
     ) return
+    if (codexAuthMissing) {
+      appendLocalCodexAuthGuidance()
+      return
+    }
     if (opts?.clearInput) state.setCodexChatInstruction('')
     const attachedRefs = [...chatAttachmentRefs]
     const nextUserTurn = {
@@ -1158,13 +1206,31 @@ export function CodexChatDrawer({ state }: { state: any }) {
           )}
         </div>
         <div className="codex-chat-composer" data-tour-id="codex-chat-composer">
+          {codexAuthMissing && (
+            <div className="notice notice-error codex-chat-auth-banner" role="alert">
+              <div className="codex-chat-auth-banner-copy">
+                {codexAuthMissingBannerText}
+              </div>
+              <button
+                type="button"
+                className="button-secondary codex-chat-auth-banner-action"
+                onClick={openCodexAuthSettings}
+              >
+                Open settings
+              </button>
+            </div>
+          )}
           <textarea
             ref={inputRef}
             className="codex-chat-input"
             value={state.codexChatInstruction}
             onChange={(e) => state.setCodexChatInstruction(e.target.value)}
             rows={2}
-            placeholder="Try: Create 3 high-priority tasks for tomorrow in the Website Redesign project and assign them to me."
+            placeholder={
+              codexAuthMissing
+                ? codexAuthMissingPlaceholder
+                : 'Try: Create 3 high-priority tasks for tomorrow in the Website Redesign project and assign them to me.'
+            }
           />
           {!state.codexChatProjectId.trim() && (
             <div className="row wrap" style={{ marginTop: 8, alignItems: 'center', gap: 8 }}>

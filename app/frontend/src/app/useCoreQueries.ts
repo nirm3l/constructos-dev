@@ -9,6 +9,7 @@ import {
   getProjectEventStormingSubgraph,
   getProjectGraphOverview,
   getProjectGraphSubgraph,
+  getProjectTaskDependencyGraph,
   getProjectRules,
   getProjectSkills,
   getNote,
@@ -198,6 +199,12 @@ export function useCoreQueries(c: any) {
     queryFn: () => getProjectEventStormingSubgraph(c.userId, c.selectedProjectId, { limit_nodes: 120, limit_edges: 220 }),
     enabled: Boolean(c.selectedProjectId) && (c.tab === 'projects' || c.tab === 'knowledge-graph'),
   })
+
+  const projectTaskDependencyGraph = useQuery({
+    queryKey: ['project-task-dependency-graph', c.userId, c.selectedProjectId],
+    queryFn: () => getProjectTaskDependencyGraph(c.userId, c.selectedProjectId, { limit_nodes: 240, limit_edges: 1600 }),
+    enabled: Boolean(c.selectedProjectId) && (c.tab === 'projects' || c.tab === 'task-flow'),
+  })
   const specificationArchivedFilter = c.specificationStatus === 'Archived'
 
   const specifications = useQuery({
@@ -355,6 +362,7 @@ export function useCoreQueries(c: any) {
     projectGraphSubgraph,
     projectEventStormingOverview,
     projectEventStormingSubgraph,
+    projectTaskDependencyGraph,
     specifications,
     selectedSpecification,
     searchSpecifications,

@@ -9,6 +9,7 @@ APP_COMPOSE_PROJECT_NAME="${APP_COMPOSE_PROJECT_NAME:-constructos-app}"
 PROXY_DOCKER_PROJECT_NAME="${AGENT_DOCKER_PROJECT_NAME:-}"
 CODEX_AUTH_FILE="${CODEX_AUTH_FILE:-${HOME}/.codex/auth.json}"
 CODEX_CONFIG_FILE="${CODEX_CONFIG_FILE:-${ROOT_DIR}/codex.config.toml}"
+CODEX_AUTH_PLACEHOLDER_FILE="${ROOT_DIR}/codex.auth.placeholder.json"
 
 resolve_absolute_path() {
   local raw_path="$1"
@@ -87,9 +88,9 @@ CODEX_AUTH_FILE="$(resolve_absolute_path "$CODEX_AUTH_FILE")"
 CODEX_CONFIG_FILE="$(resolve_absolute_path "$CODEX_CONFIG_FILE")"
 
 if [[ ! -f "$CODEX_AUTH_FILE" ]]; then
-  echo "Missing Codex auth file: $CODEX_AUTH_FILE"
-  echo "Run codex login on host or set CODEX_AUTH_FILE before reset."
-  exit 1
+  echo "Host Codex auth file not found: $CODEX_AUTH_FILE"
+  echo "Falling back to placeholder auth mount so Codex can be configured from the UI."
+  CODEX_AUTH_FILE="$CODEX_AUTH_PLACEHOLDER_FILE"
 fi
 if [[ ! -f "$CODEX_CONFIG_FILE" ]]; then
   echo "Missing Codex config file: $CODEX_CONFIG_FILE"
