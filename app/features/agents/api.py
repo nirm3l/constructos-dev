@@ -28,6 +28,7 @@ from shared.core import (
     ensure_role,
     get_command_id,
     get_current_user,
+    get_current_user_detached,
     get_db,
 )
 from shared.models import (
@@ -39,6 +40,7 @@ from shared.models import (
     Project,
     ProjectPluginConfig,
     Task,
+    SessionLocal,
     WorkspaceMember,
 )
 from shared.in_memory_stream_broker import InMemoryStreamBroker
@@ -2601,20 +2603,20 @@ def agent_chat(
 @router.post("/api/agents/chat/stream")
 def agent_chat_stream(
     payload: AgentChatRun,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user_detached),
     command_id: str | None = Depends(get_command_id),
 ):
-    ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     session_id = _resolve_chat_session_id(payload.session_id)
-    effective_project_id = _resolve_effective_chat_project_id(
-        db=db,
-        workspace_id=payload.workspace_id,
-        user_id=user.id,
-        project_id=payload.project_id,
-        session_id=session_id,
-        instruction=payload.instruction,
-    )
+    with SessionLocal() as db:
+        ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+        effective_project_id = _resolve_effective_chat_project_id(
+            db=db,
+            workspace_id=payload.workspace_id,
+            user_id=user.id,
+            project_id=payload.project_id,
+            session_id=session_id,
+            instruction=payload.instruction,
+        )
     mcp_servers = _normalize_chat_mcp_servers(
         payload.mcp_servers,
         project_id=effective_project_id,
@@ -2674,50 +2676,51 @@ def agent_chat_stream(
             yield json.dumps({"type": "final", "response": response}, ensure_ascii=True) + "\n"
 
         return StreamingResponse(_auth_required_stream(), media_type="application/x-ndjson", headers=stream_headers)
-    existing_codex_session_id, resume_last_succeeded = _load_chat_session_codex_state(
-        db=db,
-        workspace_id=payload.workspace_id,
-        session_id=session_id,
-    )
-    payload_with_session = payload.model_copy(update={"session_id": session_id, "project_id": effective_project_id})
-    (
-        effective_instruction,
-        _,
-        compact_only,
-        prepared_attachment_refs,
-        prepared_session_attachment_refs,
-        intent_flags,
-        chat_usage_metadata,
-    ) = _prepare_chat_instruction(
-        payload=payload_with_session,
-        db=db,
-        user=user,
-        resume_codex_session_id=existing_codex_session_id,
-        resume_last_succeeded=resume_last_succeeded,
-    )
-
-    attachment_refs = prepared_attachment_refs or [item.model_dump() for item in payload.attachment_refs or []]
-    session_attachment_refs = (
-        prepared_session_attachment_refs
-        or [item.model_dump() for item in payload.session_attachment_refs or []]
-    )
-    ChatApplicationService(
-        db,
-        user,
-        command_id=_command_id_with_suffix(command_id, "chat-user"),
-    ).append_user_message(
-        AppendUserMessagePayload(
+    with SessionLocal() as db:
+        existing_codex_session_id, resume_last_succeeded = _load_chat_session_codex_state(
+            db=db,
             workspace_id=payload.workspace_id,
-            project_id=effective_project_id,
             session_id=session_id,
-            message_id=None,
-            content=(payload.instruction or "").strip(),
-            usage={"intent_flags": intent_flags},
-            mcp_servers=mcp_servers,
-            attachment_refs=attachment_refs,
-            session_attachment_refs=session_attachment_refs,
         )
-    )
+        payload_with_session = payload.model_copy(update={"session_id": session_id, "project_id": effective_project_id})
+        (
+            effective_instruction,
+            _,
+            compact_only,
+            prepared_attachment_refs,
+            prepared_session_attachment_refs,
+            intent_flags,
+            chat_usage_metadata,
+        ) = _prepare_chat_instruction(
+            payload=payload_with_session,
+            db=db,
+            user=user,
+            resume_codex_session_id=existing_codex_session_id,
+            resume_last_succeeded=resume_last_succeeded,
+        )
+
+        attachment_refs = prepared_attachment_refs or [item.model_dump() for item in payload.attachment_refs or []]
+        session_attachment_refs = (
+            prepared_session_attachment_refs
+            or [item.model_dump() for item in payload.session_attachment_refs or []]
+        )
+        ChatApplicationService(
+            db,
+            user,
+            command_id=_command_id_with_suffix(command_id, "chat-user"),
+        ).append_user_message(
+            AppendUserMessagePayload(
+                workspace_id=payload.workspace_id,
+                project_id=effective_project_id,
+                session_id=session_id,
+                message_id=None,
+                content=(payload.instruction or "").strip(),
+                usage={"intent_flags": intent_flags},
+                mcp_servers=mcp_servers,
+                attachment_refs=attachment_refs,
+                session_attachment_refs=session_attachment_refs,
+            )
+        )
 
     if _should_prompt_for_project_setup_name(intent_flags=intent_flags, project_id=effective_project_id):
         summary = _PROJECT_SETUP_STARTER_NEXT_QUESTION
@@ -2782,18 +2785,19 @@ def agent_chat_stream(
 
         return StreamingResponse(_compact_stream(), media_type="application/x-ndjson", headers=stream_headers)
 
-    kickoff_result = plugin_api_policy.maybe_dispatch_execution_kickoff(
-        db=db,
-        user=user,
-        workspace_id=payload.workspace_id,
-        project_id=effective_project_id,
-        intent_flags=intent_flags,
-        allow_mutations=bool(payload.allow_mutations),
-        command_id=command_id,
-        promote_plugin_policy_to_execution_mode_if_needed=_promote_plugin_policy_to_execution_mode_if_needed,
-        build_team_lead_kickoff_instruction=_build_team_lead_kickoff_instruction,
-        command_id_with_suffix=_command_id_with_suffix,
-    )
+    with SessionLocal() as db:
+        kickoff_result = plugin_api_policy.maybe_dispatch_execution_kickoff(
+            db=db,
+            user=user,
+            workspace_id=payload.workspace_id,
+            project_id=effective_project_id,
+            intent_flags=intent_flags,
+            allow_mutations=bool(payload.allow_mutations),
+            command_id=command_id,
+            promote_plugin_policy_to_execution_mode_if_needed=_promote_plugin_policy_to_execution_mode_if_needed,
+            build_team_lead_kickoff_instruction=_build_team_lead_kickoff_instruction,
+            command_id_with_suffix=_command_id_with_suffix,
+        )
     if kickoff_result is not None:
         summary = str(kickoff_result.get("summary") or "").strip() or "Team Mode kickoff dispatched."
         comment = str(kickoff_result.get("comment") or "").strip() or None
@@ -3101,10 +3105,10 @@ def resume_agent_chat_stream(
     session_id: str,
     run_id: str,
     since_seq: int = 0,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user_detached),
 ):
-    ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    with SessionLocal() as db:
+        ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     normalized_session_id = _resolve_chat_session_id(session_id)
     stream_key = _chat_stream_key(workspace_id=workspace_id, session_id=normalized_session_id)
     subscriber_queue, replay_events, done = _subscribe_chat_stream_run(
@@ -3152,15 +3156,15 @@ def resume_agent_chat_stream(
 @router.post("/api/agents/chat/stop")
 def stop_agent_chat_stream(
     payload: dict[str, object] = Body(...),
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user_detached),
 ):
     workspace_id = str(payload.get("workspace_id") or "").strip()
     session_id = str(payload.get("session_id") or "").strip()
     run_id = str(payload.get("run_id") or "").strip()
     if not workspace_id or not session_id:
         raise HTTPException(status_code=400, detail="workspace_id and session_id are required")
-    ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    with SessionLocal() as db:
+        ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     stream_key = _chat_stream_key(workspace_id=workspace_id, session_id=_resolve_chat_session_id(session_id))
     _set_chat_stream_stop_requested(stream_key=stream_key, value=True)
     effective_run_id = run_id

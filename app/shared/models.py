@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
+import threading
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, create_engine
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
+from .observability import incr, set_value
 from .settings import DATABASE_URL
 
 
@@ -661,12 +663,52 @@ def _build_engine(url: str):
     kwargs: dict[str, object] = {"pool_pre_ping": True}
     if url.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False}
+    else:
+        kwargs["pool_size"] = int(os.getenv("DB_POOL_SIZE", "20"))
+        kwargs["max_overflow"] = int(os.getenv("DB_MAX_OVERFLOW", "20"))
+        kwargs["pool_timeout"] = int(os.getenv("DB_POOL_TIMEOUT_SECONDS", "30"))
+        kwargs["pool_recycle"] = int(os.getenv("DB_POOL_RECYCLE_SECONDS", "1800"))
     return create_engine(url, **kwargs)
+
+
+_db_pool_lock = threading.Lock()
+_db_pool_checked_out = 0
+_db_pool_checked_out_peak = 0
+
+
+def _attach_pool_observers(sqlalchemy_engine) -> None:
+    if getattr(sqlalchemy_engine, "_constructos_pool_observers_attached", False):
+        return
+
+    @event.listens_for(sqlalchemy_engine, "checkout")
+    def _on_checkout(_dbapi_connection, _connection_record, _connection_proxy) -> None:
+        global _db_pool_checked_out, _db_pool_checked_out_peak
+        with _db_pool_lock:
+            _db_pool_checked_out += 1
+            if _db_pool_checked_out > _db_pool_checked_out_peak:
+                _db_pool_checked_out_peak = _db_pool_checked_out
+            checked_out = _db_pool_checked_out
+            peak = _db_pool_checked_out_peak
+        incr("db_pool_checkout_events")
+        set_value("db_pool_checked_out", checked_out)
+        set_value("db_pool_checked_out_peak", peak)
+
+    @event.listens_for(sqlalchemy_engine, "checkin")
+    def _on_checkin(_dbapi_connection, _connection_record) -> None:
+        global _db_pool_checked_out
+        with _db_pool_lock:
+            _db_pool_checked_out = max(0, _db_pool_checked_out - 1)
+            checked_out = _db_pool_checked_out
+        incr("db_pool_checkin_events")
+        set_value("db_pool_checked_out", checked_out)
+
+    sqlalchemy_engine._constructos_pool_observers_attached = True
 
 
 _existing_session_local = globals().get("SessionLocal")
 _engine_url = str(DATABASE_URL or "").strip() or _runtime_database_url()
 engine = _build_engine(_engine_url)
+_attach_pool_observers(engine)
 if isinstance(_existing_session_local, sessionmaker):
     SessionLocal = _existing_session_local
     SessionLocal.configure(bind=engine, autocommit=False, autoflush=False)
@@ -680,6 +722,7 @@ def ensure_engine() -> str:
     if runtime_url == _engine_url:
         return _engine_url
     new_engine = _build_engine(runtime_url)
+    _attach_pool_observers(new_engine)
     previous_engine = engine
     engine = new_engine
     SessionLocal.configure(bind=new_engine)

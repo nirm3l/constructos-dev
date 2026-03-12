@@ -35,6 +35,7 @@ from shared.core import (
     export_tasks_response,
     get_command_id,
     get_current_user,
+    get_current_user_detached,
     get_db,
     get_user_zoneinfo,
     load_task_view,
@@ -114,8 +115,7 @@ def list_tasks(
     archived: bool = False,
     limit: int = Query(default=30, le=500),
     offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user_detached),
 ):
     gateway = build_ui_gateway(actor_user_id=user.id)
     return gateway.list_tasks(
@@ -418,8 +418,7 @@ def request_automation_run(
 def run_automation_stream(
     task_id: str,
     payload: TaskAutomationRun,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user_detached),
     command_id: str | None = Depends(get_command_id),
 ):
     def _single_final_stream(response: dict[str, Any]) -> StreamingResponse:
@@ -427,37 +426,38 @@ def run_automation_stream(
         return StreamingResponse(iter([body]), media_type="application/x-ndjson", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
     normalized_command_id = str(command_id or "").strip() or None
-    if normalized_command_id:
-        existing = db.execute(
-            select(CommandExecution).where(CommandExecution.command_id == normalized_command_id)
-        ).scalar_one_or_none()
-        if existing is not None:
-            try:
-                replay_payload = json.loads(existing.response_json or "{}")
-            except Exception:
-                replay_payload = {}
-            if not isinstance(replay_payload, dict):
-                replay_payload = {}
-            replay_response = {
-                "ok": bool(replay_payload.get("ok", True)),
-                "task_id": str(replay_payload.get("task_id") or task_id),
-                "automation_state": str(replay_payload.get("automation_state") or "completed"),
-                "summary": str(replay_payload.get("summary") or "Automation run replayed from command idempotency."),
-                "comment": str(replay_payload.get("comment") or ""),
-            }
-            return _single_final_stream(replay_response)
+    with SessionLocal() as db:
+        if normalized_command_id:
+            existing = db.execute(
+                select(CommandExecution).where(CommandExecution.command_id == normalized_command_id)
+            ).scalar_one_or_none()
+            if existing is not None:
+                try:
+                    replay_payload = json.loads(existing.response_json or "{}")
+                except Exception:
+                    replay_payload = {}
+                if not isinstance(replay_payload, dict):
+                    replay_payload = {}
+                replay_response = {
+                    "ok": bool(replay_payload.get("ok", True)),
+                    "task_id": str(replay_payload.get("task_id") or task_id),
+                    "automation_state": str(replay_payload.get("automation_state") or "completed"),
+                    "summary": str(replay_payload.get("summary") or "Automation run replayed from command idempotency."),
+                    "comment": str(replay_payload.get("comment") or ""),
+                }
+                return _single_final_stream(replay_response)
 
-    task_row = db.get(Task, task_id)
-    if not task_row or task_row.is_deleted:
-        raise HTTPException(status_code=404, detail="Task not found")
-    workspace_id = str(task_row.workspace_id or "").strip()
-    project_id = str(task_row.project_id or "").strip() or None
-    if project_id:
-        ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
-    else:
-        ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+        task_row = db.get(Task, task_id)
+        if not task_row or task_row.is_deleted:
+            raise HTTPException(status_code=404, detail="Task not found")
+        workspace_id = str(task_row.workspace_id or "").strip()
+        project_id = str(task_row.project_id or "").strip() or None
+        if project_id:
+            ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+        else:
+            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
 
-    state, _ = rebuild_state(db, "Task", task_id)
+        state, _ = rebuild_state(db, "Task", task_id)
     current_automation_state = str(state.get("automation_state") or "").strip().lower()
     if current_automation_state in {"queued", "running"}:
         raise HTTPException(
@@ -499,92 +499,93 @@ def run_automation_stream(
     run_id = _create_stream_run(task_id)
 
     now_iso = to_iso_utc(datetime.now(timezone.utc))
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=task_id,
-        event_type=EVENT_AUTOMATION_REQUESTED,
-        payload={
-            "requested_at": now_iso,
-            "instruction": instruction,
-            "source": "manual_stream",
-            "execution_intent": bool(classification.get("execution_intent")),
-            "execution_kickoff_intent": bool(classification.get("execution_kickoff_intent")),
-            "project_creation_intent": bool(classification.get("project_creation_intent")),
-            "workflow_scope": str(classification.get("workflow_scope") or "").strip() or None,
-            "execution_mode": str(classification.get("execution_mode") or "").strip() or None,
-            "task_completion_requested": bool(classification.get("task_completion_requested")),
-            "classifier_reason": str(classification.get("reason") or "").strip() or None,
-        },
-        metadata={
-            "actor_id": user.id,
-            "workspace_id": workspace_id,
-            "project_id": project_id,
-            "task_id": task_id,
-        },
-    )
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=task_id,
-        event_type=EVENT_AUTOMATION_STARTED,
-        payload={
-            "started_at": now_iso,
-            "last_agent_progress": "",
-            "last_agent_stream_status": "Automation run started.",
-            "last_agent_stream_updated_at": now_iso,
-            "last_agent_run_id": run_id,
-        },
-        metadata={
-            "actor_id": user.id,
-            "workspace_id": workspace_id,
-            "project_id": project_id,
-            "task_id": task_id,
-        },
-    )
-    db.commit()
-    _publish_stream_event(task_id, {"type": "status", "message": "Automation run started."})
-    if normalized_command_id:
-        try:
-            db.add(
-                CommandExecution(
-                    command_id=normalized_command_id,
-                    command_name="Task.AutomationStream",
-                    user_id=user.id,
-                    response_json=json.dumps(
-                        {
-                            "ok": True,
-                            "task_id": task_id,
-                            "automation_state": "running",
-                            "summary": "Automation stream run accepted.",
-                            "comment": "",
-                        },
-                        ensure_ascii=True,
-                    ),
+    with SessionLocal() as db:
+        append_event(
+            db,
+            aggregate_type="Task",
+            aggregate_id=task_id,
+            event_type=EVENT_AUTOMATION_REQUESTED,
+            payload={
+                "requested_at": now_iso,
+                "instruction": instruction,
+                "source": "manual_stream",
+                "execution_intent": bool(classification.get("execution_intent")),
+                "execution_kickoff_intent": bool(classification.get("execution_kickoff_intent")),
+                "project_creation_intent": bool(classification.get("project_creation_intent")),
+                "workflow_scope": str(classification.get("workflow_scope") or "").strip() or None,
+                "execution_mode": str(classification.get("execution_mode") or "").strip() or None,
+                "task_completion_requested": bool(classification.get("task_completion_requested")),
+                "classifier_reason": str(classification.get("reason") or "").strip() or None,
+            },
+            metadata={
+                "actor_id": user.id,
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "task_id": task_id,
+            },
+        )
+        append_event(
+            db,
+            aggregate_type="Task",
+            aggregate_id=task_id,
+            event_type=EVENT_AUTOMATION_STARTED,
+            payload={
+                "started_at": now_iso,
+                "last_agent_progress": "",
+                "last_agent_stream_status": "Automation run started.",
+                "last_agent_stream_updated_at": now_iso,
+                "last_agent_run_id": run_id,
+            },
+            metadata={
+                "actor_id": user.id,
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "task_id": task_id,
+            },
+        )
+        db.commit()
+        _publish_stream_event(task_id, {"type": "status", "message": "Automation run started."})
+        if normalized_command_id:
+            try:
+                db.add(
+                    CommandExecution(
+                        command_id=normalized_command_id,
+                        command_name="Task.AutomationStream",
+                        user_id=user.id,
+                        response_json=json.dumps(
+                            {
+                                "ok": True,
+                                "task_id": task_id,
+                                "automation_state": "running",
+                                "summary": "Automation stream run accepted.",
+                                "comment": "",
+                            },
+                            ensure_ascii=True,
+                        ),
+                    )
                 )
-            )
-            db.commit()
-        except IntegrityError:
-            db.rollback()
-            existing = db.execute(
-                select(CommandExecution).where(CommandExecution.command_id == normalized_command_id)
-            ).scalar_one_or_none()
-            if existing is not None:
-                try:
-                    replay_payload = json.loads(existing.response_json or "{}")
-                except Exception:
-                    replay_payload = {}
-                if not isinstance(replay_payload, dict):
-                    replay_payload = {}
-                replay_response = {
-                    "ok": bool(replay_payload.get("ok", True)),
-                    "task_id": str(replay_payload.get("task_id") or task_id),
-                    "automation_state": str(replay_payload.get("automation_state") or "completed"),
-                    "summary": str(replay_payload.get("summary") or "Automation run replayed from command idempotency."),
-                    "comment": str(replay_payload.get("comment") or ""),
-                }
-                return _single_final_stream(replay_response)
-            raise
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                existing = db.execute(
+                    select(CommandExecution).where(CommandExecution.command_id == normalized_command_id)
+                ).scalar_one_or_none()
+                if existing is not None:
+                    try:
+                        replay_payload = json.loads(existing.response_json or "{}")
+                    except Exception:
+                        replay_payload = {}
+                    if not isinstance(replay_payload, dict):
+                        replay_payload = {}
+                    replay_response = {
+                        "ok": bool(replay_payload.get("ok", True)),
+                        "task_id": str(replay_payload.get("task_id") or task_id),
+                        "automation_state": str(replay_payload.get("automation_state") or "completed"),
+                        "summary": str(replay_payload.get("summary") or "Automation run replayed from command idempotency."),
+                        "comment": str(replay_payload.get("comment") or ""),
+                    }
+                    return _single_final_stream(replay_response)
+                raise
 
     stream_headers = {
         "Cache-Control": "no-store",
@@ -885,18 +886,18 @@ def resume_automation_stream(
     task_id: str,
     run_id: str,
     since_seq: int = 0,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user_detached),
 ):
-    task_row = db.get(Task, task_id)
-    if not task_row or task_row.is_deleted:
-        raise HTTPException(status_code=404, detail="Task not found")
-    workspace_id = str(task_row.workspace_id or "").strip()
-    project_id = str(task_row.project_id or "").strip() or None
-    if project_id:
-        ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
-    else:
-        ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    with SessionLocal() as db:
+        task_row = db.get(Task, task_id)
+        if not task_row or task_row.is_deleted:
+            raise HTTPException(status_code=404, detail="Task not found")
+        workspace_id = str(task_row.workspace_id or "").strip()
+        project_id = str(task_row.project_id or "").strip() or None
+        if project_id:
+            ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+        else:
+            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
 
     subscriber_queue, replay_events, done = _subscribe_stream_run(task_id, run_id, since_seq)
     if not replay_events and done:

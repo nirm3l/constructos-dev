@@ -7751,7 +7751,6 @@ def test_notifications_stream_emits_refresh_when_user_state_changes_without_sign
                 last_id=None,
                 workspace_id=None,
                 last_activity_id=0,
-                db=db,
                 user=local_user,
             )
             async for raw_chunk in response.body_iterator:
@@ -7834,7 +7833,6 @@ def test_notifications_stream_emits_refresh_on_mark_read_signal(tmp_path, monkey
                     last_id=notification_id,
                     workspace_id=None,
                     last_activity_id=0,
-                    db=db,
                     user=local_user,
                 )
                 async for raw_chunk in response.body_iterator:
@@ -7905,7 +7903,6 @@ def test_notifications_stream_defaults_to_tail_and_does_not_replay_history(tmp_p
                 last_id=None,
                 workspace_id=None,
                 last_activity_id=0,
-                db=db,
                 user=local_user,
             )
             async for raw_chunk in response.body_iterator:
@@ -7971,7 +7968,6 @@ def test_notifications_stream_resumes_from_last_event_id_header(tmp_path):
                 last_id=None,
                 workspace_id=None,
                 last_activity_id=0,
-                db=db,
                 user=local_user,
             )
             async for raw_chunk in response.body_iterator:
@@ -8020,7 +8016,6 @@ def test_notifications_stream_init_is_read_only_and_does_not_emit_system_notific
                 last_id=None,
                 workspace_id=None,
                 last_activity_id=0,
-                db=db,
                 user=local_user,
             )
             async for _ in response.body_iterator:

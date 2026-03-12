@@ -41,7 +41,15 @@ from .contracts import (
     SpecificationCommandState,
     UserPreferencesPatch,
 )
-from .deps import ensure_project_access, ensure_role, get_command_id, get_current_user, get_db, run_command_with_retry
+from .deps import (
+    ensure_project_access,
+    ensure_role,
+    get_command_id,
+    get_current_user,
+    get_current_user_detached,
+    get_db,
+    run_command_with_retry,
+)
 from .eventing import (
     allocate_id,
     append_event,

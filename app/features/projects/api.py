@@ -20,9 +20,11 @@ from shared.core import (
     ensure_project_access,
     get_command_id,
     get_current_user,
+    get_current_user_detached,
     get_db,
 )
 from shared.models import ProjectPluginConfig
+from shared.models import SessionLocal
 from shared.knowledge_graph import (
     event_storming_set_link_review_status,
     event_storming_get_component_links,
@@ -660,38 +662,41 @@ def patch_project(
 def project_board(
     project_id: str,
     tags: str | None = None,
-    db: Session = Depends(get_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_detached),
 ):
     parsed_tags = [t.strip().lower() for t in tags.split(",") if t.strip()] if tags else None
-    return get_project_board_read_model(db, user, project_id, tags=parsed_tags)
+    with SessionLocal() as db:
+        return get_project_board_read_model(db, user, project_id, tags=parsed_tags)
 
 
 @router.get("/api/projects/{project_id}/activity")
-def project_activity(project_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    return get_project_activity_read_model(db, user, project_id)
+def project_activity(project_id: str, user=Depends(get_current_user_detached)):
+    with SessionLocal() as db:
+        return get_project_activity_read_model(db, user, project_id)
 
 
 @router.get("/api/projects/{project_id}/tags")
-def project_tags(project_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    return get_project_tags_read_model(db, user, project_id)
+def project_tags(project_id: str, user=Depends(get_current_user_detached)):
+    with SessionLocal() as db:
+        return get_project_tags_read_model(db, user, project_id)
 
 
 @router.get("/api/projects/{project_id}/members")
-def project_members(project_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    return get_project_members_read_model(db, user, project_id)
+def project_members(project_id: str, user=Depends(get_current_user_detached)):
+    with SessionLocal() as db:
+        return get_project_members_read_model(db, user, project_id)
 
 
 @router.get("/api/projects/{project_id}/checks/verify")
 def project_checks_verify(
     project_id: str,
-    db: Session = Depends(get_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_detached),
 ):
+    with SessionLocal() as db:
+        project_execution_snapshot = _project_execution_gate_snapshot(db=db, user=user, project_id=project_id)
     gateway = build_ui_gateway(actor_user_id=user.id)
     team_mode = gateway.verify_team_mode_workflow(project_id=project_id)
     delivery = gateway.verify_delivery_workflow(project_id=project_id)
-    project_execution_snapshot = _project_execution_gate_snapshot(db=db, user=user, project_id=project_id)
     return {
         "project_id": project_id,
         "team_mode": team_mode,
@@ -708,10 +713,10 @@ def project_checks_verify(
 def project_plugin_config_get(
     project_id: str,
     plugin_key: str,
-    db: Session = Depends(get_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_detached),
 ):
-    _load_project_with_access(db, user, project_id)
+    with SessionLocal() as db:
+        _load_project_with_access(db, user, project_id)
     gateway = build_ui_gateway(actor_user_id=user.id)
     return gateway.get_project_plugin_config(
         project_id=project_id,
@@ -986,24 +991,24 @@ async def project_docker_compose_runtime_logs_stream(
     request: Request,
     container_name: str = Query(..., min_length=1),
     tail: int = Query(200, ge=1, le=2000),
-    db: Session = Depends(get_db),
-    user=Depends(get_current_user),
+    user=Depends(get_current_user_detached),
 ):
-    project = _load_project_with_access(db, user, project_id)
-    snapshot = _load_project_runtime_snapshot(db=db, project_id=project.id)
-    containers = snapshot.get("containers")
-    if not isinstance(containers, list):
-        raise HTTPException(status_code=404, detail="Runtime is not available")
-    requested_container = str(container_name or "").strip()
-    allowed = next(
-        (
-            item for item in containers
-            if isinstance(item, dict) and str(item.get("name") or "").strip() == requested_container
-        ),
-        None,
-    )
-    if allowed is None:
-        raise HTTPException(status_code=404, detail="Runtime container not found")
+    with SessionLocal() as db:
+        project = _load_project_with_access(db, user, project_id)
+        snapshot = _load_project_runtime_snapshot(db=db, project_id=project.id)
+        containers = snapshot.get("containers")
+        if not isinstance(containers, list):
+            raise HTTPException(status_code=404, detail="Runtime is not available")
+        requested_container = str(container_name or "").strip()
+        allowed = next(
+            (
+                item for item in containers
+                if isinstance(item, dict) and str(item.get("name") or "").strip() == requested_container
+            ),
+            None,
+        )
+        if allowed is None:
+            raise HTTPException(status_code=404, detail="Runtime container not found")
 
     async def event_generator():
         process = await asyncio.create_subprocess_exec(

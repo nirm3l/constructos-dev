@@ -1,4 +1,5 @@
 import React from 'react'
+import * as AlertDialog from '@radix-ui/react-alert-dialog'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Popover from '@radix-ui/react-popover'
 import * as Select from '@radix-ui/react-select'
@@ -6,7 +7,6 @@ import * as Tooltip from '@radix-ui/react-tooltip'
 import type { BootstrapPayload, LicenseStatus, Notification } from '../../types'
 import type { Tab } from '../../utils/ui'
 import { Icon } from '../shared/uiHelpers'
-import { MarkdownModeToggle } from '../shared/uiHelpers'
 import { MarkdownView } from '../../markdown/MarkdownView'
 
 type AppHeaderProps = {
@@ -297,113 +297,116 @@ export function AppHeader({
                                 <div className="notif-message notif-message-md">
                                   <MarkdownView value={markdownPreview} />
                                 </div>
-                                <div className="notif-hint-row">
-                                  <div className="notif-hint">
-                                    {!n.is_read ? 'Click to mark as read' : 'Read'}
-                                  </div>
-                                  <div className="notif-hint-actions">
+                              </div>
+                              <div className="notif-hint-row">
+                                <div className="notif-hint">
+                                  {!n.is_read ? 'Click to mark as read' : 'Read'}
+                                </div>
+                                <div className="notif-hint-actions">
+                                  <button
+                                    className="notif-inline-action"
+                                    onClick={(event) => {
+                                      event.stopPropagation()
+                                      openNotificationPreview()
+                                    }}
+                                  >
+                                    Open full notification
+                                  </button>
+                                  {inlineNotificationAction && canRunNotificationAction ? (
                                     <button
                                       className="notif-inline-action"
                                       onClick={(event) => {
                                         event.stopPropagation()
-                                        openNotificationPreview()
+                                        onNotificationAction(n.id, notificationAction)
+                                        markNotificationRead()
+                                        setShowNotificationsPanel(false)
                                       }}
                                     >
-                                      Open full notification
+                                      {notificationActionLabel || 'Update app'}
                                     </button>
-                                    {inlineNotificationAction && canRunNotificationAction ? (
-                                      <button
-                                        className="notif-inline-action"
-                                        onClick={(event) => {
-                                          event.stopPropagation()
-                                          onNotificationAction(n.id, notificationAction)
-                                          markNotificationRead()
-                                          setShowNotificationsPanel(false)
-                                        }}
-                                      >
-                                        {notificationActionLabel || 'Update app'}
-                                      </button>
-                                    ) : null}
-                                    {n.is_read ? (
-                                      <button
-                                        className="notif-inline-action"
-                                        onClick={(event) => {
-                                          event.stopPropagation()
-                                          onMarkUnread(n.id)
-                                        }}
-                                      >
-                                        Mark unread
-                                      </button>
-                                    ) : null}
-                                  </div>
+                                  ) : null}
+                                  {n.is_read ? (
+                                    <button
+                                      className="notif-inline-action"
+                                      onClick={(event) => {
+                                        event.stopPropagation()
+                                        onMarkUnread(n.id)
+                                      }}
+                                    >
+                                      Mark unread
+                                    </button>
+                                  ) : null}
+                                  {(taskId || noteId || specificationId || (canRunNotificationAction && !inlineNotificationAction) || (!taskId && !noteId && !specificationId && projectId)) ? (
+                                    <span className="notif-inline-separator" aria-hidden="true">
+                                      |
+                                    </span>
+                                  ) : null}
+                                  {taskId ? (
+                                    <button
+                                      className="notif-inline-action"
+                                      onClick={(event) => {
+                                        event.stopPropagation()
+                                        onOpenTask(taskId, projectId)
+                                        markNotificationRead()
+                                        setShowNotificationsPanel(false)
+                                      }}
+                                    >
+                                      Open task
+                                    </button>
+                                  ) : null}
+                                  {noteId ? (
+                                    <button
+                                      className="notif-inline-action"
+                                      onClick={(event) => {
+                                        event.stopPropagation()
+                                        onOpenNote(noteId, projectId)
+                                        markNotificationRead()
+                                        setShowNotificationsPanel(false)
+                                      }}
+                                    >
+                                      Open note
+                                    </button>
+                                  ) : null}
+                                  {specificationId ? (
+                                    <button
+                                      className="notif-inline-action"
+                                      onClick={(event) => {
+                                        event.stopPropagation()
+                                        onOpenSpecification(specificationId, projectId)
+                                        markNotificationRead()
+                                        setShowNotificationsPanel(false)
+                                      }}
+                                    >
+                                      Open specification
+                                    </button>
+                                  ) : null}
+                                  {canRunNotificationAction && !inlineNotificationAction ? (
+                                    <button
+                                      className="notif-inline-action"
+                                      onClick={(event) => {
+                                        event.stopPropagation()
+                                        onNotificationAction(n.id, notificationAction)
+                                        markNotificationRead()
+                                        setShowNotificationsPanel(false)
+                                      }}
+                                    >
+                                      {notificationActionLabel || (notificationAction === 'auto_update_app_images' ? 'Update app' : 'Run action')}
+                                    </button>
+                                  ) : null}
+                                  {!taskId && !noteId && !specificationId && projectId ? (
+                                    <button
+                                      className="notif-inline-action"
+                                      onClick={(event) => {
+                                        event.stopPropagation()
+                                        onOpenProject(projectId)
+                                        markNotificationRead()
+                                        setShowNotificationsPanel(false)
+                                      }}
+                                    >
+                                      Open project
+                                    </button>
+                                  ) : null}
                                 </div>
-                              </div>
-                              <div className="notif-actions">
-                                {taskId && (
-                                  <button
-                                    className="status-chip"
-                                    onClick={(event) => {
-                                      event.stopPropagation()
-                                      onOpenTask(taskId, projectId)
-                                      markNotificationRead()
-                                      setShowNotificationsPanel(false)
-                                    }}
-                                  >
-                                    Open task
-                                  </button>
-                                )}
-                                {noteId && (
-                                  <button
-                                    className="status-chip"
-                                    onClick={(event) => {
-                                      event.stopPropagation()
-                                      onOpenNote(noteId, projectId)
-                                      markNotificationRead()
-                                      setShowNotificationsPanel(false)
-                                    }}
-                                  >
-                                    Open note
-                                  </button>
-                                )}
-                                {specificationId && (
-                                  <button
-                                    className="status-chip"
-                                    onClick={(event) => {
-                                      event.stopPropagation()
-                                      onOpenSpecification(specificationId, projectId)
-                                      markNotificationRead()
-                                      setShowNotificationsPanel(false)
-                                    }}
-                                  >
-                                    Open specification
-                                  </button>
-                                )}
-                                {canRunNotificationAction && !inlineNotificationAction && (
-                                  <button
-                                    className="status-chip"
-                                    onClick={(event) => {
-                                      event.stopPropagation()
-                                      onNotificationAction(n.id, notificationAction)
-                                      markNotificationRead()
-                                      setShowNotificationsPanel(false)
-                                    }}
-                                  >
-                                    {notificationActionLabel || (notificationAction === 'auto_update_app_images' ? 'Update app' : 'Run action')}
-                                  </button>
-                                )}
-                                {!taskId && !noteId && !specificationId && projectId && (
-                                  <button
-                                    className="status-chip"
-                                    onClick={(event) => {
-                                      event.stopPropagation()
-                                      onOpenProject(projectId)
-                                      markNotificationRead()
-                                      setShowNotificationsPanel(false)
-                                    }}
-                                  >
-                                    Open project
-                                  </button>
-                                )}
                               </div>
                             </div>
                           </div>
@@ -492,40 +495,47 @@ export function AppHeader({
             </div>
           </div>
         </div>
-        {notificationPreviewOpen ? (
-          <div
-            className="md-editor-surface md-editor-fullscreen notification-markdown-fullscreen"
-            onClick={(event) => event.stopPropagation()}
-            onPointerDown={(event) => event.stopPropagation()}
-          >
-            <div className="notification-markdown-header">
-              <strong className="notification-markdown-title">{notificationPreviewTitle}</strong>
-              <MarkdownModeToggle
-                view={notificationPreviewView}
-                onChange={() => {}}
-                ariaLabel="Notification preview view"
-                previewOnly
-                onFullscreenTriggerMode={(_mode, nextFullscreen) => {
-                  if (!nextFullscreen) setNotificationPreviewOpen(false)
-                }}
-              />
-              {notificationPreviewAction ? (
-                <button
-                  className="status-chip"
-                  onClick={() => {
-                    if (!notificationPreviewId) return
-                    onNotificationAction(notificationPreviewId, notificationPreviewAction)
-                  }}
-                >
-                  {notificationPreviewActionLabel || (notificationPreviewAction === 'auto_update_app_images' ? 'Update app' : 'Run action')}
-                </button>
-              ) : null}
-            </div>
-            <div className="md-editor-content notification-markdown-content">
-              <MarkdownView value={notificationPreviewMarkdown} />
-            </div>
-          </div>
-        ) : null}
+        <AlertDialog.Root open={notificationPreviewOpen} onOpenChange={setNotificationPreviewOpen}>
+          <AlertDialog.Portal>
+            <AlertDialog.Overlay className="codex-chat-alert-overlay" />
+            <AlertDialog.Content className="codex-chat-alert-content docker-runtime-dialog notification-preview-dialog">
+              <div className="notification-markdown-header">
+                <div>
+                  <AlertDialog.Title className="codex-chat-alert-title notification-markdown-title">
+                    {notificationPreviewTitle}
+                  </AlertDialog.Title>
+                  <AlertDialog.Description className="codex-chat-alert-description">
+                    Notification details and linked actions.
+                  </AlertDialog.Description>
+                </div>
+                {notificationPreviewAction ? (
+                  <button
+                    className="status-chip"
+                    onClick={() => {
+                      if (!notificationPreviewId) return
+                      onNotificationAction(notificationPreviewId, notificationPreviewAction)
+                    }}
+                  >
+                    {notificationPreviewActionLabel || (notificationPreviewAction === 'auto_update_app_images' ? 'Update app' : 'Run action')}
+                  </button>
+                ) : null}
+                <AlertDialog.Cancel asChild>
+                  <button
+                    type="button"
+                    className="action-icon docker-runtime-dialog-close notification-preview-close"
+                    aria-label="Close notification preview"
+                    title="Close"
+                  >
+                    <Icon path="M6 6l12 12M18 6L6 18" />
+                  </button>
+                </AlertDialog.Cancel>
+              </div>
+              <div className="md-editor-content notification-markdown-content notification-preview-body">
+                <MarkdownView value={notificationPreviewMarkdown} />
+              </div>
+            </AlertDialog.Content>
+          </AlertDialog.Portal>
+        </AlertDialog.Root>
         <div className="header-lower">
           <div className="top-search-wrap" role="search">
             <Icon path="M20 20l-3.5-3.5M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14z" />

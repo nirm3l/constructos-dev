@@ -15,9 +15,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from shared.core import User, get_current_user, get_db
+from shared.core import User, get_current_user, get_current_user_detached, get_db
 from shared.in_memory_stream_broker import InMemoryStreamBroker
-from shared.models import WorkspaceMember
+from shared.models import SessionLocal, WorkspaceMember
 
 from .read_models import license_status_read_model
 from .sync import LicenseActivationError, activate_with_code_once
@@ -319,11 +319,11 @@ def auto_update_app_images(
 def auto_update_stream(
     run_id: str,
     since_seq: int = 0,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user_detached),
 ):
-    if not _user_is_workspace_owner(db, str(user.id)):
-        raise HTTPException(status_code=403, detail="Only workspace owners can read application auto-update stream.")
+    with SessionLocal() as db:
+        if not _user_is_workspace_owner(db, str(user.id)):
+            raise HTTPException(status_code=403, detail="Only workspace owners can read application auto-update stream.")
 
     normalized_run_id = str(run_id or "").strip()
     if not normalized_run_id:
