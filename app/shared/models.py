@@ -92,6 +92,7 @@ class Project(Base, TimeMixin):
     automation_max_parallel_tasks: Mapped[int] = mapped_column(Integer, default=4)
     chat_index_mode: Mapped[str] = mapped_column(String(32), default="OFF")
     chat_attachment_ingestion_mode: Mapped[str] = mapped_column(String(32), default="METADATA_ONLY")
+    vector_index_distill_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     event_storming_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
 

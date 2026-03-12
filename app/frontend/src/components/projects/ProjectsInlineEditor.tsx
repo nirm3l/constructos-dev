@@ -330,6 +330,8 @@ export function ProjectsInlineEditor({
   setEditProjectEmbeddingEnabled,
   editProjectEmbeddingModel,
   setEditProjectEmbeddingModel,
+  editProjectVectorIndexDistillEnabled,
+  setEditProjectVectorIndexDistillEnabled,
   editProjectContextPackEvidenceTopKText,
   setEditProjectContextPackEvidenceTopKText,
   editProjectAutomationMaxParallelTasksText,
@@ -408,6 +410,8 @@ export function ProjectsInlineEditor({
   setEditProjectEmbeddingEnabled: React.Dispatch<React.SetStateAction<boolean>>
   editProjectEmbeddingModel: string
   setEditProjectEmbeddingModel: React.Dispatch<React.SetStateAction<string>>
+  editProjectVectorIndexDistillEnabled: boolean
+  setEditProjectVectorIndexDistillEnabled: React.Dispatch<React.SetStateAction<boolean>>
   editProjectContextPackEvidenceTopKText: string
   setEditProjectContextPackEvidenceTopKText: React.Dispatch<React.SetStateAction<string>>
   editProjectAutomationMaxParallelTasksText: string
@@ -2182,6 +2186,7 @@ export function ProjectsInlineEditor({
     editProjectDescription,
     editProjectEmbeddingEnabled,
     editProjectEmbeddingModel,
+    editProjectVectorIndexDistillEnabled,
     editProjectEventStormingEnabled,
     editProjectName,
     editProjectCustomStatusesText,
@@ -2720,6 +2725,18 @@ export function ProjectsInlineEditor({
             </Select.Portal>
           </Select.Root>
           <span className="badge">{embeddingStatusBadgeLabel}</span>
+        </div>
+        <label className="row" style={{ gap: 6, alignItems: 'center', marginTop: 8 }}>
+          <input
+            type="checkbox"
+            checked={editProjectVectorIndexDistillEnabled}
+            disabled={!editProjectEmbeddingEnabled}
+            onChange={(e) => setEditProjectVectorIndexDistillEnabled(e.target.checked)}
+          />
+          <span>Use LLM distillation for large vector sources</span>
+        </label>
+        <div className="meta" style={{ marginTop: 6 }}>
+          Adds distilled retrieval text for large note/spec/rule and attachment bodies. Raw chunks remain indexed.
         </div>
         <label className="field-control" style={{ marginTop: 8 }}>
           <span className="field-label">Context pack evidence top K (optional override)</span>

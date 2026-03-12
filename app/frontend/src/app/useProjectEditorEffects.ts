@@ -26,6 +26,7 @@ export function useProjectEditorEffects(c: any) {
       c.setEditProjectAttachmentRefsText('')
       c.setEditProjectEmbeddingEnabled(false)
       c.setEditProjectEmbeddingModel('')
+      c.setEditProjectVectorIndexDistillEnabled(false)
       c.setEditProjectContextPackEvidenceTopKText('')
       c.setEditProjectAutomationMaxParallelTasksText('4')
       c.setEditProjectChatIndexMode('OFF')
@@ -46,6 +47,7 @@ export function useProjectEditorEffects(c: any) {
     c.setEditProjectAttachmentRefsText(attachmentRefsToText(c.selectedProject.attachment_refs))
     c.setEditProjectEmbeddingEnabled(Boolean(c.selectedProject.embedding_enabled))
     c.setEditProjectEmbeddingModel(String(c.selectedProject.embedding_model || ''))
+    c.setEditProjectVectorIndexDistillEnabled(Boolean(c.selectedProject.vector_index_distill_enabled))
     c.setEditProjectContextPackEvidenceTopKText(
       c.selectedProject.context_pack_evidence_top_k == null ? '' : String(c.selectedProject.context_pack_evidence_top_k)
     )

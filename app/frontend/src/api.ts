@@ -1014,6 +1014,7 @@ export const createProject = (
     automation_max_parallel_tasks?: number
     chat_index_mode?: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'
     chat_attachment_ingestion_mode?: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
+    vector_index_distill_enabled?: boolean
     event_storming_enabled?: boolean
     member_user_ids?: string[]
     external_refs?: ExternalRef[]
@@ -1086,6 +1087,7 @@ export const patchProject = (
       | 'automation_max_parallel_tasks'
       | 'chat_index_mode'
       | 'chat_attachment_ingestion_mode'
+      | 'vector_index_distill_enabled'
       | 'event_storming_enabled'
     >
   >

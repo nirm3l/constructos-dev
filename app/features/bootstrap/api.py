@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from features.licensing.read_models import license_health_summary_read_model
 from shared.core import get_current_user, get_db
 from shared.settings import APP_BUILD, APP_DEPLOYED_AT_UTC, APP_VERSION
+from shared.vector_store import vector_backend_health_summary
 from .read_models import bootstrap_payload_read_model
 
 router = APIRouter()
@@ -43,6 +44,7 @@ def health(db: Session = Depends(get_db)):
         "ok": True,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "license": license_health_summary_read_model(db),
+        "vector": vector_backend_health_summary(db),
     }
 
 

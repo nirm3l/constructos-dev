@@ -146,6 +146,8 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
             setEditProjectEmbeddingEnabled={state.setEditProjectEmbeddingEnabled}
             editProjectEmbeddingModel={state.editProjectEmbeddingModel}
             setEditProjectEmbeddingModel={state.setEditProjectEmbeddingModel}
+            editProjectVectorIndexDistillEnabled={state.editProjectVectorIndexDistillEnabled}
+            setEditProjectVectorIndexDistillEnabled={state.setEditProjectVectorIndexDistillEnabled}
             editProjectContextPackEvidenceTopKText={state.editProjectContextPackEvidenceTopKText}
             setEditProjectContextPackEvidenceTopKText={state.setEditProjectContextPackEvidenceTopKText}
             editProjectAutomationMaxParallelTasksText={state.editProjectAutomationMaxParallelTasksText}

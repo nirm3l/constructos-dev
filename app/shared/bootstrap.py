@@ -61,6 +61,7 @@ from .settings import (
     DEFAULT_STATUSES,
     LEGACY_BOOTSTRAP_PASSWORD,
     LICENSE_TRIAL_DAYS,
+    VECTOR_INDEX_DISTILL_ENABLED,
     CODEX_SYSTEM_FULL_NAME,
     CODEX_SYSTEM_USER_ID,
     CODEX_SYSTEM_USERNAME,
@@ -668,6 +669,13 @@ def ensure_project_table_columns(db: Session):
         db.execute(text("ALTER TABLE projects ADD COLUMN chat_index_mode VARCHAR(32) DEFAULT 'OFF'"))
     if "chat_attachment_ingestion_mode" not in existing:
         db.execute(text("ALTER TABLE projects ADD COLUMN chat_attachment_ingestion_mode VARCHAR(32) DEFAULT 'METADATA_ONLY'"))
+    if "vector_index_distill_enabled" not in existing:
+        db.execute(
+            text(
+                "ALTER TABLE projects ADD COLUMN vector_index_distill_enabled BOOLEAN DEFAULT "
+                + ("TRUE" if VECTOR_INDEX_DISTILL_ENABLED else "FALSE")
+            )
+        )
     if "event_storming_enabled" not in existing:
         db.execute(text("ALTER TABLE projects ADD COLUMN event_storming_enabled BOOLEAN DEFAULT TRUE"))
     db.execute(text("UPDATE projects SET chat_index_mode='OFF' WHERE chat_index_mode IS NULL OR chat_index_mode = ''"))
@@ -675,6 +683,13 @@ def ensure_project_table_columns(db: Session):
         text(
             "UPDATE projects SET chat_attachment_ingestion_mode='METADATA_ONLY' "
             "WHERE chat_attachment_ingestion_mode IS NULL OR chat_attachment_ingestion_mode = ''"
+        )
+    )
+    db.execute(
+        text(
+            "UPDATE projects SET vector_index_distill_enabled="
+            + ("TRUE" if VECTOR_INDEX_DISTILL_ENABLED else "FALSE")
+            + " WHERE vector_index_distill_enabled IS NULL"
         )
     )
     db.execute(
@@ -713,6 +728,38 @@ def ensure_event_storming_analysis_table_columns(db: Session):
 
 def ensure_context_session_state_table_columns(db: Session):
     ContextSessionState.__table__.create(bind=db.bind, checkfirst=True)
+    db.commit()
+
+
+def ensure_vector_chunk_table_columns(db: Session):
+    bind = db.bind
+    if bind is None:
+        return
+    dialect_name = str(getattr(bind.dialect, "name", "")).strip().lower()
+    if dialect_name != "postgresql":
+        return
+
+    db.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+    existing = {column["name"] for column in inspect(bind).get_columns("vector_chunks")}
+    if "embedding_vector" not in existing:
+        db.execute(text("ALTER TABLE vector_chunks ADD COLUMN embedding_vector vector"))
+    db.execute(
+        text(
+            "UPDATE vector_chunks "
+            "SET embedding_vector = CAST(embedding_json AS vector) "
+            "WHERE embedding_vector IS NULL "
+            "AND embedding_json IS NOT NULL "
+            "AND embedding_json <> '' "
+            "AND embedding_json <> '[]'"
+        )
+    )
+    db.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_vector_chunks_project_model_live "
+            "ON vector_chunks(project_id, embedding_model) "
+            "WHERE is_deleted = FALSE"
+        )
+    )
     db.commit()
 
 
@@ -861,6 +908,7 @@ def bootstrap_data():
         ensure_chat_table_columns(db)
         ensure_event_storming_analysis_table_columns(db)
         ensure_context_session_state_table_columns(db)
+        ensure_vector_chunk_table_columns(db)
         ensure_task_watcher_table_constraints(db)
         ensure_system_users(db)
         default_user = db.get(User, DEFAULT_USER_ID)
@@ -1575,6 +1623,9 @@ def _backfill_project_streams_from_read_model(db: Session) -> None:
                 "chat_index_mode": str(getattr(p, "chat_index_mode", "") or "OFF"),
                 "chat_attachment_ingestion_mode": str(
                     getattr(p, "chat_attachment_ingestion_mode", "") or "METADATA_ONLY"
+                ),
+                "vector_index_distill_enabled": bool(
+                    getattr(p, "vector_index_distill_enabled", VECTOR_INDEX_DISTILL_ENABLED)
                 ),
                 "event_storming_enabled": bool(getattr(p, "event_storming_enabled", True)),
             },

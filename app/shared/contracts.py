@@ -6,6 +6,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .settings import VECTOR_INDEX_DISTILL_ENABLED
+
 
 class ExternalRef(BaseModel):
     url: str = Field(min_length=1)
@@ -165,6 +167,7 @@ class ProjectCreate(BaseModel):
     automation_max_parallel_tasks: int = Field(default=4, ge=1, le=50)
     chat_index_mode: str = "OFF"
     chat_attachment_ingestion_mode: str = "METADATA_ONLY"
+    vector_index_distill_enabled: bool = VECTOR_INDEX_DISTILL_ENABLED
     event_storming_enabled: bool = True
     member_user_ids: list[str] = Field(default_factory=list)
 
@@ -181,6 +184,7 @@ class ProjectPatch(BaseModel):
     automation_max_parallel_tasks: int | None = Field(default=None, ge=1, le=50)
     chat_index_mode: str | None = None
     chat_attachment_ingestion_mode: str | None = None
+    vector_index_distill_enabled: bool | None = None
     event_storming_enabled: bool | None = None
 
 

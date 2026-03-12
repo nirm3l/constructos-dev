@@ -168,7 +168,10 @@ def test_health(tmp_path):
     client = build_client(tmp_path)
     res = client.get('/api/health')
     assert res.status_code == 200
-    assert res.json()['ok'] is True
+    payload = res.json()
+    assert payload['ok'] is True
+    assert isinstance(payload.get('vector'), dict)
+    assert payload['vector']['status'] in {'disabled', 'unsupported_database', 'not_ready', 'ready', 'error'}
 
 
 def test_bootstrap_general_project_has_embedding_enabled_by_default(tmp_path):
@@ -1179,6 +1182,35 @@ def test_project_patch_can_explicitly_clear_nullable_field(tmp_path):
     refreshed = client.get('/api/bootstrap').json()
     refreshed_project = next(p for p in refreshed['projects'] if p['id'] == project['id'])
     assert refreshed_project['context_pack_evidence_top_k'] is None
+
+
+def test_project_vector_index_distill_setting_defaults_and_can_be_patched(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    created = client.post(
+        '/api/projects',
+        json={
+            'workspace_id': ws_id,
+            'name': 'Vector distill project',
+        },
+    )
+    assert created.status_code == 200
+    project = created.json()
+    assert project['vector_index_distill_enabled'] is False
+
+    patched = client.patch(
+        f"/api/projects/{project['id']}",
+        json={'vector_index_distill_enabled': True},
+    )
+    assert patched.status_code == 200
+    payload = patched.json()
+    assert payload['vector_index_distill_enabled'] is True
+
+    refreshed = client.get('/api/bootstrap').json()
+    refreshed_project = next(p for p in refreshed['projects'] if p['id'] == project['id'])
+    assert refreshed_project['vector_index_distill_enabled'] is True
 
 
 def test_project_board_supports_tag_filtering(tmp_path):
@@ -3810,6 +3842,81 @@ def test_runner_contract_validation_uses_repo_state_fallback_for_task_worktree_c
     assert str(git_evidence.get("after_head_sha") or "").strip()
     assert sorted(runner_module._derive_files_changed_from_git_evidence(git_evidence)) == ["app.js", "index.html"]
 
+    error = runner_module._validate_execution_outcome_contract(
+        outcome=outcome,
+        assignee_role="Developer",
+        task_status="Dev",
+        git_delivery_enabled=True,
+        require_nontrivial_dev_changes=True,
+        git_evidence=git_evidence,
+    )
+    assert error is None
+
+
+def test_runner_contract_validation_prefers_repo_state_for_post_run_branch_head(tmp_path, monkeypatch):
+    import subprocess
+
+    import features.agents.runner as runner_module
+    from features.agents.executor import AutomationOutcome
+    from shared.project_repository import (
+        ensure_project_repository_initialized,
+        resolve_task_branch_name,
+        resolve_task_worktree_path,
+    )
+
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path))
+    project_name = "Battle City"
+    project_id = "proj-stale-outcome-sha"
+    task_id = "b7b24050-160f-5a60-b4a4-f51a25c6108e"
+    title = "Implement core tank controls, movement, shooting, and collision loop"
+
+    repo = ensure_project_repository_initialized(project_name=project_name, project_id=project_id)
+    branch = resolve_task_branch_name(task_id=task_id, title=title)
+    worktree = resolve_task_worktree_path(project_name=project_name, project_id=project_id, task_id=task_id)
+
+    subprocess.run(["git", "worktree", "add", "-b", branch, str(worktree), "main"], cwd=str(repo), check=True, capture_output=True, text=True)
+    (worktree / "src").mkdir(parents=True, exist_ok=True)
+    (worktree / "src" / "tank.js").write_text("export const tank = true;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/tank.js"], cwd=str(worktree), check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "feat: implement tank controls"], cwd=str(worktree), check=True, capture_output=True, text=True)
+    actual_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(worktree), check=True, capture_output=True, text=True).stdout.strip().lower()
+    stale_head = "1111111111111111111111111111111111111111"
+
+    outcome = AutomationOutcome(
+        action="comment",
+        summary="Implementation done.",
+        comment="Ready for Lead review.",
+        execution_outcome_contract={
+            "contract_version": 1,
+            "files_changed": ["src/tank.js"],
+            "commit_sha": actual_head,
+            "branch": branch,
+            "tests_run": True,
+            "tests_passed": True,
+            "artifacts": [{"kind": "test", "ref": "node --test", "description": "tests passed"}],
+        },
+        usage={
+            "git_evidence": {
+                "task_workdir": str(worktree),
+                "repo_root": str(repo),
+                "task_branch": branch,
+                "before": {"head_sha": "", "on_task_branch": True, "is_dirty": False},
+                "after": {"head_sha": stale_head, "on_task_branch": True, "is_dirty": False},
+            }
+        },
+    )
+
+    git_evidence = runner_module._merge_git_evidence(
+        runner_module._collect_git_evidence_from_outcome(outcome),
+        runner_module._collect_git_evidence_from_repo_state(
+            project_name=project_name,
+            project_id=project_id,
+            task_id=task_id,
+            title=title,
+        ),
+    )
+
+    assert str(git_evidence.get("after_head_sha") or "").strip().lower() == actual_head
     error = runner_module._validate_execution_outcome_contract(
         outcome=outcome,
         assignee_role="Developer",
@@ -12310,6 +12417,42 @@ def test_agent_service_setup_project_orchestration_skips_known_answers_in_missin
     assert str(detail.get("next_input_key") or "").strip() == "enable_docker_compose"
 
 
+def test_agent_service_setup_project_orchestration_uses_chat_default_profile_for_new_project(tmp_path, monkeypatch):
+    from shared.models import Project, SessionLocal
+
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", set())
+
+    service = AgentTaskService()
+    payload = service.setup_project_orchestration(
+        name="Embedding Default Project",
+        short_description="Validate setup defaults.",
+        workspace_id=ws_id,
+        enable_team_mode=False,
+        enable_git_delivery=False,
+        enable_docker_compose=False,
+    )
+
+    assert payload["execution_state"] == "setup_complete"
+    project = payload.get("project") if isinstance(payload.get("project"), dict) else {}
+    project_id = str(project.get("id") or "").strip()
+    assert project_id
+    with SessionLocal() as db:
+        persisted = db.get(Project, project_id)
+        assert persisted is not None
+        assert persisted.embedding_enabled is True
+        assert str(persisted.chat_index_mode or "").strip().upper() == "KG_AND_VECTOR"
+
+
 def test_agent_service_apply_plugin_config_with_retry_handles_version_mismatch(monkeypatch):
     from features.agents.service import AgentTaskService
 
@@ -12767,6 +12910,178 @@ def test_agents_chat_endpoint_returns_executor_response(tmp_path):
     assert payload['action'] in {'complete', 'comment'}
     assert isinstance(payload['summary'], str)
     assert payload['session_id'] == 'test-session-1'
+
+
+def test_agents_chat_endpoint_includes_project_knowledge_evidence_for_grounded_lookup(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    captured: dict[str, object] = {}
+
+    def _fake_execute_task_automation(**kwargs):
+        captured.update(kwargs)
+        return AutomationOutcome(action='comment', summary='The secret number is 99.', comment=None, usage=None)
+
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+    monkeypatch.setattr(
+        agents_api,
+        '_classify_chat_instruction_intents',
+        lambda **_kwargs: {
+            'execution_intent': False,
+            'execution_kickoff_intent': False,
+            'project_creation_intent': False,
+            'project_knowledge_lookup_intent': False,
+            'grounded_answer_required': False,
+            'workflow_scope': 'unknown',
+            'execution_mode': 'unknown',
+            'deploy_requested': False,
+            'docker_compose_requested': False,
+            'requested_port': None,
+            'exact_task_count': None,
+            'project_name_provided': False,
+            'task_completion_requested': False,
+            'reason': 'Classifier missed multilingual factual lookup.',
+        },
+    )
+    monkeypatch.setattr(
+        agents_api,
+        'search_project_knowledge_query',
+        lambda **_kwargs: {
+            'project_id': project_id,
+            'query': 'what is secret number',
+            'mode': 'graph+vector',
+            'items': [
+                {
+                    'entity_type': 'Note',
+                    'entity_id': 'note-123',
+                    'source_type': 'note.body',
+                    'snippet': 'The secret number is 99.',
+                    'vector_similarity': 0.91,
+                    'final_score': 0.93,
+                }
+            ],
+        },
+    )
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'what is secret number',
+            'session_id': 'test-session-grounded-lookup',
+            'history': [],
+        },
+    )
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload['ok'] is True
+    sent_instruction = str(captured['instruction'])
+    assert 'Project knowledge evidence' in sent_instruction
+    assert 'The secret number is 99.' in sent_instruction
+    assert 'could not verify it from project knowledge' in sent_instruction
+
+
+def test_agents_chat_endpoint_uses_normalized_multilingual_knowledge_query(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents import api as agents_api
+    from features.agents.executor import AutomationOutcome
+
+    captured: dict[str, object] = {}
+    knowledge_queries: list[str] = []
+
+    def _fake_execute_task_automation(**kwargs):
+        captured.update(kwargs)
+        return AutomationOutcome(action='comment', summary='The secret number is 99.', comment=None, usage=None)
+
+    monkeypatch.setattr(agents_api, 'execute_task_automation', _fake_execute_task_automation)
+    monkeypatch.setattr(
+        agents_api,
+        '_classify_chat_instruction_intents',
+        lambda **_kwargs: {
+            'execution_intent': False,
+            'execution_kickoff_intent': False,
+            'project_creation_intent': False,
+            'project_knowledge_lookup_intent': False,
+            'grounded_answer_required': False,
+            'workflow_scope': 'unknown',
+            'execution_mode': 'unknown',
+            'deploy_requested': False,
+            'docker_compose_requested': False,
+            'requested_port': None,
+            'exact_task_count': None,
+            'project_name_provided': False,
+            'task_completion_requested': False,
+            'reason': 'Classifier missed multilingual factual lookup.',
+        },
+    )
+    monkeypatch.setattr(
+        agents_api,
+        '_normalize_chat_knowledge_lookup_query',
+        lambda **_kwargs: {
+            'project_knowledge_lookup_intent': True,
+            'grounded_answer_required': True,
+            'input_language': 'bs',
+            'english_retrieval_query': 'secret number',
+            'native_retrieval_query': 'tajni broj',
+            'reasoning': 'Bosnian factual lookup normalized to English.',
+        },
+    )
+
+    def _fake_search_project_knowledge_query(**kwargs):
+        knowledge_queries.append(str(kwargs.get('query') or ''))
+        query = str(kwargs.get('query') or '')
+        if query == 'secret number':
+            return {
+                'project_id': project_id,
+                'query': query,
+                'mode': 'graph+vector',
+                'items': [
+                    {
+                        'entity_type': 'Note',
+                        'entity_id': 'note-123',
+                        'source_type': 'note.body',
+                        'snippet': 'The secret number is 99.',
+                        'vector_similarity': 0.91,
+                        'final_score': 0.93,
+                    }
+                ],
+            }
+        return {
+            'project_id': project_id,
+            'query': query,
+            'mode': 'graph+vector',
+            'items': [],
+        }
+
+    monkeypatch.setattr(agents_api, 'search_project_knowledge_query', _fake_search_project_knowledge_query)
+
+    res = client.post(
+        '/api/agents/chat',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'instruction': 'mozes li mi reci koji je tajni broj?',
+            'session_id': 'test-session-grounded-lookup-bs',
+            'history': [],
+        },
+    )
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload['ok'] is True
+    assert 'secret number' in knowledge_queries
+    sent_instruction = str(captured['instruction'])
+    assert 'Project knowledge evidence' in sent_instruction
+    assert 'The secret number is 99.' in sent_instruction
 
 
 def test_agents_chat_stream_project_setup_starter_returns_immediate_question(tmp_path, monkeypatch):

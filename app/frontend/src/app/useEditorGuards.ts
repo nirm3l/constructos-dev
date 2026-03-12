@@ -135,6 +135,7 @@ export function useEditorGuards(c: any) {
         stableJson(c.selectedProject.custom_statuses ?? []) ||
       Boolean(c.editProjectEmbeddingEnabled) !== Boolean(c.selectedProject.embedding_enabled) ||
       String(c.editProjectEmbeddingModel || '').trim() !== String(c.selectedProject.embedding_model || '').trim() ||
+      Boolean(c.editProjectVectorIndexDistillEnabled) !== Boolean(c.selectedProject.vector_index_distill_enabled) ||
       String(c.editProjectContextPackEvidenceTopKText || '').trim() !==
         String(c.selectedProject.context_pack_evidence_top_k ?? '').trim() ||
       String(c.editProjectAutomationMaxParallelTasksText || '').trim() !==
@@ -156,6 +157,7 @@ export function useEditorGuards(c: any) {
     c.editProjectDescription,
     c.editProjectEmbeddingEnabled,
     c.editProjectEmbeddingModel,
+    c.editProjectVectorIndexDistillEnabled,
     c.editProjectContextPackEvidenceTopKText,
     c.editProjectAutomationMaxParallelTasksText,
     c.editProjectChatIndexMode,

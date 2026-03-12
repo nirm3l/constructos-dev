@@ -172,6 +172,7 @@ export type Project = {
   automation_max_parallel_tasks: number
   chat_index_mode: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR' | string
   chat_attachment_ingestion_mode: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT' | string
+  vector_index_distill_enabled: boolean
   event_storming_enabled: boolean
   embedding_index_status: 'not_indexed' | 'indexing' | 'ready' | 'stale'
   embedding_index_progress_pct: number | null

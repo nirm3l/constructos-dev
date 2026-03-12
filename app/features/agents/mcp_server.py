@@ -1005,6 +1005,7 @@ def create_mcp():
         automation_max_parallel_tasks: int = 4,
         chat_index_mode: str = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE,
         chat_attachment_ingestion_mode: str = MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE,
+        vector_index_distill_enabled: bool = False,
         event_storming_enabled: bool = True,
         command_id: str | None = None,
     ) -> dict[str, Any]:
@@ -1021,6 +1022,7 @@ def create_mcp():
             automation_max_parallel_tasks=automation_max_parallel_tasks,
             chat_index_mode=chat_index_mode,
             chat_attachment_ingestion_mode=chat_attachment_ingestion_mode,
+            vector_index_distill_enabled=vector_index_distill_enabled,
             event_storming_enabled=event_storming_enabled,
             command_id=command_id,
         )

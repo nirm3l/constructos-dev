@@ -4,7 +4,11 @@ import hashlib
 import json
 from typing import Any, Callable
 
-_PROJECT_CONTEXT_CLASSIFIER_CACHE: dict[str, dict[str, Any]] = {}
+from shared.classification_cache import ClassificationCache, build_classification_cache_key
+
+_PROJECT_CONTEXT_CLASSIFIER_VERSION = "project-context-v1"
+_PROJECT_CONTEXT_CLASSIFIER_SCHEMA_VERSION = "1"
+_PROJECT_CONTEXT_CLASSIFIER_CACHE = ClassificationCache(max_entries=128)
 
 
 def run_structured_codex_prompt(**kwargs):
@@ -125,7 +129,14 @@ def classify_project_context_signals(
     payload_hash = hashlib.sha256(
         json.dumps(llm_payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
     ).hexdigest()[:16]
-    cache_key = f"project-context:{payload_hash}"
+    cache_key = build_classification_cache_key(
+        cache_name="project_context",
+        workspace_id=None,
+        project_id=None,
+        classifier_version=_PROJECT_CONTEXT_CLASSIFIER_VERSION,
+        schema_version=_PROJECT_CONTEXT_CLASSIFIER_SCHEMA_VERSION,
+        payload=llm_payload,
+    )
     cached = _PROJECT_CONTEXT_CLASSIFIER_CACHE.get(cache_key)
     if isinstance(cached, dict):
         return {
@@ -157,7 +168,7 @@ def classify_project_context_signals(
             "repo_reason": str(parsed.get("repo_reason") or ""),
             "github_reason": str(parsed.get("github_reason") or ""),
         }
-        _PROJECT_CONTEXT_CLASSIFIER_CACHE[cache_key] = normalized
+        _PROJECT_CONTEXT_CLASSIFIER_CACHE.set(cache_key, normalized)
         return normalized
     except Exception:
         return {

@@ -229,6 +229,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             setEditProjectEmbeddingEnabled: state.setEditProjectEmbeddingEnabled,
             editProjectEmbeddingModel: state.editProjectEmbeddingModel,
             setEditProjectEmbeddingModel: state.setEditProjectEmbeddingModel,
+            editProjectVectorIndexDistillEnabled: state.editProjectVectorIndexDistillEnabled,
+            setEditProjectVectorIndexDistillEnabled: state.setEditProjectVectorIndexDistillEnabled,
             editProjectContextPackEvidenceTopKText: state.editProjectContextPackEvidenceTopKText,
             setEditProjectContextPackEvidenceTopKText: state.setEditProjectContextPackEvidenceTopKText,
             editProjectChatIndexMode: state.editProjectChatIndexMode,

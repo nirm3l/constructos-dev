@@ -18,6 +18,10 @@ export function useTaskQueryParams(args: {
     if (tab === 'tasks') {
       return {
         project_id: selectedProjectId,
+        q: searchQ || undefined,
+        status: searchStatus || undefined,
+        priority: searchPriority || undefined,
+        archived: searchArchived,
         tags: searchTags,
         limit: tasksPageLimit,
         offset: 0,

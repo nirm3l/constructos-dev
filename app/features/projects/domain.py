@@ -30,6 +30,7 @@ class ProjectAggregate(Aggregate):
         automation_max_parallel_tasks: int = 4,
         chat_index_mode: str = "OFF",
         chat_attachment_ingestion_mode: str = "METADATA_ONLY",
+        vector_index_distill_enabled: bool = False,
         event_storming_enabled: bool = True,
         status: str = "Active",
     ) -> None:
@@ -46,6 +47,7 @@ class ProjectAggregate(Aggregate):
         self.automation_max_parallel_tasks = max(1, int(automation_max_parallel_tasks or 4))
         self.chat_index_mode = chat_index_mode
         self.chat_attachment_ingestion_mode = chat_attachment_ingestion_mode
+        self.vector_index_distill_enabled = bool(vector_index_distill_enabled)
         self.event_storming_enabled = event_storming_enabled
         self.status = status
         self.is_deleted = False
@@ -65,6 +67,7 @@ class ProjectAggregate(Aggregate):
         automation_max_parallel_tasks: int | None = None,
         chat_index_mode: str | None = None,
         chat_attachment_ingestion_mode: str | None = None,
+        vector_index_distill_enabled: bool | None = None,
         event_storming_enabled: bool | None = None,
         updated_fields: list[str] | None = None,
     ) -> None:
@@ -93,6 +96,8 @@ class ProjectAggregate(Aggregate):
             self.chat_index_mode = chat_index_mode
         if chat_attachment_ingestion_mode is not None:
             self.chat_attachment_ingestion_mode = chat_attachment_ingestion_mode
+        if vector_index_distill_enabled is not None:
+            self.vector_index_distill_enabled = bool(vector_index_distill_enabled)
         if event_storming_enabled is not None:
             self.event_storming_enabled = event_storming_enabled
 

@@ -633,6 +633,7 @@ def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str
             "chat_attachment_ingestion_mode": str(
                 p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
             ),
+            "vector_index_distill_enabled": bool(p.get("vector_index_distill_enabled", False)),
             "event_storming_enabled": bool(p.get("event_storming_enabled", True)),
             "is_deleted": False,
         }
@@ -664,6 +665,8 @@ def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str
             s["chat_attachment_ingestion_mode"] = str(
                 p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
             )
+        if touched("vector_index_distill_enabled"):
+            s["vector_index_distill_enabled"] = bool(p.get("vector_index_distill_enabled", False))
         if touched("event_storming_enabled"):
             s["event_storming_enabled"] = bool(p.get("event_storming_enabled", True))
     return s
@@ -1079,6 +1082,7 @@ def project_event(db: Session, ev: EventEnvelope):
         project.chat_attachment_ingestion_mode = str(
             p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
         )
+        project.vector_index_distill_enabled = bool(p.get("vector_index_distill_enabled", False))
         project.event_storming_enabled = bool(p.get("event_storming_enabled", True))
     elif ev.event_type == PROJECT_EVENT_DELETED:
         project = db.get(Project, ev.aggregate_id)
@@ -1114,6 +1118,8 @@ def project_event(db: Session, ev: EventEnvelope):
                 project.chat_attachment_ingestion_mode = str(
                     p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
                 )
+            if touched("vector_index_distill_enabled"):
+                project.vector_index_distill_enabled = bool(p.get("vector_index_distill_enabled", False))
             if touched("event_storming_enabled"):
                 project.event_storming_enabled = bool(p.get("event_storming_enabled", True))
     elif ev.event_type == PROJECT_EVENT_MEMBER_UPSERTED:

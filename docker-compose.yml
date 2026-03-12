@@ -52,7 +52,7 @@ x-agent-common-config-env: &agent_common_config_env
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: postgres
     environment:
       POSTGRES_DB: "task_management"

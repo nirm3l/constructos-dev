@@ -2260,10 +2260,18 @@ def search_project_knowledge(
             if not snippet:
                 continue
             key = (entity_type, entity_id)
-            graph_score = float(candidate_scores.get(key, 0.2 if not candidate_scores else 0.3))
+            raw_graph_score = float(candidate_scores.get(key, 0.2 if not candidate_scores else 0.3))
             vector_similarity = float(candidate.get("vector_similarity") or 0.0)
+            graph_score = _effective_graph_score(
+                raw_graph_score=raw_graph_score,
+                vector_similarity=vector_similarity,
+                focus_entity_type=focus_type,
+                focus_entity_id=focus_id,
+            )
             freshness = _score_freshness(candidate.get("source_updated_at"))
             entity_priority = _score_entity_priority(entity_type)
+            source_priority = _score_source_type_priority(source_type)
+            lexical_overlap = _score_query_snippet_overlap(query=text_query, snippet=snippet)
             graph_path = path_lookup.get(key, [entity_type])
             template_alignment = _template_alignment_score(
                 template_key=template_key,
@@ -2272,11 +2280,13 @@ def search_project_knowledge(
                 graph_path=graph_path,
             )
             final_score = (
-                (0.38 * vector_similarity)
-                + (0.30 * graph_score)
-                + (0.14 * freshness)
-                + (0.08 * entity_priority)
-                + (0.10 * template_alignment)
+                (0.42 * vector_similarity)
+                + (0.14 * graph_score)
+                + (0.12 * freshness)
+                + (0.07 * entity_priority)
+                + (0.05 * source_priority)
+                + (0.04 * template_alignment)
+                + (0.16 * lexical_overlap)
             )
             updated_at = _as_datetime_utc(candidate.get("source_updated_at"))
             items.append(
@@ -2287,6 +2297,7 @@ def search_project_knowledge(
                     "snippet": snippet,
                     "vector_similarity": round(vector_similarity, 4),
                     "graph_score": round(graph_score, 4),
+                    "lexical_overlap": round(lexical_overlap, 4),
                     "template_alignment": round(template_alignment, 4),
                     "final_score": float(final_score),
                     "graph_path": graph_path,
@@ -2313,6 +2324,7 @@ def search_project_knowledge(
             graph_score = float(candidate.get("graph_score") or 0.0)
             freshness = _score_freshness(candidate.get("source_updated_at"))
             entity_priority = _score_entity_priority(entity_type)
+            source_priority = _score_source_type_priority(source_type)
             key = (entity_type, entity_id)
             graph_path = path_lookup.get(key, [entity_type])
             template_alignment = _template_alignment_score(
@@ -2325,7 +2337,8 @@ def search_project_knowledge(
                 (0.62 * graph_score)
                 + (0.16 * freshness)
                 + (0.08 * entity_priority)
-                + (0.14 * template_alignment)
+                + (0.06 * source_priority)
+                + (0.08 * template_alignment)
             )
             updated_at = _as_datetime_utc(candidate.get("source_updated_at"))
             items.append(
@@ -2447,6 +2460,64 @@ def _score_entity_priority(entity_type: str) -> float:
     if key == "comment":
         return 0.6
     return 0.5
+
+
+def _score_source_type_priority(source_type: str | None) -> float:
+    raw = str(source_type or "").strip().lower()
+    if raw.endswith(".distilled"):
+        return 0.98
+    if raw.endswith(".description") or raw.endswith(".body") or raw.endswith(".content"):
+        return 0.92
+    if raw.endswith(".title"):
+        return 0.78
+    if raw.endswith(".metadata"):
+        return 0.68
+    return 0.72
+
+
+def _normalize_knowledge_search_text(value: str) -> str:
+    return re.sub(r"[^\w\s]+", " ", str(value or "").lower()).strip()
+
+
+def _knowledge_search_tokens(value: str, *, min_length: int = 3, max_terms: int = 12) -> list[str]:
+    normalized = _normalize_knowledge_search_text(value)
+    if not normalized:
+        return []
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for token in normalized.split():
+        if len(token) < min_length or token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+        if len(tokens) >= max_terms:
+            break
+    return tokens
+
+
+def _score_query_snippet_overlap(*, query: str, snippet: str) -> float:
+    query_tokens = _knowledge_search_tokens(query)
+    if not query_tokens:
+        return 0.0
+    normalized_snippet = _normalize_knowledge_search_text(snippet)
+    if not normalized_snippet:
+        return 0.0
+    matches = sum(1 for token in query_tokens if token in normalized_snippet)
+    return max(0.0, min(1.0, matches / max(1, len(query_tokens))))
+
+
+def _effective_graph_score(
+    *,
+    raw_graph_score: float,
+    vector_similarity: float,
+    focus_entity_type: str | None,
+    focus_entity_id: str | None,
+) -> float:
+    base = max(0.0, min(1.0, float(raw_graph_score or 0.0)))
+    if focus_entity_type and focus_entity_id:
+        return base
+    semantic_cap = min(1.0, max(0.35, vector_similarity + 0.08))
+    return min(base, semantic_cap)
 
 
 _TEMPLATE_ENTITY_ALIGNMENT: dict[str, set[str]] = {
@@ -3109,10 +3180,17 @@ def graph_context_pack(
                 if not snippet:
                     continue
                 key = (entity_type, entity_id)
-                graph_score = float(candidate_scores.get(key, 0.25))
+                raw_graph_score = float(candidate_scores.get(key, 0.25))
                 vector_similarity = float(item.get("vector_similarity") or 0.0)
+                graph_score = _effective_graph_score(
+                    raw_graph_score=raw_graph_score,
+                    vector_similarity=vector_similarity,
+                    focus_entity_type=focus_entity_type,
+                    focus_entity_id=focus_entity_id,
+                )
                 freshness = _score_freshness(item.get("source_updated_at"))
                 entity_priority = _score_entity_priority(entity_type)
+                source_priority = _score_source_type_priority(source_type)
                 graph_path = path_lookup.get(key, [entity_type])
                 template_alignment = _template_alignment_score(
                     template_key=template_key,
@@ -3121,11 +3199,12 @@ def graph_context_pack(
                     graph_path=graph_path,
                 )
                 final_score = (
-                    (0.34 * graph_score)
-                    + (0.34 * vector_similarity)
+                    (0.44 * vector_similarity)
+                    + (0.22 * graph_score)
                     + (0.14 * freshness)
                     + (0.08 * entity_priority)
-                    + (0.10 * template_alignment)
+                    + (0.07 * source_priority)
+                    + (0.05 * template_alignment)
                 )
                 source_updated_at = _as_datetime_utc(item.get("source_updated_at"))
                 evidence.append(
@@ -3167,6 +3246,7 @@ def graph_context_pack(
                 graph_score = float(item.get("graph_score") or 0.0)
                 freshness = _score_freshness(item.get("source_updated_at"))
                 entity_priority = _score_entity_priority(entity_type)
+                source_priority = _score_source_type_priority(source_type)
                 source_updated_at = _as_datetime_utc(item.get("source_updated_at"))
                 key = (entity_type, entity_id)
                 graph_path = path_lookup.get(key, [entity_type])
@@ -3180,7 +3260,8 @@ def graph_context_pack(
                     (0.60 * graph_score)
                     + (0.18 * freshness)
                     + (0.08 * entity_priority)
-                    + (0.14 * template_alignment)
+                    + (0.06 * source_priority)
+                    + (0.08 * template_alignment)
                 )
                 evidence.append(
                     {

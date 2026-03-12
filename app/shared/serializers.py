@@ -29,7 +29,7 @@ from .contracts import (
     TaskGroupDTO,
 )
 from .models import Note, NoteGroup, Notification, Project, ProjectRule, SavedView, Specification, StoredEvent, Task, TaskGroup
-from .settings import DEFAULT_STATUSES
+from .settings import DEFAULT_STATUSES, VECTOR_INDEX_DISTILL_ENABLED
 from .typed_notifications import (
     DEFAULT_NOTIFICATION_SEVERITY,
     DEFAULT_NOTIFICATION_TYPE,
@@ -574,6 +574,9 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
             "chat_attachment_ingestion_mode": str(
                 project.chat_attachment_ingestion_mode or "METADATA_ONLY"
             ),
+            "vector_index_distill_enabled": bool(
+                getattr(project, "vector_index_distill_enabled", VECTOR_INDEX_DISTILL_ENABLED)
+            ),
             "event_storming_enabled": bool(getattr(project, "event_storming_enabled", True)),
             "embedding_index_status": str(index_snapshot.get("status") or "not_indexed"),
             "embedding_index_progress_pct": index_snapshot.get("progress_pct"),
@@ -618,6 +621,7 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
         "chat_attachment_ingestion_mode": str(
             state.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
         ),
+        "vector_index_distill_enabled": bool(state.get("vector_index_distill_enabled", VECTOR_INDEX_DISTILL_ENABLED)),
         "event_storming_enabled": bool(state.get("event_storming_enabled", True)),
         "embedding_index_status": str(index_snapshot.get("status") or "not_indexed"),
         "embedding_index_progress_pct": index_snapshot.get("progress_pct"),

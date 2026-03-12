@@ -308,6 +308,7 @@ def _project_vector_event(db, ev: EventEnvelope) -> None:
             (ev.event_type == PROJECT_EVENT_CREATED and bool(payload.get("embedding_enabled", False)))
             or "embedding_enabled" in payload
             or "embedding_model" in payload
+            or "vector_index_distill_enabled" in payload
         )
         chat_policy_changed = bool("chat_index_mode" in payload or "chat_attachment_ingestion_mode" in payload)
 
@@ -318,6 +319,7 @@ def _project_vector_event(db, ev: EventEnvelope) -> None:
                 project_id=ev.aggregate_id,
                 embedding_enabled=payload.get("embedding_enabled"),
                 embedding_model=payload.get("embedding_model"),
+                vector_index_distill_enabled=payload.get("vector_index_distill_enabled"),
                 chat_index_mode=(policy_override.index_mode if policy_override is not None else payload.get("chat_index_mode")),
                 chat_attachment_ingestion_mode=(
                     policy_override.attachment_ingestion_mode

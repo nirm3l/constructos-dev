@@ -31,6 +31,7 @@ from shared.core import (
     get_current_user_detached,
     get_db,
 )
+from shared.classification_cache import ClassificationCache, build_classification_cache_key
 from shared.models import (
     ActivityLog,
     ChatMessage,
@@ -44,6 +45,7 @@ from shared.models import (
     WorkspaceMember,
 )
 from shared.in_memory_stream_broker import InMemoryStreamBroker
+from shared.knowledge_graph import search_project_knowledge as search_project_knowledge_query
 from shared.settings import (
     ATTACHMENTS_DIR,
     AGENT_CHAT_HISTORY_COMPACT_THRESHOLD,
@@ -52,6 +54,7 @@ from shared.settings import (
     AGENT_SYSTEM_USER_ID,
 )
 
+from features.agents.agent_mcp_adapter import run_structured_agent_prompt
 from .executor import AutomationOutcome, execute_task_automation, execute_task_automation_stream
 from .intent_classifier import classify_instruction_intent
 from .mcp_registry import (
@@ -138,6 +141,12 @@ _MAX_CHAT_ATTACHMENT_CHARS_TOTAL = 36_000
 _MAX_CROSS_SESSION_DELTA_MESSAGES = 8
 _MAX_CROSS_SESSION_DELTA_CHARS_PER_MESSAGE = 220
 _ALLOWED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+_CHAT_KNOWLEDGE_EVIDENCE_LIMIT = 5
+_CHAT_KNOWLEDGE_MIN_FINAL_SCORE = 0.42
+_CHAT_KNOWLEDGE_MIN_VECTOR_SIMILARITY = 0.24
+_CHAT_KNOWLEDGE_QUERY_NORMALIZER_VERSION = "chat-knowledge-query-normalizer-v2"
+_CHAT_KNOWLEDGE_QUERY_NORMALIZER_SCHEMA_VERSION = "2"
+_CHAT_KNOWLEDGE_QUERY_NORMALIZER_CACHE = ClassificationCache(max_entries=256)
 _PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "shared" / "prompt_templates" / "codex"
 _CREATED_RESOURCE_ACTIONS: dict[str, str] = {
     "TaskCreated": "task",
@@ -1355,6 +1364,348 @@ def _build_execution_intent_mandate() -> str:
     return _render_prompt_template("chat_execution_intent_mandate.md", {})
 
 
+def _format_chat_knowledge_evidence_block(
+    *,
+    query: str,
+    items: list[dict[str, object]],
+    grounded_answer_required: bool,
+) -> str:
+    lines = [
+        "Project knowledge evidence",
+        f"Query: {query}",
+        (
+            "Answer factual questions using this evidence first. "
+            "If the answer is not supported here, say you could not verify it from project knowledge."
+            if grounded_answer_required
+            else "Use this evidence when it is relevant to the user's question."
+        ),
+    ]
+    for index, item in enumerate(items, start=1):
+        entity_type = str(item.get("entity_type") or "Entity").strip() or "Entity"
+        entity_id = str(item.get("entity_id") or "").strip()
+        source_type = str(item.get("source_type") or "source").strip() or "source"
+        snippet = str(item.get("snippet") or "").strip()
+        final_score = item.get("final_score")
+        vector_similarity = item.get("vector_similarity")
+        metrics: list[str] = []
+        if isinstance(final_score, (int, float)):
+            metrics.append(f"final_score={float(final_score):.4f}")
+        if isinstance(vector_similarity, (int, float)):
+            metrics.append(f"vector_similarity={float(vector_similarity):.4f}")
+        score_suffix = f" ({', '.join(metrics)})" if metrics else ""
+        lines.append(f"{index}. [{entity_type}] {source_type} {entity_id}{score_suffix}")
+        if snippet:
+            lines.append(f"   {snippet}")
+    return "\n".join(lines).strip()
+
+
+def _normalize_chat_knowledge_query_payload(values: dict[str, object] | None) -> dict[str, object]:
+    parsed = dict(values or {})
+    project_knowledge_lookup_intent = bool(parsed.get("project_knowledge_lookup_intent"))
+    grounded_answer_required = bool(parsed.get("grounded_answer_required"))
+    input_language = str(parsed.get("input_language") or "").strip().lower() or "unknown"
+    english_retrieval_query = str(parsed.get("english_retrieval_query") or "").strip()
+    native_retrieval_query = str(parsed.get("native_retrieval_query") or "").strip()
+    reasoning = str(parsed.get("reasoning") or "").strip()
+    return {
+        "project_knowledge_lookup_intent": project_knowledge_lookup_intent,
+        "grounded_answer_required": grounded_answer_required,
+        "input_language": input_language,
+        "english_retrieval_query": english_retrieval_query,
+        "native_retrieval_query": native_retrieval_query,
+        "reasoning": reasoning,
+    }
+
+
+def _normalize_chat_knowledge_lookup_query(
+    *,
+    instruction: str,
+    workspace_id: str,
+    project_id: str | None,
+    session_id: str | None,
+    actor_user_id: str | None,
+) -> dict[str, object]:
+    normalized_instruction = str(instruction or "").strip()
+    if not normalized_instruction:
+        return _normalize_chat_knowledge_query_payload({})
+    payload = {
+        "instruction": normalized_instruction,
+        "workspace_id": str(workspace_id or "").strip() or None,
+        "project_id": str(project_id or "").strip() or None,
+        "session_id": str(session_id or "").strip() or None,
+    }
+    cache_key = build_classification_cache_key(
+        cache_name="chat_knowledge_query_normalizer",
+        workspace_id=str(workspace_id or "").strip() or None,
+        project_id=str(project_id or "").strip() or None,
+        classifier_version=_CHAT_KNOWLEDGE_QUERY_NORMALIZER_VERSION,
+        schema_version=_CHAT_KNOWLEDGE_QUERY_NORMALIZER_SCHEMA_VERSION,
+        payload=payload,
+    )
+    cached = _CHAT_KNOWLEDGE_QUERY_NORMALIZER_CACHE.get(cache_key)
+    if cached is not None:
+        return _normalize_chat_knowledge_query_payload(cached)
+    prompt = _render_prompt_template(
+        "chat_knowledge_query_normalizer.md",
+        {"payload_json": json.dumps(payload, ensure_ascii=True)},
+    )
+    output_schema: dict[str, object] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "project_knowledge_lookup_intent": {"type": "boolean"},
+            "grounded_answer_required": {"type": "boolean"},
+            "input_language": {"type": "string"},
+            "english_retrieval_query": {"type": "string"},
+            "native_retrieval_query": {"type": "string"},
+            "reasoning": {"type": "string"},
+        },
+        "required": [
+            "project_knowledge_lookup_intent",
+            "grounded_answer_required",
+            "input_language",
+            "english_retrieval_query",
+            "native_retrieval_query",
+            "reasoning",
+        ],
+    }
+    try:
+        parsed = run_structured_agent_prompt(
+            prompt=prompt,
+            output_schema=output_schema,
+            workspace_id=str(workspace_id or "").strip() or None,
+            session_key=(
+                f"{_CHAT_KNOWLEDGE_QUERY_NORMALIZER_VERSION}:{_CHAT_KNOWLEDGE_QUERY_NORMALIZER_SCHEMA_VERSION}:"
+                f"{str(workspace_id or '').strip()}:{str(project_id or '').strip()}:{str(session_id or '').strip()}:"
+                f"{hashlib.sha256(normalized_instruction.encode('utf-8')).hexdigest()[:16]}"
+            ),
+            actor_user_id=str(actor_user_id or "").strip() or None,
+            mcp_servers=[],
+            use_cache=True,
+        )
+    except Exception:
+        parsed = {}
+    normalized = _normalize_chat_knowledge_query_payload(parsed if isinstance(parsed, dict) else {})
+    _CHAT_KNOWLEDGE_QUERY_NORMALIZER_CACHE.set(cache_key, normalized)
+    return normalized
+
+
+def _augment_chat_intents_with_knowledge_lookup(
+    *,
+    instruction: str,
+    workspace_id: str,
+    project_id: str | None,
+    session_id: str | None,
+    actor_user_id: str | None,
+    intent_flags: dict[str, object],
+) -> tuple[dict[str, object], dict[str, object] | None]:
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_project_id:
+        return dict(intent_flags), None
+
+    if bool(intent_flags.get("execution_intent")) or bool(intent_flags.get("project_creation_intent")):
+        return dict(intent_flags), None
+
+    normalization = _normalize_chat_knowledge_lookup_query(
+        instruction=instruction,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        session_id=session_id,
+        actor_user_id=actor_user_id,
+    )
+    if not bool(normalization.get("project_knowledge_lookup_intent")):
+        return dict(intent_flags), normalization
+
+    merged = dict(intent_flags)
+    merged["project_knowledge_lookup_intent"] = True
+    merged["grounded_answer_required"] = bool(normalization.get("grounded_answer_required")) or bool(
+        intent_flags.get("grounded_answer_required")
+    )
+    if not str(merged.get("reason") or "").strip():
+        merged["reason"] = str(normalization.get("reasoning") or "").strip()
+    return merged, normalization
+
+
+def _normalize_chat_knowledge_text(value: str) -> str:
+    return re.sub(r"[^\w\s]+", " ", str(value or "").lower()).strip()
+
+
+def _chat_knowledge_query_tokens(query: str) -> list[str]:
+    normalized = _normalize_chat_knowledge_text(query)
+    if not normalized:
+        return []
+    return [token for token in normalized.split() if len(token) >= 3]
+
+
+def _filter_chat_knowledge_items(*, query: str, items: list[dict[str, object]]) -> list[dict[str, object]]:
+    candidates: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str]] = set()
+    query_tokens = _chat_knowledge_query_tokens(query)
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        final_score = float(item.get("final_score") or 0.0)
+        vector_similarity = item.get("vector_similarity")
+        vector_value = float(vector_similarity or 0.0) if vector_similarity is not None else None
+        if final_score < _CHAT_KNOWLEDGE_MIN_FINAL_SCORE:
+            continue
+        if vector_value is not None and vector_value < _CHAT_KNOWLEDGE_MIN_VECTOR_SIMILARITY:
+            continue
+        key = (
+            str(item.get("entity_type") or "").strip(),
+            str(item.get("entity_id") or "").strip(),
+            str(item.get("source_type") or "").strip(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        snippet = _normalize_chat_knowledge_text(str(item.get("snippet") or ""))
+        overlap_count = sum(1 for token in query_tokens if token in snippet)
+        item_copy = dict(item)
+        item_copy["_chat_overlap_count"] = overlap_count
+        item_copy["_chat_query"] = str(query)
+        candidates.append(item_copy)
+    if not candidates:
+        return []
+
+    max_overlap = max(int(item.get("_chat_overlap_count") or 0) for item in candidates)
+    if max_overlap > 0:
+        candidates = [item for item in candidates if int(item.get("_chat_overlap_count") or 0) > 0]
+    candidates.sort(
+        key=lambda item: (
+            -int(item.get("_chat_overlap_count") or 0),
+            -float(item.get("vector_similarity") or 0.0),
+            -float(item.get("final_score") or 0.0),
+            str(item.get("source_type") or ""),
+        )
+    )
+    trimmed = candidates[:_CHAT_KNOWLEDGE_EVIDENCE_LIMIT]
+    for item in trimmed:
+        item.pop("_chat_overlap_count", None)
+    return trimmed
+
+
+def _maybe_build_chat_project_knowledge_context(
+    *,
+    instruction: str,
+    workspace_id: str,
+    project_id: str | None,
+    session_id: str | None,
+    actor_user_id: str | None,
+    intent_flags: dict[str, object],
+    query_normalization: dict[str, object] | None = None,
+) -> tuple[str | None, dict[str, object]]:
+    normalized_instruction = str(instruction or "").strip()
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_instruction or not normalized_project_id:
+        return None, {
+            "knowledge_lookup_triggered": False,
+            "knowledge_lookup_used": False,
+            "knowledge_lookup_hits": 0,
+        }
+
+    if not bool(intent_flags.get("project_knowledge_lookup_intent")):
+        return None, {
+            "knowledge_lookup_triggered": False,
+            "knowledge_lookup_used": False,
+            "knowledge_lookup_hits": 0,
+        }
+
+    normalized_query_payload = query_normalization or _normalize_chat_knowledge_lookup_query(
+        instruction=normalized_instruction,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        session_id=session_id,
+        actor_user_id=actor_user_id,
+    )
+    retrieval_queries: list[str] = []
+    for candidate in [
+        normalized_instruction,
+        str(normalized_query_payload.get("native_retrieval_query") or "").strip(),
+        str(normalized_query_payload.get("english_retrieval_query") or "").strip(),
+    ]:
+        if candidate and candidate not in retrieval_queries:
+            retrieval_queries.append(candidate)
+
+    merged_items: list[dict[str, object]] = []
+    first_mode = ""
+    try:
+        for retrieval_query in retrieval_queries:
+            payload = search_project_knowledge_query(
+                project_id=normalized_project_id,
+                query=retrieval_query,
+                limit=max(_CHAT_KNOWLEDGE_EVIDENCE_LIMIT * 2, 8),
+            )
+            if not first_mode:
+                first_mode = str(payload.get("mode") or "")
+            for item in list(payload.get("items") or []):
+                if not isinstance(item, dict):
+                    continue
+                item_copy = dict(item)
+                item_copy["_retrieval_query"] = retrieval_query
+                merged_items.append(item_copy)
+    except Exception as exc:
+        logger.warning("Chat project knowledge lookup failed for project=%s: %s", normalized_project_id, exc)
+        if bool(intent_flags.get("grounded_answer_required")):
+            return (
+                "Project knowledge lookup was attempted for this question but no verified evidence could be loaded. "
+                "Do not invent the answer. Say that you could not verify it from project knowledge.",
+                {
+                    "knowledge_lookup_triggered": True,
+                    "knowledge_lookup_used": False,
+                    "knowledge_lookup_hits": 0,
+                    "knowledge_lookup_error": str(exc),
+                },
+            )
+        return None, {
+            "knowledge_lookup_triggered": True,
+            "knowledge_lookup_used": False,
+            "knowledge_lookup_hits": 0,
+            "knowledge_lookup_error": str(exc),
+        }
+
+    effective_filter_query = str(normalized_query_payload.get("english_retrieval_query") or "").strip() or normalized_instruction
+    items = _filter_chat_knowledge_items(query=effective_filter_query, items=merged_items)
+    if not items:
+        if bool(intent_flags.get("grounded_answer_required")):
+            return (
+                "No grounded project knowledge evidence was found for this question. "
+                "If the user is asking for a factual project answer, say that you could not verify it from project knowledge.",
+                {
+                    "knowledge_lookup_triggered": True,
+                    "knowledge_lookup_used": False,
+                    "knowledge_lookup_hits": 0,
+                    "knowledge_lookup_mode": first_mode,
+                    "knowledge_lookup_language": str(normalized_query_payload.get("input_language") or ""),
+                    "knowledge_lookup_english_query": str(normalized_query_payload.get("english_retrieval_query") or ""),
+                },
+            )
+        return None, {
+            "knowledge_lookup_triggered": True,
+            "knowledge_lookup_used": False,
+            "knowledge_lookup_hits": 0,
+            "knowledge_lookup_mode": first_mode,
+            "knowledge_lookup_language": str(normalized_query_payload.get("input_language") or ""),
+            "knowledge_lookup_english_query": str(normalized_query_payload.get("english_retrieval_query") or ""),
+        }
+
+    return (
+        _format_chat_knowledge_evidence_block(
+            query=normalized_instruction,
+            items=items,
+            grounded_answer_required=bool(intent_flags.get("grounded_answer_required")),
+        ),
+        {
+            "knowledge_lookup_triggered": True,
+            "knowledge_lookup_used": True,
+            "knowledge_lookup_hits": len(items),
+            "knowledge_lookup_mode": first_mode,
+            "knowledge_lookup_language": str(normalized_query_payload.get("input_language") or ""),
+            "knowledge_lookup_english_query": str(normalized_query_payload.get("english_retrieval_query") or ""),
+        },
+    )
+
+
 def _build_chat_history_compaction_instruction(*, history_lines: str) -> str:
     return _render_prompt_template(
         "chat_history_compaction_instruction.md",
@@ -2046,6 +2397,8 @@ def _prepare_chat_instruction(
                 "execution_intent": False,
                 "execution_kickoff_intent": False,
                 "project_creation_intent": False,
+                "project_knowledge_lookup_intent": False,
+                "grounded_answer_required": False,
                 "workflow_scope": "unknown",
                 "execution_mode": "unknown",
                 "deploy_requested": False,
@@ -2075,6 +2428,8 @@ def _prepare_chat_instruction(
         "execution_intent": False,
         "execution_kickoff_intent": False,
         "project_creation_intent": False,
+        "project_knowledge_lookup_intent": False,
+        "grounded_answer_required": False,
         "workflow_scope": "unknown",
         "execution_mode": "unknown",
         "deploy_requested": False,
@@ -2085,19 +2440,39 @@ def _prepare_chat_instruction(
         "task_completion_requested": False,
     }
     mandate_text = ""
-    if payload.allow_mutations:
-        intent_flags = _classify_chat_instruction_intents(
-            instruction=instruction,
-            workspace_id=payload.workspace_id,
-            project_id=payload.project_id,
-            session_id=payload.session_id,
-            actor_user_id=user.id,
-        )
-        if bool(intent_flags.get("execution_intent")) and str(payload.project_id or "").strip():
-            mandate_text = _build_execution_intent_mandate()
-            instruction_with_context = f"{instruction_with_context}\n\n{mandate_text}"
-            instruction_segments["intent_mandate"] = len(mandate_text)
+    intent_flags = _classify_chat_instruction_intents(
+        instruction=instruction,
+        workspace_id=payload.workspace_id,
+        project_id=payload.project_id,
+        session_id=payload.session_id,
+        actor_user_id=user.id,
+    )
+    intent_flags, knowledge_query_normalization = _augment_chat_intents_with_knowledge_lookup(
+        instruction=instruction,
+        workspace_id=payload.workspace_id,
+        project_id=payload.project_id,
+        session_id=payload.session_id,
+        actor_user_id=user.id,
+        intent_flags=intent_flags,
+    )
+    if payload.allow_mutations and bool(intent_flags.get("execution_intent")) and str(payload.project_id or "").strip():
+        mandate_text = _build_execution_intent_mandate()
+        instruction_with_context = f"{instruction_with_context}\n\n{mandate_text}"
+        instruction_segments["intent_mandate"] = len(mandate_text)
+    knowledge_context, knowledge_usage = _maybe_build_chat_project_knowledge_context(
+        instruction=instruction,
+        workspace_id=payload.workspace_id,
+        project_id=payload.project_id,
+        session_id=payload.session_id,
+        actor_user_id=user.id,
+        intent_flags=intent_flags,
+        query_normalization=knowledge_query_normalization,
+    )
+    if knowledge_context:
+        instruction_with_context = f"{instruction_with_context}\n\n{knowledge_context}"
+        instruction_segments["project_knowledge_context"] = len(knowledge_context)
     usage_metadata: dict[str, object] = {"prompt_instruction_segments": instruction_segments}
+    usage_metadata.update(knowledge_usage)
     if resume_active:
         # For resumed Codex threads, avoid resending stitched history on every turn.
         # Instead, inject only small fresh deltas from other project chat sessions so stale

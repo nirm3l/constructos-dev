@@ -5,6 +5,7 @@ from importlib import reload
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import select
 
 
@@ -220,6 +221,32 @@ def test_maybe_reindex_project_purges_chunks_when_runtime_is_disabled(tmp_path: 
         assert remaining == []
 
 
+def test_search_project_chunks_requires_postgresql(tmp_path: Path, monkeypatch) -> None:
+    _bootstrap_runtime(tmp_path)
+
+    from shared import vector_store
+    from shared.models import Project, SessionLocal
+
+    monkeypatch.setattr(vector_store, "vector_store_enabled", lambda: True)
+    monkeypatch.setattr(vector_store, "_ollama_embed_text", lambda _text, _model: [0.25, 0.5, 0.75])
+
+    with SessionLocal() as db:
+        project = db.execute(select(Project).where(Project.is_deleted.is_(False))).scalars().first()
+        assert project is not None
+
+        project.embedding_enabled = True
+        project.embedding_model = "nomic-embed-text"
+        db.commit()
+
+        with pytest.raises(vector_store.EmbeddingRuntimeError, match="pgvector retrieval requires PostgreSQL"):
+            vector_store.search_project_chunks(
+                db,
+                project_id=project.id,
+                query="find related vector evidence",
+                limit=5,
+            )
+
+
 def test_project_vector_event_routes_chat_policy_changes_to_chat_sync(monkeypatch) -> None:
     from features.projects.domain import EVENT_UPDATED as PROJECT_EVENT_UPDATED
     from shared import eventing_vector
@@ -432,3 +459,124 @@ def test_project_graph_event_for_delete_forces_chat_purge(monkeypatch) -> None:
     eventing_graph._project_graph_event(ev, commit_position=100)
 
     assert calls == [("project-chat-policy", True)]
+
+
+def test_index_entity_state_skips_reembedding_when_chunks_are_unchanged(tmp_path: Path, monkeypatch) -> None:
+    _bootstrap_runtime(tmp_path)
+
+    from shared import vector_store
+    from shared.models import Project, SessionLocal, VectorChunk
+
+    calls = {"count": 0}
+
+    def _fake_embed(_text: str, _model: str) -> list[float]:
+        calls["count"] += 1
+        return [0.21, 0.31, 0.41]
+
+    monkeypatch.setattr(vector_store, "vector_store_enabled", lambda: True)
+    monkeypatch.setattr(vector_store, "_ollama_embed_text", _fake_embed)
+
+    with SessionLocal() as db:
+        project = db.execute(select(Project).where(Project.is_deleted.is_(False))).scalars().first()
+        assert project is not None
+
+        project.embedding_enabled = True
+        project.embedding_model = "nomic-embed-text"
+        db.commit()
+
+        state = {
+            "workspace_id": project.workspace_id,
+            "project_id": project.id,
+            "title": "Task title",
+            "description": "Task description that should be embedded once and then reused.",
+            "archived": False,
+            "is_deleted": False,
+        }
+
+        first_indexed = vector_store.index_entity_state(
+            db,
+            entity_type="Task",
+            entity_id="task-cache-test",
+            state=state,
+        )
+        db.commit()
+
+        first_rows = db.execute(
+            select(VectorChunk).where(
+                VectorChunk.project_id == project.id,
+                VectorChunk.entity_type == "Task",
+                VectorChunk.entity_id == "task-cache-test",
+            )
+        ).scalars().all()
+
+        second_indexed = vector_store.index_entity_state(
+            db,
+            entity_type="Task",
+            entity_id="task-cache-test",
+            state=state,
+        )
+        db.commit()
+
+        second_rows = db.execute(
+            select(VectorChunk).where(
+                VectorChunk.project_id == project.id,
+                VectorChunk.entity_type == "Task",
+                VectorChunk.entity_id == "task-cache-test",
+            )
+        ).scalars().all()
+
+        assert first_indexed == 2
+        assert second_indexed == 0
+        assert calls["count"] == 2
+        assert len(first_rows) == 2
+        assert len(second_rows) == 2
+
+
+def test_index_entity_state_adds_distilled_sources_without_replacing_raw_chunks(tmp_path: Path, monkeypatch) -> None:
+    _bootstrap_runtime(tmp_path)
+
+    from shared import vector_store
+    from shared.models import Project, SessionLocal, VectorChunk
+
+    monkeypatch.setattr(vector_store, "vector_store_enabled", lambda: True)
+    monkeypatch.setattr(vector_store, "_ollama_embed_text", lambda _text, _model: [0.5, 0.6, 0.7])
+    monkeypatch.setattr(
+        vector_store,
+        "_distill_index_sources",
+        lambda **_kwargs: [("task.description.distilled", "Distilled implementation constraints and API requirements.")],
+    )
+
+    with SessionLocal() as db:
+        project = db.execute(select(Project).where(Project.is_deleted.is_(False))).scalars().first()
+        assert project is not None
+
+        project.embedding_enabled = True
+        project.embedding_model = "nomic-embed-text"
+        db.commit()
+
+        indexed = vector_store.index_entity_state(
+            db,
+            entity_type="Task",
+            entity_id="task-distill-test",
+            state={
+                "workspace_id": project.workspace_id,
+                "project_id": project.id,
+                "title": "Ship workflow update",
+                "description": "Implement the new workflow update and validate the deployment evidence path.",
+                "archived": False,
+                "is_deleted": False,
+            },
+        )
+        db.commit()
+
+        rows = db.execute(
+            select(VectorChunk).where(
+                VectorChunk.project_id == project.id,
+                VectorChunk.entity_type == "Task",
+                VectorChunk.entity_id == "task-distill-test",
+            )
+        ).scalars().all()
+
+        source_types = sorted(str(row.source_type or "") for row in rows)
+        assert indexed == 3
+        assert source_types == ["task.description", "task.description.distilled", "task.title"]

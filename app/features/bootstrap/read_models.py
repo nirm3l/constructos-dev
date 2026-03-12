@@ -27,6 +27,7 @@ from shared.settings import (
     ALLOWED_EMBEDDING_MODELS,
     CONTEXT_PACK_EVIDENCE_TOP_K,
     DEFAULT_EMBEDDING_MODEL,
+    VECTOR_INDEX_DISTILL_ENABLED,
     agent_default_model_for_provider,
     agent_default_reasoning_effort_for_provider,
 )
@@ -173,6 +174,9 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
                 "chat_index_mode": str(p.chat_index_mode or "OFF"),
                 "chat_attachment_ingestion_mode": str(
                     p.chat_attachment_ingestion_mode or "METADATA_ONLY"
+                ),
+                "vector_index_distill_enabled": bool(
+                    getattr(p, "vector_index_distill_enabled", VECTOR_INDEX_DISTILL_ENABLED)
                 ),
                 "event_storming_enabled": bool(getattr(p, "event_storming_enabled", True)),
                 "embedding_index_status": str(index_snapshot.get("status") or "not_indexed"),

@@ -30,6 +30,8 @@ _FULL_INTENT_ENVELOPE_FIELDS = (
     "execution_intent",
     "execution_kickoff_intent",
     "project_creation_intent",
+    "project_knowledge_lookup_intent",
+    "grounded_answer_required",
     "workflow_scope",
     "execution_mode",
     "deploy_requested",
@@ -44,6 +46,8 @@ _AUTOMATION_REQUEST_INTENT_FIELDS = (
     "execution_intent",
     "execution_kickoff_intent",
     "project_creation_intent",
+    "project_knowledge_lookup_intent",
+    "grounded_answer_required",
     "workflow_scope",
     "execution_mode",
     "task_completion_requested",
@@ -96,6 +100,8 @@ def _default_intent_envelope() -> dict[str, Any]:
         "execution_intent": False,
         "execution_kickoff_intent": False,
         "project_creation_intent": False,
+        "project_knowledge_lookup_intent": False,
+        "grounded_answer_required": False,
         "workflow_scope": "unknown",
         "execution_mode": "unknown",
         "deploy_requested": False,
@@ -114,6 +120,8 @@ def _normalize_intent_envelope(values: dict[str, Any] | None) -> dict[str, Any]:
     normalized["execution_intent"] = bool(parsed.get("execution_intent"))
     normalized["execution_kickoff_intent"] = bool(parsed.get("execution_kickoff_intent"))
     normalized["project_creation_intent"] = bool(parsed.get("project_creation_intent"))
+    normalized["project_knowledge_lookup_intent"] = bool(parsed.get("project_knowledge_lookup_intent"))
+    normalized["grounded_answer_required"] = bool(parsed.get("grounded_answer_required"))
     normalized["workflow_scope"] = _normalize_scope(parsed.get("workflow_scope"))
     normalized["execution_mode"] = _normalize_execution_mode(parsed.get("execution_mode"))
     normalized["deploy_requested"] = bool(parsed.get("deploy_requested"))
@@ -132,6 +140,8 @@ def _build_partial_intent_envelope(values: dict[str, Any] | None) -> dict[str, A
         "execution_intent": parsed.get("execution_intent"),
         "execution_kickoff_intent": parsed.get("execution_kickoff_intent"),
         "project_creation_intent": parsed.get("project_creation_intent"),
+        "project_knowledge_lookup_intent": parsed.get("project_knowledge_lookup_intent"),
+        "grounded_answer_required": parsed.get("grounded_answer_required"),
         "workflow_scope": (
             _normalize_scope(parsed.get("workflow_scope"))
             if parsed.get("workflow_scope") is not None
@@ -194,6 +204,8 @@ def classify_instruction_intent(
             "execution_intent": {"type": "boolean"},
             "execution_kickoff_intent": {"type": "boolean"},
             "project_creation_intent": {"type": "boolean"},
+            "project_knowledge_lookup_intent": {"type": "boolean"},
+            "grounded_answer_required": {"type": "boolean"},
             "workflow_scope": {"type": "string", "enum": sorted(_WORKFLOW_SCOPES)},
             "execution_mode": {"type": "string", "enum": sorted(_EXECUTION_MODES)},
             "deploy_requested": {"type": "boolean"},
@@ -208,6 +220,8 @@ def classify_instruction_intent(
             "execution_intent",
             "execution_kickoff_intent",
             "project_creation_intent",
+            "project_knowledge_lookup_intent",
+            "grounded_answer_required",
             "workflow_scope",
             "execution_mode",
             "deploy_requested",

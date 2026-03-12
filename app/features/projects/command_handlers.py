@@ -26,7 +26,7 @@ from shared.core import (
     load_project_command_state,
     load_project_view,
 )
-from shared.settings import ALLOWED_EMBEDDING_MODELS, DEFAULT_EMBEDDING_MODEL
+from shared.settings import ALLOWED_EMBEDDING_MODELS, DEFAULT_EMBEDDING_MODEL, VECTOR_INDEX_DISTILL_ENABLED
 from shared.chat_indexing import (
     CHAT_ATTACHMENT_INGESTION_FULL_TEXT,
     CHAT_ATTACHMENT_INGESTION_METADATA_ONLY,
@@ -133,6 +133,9 @@ def _project_view_from_aggregate(aggregate: ProjectAggregate, *, created_by: str
         "automation_max_parallel_tasks": int(getattr(aggregate, "automation_max_parallel_tasks", 4) or 4),
         "chat_index_mode": str(aggregate.chat_index_mode or "OFF"),
         "chat_attachment_ingestion_mode": str(aggregate.chat_attachment_ingestion_mode or "METADATA_ONLY"),
+        "vector_index_distill_enabled": bool(
+            getattr(aggregate, "vector_index_distill_enabled", VECTOR_INDEX_DISTILL_ENABLED)
+        ),
         "event_storming_enabled": bool(getattr(aggregate, "event_storming_enabled", True)),
         "embedding_index_status": "not_indexed",
         "embedding_index_progress_pct": None,
@@ -282,6 +285,7 @@ class CreateProjectHandler:
             chat_attachment_ingestion_mode=_normalize_chat_attachment_ingestion_mode(
                 self.payload.chat_attachment_ingestion_mode
             ),
+            vector_index_distill_enabled=bool(self.payload.vector_index_distill_enabled),
             event_storming_enabled=bool(self.payload.event_storming_enabled),
             status="Active",
         )
@@ -485,6 +489,8 @@ class PatchProjectHandler:
             event_payload["chat_attachment_ingestion_mode"] = _normalize_chat_attachment_ingestion_mode(
                 data.get("chat_attachment_ingestion_mode")
             )
+        if "vector_index_distill_enabled" in data and data["vector_index_distill_enabled"] is not None:
+            event_payload["vector_index_distill_enabled"] = bool(data.get("vector_index_distill_enabled"))
         if "event_storming_enabled" in data and data["event_storming_enabled"] is not None:
             event_payload["event_storming_enabled"] = bool(data.get("event_storming_enabled"))
 

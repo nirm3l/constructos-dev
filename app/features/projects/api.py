@@ -624,6 +624,7 @@ def create_project(
         automation_max_parallel_tasks=payload.automation_max_parallel_tasks,
         chat_index_mode=payload.chat_index_mode,
         chat_attachment_ingestion_mode=payload.chat_attachment_ingestion_mode,
+        vector_index_distill_enabled=payload.vector_index_distill_enabled,
         event_storming_enabled=payload.event_storming_enabled,
         member_user_ids=payload.member_user_ids,
         command_id=command_id,

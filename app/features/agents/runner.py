@@ -1752,7 +1752,17 @@ def _collect_git_evidence_from_repo_state(
 
 def _merge_git_evidence(primary: dict[str, object], fallback: dict[str, object]) -> dict[str, object]:
     merged = dict(fallback or {})
+    repo_authoritative_keys = {
+        "repo_root",
+        "task_workdir",
+        "task_branch",
+        "after_head_sha",
+        "after_on_task_branch",
+        "after_is_dirty",
+    }
     for key, value in dict(primary or {}).items():
+        if key in repo_authoritative_keys and key in merged and merged.get(key) not in (None, "", False):
+            continue
         if value not in (None, "", False):
             merged[key] = value
         elif key not in merged:

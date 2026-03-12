@@ -38,6 +38,8 @@ from features.note_groups.application import NoteGroupApplicationService
 from features.note_groups.read_models import NoteGroupListQuery, list_note_groups_read_model
 from features.task_groups.application import TaskGroupApplicationService
 from features.task_groups.read_models import TaskGroupListQuery, list_task_groups_read_model
+from shared.chat_indexing import CHAT_INDEX_MODE_KG_AND_VECTOR
+from shared.classification_cache import ClassificationCache, build_classification_cache_key
 from shared.core import (
     BulkAction,
     CommentCreate,
@@ -195,7 +197,9 @@ _COMMIT_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
 _COMMIT_SHA_EXPLICIT_RE = re.compile(
     r"(?i)(?:\b(?:commit|sha|changeset|hash)\s*[:=#]?\s*|/commit/)([0-9a-f]{7,40})\b"
 )
-_PROJECT_POLICY_CHECKS_LLM_EVAL_CACHE: dict[str, dict[str, Any]] = {}
+_PROJECT_POLICY_CHECKS_LLM_EVAL_VERSION = "project-policy-checks-v1"
+_PROJECT_POLICY_CHECKS_LLM_EVAL_SCHEMA_VERSION = "1"
+_PROJECT_POLICY_CHECKS_LLM_EVAL_CACHE = ClassificationCache(max_entries=64)
 _TEAM_MODE_PLUGIN_KEY = "team_mode"
 _PROJECT_PLUGIN_KEYS: set[str] = {"team_mode", "git_delivery", "docker_compose"}
 
@@ -3415,7 +3419,14 @@ class AgentTaskService:
         payload_hash = hashlib.sha256(
             json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
         ).hexdigest()[:20]
-        cache_key = f"project-policy-checks-eval:{payload_hash}"
+        cache_key = build_classification_cache_key(
+            cache_name="project_policy_checks",
+            workspace_id=workspace_id,
+            project_id=project_id,
+            classifier_version=_PROJECT_POLICY_CHECKS_LLM_EVAL_VERSION,
+            schema_version=_PROJECT_POLICY_CHECKS_LLM_EVAL_SCHEMA_VERSION,
+            payload=payload,
+        )
         cached = _PROJECT_POLICY_CHECKS_LLM_EVAL_CACHE.get(cache_key)
         if isinstance(cached, dict):
             return cached
@@ -3478,7 +3489,7 @@ class AgentTaskService:
             result_map[scope]["checks"][check_id] = bool(item.get("passed"))
             result_map[scope]["reasons"][check_id] = str(item.get("reason") or "").strip()
 
-        _PROJECT_POLICY_CHECKS_LLM_EVAL_CACHE[cache_key] = result_map
+        _PROJECT_POLICY_CHECKS_LLM_EVAL_CACHE.set(cache_key, result_map)
         return result_map
 
     @staticmethod
@@ -6195,12 +6206,13 @@ class AgentTaskService:
         custom_statuses: Any | None = None,
         external_refs: list[dict[str, Any]] | None = None,
         attachment_refs: list[dict[str, Any]] | None = None,
-        embedding_enabled: bool = False,
+        embedding_enabled: bool = True,
         embedding_model: str | None = None,
         context_pack_evidence_top_k: int | None = None,
         automation_max_parallel_tasks: int = 4,
-        chat_index_mode: str = "OFF",
+        chat_index_mode: str = CHAT_INDEX_MODE_KG_AND_VECTOR,
         chat_attachment_ingestion_mode: str = "METADATA_ONLY",
+        vector_index_distill_enabled: bool = False,
         event_storming_enabled: bool = True,
         member_user_ids: list[str] | None = None,
         command_id: str | None = None,
@@ -6232,6 +6244,7 @@ class AgentTaskService:
                 automation_max_parallel_tasks=int(automation_max_parallel_tasks or 4),
                 chat_index_mode=chat_index_mode,
                 chat_attachment_ingestion_mode=chat_attachment_ingestion_mode,
+                vector_index_distill_enabled=bool(vector_index_distill_enabled),
                 event_storming_enabled=bool(event_storming_enabled),
                 member_user_ids=effective_member_user_ids,
             )
