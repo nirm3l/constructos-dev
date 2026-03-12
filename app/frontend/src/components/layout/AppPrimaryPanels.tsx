@@ -6,9 +6,15 @@ import { SpecificationsPanel } from '../specifications/SpecificationsPanel'
 import { NotesPanel } from '../notes/NotesPanel'
 import { QuickAddDrawer } from '../tasks/QuickAddDrawer'
 import { TasksPanel } from '../tasks/TasksPanel'
-import { AdminPanel, GlobalSearchResultsPanel, ProfilePanel, SearchPanel } from '../auxPanels'
+import { AdminPanel, GlobalSearchResultsPanel, ProfilePanel, SearchPanel, WorkspacePanel } from '../auxPanels'
 
 export function AppPrimaryPanels({ state }: { state: any }) {
+  const currentWorkspace = (state.bootstrap.data?.workspaces ?? []).find((item: any) => item.id === state.workspaceId)
+    ?? state.bootstrap.data?.workspaces?.[0]
+    ?? null
+  const currentWorkspaceRole = (state.bootstrap.data?.memberships ?? []).find((item: any) => item.workspace_id === state.workspaceId)?.role
+    ?? (state.bootstrap.data?.memberships ?? [])[0]?.role
+    ?? ''
   return (
     <>
       <QuickAddDrawer
@@ -433,10 +439,10 @@ export function AppPrimaryPanels({ state }: { state: any }) {
         />
       )}
 
-      {state.tab === 'profile' || state.tab === 'admin' ? (
+      {state.tab === 'settings' ? (
         <div className="profile-stack">
           <ProfilePanel
-            userName={state.bootstrap.data.current_user.full_name}
+            userUsername={state.bootstrap.data.current_user.username}
             theme={state.theme}
             speechLang={state.speechLang}
             agentChatModel={state.agentChatModel}
@@ -450,7 +456,10 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             deployedAtUtc={state.backendDeployedAtUtc}
             codexAuthStatus={state.codexAuthStatus?.data ?? null}
             codexAuthLoading={Boolean(state.codexAuthStatus?.isLoading || state.codexAuthStatus?.isFetching)}
+            claudeAuthStatus={state.claudeAuthStatus?.data ?? null}
+            claudeAuthLoading={Boolean(state.claudeAuthStatus?.isLoading || state.claudeAuthStatus?.isFetching)}
             canManageCodexAuth={state.canManageUsers}
+            canManageClaudeAuth={state.canManageUsers}
             license={state.licenseStatus?.data?.license ?? null}
             licenseLoading={Boolean(state.licenseStatus?.isLoading)}
             licenseError={state.licenseStatus?.isError ? 'Unable to load license status.' : null}
@@ -471,43 +480,129 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             cancelCodexDeviceAuthPending={state.cancelCodexDeviceAuthPending}
             onDeleteCodexAuthOverride={state.deleteCodexAuthOverride}
             deleteCodexAuthOverridePending={state.deleteCodexAuthOverridePending}
+            onStartClaudeDeviceAuth={state.startClaudeDeviceAuth}
+            startClaudeDeviceAuthPending={state.startClaudeDeviceAuthPending}
+            onCancelClaudeDeviceAuth={state.cancelClaudeDeviceAuth}
+            cancelClaudeDeviceAuthPending={state.cancelClaudeDeviceAuthPending}
+            onSubmitClaudeDeviceAuthCode={state.submitClaudeDeviceAuthCode}
+            submitClaudeDeviceAuthCodePending={state.submitClaudeDeviceAuthCodePending}
+            onDeleteClaudeAuthOverride={state.deleteClaudeAuthOverride}
+            deleteClaudeAuthOverridePending={state.deleteClaudeAuthOverridePending}
             submitFeedback={state.submitFeedback}
             feedbackSubmitting={state.submitFeedbackPending}
           />
-          {state.canManageUsers && (
-            <AdminPanel
-              canManageUsers={state.canManageUsers}
-              workspaceId={state.workspaceId}
-              users={state.adminUsers}
-              usersLoading={state.adminUsersLoading}
-              usersError={state.adminUsersError}
-              username={state.adminCreateUsername}
-              setUsername={state.setAdminCreateUsername}
-              fullName={state.adminCreateFullName}
-              setFullName={state.setAdminCreateFullName}
-              role={state.adminCreateRole}
-              setRole={state.setAdminCreateRole}
-              createPending={state.createAdminUserMutation.isPending}
-              onCreate={state.onCreateAdminUser}
-              lastTempPassword={state.adminLastTempPassword}
-              onResetPassword={state.onResetAdminUserPassword}
-              resetPendingUserId={state.resetAdminPasswordUserId}
-              onUpdateRole={state.onUpdateAdminUserRole}
-              updateRolePendingUserId={state.updateAdminRoleUserId}
-              onDeactivateUser={state.onDeactivateAdminUser}
-              deactivatePendingUserId={state.deactivateAdminUserId}
-              workspaceSkills={state.workspaceSkills.data}
-              workspaceSkillsLoading={Boolean(state.workspaceSkills.isLoading || state.workspaceSkills.isFetching)}
-              importWorkspaceSkillPending={state.importWorkspaceSkillMutation.isPending}
-              importWorkspaceSkillFilePending={state.importWorkspaceSkillFileMutation.isPending}
-              patchWorkspaceSkillPending={state.patchWorkspaceSkillMutation.isPending}
-              deleteWorkspaceSkillPending={state.deleteWorkspaceSkillMutation.isPending}
-              onImportWorkspaceSkill={(payload) => state.importWorkspaceSkillMutation.mutateAsync(payload)}
-              onImportWorkspaceSkillFile={(payload) => state.importWorkspaceSkillFileMutation.mutateAsync(payload)}
-              onPatchWorkspaceSkill={(payload) => state.patchWorkspaceSkillMutation.mutateAsync(payload)}
-              onDeleteWorkspaceSkill={(skillId) => state.deleteWorkspaceSkillMutation.mutateAsync({ skillId })}
-            />
-          )}
+          <WorkspacePanel
+            workspaceName={String(currentWorkspace?.name || '').trim()}
+            workspaceRole={String(currentWorkspaceRole || '').trim()}
+            canManageUsers={state.canManageUsers}
+            workspaceUsersCount={state.adminUsers.length}
+            workspaceSkillsCount={state.workspaceSkills.data?.total ?? state.workspaceSkills.data?.items?.length ?? 0}
+            workspaceUsersContent={state.canManageUsers ? (
+              <AdminPanel
+                embeddedTab="users"
+                canManageUsers={state.canManageUsers}
+                workspaceRole={String(currentWorkspaceRole || '').trim()}
+                workspaceId={state.workspaceId}
+                users={state.adminUsers}
+                usersLoading={state.adminUsersLoading}
+                usersError={state.adminUsersError}
+                username={state.adminCreateUsername}
+                setUsername={state.setAdminCreateUsername}
+                fullName={state.adminCreateFullName}
+                setFullName={state.setAdminCreateFullName}
+                role={state.adminCreateRole}
+                setRole={state.setAdminCreateRole}
+                createPending={state.createAdminUserMutation.isPending}
+                onCreate={state.onCreateAdminUser}
+                lastTempPassword={state.adminLastTempPassword}
+                onResetPassword={state.onResetAdminUserPassword}
+                resetPendingUserId={state.resetAdminPasswordUserId}
+                onUpdateRole={state.onUpdateAdminUserRole}
+                updateRolePendingUserId={state.updateAdminRoleUserId}
+                onUpdateAgentRuntime={state.onUpdateAdminUserAgentRuntime}
+                updateAgentRuntimePendingUserId={state.updateAdminAgentRuntimeUserId}
+                agentExecutionAvailableModels={Array.isArray(state.bootstrap.data.agent_chat_available_models) ? state.bootstrap.data.agent_chat_available_models : []}
+                onDeactivateUser={state.onDeactivateAdminUser}
+                deactivatePendingUserId={state.deactivateAdminUserId}
+                workspaceSkills={state.workspaceSkills.data}
+                workspaceSkillsLoading={Boolean(state.workspaceSkills.isLoading || state.workspaceSkills.isFetching)}
+                importWorkspaceSkillPending={state.importWorkspaceSkillMutation.isPending}
+                importWorkspaceSkillFilePending={state.importWorkspaceSkillFileMutation.isPending}
+                patchWorkspaceSkillPending={state.patchWorkspaceSkillMutation.isPending}
+                deleteWorkspaceSkillPending={state.deleteWorkspaceSkillMutation.isPending}
+                onImportWorkspaceSkill={(payload) => state.importWorkspaceSkillMutation.mutateAsync(payload)}
+                onImportWorkspaceSkillFile={(payload) => state.importWorkspaceSkillFileMutation.mutateAsync(payload)}
+                onPatchWorkspaceSkill={(payload) => state.patchWorkspaceSkillMutation.mutateAsync(payload)}
+                onDeleteWorkspaceSkill={(skillId) => state.deleteWorkspaceSkillMutation.mutateAsync({ skillId })}
+              />
+            ) : null}
+            workspaceSkillsContent={state.canManageUsers ? (
+              <AdminPanel
+                embeddedTab="skills"
+                canManageUsers={state.canManageUsers}
+                workspaceRole={String(currentWorkspaceRole || '').trim()}
+                workspaceId={state.workspaceId}
+                users={state.adminUsers}
+                usersLoading={state.adminUsersLoading}
+                usersError={state.adminUsersError}
+                username={state.adminCreateUsername}
+                setUsername={state.setAdminCreateUsername}
+                fullName={state.adminCreateFullName}
+                setFullName={state.setAdminCreateFullName}
+                role={state.adminCreateRole}
+                setRole={state.setAdminCreateRole}
+                createPending={state.createAdminUserMutation.isPending}
+                onCreate={state.onCreateAdminUser}
+                lastTempPassword={state.adminLastTempPassword}
+                onResetPassword={state.onResetAdminUserPassword}
+                resetPendingUserId={state.resetAdminPasswordUserId}
+                onUpdateRole={state.onUpdateAdminUserRole}
+                updateRolePendingUserId={state.updateAdminRoleUserId}
+                onUpdateAgentRuntime={state.onUpdateAdminUserAgentRuntime}
+                updateAgentRuntimePendingUserId={state.updateAdminAgentRuntimeUserId}
+                agentExecutionAvailableModels={Array.isArray(state.bootstrap.data.agent_chat_available_models) ? state.bootstrap.data.agent_chat_available_models : []}
+                onDeactivateUser={state.onDeactivateAdminUser}
+                deactivatePendingUserId={state.deactivateAdminUserId}
+                workspaceSkills={state.workspaceSkills.data}
+                workspaceSkillsLoading={Boolean(state.workspaceSkills.isLoading || state.workspaceSkills.isFetching)}
+                importWorkspaceSkillPending={state.importWorkspaceSkillMutation.isPending}
+                importWorkspaceSkillFilePending={state.importWorkspaceSkillFileMutation.isPending}
+                patchWorkspaceSkillPending={state.patchWorkspaceSkillMutation.isPending}
+                deleteWorkspaceSkillPending={state.deleteWorkspaceSkillMutation.isPending}
+                onImportWorkspaceSkill={(payload) => state.importWorkspaceSkillMutation.mutateAsync(payload)}
+                onImportWorkspaceSkillFile={(payload) => state.importWorkspaceSkillFileMutation.mutateAsync(payload)}
+                onPatchWorkspaceSkill={(payload) => state.patchWorkspaceSkillMutation.mutateAsync(payload)}
+                onDeleteWorkspaceSkill={(skillId) => state.deleteWorkspaceSkillMutation.mutateAsync({ skillId })}
+              />
+            ) : null}
+            frontendVersion={state.frontendVersion}
+            backendVersion={state.backendVersion}
+            backendBuild={state.backendBuild}
+            deployedAtUtc={state.backendDeployedAtUtc}
+            codexAuthStatus={state.codexAuthStatus?.data ?? null}
+            codexAuthLoading={Boolean(state.codexAuthStatus?.isLoading || state.codexAuthStatus?.isFetching)}
+            claudeAuthStatus={state.claudeAuthStatus?.data ?? null}
+            claudeAuthLoading={Boolean(state.claudeAuthStatus?.isLoading || state.claudeAuthStatus?.isFetching)}
+            canManageCodexAuth={state.canManageUsers}
+            canManageClaudeAuth={state.canManageUsers}
+            license={state.licenseStatus?.data?.license ?? null}
+            licenseLoading={Boolean(state.licenseStatus?.isLoading)}
+            licenseError={state.licenseStatus?.isError ? 'Unable to load license status.' : null}
+            onStartCodexDeviceAuth={state.startCodexDeviceAuth}
+            startCodexDeviceAuthPending={state.startCodexDeviceAuthPending}
+            onCancelCodexDeviceAuth={state.cancelCodexDeviceAuth}
+            cancelCodexDeviceAuthPending={state.cancelCodexDeviceAuthPending}
+            onDeleteCodexAuthOverride={state.deleteCodexAuthOverride}
+            deleteCodexAuthOverridePending={state.deleteCodexAuthOverridePending}
+            onStartClaudeDeviceAuth={state.startClaudeDeviceAuth}
+            startClaudeDeviceAuthPending={state.startClaudeDeviceAuthPending}
+            onCancelClaudeDeviceAuth={state.cancelClaudeDeviceAuth}
+            cancelClaudeDeviceAuthPending={state.cancelClaudeDeviceAuthPending}
+            onSubmitClaudeDeviceAuthCode={state.submitClaudeDeviceAuthCode}
+            submitClaudeDeviceAuthCodePending={state.submitClaudeDeviceAuthCodePending}
+            onDeleteClaudeAuthOverride={state.deleteClaudeAuthOverride}
+            deleteClaudeAuthOverridePending={state.deleteClaudeAuthOverridePending}
+          />
         </div>
       ) : state.tab === 'search' ? (
         <GlobalSearchResultsPanel

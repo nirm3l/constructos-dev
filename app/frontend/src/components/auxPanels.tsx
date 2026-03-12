@@ -10,8 +10,10 @@ import * as Tabs from '@radix-ui/react-tabs'
 import * as Tooltip from '@radix-ui/react-tooltip'
 import type {
   AdminWorkspaceUser,
+  AgentAuthStatus,
+  AgentAuthProvider,
   ChatReasoningEffort,
-  CodexAuthStatus,
+  ClaudeAuthLoginMethod,
   LicenseStatus,
   Note,
   Specification,
@@ -20,6 +22,14 @@ import type {
   WorkspaceSkillsPage,
 } from '../types'
 import { tagHue } from '../utils/ui'
+import {
+  authSourceLabel,
+  formatAgentExecutionModelLabel,
+  getAgentExecutionProviderLabel,
+  normalizeAgentExecutionModel,
+  parseAgentExecutionModel,
+  resolveActiveAgentExecutionProvider,
+} from '../utils/agentExecution'
 import { MarkdownView } from '../markdown/MarkdownView'
 import { PopularTagFilters } from './shared/PopularTagFilters'
 import { Icon, MarkdownModeToggle, MarkdownSplitPane } from './shared/uiHelpers'
@@ -30,25 +40,43 @@ const VOICE_LANG_OPTIONS = [
   { value: 'en-US', label: 'English (en-US)' },
 ]
 
-const CHAT_REASONING_OPTIONS: Array<{ value: ChatReasoningEffort; label: string }> = [
+const CODEX_CHAT_REASONING_OPTIONS: Array<{ value: ChatReasoningEffort; label: string }> = [
   { value: 'low', label: 'Low' },
   { value: 'medium', label: 'Medium' },
   { value: 'high', label: 'High' },
   { value: 'xhigh', label: 'Very high' },
 ]
+const CLAUDE_CHAT_REASONING_OPTIONS: Array<{ value: ChatReasoningEffort; label: string }> = [
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'Max' },
+]
 const CHAT_MODEL_DEFAULT_VALUE = '__default__'
+const BACKGROUND_RUNTIME_MODEL_DEFAULT_VALUE = '__background_runtime_default__'
 
 function normalizeChatReasoningEffort(value: unknown): ChatReasoningEffort {
   const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'max' || normalized === 'maximum') return 'xhigh'
   if (normalized === 'low' || normalized === 'high' || normalized === 'xhigh') return normalized
   return 'medium'
 }
 
-function codexAuthSourceLabel(value: CodexAuthStatus['effective_source'] | string | null | undefined): string {
-  const normalized = String(value || '').trim().toLowerCase()
-  if (normalized === 'system_override') return 'Connected for codex-bot'
-  if (normalized === 'host_mount') return 'Using host-mounted auth'
-  return 'Not configured'
+function getChatReasoningOptions(provider: AgentAuthProvider): Array<{ value: ChatReasoningEffort; label: string }> {
+  return provider === 'claude' ? CLAUDE_CHAT_REASONING_OPTIONS : CODEX_CHAT_REASONING_OPTIONS
+}
+
+function getChatReasoningLabel(value: unknown, provider: AgentAuthProvider): string {
+  const normalized = normalizeChatReasoningEffort(value)
+  return getChatReasoningOptions(provider).find((item) => item.value === normalized)?.label || 'Medium'
+}
+
+function normalizeClaudeAuthLoginMethod(value: unknown): ClaudeAuthLoginMethod {
+  return String(value || '').trim().toLowerCase() === 'console' ? 'console' : 'claudeai'
+}
+
+function formatClaudeAuthLoginMethodLabel(value: unknown): string {
+  return normalizeClaudeAuthLoginMethod(value) === 'console' ? 'Anthropic Console' : 'Claude subscription'
 }
 
 const PROFILE_FEEDBACK_TYPE_OPTIONS: Array<{
@@ -91,6 +119,10 @@ const ADMIN_ROLE_OPTIONS = [
   { value: 'Guest', label: 'Guest' },
 ]
 
+const NON_OWNER_ROLE_OPTIONS = ADMIN_ROLE_OPTIONS.filter((option) => (
+  option.value === 'Member' || option.value === 'Guest'
+))
+
 const SKILL_MODE_OPTIONS = [
   { value: 'advisory', label: 'advisory' },
   { value: 'enforced', label: 'enforced' },
@@ -111,6 +143,189 @@ function normalizeOptionValue(
   if (!normalized) return fallback
   const match = options.find((option) => option.value.toLowerCase() === normalized)
   return match?.value || fallback
+}
+
+function isAdminTierRole(value: unknown): boolean {
+  const normalized = String(value || '').trim()
+  return normalized === 'Owner' || normalized === 'Admin'
+}
+
+function resolveWorkspaceBotProvider(item: AdminWorkspaceUser): AgentAuthProvider | null {
+  const configuredProvider = String(item.background_agent_provider || '').trim().toLowerCase()
+  if (configuredProvider === 'claude') return 'claude'
+  if (configuredProvider === 'codex') return 'codex'
+  const username = String(item.username || '').trim().toLowerCase()
+  if (username === 'claude-bot') return 'claude'
+  if (username === 'codex-bot') return 'codex'
+  const parsed = parseAgentExecutionModel(item.background_agent_model)
+  return parsed?.provider || null
+}
+
+function getWorkspaceUserMonogram(item: AdminWorkspaceUser): string {
+  const username = String(item.username || '').trim().toLowerCase()
+  if (username === 'codex-bot') return 'CX'
+  if (username === 'claude-bot') return 'CL'
+  const source = String(item.full_name || item.username || '').trim()
+  if (!source) return '??'
+  const tokens = source.split(/\s+/).filter(Boolean)
+  if (tokens.length >= 2) {
+    return `${tokens[0]?.charAt(0) || ''}${tokens[1]?.charAt(0) || ''}`.toUpperCase()
+  }
+  return source.slice(0, 2).toUpperCase()
+}
+
+function buildProviderModelOptions(
+  models: string[],
+  provider: AgentAuthProvider
+): Array<{ value: string; label: string }> {
+  const seen = new Set<string>()
+  const options: Array<{ value: string; label: string }> = []
+  for (const raw of Array.isArray(models) ? models : []) {
+    const normalized = normalizeAgentExecutionModel(raw)
+    const parsed = parseAgentExecutionModel(normalized)
+    if (!parsed || parsed.provider !== provider) continue
+    if (seen.has(normalized.toLowerCase())) continue
+    seen.add(normalized.toLowerCase())
+    options.push({
+      value: normalized,
+      label: parsed.model,
+    })
+  }
+  return options
+}
+
+type WorkspaceAuthSummaryPill = {
+  label: string
+  value: string
+}
+
+type WorkspaceAuthFact = {
+  label: string
+  value: string
+}
+
+function WorkspaceAuthCard({
+  id,
+  containerRef,
+  title,
+  providerLabel,
+  actorUsername,
+  loading,
+  loadingText,
+  description,
+  statusLabel,
+  statusTone = 'default',
+  sessionStatusLabel,
+  summaryPills,
+  facts,
+  actionSlot,
+  feedback,
+  canManage,
+  manageHint,
+  forceDetailsOpen = false,
+}: {
+  id: string
+  containerRef?: React.RefObject<HTMLDivElement | null>
+  title: string
+  providerLabel: string
+  actorUsername: string
+  loading: boolean
+  loadingText: string
+  description: string
+  statusLabel: string
+  statusTone?: 'default' | 'error'
+  sessionStatusLabel?: string | null
+  summaryPills: WorkspaceAuthSummaryPill[]
+  facts: WorkspaceAuthFact[]
+  actionSlot?: React.ReactNode
+  feedback?: { tone: 'success' | 'error'; message: string } | null
+  canManage: boolean
+  manageHint: string
+  forceDetailsOpen?: boolean
+}) {
+  const [detailsOpen, setDetailsOpen] = React.useState(forceDetailsOpen)
+
+  React.useEffect(() => {
+    if (forceDetailsOpen) {
+      setDetailsOpen(true)
+    }
+  }, [forceDetailsOpen])
+
+  return (
+    <section className="profile-pane-card workspace-auth-card" aria-label={title} id={id} ref={containerRef}>
+      <div className="workspace-auth-card-head">
+        <div className="workspace-auth-card-title-group">
+          <div className="profile-pane-head">
+            <h3>
+              <span className="profile-pane-head-icon" aria-hidden="true">
+                <Icon path="M12 3l7 4v6c0 5-3.5 9-7 10-3.5-1-7-5-7-10V7l7-4zM8 12h8M8 16h5" />
+              </span>
+              <span>{title}</span>
+            </h3>
+            <span className="status-chip">{providerLabel}</span>
+          </div>
+          <p className="meta workspace-auth-card-title-meta">Shared workspace connection for @{actorUsername}</p>
+        </div>
+        <div className="workspace-auth-card-badges">
+          <span className={`status-chip ${statusTone === 'error' ? 'is-error' : ''}`.trim()}>
+            {statusLabel}
+          </span>
+          {sessionStatusLabel ? <span className="status-chip">{sessionStatusLabel}</span> : null}
+        </div>
+      </div>
+
+      {loading ? (
+        <p className="meta">{loadingText}</p>
+      ) : (
+        <>
+          <p className="meta workspace-auth-card-description">{description}</p>
+          {summaryPills.length > 0 ? (
+            <div className="workspace-auth-pill-row">
+              {summaryPills.map((item) => (
+                <div key={`${item.label}:${item.value}`} className="workspace-auth-pill">
+                  <span className="workspace-auth-pill-label">{item.label}</span>
+                  <span className="workspace-auth-pill-value">{item.value}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          <div className="workspace-auth-card-actions">
+            <div className="workspace-auth-card-actions-main">
+              {actionSlot}
+            </div>
+            <Collapsible.Root open={detailsOpen} onOpenChange={setDetailsOpen}>
+              <Collapsible.Trigger asChild>
+                <button className="button-secondary profile-action-button workspace-auth-details-trigger" type="button">
+                  <span>{detailsOpen ? 'Hide details' : 'Show details'}</span>
+                  <span className={`workspace-auth-details-chevron ${detailsOpen ? 'is-open' : ''}`.trim()} aria-hidden="true">
+                    <Icon path="M6 9l6 6 6-6" />
+                  </span>
+                </button>
+              </Collapsible.Trigger>
+              <Collapsible.Content className="workspace-auth-details">
+                <dl className="workspace-auth-facts">
+                  {facts.map((item) => (
+                    <div key={`${item.label}:${item.value}`} className="workspace-auth-fact">
+                      <dt>{item.label}</dt>
+                      <dd>{item.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </Collapsible.Content>
+            </Collapsible.Root>
+          </div>
+          {!canManage ? (
+            <p className="meta">{manageHint}</p>
+          ) : null}
+          {feedback ? (
+            <div className={`notice ${feedback.tone === 'error' ? 'notice-error' : ''}`.trim()}>
+              {feedback.message}
+            </div>
+          ) : null}
+        </>
+      )}
+    </section>
+  )
 }
 
 function SearchFilterSelect({
@@ -382,7 +597,7 @@ export function SearchPanel({
 }
 
 export function ProfilePanel({
-  userName,
+  userUsername,
   theme,
   speechLang,
   agentChatModel,
@@ -397,6 +612,9 @@ export function ProfilePanel({
   codexAuthStatus,
   codexAuthLoading,
   canManageCodexAuth,
+  claudeAuthStatus,
+  claudeAuthLoading,
+  canManageClaudeAuth,
   license,
   licenseLoading,
   licenseError,
@@ -413,10 +631,18 @@ export function ProfilePanel({
   cancelCodexDeviceAuthPending,
   onDeleteCodexAuthOverride,
   deleteCodexAuthOverridePending,
+  onStartClaudeDeviceAuth,
+  startClaudeDeviceAuthPending,
+  onCancelClaudeDeviceAuth,
+  cancelClaudeDeviceAuthPending,
+  onSubmitClaudeDeviceAuthCode,
+  submitClaudeDeviceAuthCodePending,
+  onDeleteClaudeAuthOverride,
+  deleteClaudeAuthOverridePending,
   submitFeedback,
   feedbackSubmitting,
 }: {
-  userName: string
+  userUsername: string
   theme: 'light' | 'dark'
   speechLang: string
   agentChatModel: string
@@ -428,9 +654,12 @@ export function ProfilePanel({
   backendVersion: string
   backendBuild: string | null
   deployedAtUtc: string | null
-  codexAuthStatus: CodexAuthStatus | null
+  codexAuthStatus: AgentAuthStatus | null
   codexAuthLoading: boolean
   canManageCodexAuth: boolean
+  claudeAuthStatus: AgentAuthStatus | null
+  claudeAuthLoading: boolean
+  canManageClaudeAuth: boolean
   license: LicenseStatus | null | undefined
   licenseLoading: boolean
   licenseError: string | null
@@ -450,6 +679,14 @@ export function ProfilePanel({
   cancelCodexDeviceAuthPending: boolean
   onDeleteCodexAuthOverride: () => Promise<unknown>
   deleteCodexAuthOverridePending: boolean
+  onStartClaudeDeviceAuth: (loginMethod: ClaudeAuthLoginMethod) => Promise<unknown>
+  startClaudeDeviceAuthPending: boolean
+  onCancelClaudeDeviceAuth: () => Promise<unknown>
+  cancelClaudeDeviceAuthPending: boolean
+  onSubmitClaudeDeviceAuthCode: (code: string) => Promise<unknown>
+  submitClaudeDeviceAuthCodePending: boolean
+  onDeleteClaudeAuthOverride: () => Promise<unknown>
+  deleteClaudeAuthOverridePending: boolean
   submitFeedback: (payload: {
     title: string
     description: string
@@ -489,7 +726,7 @@ export function ProfilePanel({
       ? `Subscription (${formatLabel(subscriptionStatus)})`
       : 'Trial fallback'
   const showTrialWindow = licenseStatus === 'trial' || licenseStatus === 'grace'
-  const [profileTab, setProfileTab] = React.useState<'preferences' | 'security' | 'feedback' | 'runtime' | 'license'>('preferences')
+  const [profileTab, setProfileTab] = React.useState<'preferences' | 'security' | 'feedback'>('preferences')
   const [currentPasswordInput, setCurrentPasswordInput] = React.useState('')
   const [newPasswordInput, setNewPasswordInput] = React.useState('')
   const [confirmPasswordInput, setConfirmPasswordInput] = React.useState('')
@@ -506,15 +743,21 @@ export function ProfilePanel({
   const chatExecutionModelTriggerRef = React.useRef<HTMLButtonElement | null>(null)
   const codexAuthFactRef = React.useRef<HTMLDivElement | null>(null)
   const codexAuthPrimaryButtonRef = React.useRef<HTMLButtonElement | null>(null)
+  const claudeAuthFactRef = React.useRef<HTMLDivElement | null>(null)
+  const claudeAuthPrimaryButtonRef = React.useRef<HTMLButtonElement | null>(null)
   const [codexAuthDialogOpen, setCodexAuthDialogOpen] = React.useState(false)
   const [codexAuthFeedback, setCodexAuthFeedback] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
-  const [chatModelInput, setChatModelInput] = React.useState(() => String(agentChatModel || '').trim())
+  const [claudeAuthDialogOpen, setClaudeAuthDialogOpen] = React.useState(false)
+  const [claudeAuthFeedback, setClaudeAuthFeedback] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
+  const [claudeAuthManualCodeInput, setClaudeAuthManualCodeInput] = React.useState('')
+  const [chatModelInput, setChatModelInput] = React.useState(() => normalizeAgentExecutionModel(agentChatModel))
   const [chatReasoningInput, setChatReasoningInput] = React.useState<ChatReasoningEffort>(() =>
     normalizeChatReasoningEffort(agentChatReasoningEffort)
   )
   const [chatExecutionFeedback, setChatExecutionFeedback] = React.useState<{ tone: 'error'; message: string } | null>(null)
   const chatExecutionLastAttemptKeyRef = React.useRef('')
   const chatExecutionLastFailedKeyRef = React.useRef('')
+  const chatExecutionDirtyRef = React.useRef(false)
   const browserTimeZone = React.useMemo(() => {
     try {
       return Intl.DateTimeFormat().resolvedOptions().timeZone || 'n/a'
@@ -529,7 +772,7 @@ export function ProfilePanel({
     const out: string[] = []
     const seen = new Set<string>()
     const push = (value: string) => {
-      const model = String(value || '').trim()
+      const model = normalizeAgentExecutionModel(value)
       if (!model) return
       const key = model.toLowerCase()
       if (seen.has(key)) return
@@ -544,14 +787,22 @@ export function ProfilePanel({
     push(chatModelInput)
     return out
   }, [agentChatAvailableModels, agentChatDefaultModel, agentChatModel, chatModelInput])
-  const selectedChatReasoningLabel = React.useMemo(() => {
-    const normalized = normalizeChatReasoningEffort(chatReasoningInput)
-    return CHAT_REASONING_OPTIONS.find((item) => item.value === normalized)?.label || 'Medium'
-  }, [chatReasoningInput])
-  const normalizedChatModelInput = String(chatModelInput || '').trim()
+  const normalizedChatModelInput = normalizeAgentExecutionModel(chatModelInput)
   const normalizedChatReasoningInput = normalizeChatReasoningEffort(chatReasoningInput)
-  const normalizedPersistedChatModel = String(agentChatModel || '').trim()
+  const normalizedPersistedChatModel = normalizeAgentExecutionModel(agentChatModel)
   const normalizedPersistedChatReasoning = normalizeChatReasoningEffort(agentChatReasoningEffort)
+  const activeExecutionProvider = resolveActiveAgentExecutionProvider(
+    normalizedChatModelInput || normalizedPersistedChatModel,
+    agentChatDefaultModel
+  )
+  const chatReasoningOptions = React.useMemo(
+    () => getChatReasoningOptions(activeExecutionProvider),
+    [activeExecutionProvider]
+  )
+  const selectedChatReasoningLabel = React.useMemo(
+    () => getChatReasoningLabel(chatReasoningInput, activeExecutionProvider),
+    [activeExecutionProvider, chatReasoningInput]
+  )
   const chatExecutionHasPendingChanges = (
     normalizedChatModelInput !== normalizedPersistedChatModel
     || normalizedChatReasoningInput !== normalizedPersistedChatReasoning
@@ -564,10 +815,19 @@ export function ProfilePanel({
   const selectedFeedbackTypeLabel = React.useMemo(() => {
     return PROFILE_FEEDBACK_TYPE_OPTIONS.find((item) => item.value === feedbackTypeInput)?.label || 'General'
   }, [feedbackTypeInput])
+  const activeExecutionProviderLabel = getAgentExecutionProviderLabel(activeExecutionProvider)
+  const activeExecutionModelLabel = formatAgentExecutionModelLabel(
+    normalizedPersistedChatModel || agentChatDefaultModel
+  )
   const codexAuthSource = String(codexAuthStatus?.effective_source || '').trim().toLowerCase()
   const codexAuthLoginSession = codexAuthStatus?.login_session ?? null
-  const codexAuthStatusLabel = codexAuthSourceLabel(codexAuthStatus?.effective_source)
+  const codexAuthStatusLabel = authSourceLabel(
+    'codex',
+    codexAuthStatus?.effective_source,
+    codexAuthStatus?.target_actor_username
+  )
   const codexAuthSessionStatusLabel = (() => {
+    if (codexAuthSource === 'system_override') return 'Connected'
     const status = String(codexAuthLoginSession?.status || '').trim().toLowerCase()
     if (status === 'pending') return 'Awaiting browser confirmation'
     if (status === 'succeeded') return 'Connected'
@@ -581,6 +841,39 @@ export function ProfilePanel({
   const codexAuthCanRemoveOverride = canManageCodexAuth
     && Boolean(codexAuthStatus?.override_available)
     && !deleteCodexAuthOverridePending
+  const claudeAuthSource = String(claudeAuthStatus?.effective_source || '').trim().toLowerCase()
+  const claudeAuthLoginSession = claudeAuthStatus?.login_session ?? null
+  const claudeAuthStatusLabel = authSourceLabel(
+    'claude',
+    claudeAuthStatus?.effective_source,
+    claudeAuthStatus?.target_actor_username
+  )
+  const claudeAuthSessionStatusLabel = (() => {
+    if (claudeAuthSource === 'system_override') return 'Connected'
+    const status = String(claudeAuthLoginSession?.status || '').trim().toLowerCase()
+    if (status === 'pending') return 'Awaiting browser confirmation'
+    if (status === 'succeeded') return 'Connected'
+    if (status === 'failed') return 'Sign-in failed'
+    if (status === 'cancelled') return 'Sign-in cancelled'
+    return null
+  })()
+  const claudeAuthLoginMethod = normalizeClaudeAuthLoginMethod(
+    claudeAuthLoginSession?.login_method ?? claudeAuthStatus?.selected_login_method
+  )
+  const claudeAuthLoginMethodLabel = formatClaudeAuthLoginMethodLabel(claudeAuthLoginMethod)
+  const claudeAuthHasSystemOverride = claudeAuthSource === 'system_override'
+  const claudeAuthHasPendingSignIn = (
+    String(claudeAuthLoginSession?.status || '').trim().toLowerCase() === 'pending'
+    && !claudeAuthHasSystemOverride
+  )
+  const claudeAuthCanConnect = canManageClaudeAuth && !startClaudeDeviceAuthPending && !cancelClaudeDeviceAuthPending
+  const claudeAuthCanSubmitCode = canManageClaudeAuth
+    && claudeAuthHasPendingSignIn
+    && !submitClaudeDeviceAuthCodePending
+    && claudeAuthManualCodeInput.trim().length > 0
+  const claudeAuthCanRemoveOverride = canManageClaudeAuth
+    && Boolean(claudeAuthStatus?.override_available)
+    && !deleteClaudeAuthOverridePending
   const runtimeSnapshotText = React.useMemo(() => {
     return [
       `Frontend version: ${frontendVersion || 'n/a'}`,
@@ -589,13 +882,15 @@ export function ProfilePanel({
       `Deployed UTC: ${deployedAtUtc || 'unknown'}`,
       `Theme: ${theme}`,
       `Voice language: ${selectedVoiceLabel}`,
-      `Chat model: ${String(agentChatModel || '').trim() || agentChatDefaultModel || 'system default'}`,
-      `Chat reasoning: ${normalizeChatReasoningEffort(agentChatReasoningEffort)}`,
+      `Chat execution provider: ${activeExecutionProviderLabel}`,
+      `Chat execution model: ${activeExecutionModelLabel}`,
+      `Chat execution reasoning: ${normalizeChatReasoningEffort(agentChatReasoningEffort)}`,
       `Browser timezone: ${browserTimeZone}`,
     ].join('\n')
   }, [
+    activeExecutionModelLabel,
+    activeExecutionProviderLabel,
     agentChatDefaultModel,
-    agentChatModel,
     agentChatReasoningEffort,
     backendBuild,
     backendVersion,
@@ -744,6 +1039,52 @@ export function ProfilePanel({
     window.setTimeout(focusPrimaryAction, 340)
   }, [])
 
+  const scrollClaudeAuthIntoView = React.useCallback(() => {
+    if (typeof window === 'undefined') return
+
+    const scrollNearestContainer = () => {
+      const target = claudeAuthFactRef.current
+      if (!target) return
+
+      const findScrollableParent = (node: HTMLElement | null): HTMLElement | null => {
+        let current = node?.parentElement ?? null
+        while (current) {
+          const styles = window.getComputedStyle(current)
+          const overflowY = styles.overflowY
+          const isScrollable =
+            (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') &&
+            current.scrollHeight > current.clientHeight + 1
+          if (isScrollable) return current
+          current = current.parentElement
+        }
+        return null
+      }
+
+      target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })
+
+      const parent = findScrollableParent(target)
+      if (parent) {
+        const targetRect = target.getBoundingClientRect()
+        const parentRect = parent.getBoundingClientRect()
+        const nextTop = parent.scrollTop + (targetRect.top - parentRect.top) - parent.clientHeight * 0.35
+        parent.scrollTo({ top: Math.max(0, nextTop), behavior: 'smooth' })
+      }
+    }
+
+    const focusPrimaryAction = () => {
+      try {
+        claudeAuthPrimaryButtonRef.current?.focus({ preventScroll: true })
+      } catch {
+        claudeAuthPrimaryButtonRef.current?.focus()
+      }
+    }
+
+    scrollNearestContainer()
+    window.setTimeout(scrollNearestContainer, 120)
+    window.setTimeout(scrollNearestContainer, 300)
+    window.setTimeout(focusPrimaryAction, 340)
+  }, [])
+
   React.useEffect(() => {
     if (typeof window === 'undefined') return
     const handleVoiceFocus = () => {
@@ -780,7 +1121,7 @@ export function ProfilePanel({
   }, [scrollVoiceLanguageIntoView])
 
   React.useEffect(() => {
-    setChatModelInput(String(agentChatModel || '').trim())
+    setChatModelInput(normalizeAgentExecutionModel(agentChatModel))
     setChatReasoningInput(normalizeChatReasoningEffort(agentChatReasoningEffort))
   }, [agentChatModel, agentChatReasoningEffort])
 
@@ -794,32 +1135,31 @@ export function ProfilePanel({
 
     if (currentKey === persistedKey) {
       chatExecutionLastAttemptKeyRef.current = ''
+      chatExecutionDirtyRef.current = false
       if (chatExecutionFeedback) setChatExecutionFeedback(null)
       return
     }
+    if (!chatExecutionDirtyRef.current) return
     if (saveChatExecutionPreferencesPending) return
     if (chatExecutionLastFailedKeyRef.current === currentKey) return
     if (chatExecutionLastAttemptKeyRef.current === currentKey) return
 
-    const timer = window.setTimeout(() => {
-      chatExecutionLastAttemptKeyRef.current = currentKey
-      void onSaveChatExecutionPreferences({
-        agent_chat_model: normalizedChatModelInput || null,
-        agent_chat_reasoning_effort: normalizedChatReasoningInput,
+    chatExecutionLastAttemptKeyRef.current = currentKey
+    void onSaveChatExecutionPreferences({
+      agent_chat_model: normalizedChatModelInput || null,
+      agent_chat_reasoning_effort: normalizedChatReasoningInput,
+    })
+      .then(() => {
+        chatExecutionLastAttemptKeyRef.current = ''
+        chatExecutionLastFailedKeyRef.current = ''
+        setChatExecutionFeedback(null)
       })
-        .then(() => {
-          chatExecutionLastAttemptKeyRef.current = ''
-          chatExecutionLastFailedKeyRef.current = ''
-          setChatExecutionFeedback(null)
-        })
-        .catch((error) => {
-          chatExecutionLastAttemptKeyRef.current = ''
-          chatExecutionLastFailedKeyRef.current = currentKey
-          const message = error instanceof Error ? error.message : 'Failed to save chat execution settings.'
-          setChatExecutionFeedback({ tone: 'error', message })
-        })
-    }, 320)
-    return () => window.clearTimeout(timer)
+      .catch((error) => {
+        chatExecutionLastAttemptKeyRef.current = ''
+        chatExecutionLastFailedKeyRef.current = currentKey
+        const message = error instanceof Error ? error.message : 'Failed to save chat execution settings.'
+        setChatExecutionFeedback({ tone: 'error', message })
+      })
   }, [
     normalizedChatModelInput,
     normalizedChatReasoningInput,
@@ -899,6 +1239,41 @@ export function ProfilePanel({
       window.removeEventListener('ui:focus-codex-auth', handleCodexAuthFocus)
     }
   }, [scrollCodexAuthIntoView])
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return
+    const handleClaudeAuthFocus = () => {
+      setProfileTab('security')
+      window.setTimeout(() => {
+        scrollClaudeAuthIntoView()
+      }, 80)
+    }
+
+    window.addEventListener('ui:focus-claude-auth', handleClaudeAuthFocus)
+
+    let shouldScroll = false
+    try {
+      shouldScroll = window.sessionStorage.getItem('ui_profile_scroll_target') === 'claude_auth'
+      if (shouldScroll) {
+        window.sessionStorage.removeItem('ui_profile_scroll_target')
+      }
+    } catch {
+      shouldScroll = false
+    }
+    if (!shouldScroll) {
+      return () => {
+        window.removeEventListener('ui:focus-claude-auth', handleClaudeAuthFocus)
+      }
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      handleClaudeAuthFocus()
+    })
+    return () => {
+      window.cancelAnimationFrame(frameId)
+      window.removeEventListener('ui:focus-claude-auth', handleClaudeAuthFocus)
+    }
+  }, [scrollClaudeAuthIntoView])
 
   const resetPasswordForm = React.useCallback(() => {
     setCurrentPasswordInput('')
@@ -1052,9 +1427,57 @@ export function ProfilePanel({
     }
   }, [onDeleteCodexAuthOverride])
 
+  const handleStartClaudeDeviceAuth = React.useCallback(async (loginMethod: ClaudeAuthLoginMethod) => {
+    try {
+      await onStartClaudeDeviceAuth(loginMethod)
+      setClaudeAuthFeedback(null)
+      setClaudeAuthDialogOpen(true)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to start Claude sign-in.'
+      setClaudeAuthFeedback({ tone: 'error', message })
+    }
+  }, [onStartClaudeDeviceAuth])
+
+  const handleCancelClaudeDeviceAuth = React.useCallback(async () => {
+    try {
+      await onCancelClaudeDeviceAuth()
+      setClaudeAuthFeedback({ tone: 'success', message: 'Claude sign-in was cancelled.' })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to cancel Claude sign-in.'
+      setClaudeAuthFeedback({ tone: 'error', message })
+    }
+  }, [onCancelClaudeDeviceAuth])
+
+  const handleSubmitClaudeDeviceAuthCode = React.useCallback(async () => {
+    const code = claudeAuthManualCodeInput.trim()
+    if (!code) {
+      setClaudeAuthFeedback({ tone: 'error', message: 'Authentication code is required.' })
+      return
+    }
+    try {
+      await onSubmitClaudeDeviceAuthCode(code)
+      setClaudeAuthManualCodeInput('')
+      setClaudeAuthFeedback({ tone: 'success', message: 'Authentication code submitted. Waiting for Claude to finish sign-in.' })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to submit Claude authentication code.'
+      setClaudeAuthFeedback({ tone: 'error', message })
+    }
+  }, [claudeAuthManualCodeInput, onSubmitClaudeDeviceAuthCode])
+
+  const handleDeleteClaudeAuthOverride = React.useCallback(async () => {
+    try {
+      await onDeleteClaudeAuthOverride()
+      setClaudeAuthFeedback({ tone: 'success', message: 'Shared Claude authentication was removed.' })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to remove shared Claude authentication.'
+      setClaudeAuthFeedback({ tone: 'error', message })
+    }
+  }, [onDeleteClaudeAuthOverride])
+
   React.useEffect(() => {
     if (
       canManageCodexAuth
+      && !codexAuthHasSystemOverride
       && codexAuthLoginSession?.status === 'pending'
       && (codexAuthLoginSession.user_code || codexAuthLoginSession.verification_uri)
     ) {
@@ -1064,11 +1487,44 @@ export function ProfilePanel({
     if (codexAuthLoginSession?.status === 'succeeded') {
       setCodexAuthDialogOpen(false)
     }
+    if (codexAuthHasSystemOverride) {
+      setCodexAuthFeedback(null)
+      setCodexAuthDialogOpen(false)
+    }
   }, [
     canManageCodexAuth,
+    codexAuthHasSystemOverride,
     codexAuthLoginSession?.status,
     codexAuthLoginSession?.user_code,
     codexAuthLoginSession?.verification_uri,
+  ])
+
+  React.useEffect(() => {
+    if (
+      canManageClaudeAuth
+      && !claudeAuthHasSystemOverride
+      && claudeAuthLoginSession?.status === 'pending'
+      && (claudeAuthLoginSession.user_code || claudeAuthLoginSession.verification_uri)
+    ) {
+      setClaudeAuthDialogOpen(true)
+      return
+    }
+    if (claudeAuthLoginSession?.status === 'succeeded') {
+      setClaudeAuthManualCodeInput('')
+      setClaudeAuthFeedback(null)
+      setClaudeAuthDialogOpen(false)
+    }
+    if (claudeAuthHasSystemOverride) {
+      setClaudeAuthManualCodeInput('')
+      setClaudeAuthFeedback(null)
+      setClaudeAuthDialogOpen(false)
+    }
+  }, [
+    canManageClaudeAuth,
+    claudeAuthHasSystemOverride,
+    claudeAuthLoginSession?.status,
+    claudeAuthLoginSession?.user_code,
+    claudeAuthLoginSession?.verification_uri,
   ])
 
   return (
@@ -1081,12 +1537,20 @@ export function ProfilePanel({
             </div>
             <div className="profile-head-copy">
               <h2>Profile</h2>
-              <p className="meta">Personal settings and runtime details</p>
+              <p className="meta">Personal preferences, account security, and feedback</p>
             </div>
           </div>
           <div className="profile-head-chips">
-            <span className="status-chip profile-theme-chip">{theme} mode</span>
-            <span className="status-chip">{licenseStatusLabel}</span>
+            <span className="status-chip profile-signin-chip">Signed in as @{userUsername}</span>
+            <button
+              className="button-secondary profile-action-button profile-head-logout"
+              type="button"
+              onClick={onLogout}
+              title="Logout"
+            >
+              <Icon path="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" />
+              <span>Logout</span>
+            </button>
           </div>
         </div>
 
@@ -1097,9 +1561,7 @@ export function ProfilePanel({
             if (
               nextValue === 'preferences' ||
               nextValue === 'security' ||
-              nextValue === 'feedback' ||
-              nextValue === 'runtime' ||
-              nextValue === 'license'
+              nextValue === 'feedback'
             ) {
               setProfileTab(nextValue)
             }
@@ -1123,18 +1585,6 @@ export function ProfilePanel({
                 <Icon path="M21 15a2 2 0 0 1-2 2H8l-5 5V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
               </span>
               <span>Feedback</span>
-            </Tabs.Trigger>
-            <Tabs.Trigger className="profile-tab-trigger" value="runtime">
-              <span className="profile-tab-trigger-icon" aria-hidden="true">
-                <Icon path="M4 4h16v12H4zM10 20h4M12 16v4" />
-              </span>
-              <span>Runtime</span>
-            </Tabs.Trigger>
-            <Tabs.Trigger className="profile-tab-trigger" value="license">
-              <span className="profile-tab-trigger-icon" aria-hidden="true">
-                <Icon path="M9 12l2 2 4-4M12 3l7 4v5c0 5-3.5 8.5-7 9.5-3.5-1-7-4.5-7-9.5V7l7-4z" />
-              </span>
-              <span>License</span>
             </Tabs.Trigger>
           </Tabs.List>
 
@@ -1230,7 +1680,7 @@ export function ProfilePanel({
                     </span>
                     <span>Chat execution</span>
                   </h3>
-                  <span className="status-chip">Codex</span>
+                  <span className="status-chip">{activeExecutionProviderLabel}</span>
                 </div>
                 <div className="profile-chat-execution-grid">
                 <label className="field-control profile-chat-execution-field profile-chat-execution-field-model">
@@ -1238,6 +1688,7 @@ export function ProfilePanel({
                   <Select.Root
                     value={chatModelInput || CHAT_MODEL_DEFAULT_VALUE}
                     onValueChange={(value) => {
+                      chatExecutionDirtyRef.current = true
                       setChatModelInput(value === CHAT_MODEL_DEFAULT_VALUE ? '' : value)
                       setChatExecutionFeedback(null)
                     }}
@@ -1245,7 +1696,7 @@ export function ProfilePanel({
                     <Select.Trigger
                       ref={chatExecutionModelTriggerRef}
                       className="quickadd-project-trigger taskdrawer-select-trigger profile-select-trigger profile-chat-model-trigger"
-                      aria-label="Chat model"
+                      aria-label="Chat execution model"
                     >
                       <Select.Value />
                       <Select.Icon asChild>
@@ -1259,7 +1710,9 @@ export function ProfilePanel({
                         <Select.Viewport className="quickadd-project-viewport">
                           <Select.Item value={CHAT_MODEL_DEFAULT_VALUE} className="quickadd-project-item">
                             <Select.ItemText>
-                              {agentChatDefaultModel ? `System default (${agentChatDefaultModel})` : 'System default'}
+                              {agentChatDefaultModel
+                                ? `System default (${formatAgentExecutionModelLabel(agentChatDefaultModel)})`
+                                : 'System default'}
                             </Select.ItemText>
                             <Select.ItemIndicator className="quickadd-project-item-indicator">
                               <Icon path="M5 13l4 4L19 7" />
@@ -1267,7 +1720,7 @@ export function ProfilePanel({
                           </Select.Item>
                           {chatModelOptions.map((model) => (
                             <Select.Item key={model} value={model} className="quickadd-project-item">
-                              <Select.ItemText>{model}</Select.ItemText>
+                              <Select.ItemText>{formatAgentExecutionModelLabel(model)}</Select.ItemText>
                               <Select.ItemIndicator className="quickadd-project-item-indicator">
                                 <Icon path="M5 13l4 4L19 7" />
                               </Select.ItemIndicator>
@@ -1283,13 +1736,14 @@ export function ProfilePanel({
                   <Select.Root
                     value={normalizeChatReasoningEffort(chatReasoningInput)}
                     onValueChange={(value) => {
+                      chatExecutionDirtyRef.current = true
                       setChatReasoningInput(normalizeChatReasoningEffort(value))
                       setChatExecutionFeedback(null)
                     }}
                   >
                     <Select.Trigger
                       className="quickadd-project-trigger taskdrawer-select-trigger profile-select-trigger profile-chat-reasoning-trigger"
-                      aria-label="Chat reasoning level"
+                      aria-label="Chat execution reasoning level"
                     >
                       <Select.Value />
                       <Select.Icon asChild>
@@ -1301,7 +1755,7 @@ export function ProfilePanel({
                     <Select.Portal>
                       <Select.Content className="quickadd-project-content profile-select-content" position="popper" sideOffset={6}>
                         <Select.Viewport className="quickadd-project-viewport">
-                          {CHAT_REASONING_OPTIONS.map((option) => (
+                          {chatReasoningOptions.map((option) => (
                             <Select.Item key={option.value} value={option.value} className="quickadd-project-item">
                               <Select.ItemText>{option.label}</Select.ItemText>
                               <Select.ItemIndicator className="quickadd-project-item-indicator">
@@ -1320,8 +1774,9 @@ export function ProfilePanel({
                     <span className={`status-chip ${chatExecutionFeedback ? 'is-error' : ''}`.trim()}>{chatExecutionStatusLabel}</span>
                   ) : null}
                   <p className="meta">
-                  Active model: {String(agentChatModel || '').trim() || agentChatDefaultModel || 'system default'} · Reasoning: {selectedChatReasoningLabel}
+                    Active provider: {activeExecutionProviderLabel} · Active model: {activeExecutionModelLabel} · Reasoning: {selectedChatReasoningLabel}
                   </p>
+                  <p className="meta">This preference controls the provider and model used for interactive agent chat in this workspace session.</p>
                 </div>
                 {chatExecutionFeedback ? (
                   <div className="notice notice-error">
@@ -1330,137 +1785,11 @@ export function ProfilePanel({
                 ) : null}
               </section>
 
-              <section className="profile-pane-card" aria-label="Account actions">
-                <div className="profile-pane-head">
-                  <h3>
-                    <span className="profile-pane-head-icon" aria-hidden="true">
-                      <Icon path="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8M4 20a8 8 0 0 1 16 0" />
-                    </span>
-                    <span>Account</span>
-                  </h3>
-                  <span className="status-chip">Session</span>
-                </div>
-                <div className="profile-account-row">
-                  <div className="profile-fact-user-name">{userName}</div>
-                  <button className="button-secondary profile-action-button" type="button" onClick={onLogout} title="Logout">
-                    <Icon path="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" />
-                    <span>Logout</span>
-                  </button>
-                </div>
-              </section>
             </div>
           </Tabs.Content>
 
           <Tabs.Content className="profile-tab-content" value="security">
             <div className="profile-pane-grid">
-              <section
-                className="profile-pane-card profile-codex-auth"
-                aria-label="Codex authentication"
-                id="profile-codex-auth"
-                ref={codexAuthFactRef}
-              >
-                <div className="profile-pane-head">
-                  <h3>
-                    <span className="profile-pane-head-icon" aria-hidden="true">
-                      <Icon path="M12 3l7 4v6c0 5-3.5 9-7 10-3.5-1-7-5-7-10V7l7-4zM8 12h8M8 16h5" />
-                    </span>
-                    <span>Codex authentication</span>
-                  </h3>
-                  <span className="status-chip">Codex</span>
-                </div>
-                {codexAuthLoading ? (
-                  <p className="meta">Loading Codex authentication status...</p>
-                ) : (
-                  <>
-                    <div className="profile-codex-auth-status-row">
-                      <span className={`status-chip ${codexAuthSource === 'none' ? 'is-error' : ''}`.trim()}>
-                        {codexAuthStatusLabel}
-                      </span>
-                      {codexAuthSessionStatusLabel ? <span className="status-chip">{codexAuthSessionStatusLabel}</span> : null}
-                    </div>
-                    <dl className="profile-facts profile-runtime-facts">
-                      <div className="profile-fact">
-                        <dt>Effective source</dt>
-                        <dd>{codexAuthStatusLabel}</dd>
-                      </div>
-                      <div className="profile-fact">
-                        <dt>Host auth</dt>
-                        <dd>{codexAuthStatus?.host_auth_available ? 'Available' : 'Not available'}</dd>
-                      </div>
-                      <div className="profile-fact">
-                        <dt>Shared system auth</dt>
-                        <dd>{codexAuthStatus?.override_available ? 'Available' : 'Not configured'}</dd>
-                      </div>
-                      <div className="profile-fact">
-                        <dt>Auth scope</dt>
-                        <dd>{String(codexAuthStatus?.scope || 'system').trim() || 'system'}</dd>
-                      </div>
-                      <div className="profile-fact">
-                        <dt>Auth target</dt>
-                        <dd>{String(codexAuthStatus?.target_actor_username || 'codex-bot').trim() || 'codex-bot'}</dd>
-                      </div>
-                      <div className="profile-fact">
-                        <dt>Override updated</dt>
-                        <dd>{formatDateTime(codexAuthStatus?.override_updated_at || null)}</dd>
-                      </div>
-                    </dl>
-                    <p className="meta">
-                      This shared connection is used by codex-bot for chat and task automation inside this container only.
-                    </p>
-                    {canManageCodexAuth ? (
-                      <div className="row wrap profile-actions">
-                        {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn ? (
-                          <button
-                            ref={codexAuthPrimaryButtonRef}
-                            className="button-secondary"
-                            type="button"
-                            onClick={() => setCodexAuthDialogOpen(true)}
-                          >
-                            Manage connection
-                          </button>
-                        ) : (
-                          <>
-                            <button
-                              ref={codexAuthPrimaryButtonRef}
-                              className="primary"
-                              type="button"
-                              onClick={() => {
-                                void handleStartCodexDeviceAuth()
-                              }}
-                              disabled={!codexAuthCanConnect}
-                            >
-                              {startCodexDeviceAuthPending
-                                ? 'Starting...'
-                                : codexAuthHasPendingSignIn
-                                  ? 'Continue sign-in'
-                                  : 'Connect Codex'}
-                            </button>
-                            {codexAuthLoginSession ? (
-                              <button
-                                className="button-secondary"
-                                type="button"
-                                onClick={() => setCodexAuthDialogOpen(true)}
-                              >
-                                Show sign-in details
-                              </button>
-                            ) : null}
-                          </>
-                        )}
-                      </div>
-                    ) : (
-                      <p className="meta">
-                        Only workspace owners and admins can update the shared Codex connection.
-                      </p>
-                    )}
-                    {codexAuthFeedback ? (
-                      <div className={`notice ${codexAuthFeedback.tone === 'error' ? 'notice-error' : ''}`.trim()}>
-                        {codexAuthFeedback.message}
-                      </div>
-                    ) : null}
-                  </>
-                )}
-              </section>
-
               <section className="profile-pane-card profile-password" aria-label="Password settings">
                 <Accordion.Root className="profile-accordion" type="single" collapsible defaultValue="change-password">
                   <Accordion.Item className="profile-accordion-item" value="change-password">
@@ -1541,95 +1870,6 @@ export function ProfilePanel({
                 </Accordion.Root>
               </section>
             </div>
-
-            <AlertDialog.Root open={codexAuthDialogOpen} onOpenChange={setCodexAuthDialogOpen}>
-              <AlertDialog.Portal>
-                <AlertDialog.Overlay className="codex-chat-alert-overlay" />
-                <AlertDialog.Content className="codex-chat-alert-content profile-codex-auth-dialog">
-                  <AlertDialog.Title className="codex-chat-alert-title">
-                    {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn ? 'Codex connection' : 'Connect Codex'}
-                  </AlertDialog.Title>
-                  <AlertDialog.Description className="codex-chat-alert-description">
-                    {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn
-                      ? 'This shared codex-bot connection is active and overrides the host-mounted auth file inside this runtime.'
-                      : 'Finish the browser sign-in and the shared codex-bot connection will be stored inside this runtime only.'}
-                  </AlertDialog.Description>
-                  <div className="profile-codex-auth-dialog-body">
-                    {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn ? (
-                      <div className="profile-codex-auth-dialog-block">
-                        <div className="field-label">Connection</div>
-                        <span className="status-chip">Connected for codex-bot</span>
-                      </div>
-                    ) : null}
-                    {codexAuthLoginSession?.verification_uri ? (
-                      <div className="profile-codex-auth-dialog-block">
-                        <div className="field-label">Verification URL</div>
-                        <a
-                          className="profile-codex-auth-link"
-                          href={codexAuthLoginSession.verification_uri}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          {codexAuthLoginSession.verification_uri}
-                        </a>
-                      </div>
-                    ) : null}
-                    {codexAuthLoginSession?.user_code ? (
-                      <div className="profile-codex-auth-dialog-block">
-                        <div className="field-label">One-time code</div>
-                        <code className="profile-codex-auth-code">{codexAuthLoginSession.user_code}</code>
-                      </div>
-                    ) : null}
-                    {codexAuthSessionStatusLabel ? (
-                      <div className="profile-codex-auth-dialog-block">
-                        <div className="field-label">Status</div>
-                        <span className="status-chip">{codexAuthSessionStatusLabel}</span>
-                      </div>
-                    ) : null}
-                    {codexAuthLoginSession?.error ? (
-                      <div className="notice notice-error">{codexAuthLoginSession.error}</div>
-                    ) : null}
-                    {Array.isArray(codexAuthLoginSession?.output_excerpt) && codexAuthLoginSession.output_excerpt.length > 0 ? (
-                      <div className="profile-codex-auth-dialog-block">
-                        <div className="field-label">Recent output</div>
-                        <div className="notice profile-codex-auth-output">
-                          {codexAuthLoginSession.output_excerpt.join('\n')}
-                        </div>
-                      </div>
-                    ) : null}
-                  </div>
-                  <div className="row wrap profile-actions">
-                    {canManageCodexAuth && codexAuthLoginSession?.status === 'pending' ? (
-                      <button
-                        type="button"
-                        className="button-secondary"
-                        onClick={() => {
-                          void handleCancelCodexDeviceAuth()
-                        }}
-                        disabled={cancelCodexDeviceAuthPending}
-                      >
-                        {cancelCodexDeviceAuthPending ? 'Cancelling...' : 'Cancel sign-in'}
-                      </button>
-                    ) : null}
-                    {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn && codexAuthCanRemoveOverride ? (
-                      <button
-                        type="button"
-                        className="button-secondary"
-                        onClick={() => {
-                          void handleDeleteCodexAuthOverride()
-                        }}
-                        disabled={!codexAuthCanRemoveOverride}
-                      >
-                        {deleteCodexAuthOverridePending ? 'Removing...' : 'Remove override'}
-                      </button>
-                    ) : null}
-                    <AlertDialog.Cancel asChild>
-                      <button type="button" className="button-secondary">Close</button>
-                    </AlertDialog.Cancel>
-                  </div>
-                </AlertDialog.Content>
-              </AlertDialog.Portal>
-            </AlertDialog.Root>
           </Tabs.Content>
 
           <Tabs.Content className="profile-tab-content" value="feedback">
@@ -1756,8 +1996,719 @@ export function ProfilePanel({
             </div>
           </Tabs.Content>
 
+        </Tabs.Root>
+      </section>
+    </Tooltip.Provider>
+  )
+}
+
+export function WorkspacePanel({
+  workspaceName,
+  workspaceRole,
+  canManageUsers,
+  workspaceUsersCount,
+  workspaceSkillsCount,
+  workspaceUsersContent,
+  workspaceSkillsContent,
+  frontendVersion,
+  backendVersion,
+  backendBuild,
+  deployedAtUtc,
+  codexAuthStatus,
+  codexAuthLoading,
+  canManageCodexAuth,
+  claudeAuthStatus,
+  claudeAuthLoading,
+  canManageClaudeAuth,
+  license,
+  licenseLoading,
+  licenseError,
+  onStartCodexDeviceAuth,
+  startCodexDeviceAuthPending,
+  onCancelCodexDeviceAuth,
+  cancelCodexDeviceAuthPending,
+  onDeleteCodexAuthOverride,
+  deleteCodexAuthOverridePending,
+  onStartClaudeDeviceAuth,
+  startClaudeDeviceAuthPending,
+  onCancelClaudeDeviceAuth,
+  cancelClaudeDeviceAuthPending,
+  onSubmitClaudeDeviceAuthCode,
+  submitClaudeDeviceAuthCodePending,
+  onDeleteClaudeAuthOverride,
+  deleteClaudeAuthOverridePending,
+}: {
+  workspaceName: string
+  workspaceRole: string
+  canManageUsers: boolean
+  workspaceUsersCount: number
+  workspaceSkillsCount: number
+  workspaceUsersContent?: React.ReactNode
+  workspaceSkillsContent?: React.ReactNode
+  frontendVersion: string
+  backendVersion: string
+  backendBuild: string | null
+  deployedAtUtc: string | null
+  codexAuthStatus: AgentAuthStatus | null
+  codexAuthLoading: boolean
+  canManageCodexAuth: boolean
+  claudeAuthStatus: AgentAuthStatus | null
+  claudeAuthLoading: boolean
+  canManageClaudeAuth: boolean
+  license: LicenseStatus | null | undefined
+  licenseLoading: boolean
+  licenseError: string | null
+  onStartCodexDeviceAuth: () => Promise<unknown>
+  startCodexDeviceAuthPending: boolean
+  onCancelCodexDeviceAuth: () => Promise<unknown>
+  cancelCodexDeviceAuthPending: boolean
+  onDeleteCodexAuthOverride: () => Promise<unknown>
+  deleteCodexAuthOverridePending: boolean
+  onStartClaudeDeviceAuth: (loginMethod: ClaudeAuthLoginMethod) => Promise<unknown>
+  startClaudeDeviceAuthPending: boolean
+  onCancelClaudeDeviceAuth: () => Promise<unknown>
+  cancelClaudeDeviceAuthPending: boolean
+  onSubmitClaudeDeviceAuthCode: (code: string) => Promise<unknown>
+  submitClaudeDeviceAuthCodePending: boolean
+  onDeleteClaudeAuthOverride: () => Promise<unknown>
+  deleteClaudeAuthOverridePending: boolean
+}) {
+  const formatDateTime = (value: string | null): string => {
+    if (!value) return 'n/a'
+    const parsed = new Date(value)
+    if (Number.isNaN(parsed.getTime())) return value
+    return parsed.toLocaleString()
+  }
+  const formatLabel = (value: string): string => {
+    const normalized = String(value || '').trim().replace(/_/g, ' ')
+    if (!normalized) return 'n/a'
+    return normalized
+      .split(/\s+/)
+      .map((chunk) => chunk.charAt(0).toUpperCase() + chunk.slice(1))
+      .join(' ')
+  }
+  const licenseStatus = String(license?.status || '').trim().toLowerCase() || 'unknown'
+  const licenseStatusLabel = licenseStatus.charAt(0).toUpperCase() + licenseStatus.slice(1)
+  const licenseMetadata = (license?.metadata && typeof license.metadata === 'object'
+    ? (license.metadata as Record<string, unknown>)
+    : {}) as Record<string, unknown>
+  const subscriptionStatus = String(licenseMetadata.subscription_status ?? '').trim().toLowerCase()
+  const subscriptionValidUntil = String(licenseMetadata.subscription_valid_until ?? '').trim() || null
+  const publicBetaEnabled = licenseMetadata.public_beta === true
+  const publicBetaFreeUntil = String(licenseMetadata.public_beta_free_until ?? '').trim() || null
+  const entitlementSource = publicBetaEnabled
+    ? `Public beta until ${formatDateTime(publicBetaFreeUntil)}`
+    : subscriptionStatus
+      ? `Subscription (${formatLabel(subscriptionStatus)})`
+      : 'Trial fallback'
+  const showTrialWindow = licenseStatus === 'trial' || licenseStatus === 'grace'
+  const [workspaceTab, setWorkspaceTab] = React.useState<'connections' | 'runtime' | 'users' | 'skills' | 'license'>('connections')
+  const [installationCopyState, setInstallationCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
+  const [runtimeCopyState, setRuntimeCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
+  const codexAuthFactRef = React.useRef<HTMLDivElement | null>(null)
+  const codexAuthPrimaryButtonRef = React.useRef<HTMLButtonElement | null>(null)
+  const claudeAuthFactRef = React.useRef<HTMLDivElement | null>(null)
+  const claudeAuthPrimaryButtonRef = React.useRef<HTMLButtonElement | null>(null)
+  const [codexAuthDialogOpen, setCodexAuthDialogOpen] = React.useState(false)
+  const [codexAuthFeedback, setCodexAuthFeedback] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
+  const [claudeAuthDialogOpen, setClaudeAuthDialogOpen] = React.useState(false)
+  const [claudeAuthFeedback, setClaudeAuthFeedback] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
+  const [claudeAuthManualCodeInput, setClaudeAuthManualCodeInput] = React.useState('')
+  const codexAuthSource = String(codexAuthStatus?.effective_source || '').trim().toLowerCase()
+  const codexAuthLoginSession = codexAuthStatus?.login_session ?? null
+  const codexAuthStatusLabel = authSourceLabel(
+    'codex',
+    codexAuthStatus?.effective_source,
+    codexAuthStatus?.target_actor_username
+  )
+  const codexAuthSessionStatusLabel = (() => {
+    if (codexAuthSource === 'system_override') return 'Connected'
+    const status = String(codexAuthLoginSession?.status || '').trim().toLowerCase()
+    if (status === 'pending') return 'Awaiting browser confirmation'
+    if (status === 'succeeded') return 'Connected'
+    if (status === 'failed') return 'Sign-in failed'
+    if (status === 'cancelled') return 'Sign-in cancelled'
+    return null
+  })()
+  const codexAuthHasSystemOverride = codexAuthSource === 'system_override'
+  const codexAuthHasPendingSignIn = String(codexAuthLoginSession?.status || '').trim().toLowerCase() === 'pending'
+  const codexAuthCanConnect = canManageCodexAuth && !startCodexDeviceAuthPending && !cancelCodexDeviceAuthPending
+  const codexAuthCanRemoveOverride = canManageCodexAuth
+    && Boolean(codexAuthStatus?.override_available)
+    && !deleteCodexAuthOverridePending
+  const claudeAuthSource = String(claudeAuthStatus?.effective_source || '').trim().toLowerCase()
+  const claudeAuthLoginSession = claudeAuthStatus?.login_session ?? null
+  const claudeAuthStatusLabel = authSourceLabel(
+    'claude',
+    claudeAuthStatus?.effective_source,
+    claudeAuthStatus?.target_actor_username
+  )
+  const claudeAuthSessionStatusLabel = (() => {
+    if (claudeAuthSource === 'system_override') return 'Connected'
+    const status = String(claudeAuthLoginSession?.status || '').trim().toLowerCase()
+    if (status === 'pending') return 'Awaiting browser confirmation'
+    if (status === 'succeeded') return 'Connected'
+    if (status === 'failed') return 'Sign-in failed'
+    if (status === 'cancelled') return 'Sign-in cancelled'
+    return null
+  })()
+  const claudeAuthLoginMethod = normalizeClaudeAuthLoginMethod(
+    claudeAuthLoginSession?.login_method ?? claudeAuthStatus?.selected_login_method
+  )
+  const claudeAuthLoginMethodLabel = formatClaudeAuthLoginMethodLabel(claudeAuthLoginMethod)
+  const claudeAuthHasSystemOverride = claudeAuthSource === 'system_override'
+  const claudeAuthHasPendingSignIn = (
+    String(claudeAuthLoginSession?.status || '').trim().toLowerCase() === 'pending'
+    && !claudeAuthHasSystemOverride
+  )
+  const claudeAuthCanConnect = canManageClaudeAuth && !startClaudeDeviceAuthPending && !cancelClaudeDeviceAuthPending
+  const claudeAuthCanSubmitCode = canManageClaudeAuth
+    && claudeAuthHasPendingSignIn
+    && !submitClaudeDeviceAuthCodePending
+    && claudeAuthManualCodeInput.trim().length > 0
+  const claudeAuthCanRemoveOverride = canManageClaudeAuth
+    && Boolean(claudeAuthStatus?.override_available)
+    && !deleteClaudeAuthOverridePending
+  const runtimeSnapshotText = React.useMemo(() => {
+    return [
+      `Workspace: ${workspaceName || 'n/a'}`,
+      `Workspace role: ${workspaceRole || 'n/a'}`,
+      `Frontend version: ${frontendVersion || 'n/a'}`,
+      `Backend version: ${backendVersion || 'n/a'}`,
+      `Backend build: ${backendBuild || 'n/a'}`,
+      `Deployed UTC: ${deployedAtUtc || 'unknown'}`,
+    ].join('\n')
+  }, [backendBuild, backendVersion, deployedAtUtc, frontendVersion, workspaceName, workspaceRole])
+  const codexAuthSummaryPills: WorkspaceAuthSummaryPill[] = [
+    { label: 'Host auth', value: codexAuthStatus?.host_auth_available ? 'Available' : 'Missing' },
+    { label: 'Shared override', value: codexAuthStatus?.override_available ? 'Active' : 'Not set' },
+    { label: 'Scope', value: String(codexAuthStatus?.scope || 'system').trim() || 'system' },
+  ]
+  const claudeAuthSummaryPills: WorkspaceAuthSummaryPill[] = [
+    { label: 'Host auth', value: claudeAuthStatus?.host_auth_available ? 'Available' : 'Missing' },
+    { label: 'Shared override', value: claudeAuthStatus?.override_available ? 'Active' : 'Not set' },
+    { label: 'Sign-in', value: claudeAuthLoginMethodLabel },
+  ]
+  const hasWorkspaceAdminTabs = canManageUsers
+  const copyInstallationId = React.useCallback(async () => {
+    const value = String(license?.installation_id || '').trim()
+    if (!value) return
+    if (typeof navigator === 'undefined' || !navigator.clipboard) {
+      setInstallationCopyState('error')
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(value)
+      setInstallationCopyState('copied')
+      window.setTimeout(() => setInstallationCopyState('idle'), 1400)
+    } catch {
+      setInstallationCopyState('error')
+      window.setTimeout(() => setInstallationCopyState('idle'), 1800)
+    }
+  }, [license?.installation_id])
+  const copyRuntimeSnapshot = React.useCallback(async () => {
+    if (typeof navigator === 'undefined' || !navigator.clipboard) {
+      setRuntimeCopyState('error')
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(runtimeSnapshotText)
+      setRuntimeCopyState('copied')
+      window.setTimeout(() => setRuntimeCopyState('idle'), 1400)
+    } catch {
+      setRuntimeCopyState('error')
+      window.setTimeout(() => setRuntimeCopyState('idle'), 1800)
+    }
+  }, [runtimeSnapshotText])
+  const handleStartCodexDeviceAuth = React.useCallback(async () => {
+    try {
+      await onStartCodexDeviceAuth()
+      setCodexAuthFeedback(null)
+      setCodexAuthDialogOpen(true)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to start Codex sign-in.'
+      setCodexAuthFeedback({ tone: 'error', message })
+    }
+  }, [onStartCodexDeviceAuth])
+  const handleCancelCodexDeviceAuth = React.useCallback(async () => {
+    try {
+      await onCancelCodexDeviceAuth()
+      setCodexAuthFeedback({ tone: 'success', message: 'Codex sign-in was cancelled.' })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to cancel Codex sign-in.'
+      setCodexAuthFeedback({ tone: 'error', message })
+    }
+  }, [onCancelCodexDeviceAuth])
+  const handleDeleteCodexAuthOverride = React.useCallback(async () => {
+    try {
+      await onDeleteCodexAuthOverride()
+      setCodexAuthFeedback({ tone: 'success', message: 'Shared Codex authentication was removed.' })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to remove shared Codex authentication.'
+      setCodexAuthFeedback({ tone: 'error', message })
+    }
+  }, [onDeleteCodexAuthOverride])
+  const handleStartClaudeDeviceAuth = React.useCallback(async (loginMethod: ClaudeAuthLoginMethod) => {
+    try {
+      await onStartClaudeDeviceAuth(loginMethod)
+      setClaudeAuthFeedback(null)
+      setClaudeAuthDialogOpen(true)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to start Claude sign-in.'
+      setClaudeAuthFeedback({ tone: 'error', message })
+    }
+  }, [onStartClaudeDeviceAuth])
+  const handleCancelClaudeDeviceAuth = React.useCallback(async () => {
+    try {
+      await onCancelClaudeDeviceAuth()
+      setClaudeAuthFeedback({ tone: 'success', message: 'Claude sign-in was cancelled.' })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to cancel Claude sign-in.'
+      setClaudeAuthFeedback({ tone: 'error', message })
+    }
+  }, [onCancelClaudeDeviceAuth])
+  const handleSubmitClaudeDeviceAuthCode = React.useCallback(async () => {
+    const code = claudeAuthManualCodeInput.trim()
+    if (!code) {
+      setClaudeAuthFeedback({ tone: 'error', message: 'Authentication code is required.' })
+      return
+    }
+    try {
+      await onSubmitClaudeDeviceAuthCode(code)
+      setClaudeAuthManualCodeInput('')
+      setClaudeAuthFeedback({ tone: 'success', message: 'Authentication code submitted. Waiting for Claude to finish sign-in.' })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to submit Claude authentication code.'
+      setClaudeAuthFeedback({ tone: 'error', message })
+    }
+  }, [claudeAuthManualCodeInput, onSubmitClaudeDeviceAuthCode])
+  const handleDeleteClaudeAuthOverride = React.useCallback(async () => {
+    try {
+      await onDeleteClaudeAuthOverride()
+      setClaudeAuthFeedback({ tone: 'success', message: 'Shared Claude authentication was removed.' })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to remove shared Claude authentication.'
+      setClaudeAuthFeedback({ tone: 'error', message })
+    }
+  }, [onDeleteClaudeAuthOverride])
+  const scrollCodexAuthIntoView = React.useCallback(() => {
+    if (typeof window === 'undefined') return
+    const scrollNearestContainer = () => {
+      const target = codexAuthFactRef.current
+      if (!target) return
+      target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })
+    }
+    const focusPrimaryAction = () => {
+      try {
+        codexAuthPrimaryButtonRef.current?.focus({ preventScroll: true })
+      } catch {
+        codexAuthPrimaryButtonRef.current?.focus()
+      }
+    }
+    scrollNearestContainer()
+    window.setTimeout(scrollNearestContainer, 120)
+    window.setTimeout(focusPrimaryAction, 220)
+  }, [])
+  const scrollClaudeAuthIntoView = React.useCallback(() => {
+    if (typeof window === 'undefined') return
+    const scrollNearestContainer = () => {
+      const target = claudeAuthFactRef.current
+      if (!target) return
+      target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })
+    }
+    const focusPrimaryAction = () => {
+      try {
+        claudeAuthPrimaryButtonRef.current?.focus({ preventScroll: true })
+      } catch {
+        claudeAuthPrimaryButtonRef.current?.focus()
+      }
+    }
+    scrollNearestContainer()
+    window.setTimeout(scrollNearestContainer, 120)
+    window.setTimeout(focusPrimaryAction, 220)
+  }, [])
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return
+    const handleCodexAuthFocus = () => {
+      setWorkspaceTab('connections')
+      window.setTimeout(() => {
+        scrollCodexAuthIntoView()
+      }, 80)
+    }
+    window.addEventListener('ui:focus-codex-auth', handleCodexAuthFocus)
+    let shouldScroll = false
+    try {
+      shouldScroll = window.sessionStorage.getItem('ui_profile_scroll_target') === 'codex_auth'
+      if (shouldScroll) {
+        window.sessionStorage.removeItem('ui_profile_scroll_target')
+      }
+    } catch {
+      shouldScroll = false
+    }
+    if (shouldScroll) {
+      const frameId = window.requestAnimationFrame(() => {
+        handleCodexAuthFocus()
+      })
+      return () => {
+        window.cancelAnimationFrame(frameId)
+        window.removeEventListener('ui:focus-codex-auth', handleCodexAuthFocus)
+      }
+    }
+    return () => {
+      window.removeEventListener('ui:focus-codex-auth', handleCodexAuthFocus)
+    }
+  }, [scrollCodexAuthIntoView])
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return
+    const handleClaudeAuthFocus = () => {
+      setWorkspaceTab('connections')
+      window.setTimeout(() => {
+        scrollClaudeAuthIntoView()
+      }, 80)
+    }
+    window.addEventListener('ui:focus-claude-auth', handleClaudeAuthFocus)
+    let shouldScroll = false
+    try {
+      shouldScroll = window.sessionStorage.getItem('ui_profile_scroll_target') === 'claude_auth'
+      if (shouldScroll) {
+        window.sessionStorage.removeItem('ui_profile_scroll_target')
+      }
+    } catch {
+      shouldScroll = false
+    }
+    if (shouldScroll) {
+      const frameId = window.requestAnimationFrame(() => {
+        handleClaudeAuthFocus()
+      })
+      return () => {
+        window.cancelAnimationFrame(frameId)
+        window.removeEventListener('ui:focus-claude-auth', handleClaudeAuthFocus)
+      }
+    }
+    return () => {
+      window.removeEventListener('ui:focus-claude-auth', handleClaudeAuthFocus)
+    }
+  }, [scrollClaudeAuthIntoView])
+
+  React.useEffect(() => {
+    if (
+      canManageCodexAuth
+      && !codexAuthHasSystemOverride
+      && codexAuthLoginSession?.status === 'pending'
+      && (codexAuthLoginSession.user_code || codexAuthLoginSession.verification_uri)
+    ) {
+      setCodexAuthDialogOpen(true)
+      return
+    }
+    if (codexAuthLoginSession?.status === 'succeeded') {
+      setCodexAuthDialogOpen(false)
+    }
+    if (codexAuthHasSystemOverride) {
+      setCodexAuthFeedback(null)
+      setCodexAuthDialogOpen(false)
+    }
+  }, [
+    canManageCodexAuth,
+    codexAuthHasSystemOverride,
+    codexAuthLoginSession?.status,
+    codexAuthLoginSession?.user_code,
+    codexAuthLoginSession?.verification_uri,
+  ])
+
+  React.useEffect(() => {
+    if (
+      canManageClaudeAuth
+      && !claudeAuthHasSystemOverride
+      && claudeAuthLoginSession?.status === 'pending'
+      && (claudeAuthLoginSession.user_code || claudeAuthLoginSession.verification_uri)
+    ) {
+      setClaudeAuthDialogOpen(true)
+      return
+    }
+    if (claudeAuthLoginSession?.status === 'succeeded') {
+      setClaudeAuthManualCodeInput('')
+      setClaudeAuthFeedback(null)
+      setClaudeAuthDialogOpen(false)
+    }
+    if (claudeAuthHasSystemOverride) {
+      setClaudeAuthManualCodeInput('')
+      setClaudeAuthFeedback(null)
+      setClaudeAuthDialogOpen(false)
+    }
+  }, [
+    canManageClaudeAuth,
+    claudeAuthHasSystemOverride,
+    claudeAuthLoginSession?.status,
+    claudeAuthLoginSession?.user_code,
+    claudeAuthLoginSession?.verification_uri,
+  ])
+
+  return (
+    <Tooltip.Provider delayDuration={180}>
+      <section className="card profile-panel workspace-panel">
+        <div className="profile-panel-head">
+          <div className="profile-panel-identity">
+            <div className="profile-avatar" aria-hidden="true">
+              <Icon path="M4 5h16v12H4zM7 8h10M7 12h7M10 20h4M12 17v3" />
+            </div>
+            <div className="profile-head-copy">
+              <h2>Workspace</h2>
+              <p className="meta">{workspaceName || 'Current workspace'} shared connections and runtime settings</p>
+            </div>
+          </div>
+          <div className="profile-head-chips">
+            <span className="status-chip">{workspaceRole || 'Member'}</span>
+            <span className="status-chip">{licenseStatusLabel}</span>
+            <span className="status-chip">{canManageCodexAuth || canManageClaudeAuth ? 'Admin access' : 'Read-only'}</span>
+          </div>
+        </div>
+
+        <Tabs.Root
+          className="profile-tabs"
+          value={workspaceTab}
+          onValueChange={(nextValue) => {
+            if (
+              nextValue === 'connections'
+              || nextValue === 'runtime'
+              || nextValue === 'users'
+              || nextValue === 'skills'
+              || nextValue === 'license'
+            ) {
+              setWorkspaceTab(nextValue)
+            }
+          }}
+        >
+          <Tabs.List className="profile-tabs-list" aria-label="Workspace sections">
+            <Tabs.Trigger className="profile-tab-trigger" value="connections">
+              <span className="profile-tab-trigger-icon" aria-hidden="true">
+                <Icon path="M7 7h10v4H7zM5 5h14v8H5zM8 15h8M10 19h4" />
+              </span>
+              <span>Connections</span>
+            </Tabs.Trigger>
+            <Tabs.Trigger className="profile-tab-trigger" value="runtime">
+              <span className="profile-tab-trigger-icon" aria-hidden="true">
+                <Icon path="M4 4h16v12H4zM10 20h4M12 16v4" />
+              </span>
+              <span>Runtime</span>
+            </Tabs.Trigger>
+            {hasWorkspaceAdminTabs ? (
+              <Tabs.Trigger className="profile-tab-trigger" value="users">
+                <span className="profile-tab-trigger-icon" aria-hidden="true">
+                  <Icon path="M16 11c1.66 0 3-1.57 3-3.5S17.66 4 16 4s-3 1.57-3 3.5 1.34 3.5 3 3.5M8 11c1.66 0 3-1.57 3-3.5S9.66 4 8 4 5 5.57 5 7.5 6.34 11 8 11M8 13c-2.67 0-8 1.34-8 4v3h10v-3c0-1.53.82-2.75 2.05-3.73C10.72 13.09 9.32 13 8 13M16 13c-.26 0-.54.02-.83.05 1.43 1 2.33 2.39 2.33 3.95v3H24v-3c0-2.66-5.33-4-8-4" />
+                </span>
+                <span>Users</span>
+                <span className="status-chip admin-tab-count">{workspaceUsersCount}</span>
+              </Tabs.Trigger>
+            ) : null}
+            {hasWorkspaceAdminTabs ? (
+              <Tabs.Trigger className="profile-tab-trigger" value="skills">
+                <span className="profile-tab-trigger-icon" aria-hidden="true">
+                  <Icon path="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 4.5A2.5 2.5 0 0 1 6.5 7H20M6.5 7A2.5 2.5 0 0 1 4 9.5v10" />
+                </span>
+                <span>Skills</span>
+                <span className="status-chip admin-tab-count">{workspaceSkillsCount}</span>
+              </Tabs.Trigger>
+            ) : null}
+            <Tabs.Trigger className="profile-tab-trigger" value="license">
+              <span className="profile-tab-trigger-icon" aria-hidden="true">
+                <Icon path="M9 12l2 2 4-4M12 3l7 4v5c0 5-3.5 8.5-7 9.5-3.5-1-7-4.5-7-9.5V7l7-4z" />
+              </span>
+              <span>License</span>
+            </Tabs.Trigger>
+          </Tabs.List>
+
+          <Tabs.Content className="profile-tab-content" value="connections">
+            <div className="profile-pane-grid profile-workspace-grid">
+              <section className="profile-pane-card workspace-overview-card" aria-label="Workspace overview">
+                <div className="profile-pane-head">
+                  <h3>
+                    <span className="profile-pane-head-icon" aria-hidden="true">
+                      <Icon path="M4 6h16M4 12h16M4 18h10" />
+                    </span>
+                    <span>Workspace overview</span>
+                  </h3>
+                  <span className="status-chip">{workspaceRole || 'Member'}</span>
+                </div>
+                <dl className="profile-facts">
+                  <div className="profile-fact">
+                    <dt>Workspace</dt>
+                    <dd>{workspaceName || 'n/a'}</dd>
+                  </div>
+                  <div className="profile-fact">
+                    <dt>Your role</dt>
+                    <dd>{workspaceRole || 'n/a'}</dd>
+                  </div>
+                  <div className="profile-fact">
+                    <dt>Shared auth access</dt>
+                    <dd>{canManageCodexAuth || canManageClaudeAuth ? 'Can manage' : 'Read only'}</dd>
+                  </div>
+                  <div className="profile-fact">
+                    <dt>Background runtime scope</dt>
+                    <dd>Workspace</dd>
+                  </div>
+                </dl>
+                <p className="meta">
+                  Shared bot connections, runtime metadata, workspace users, skills catalog, and license details live here.
+                </p>
+              </section>
+
+              <WorkspaceAuthCard
+                id="workspace-codex-auth"
+                containerRef={codexAuthFactRef}
+                title="Codex authentication"
+                providerLabel="Codex"
+                actorUsername={String(codexAuthStatus?.target_actor_username || 'codex-bot').trim() || 'codex-bot'}
+                loading={codexAuthLoading}
+                loadingText="Loading Codex authentication status..."
+                description="Shared workspace connection for codex-bot when Codex is selected for chat or background work."
+                statusLabel={codexAuthStatusLabel}
+                statusTone={codexAuthSource === 'none' ? 'error' : 'default'}
+                sessionStatusLabel={codexAuthSessionStatusLabel}
+                summaryPills={codexAuthSummaryPills}
+                facts={[
+                  { label: 'Effective source', value: codexAuthStatusLabel },
+                  { label: 'Auth target', value: String(codexAuthStatus?.target_actor_username || 'codex-bot').trim() || 'codex-bot' },
+                  { label: 'Override updated', value: formatDateTime(codexAuthStatus?.override_updated_at || null) },
+                ]}
+                canManage={canManageCodexAuth}
+                manageHint="Only workspace owners and admins can update the shared Codex connection."
+                forceDetailsOpen={codexAuthHasPendingSignIn}
+                actionSlot={canManageCodexAuth ? (
+                  <div className="row wrap profile-actions workspace-auth-inline-actions">
+                    {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn ? (
+                      <button
+                        ref={codexAuthPrimaryButtonRef}
+                        className="button-secondary profile-action-button"
+                        type="button"
+                        onClick={() => setCodexAuthDialogOpen(true)}
+                      >
+                        Manage connection
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          ref={codexAuthPrimaryButtonRef}
+                          className="primary profile-action-button"
+                          type="button"
+                          onClick={() => {
+                            void handleStartCodexDeviceAuth()
+                          }}
+                          disabled={!codexAuthCanConnect}
+                        >
+                          {startCodexDeviceAuthPending
+                            ? 'Starting...'
+                            : codexAuthHasPendingSignIn
+                              ? 'Continue sign-in'
+                              : 'Connect Codex'}
+                        </button>
+                        {codexAuthLoginSession ? (
+                          <button
+                            className="button-secondary profile-action-button"
+                            type="button"
+                            onClick={() => setCodexAuthDialogOpen(true)}
+                          >
+                            Show sign-in details
+                          </button>
+                        ) : null}
+                      </>
+                    )}
+                  </div>
+                ) : null}
+                feedback={codexAuthFeedback}
+              />
+
+              <WorkspaceAuthCard
+                id="workspace-claude-auth"
+                containerRef={claudeAuthFactRef}
+                title="Claude authentication"
+                providerLabel="Claude"
+                actorUsername={String(claudeAuthStatus?.target_actor_username || 'claude-bot').trim() || 'claude-bot'}
+                loading={claudeAuthLoading}
+                loadingText="Loading Claude authentication status..."
+                description="Shared workspace connection for claude-bot. Anthropic Console uses API billing; Claude subscription uses Pro, Max, Team, or Enterprise."
+                statusLabel={claudeAuthStatusLabel}
+                statusTone={claudeAuthSource === 'none' ? 'error' : 'default'}
+                sessionStatusLabel={claudeAuthSessionStatusLabel}
+                summaryPills={claudeAuthSummaryPills}
+                facts={[
+                  { label: 'Effective source', value: claudeAuthStatusLabel },
+                  { label: 'Auth target', value: String(claudeAuthStatus?.target_actor_username || 'claude-bot').trim() || 'claude-bot' },
+                  { label: 'Override updated', value: formatDateTime(claudeAuthStatus?.override_updated_at || null) },
+                ]}
+                canManage={canManageClaudeAuth}
+                manageHint="Only workspace owners and admins can update the shared Claude connection."
+                forceDetailsOpen={claudeAuthHasPendingSignIn}
+                actionSlot={canManageClaudeAuth ? (
+                  <div className="row wrap profile-actions workspace-auth-inline-actions">
+                    {claudeAuthHasSystemOverride && !claudeAuthHasPendingSignIn ? (
+                      <button
+                        ref={claudeAuthPrimaryButtonRef}
+                        className="button-secondary profile-action-button"
+                        type="button"
+                        onClick={() => setClaudeAuthDialogOpen(true)}
+                      >
+                        Manage connection
+                      </button>
+                    ) : claudeAuthHasPendingSignIn ? (
+                      <>
+                        <button
+                          ref={claudeAuthPrimaryButtonRef}
+                          className="primary profile-action-button"
+                          type="button"
+                          onClick={() => setClaudeAuthDialogOpen(true)}
+                          disabled={!claudeAuthCanConnect}
+                        >
+                          {startClaudeDeviceAuthPending
+                            ? 'Starting...'
+                            : `Continue ${claudeAuthLoginMethodLabel} sign-in`}
+                        </button>
+                        <button
+                          className="button-secondary profile-action-button"
+                          type="button"
+                          onClick={() => {
+                            void handleCancelClaudeDeviceAuth()
+                          }}
+                          disabled={cancelClaudeDeviceAuthPending}
+                        >
+                          {cancelClaudeDeviceAuthPending ? 'Cancelling...' : 'Cancel sign-in'}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          ref={claudeAuthPrimaryButtonRef}
+                          className="primary profile-action-button"
+                          type="button"
+                          onClick={() => {
+                            void handleStartClaudeDeviceAuth('console')
+                          }}
+                          disabled={!claudeAuthCanConnect}
+                        >
+                          {startClaudeDeviceAuthPending ? 'Starting...' : 'Connect Anthropic Console'}
+                        </button>
+                        <button
+                          className="button-secondary profile-action-button"
+                          type="button"
+                          onClick={() => {
+                            void handleStartClaudeDeviceAuth('claudeai')
+                          }}
+                          disabled={!claudeAuthCanConnect}
+                        >
+                          {startClaudeDeviceAuthPending ? 'Starting...' : 'Connect Claude subscription'}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                ) : null}
+                feedback={claudeAuthFeedback}
+              />
+            </div>
+          </Tabs.Content>
+
           <Tabs.Content className="profile-tab-content" value="runtime">
-            <section className="profile-pane-card profile-runtime" aria-label="Build details">
+            <section className="profile-pane-card profile-runtime" aria-label="Workspace runtime">
               <div className="profile-pane-head">
                 <h3>
                   <span className="profile-pane-head-icon" aria-hidden="true">
@@ -1783,7 +2734,7 @@ export function ProfilePanel({
               <Accordion.Root
                 className="profile-accordion profile-runtime-accordion"
                 type="multiple"
-                defaultValue={['versions', 'deployment', 'preferences']}
+                defaultValue={['versions', 'deployment']}
               >
                 <Accordion.Item className="profile-accordion-item" value="versions">
                   <Accordion.Header className="profile-accordion-header">
@@ -1829,7 +2780,7 @@ export function ProfilePanel({
                           </span>
                           <span>Deployment</span>
                         </span>
-                        <span className="profile-accordion-meta">Timestamp and local environment details</span>
+                        <span className="profile-accordion-meta">Workspace runtime timestamp and deployment context</span>
                       </span>
                       <span className="profile-accordion-chevron" aria-hidden="true">
                         <Icon path="M6 9l6 6 6-6" />
@@ -1838,6 +2789,10 @@ export function ProfilePanel({
                   </Accordion.Header>
                   <Accordion.Content className="profile-accordion-content">
                     <dl className="profile-facts profile-runtime-facts">
+                      <div className="profile-fact">
+                        <dt>Workspace</dt>
+                        <dd>{workspaceName || 'n/a'}</dd>
+                      </div>
                       <div className="profile-fact">
                         <dt>Deployed (UTC)</dt>
                         <dd>{deployedAtUtc ?? 'unknown'}</dd>
@@ -1846,63 +2801,27 @@ export function ProfilePanel({
                         <dt>Deployed (local)</dt>
                         <dd>{formatDateTime(deployedAtUtc)}</dd>
                       </div>
-                      <div className="profile-fact">
-                        <dt>Browser timezone</dt>
-                        <dd>{browserTimeZone}</dd>
-                      </div>
                     </dl>
-                  </Accordion.Content>
-                </Accordion.Item>
-                <Accordion.Item className="profile-accordion-item" value="preferences">
-                  <Accordion.Header className="profile-accordion-header">
-                    <Accordion.Trigger className="profile-accordion-trigger">
-                      <span className="profile-accordion-head">
-                        <span className="profile-accordion-title">
-                          <span className="profile-accordion-title-icon" aria-hidden="true">
-                            <Icon path="M4 7h16M7 12h10M9 17h6" />
-                          </span>
-                          <span>Active preferences</span>
-                        </span>
-                        <span className="profile-accordion-meta">Theme and speech language currently in use</span>
-                      </span>
-                      <span className="profile-accordion-chevron" aria-hidden="true">
-                        <Icon path="M6 9l6 6 6-6" />
-                      </span>
-                    </Accordion.Trigger>
-                  </Accordion.Header>
-                  <Accordion.Content className="profile-accordion-content">
-                    <dl className="profile-facts profile-runtime-facts">
-                      <div className="profile-fact">
-                        <dt>Theme</dt>
-                        <dd>{theme}</dd>
-                      </div>
-                      <div className="profile-fact">
-                        <dt>Voice language</dt>
-                        <dd>{selectedVoiceLabel}</dd>
-                      </div>
-                    </dl>
-                    <div className="row wrap profile-actions profile-runtime-actions">
-                      <button
-                        className="button-secondary"
-                        type="button"
-                        onClick={() => {
-                          setProfileTab('preferences')
-                          window.setTimeout(() => {
-                            scrollVoiceLanguageIntoView()
-                          }, 60)
-                        }}
-                      >
-                        Open preference controls
-                      </button>
-                    </div>
                   </Accordion.Content>
                 </Accordion.Item>
               </Accordion.Root>
             </section>
           </Tabs.Content>
 
+          {hasWorkspaceAdminTabs ? (
+            <Tabs.Content className="profile-tab-content" value="users">
+              {workspaceUsersContent}
+            </Tabs.Content>
+          ) : null}
+
+          {hasWorkspaceAdminTabs ? (
+            <Tabs.Content className="profile-tab-content" value="skills">
+              {workspaceSkillsContent}
+            </Tabs.Content>
+          ) : null}
+
           <Tabs.Content className="profile-tab-content" value="license">
-            <section className="profile-pane-card profile-license" aria-label="License details">
+            <section className="profile-pane-card profile-license" aria-label="Workspace license">
               <div className="profile-pane-head">
                 <h3>
                   <span className="profile-pane-head-icon" aria-hidden="true">
@@ -2035,6 +2954,209 @@ export function ProfilePanel({
             </section>
           </Tabs.Content>
         </Tabs.Root>
+
+        <AlertDialog.Root open={codexAuthDialogOpen} onOpenChange={setCodexAuthDialogOpen}>
+          <AlertDialog.Portal>
+            <AlertDialog.Overlay className="codex-chat-alert-overlay" />
+            <AlertDialog.Content className="codex-chat-alert-content profile-codex-auth-dialog">
+              <AlertDialog.Title className="codex-chat-alert-title">
+                {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn ? 'Codex connection' : 'Connect Codex'}
+              </AlertDialog.Title>
+              <AlertDialog.Description className="codex-chat-alert-description">
+                {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn
+                  ? 'This shared codex-bot connection is active and overrides the host-mounted auth file inside this runtime.'
+                  : 'Finish the browser sign-in and the shared codex-bot connection will be stored inside this runtime only.'}
+              </AlertDialog.Description>
+              <div className="profile-codex-auth-dialog-body">
+                {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn ? (
+                  <div className="profile-codex-auth-dialog-block">
+                    <div className="field-label">Connection</div>
+                    <span className="status-chip">Connected for codex-bot</span>
+                  </div>
+                ) : null}
+                {!codexAuthHasSystemOverride && codexAuthLoginSession?.verification_uri ? (
+                  <div className="profile-codex-auth-dialog-block">
+                    <div className="field-label">Browser step</div>
+                    <p className="meta">Continue in your browser to approve the sign-in.</p>
+                    <div className="workspace-auth-inline-actions">
+                      <a
+                        className="btn btn-primary"
+                        href={codexAuthLoginSession.verification_uri}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Continue in browser
+                      </a>
+                    </div>
+                  </div>
+                ) : null}
+                {!codexAuthHasSystemOverride && codexAuthLoginSession?.user_code ? (
+                  <div className="profile-codex-auth-dialog-block">
+                    <div className="field-label">One-time code</div>
+                    <code className="profile-codex-auth-code">{codexAuthLoginSession.user_code}</code>
+                  </div>
+                ) : null}
+                {codexAuthSessionStatusLabel ? (
+                  <div className="profile-codex-auth-dialog-block">
+                    <div className="field-label">Status</div>
+                    <span className="status-chip">{codexAuthSessionStatusLabel}</span>
+                  </div>
+                ) : null}
+                {codexAuthLoginSession?.error ? (
+                  <div className="notice notice-error">{codexAuthLoginSession.error}</div>
+                ) : null}
+              </div>
+              <div className="row wrap profile-actions">
+                {canManageCodexAuth && codexAuthHasPendingSignIn ? (
+                  <button
+                    type="button"
+                    className="button-secondary"
+                    onClick={() => {
+                      void handleCancelCodexDeviceAuth()
+                    }}
+                    disabled={cancelCodexDeviceAuthPending}
+                  >
+                    {cancelCodexDeviceAuthPending ? 'Cancelling...' : 'Cancel sign-in'}
+                  </button>
+                ) : null}
+                {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn && codexAuthCanRemoveOverride ? (
+                  <button
+                    type="button"
+                    className="button-secondary"
+                    onClick={() => {
+                      void handleDeleteCodexAuthOverride()
+                    }}
+                    disabled={!codexAuthCanRemoveOverride}
+                  >
+                    {deleteCodexAuthOverridePending ? 'Removing...' : 'Remove override'}
+                  </button>
+                ) : null}
+                <AlertDialog.Cancel asChild>
+                  <button type="button" className="button-secondary">Close</button>
+                </AlertDialog.Cancel>
+              </div>
+            </AlertDialog.Content>
+          </AlertDialog.Portal>
+        </AlertDialog.Root>
+
+        <AlertDialog.Root open={claudeAuthDialogOpen} onOpenChange={setClaudeAuthDialogOpen}>
+          <AlertDialog.Portal>
+            <AlertDialog.Overlay className="codex-chat-alert-overlay" />
+            <AlertDialog.Content className="codex-chat-alert-content profile-codex-auth-dialog">
+              <AlertDialog.Title className="codex-chat-alert-title">
+                {claudeAuthHasSystemOverride && !claudeAuthHasPendingSignIn
+                  ? 'Claude connection'
+                  : `Connect ${claudeAuthLoginMethodLabel}`}
+              </AlertDialog.Title>
+              <AlertDialog.Description className="codex-chat-alert-description">
+                {claudeAuthHasSystemOverride && !claudeAuthHasPendingSignIn
+                  ? 'This shared claude-bot connection is active and overrides the host-mounted auth file inside this runtime.'
+                  : `Finish the ${claudeAuthLoginMethodLabel.toLowerCase()} browser sign-in and the shared claude-bot connection will be stored inside this runtime only.`}
+              </AlertDialog.Description>
+              <div className="profile-codex-auth-dialog-body">
+                {claudeAuthHasSystemOverride && !claudeAuthHasPendingSignIn ? (
+                  <div className="profile-codex-auth-dialog-block">
+                    <div className="field-label">Connection</div>
+                    <span className="status-chip">Connected for claude-bot</span>
+                  </div>
+                ) : null}
+                <div className="profile-codex-auth-dialog-block">
+                  <div className="field-label">Sign-in method</div>
+                  <span className="status-chip">{claudeAuthLoginMethodLabel}</span>
+                </div>
+                {!claudeAuthHasSystemOverride && claudeAuthLoginSession?.verification_uri ? (
+                  <div className="profile-codex-auth-dialog-block">
+                    <div className="field-label">Browser step</div>
+                    <p className="meta">Open the browser flow first. After approval, copy the code shown by Claude and paste it back below.</p>
+                    <div className="workspace-auth-inline-actions">
+                      <a
+                        className="btn btn-primary"
+                        href={claudeAuthLoginSession.verification_uri}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Continue in browser
+                      </a>
+                    </div>
+                  </div>
+                ) : null}
+                {!claudeAuthHasSystemOverride && claudeAuthLoginSession?.user_code ? (
+                  <div className="profile-codex-auth-dialog-block">
+                    <div className="field-label">One-time code</div>
+                    <code className="profile-codex-auth-code">{claudeAuthLoginSession.user_code}</code>
+                  </div>
+                ) : null}
+                {claudeAuthHasPendingSignIn ? (
+                  <div className="profile-codex-auth-dialog-block">
+                    <div className="field-label">Browser return code</div>
+                    <p className="meta">If the browser shows “Paste this into Claude Code”, paste that code here.</p>
+                    <div className="workspace-auth-inline-actions">
+                      <input
+                        className="search-panel-input"
+                        type="text"
+                        inputMode="text"
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        placeholder="Paste Claude code"
+                        value={claudeAuthManualCodeInput}
+                        onChange={(event) => setClaudeAuthManualCodeInput(event.target.value)}
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={() => {
+                          void handleSubmitClaudeDeviceAuthCode()
+                        }}
+                        disabled={!claudeAuthCanSubmitCode}
+                      >
+                        {submitClaudeDeviceAuthCodePending ? 'Submitting...' : 'Submit code'}
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+                {claudeAuthSessionStatusLabel ? (
+                  <div className="profile-codex-auth-dialog-block">
+                    <div className="field-label">Status</div>
+                    <span className="status-chip">{claudeAuthSessionStatusLabel}</span>
+                  </div>
+                ) : null}
+                {claudeAuthLoginSession?.error ? (
+                  <div className="notice notice-error">{claudeAuthLoginSession.error}</div>
+                ) : null}
+              </div>
+              <div className="row wrap profile-actions">
+                {canManageClaudeAuth && claudeAuthHasPendingSignIn ? (
+                  <button
+                    type="button"
+                    className="button-secondary"
+                    onClick={() => {
+                      void handleCancelClaudeDeviceAuth()
+                    }}
+                    disabled={cancelClaudeDeviceAuthPending}
+                  >
+                    {cancelClaudeDeviceAuthPending ? 'Cancelling...' : 'Cancel sign-in'}
+                  </button>
+                ) : null}
+                {claudeAuthHasSystemOverride && !claudeAuthHasPendingSignIn && claudeAuthCanRemoveOverride ? (
+                  <button
+                    type="button"
+                    className="button-secondary"
+                    onClick={() => {
+                      void handleDeleteClaudeAuthOverride()
+                    }}
+                    disabled={!claudeAuthCanRemoveOverride}
+                  >
+                    {deleteClaudeAuthOverridePending ? 'Removing...' : 'Remove override'}
+                  </button>
+                ) : null}
+                <AlertDialog.Cancel asChild>
+                  <button type="button" className="button-secondary">Close</button>
+                </AlertDialog.Cancel>
+              </div>
+            </AlertDialog.Content>
+          </AlertDialog.Portal>
+        </AlertDialog.Root>
       </section>
     </Tooltip.Provider>
   )
@@ -2042,6 +3164,7 @@ export function ProfilePanel({
 
 export function AdminPanel({
   canManageUsers,
+  workspaceRole,
   workspaceId,
   users,
   usersLoading,
@@ -2059,6 +3182,9 @@ export function AdminPanel({
   resetPendingUserId,
   onUpdateRole,
   updateRolePendingUserId,
+  onUpdateAgentRuntime,
+  updateAgentRuntimePendingUserId,
+  agentExecutionAvailableModels,
   onDeactivateUser,
   deactivatePendingUserId,
   workspaceSkills,
@@ -2071,8 +3197,10 @@ export function AdminPanel({
   onImportWorkspaceSkillFile,
   onPatchWorkspaceSkill,
   onDeleteWorkspaceSkill,
+  embeddedTab,
 }: {
   canManageUsers: boolean
+  workspaceRole: string
   workspaceId: string
   users: AdminWorkspaceUser[]
   usersLoading: boolean
@@ -2090,6 +3218,14 @@ export function AdminPanel({
   resetPendingUserId: string | null
   onUpdateRole: (userId: string, role: string) => void
   updateRolePendingUserId: string | null
+  onUpdateAgentRuntime: (payload: {
+    targetUserId: string
+    model?: string | null
+    reasoning_effort?: string | null
+    use_for_background_processing?: boolean | null
+  }) => void
+  updateAgentRuntimePendingUserId: string | null
+  agentExecutionAvailableModels: string[]
   onDeactivateUser: (userId: string) => void
   deactivatePendingUserId: string | null
   workspaceSkills: WorkspaceSkillsPage | undefined
@@ -2121,6 +3257,7 @@ export function AdminPanel({
     }
   }) => Promise<unknown>
   onDeleteWorkspaceSkill: (skillId: string) => Promise<unknown>
+  embeddedTab?: 'users' | 'skills'
 }) {
   const [skillSourceUrl, setSkillSourceUrl] = React.useState('')
   const [skillKey, setSkillKey] = React.useState('')
@@ -2134,7 +3271,7 @@ export function AdminPanel({
   const [workspaceSkillEditorTrustLevel, setWorkspaceSkillEditorTrustLevel] = React.useState<
     'verified' | 'reviewed' | 'untrusted'
   >('reviewed')
-  const [adminTab, setAdminTab] = React.useState<'users' | 'skills'>('users')
+  const [adminTab, setAdminTab] = React.useState<'users' | 'skills'>(embeddedTab ?? 'users')
   const [skillsSearchQ, setSkillsSearchQ] = React.useState('')
   const [selectedWorkspaceSkillId, setSelectedWorkspaceSkillId] = React.useState<string | null>(null)
   const workspaceSkillFileInputRef = React.useRef<HTMLInputElement | null>(null)
@@ -2143,9 +3280,14 @@ export function AdminPanel({
   const totalSkills = workspaceSkills?.total ?? workspaceSkillItems.length
   const activeUsers = React.useMemo(() => users.filter((item) => Boolean(item.is_active)).length, [users])
   const inactiveUsers = Math.max(0, totalUsers - activeUsers)
+  const actorIsOwner = normalizeOptionValue(workspaceRole, ADMIN_ROLE_OPTIONS, 'Member') === 'Owner'
+  const createRoleOptions = React.useMemo(
+    () => (actorIsOwner ? ADMIN_ROLE_OPTIONS : NON_OWNER_ROLE_OPTIONS),
+    [actorIsOwner]
+  )
   const normalizedCreateRole = React.useMemo(
-    () => normalizeOptionValue(role, ADMIN_ROLE_OPTIONS, 'Member'),
-    [role]
+    () => normalizeOptionValue(role, createRoleOptions, 'Member'),
+    [createRoleOptions, role]
   )
   const getWorkspaceSkillSourceContent = React.useCallback((manifest: Record<string, unknown> | undefined): string => {
     if (!manifest || typeof manifest !== 'object') return ''
@@ -2233,10 +3375,22 @@ export function AdminPanel({
     }
   }, [getWorkspaceSkillSourceContent, selectedWorkspaceSkill])
 
+  React.useEffect(() => {
+    if (embeddedTab && adminTab !== embeddedTab) {
+      setAdminTab(embeddedTab)
+    }
+  }, [adminTab, embeddedTab])
+
+  React.useEffect(() => {
+    if (!actorIsOwner && isAdminTierRole(role)) {
+      setRole('Member')
+    }
+  }, [actorIsOwner, role, setRole])
+
   if (!canManageUsers) {
     return (
       <section className="card">
-        <h2>Admin</h2>
+        <h2>Workspace</h2>
         <p className="meta">Admin access required.</p>
       </section>
     )
@@ -2244,34 +3398,38 @@ export function AdminPanel({
 
   return (
     <Tooltip.Provider delayDuration={180}>
-      <section className="card admin-panel">
-      <div className="admin-panel-head">
-        <div>
-          <h2>Admin</h2>
-          <p className="meta">Create users, assign workspace roles, and rotate credentials.</p>
-        </div>
-        <span className="status-chip admin-workspace-chip">Workspace: {workspaceId || 'n/a'}</span>
-      </div>
-      <div className="admin-panel-summary">
-        <span className="status-chip admin-summary-chip">
-          <Icon path="M16 11c1.66 0 3-1.57 3-3.5S17.66 4 16 4s-3 1.57-3 3.5 1.34 3.5 3 3.5M8 11c1.66 0 3-1.57 3-3.5S9.66 4 8 4 5 5.57 5 7.5 6.34 11 8 11M8 13c-2.67 0-8 1.34-8 4v3h10v-3c0-1.53.82-2.75 2.05-3.73C10.72 13.09 9.32 13 8 13M16 13c-.26 0-.54.02-.83.05 1.43 1 2.33 2.39 2.33 3.95v3H24v-3c0-2.66-5.33-4-8-4" />
-          <span>Users: {totalUsers}</span>
-        </span>
-        <span className="status-chip admin-summary-chip">
-          <Icon path="M9 12l2 2 4-4M12 3l7 4v5c0 5-3.5 8.5-7 9.5-3.5-1-7-4.5-7-9.5V7l7-4z" />
-          <span>Active: {activeUsers}</span>
-        </span>
-        {inactiveUsers > 0 ? (
-          <span className="status-chip admin-summary-chip">
-            <Icon path="M6 6l12 12M18 6 6 18" />
-            <span>Inactive: {inactiveUsers}</span>
-          </span>
-        ) : null}
-        <span className="status-chip admin-summary-chip">
-          <Icon path="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 4.5A2.5 2.5 0 0 1 6.5 7H20M6.5 7A2.5 2.5 0 0 1 4 9.5v10" />
-          <span>Skills: {totalSkills}</span>
-        </span>
-      </div>
+      <section className={`card admin-panel ${embeddedTab ? 'admin-panel-embedded' : ''}`.trim()}>
+      {!embeddedTab ? (
+        <>
+          <div className="admin-panel-head">
+            <div>
+              <h2>Workspace admin</h2>
+              <p className="meta">Create users, assign workspace roles, and maintain the workspace skills catalog.</p>
+            </div>
+            <span className="status-chip admin-workspace-chip">Workspace: {workspaceId || 'n/a'}</span>
+          </div>
+          <div className="admin-panel-summary">
+            <span className="status-chip admin-summary-chip">
+              <Icon path="M16 11c1.66 0 3-1.57 3-3.5S17.66 4 16 4s-3 1.57-3 3.5 1.34 3.5 3 3.5M8 11c1.66 0 3-1.57 3-3.5S9.66 4 8 4 5 5.57 5 7.5 6.34 11 8 11M8 13c-2.67 0-8 1.34-8 4v3h10v-3c0-1.53.82-2.75 2.05-3.73C10.72 13.09 9.32 13 8 13M16 13c-.26 0-.54.02-.83.05 1.43 1 2.33 2.39 2.33 3.95v3H24v-3c0-2.66-5.33-4-8-4" />
+              <span>Users: {totalUsers}</span>
+            </span>
+            <span className="status-chip admin-summary-chip">
+              <Icon path="M9 12l2 2 4-4M12 3l7 4v5c0 5-3.5 8.5-7 9.5-3.5-1-7-4.5-7-9.5V7l7-4z" />
+              <span>Active: {activeUsers}</span>
+            </span>
+            {inactiveUsers > 0 ? (
+              <span className="status-chip admin-summary-chip">
+                <Icon path="M6 6l12 12M18 6 6 18" />
+                <span>Inactive: {inactiveUsers}</span>
+              </span>
+            ) : null}
+            <span className="status-chip admin-summary-chip">
+              <Icon path="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 4.5A2.5 2.5 0 0 1 6.5 7H20M6.5 7A2.5 2.5 0 0 1 4 9.5v10" />
+              <span>Skills: {totalSkills}</span>
+            </span>
+          </div>
+        </>
+      ) : null}
 
       <Tabs.Root
         className="admin-tabs"
@@ -2280,22 +3438,24 @@ export function AdminPanel({
           if (nextTab === 'users' || nextTab === 'skills') setAdminTab(nextTab)
         }}
       >
-        <Tabs.List className="admin-tabs-list" aria-label="Admin sections">
-          <Tabs.Trigger className="admin-tab-trigger" value="users">
-            <span className="admin-tab-trigger-icon" aria-hidden="true">
-              <Icon path="M16 11c1.66 0 3-1.57 3-3.5S17.66 4 16 4s-3 1.57-3 3.5 1.34 3.5 3 3.5M8 11c1.66 0 3-1.57 3-3.5S9.66 4 8 4 5 5.57 5 7.5 6.34 11 8 11M8 13c-2.67 0-8 1.34-8 4v3h10v-3c0-1.53.82-2.75 2.05-3.73C10.72 13.09 9.32 13 8 13M16 13c-.26 0-.54.02-.83.05 1.43 1 2.33 2.39 2.33 3.95v3H24v-3c0-2.66-5.33-4-8-4" />
-            </span>
-            <span>Users</span>
-            <span className="status-chip admin-tab-count">{totalUsers}</span>
-          </Tabs.Trigger>
-          <Tabs.Trigger className="admin-tab-trigger" value="skills">
-            <span className="admin-tab-trigger-icon" aria-hidden="true">
-              <Icon path="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 4.5A2.5 2.5 0 0 1 6.5 7H20M6.5 7A2.5 2.5 0 0 1 4 9.5v10" />
-            </span>
-            <span>Skills catalog</span>
-            <span className="status-chip admin-tab-count">{totalSkills}</span>
-          </Tabs.Trigger>
-        </Tabs.List>
+        {!embeddedTab ? (
+          <Tabs.List className="admin-tabs-list" aria-label="Admin sections">
+            <Tabs.Trigger className="admin-tab-trigger" value="users">
+              <span className="admin-tab-trigger-icon" aria-hidden="true">
+                <Icon path="M16 11c1.66 0 3-1.57 3-3.5S17.66 4 16 4s-3 1.57-3 3.5 1.34 3.5 3 3.5M8 11c1.66 0 3-1.57 3-3.5S9.66 4 8 4 5 5.57 5 7.5 6.34 11 8 11M8 13c-2.67 0-8 1.34-8 4v3h10v-3c0-1.53.82-2.75 2.05-3.73C10.72 13.09 9.32 13 8 13M16 13c-.26 0-.54.02-.83.05 1.43 1 2.33 2.39 2.33 3.95v3H24v-3c0-2.66-5.33-4-8-4" />
+              </span>
+              <span>Users</span>
+              <span className="status-chip admin-tab-count">{totalUsers}</span>
+            </Tabs.Trigger>
+            <Tabs.Trigger className="admin-tab-trigger" value="skills">
+              <span className="admin-tab-trigger-icon" aria-hidden="true">
+                <Icon path="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 4.5A2.5 2.5 0 0 1 6.5 7H20M6.5 7A2.5 2.5 0 0 1 4 9.5v10" />
+              </span>
+              <span>Skills catalog</span>
+              <span className="status-chip admin-tab-count">{totalSkills}</span>
+            </Tabs.Trigger>
+          </Tabs.List>
+        ) : null}
 
         <Tabs.Content className="admin-tab-content" value="users">
           <Accordion.Root className="profile-accordion admin-accordion" type="single" collapsible defaultValue="create-user">
@@ -2314,6 +3474,11 @@ export function AdminPanel({
               </Accordion.Header>
               <Accordion.Content className="profile-accordion-content">
                 <div className="admin-create">
+                  {!actorIsOwner ? (
+                    <div className="notice">
+                      Admins can create Member and Guest users. Owner and Admin roles require an owner.
+                    </div>
+                  ) : null}
                   <div className="admin-create-grid">
                     <label className="field-control">
                       <span className="field-label">Username</span>
@@ -2338,7 +3503,7 @@ export function AdminPanel({
                       <AdminSelect
                         value={normalizedCreateRole}
                         onValueChange={setRole}
-                        options={ADMIN_ROLE_OPTIONS}
+                        options={createRoleOptions}
                         ariaLabel="New user workspace role"
                         disabled={createPending}
                       />
@@ -2373,94 +3538,246 @@ export function AdminPanel({
               <div className="meta">No users.</div>
             ) : (
               <div className="admin-user-list">
-                {users.map((item) => {
-                  const canResetPassword = item.can_reset_password ?? item.user_type === 'human'
-                  const canDeactivate = item.can_deactivate ?? (item.user_type === 'human' && item.is_active)
-                  const roleUpdatePending = updateRolePendingUserId === item.id
-                  const resetPending = resetPendingUserId === item.id
-                  const deactivatePending = deactivatePendingUserId === item.id
-                  const normalizedUserRole = normalizeOptionValue(String(item.role || ''), ADMIN_ROLE_OPTIONS, 'Member')
-                  return (
-                    <article key={item.id} className="admin-user-row">
-                      <div className="admin-user-main">
-                        <div className="admin-user-title">
-                          <strong>{item.full_name || item.username}</strong>
-                          <span className="admin-user-username">@{item.username}</span>
-                        </div>
-                        <div className="admin-user-badges">
-                          <span className="status-chip">{item.role}</span>
-                          <span className="status-chip">{item.user_type}</span>
-                          {canResetPassword && item.must_change_password ? <span className="status-chip">must change password</span> : null}
-                          {!canResetPassword ? <span className="status-chip">service account</span> : null}
-                          {!item.is_active ? <span className="status-chip">inactive</span> : null}
-                        </div>
-                      </div>
-                      <div className="admin-user-actions">
-                        <label className="field-control admin-role-field">
-                          <span className="field-label">Role</span>
-                          <AdminSelect
-                            value={normalizedUserRole}
-                            onValueChange={(nextRole) => {
-                              if (nextRole === normalizedUserRole) return
-                              onUpdateRole(item.id, nextRole)
-                            }}
-                            options={ADMIN_ROLE_OPTIONS}
-                            disabled={roleUpdatePending}
-                            ariaLabel={`Set workspace role for ${item.username}`}
-                          />
-                        </label>
-                        {item.is_active && canResetPassword ? (
-                          <Tooltip.Root>
-                            <Tooltip.Trigger asChild>
-                              <button
-                                className="admin-reset-btn"
-                                type="button"
-                                onClick={() => onResetPassword(item.id)}
-                                disabled={resetPending}
-                              >
-                                <Icon path="M20 11a8 8 0 1 0 2.3 5.6M20 4v7h-7" />
-                                <span>{resetPending ? 'Resetting...' : 'Reset password'}</span>
-                              </button>
-                            </Tooltip.Trigger>
-                            <Tooltip.Portal>
-                              <Tooltip.Content className="header-tooltip-content" sideOffset={6}>
-                                Generate a temporary password for this user
-                                <Tooltip.Arrow className="header-tooltip-arrow" />
-                              </Tooltip.Content>
-                            </Tooltip.Portal>
-                          </Tooltip.Root>
-                        ) : null}
-                        {item.is_active && canDeactivate ? (
-                          <Tooltip.Root>
-                            <Tooltip.Trigger asChild>
-                              <button
-                                className="admin-deactivate-btn"
-                                type="button"
-                                onClick={() => {
-                                  const confirmDeactivate = window.confirm(
-                                    `Deactivate ${item.username}? They will be signed out and unable to log in.`
-                                  )
-                                  if (!confirmDeactivate) return
-                                  onDeactivateUser(item.id)
+                <Accordion.Root className="admin-user-accordion" type="multiple">
+                  {users.map((item) => {
+                    const canResetPassword = item.can_reset_password ?? item.user_type === 'human'
+                    const canDeactivate = item.can_deactivate ?? (item.user_type === 'human' && item.is_active)
+                    const canUpdateRole = item.can_update_role ?? (item.user_type === 'human' && !isAdminTierRole(item.role))
+                    const roleUpdatePending = updateRolePendingUserId === item.id
+                    const resetPending = resetPendingUserId === item.id
+                    const deactivatePending = deactivatePendingUserId === item.id
+                    const runtimePending = updateAgentRuntimePendingUserId === item.id
+                    const normalizedUserRole = normalizeOptionValue(String(item.role || ''), ADMIN_ROLE_OPTIONS, 'Member')
+                    const rowRoleOptions = canUpdateRole
+                      ? (actorIsOwner ? ADMIN_ROLE_OPTIONS : NON_OWNER_ROLE_OPTIONS)
+                      : [{ value: normalizedUserRole, label: normalizedUserRole }]
+                    const botProvider = resolveWorkspaceBotProvider(item)
+                    const canConfigureBackgroundRuntime = Boolean(item.can_configure_background_execution && botProvider)
+                    const backgroundRuntimeAvailable = item.background_agent_available !== false
+                    const runtimeModelOptions = botProvider
+                      ? buildProviderModelOptions(
+                          [...agentExecutionAvailableModels, String(item.background_agent_model || '')],
+                          botProvider
+                        )
+                      : []
+                    const normalizedRuntimeModel = normalizeAgentExecutionModel(item.background_agent_model)
+                    const runtimeModelValue = normalizedRuntimeModel || BACKGROUND_RUNTIME_MODEL_DEFAULT_VALUE
+                    const runtimeReasoningValue = normalizeChatReasoningEffort(item.background_agent_reasoning_effort)
+                    const runtimeReasoningOptions = botProvider ? getChatReasoningOptions(botProvider) : CODEX_CHAT_REASONING_OPTIONS
+                    const displayName = item.full_name || item.username
+                    const summaryChipLabel = canConfigureBackgroundRuntime && botProvider
+                      ? `${getAgentExecutionProviderLabel(botProvider)} runtime`
+                      : normalizedUserRole
+                    const runtimeSummaryLabel = canConfigureBackgroundRuntime && botProvider
+                      ? (
+                          normalizedRuntimeModel
+                            ? formatAgentExecutionModelLabel(normalizedRuntimeModel)
+                            : `${getAgentExecutionProviderLabel(botProvider)} · Workspace default`
+                        )
+                      : ''
+                    const summaryParts: string[] = []
+                    if (canConfigureBackgroundRuntime && botProvider) {
+                      summaryParts.push(runtimeSummaryLabel)
+                      summaryParts.push(`Reasoning ${getChatReasoningLabel(runtimeReasoningValue, botProvider)}`)
+                      summaryParts.push(
+                        item.is_background_execution_selected
+                          ? 'Used for event/classifier processing'
+                          : backgroundRuntimeAvailable
+                            ? 'Available for event/classifier processing'
+                            : 'Unavailable for event/classifier processing'
+                      )
+                    } else {
+                      summaryParts.push(item.is_active ? 'Workspace account' : 'Inactive workspace account')
+                      if (!canResetPassword) {
+                        summaryParts.push('Service account')
+                      } else if (!canUpdateRole && item.user_type === 'human' && isAdminTierRole(item.role)) {
+                        summaryParts.push('Owner approval required for role changes')
+                      } else if (canUpdateRole) {
+                        summaryParts.push('Role and access controls available')
+                      }
+                    }
+                    return (
+                      <Accordion.Item key={item.id} className="admin-user-card" value={item.id}>
+                        <Accordion.Header className="admin-user-card-header">
+                          <Accordion.Trigger className="admin-user-card-trigger">
+                            <span
+                              className={`admin-user-avatar ${canConfigureBackgroundRuntime ? 'is-bot' : ''}`.trim()}
+                              aria-hidden="true"
+                            >
+                              {getWorkspaceUserMonogram(item)}
+                            </span>
+                            <span className="admin-user-card-main">
+                              <span className="admin-user-title">
+                                <span className="admin-user-display-name">{displayName}</span>
+                                <span className="admin-user-username">@{item.username}</span>
+                              </span>
+                              <span className="admin-user-card-meta">{summaryParts.join(' · ')}</span>
+                              <span className="admin-user-badges">
+                                <span className="status-chip">{item.role}</span>
+                                <span className="status-chip">{item.user_type}</span>
+                                {canResetPassword && item.must_change_password ? <span className="status-chip">must change password</span> : null}
+                                {!canResetPassword ? <span className="status-chip">service account</span> : null}
+                                {!canUpdateRole && item.user_type === 'human' && isAdminTierRole(item.role) ? (
+                                  <span className="status-chip">owner required</span>
+                                ) : null}
+                                {item.is_background_execution_selected ? <span className="status-chip">event/classifier runtime</span> : null}
+                                {canConfigureBackgroundRuntime && !backgroundRuntimeAvailable ? (
+                                  <span className="status-chip">not configured</span>
+                                ) : null}
+                                {canConfigureBackgroundRuntime && item.background_agent_model_is_fallback ? (
+                                  <span className="status-chip">runtime fallback</span>
+                                ) : null}
+                                {!item.is_active ? <span className="status-chip">inactive</span> : null}
+                              </span>
+                            </span>
+                            <span className="admin-user-card-aside">
+                              <span className="status-chip admin-user-card-summary-chip">{summaryChipLabel}</span>
+                              <span className="admin-user-card-summary-text">Open controls</span>
+                            </span>
+                            <span className="admin-user-card-chevron" aria-hidden="true">
+                              <Icon path="M6 9l6 6 6-6" />
+                            </span>
+                          </Accordion.Trigger>
+                        </Accordion.Header>
+                        <Accordion.Content className="admin-user-card-content">
+                          <div className="admin-user-control-grid">
+                            <label className="field-control admin-role-field">
+                              <span className="field-label">Role</span>
+                              <AdminSelect
+                                value={normalizedUserRole}
+                                onValueChange={(nextRole) => {
+                                  if (nextRole === normalizedUserRole) return
+                                  onUpdateRole(item.id, nextRole)
                                 }}
-                                disabled={deactivatePending}
-                              >
-                                <Icon path="M6 6l12 12M18 6 6 18" />
-                                <span>{deactivatePending ? 'Deactivating...' : 'Deactivate user'}</span>
-                              </button>
-                            </Tooltip.Trigger>
-                            <Tooltip.Portal>
-                              <Tooltip.Content className="header-tooltip-content" sideOffset={6}>
-                                Disable login and revoke active sessions
-                                <Tooltip.Arrow className="header-tooltip-arrow" />
-                              </Tooltip.Content>
-                            </Tooltip.Portal>
-                          </Tooltip.Root>
-                        ) : null}
-                      </div>
-                    </article>
-                  )
-                })}
+                                options={rowRoleOptions}
+                                disabled={roleUpdatePending || !canUpdateRole}
+                                ariaLabel={`Set workspace role for ${item.username}`}
+                              />
+                            </label>
+                            {canConfigureBackgroundRuntime && botProvider ? (
+                              <label className="field-control admin-role-field">
+                                <span className="field-label">Runtime model</span>
+                                <AdminSelect
+                                  value={runtimeModelValue}
+                                  onValueChange={(nextModel) => {
+                                    const resolvedModel = nextModel === BACKGROUND_RUNTIME_MODEL_DEFAULT_VALUE ? '' : nextModel
+                                    if (resolvedModel === normalizedRuntimeModel) return
+                                    onUpdateAgentRuntime({
+                                      targetUserId: item.id,
+                                      model: resolvedModel || null,
+                                      reasoning_effort: runtimeReasoningValue,
+                                    })
+                                  }}
+                                  options={[
+                                    { value: BACKGROUND_RUNTIME_MODEL_DEFAULT_VALUE, label: 'Workspace default' },
+                                    ...runtimeModelOptions,
+                                  ]}
+                                  disabled={runtimePending}
+                                  ariaLabel={`Set runtime model for ${item.username}`}
+                                />
+                              </label>
+                            ) : null}
+                            {canConfigureBackgroundRuntime && botProvider ? (
+                              <label className="field-control admin-role-field">
+                                <span className="field-label">Reasoning</span>
+                                <AdminSelect
+                                  value={runtimeReasoningValue}
+                                  onValueChange={(nextReasoning) => {
+                                    if (nextReasoning === runtimeReasoningValue) return
+                                    onUpdateAgentRuntime({
+                                      targetUserId: item.id,
+                                      model: normalizedRuntimeModel || null,
+                                      reasoning_effort: nextReasoning,
+                                    })
+                                  }}
+                                  options={runtimeReasoningOptions}
+                                  disabled={runtimePending}
+                                  ariaLabel={`Set runtime reasoning for ${item.username}`}
+                                />
+                              </label>
+                            ) : null}
+                          </div>
+                          <div className="admin-user-card-actions">
+                            {canConfigureBackgroundRuntime && backgroundRuntimeAvailable && !item.is_background_execution_selected ? (
+                              <Tooltip.Root>
+                                <Tooltip.Trigger asChild>
+                                  <button
+                                    className="admin-reset-btn"
+                                    type="button"
+                                    onClick={() =>
+                                      onUpdateAgentRuntime({
+                                        targetUserId: item.id,
+                                        use_for_background_processing: true,
+                                      })
+                                    }
+                                    disabled={runtimePending}
+                                  >
+                                    <Icon path="M5 13l4 4L19 7" />
+                                    <span>{runtimePending ? 'Saving...' : 'Use for event/classifier runtime'}</span>
+                                  </button>
+                                </Tooltip.Trigger>
+                                <Tooltip.Portal>
+                                  <Tooltip.Content className="header-tooltip-content" sideOffset={6}>
+                                    Route event storming and classifiers through this bot runtime
+                                    <Tooltip.Arrow className="header-tooltip-arrow" />
+                                  </Tooltip.Content>
+                                </Tooltip.Portal>
+                              </Tooltip.Root>
+                            ) : null}
+                            {item.is_active && canResetPassword ? (
+                              <Tooltip.Root>
+                                <Tooltip.Trigger asChild>
+                                  <button
+                                    className="admin-reset-btn"
+                                    type="button"
+                                    onClick={() => onResetPassword(item.id)}
+                                    disabled={resetPending}
+                                  >
+                                    <Icon path="M20 11a8 8 0 1 0 2.3 5.6M20 4v7h-7" />
+                                    <span>{resetPending ? 'Resetting...' : 'Reset password'}</span>
+                                  </button>
+                                </Tooltip.Trigger>
+                                <Tooltip.Portal>
+                                  <Tooltip.Content className="header-tooltip-content" sideOffset={6}>
+                                    Generate a temporary password for this user
+                                    <Tooltip.Arrow className="header-tooltip-arrow" />
+                                  </Tooltip.Content>
+                                </Tooltip.Portal>
+                              </Tooltip.Root>
+                            ) : null}
+                            {item.is_active && canDeactivate ? (
+                              <Tooltip.Root>
+                                <Tooltip.Trigger asChild>
+                                  <button
+                                    className="admin-deactivate-btn"
+                                    type="button"
+                                    onClick={() => {
+                                      const confirmDeactivate = window.confirm(
+                                        `Deactivate ${item.username}? They will be signed out and unable to log in.`
+                                      )
+                                      if (!confirmDeactivate) return
+                                      onDeactivateUser(item.id)
+                                    }}
+                                    disabled={deactivatePending}
+                                  >
+                                    <Icon path="M6 6l12 12M18 6 6 18" />
+                                    <span>{deactivatePending ? 'Deactivating...' : 'Deactivate user'}</span>
+                                  </button>
+                                </Tooltip.Trigger>
+                                <Tooltip.Portal>
+                                  <Tooltip.Content className="header-tooltip-content" sideOffset={6}>
+                                    Disable login and revoke active sessions
+                                    <Tooltip.Arrow className="header-tooltip-arrow" />
+                                  </Tooltip.Content>
+                                </Tooltip.Portal>
+                              </Tooltip.Root>
+                            ) : null}
+                          </div>
+                        </Accordion.Content>
+                      </Accordion.Item>
+                    )
+                  })}
+                </Accordion.Root>
               </div>
             )}
           </div>

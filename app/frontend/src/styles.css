@@ -4205,17 +4205,19 @@ textarea:disabled {
 }
 
 .profile-panel-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: flex-start;
-  justify-content: space-between;
   gap: 10px;
-  flex-wrap: wrap;
 }
 
 .profile-head-chips {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  justify-self: end;
 }
 
 .profile-panel-identity {
@@ -4260,9 +4262,8 @@ textarea:disabled {
   margin-top: 4px;
 }
 
-.profile-theme-chip {
+.profile-signin-chip {
   font-weight: 700;
-  text-transform: capitalize;
 }
 
 .profile-tabs {
@@ -4359,6 +4360,141 @@ textarea:disabled {
   display: grid;
   gap: 8px;
   min-width: 0;
+}
+
+.profile-workspace-grid {
+  align-items: start;
+}
+
+.workspace-overview-card {
+  grid-column: 1 / -1;
+}
+
+.workspace-auth-card {
+  display: grid;
+  gap: 10px;
+  grid-column: 1 / -1;
+}
+
+.workspace-auth-card-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+}
+
+.workspace-auth-card-title-group {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.workspace-auth-card-title-meta,
+.workspace-auth-card-description {
+  margin: 0;
+}
+
+.workspace-auth-card-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.workspace-auth-pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.workspace-auth-pill {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--brand), var(--line) 28%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 20%);
+}
+
+.workspace-auth-pill-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.workspace-auth-pill-value {
+  font-size: 12px;
+  font-weight: 700;
+  color: color-mix(in srgb, var(--text), var(--brand-strong) 12%);
+}
+
+.workspace-auth-card-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+}
+
+.workspace-auth-card-actions-main {
+  min-width: 0;
+}
+
+.workspace-auth-inline-actions {
+  justify-content: flex-start;
+}
+
+.workspace-auth-details-trigger {
+  white-space: nowrap;
+}
+
+.workspace-auth-details-chevron {
+  display: inline-flex;
+  transition: transform 0.16s ease;
+}
+
+.workspace-auth-details-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+.workspace-auth-details {
+  margin-top: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.workspace-auth-facts {
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.workspace-auth-fact {
+  margin: 0;
+  min-width: 0;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--brand), var(--line) 24%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 24%);
+}
+
+.workspace-auth-fact dt {
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.workspace-auth-fact dd {
+  margin: 6px 0 0;
+  font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .profile-pane-head {
@@ -4532,6 +4668,10 @@ textarea:disabled {
   width: 13px;
   height: 13px;
   flex-shrink: 0;
+}
+
+.profile-head-logout {
+  align-items: center;
 }
 
 .profile-voice-select {
@@ -4915,6 +5055,14 @@ textarea:disabled {
   gap: 14px;
 }
 
+.admin-panel-embedded {
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
 .admin-panel-summary {
   display: inline-flex;
   flex-wrap: wrap;
@@ -5128,34 +5276,117 @@ textarea:disabled {
   gap: 8px;
 }
 
-.admin-user-row {
-  border: 1px solid color-mix(in srgb, var(--line), transparent 5%);
-  border-radius: 14px;
-  padding: 10px;
+.admin-user-accordion {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
-  align-items: center;
-  background: color-mix(in srgb, var(--surface), var(--surface-alt) 20%);
 }
 
-.admin-user-main {
+.admin-user-card {
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 10%);
+  border-radius: 18px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at top right, color-mix(in srgb, var(--brand), transparent 92%), transparent 38%),
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--surface), var(--surface-alt) 10%),
+      color-mix(in srgb, var(--surface), var(--surface-alt) 28%)
+    );
+  box-shadow:
+    0 10px 24px color-mix(in srgb, var(--shadow), transparent 90%),
+    inset 0 1px 0 color-mix(in srgb, #ffffff, transparent 72%);
+}
+
+.admin-user-card[data-state="open"] {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 6%);
+  box-shadow:
+    0 14px 30px color-mix(in srgb, var(--shadow), transparent 86%),
+    inset 0 1px 0 color-mix(in srgb, #ffffff, transparent 68%);
+}
+
+.admin-user-card-header {
+  display: block;
+}
+
+.admin-user-card-trigger {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 12px 14px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 12px;
+  align-items: center;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.18s ease, transform 0.18s ease;
+}
+
+.admin-user-card-trigger:hover {
+  background: color-mix(in srgb, var(--surface-alt), var(--brand) 6%);
+}
+
+.admin-user-card-trigger[data-state="open"] {
+  background: color-mix(in srgb, var(--surface-alt), var(--brand) 10%);
+}
+
+.admin-user-avatar {
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--surface), white 50%), color-mix(in srgb, var(--surface-alt), var(--brand) 10%));
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 14%);
+  color: color-mix(in srgb, var(--brand-strong), var(--text) 22%);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+}
+
+.admin-user-avatar.is-bot {
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--brand), white 28%), color-mix(in srgb, var(--brand-strong), var(--surface) 20%));
+  border-color: color-mix(in srgb, var(--brand), var(--line) 6%);
+  color: #f4fff7;
+}
+
+.admin-user-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.admin-user-display-name {
+  font-size: 15px;
+  line-height: 1.2;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.admin-user-card-main {
   min-width: 0;
   display: grid;
   gap: 6px;
 }
 
-.admin-user-title {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 8px;
-  min-width: 0;
-}
-
 .admin-user-username {
   font-size: 12px;
-  color: var(--muted);
+  font-weight: 500;
+  color: color-mix(in srgb, var(--muted), var(--text) 10%);
+}
+
+.admin-user-card-meta {
+  font-size: 12px;
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--muted), var(--text) 14%);
+  overflow-wrap: anywhere;
 }
 
 .admin-user-badges {
@@ -5164,12 +5395,69 @@ textarea:disabled {
   gap: 6px;
 }
 
-.admin-user-actions {
+.admin-user-card-aside {
   display: grid;
-  grid-template-columns: minmax(156px, 196px);
+  gap: 4px;
+  justify-items: end;
+  text-align: right;
+}
+
+.admin-user-card-summary-chip {
+  min-height: 24px;
+  font-weight: 600;
+}
+
+.admin-user-card-summary-text {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.admin-user-card-chevron {
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: color-mix(in srgb, var(--brand-strong), var(--text) 26%);
+  background: color-mix(in srgb, var(--surface), var(--brand) 8%);
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 14%);
+  transition: transform 0.18s ease, background-color 0.18s ease, border-color 0.18s ease;
+}
+
+.admin-user-card-trigger[data-state="open"] .admin-user-card-chevron {
+  transform: rotate(180deg);
+  background: color-mix(in srgb, var(--surface), var(--brand) 16%);
+  border-color: color-mix(in srgb, var(--brand), var(--line) 16%);
+}
+
+.admin-user-card-content {
+  display: grid;
+  gap: 12px;
+  padding: 0 14px 14px;
+  border-top: 1px solid color-mix(in srgb, var(--line), var(--brand) 8%);
+}
+
+.admin-user-control-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.admin-user-card-actions {
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  justify-content: end;
-  align-content: center;
+}
+
+.admin-user-card-actions .admin-reset-btn,
+.admin-user-card-actions .admin-deactivate-btn {
+  width: auto;
+  min-width: 176px;
+  padding-inline: 12px;
 }
 
 .admin-role-field {
@@ -5201,6 +5489,8 @@ textarea:disabled {
   justify-content: center;
   gap: 6px;
   white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.15;
   border-radius: 12px;
   border: 1px solid color-mix(in srgb, var(--brand), var(--line) 26%);
   background: linear-gradient(
@@ -5251,6 +5541,8 @@ textarea:disabled {
   justify-content: center;
   gap: 6px;
   white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.15;
   border-radius: 12px;
   border: 1px solid color-mix(in srgb, var(--brand), var(--line) 42%);
   background: linear-gradient(
@@ -5296,6 +5588,42 @@ textarea:disabled {
   box-shadow:
     0 1px 0 color-mix(in srgb, var(--brand), transparent 84%),
     inset 0 0 0 1px color-mix(in srgb, #bbffd1, transparent 92%);
+}
+
+[data-theme="dark"] .admin-user-card {
+  background:
+    radial-gradient(circle at top right, color-mix(in srgb, var(--brand), transparent 84%), transparent 42%),
+    linear-gradient(180deg, color-mix(in srgb, var(--surface), #13241b 28%), color-mix(in srgb, var(--surface-alt), #0d1711 28%));
+  box-shadow:
+    0 14px 30px color-mix(in srgb, #000000, transparent 78%),
+    inset 0 1px 0 color-mix(in srgb, #bbffd1, transparent 92%);
+}
+
+[data-theme="dark"] .admin-user-card[data-state="open"] {
+  border-color: color-mix(in srgb, #65f59a, var(--line) 24%);
+}
+
+[data-theme="dark"] .admin-user-card-trigger:hover,
+[data-theme="dark"] .admin-user-card-trigger[data-state="open"] {
+  background: color-mix(in srgb, #173824, transparent 12%);
+}
+
+[data-theme="dark"] .admin-user-avatar {
+  background: linear-gradient(145deg, #14261c, #0f1a14);
+  border-color: color-mix(in srgb, #4db975, transparent 74%);
+  color: #dfffe9;
+}
+
+[data-theme="dark"] .admin-user-avatar.is-bot {
+  background: linear-gradient(145deg, #2a6c46, #173824);
+  border-color: color-mix(in srgb, #65f59a, transparent 70%);
+  color: #f3fff7;
+}
+
+[data-theme="dark"] .admin-user-card-chevron {
+  background: color-mix(in srgb, #173824, transparent 10%);
+  border-color: color-mix(in srgb, #4db975, transparent 72%);
+  color: #dfffe9;
 }
 
 [data-theme="dark"] .admin-tabs-list {
@@ -5379,15 +5707,33 @@ textarea:disabled {
   .admin-skill-import-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .admin-user-control-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 680px) {
+  .profile-panel-head {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+  }
+
+  .profile-head-chips {
+    gap: 5px;
+    max-width: 44vw;
+  }
+
+  .profile-head-logout {
+    padding: 5px 8px;
+  }
+
   .profile-tabs-list {
     padding: 3px;
     gap: 5px;
     overflow-x: hidden;
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .profile-tab-trigger {
@@ -5456,6 +5802,19 @@ textarea:disabled {
     grid-template-columns: 1fr;
   }
 
+  .workspace-auth-card-head,
+  .workspace-auth-card-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-auth-card-badges {
+    justify-content: flex-start;
+  }
+
+  .workspace-auth-facts {
+    grid-template-columns: 1fr;
+  }
+
   .profile-runtime-chip-row {
     gap: 5px;
   }
@@ -5493,14 +5852,46 @@ textarea:disabled {
     min-width: 132px;
   }
 
-  .admin-user-row {
-    grid-template-columns: 1fr;
-    align-items: stretch;
+  .admin-user-card-trigger {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "avatar main chevron"
+      "avatar aside aside";
+    align-items: start;
   }
 
-  .admin-user-actions {
+  .admin-user-avatar {
+    grid-area: avatar;
+  }
+
+  .admin-user-card-main {
+    grid-area: main;
+  }
+
+  .admin-user-card-aside {
+    grid-area: aside;
+    justify-items: start;
+    text-align: left;
+    margin-left: 0;
+  }
+
+  .admin-user-card-chevron {
+    grid-area: chevron;
+    justify-self: end;
+  }
+
+  .admin-user-control-grid {
     grid-template-columns: 1fr;
-    justify-content: stretch;
+  }
+
+  .admin-user-card-actions {
+    flex-direction: column;
+  }
+
+  .admin-user-card-actions .admin-reset-btn,
+  .admin-user-card-actions .admin-deactivate-btn {
+    width: 100%;
+    min-width: 0;
   }
 
   .admin-tabs-list {
@@ -11428,6 +11819,105 @@ textarea {
   white-space: nowrap;
 }
 
+.external-ref-list {
+  gap: 7px;
+}
+
+.external-ref-item {
+  max-width: min(100%, 360px);
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 14%);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 18%);
+  padding: 2px;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white, transparent 72%);
+}
+
+.external-ref-chip {
+  gap: 8px;
+  justify-content: flex-start;
+  min-height: 32px;
+  padding: 0 12px 0 10px;
+  border: none;
+  background: transparent;
+  color: color-mix(in srgb, var(--text), var(--brand-strong) 10%);
+  box-shadow: none;
+  max-width: min(100%, 310px);
+}
+
+.external-ref-chip:hover,
+.external-ref-chip:focus-visible {
+  background: color-mix(in srgb, var(--surface), var(--brand) 10%);
+  color: color-mix(in srgb, var(--text), var(--brand) 18%);
+}
+
+.external-ref-chip-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface-alt), var(--brand) 18%);
+  color: color-mix(in srgb, var(--brand-strong), var(--text) 22%);
+  flex: 0 0 auto;
+}
+
+.external-ref-chip-icon .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.external-ref-chip-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.external-ref-menu-trigger {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  border-radius: 999px;
+  border: none;
+  background: color-mix(in srgb, var(--surface-alt), var(--surface) 26%);
+  color: color-mix(in srgb, var(--muted), var(--text) 22%);
+  flex: 0 0 auto;
+}
+
+.external-ref-menu-trigger:hover,
+.external-ref-menu-trigger:focus-visible {
+  background: color-mix(in srgb, var(--surface-alt), var(--brand) 12%);
+  color: color-mix(in srgb, var(--text), var(--brand) 18%);
+}
+
+.external-ref-menu {
+  min-width: 180px;
+}
+
+.external-ref-menu-separator {
+  height: 1px;
+  margin: 4px 2px;
+  background: color-mix(in srgb, var(--line), transparent 10%);
+}
+
+.external-ref-tooltip-body {
+  display: grid;
+  gap: 4px;
+  max-width: min(78vw, 420px);
+}
+
+.external-ref-tooltip-body strong,
+.external-ref-tooltip-body span,
+.external-ref-tooltip-body code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 900px) {
   .shell {
     grid-template-columns: 1fr;
@@ -11457,6 +11947,16 @@ textarea {
 
   .resource-ref-chip {
     max-width: min(100%, 220px);
+  }
+
+  .external-ref-item {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .external-ref-chip {
+    max-width: none;
+    flex: 1 1 auto;
   }
 
   .project-inline-editor .row {
@@ -12885,19 +13385,225 @@ textarea {
   word-break: break-word;
 }
 
+.git-repository-dialog {
+  width: min(1280px, calc(100vw - 32px));
+  max-height: min(92vh, 920px);
+  overflow: hidden;
+}
+
+.git-repository-dialog-body {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+}
+
+.git-repository-toolbar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.git-repository-branch-picker {
+  display: grid;
+  gap: 6px;
+}
+
+.git-repository-branch-picker select {
+  min-width: 220px;
+  width: min(100%, 320px);
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--line), transparent 10%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 10%);
+  color: var(--text);
+  padding: 8px 10px;
+}
+
+.git-repository-breadcrumbs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.git-repository-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(240px, 340px) minmax(0, 1fr);
+  gap: 12px;
+  min-height: 0;
+  align-items: start;
+}
+
+.git-repository-branches-panel,
+.git-repository-tree-panel,
+.git-repository-preview-panel {
+  display: grid;
+  gap: 8px;
+  min-height: 0;
+  align-content: start;
+  align-self: start;
+}
+
+.git-repository-branch-list,
+.git-repository-tree-list {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  max-height: 560px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.git-repository-branch-card,
+.git-repository-tree-entry {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--line), transparent 10%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 18%);
+  text-align: left;
+  cursor: pointer;
+}
+
+.git-repository-branch-card.active,
+.git-repository-tree-entry.active {
+  border-color: color-mix(in srgb, var(--brand-strong), var(--brand) 32%);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand), transparent 50%);
+}
+
+.git-repository-tree-entry {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.git-repository-tree-entry-icon {
+  width: 16px;
+  height: 16px;
+  color: var(--muted);
+}
+
+.git-repository-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.git-repository-preview {
+  min-height: 560px;
+  margin: 0;
+  overflow: auto;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--line), transparent 10%);
+  background: color-mix(in srgb, var(--surface-alt), black 6%);
+  color: color-mix(in srgb, var(--text), var(--surface) 4%);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.git-repository-preview .markdown {
+  margin: 0;
+}
+
+.git-repository-preview .markdown pre {
+  margin: 0;
+}
+
+.git-repository-preview-fallback {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 @media (max-width: 980px) {
   .docker-runtime-summary-grid,
   .docker-runtime-layout,
-  .docker-runtime-detail-grid {
+  .docker-runtime-detail-grid,
+  .git-repository-layout {
     grid-template-columns: 1fr;
   }
 
   .project-docker-runtime-bar,
   .docker-runtime-detail-head,
   .docker-runtime-container-card-head,
-  .docker-runtime-logs-head {
+  .docker-runtime-logs-head,
+  .git-repository-toolbar,
+  .git-repository-preview-head {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .git-repository-dialog {
+    width: min(100vw - 20px, 760px);
+    max-height: 92vh;
+  }
+
+  .git-repository-branch-picker,
+  .git-repository-branch-picker select,
+  .git-repository-breadcrumbs {
+    width: 100%;
+  }
+
+  .git-repository-branch-list,
+  .git-repository-tree-list {
+    max-height: 220px;
+  }
+
+  .git-repository-preview {
+    min-height: 280px;
+    max-height: 40vh;
+  }
+}
+
+@media (max-width: 640px) and (orientation: portrait) {
+  .git-repository-dialog {
+    width: calc(100vw - 12px);
+    max-height: 96vh;
+  }
+
+  .git-repository-dialog-body {
+    gap: 10px;
+  }
+
+  .docker-runtime-summary-grid {
+    gap: 8px;
+  }
+
+  .docker-runtime-summary-card {
+    padding: 10px;
+  }
+
+  .git-repository-toolbar {
+    gap: 10px;
+  }
+
+  .git-repository-breadcrumbs {
+    gap: 6px;
+  }
+
+  .git-repository-branch-list,
+  .git-repository-tree-list {
+    max-height: 180px;
+    gap: 6px;
+  }
+
+  .git-repository-branch-card,
+  .git-repository-tree-entry {
+    padding: 9px 10px;
+  }
+
+  .git-repository-preview {
+    min-height: 220px;
+    max-height: 34vh;
+    padding: 10px 12px;
+    font-size: 11px;
   }
 }
 

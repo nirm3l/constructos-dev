@@ -45,11 +45,11 @@ class LicenseActivationRequest(BaseModel):
     activation_code: str = Field(min_length=8, max_length=128)
 
 
-def _user_can_manage_global_update(db: Session, user_id: str) -> bool:
+def _user_is_workspace_owner(db: Session, user_id: str) -> bool:
     membership = db.execute(
         select(WorkspaceMember.id).where(
             WorkspaceMember.user_id == user_id,
-            WorkspaceMember.role.in_(("Owner", "Admin")),
+            WorkspaceMember.role == "Owner",
         ).limit(1)
     ).scalar_one_or_none()
     return membership is not None
@@ -70,7 +70,7 @@ def _docker_env_with_proxy() -> dict[str, str]:
     return env
 
 
-def _resolve_task_app_host_binds(*, env: dict[str, str]) -> tuple[str, str, str]:
+def _resolve_task_app_host_binds(*, env: dict[str, str]) -> tuple[str, str, str, str]:
     inspect_cmd = [_AUTO_UPDATE_DOCKER_BIN, "inspect", "task-app", "--format", "{{json .Mounts}}"]
     inspect_output = subprocess.check_output(inspect_cmd, env=env, text=True).strip()
     mounts = json.loads(inspect_output or "[]")
@@ -88,10 +88,11 @@ def _resolve_task_app_host_binds(*, env: dict[str, str]) -> tuple[str, str, str]
 
     code_config = by_destination.get("/home/app/.codex/config.toml", "").strip()
     code_auth = by_destination.get("/home/app/.codex/auth.json", "").strip()
+    claude_auth = by_destination.get("/home/app/.claude.json", "").strip()
     workspace = by_destination.get("/home/app/workspace", "").strip()
-    if not code_config or not code_auth or not workspace:
-        raise RuntimeError("required task-app bind mounts are missing (config/auth/workspace)")
-    return code_config, code_auth, workspace
+    if not code_config or not code_auth or not claude_auth or not workspace:
+        raise RuntimeError("required task-app bind mounts are missing (config/auth/claude-auth/workspace)")
+    return code_config, code_auth, claude_auth, workspace
 
 
 def _stream_process_lines(*, cmd: list[str], env: dict[str, str], log_file) -> int:
@@ -151,7 +152,7 @@ def _run_auto_update_background(*, run_id: str) -> None:
     _publish_auto_update_event({"type": "status", "message": "Pulling latest images for task-app and mcp-tools."})
     try:
         env = _docker_env_with_proxy()
-        code_config_file, code_auth_file, workspace_mount = _resolve_task_app_host_binds(env=env)
+        code_config_file, code_auth_file, claude_auth_file, workspace_mount = _resolve_task_app_host_binds(env=env)
         repo_mount_host = str(Path(code_config_file).resolve().parent).strip()
         if not repo_mount_host:
             raise RuntimeError("unable to derive repository host path from CODEX_CONFIG_FILE mount")
@@ -198,6 +199,9 @@ def _run_auto_update_background(*, run_id: str) -> None:
                 "-e",
                 f"CODEX_AUTH_FILE={code_auth_file}",
                 "-e",
+                f"CLAUDE_AUTH_FILE={claude_auth_file}",
+                "-e",
+                f"AGENT_WORKSPACE_MOUNT={workspace_mount}",
                 f"AGENT_CODEX_WORKSPACE_MOUNT={workspace_mount}",
                 "-e",
                 f"TASK_APP_IMAGE={task_app_image}",
@@ -263,8 +267,11 @@ def get_license_status(
 @router.post("/api/license/activate")
 def activate_license(
     payload: LicenseActivationRequest,
-    _user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
+    if not _user_is_workspace_owner(db, str(user.id)):
+        raise HTTPException(status_code=403, detail="Only workspace owners can activate a license.")
     try:
         result = activate_with_code_once(payload.activation_code)
     except LicenseActivationError as exc:
@@ -277,8 +284,8 @@ def auto_update_app_images(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if not _user_can_manage_global_update(db, str(user.id)):
-        raise HTTPException(status_code=403, detail="Only Owner/Admin users can trigger application auto-update.")
+    if not _user_is_workspace_owner(db, str(user.id)):
+        raise HTTPException(status_code=403, detail="Only workspace owners can trigger application auto-update.")
 
     with _AUTO_UPDATE_LOCK:
         if _AUTO_UPDATE_RUNNING:
@@ -315,8 +322,8 @@ def auto_update_stream(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if not _user_can_manage_global_update(db, str(user.id)):
-        raise HTTPException(status_code=403, detail="Only Owner/Admin users can read application auto-update stream.")
+    if not _user_is_workspace_owner(db, str(user.id)):
+        raise HTTPException(status_code=403, detail="Only workspace owners can read application auto-update stream.")
 
     normalized_run_id = str(run_id or "").strip()
     if not normalized_run_id:

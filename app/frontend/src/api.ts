@@ -1,6 +1,7 @@
 import type {
   AdminUserCreateResponse,
   AdminUserDeactivateResponse,
+  AdminUserAgentRuntimeUpdateResponse,
   AdminUserRoleUpdateResponse,
   AdminUserResetPasswordResponse,
   AdminUsersPage,
@@ -16,6 +17,7 @@ import type {
   ChatMcpServer,
   ChatReasoningEffort,
   ChatSessionRecord,
+  ClaudeAuthLoginMethod,
   CodexAuthStatus,
   EventStormingOverview,
   EventStormingEntityLinks,
@@ -28,6 +30,10 @@ import type {
   GraphProjectOverview,
   GraphProjectSubgraph,
   ProjectDockerComposeRuntimeSnapshot,
+  ProjectGitRepositoryBranchesResponse,
+  ProjectGitRepositoryFileResponse,
+  ProjectGitRepositorySummary,
+  ProjectGitRepositoryTreeResponse,
   ProjectTaskDependencyGraph,
   TaskDependencyGraphEventDetail,
   Notification,
@@ -265,6 +271,21 @@ export const deactivateAdminUser = (
   payload: { workspace_id: string }
 ) =>
   api<AdminUserDeactivateResponse>(`/api/admin/users/${targetUserId}/deactivate`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const updateAdminUserAgentRuntime = (
+  userId: string,
+  targetUserId: string,
+  payload: {
+    workspace_id: string
+    model?: string | null
+    reasoning_effort?: string | null
+    use_for_background_processing?: boolean | null
+  }
+) =>
+  api<AdminUserAgentRuntimeUpdateResponse>(`/api/admin/users/${targetUserId}/agent-runtime`, userId, {
     method: 'POST',
     body: JSON.stringify(payload),
   })
@@ -944,6 +965,31 @@ export const deleteCodexAuthOverride = (userId: string) =>
     method: 'DELETE',
   })
 
+export const getClaudeAuthStatus = (userId: string) =>
+  api<CodexAuthStatus>('/api/agents/claude-auth', userId)
+
+export const startClaudeDeviceAuth = (userId: string, payload?: { login_method?: ClaudeAuthLoginMethod | null }) =>
+  api<CodexAuthStatus>('/api/agents/claude-auth/device/start', userId, {
+    method: 'POST',
+    body: JSON.stringify(payload ?? {}),
+  })
+
+export const cancelClaudeDeviceAuth = (userId: string) =>
+  api<CodexAuthStatus>('/api/agents/claude-auth/device/cancel', userId, {
+    method: 'POST',
+  })
+
+export const submitClaudeDeviceAuthCode = (userId: string, payload: { code: string }) =>
+  api<CodexAuthStatus>('/api/agents/claude-auth/device/submit', userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const deleteClaudeAuthOverride = (userId: string) =>
+  api<CodexAuthStatus>('/api/agents/claude-auth/override', userId, {
+    method: 'DELETE',
+  })
+
 export const getNotifications = (userId: string) => api<Notification[]>('/api/notifications', userId)
 
 export const markNotificationRead = (userId: string, id: string) =>
@@ -1151,6 +1197,50 @@ export const getProjectDockerComposeRuntime = (
 ) =>
   api<ProjectDockerComposeRuntimeSnapshot>(
     `/api/projects/${projectId}/docker-compose/runtime`,
+    userId
+  )
+
+export const getProjectGitRepositorySummary = (
+  userId: string,
+  projectId: string
+) =>
+  api<ProjectGitRepositorySummary>(
+    `/api/projects/${projectId}/git-delivery/repository`,
+    userId
+  )
+
+export const getProjectGitRepositoryBranches = (
+  userId: string,
+  projectId: string
+) =>
+  api<ProjectGitRepositoryBranchesResponse>(
+    `/api/projects/${projectId}/git-delivery/repository/branches`,
+    userId
+  )
+
+export const getProjectGitRepositoryTree = (
+  userId: string,
+  projectId: string,
+  params?: { ref?: string; path?: string }
+) =>
+  api<ProjectGitRepositoryTreeResponse>(
+    `/api/projects/${projectId}/git-delivery/repository/tree${queryString({
+      ref: params?.ref,
+      path: params?.path,
+    })}`,
+    userId
+  )
+
+export const getProjectGitRepositoryFile = (
+  userId: string,
+  projectId: string,
+  params: { ref?: string; path: string }
+) =>
+  api<ProjectGitRepositoryFileResponse>(
+    `/api/projects/${projectId}/git-delivery/repository/file${queryString({
+      ref: params.ref,
+      path: params.path,
+    })}`,
     userId
   )
 
@@ -1548,9 +1638,9 @@ export const patchMyPreferences = (
     timezone?: string
     notifications_enabled?: boolean
     agent_chat_model?: string | null
-    agent_chat_reasoning_effort?: ChatReasoningEffort | string | null
-    onboarding_quick_tour_completed?: boolean
-    onboarding_advanced_tour_completed?: boolean
+  agent_chat_reasoning_effort?: ChatReasoningEffort | string | null
+  onboarding_quick_tour_completed?: boolean
+  onboarding_advanced_tour_completed?: boolean
   }
 ) => api<{
   id: string
@@ -1561,7 +1651,11 @@ export const patchMyPreferences = (
   agent_chat_reasoning_effort?: ChatReasoningEffort | string
   onboarding_quick_tour_completed?: boolean
   onboarding_advanced_tour_completed?: boolean
-}>('/api/me/preferences', userId, { method: 'PATCH', body: JSON.stringify(payload) })
+}>('/api/me/preferences', userId, {
+  method: 'PATCH',
+  body: JSON.stringify(payload),
+  keepalive: true,
+})
 
 export const getNotes = (
   userId: string,

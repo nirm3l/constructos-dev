@@ -7,6 +7,8 @@ import subprocess
 from functools import lru_cache
 from pathlib import Path
 
+from shared.settings import AGENT_WORKDIR
+
 DEFAULT_CODEX_WORKDIR = "/home/app/workspace"
 PROJECT_REPOSITORIES_DIR = ".constructos/repos"
 DEFAULT_TASK_APP_CONTAINER_NAME = "task-app"
@@ -26,7 +28,7 @@ def slugify_project_name(value: str, *, fallback: str) -> str:
 
 
 def resolve_workspace_root() -> Path:
-    raw = str(os.getenv("AGENT_CODEX_WORKDIR", DEFAULT_CODEX_WORKDIR)).strip() or DEFAULT_CODEX_WORKDIR
+    raw = str(AGENT_WORKDIR or os.getenv("AGENT_CODEX_WORKDIR", DEFAULT_CODEX_WORKDIR)).strip() or DEFAULT_CODEX_WORKDIR
     path = Path(raw).expanduser().resolve()
     path.mkdir(parents=True, exist_ok=True)
     return path

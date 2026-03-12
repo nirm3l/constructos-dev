@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from shared.models import ProjectMember, SessionLocal, User as UserModel
+from shared.models import ProjectMember, SessionLocal, Task, User as UserModel, WorkspaceAgentRuntime
 
 _MIN_EXECUTION_OUTCOME_CONTRACT_JSON = (
     '"execution_outcome_contract":{"contract_version":1,"files_changed":[],"commit_sha":null,'
@@ -401,6 +401,87 @@ def test_execute_task_automation_sets_task_worktree_context_for_team_mode_develo
     assert captured["task_workdir"] == "/home/app/workspace/team-mode-worktree/.constructos/worktrees/task1234"
     assert captured["task_branch"] == "task/task1234-feature"
     assert captured["repo_root"] == "/home/app/workspace/team-mode-worktree"
+
+
+def test_execute_task_automation_uses_assigned_bot_runtime_before_workspace_selection(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+
+    from shared.settings import AGENT_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID
+
+    task_id = str(uuid.uuid4())
+    with SessionLocal() as db:
+        db.add(
+            WorkspaceAgentRuntime(
+                workspace_id=ws_id,
+                user_id=AGENT_SYSTEM_USER_ID,
+                model="codex:gpt-5-codex",
+                reasoning_effort="high",
+                is_background_default=False,
+            )
+        )
+        db.add(
+            WorkspaceAgentRuntime(
+                workspace_id=ws_id,
+                user_id=CLAUDE_SYSTEM_USER_ID,
+                model="claude:sonnet",
+                reasoning_effort="",
+                is_background_default=True,
+            )
+        )
+        db.add(
+            Task(
+                id=task_id,
+                workspace_id=ws_id,
+                project_id=project_id,
+                title="Assigned bot runtime",
+                description="ctx",
+                status="To do",
+                assignee_id=AGENT_SYSTEM_USER_ID,
+            )
+        )
+        db.commit()
+
+    from features.agents import executor as executor_module
+
+    monkeypatch.setattr(executor_module, "AGENT_EXECUTOR_MODE", "command")
+    monkeypatch.setattr(executor_module, "AGENT_CODEX_COMMAND", "dummy-exec")
+
+    captured: dict = {}
+
+    class DummyProcess:
+        returncode = 0
+        stdout = (
+            '{"action":"comment","summary":"ok","comment":null,'
+            + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+            + "}"
+        )
+        stderr = ""
+
+    def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
+        _ = (command, text, capture_output, timeout, check, cwd)
+        captured.update(json.loads(input))
+        return DummyProcess()
+
+    monkeypatch.setattr(executor_module.subprocess, "run", fake_run)
+
+    outcome = executor_module.execute_task_automation(
+        task_id=task_id,
+        title="Assigned bot runtime",
+        description="ctx",
+        status="To do",
+        instruction="Use the assigned bot runtime.",
+        workspace_id=ws_id,
+        project_id=project_id,
+        actor_user_id=bootstrap["current_user"]["id"],
+        allow_mutations=True,
+    )
+
+    assert outcome.summary == "ok"
+    assert captured["model"] == "codex:gpt-5-codex"
+    assert captured["reasoning_effort"] == "high"
 
 
 def test_codex_prompt_includes_soul_md_section():
@@ -1038,6 +1119,18 @@ def test_extract_delta_text_supports_nested_delta_payload():
     assert _extract_delta_text(params) == "Partial response"
 
 
+def test_extract_delta_text_preserves_leading_space_for_claude_text_delta():
+    from features.agents.codex_mcp_adapter import _extract_delta_text
+
+    params = {
+        "delta": {
+            "type": "text_delta",
+            "text": " on various",
+        }
+    }
+    assert _extract_delta_text(params) == " on various"
+
+
 def test_message_delta_method_recognizes_assistant_event_names():
     from features.agents.codex_mcp_adapter import _is_message_delta_method
 
@@ -1138,15 +1231,18 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
     @contextmanager
     def _fake_home_env(
         *,
+        provider: str,
         mcp_config_text: str,
         runtime_config_text: str = "",
         workspace_id: str | None = None,
         chat_session_id: str | None = None,
+        actor_user_id: str | None = None,
     ):
+        captured["home_env_provider"] = provider
         captured["home_env_workspace_id"] = workspace_id
         captured["home_env_chat_session_id"] = chat_session_id
         captured["home_env_runtime_config_text"] = runtime_config_text
-        _ = mcp_config_text
+        _ = (mcp_config_text, actor_user_id)
         yield {"HOME": "/tmp/fake-codex-home"}
 
     @contextmanager
@@ -1165,6 +1261,7 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
 
     def _fake_run_codex_app_server_with_optional_stream(
         *,
+        provider: str,
         start_prompt: str,
         resume_prompt: str | None,
         timeout_seconds: float,
@@ -1175,8 +1272,11 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
         local_provider: str | None = None,
         output_schema: dict | None = None,
         preferred_thread_id: str | None = None,
+        mcp_config_payload: dict | None = None,
+        run_cwd: str | None = None,
         env: dict[str, str] | None = None,
     ) -> tuple[str, dict[str, int] | None, str | None, bool, bool]:
+        captured["run_provider"] = provider
         captured["stream_events"] = stream_events
         captured["preferred_thread_id"] = preferred_thread_id
         captured["timeout_seconds"] = timeout_seconds
@@ -1185,7 +1285,7 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
         captured["start_prompt_contains_context_pack"] = "Context Pack:" in start_prompt
         captured["resume_prompt_contains_context_pack"] = "Context Pack:" in str(resume_prompt or "")
         captured["resume_prompt_text"] = str(resume_prompt or "")
-        _ = (model, reasoning_effort, model_provider, local_provider)
+        _ = (model, reasoning_effort, model_provider, local_provider, mcp_config_payload, run_cwd)
         return (
             (
                 '{"action":"comment","summary":"ok","comment":null,'
@@ -1290,7 +1390,7 @@ url = "http://old.example/mcp"
 [mcp_servers.task-management-tools]
 url = "http://mcp-tools:8091/mcp"
 """.strip()
-    _prepare_codex_home(target_home, mcp_config_text=selected_mcp_text)
+    _prepare_codex_home(target_home, provider="codex", mcp_config_text=selected_mcp_text)
     output = (target_home / ".codex" / "config.toml").read_text(encoding="utf-8")
 
     assert 'model_provider = "openai"' in output
@@ -1318,6 +1418,7 @@ model = "gpt-5.3-codex-spark"
     target_home = tmp_path / "target-home"
     _prepare_codex_home(
         target_home,
+        provider="codex",
         mcp_config_text="",
         runtime_config_text='model_provider = "openai"\nreasoning_effort = "medium"\n',
     )

@@ -8,6 +8,11 @@ import * as Tooltip from '@radix-ui/react-tooltip'
 import { archiveChatSession, updateChatSessionContext } from '../../api'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import type { AttachmentRef } from '../../types'
+import {
+  authStatusForProvider,
+  getAgentExecutionProviderLabel,
+  resolveActiveAgentExecutionProvider,
+} from '../../utils/agentExecution'
 import { AttachmentRefList, Icon } from '../shared/uiHelpers'
 
 function getSpeechRecognitionCtor(): any | null {
@@ -104,6 +109,7 @@ function normalizeBool(value: unknown): boolean {
 
 function normalizeReasoningEffort(value: unknown): 'low' | 'medium' | 'high' | 'xhigh' {
   const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'max' || normalized === 'maximum') return 'xhigh'
   if (normalized === 'low' || normalized === 'high' || normalized === 'xhigh') return normalized
   return 'medium'
 }
@@ -113,8 +119,11 @@ function buildClassifierMarkdown(value: Record<string, unknown> | null | undefin
   return `\`\`\`json\n${JSON.stringify(value, null, 2)}\n\`\`\``
 }
 
-function reasoningEffortLabel(value: 'low' | 'medium' | 'high' | 'xhigh'): string {
-  if (value === 'xhigh') return 'Very high'
+function reasoningEffortLabel(
+  value: 'low' | 'medium' | 'high' | 'xhigh',
+  provider: 'codex' | 'claude' = 'codex'
+): string {
+  if (value === 'xhigh') return provider === 'claude' ? 'Max' : 'Very high'
   return value.charAt(0).toUpperCase() + value.slice(1)
 }
 
@@ -523,20 +532,32 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const effectiveReasoningEffort = normalizeReasoningEffort(
     state.agentChatReasoningEffort || state.agentChatDefaultReasoningEffort
   )
-  const effectiveReasoningLabel = reasoningEffortLabel(effectiveReasoningEffort)
-  const codexAuthStatus = state.codexAuthStatus?.data ?? null
-  const codexAuthMissing = !Boolean(state.codexAuthStatus?.isLoading || state.codexAuthStatus?.isFetching)
-    && String(codexAuthStatus?.effective_source || '').trim().toLowerCase() === 'none'
-  const canManageCodexAuth = Boolean(state.canManageUsers)
-  const codexAuthMissingGuidance = canManageCodexAuth
-    ? 'Codex authentication is not configured. Open Profile > Security and connect Codex before using chat or task automation.'
-    : 'Codex authentication is not configured. Ask a workspace admin to open Profile > Security and connect Codex before using chat or task automation.'
-  const codexAuthMissingBannerText = canManageCodexAuth
-    ? 'Codex authentication is not configured. Open settings and connect Codex before sending messages.'
-    : 'Codex authentication is not configured. Ask a workspace admin to connect Codex in settings before sending messages.'
-  const codexAuthMissingPlaceholder = canManageCodexAuth
-    ? 'Connect Codex in Profile > Security before starting a chat session.'
-    : 'Ask a workspace admin to connect Codex in Profile > Security before starting a chat session.'
+  const activeExecutionProvider = resolveActiveAgentExecutionProvider(
+    state.agentChatModel || chatModelOverride,
+    defaultChatModel
+  )
+  const effectiveReasoningLabel = reasoningEffortLabel(effectiveReasoningEffort, activeExecutionProvider)
+  const activeExecutionProviderLabel = getAgentExecutionProviderLabel(activeExecutionProvider)
+  const activeAuthStatus = authStatusForProvider(
+    activeExecutionProvider,
+    state.codexAuthStatus?.data ?? null,
+    state.claudeAuthStatus?.data ?? null
+  )
+  const activeAuthLoading = activeExecutionProvider === 'claude'
+    ? Boolean(state.claudeAuthStatus?.isLoading || state.claudeAuthStatus?.isFetching)
+    : Boolean(state.codexAuthStatus?.isLoading || state.codexAuthStatus?.isFetching)
+  const providerAuthMissing = !activeAuthLoading
+    && String(activeAuthStatus?.effective_source || '').trim().toLowerCase() === 'none'
+  const canManageProviderAuth = Boolean(state.canManageUsers)
+  const providerAuthMissingGuidance = canManageProviderAuth
+    ? `${activeExecutionProviderLabel} authentication is not configured. Open Settings and use Workspace > Connections to connect ${activeExecutionProviderLabel} before using chat.`
+    : `${activeExecutionProviderLabel} authentication is not configured. Ask a workspace admin to open Settings and use Workspace > Connections to connect ${activeExecutionProviderLabel} before using chat.`
+  const providerAuthMissingBannerText = canManageProviderAuth
+    ? `${activeExecutionProviderLabel} authentication is not configured. Open settings and connect ${activeExecutionProviderLabel} before sending messages.`
+    : `${activeExecutionProviderLabel} authentication is not configured. Ask a workspace admin to connect ${activeExecutionProviderLabel} in settings before sending messages.`
+  const providerAuthMissingPlaceholder = canManageProviderAuth
+    ? `Connect ${activeExecutionProviderLabel} in Settings under Workspace > Connections before starting a chat session.`
+    : `Ask a workspace admin to connect ${activeExecutionProviderLabel} in Settings under Workspace > Connections before starting a chat session.`
 
   const stopVoiceInput = () => {
     const recognition = recognitionRef.current
@@ -728,7 +749,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
     } catch {
       // Ignore storage failures and still navigate.
     }
-    state.setTab?.('profile')
+    state.setTab?.('settings')
     state.setShowCodexChat?.(false)
   }
 
@@ -740,24 +761,25 @@ export function CodexChatDrawer({ state }: { state: any }) {
     } catch {
       // Ignore storage failures and still navigate.
     }
-    state.setTab?.('profile')
+    state.setTab?.('settings')
     state.setShowCodexChat?.(false)
   }
 
   const openCodexAuthSettings = () => {
     stopVoiceInput()
     try {
-      window.sessionStorage.setItem('ui_profile_scroll_target', 'codex_auth')
-      window.dispatchEvent(new Event('ui:focus-codex-auth'))
+      const authTarget = activeExecutionProvider === 'claude' ? 'claude_auth' : 'codex_auth'
+      window.sessionStorage.setItem('ui_profile_scroll_target', authTarget)
+      window.dispatchEvent(new Event(activeExecutionProvider === 'claude' ? 'ui:focus-claude-auth' : 'ui:focus-codex-auth'))
     } catch {
       // Ignore storage failures and still navigate.
     }
-    state.setTab?.('profile')
+    state.setTab?.('settings')
     state.setShowCodexChat?.(false)
   }
 
   const appendLocalCodexAuthGuidance = () => {
-    const content = codexAuthMissingGuidance
+    const content = providerAuthMissingGuidance
     state.setCodexChatTurns((prev: any[]) => {
       const lastTurn = Array.isArray(prev) && prev.length > 0 ? prev[prev.length - 1] : null
       if (lastTurn?.role === 'assistant' && String(lastTurn?.content || '').trim() === content) {
@@ -814,7 +836,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
       || isUploadingAttachments
       || isUpdatingSessionAttachments
     ) return
-    if (codexAuthMissing) {
+    if (providerAuthMissing) {
       appendLocalCodexAuthGuidance()
       return
     }
@@ -864,7 +886,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
           <div className="row codex-chat-header-row">
             <div className="codex-chat-header-main">
               <h3 className="codex-chat-header-title">Chat</h3>
-              <ChatTooltip content="Open Profile settings to change chat model and reasoning level">
+              <ChatTooltip content="Open Settings to change chat model and reasoning level">
                 <button
                   className="status-chip tag-filter-chip codex-chat-execution-chip codex-chat-header-inline-chip"
                   type="button"
@@ -1242,10 +1264,10 @@ export function CodexChatDrawer({ state }: { state: any }) {
           )}
         </div>
         <div className="codex-chat-composer" data-tour-id="codex-chat-composer">
-          {codexAuthMissing && (
+          {providerAuthMissing && (
             <div className="notice notice-error codex-chat-auth-banner" role="alert">
               <div className="codex-chat-auth-banner-copy">
-                {codexAuthMissingBannerText}
+                {providerAuthMissingBannerText}
               </div>
               <button
                 type="button"
@@ -1263,8 +1285,8 @@ export function CodexChatDrawer({ state }: { state: any }) {
             onChange={(e) => state.setCodexChatInstruction(e.target.value)}
             rows={2}
             placeholder={
-              codexAuthMissing
-                ? codexAuthMissingPlaceholder
+              providerAuthMissing
+                ? providerAuthMissingPlaceholder
                 : 'Try: Create 3 high-priority tasks for tomorrow in the Website Redesign project and assign them to me.'
             }
           />

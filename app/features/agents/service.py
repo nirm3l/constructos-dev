@@ -78,12 +78,13 @@ from shared.core import (
     load_specification_view,
 )
 from features.project_templates.schemas import ProjectFromTemplateCreate, ProjectFromTemplatePreview
-from features.agents.codex_mcp_adapter import run_structured_codex_prompt
+from features.agents.agent_mcp_adapter import run_structured_agent_prompt
 from features.agents.intent_classifier import (
     AUTOMATION_REQUEST_INTENT_FIELDS,
     classify_instruction_intent,
     resolve_instruction_intent,
 )
+from features.agents.provider_auth import resolve_provider_effective_auth_source
 from features.agents.gates import (
     DEFAULT_REQUIRED_DELIVERY_CHECKS,
     DELIVERY_CORE_CHECK_DESCRIPTIONS,
@@ -112,6 +113,7 @@ from shared.project_repository import (
     ensure_project_repository_initialized,
     resolve_project_repository_path,
 )
+from shared.settings import agent_system_username_for_provider
 from shared.task_relationships import normalize_task_relationships
 from shared.knowledge_graph import (
     build_graph_context_pack,
@@ -123,6 +125,8 @@ from shared.knowledge_graph import (
     require_graph_available,
     search_project_knowledge as search_project_knowledge_query,
 )
+
+run_structured_codex_prompt = run_structured_agent_prompt
 from shared.models import (
     Notification,
     Note,
@@ -1406,6 +1410,44 @@ class AgentTaskService:
                 continue
             seen.add(user_id)
             normalized_ids.append(user_id)
+
+        workspace_agent_rows = db.execute(
+            select(WorkspaceMember.user_id, UserModel.username)
+            .join(UserModel, UserModel.id == WorkspaceMember.user_id)
+            .where(
+                WorkspaceMember.workspace_id == workspace_id,
+                UserModel.is_active == True,  # noqa: E712
+                UserModel.user_type == "agent",
+                UserModel.username.in_(
+                    [
+                        agent_system_username_for_provider("codex"),
+                        agent_system_username_for_provider("claude"),
+                    ]
+                ),
+            )
+            .order_by(WorkspaceMember.id.asc())
+        ).all()
+        available_agent_member_ids_by_provider: dict[str, str] = {}
+        for user_id, username in workspace_agent_rows:
+            normalized_user_id = str(user_id or "").strip()
+            normalized_username = str(username or "").strip().lower()
+            if not normalized_user_id:
+                continue
+            if normalized_username == agent_system_username_for_provider("codex").lower():
+                available_agent_member_ids_by_provider["codex"] = normalized_user_id
+            elif normalized_username == agent_system_username_for_provider("claude").lower():
+                available_agent_member_ids_by_provider["claude"] = normalized_user_id
+
+        for provider in ("codex", "claude"):
+            member_id = str(available_agent_member_ids_by_provider.get(provider) or "").strip()
+            if not member_id:
+                continue
+            if resolve_provider_effective_auth_source(provider) == "none":
+                continue
+            if member_id in seen:
+                continue
+            seen.add(member_id)
+            normalized_ids.append(member_id)
 
         actor_user_type = str(getattr(actor_user, "user_type", "") or "").strip().lower()
         if actor_user_type != "agent":
@@ -3412,7 +3454,7 @@ class AgentTaskService:
             parsed = run_structured_codex_prompt(
                 prompt=prompt,
                 output_schema=output_schema,
-                workspace_id=None,
+                workspace_id=workspace_id,
                 session_key=f"project-policy-checks-evaluator:{payload_hash}",
                 mcp_servers=[],
                 use_cache=True,
@@ -3958,6 +4000,7 @@ class AgentTaskService:
                 ).all()
                 active_agent_member_ids: set[str] = set()
                 default_agent_member_id = ""
+                available_bot_member_ids: dict[str, str] = {}
                 for user_id, username, user_type, is_active in member_rows:
                     normalized_user_id = str(user_id or "").strip()
                     if not normalized_user_id or not bool(is_active):
@@ -3967,9 +4010,27 @@ class AgentTaskService:
                     active_agent_member_ids.add(normalized_user_id)
                     if not default_agent_member_id:
                         default_agent_member_id = normalized_user_id
-                    if str(username or "").strip().lower() == "codex-bot":
-                        default_agent_member_id = normalized_user_id
-                        break
+                    normalized_username = str(username or "").strip().lower()
+                    if normalized_username == agent_system_username_for_provider("codex").lower():
+                        available_bot_member_ids["codex"] = normalized_user_id
+                    elif normalized_username == agent_system_username_for_provider("claude").lower():
+                        available_bot_member_ids["claude"] = normalized_user_id
+
+                configured_bot_member_ids: dict[str, str] = {}
+                for provider in ("codex", "claude"):
+                    member_id = str(available_bot_member_ids.get(provider) or "").strip()
+                    if not member_id:
+                        continue
+                    if resolve_provider_effective_auth_source(provider) == "none":
+                        continue
+                    configured_bot_member_ids[provider] = member_id
+
+                if configured_bot_member_ids:
+                    default_agent_member_id = str(
+                        configured_bot_member_ids.get("codex")
+                        or configured_bot_member_ids.get("claude")
+                        or default_agent_member_id
+                    ).strip()
 
                 if not active_agent_member_ids:
                     return {}

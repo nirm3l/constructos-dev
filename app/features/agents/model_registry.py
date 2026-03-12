@@ -8,12 +8,15 @@ import subprocess
 import threading
 import time
 
+from features.agents.execution_provider import encode_execution_model
+from shared.settings import agent_default_model_for_provider
+
 logger = logging.getLogger(__name__)
 
 _CACHE_LOCK = threading.Lock()
 _CACHE_EXPIRES_AT = 0.0
-_CACHE_MODELS: list[str] = []
-_CACHE_DEFAULT_MODEL = ""
+_CACHE_CODEX_MODELS: list[str] = []
+_CACHE_CODEX_DEFAULT_MODEL = ""
 
 
 def _load_positive_float_env(name: str, default: float) -> float:
@@ -45,6 +48,7 @@ def _load_positive_int_env(name: str, default: int) -> int:
 _CACHE_TTL_SECONDS = _load_positive_float_env("AGENT_CODEX_MODELS_CACHE_TTL_SECONDS", 300.0)
 _MODEL_LIST_TIMEOUT_SECONDS = _load_positive_float_env("AGENT_CODEX_MODEL_LIST_TIMEOUT_SECONDS", 2.0)
 _MODEL_LIST_LIMIT = _load_positive_int_env("AGENT_CODEX_MODEL_LIST_LIMIT", 200)
+_DEFAULT_CLAUDE_MODELS = ("sonnet", "opus")
 
 
 def _append_unique_model(out: list[str], seen: set[str], value: object) -> None:
@@ -56,6 +60,38 @@ def _append_unique_model(out: list[str], seen: set[str], value: object) -> None:
         return
     seen.add(key)
     out.append(model)
+
+
+def _normalize_claude_model(value: object) -> str:
+    model = str(value or "").strip()
+    if not model:
+        return ""
+    lowered = model.lower()
+    if lowered in {"sonnet", "opus", "haiku"}:
+        return lowered
+    if lowered.startswith("claude-"):
+        return model
+    return ""
+
+
+def _load_claude_models_from_env() -> tuple[list[str], str]:
+    raw_available = str(os.getenv("AGENT_CLAUDE_AVAILABLE_MODELS", "")).strip()
+    out: list[str] = []
+    seen: set[str] = set()
+    for chunk in raw_available.split(","):
+        normalized = _normalize_claude_model(chunk)
+        if not normalized:
+            continue
+        _append_unique_model(out, seen, normalized)
+    default_model = _normalize_claude_model(agent_default_model_for_provider("claude"))
+    if not out:
+        for fallback_model in _DEFAULT_CLAUDE_MODELS:
+            _append_unique_model(out, seen, fallback_model)
+    if not default_model:
+        default_model = out[0] if out else ""
+    if default_model and default_model.lower() not in {item.lower() for item in out}:
+        out.insert(0, default_model)
+    return out, default_model
 
 
 def _extract_error_message(payload: object) -> str:
@@ -197,26 +233,75 @@ def _read_model_list_from_codex() -> tuple[list[str], str]:
     return final_models, final_default_model
 
 
-def _discover_models_uncached() -> tuple[list[str], str]:
+def _discover_codex_models_uncached() -> tuple[list[str], str]:
     try:
         return _read_model_list_from_codex()
     except FileNotFoundError:
         logger.warning("codex binary not found; model discovery falls back to env values")
     except Exception as exc:
         logger.warning("Failed to discover Codex models from app-server: %s", exc)
-    return [], ""
+    return _load_codex_models_from_env()
+
+
+def _load_codex_models_from_env() -> tuple[list[str], str]:
+    raw_available = str(os.getenv("AGENT_CODEX_AVAILABLE_MODELS", "")).strip()
+    out: list[str] = []
+    seen: set[str] = set()
+    for chunk in raw_available.split(","):
+        _append_unique_model(out, seen, chunk)
+    default_model = str(agent_default_model_for_provider("codex") or "").strip()
+    if not default_model:
+        default_model = out[0] if out else ""
+    if default_model and default_model.lower() not in {item.lower() for item in out}:
+        out.insert(0, default_model)
+    return out, default_model
 
 
 def list_available_codex_models(*, force_refresh: bool = False) -> tuple[list[str], str]:
-    global _CACHE_MODELS, _CACHE_DEFAULT_MODEL, _CACHE_EXPIRES_AT
+    global _CACHE_CODEX_MODELS, _CACHE_CODEX_DEFAULT_MODEL, _CACHE_EXPIRES_AT
     now = time.monotonic()
     with _CACHE_LOCK:
         if not force_refresh and now < _CACHE_EXPIRES_AT:
-            return copy.deepcopy(_CACHE_MODELS), _CACHE_DEFAULT_MODEL
+            return copy.deepcopy(_CACHE_CODEX_MODELS), _CACHE_CODEX_DEFAULT_MODEL
 
-    models, default_model = _discover_models_uncached()
+    models, default_model = _discover_codex_models_uncached()
     with _CACHE_LOCK:
-        _CACHE_MODELS = copy.deepcopy(models)
-        _CACHE_DEFAULT_MODEL = str(default_model or "").strip()
+        _CACHE_CODEX_MODELS = copy.deepcopy(models)
+        _CACHE_CODEX_DEFAULT_MODEL = str(default_model or "").strip()
         _CACHE_EXPIRES_AT = time.monotonic() + _CACHE_TTL_SECONDS
-        return copy.deepcopy(_CACHE_MODELS), _CACHE_DEFAULT_MODEL
+        return copy.deepcopy(_CACHE_CODEX_MODELS), _CACHE_CODEX_DEFAULT_MODEL
+
+
+def list_available_claude_models() -> tuple[list[str], str]:
+    return _load_claude_models_from_env()
+
+
+def list_available_agent_models(*, force_refresh: bool = False) -> tuple[list[str], str]:
+    combined: list[str] = []
+    seen: set[str] = set()
+
+    def _append(provider: str, model: str) -> None:
+        encoded = encode_execution_model(provider=provider, model=model)
+        if not encoded:
+            return
+        key = encoded.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        combined.append(encoded)
+
+    codex_models, codex_default = list_available_codex_models(force_refresh=force_refresh)
+    for model in codex_models:
+        _append("codex", model)
+    claude_models, claude_default = list_available_claude_models()
+    for model in claude_models:
+        _append("claude", model)
+
+    default_model = ""
+    if codex_default:
+        default_model = encode_execution_model(provider="codex", model=codex_default)
+    elif claude_default:
+        default_model = encode_execution_model(provider="claude", model=claude_default)
+    elif combined:
+        default_model = combined[0]
+    return combined, default_model

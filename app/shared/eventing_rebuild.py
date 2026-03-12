@@ -1925,19 +1925,19 @@ def project_event(db: Session, ev: EventEnvelope):
     elif ev.event_type == USER_EVENT_PREFERENCES_UPDATED:
         user = db.get(User, ev.aggregate_id)
         if user:
-            if "theme" in p and p["theme"] in {"light", "dark"}:
+            if p.get("theme") in {"light", "dark"}:
                 user.theme = p["theme"]
-            if "timezone" in p and p["timezone"]:
+            if p.get("timezone"):
                 user.timezone = p["timezone"]
-            if "notifications_enabled" in p:
+            if "notifications_enabled" in p and p.get("notifications_enabled") is not None:
                 user.notifications_enabled = bool(p["notifications_enabled"])
-            if "agent_chat_model" in p:
+            if "agent_chat_model" in p and p.get("agent_chat_model") is not None:
                 user.agent_chat_model = str(p.get("agent_chat_model") or "")
-            if "agent_chat_reasoning_effort" in p and p.get("agent_chat_reasoning_effort"):
+            if "agent_chat_reasoning_effort" in p and p.get("agent_chat_reasoning_effort") is not None:
                 user.agent_chat_reasoning_effort = str(p.get("agent_chat_reasoning_effort"))
-            if "onboarding_quick_tour_completed" in p:
+            if "onboarding_quick_tour_completed" in p and p.get("onboarding_quick_tour_completed") is not None:
                 user.onboarding_quick_tour_completed = bool(p.get("onboarding_quick_tour_completed"))
-            if "onboarding_advanced_tour_completed" in p:
+            if "onboarding_advanced_tour_completed" in p and p.get("onboarding_advanced_tour_completed") is not None:
                 user.onboarding_advanced_tour_completed = bool(p.get("onboarding_advanced_tour_completed"))
 
     workspace_id = m.get("workspace_id")

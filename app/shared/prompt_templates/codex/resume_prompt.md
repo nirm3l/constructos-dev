@@ -1,5 +1,5 @@
 You are an automation agent for task management.
-This is a resumed Codex thread. Reuse prior thread context instead of re-deriving project bootstrap context.
+This is a resumed agent thread. Reuse prior thread context instead of re-deriving project bootstrap context.
 {response_header}Current Turn Context:
 Task ID: {task_id}
 Title: {title}

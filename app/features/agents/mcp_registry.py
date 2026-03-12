@@ -12,7 +12,7 @@ import time
 import tomllib
 from typing import Any
 
-from shared.settings import AGENT_CODEX_MCP_URL
+from shared.settings import AGENT_MCP_URL
 from shared.models import ProjectPluginConfig, SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -263,7 +263,7 @@ def _discover_rows_uncached() -> list[dict[str, Any]]:
                 "enabled": True,
                 "disabled_reason": None,
                 "auth_status": None,
-                "config": {"url": AGENT_CODEX_MCP_URL},
+                "config": {"url": AGENT_MCP_URL},
             }
         )
         return rows
@@ -272,15 +272,15 @@ def _discover_rows_uncached() -> list[dict[str, Any]]:
     if _FALLBACK_SERVER_NAME in by_name:
         fallback_config = by_name[_FALLBACK_SERVER_NAME].get("config")
         if not isinstance(fallback_config, dict):
-            by_name[_FALLBACK_SERVER_NAME]["config"] = {"url": AGENT_CODEX_MCP_URL}
+            by_name[_FALLBACK_SERVER_NAME]["config"] = {"url": AGENT_MCP_URL}
             fallback_config = by_name[_FALLBACK_SERVER_NAME]["config"]
-        fallback_config["url"] = AGENT_CODEX_MCP_URL
+        fallback_config["url"] = AGENT_MCP_URL
     if _LEGACY_CORE_SERVER_NAME in by_name:
         legacy_config = by_name[_LEGACY_CORE_SERVER_NAME].get("config")
         if not isinstance(legacy_config, dict):
-            by_name[_LEGACY_CORE_SERVER_NAME]["config"] = {"url": AGENT_CODEX_MCP_URL}
+            by_name[_LEGACY_CORE_SERVER_NAME]["config"] = {"url": AGENT_MCP_URL}
             legacy_config = by_name[_LEGACY_CORE_SERVER_NAME]["config"]
-        legacy_config["url"] = AGENT_CODEX_MCP_URL
+        legacy_config["url"] = AGENT_MCP_URL
     return rows
 
 
@@ -365,7 +365,7 @@ def normalize_chat_mcp_servers(raw_servers: list[str] | None, *, strict: bool = 
 def build_selected_mcp_config_text(*, selected_servers: list[str], task_management_mcp_url: str | None = None) -> str:
     rows = _get_rows()
     rows_by_name = {str(row.get("name") or "").strip(): row for row in rows}
-    core_url = str(task_management_mcp_url or AGENT_CODEX_MCP_URL).strip() or AGENT_CODEX_MCP_URL
+    core_url = str(task_management_mcp_url or AGENT_MCP_URL).strip() or AGENT_MCP_URL
     lines: list[str] = []
     for server_name in selected_servers:
         clean_name = str(server_name or "").strip()
@@ -387,6 +387,54 @@ def build_selected_mcp_config_text(*, selected_servers: list[str], task_manageme
             lines.append(f"{_toml_key(str(key))} = {_toml_value(value)}")
         lines.append("")
     return ("\n".join(lines).strip() + "\n") if lines else ""
+
+
+def _build_claude_mcp_server_config(*, server_name: str, config: dict[str, Any], core_url: str) -> dict[str, Any]:
+    normalized_name = str(server_name or "").strip()
+    normalized_lookup = _normalize_lookup_key(normalized_name)
+    payload: dict[str, Any] = {}
+    source = copy.deepcopy(config) if isinstance(config, dict) else {}
+    if normalized_lookup in {_normalize_lookup_key(_FALLBACK_SERVER_NAME), _normalize_lookup_key(_LEGACY_CORE_SERVER_NAME)}:
+        source["url"] = core_url
+    if str(source.get("url") or "").strip():
+        payload["type"] = str(source.get("type") or "http").strip() or "http"
+        payload["url"] = str(source.get("url") or "").strip()
+    elif str(source.get("command") or "").strip():
+        payload["type"] = str(source.get("type") or "stdio").strip() or "stdio"
+        payload["command"] = str(source.get("command") or "").strip()
+    for key in ("args", "env", "headers"):
+        value = source.get(key)
+        if value is not None:
+            payload[key] = copy.deepcopy(value)
+    bearer_token_env_var = str(source.get("bearer_token_env_var") or "").strip()
+    if bearer_token_env_var:
+        payload["bearer_token_env_var"] = bearer_token_env_var
+    return payload
+
+
+def build_selected_mcp_config_payload(
+    *,
+    selected_servers: list[str],
+    task_management_mcp_url: str | None = None,
+) -> dict[str, Any]:
+    rows = _get_rows()
+    rows_by_name = {str(row.get("name") or "").strip(): row for row in rows}
+    core_url = str(task_management_mcp_url or AGENT_MCP_URL).strip() or AGENT_MCP_URL
+    servers: dict[str, Any] = {}
+    for server_name in selected_servers:
+        clean_name = str(server_name or "").strip()
+        if not clean_name:
+            continue
+        row = rows_by_name.get(clean_name) or {}
+        config_raw = row.get("config")
+        server_payload = _build_claude_mcp_server_config(
+            server_name=clean_name,
+            config=config_raw if isinstance(config_raw, dict) else {},
+            core_url=core_url,
+        )
+        if server_payload:
+            servers[clean_name] = server_payload
+    return {"mcpServers": servers} if servers else {}
 
 
 def filter_mcp_servers_for_project_plugins(

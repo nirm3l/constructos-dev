@@ -56,7 +56,7 @@ from shared.core import (
     rebuild_state,
     to_iso_utc,
 )
-from shared.settings import AGENT_SYSTEM_USER_ID
+from shared.settings import AGENT_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID, CODEX_SYSTEM_USER_ID
 from shared.task_automation import (
     TRIGGER_KIND_SCHEDULE,
     TRIGGER_KIND_STATUS_CHANGE,
@@ -79,6 +79,7 @@ from features.agents.intent_classifier import (
     is_team_mode_kickoff_classification,
     resolve_instruction_intent,
 )
+from features.agents.provider_auth import resolve_provider_effective_auth_source
 from .domain import TaskAggregate
 
 MENTION_PATTERN = re.compile(r"@([A-Za-z0-9_\-]+)")
@@ -429,6 +430,57 @@ def _validate_assignee_id(db: Session, assignee_id: str | None, *, project_id: s
     if assignee is None:
         raise HTTPException(status_code=422, detail="assignee_id does not reference an existing user")
     return normalized
+
+
+def _resolve_available_system_bot_assignee_for_project(
+    db: Session,
+    *,
+    project_id: str | None,
+    requested_assignee_id: str | None,
+    assigned_agent_code: str | None,
+) -> str | None:
+    normalized_project_id = str(project_id or "").strip()
+    normalized_requested_assignee_id = str(requested_assignee_id or "").strip()
+    normalized_assigned_agent_code = str(assigned_agent_code or "").strip()
+    if not normalized_project_id or not normalized_requested_assignee_id or not normalized_assigned_agent_code:
+        return normalized_requested_assignee_id or None
+    if normalized_requested_assignee_id not in {CODEX_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID}:
+        return normalized_requested_assignee_id
+
+    requested_provider = "codex" if normalized_requested_assignee_id == CODEX_SYSTEM_USER_ID else "claude"
+    if resolve_provider_effective_auth_source(requested_provider) != "none":
+        return normalized_requested_assignee_id
+
+    project_bot_rows = db.execute(
+        select(ProjectMember.user_id, User.username)
+        .join(User, User.id == ProjectMember.user_id)
+        .where(
+            ProjectMember.project_id == normalized_project_id,
+            User.is_active == True,  # noqa: E712
+            User.user_type == "agent",
+            User.id.in_([CODEX_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID]),
+        )
+        .order_by(ProjectMember.id.asc())
+    ).all()
+    available_project_bot_ids_by_provider: dict[str, str] = {}
+    for user_id, username in project_bot_rows:
+        normalized_user_id = str(user_id or "").strip()
+        normalized_username = str(username or "").strip().lower()
+        if not normalized_user_id:
+            continue
+        if normalized_user_id == CODEX_SYSTEM_USER_ID or normalized_username == "codex-bot":
+            available_project_bot_ids_by_provider["codex"] = normalized_user_id
+        elif normalized_user_id == CLAUDE_SYSTEM_USER_ID or normalized_username == "claude-bot":
+            available_project_bot_ids_by_provider["claude"] = normalized_user_id
+
+    preferred_fallback_providers = ("claude", "codex") if requested_provider == "codex" else ("codex", "claude")
+    for provider in preferred_fallback_providers:
+        if resolve_provider_effective_auth_source(provider) == "none":
+            continue
+        fallback_user_id = str(available_project_bot_ids_by_provider.get(provider) or "").strip()
+        if fallback_user_id:
+            return fallback_user_id
+    return normalized_requested_assignee_id
 
 
 def _task_title_key(value: str) -> str:
@@ -1093,6 +1145,12 @@ class CreateTaskHandler:
             workspace_id=self.payload.workspace_id,
             project_id=self.payload.project_id,
             assigned_agent_code=self.payload.assigned_agent_code,
+        )
+        assignee_id = _resolve_available_system_bot_assignee_for_project(
+            self.ctx.db,
+            project_id=self.payload.project_id,
+            requested_assignee_id=assignee_id,
+            assigned_agent_code=assigned_agent_code,
         )
         if assigned_agent_code and not assignee_id:
             raise HTTPException(status_code=422, detail="assigned_agent_code requires assignee_id")

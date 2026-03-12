@@ -22,11 +22,16 @@ from shared.project_repository import (
     resolve_task_branch_name,
     resolve_task_worktree_path,
 )
-from shared.settings import AGENT_CODEX_COMMAND, AGENT_EXECUTOR_MODE, AGENT_EXECUTOR_TIMEOUT_SECONDS
+from shared.settings import AGENT_EXECUTION_COMMAND, AGENT_EXECUTOR_MODE, AGENT_EXECUTOR_TIMEOUT_SECONDS, AGENT_HOME_ROOT
+from .workspace_runtime import (
+    resolve_workspace_background_runtime_with_new_session,
+    resolve_workspace_runtime_target_for_user,
+)
 
 _TIMEOUT_UNSET = object()
-_DEFAULT_CODEX_HOME_ROOT = "/tmp/codex-home"
+_DEFAULT_AGENT_HOME_ROOT = "/tmp/agent-home"
 _TASK_AUTOMATION_SESSION_PREFIX = "task-automation:"
+AGENT_CODEX_COMMAND = AGENT_EXECUTION_COMMAND
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +57,10 @@ def _effective_timeout_seconds(value: object) -> float | None:
     return normalized
 
 
+def _executor_command() -> str:
+    return str(AGENT_EXECUTION_COMMAND or AGENT_CODEX_COMMAND or "").strip()
+
+
 def _resolve_run_timeout_seconds(override: object = _TIMEOUT_UNSET) -> tuple[float | int | None, float | None]:
     raw_timeout = AGENT_EXECUTOR_TIMEOUT_SECONDS if override is _TIMEOUT_UNSET else override
     return raw_timeout, _effective_timeout_seconds(raw_timeout)
@@ -72,6 +81,58 @@ def _coerce_bool(value: object) -> bool | None:
     if normalized in {"false", "0", "no", "off"}:
         return False
     return None
+
+
+def _resolve_background_runtime_preferences(
+    *,
+    workspace_id: str | None,
+    task_id: str | None,
+    model: str | None,
+    reasoning_effort: str | None,
+) -> tuple[str | None, str | None]:
+    effective_model = str(model or "").strip() or None
+    effective_reasoning_effort = str(reasoning_effort or "").strip().lower() or None
+    if not workspace_id:
+        return effective_model, effective_reasoning_effort
+    if effective_model is not None and effective_reasoning_effort is not None:
+        return effective_model, effective_reasoning_effort
+    runtime_target = _resolve_task_assignee_runtime_target(
+        workspace_id=workspace_id,
+        task_id=task_id,
+    )
+    if runtime_target is None:
+        runtime_target = resolve_workspace_background_runtime_with_new_session(workspace_id)
+    if runtime_target is None:
+        return effective_model, effective_reasoning_effort
+    if effective_model is None:
+        effective_model = str(runtime_target.model or "").strip() or None
+    if effective_reasoning_effort is None:
+        effective_reasoning_effort = str(runtime_target.reasoning_effort or "").strip().lower() or None
+    return effective_model, effective_reasoning_effort
+
+
+def _resolve_task_assignee_runtime_target(
+    *,
+    workspace_id: str | None,
+    task_id: str | None,
+):
+    normalized_workspace_id = str(workspace_id or "").strip()
+    normalized_task_id = str(task_id or "").strip()
+    if not normalized_workspace_id or not normalized_task_id:
+        return None
+    with SessionLocal() as db:
+        assignee_id = db.execute(
+            select(Task.assignee_id).where(
+                Task.id == normalized_task_id,
+                Task.workspace_id == normalized_workspace_id,
+                Task.is_deleted == False,  # noqa: E712
+            )
+        ).scalar_one_or_none()
+        return resolve_workspace_runtime_target_for_user(
+            db,
+            normalized_workspace_id,
+            user_id=str(assignee_id or "").strip() or None,
+        )
 
 
 def _graph_summary_to_markdown(summary: dict[str, object] | None) -> str:
@@ -374,7 +435,7 @@ def _normalize_path_component(value: object, *, fallback: str) -> str:
 
 
 def _resolve_codex_home_root() -> Path:
-    root_raw = str(os.getenv("AGENT_CODEX_HOME_ROOT", _DEFAULT_CODEX_HOME_ROOT)).strip() or _DEFAULT_CODEX_HOME_ROOT
+    root_raw = str(AGENT_HOME_ROOT or os.getenv("AGENT_CODEX_HOME_ROOT", _DEFAULT_AGENT_HOME_ROOT)).strip() or _DEFAULT_AGENT_HOME_ROOT
     return Path(root_raw).expanduser().resolve()
 
 
@@ -563,7 +624,7 @@ def _placeholder_outcome(*, instruction: str, current_status: str) -> Automation
                 "artifacts": [],
             },
         )
-    comment = "Codex runner: request accepted, leaving progress note."
+    comment = "Agent runner: request accepted, leaving progress note."
     if instruction:
         comment += f"\nInstruction: {instruction}"
     return AutomationOutcome(
@@ -957,14 +1018,21 @@ def execute_task_automation(
 
     if AGENT_EXECUTOR_MODE != "command":
         return _placeholder_outcome(instruction=instruction, current_status=status)
-    if not AGENT_CODEX_COMMAND:
+    executor_command = _executor_command()
+    if not executor_command:
         return _placeholder_outcome(instruction=instruction, current_status=status)
+    effective_model, effective_reasoning_effort = _resolve_background_runtime_preferences(
+        workspace_id=workspace_id,
+        task_id=task_id,
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
 
     effective_chat_session_id = _resolve_effective_chat_session_id(
         chat_session_id=chat_session_id,
         task_id=task_id,
     )
-    command = shlex.split(AGENT_CODEX_COMMAND)
+    command = shlex.split(executor_command)
     project_name, project_description, project_rules, project_skills = _load_project_context(project_id)
     (
         project_team_mode_enabled,
@@ -1065,8 +1133,8 @@ def execute_task_automation(
         "graph_context_frame_revision": frame_revision,
         "allow_mutations": allow_mutations,
         "mcp_servers": mcp_servers,
-        "model": model,
-        "reasoning_effort": reasoning_effort,
+        "model": effective_model,
+        "reasoning_effort": effective_reasoning_effort,
         "prompt_instruction_segments": prompt_instruction_segments,
         "executor_timeout_seconds": raw_timeout,
         "task_workdir": task_workdir,
@@ -1173,14 +1241,21 @@ def execute_task_automation_stream(
 
     if AGENT_EXECUTOR_MODE != "command":
         return _placeholder_outcome(instruction=instruction, current_status=status)
-    if not AGENT_CODEX_COMMAND:
+    executor_command = _executor_command()
+    if not executor_command:
         return _placeholder_outcome(instruction=instruction, current_status=status)
+    effective_model, effective_reasoning_effort = _resolve_background_runtime_preferences(
+        workspace_id=workspace_id,
+        task_id=task_id,
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
 
     effective_chat_session_id = _resolve_effective_chat_session_id(
         chat_session_id=chat_session_id,
         task_id=task_id,
     )
-    command = shlex.split(AGENT_CODEX_COMMAND)
+    command = shlex.split(executor_command)
     project_name, project_description, project_rules, project_skills = _load_project_context(project_id)
     (
         project_team_mode_enabled,
@@ -1284,8 +1359,8 @@ def execute_task_automation_stream(
         "graph_context_frame_revision": frame_revision,
         "allow_mutations": allow_mutations,
         "mcp_servers": mcp_servers,
-        "model": model,
-        "reasoning_effort": reasoning_effort,
+        "model": effective_model,
+        "reasoning_effort": effective_reasoning_effort,
         "prompt_instruction_segments": prompt_instruction_segments,
         "executor_timeout_seconds": raw_timeout,
         "task_workdir": task_workdir,

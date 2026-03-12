@@ -5,8 +5,11 @@ import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Popover from '@radix-ui/react-popover'
 import * as Select from '@radix-ui/react-select'
 import type { Note, NoteGroup } from '../../types'
+import type { ProjectGitRepositoryTarget } from '../../utils/gitRepositoryLinks'
+import { parseProjectGitRepositoryExternalRef } from '../../utils/gitRepositoryLinks'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import { PopularTagFilters } from '../shared/PopularTagFilters'
+import { ProjectGitRepositoryDialog } from '../projects/ProjectGitRepositoryDialog'
 import {
   AttachmentRefList,
   ExternalRefEditor,
@@ -130,6 +133,10 @@ export function NotesPanel({
   const [openSectionKeys, setOpenSectionKeys] = React.useState<string[]>([])
   const [noteEditorOpenSections, setNoteEditorOpenSections] = React.useState<string[]>([])
   const [previewOnlyNoteId, setPreviewOnlyNoteId] = React.useState<string | null>(null)
+  const [gitRepositoryDialogState, setGitRepositoryDialogState] = React.useState<{
+    projectId: string
+    target: ProjectGitRepositoryTarget | null
+  } | null>(null)
 
   React.useEffect(() => {
     const allKeys = noteSections.map((section) => section.key)
@@ -148,6 +155,14 @@ export function NotesPanel({
   React.useEffect(() => {
     if (!state.selectedNoteId) setPreviewOnlyNoteId(null)
   }, [state.selectedNoteId])
+
+  const openGitRepositoryFromRef = React.useCallback((projectId: string, ref: Note['external_refs'][number]) => {
+    const target = parseProjectGitRepositoryExternalRef(ref)
+    const normalizedProjectId = String(projectId || '').trim()
+    if (!target || !normalizedProjectId) return false
+    setGitRepositoryDialogState({ projectId: normalizedProjectId, target })
+    return true
+  }, [])
 
 
   const createGroupBusy = Boolean(state.createNoteGroupMutation?.isPending)
@@ -619,7 +634,7 @@ export function NotesPanel({
                   <Icon path="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4m2 7a5 5 0 0 0-7.07 0L3.1 13.83a5 5 0 1 0 7.07 7.07L13 18" />
                   <span>Links</span>
                 </span>
-                <ExternalRefList refs={n.external_refs} />
+                <ExternalRefList refs={n.external_refs} onOpenRef={(ref) => openGitRepositoryFromRef(n.project_id, ref)} />
               </div>
             )}
             {attachmentRefCount > 0 && (
@@ -873,6 +888,7 @@ export function NotesPanel({
                   <ExternalRefEditor
                     refs={editorExternalRefs}
                     onRemoveIndex={(idx) => state.setEditNoteExternalRefsText((prev: string) => state.removeExternalRefByIndex(prev, idx))}
+                    onOpenRef={(ref) => openGitRepositoryFromRef(state.selectedNote?.project_id || '', ref)}
                     onAdd={(ref) =>
                       state.setEditNoteExternalRefsText((prev: string) => state.externalRefsToText([...state.parseExternalRefsText(prev), ref]))
                     }
@@ -1321,6 +1337,15 @@ export function NotesPanel({
           </AlertDialog.Content>
         </AlertDialog.Portal>
       </AlertDialog.Root>
+      <ProjectGitRepositoryDialog
+        open={gitRepositoryDialogState !== null}
+        onOpenChange={(open) => {
+          if (!open) setGitRepositoryDialogState(null)
+        }}
+        userId={state.userId}
+        projectId={gitRepositoryDialogState?.projectId || ''}
+        target={gitRepositoryDialogState?.target || null}
+      />
     </section>
   )
 }

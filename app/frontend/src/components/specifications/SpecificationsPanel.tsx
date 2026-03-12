@@ -6,8 +6,11 @@ import * as Popover from '@radix-ui/react-popover'
 import * as Select from '@radix-ui/react-select'
 import { getNotes, getTasks } from '../../api'
 import type { Note, Specification, Task } from '../../types'
+import type { ProjectGitRepositoryTarget } from '../../utils/gitRepositoryLinks'
+import { parseProjectGitRepositoryExternalRef } from '../../utils/gitRepositoryLinks'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import { parseCommaTags } from '../../utils/ui'
+import { ProjectGitRepositoryDialog } from '../projects/ProjectGitRepositoryDialog'
 import { PopularTagFilters } from '../shared/PopularTagFilters'
 import {
   AttachmentRefList,
@@ -43,6 +46,10 @@ export function SpecificationsPanel({ state }: { state: any }) {
   const [specTagQuery, setSpecTagQuery] = React.useState('')
   const [specResourceSections, setSpecResourceSections] = React.useState<string[]>(['external-links', 'file-attachments'])
   const [previewOnlySpecificationId, setPreviewOnlySpecificationId] = React.useState<string | null>(null)
+  const [gitRepositoryDialogState, setGitRepositoryDialogState] = React.useState<{
+    projectId: string
+    target: ProjectGitRepositoryTarget | null
+  } | null>(null)
 
   React.useEffect(() => {
     setNewTaskTitle('')
@@ -60,6 +67,14 @@ export function SpecificationsPanel({ state }: { state: any }) {
   React.useEffect(() => {
     if (!selectedSpecificationId) setPreviewOnlySpecificationId(null)
   }, [selectedSpecificationId])
+
+  const openGitRepositoryFromRef = React.useCallback((projectId: string, ref: Specification['external_refs'][number]) => {
+    const target = parseProjectGitRepositoryExternalRef(ref)
+    const normalizedProjectId = String(projectId || '').trim()
+    if (!target || !normalizedProjectId) return false
+    setGitRepositoryDialogState({ projectId: normalizedProjectId, target })
+    return true
+  }, [])
 
 
   const taskLinkCandidates = useQuery({
@@ -744,6 +759,7 @@ export function SpecificationsPanel({ state }: { state: any }) {
                                 state.removeExternalRefByIndex(prev, idx)
                               )
                             }
+                            onOpenRef={(ref) => openGitRepositoryFromRef(specification.project_id, ref)}
                             onAdd={(ref) =>
                               state.setEditSpecificationExternalRefsText((prev: string) =>
                                 state.externalRefsToText([...state.parseExternalRefsText(prev), ref])
@@ -1117,6 +1133,15 @@ export function SpecificationsPanel({ state }: { state: any }) {
           </div>
         </div>
       )}
+      <ProjectGitRepositoryDialog
+        open={gitRepositoryDialogState !== null}
+        onOpenChange={(open) => {
+          if (!open) setGitRepositoryDialogState(null)
+        }}
+        userId={state.userId}
+        projectId={gitRepositoryDialogState?.projectId || ''}
+        target={gitRepositoryDialogState?.target || null}
+      />
     </section>
   )
 }

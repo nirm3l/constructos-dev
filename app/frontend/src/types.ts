@@ -41,6 +41,15 @@ export type AdminWorkspaceUser = {
   must_change_password: boolean
   can_reset_password?: boolean
   can_deactivate?: boolean
+  can_update_role?: boolean
+  background_agent_model?: string | null
+  background_agent_provider?: 'codex' | 'claude' | string | null
+  background_agent_available?: boolean
+  background_agent_reasoning_effort?: string | null
+  background_agent_model_is_fallback?: boolean | null
+  background_agent_reasoning_is_fallback?: boolean | null
+  is_background_execution_selected?: boolean
+  can_configure_background_execution?: boolean
 }
 
 export type AdminUsersPage = {
@@ -81,6 +90,16 @@ export type AdminUserDeactivateResponse = {
   workspace_id: string
   user_id: string
   is_active: boolean
+}
+
+export type AdminUserAgentRuntimeUpdateResponse = {
+  ok: boolean
+  workspace_id: string
+  user_id: string
+  provider: 'codex' | 'claude' | string
+  model: string
+  reasoning_effort?: string | null
+  is_background_execution_selected: boolean
 }
 
 export type ExternalRef = {
@@ -801,6 +820,63 @@ export type ProjectDockerComposeRuntimeSnapshot = {
   health?: Record<string, unknown>
 }
 
+export type ProjectGitRepositoryBranch = {
+  name: string
+  commit_sha?: string | null
+  committed_at?: string | null
+  author_name?: string | null
+  subject?: string | null
+  is_current: boolean
+  is_default: boolean
+  merged_to_main: boolean
+}
+
+export type ProjectGitRepositorySummary = {
+  project_id: string
+  project_name: string
+  available: boolean
+  repo_root: string
+  current_branch?: string | null
+  default_branch?: string | null
+  branch_count: number
+  branches_preview: ProjectGitRepositoryBranch[]
+}
+
+export type ProjectGitRepositoryBranchesResponse = {
+  project_id: string
+  project_name: string
+  branches: ProjectGitRepositoryBranch[]
+}
+
+export type ProjectGitRepositoryTreeEntry = {
+  name: string
+  path: string
+  kind: 'directory' | 'file'
+  object_id: string
+  mode: string
+}
+
+export type ProjectGitRepositoryTreeResponse = {
+  project_id: string
+  project_name: string
+  ref: string
+  path: string
+  entries: ProjectGitRepositoryTreeEntry[]
+}
+
+export type ProjectGitRepositoryFileResponse = {
+  project_id: string
+  project_name: string
+  ref: string
+  path: string
+  size_bytes?: number | null
+  encoding?: string | null
+  previewable: boolean
+  truncated: boolean
+  binary: boolean
+  content?: string | null
+}
+
 export type GraphLayoutPosition = {
   entity_id: string
   x: number
@@ -1152,30 +1228,41 @@ export type AgentChatResponse = {
   resume_fallback_used?: boolean
 }
 
-export type CodexAuthEffectiveSource = 'system_override' | 'host_mount' | 'none'
+export type AgentAuthProvider = 'codex' | 'claude'
+export type AgentAuthEffectiveSource = 'system_override' | 'host_mount' | 'none'
+export type ClaudeAuthLoginMethod = 'claudeai' | 'console'
 
-export type CodexAuthLoginSession = {
+export type AgentAuthLoginSession = {
   id: string
   status: 'pending' | 'succeeded' | 'failed' | 'cancelled'
   started_at: string
   updated_at: string
+  login_method?: ClaudeAuthLoginMethod | string | null
   verification_uri?: string | null
   user_code?: string | null
   error?: string | null
   output_excerpt?: string[]
 }
 
-export type CodexAuthStatus = {
+export type AgentAuthStatus = {
+  provider?: AgentAuthProvider | string
+  provider_label?: string | null
   configured: boolean
-  effective_source: CodexAuthEffectiveSource
+  effective_source: AgentAuthEffectiveSource
   host_auth_available: boolean
   override_available: boolean
   override_updated_at?: string | null
   scope?: 'system' | string
   target_actor_user_id?: string | null
   target_actor_username?: string | null
-  login_session?: CodexAuthLoginSession | null
+  target_actor_full_name?: string | null
+  selected_login_method?: ClaudeAuthLoginMethod | string | null
+  supported_login_methods?: Array<ClaudeAuthLoginMethod | string>
+  login_session?: AgentAuthLoginSession | null
 }
+
+export type CodexAuthStatus = AgentAuthStatus
+export type ClaudeAuthStatus = AgentAuthStatus
 
 export type ChatMcpServer = string
 export type ChatReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'

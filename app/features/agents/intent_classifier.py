@@ -8,8 +8,10 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
-from features.agents.codex_mcp_adapter import run_structured_codex_prompt
+from features.agents.agent_mcp_adapter import run_structured_agent_prompt
 from shared.classification_cache import ClassificationCache, build_classification_cache_key
+
+run_structured_codex_prompt = run_structured_agent_prompt
 
 _PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "shared" / "prompt_templates" / "codex"
 _WORKFLOW_SCOPES = {"team_mode", "single_agent", "unknown"}

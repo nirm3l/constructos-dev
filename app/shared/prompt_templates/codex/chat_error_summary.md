@@ -1,1 +1,1 @@
-Codex failed to complete the request.
+The agent failed to complete the request.

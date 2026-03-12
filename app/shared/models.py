@@ -62,6 +62,18 @@ class WorkspaceMember(Base):
     role: Mapped[str] = mapped_column(String(16), default="Member")
 
 
+class WorkspaceAgentRuntime(Base, TimeMixin):
+    __tablename__ = "workspace_agent_runtimes"
+    __table_args__ = (UniqueConstraint("workspace_id", "user_id", name="ux_workspace_agent_runtimes_workspace_user"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    model: Mapped[str] = mapped_column(String(128), default="")
+    reasoning_effort: Mapped[str] = mapped_column(String(16), default="")
+    is_background_default: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class Project(Base, TimeMixin):
     __tablename__ = "projects"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)

@@ -449,7 +449,7 @@ export function AppHeader({
                 <HeaderTooltip content="Open settings and navigation">
                   <DropdownMenu.Trigger asChild>
                     <button
-                      className={`top-profile-btn ${tab === 'profile' ? 'active' : ''}`.trim()}
+                      className={`top-profile-btn ${tab === 'settings' ? 'active' : ''}`.trim()}
                       aria-label="Open settings menu"
                       data-tour-id="header-settings-menu"
                     >
@@ -459,8 +459,8 @@ export function AppHeader({
                 </HeaderTooltip>
                 <DropdownMenu.Portal>
                   <DropdownMenu.Content className="header-settings-menu-content" sideOffset={8} align="end">
-                    <DropdownMenu.Item className="header-settings-menu-item" onSelect={() => setTab('profile')}>
-                      Profile settings
+                    <DropdownMenu.Item className="header-settings-menu-item" onSelect={() => setTab('settings')}>
+                      Settings
                     </DropdownMenu.Item>
                     <DropdownMenu.Item className="header-settings-menu-item" onSelect={() => setTab('projects')}>
                       Manage projects

@@ -548,18 +548,19 @@ export function TaskDrawerInsights({ state }: { state: any }) {
               )}
             </div>
             {showLiveOutput && (
-              <div className="automation-history" aria-live="polite" style={{ marginBottom: 8 }}>
+              <div
+                className="automation-history"
+                aria-live="polite"
+                ref={liveOutputRef}
+                onScroll={handleLiveOutputScroll}
+                style={{ marginBottom: 8 }}
+              >
                 <div className={`automation-history-item ${isAutomationRunning ? 'started' : (isAutomationQueued ? 'requested' : 'completed')}`}>
                   <div className="automation-history-head">
                     <strong>Live output</strong>
                     {visibleLiveStatusText && <span className="meta">{visibleLiveStatusText}</span>}
                   </div>
-                  <div
-                    className="automation-history-body"
-                    ref={liveOutputRef}
-                    onScroll={handleLiveOutputScroll}
-                    style={{ maxHeight: 260, overflowY: 'auto' }}
-                  >
+                  <div className="automation-history-body">
                     {displayedLiveAutomationProgress ? (
                       (isAutomationRunning || isAutomationQueued) ? (
                         <div className="codex-chat-streaming-text" aria-live="polite">

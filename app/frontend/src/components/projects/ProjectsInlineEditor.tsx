@@ -14,6 +14,7 @@ import {
   diffProjectPluginConfig,
   getProjectDockerComposeRuntime,
   getProjectEventStormingOverview,
+  getProjectGitRepositorySummary,
   getProjectCapabilities,
   getProjectMembers,
   getProjectPolicyChecksVerification,
@@ -31,6 +32,7 @@ import type {
   GraphProjectOverview,
   Project,
   ProjectDockerComposeRuntimeSnapshot,
+  ProjectGitRepositorySummary,
   ProjectPolicyChecksVerifyResponse,
   ProjectCapabilities,
   ProjectPluginConfig,
@@ -44,6 +46,8 @@ import type {
   WorkspaceSkill,
   WorkspaceSkillsPage,
 } from '../../types'
+import type { ProjectGitRepositoryTarget } from '../../utils/gitRepositoryLinks'
+import { parseProjectGitRepositoryExternalRef } from '../../utils/gitRepositoryLinks'
 import {
   AttachmentRefList,
   ExternalRefEditor,
@@ -53,6 +57,7 @@ import {
 } from '../shared/uiHelpers'
 import { ProjectContextSnapshotPanel } from './ProjectContextSnapshotPanel'
 import { ProjectDockerComposeRuntimeDialog } from './ProjectDockerComposeRuntimeDialog'
+import { ProjectGitRepositoryDialog } from './ProjectGitRepositoryDialog'
 import {
   attachmentRefsToText,
   externalRefsToText,
@@ -231,9 +236,6 @@ const GIT_DELIVERY_STARTER_CONFIG: Record<string, unknown> = {
     delivery: [
       'repo_context_present',
       'git_contract_ok',
-      'qa_has_verifiable_artifacts',
-      'deploy_execution_evidence_present',
-      'runtime_deploy_health_ok',
     ],
   },
   execution: {
@@ -573,6 +575,12 @@ export function ProjectsInlineEditor({
     queryFn: () => getProjectPluginConfig(userId, project.id, 'docker_compose'),
     enabled: Boolean(userId && project.id && selectedProject?.id === project.id),
   })
+  const gitRepositorySummaryQuery = useQuery<ProjectGitRepositorySummary>({
+    queryKey: ['project-git-repository-summary', userId, project.id],
+    queryFn: () => getProjectGitRepositorySummary(userId, project.id),
+    enabled: Boolean(userId && project.id && selectedProject?.id === project.id && gitDeliveryPluginQuery.data?.enabled),
+    retry: false,
+  })
   const dockerComposeRuntimeQuery = useQuery<ProjectDockerComposeRuntimeSnapshot>({
     queryKey: ['project-docker-compose-runtime', userId, project.id],
     queryFn: () => getProjectDockerComposeRuntime(userId, project.id),
@@ -604,6 +612,15 @@ export function ProjectsInlineEditor({
     refetchInterval: 20_000,
   })
   const [dockerRuntimeDialogOpen, setDockerRuntimeDialogOpen] = React.useState(false)
+  const [gitRepositoryDialogOpen, setGitRepositoryDialogOpen] = React.useState(false)
+  const [gitRepositoryDialogTarget, setGitRepositoryDialogTarget] = React.useState<ProjectGitRepositoryTarget | null>(null)
+  const openGitRepositoryFromRef = React.useCallback((ref: { url: string; title?: string; source?: string }) => {
+    const target = parseProjectGitRepositoryExternalRef(ref)
+    if (!target) return false
+    setGitRepositoryDialogTarget(target)
+    setGitRepositoryDialogOpen(true)
+    return true
+  }, [])
   const validatePluginConfigMutation = useMutation({
     mutationFn: (params: { pluginKey: ProjectPluginKey; draftConfig: Record<string, unknown> }) =>
       validateProjectPluginConfig(userId, project.id, params.pluginKey, {
@@ -1533,20 +1550,11 @@ export function ProjectsInlineEditor({
     () => new Set(teamModeRequiredChecksSelected),
     [teamModeRequiredChecksSelected]
   )
-  const gitDeliveryRequiredCheckSet = React.useMemo(
-    () => new Set(gitDeliveryRequiredChecksSelected),
-    [gitDeliveryRequiredChecksSelected]
-  )
   const teamModeCheckDescriptionById = React.useMemo(() => {
     const out: Record<string, string> = {}
     for (const option of teamModePolicySummary.teamModeAvailable) out[option.id] = option.description || ''
     return out
   }, [teamModePolicySummary.teamModeAvailable])
-  const gitDeliveryCheckDescriptionById = React.useMemo(() => {
-    const out: Record<string, string> = {}
-    for (const option of gitDeliveryPolicySummary.deliveryAvailable) out[option.id] = option.description || ''
-    return out
-  }, [gitDeliveryPolicySummary.deliveryAvailable])
 
   const setTeamModeRequiredChecks = React.useCallback(
     (nextChecks: string[]) => {
@@ -1562,22 +1570,6 @@ export function ProjectsInlineEditor({
       })
     },
     [patchTeamModeDraft]
-  )
-
-  const setGitDeliveryRequiredChecks = React.useCallback(
-    (nextChecks: string[]) => {
-      patchGitDeliveryDraft((draft) => {
-        const requiredChecks = ((draft.required_checks as Record<string, unknown> | undefined) || {}) as Record<string, unknown>
-        return {
-          ...draft,
-          required_checks: {
-            ...requiredChecks,
-            delivery: nextChecks,
-          },
-        }
-      })
-    },
-    [patchGitDeliveryDraft]
   )
 
   const setGitDeliveryRequireDevTests = React.useCallback(
@@ -3708,6 +3700,37 @@ export function ProjectsInlineEditor({
             <div className="meta" style={{ marginTop: 6 }}>
               Required delivery checks for a strict core delivery contract.
             </div>
+            {gitDeliveryPluginQuery.data?.enabled ? (
+              <div className="project-docker-runtime-bar" style={{ marginTop: 10 }}>
+                <div className="project-docker-runtime-copy">
+                  <div className="meta">Project repository</div>
+                  <div className="project-docker-runtime-summary">
+                    {gitRepositorySummaryQuery.isLoading
+                      ? 'Checking repository state...'
+                      : gitRepositorySummaryQuery.data?.available
+                        ? `Current branch ${String(gitRepositorySummaryQuery.data.current_branch || gitRepositorySummaryQuery.data.default_branch || 'HEAD')} across ${Number(gitRepositorySummaryQuery.data.branch_count || 0)} branch${Number(gitRepositorySummaryQuery.data.branch_count || 0) === 1 ? '' : 'es'}`
+                        : 'Project repository is not available yet'}
+                  </div>
+                </div>
+                <div className="project-docker-runtime-actions">
+                  {gitRepositorySummaryQuery.data?.default_branch ? (
+                    <span className="badge">Default: {gitRepositorySummaryQuery.data.default_branch}</span>
+                  ) : null}
+                  {gitRepositorySummaryQuery.data?.available ? (
+                    <button
+                      type="button"
+                      className="status-chip"
+                      onClick={() => {
+                        setGitRepositoryDialogTarget(null)
+                        setGitRepositoryDialogOpen(true)
+                      }}
+                    >
+                      View repository
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
             <div className="notice plugin-config-shell" style={{ marginTop: 8 }}>
               <div style={{ fontWeight: 600, marginBottom: 6 }}>Execution gates overview</div>
               {deliveryVerificationScope?.requiredChecks?.length ? (
@@ -3816,76 +3839,11 @@ export function ProjectsInlineEditor({
             </div>
             <div className="notice plugin-config-shell" style={{ marginTop: 8 }}>
               <div style={{ fontWeight: 600, marginBottom: 6 }}>Quick configuration</div>
-              <div className="row wrap" style={{ alignItems: 'center', gap: 8 }}>
-                <span className="meta">Required checks</span>
-                <InfoTip text="Keep this list minimal and high-signal. Required checks block successful delivery when failing." />
-                <Select.Root
-                  key={`gd-check-picker-${gitDeliveryRequiredChecksSelected.join('|')}`}
-                  onValueChange={(value) => {
-                    const next = String(value || '').trim()
-                    if (!next || next === '__none__') return
-                    setGitDeliveryRequiredChecks(Array.from(new Set([...gitDeliveryRequiredChecksSelected, next])))
-                  }}
-                >
-                  <Select.Trigger
-                    className="quickadd-project-trigger taskdrawer-select-trigger project-inline-select-trigger plugin-compact-select"
-                    aria-label="Add Git Delivery required check"
-                  >
-                    <Select.Value placeholder="Add check" />
-                    <Select.Icon asChild>
-                      <Icon path="M6 9l6 6 6-6" />
-                    </Select.Icon>
-                  </Select.Trigger>
-                  <Select.Portal>
-                    <Select.Content className="quickadd-project-content plugin-check-select-content" position="popper" sideOffset={6}>
-                      <Select.Viewport className="quickadd-project-viewport">
-                        {gitDeliveryPolicySummary.deliveryAvailable.filter((option) => !gitDeliveryRequiredCheckSet.has(option.id)).length === 0 ? (
-                          <div className="codex-chat-session-empty">All checks are already selected</div>
-                        ) : (
-                          gitDeliveryPolicySummary.deliveryAvailable
-                            .filter((option) => !gitDeliveryRequiredCheckSet.has(option.id))
-                            .map((option) => (
-                              <Select.Item key={`gd-required-check-${option.id}`} value={option.id} className="codex-chat-session-item plugin-check-select-item">
-                                <Select.ItemText>
-                                  <span className="codex-chat-session-item-title">{option.id}</span>
-                                </Select.ItemText>
-                                <span className="codex-chat-session-item-meta">{option.description || 'No description'}</span>
-                                <Select.ItemIndicator className="codex-chat-session-item-indicator">
-                                  <Icon path="M5 13l4 4L19 7" />
-                                </Select.ItemIndicator>
-                              </Select.Item>
-                            ))
-                        )}
-                      </Select.Viewport>
-                    </Select.Content>
-                  </Select.Portal>
-                </Select.Root>
+              <div className="meta">
+                Core defaults: {gitDeliveryRequiredChecksSelected.join(', ') || '(none)'}
               </div>
-              <div className="row wrap plugin-required-checks-row" style={{ marginTop: 4 }}>
-                {gitDeliveryRequiredChecksSelected.map((checkId) => (
-                  <Tooltip.Provider key={`gd-required-chip-${checkId}`} delayDuration={120}>
-                    <Tooltip.Root>
-                      <Tooltip.Trigger asChild>
-                        <button
-                          type="button"
-                          className="status-chip active"
-                          onClick={() =>
-                            setGitDeliveryRequiredChecks(gitDeliveryRequiredChecksSelected.filter((item) => item !== checkId))
-                          }
-                        >
-                          <code>{checkId}</code>
-                          <Icon path="M6 6l12 12M18 6 6 18" />
-                        </button>
-                      </Tooltip.Trigger>
-                      <Tooltip.Portal>
-                        <Tooltip.Content className="header-tooltip-content" side="top" sideOffset={6}>
-                          {gitDeliveryCheckDescriptionById[checkId] || checkId}
-                          <Tooltip.Arrow className="header-tooltip-arrow" />
-                        </Tooltip.Content>
-                      </Tooltip.Portal>
-                    </Tooltip.Root>
-                  </Tooltip.Provider>
-                ))}
+              <div className="meta" style={{ marginTop: 6 }}>
+                Additional delivery checks are applied automatically by runtime verification when Team Mode, deploy evidence, or runtime health requirements are in play.
               </div>
               <div className="row wrap" style={{ marginTop: 8, alignItems: 'center', gap: 8 }}>
                 <label className="project-plugin-enabled-row" htmlFor="git-delivery-require-dev-tests-checkbox">
@@ -5004,6 +4962,7 @@ export function ProjectsInlineEditor({
             <ExternalRefEditor
               refs={projectExternalRefs}
               onRemoveIndex={(idx) => setEditProjectExternalRefsText((prev) => removeExternalRefByIndex(prev, idx))}
+              onOpenRef={openGitRepositoryFromRef}
               onAdd={(ref) =>
                 setEditProjectExternalRefsText((prev) => externalRefsToText([...parseExternalRefsText(prev), ref]))
               }
@@ -5159,6 +5118,16 @@ export function ProjectsInlineEditor({
         onOpenChange={setDockerRuntimeDialogOpen}
         userId={userId}
         projectId={project.id}
+      />
+      <ProjectGitRepositoryDialog
+        open={gitRepositoryDialogOpen}
+        onOpenChange={(open) => {
+          setGitRepositoryDialogOpen(open)
+          if (!open) setGitRepositoryDialogTarget(null)
+        }}
+        userId={userId}
+        projectId={project.id}
+        target={gitRepositoryDialogTarget}
       />
       <AlertDialog.Root open={removeProjectPromptOpen} onOpenChange={setRemoveProjectPromptOpen}>
         <AlertDialog.Portal>

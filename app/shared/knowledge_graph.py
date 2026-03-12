@@ -13,10 +13,9 @@ import httpx
 
 from .json_utils import parse_json_object
 from .observability import incr, observe, set_value
-from features.agents.codex_mcp_adapter import run_structured_codex_prompt_with_usage
+from features.agents.agent_mcp_adapter import run_structured_agent_prompt_with_usage
+from features.agents.workspace_runtime import resolve_workspace_background_runtime_with_new_session
 from .settings import (
-    AGENT_CODEX_MODEL,
-    AGENT_CODEX_REASONING_EFFORT,
     CONTEXT_PACK_EVIDENCE_TOP_K,
     GRAPH_CONTEXT_MAX_HOPS,
     GRAPH_CONTEXT_MAX_TOKENS,
@@ -1127,6 +1126,7 @@ def _heuristic_graph_layout_positions(
 
 def _llm_graph_layout_positions(
     *,
+    workspace_id: str | None,
     project_name: str,
     nodes: list[dict[str, Any]],
     edges: list[dict[str, Any]],
@@ -1134,11 +1134,13 @@ def _llm_graph_layout_positions(
     node_height: int,
     fallback_positions: dict[str, dict[str, int]],
 ) -> tuple[dict[str, dict[str, int]], str]:
-    model = str(AGENT_CODEX_MODEL or "").strip()
-    if not model:
-        raise RuntimeError("Graph layout model is not configured")
+    runtime_provider = (
+        getattr(resolve_workspace_background_runtime_with_new_session(workspace_id), "provider", None)
+        if workspace_id
+        else None
+    )
     if not nodes:
-        return {}, "codex"
+        return {}, str(runtime_provider or "codex")
 
     output_schema: dict[str, Any] = {
         "type": "object",
@@ -1198,13 +1200,11 @@ def _llm_graph_layout_positions(
         "Graph payload:\n"
         f"{json.dumps(graph_payload, ensure_ascii=True)}\n"
     )
-    parsed_payload, _ = run_structured_codex_prompt_with_usage(
+    parsed_payload, _ = run_structured_agent_prompt_with_usage(
         prompt=prompt,
         output_schema=output_schema,
-        workspace_id=None,
+        workspace_id=workspace_id,
         session_key=f"knowledge-graph-layout-{project_name or 'project'}",
-        model=model,
-        reasoning_effort=str(AGENT_CODEX_REASONING_EFFORT or "").strip() or None,
         mcp_servers=[],
     )
 
@@ -1234,7 +1234,7 @@ def _llm_graph_layout_positions(
         positions=out,
         node_width=node_width,
         node_height=node_height,
-    ), "codex"
+    ), str(runtime_provider or "codex")
 
 
 def _postprocess_codex_layout_positions(
@@ -1338,6 +1338,13 @@ def graph_generate_layout(
     node_width: int = 220,
     node_height: int = 74,
 ) -> dict[str, Any]:
+    workspace_id: str | None = None
+    from .models import Project, SessionLocal
+
+    with SessionLocal() as db:
+        project_row = db.get(Project, project_id)
+        if project_row is not None:
+            workspace_id = str(getattr(project_row, "workspace_id", "") or "").strip() or None
     normalized_nodes, normalized_edges = _normalize_layout_input(nodes=nodes, edges=edges)
     signature = _build_graph_layout_signature(nodes=normalized_nodes, edges=normalized_edges)
     if not normalized_nodes:
@@ -1352,6 +1359,7 @@ def graph_generate_layout(
     width = max(120, min(int(node_width or 220), 420))
     height = max(48, min(int(node_height or 74), 280))
     positions, strategy = _llm_graph_layout_positions(
+        workspace_id=workspace_id,
         project_name=project_name,
         nodes=normalized_nodes,
         edges=normalized_edges,

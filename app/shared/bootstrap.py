@@ -48,9 +48,9 @@ from .models import (
 )
 from .serializers import to_iso_utc
 from .settings import (
-    AGENT_SYSTEM_FULL_NAME,
-    AGENT_SYSTEM_USER_ID,
-    AGENT_SYSTEM_USERNAME,
+    CLAUDE_SYSTEM_FULL_NAME,
+    CLAUDE_SYSTEM_USER_ID,
+    CLAUDE_SYSTEM_USERNAME,
     BOOTSTRAP_PROJECT_ID,
     BOOTSTRAP_PASSWORD,
     BOOTSTRAP_TASK_ID,
@@ -61,6 +61,9 @@ from .settings import (
     DEFAULT_STATUSES,
     LEGACY_BOOTSTRAP_PASSWORD,
     LICENSE_TRIAL_DAYS,
+    CODEX_SYSTEM_FULL_NAME,
+    CODEX_SYSTEM_USER_ID,
+    CODEX_SYSTEM_USERNAME,
     logger,
 )
 
@@ -347,43 +350,52 @@ def _get_default_workspace_skills() -> tuple[dict[str, str], ...]:
 
 
 def ensure_system_users(db: Session):
-    if not db.get(User, AGENT_SYSTEM_USER_ID):
-        db.add(
-            User(
-                id=AGENT_SYSTEM_USER_ID,
-                username=AGENT_SYSTEM_USERNAME,
-                full_name=AGENT_SYSTEM_FULL_NAME,
-                user_type="agent",
-                password_hash=None,
-                must_change_password=False,
-                password_changed_at=None,
-                is_active=True,
-                timezone="UTC",
-                theme="dark",
+    for user_id, username, full_name in (
+        (CODEX_SYSTEM_USER_ID, CODEX_SYSTEM_USERNAME, CODEX_SYSTEM_FULL_NAME),
+        (CLAUDE_SYSTEM_USER_ID, CLAUDE_SYSTEM_USERNAME, CLAUDE_SYSTEM_FULL_NAME),
+    ):
+        if not db.get(User, user_id):
+            db.add(
+                User(
+                    id=user_id,
+                    username=username,
+                    full_name=full_name,
+                    user_type="agent",
+                    password_hash=None,
+                    must_change_password=False,
+                    password_changed_at=None,
+                    is_active=True,
+                    timezone="UTC",
+                    theme="dark",
+                )
             )
-        )
-    else:
-        agent_user = db.get(User, AGENT_SYSTEM_USER_ID)
+            continue
+        agent_user = db.get(User, user_id)
         if agent_user:
+            if agent_user.username != username:
+                agent_user.username = username
+            if agent_user.full_name != full_name:
+                agent_user.full_name = full_name
             if agent_user.user_type != "agent":
                 agent_user.user_type = "agent"
-            # System agent does not authenticate with username/password.
+            # System agents do not authenticate with username/password.
             agent_user.password_hash = None
             agent_user.must_change_password = False
             agent_user.password_changed_at = None
             agent_user.is_active = True
     workspace = db.get(Workspace, BOOTSTRAP_WORKSPACE_ID)
     if workspace:
-        membership = db.execute(
-            select(WorkspaceMember).where(
-                WorkspaceMember.workspace_id == BOOTSTRAP_WORKSPACE_ID,
-                WorkspaceMember.user_id == AGENT_SYSTEM_USER_ID,
-            )
-        ).scalar_one_or_none()
-        if not membership:
-            db.add(WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=AGENT_SYSTEM_USER_ID, role="Admin"))
-        elif membership.role not in {"Owner", "Admin"}:
-            membership.role = "Admin"
+        for user_id in (CODEX_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID):
+            membership = db.execute(
+                select(WorkspaceMember).where(
+                    WorkspaceMember.workspace_id == BOOTSTRAP_WORKSPACE_ID,
+                    WorkspaceMember.user_id == user_id,
+                )
+            ).scalar_one_or_none()
+            if not membership:
+                db.add(WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=user_id, role="Admin"))
+            elif membership.role not in {"Owner", "Admin"}:
+                membership.role = "Admin"
     db.commit()
 
 
@@ -508,7 +520,10 @@ def ensure_user_table_columns(db: Session):
     if "onboarding_advanced_tour_completed" not in existing:
         db.execute(text("ALTER TABLE users ADD COLUMN onboarding_advanced_tour_completed BOOLEAN DEFAULT FALSE"))
     db.execute(text("UPDATE users SET user_type='human' WHERE user_type IS NULL OR user_type = ''"))
-    db.execute(text("UPDATE users SET user_type='agent' WHERE id = :agent_id"), {"agent_id": AGENT_SYSTEM_USER_ID})
+    db.execute(
+        text("UPDATE users SET user_type='agent' WHERE id IN (:codex_agent_id, :claude_agent_id)"),
+        {"codex_agent_id": CODEX_SYSTEM_USER_ID, "claude_agent_id": CLAUDE_SYSTEM_USER_ID},
+    )
     db.execute(text("UPDATE users SET must_change_password=TRUE WHERE must_change_password IS NULL"))
     db.execute(text("UPDATE users SET is_active=TRUE WHERE is_active IS NULL"))
     db.execute(text("UPDATE users SET agent_chat_model='' WHERE agent_chat_model IS NULL"))
@@ -874,7 +889,8 @@ def bootstrap_data():
             db.add_all(
                 [
                     WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=DEFAULT_USER_ID, role="Owner"),
-                    WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=AGENT_SYSTEM_USER_ID, role="Admin"),
+                    WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=CODEX_SYSTEM_USER_ID, role="Admin"),
+                    WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=CLAUDE_SYSTEM_USER_ID, role="Admin"),
                 ]
             )
             db.commit()
@@ -891,16 +907,17 @@ def bootstrap_data():
             ).scalar_one_or_none()
             if not owner:
                 db.add(WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=DEFAULT_USER_ID, role="Owner"))
-            agent_member = db.execute(
-                select(WorkspaceMember).where(
-                    WorkspaceMember.workspace_id == BOOTSTRAP_WORKSPACE_ID,
-                    WorkspaceMember.user_id == AGENT_SYSTEM_USER_ID,
-                )
-            ).scalar_one_or_none()
-            if not agent_member:
-                db.add(WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=AGENT_SYSTEM_USER_ID, role="Admin"))
-            elif agent_member.role not in {"Owner", "Admin"}:
-                agent_member.role = "Admin"
+            for user_id in (CODEX_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID):
+                agent_member = db.execute(
+                    select(WorkspaceMember).where(
+                        WorkspaceMember.workspace_id == BOOTSTRAP_WORKSPACE_ID,
+                        WorkspaceMember.user_id == user_id,
+                    )
+                ).scalar_one_or_none()
+                if not agent_member:
+                    db.add(WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=user_id, role="Admin"))
+                elif agent_member.role not in {"Owner", "Admin"}:
+                    agent_member.role = "Admin"
             db.commit()
 
         ensure_license_installation(db)
@@ -1410,14 +1427,14 @@ def bootstrap_data():
                     "project_id": BOOTSTRAP_PROJECT_ID,
                     "task_group_id": BOOTSTRAP_TASK_SPRINT_B_ID,
                     "specification_id": BOOTSTRAP_SPEC_DEMO_ID,
-                    "title": "Automation demo: run with Codex",
+                    "title": "Automation demo: run with an agent",
                     "description": "Open this task and use Run now to see live automation output and execution state.",
                     "status": "In progress",
                     "priority": "Med",
                     "due_date": None,
                     "assignee_id": DEFAULT_USER_ID,
                     "assigned_agent_code": None,
-                    "labels": ["demo", "automation", "codex"],
+                    "labels": ["demo", "automation", "agent"],
                     "subtasks": [],
                     "attachments": [],
                     "external_refs": [

@@ -121,7 +121,7 @@ _KICKOFF_EXECUTION_HOLDOFF_SECONDS = 20
 _AUTOMATION_STREAM_PROGRESS_MAX_CHARS = 24000
 _AUTOMATION_STREAM_FLUSH_INTERVAL_SECONDS = 0.35
 _AUTOMATION_STREAM_NOISY_STATUS_MESSAGES = {
-    "Codex started processing the request.",
+    "Agent started processing the request.",
     "Reasoning step completed.",
 }
 _STATUS_CHANGE_AUTOMATION_ACTIONS = {
@@ -3267,7 +3267,9 @@ def _is_noop_ack_comment(comment: str | None) -> bool:
     normalized = str(comment or "").strip().casefold()
     if not normalized:
         return False
-    return normalized.startswith("codex runner: request accepted, leaving progress note.")
+    return normalized.startswith("agent runner: request accepted, leaving progress note.") or normalized.startswith(
+        "codex runner: request accepted, leaving progress note."
+    )
 
 
 def _is_transient_runner_interruption(error: Exception | str | None) -> bool:

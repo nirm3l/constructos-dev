@@ -1,6 +1,12 @@
 import React from 'react'
+import { normalizeAgentExecutionModel } from '../utils/agentExecution'
 
-const ALLOWED_REASONING_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh'])
+function normalizeReasoningEffort(value: unknown): 'low' | 'medium' | 'high' | 'xhigh' {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'max' || normalized === 'maximum') return 'xhigh'
+  if (normalized === 'low' || normalized === 'high' || normalized === 'xhigh') return normalized
+  return 'medium'
+}
 
 export function useBootstrapSelectionEffects(c: any) {
   React.useEffect(() => {
@@ -9,18 +15,18 @@ export function useBootstrapSelectionEffects(c: any) {
   }, [c.bootstrap.data?.current_user?.theme, c.setTheme])
 
   React.useEffect(() => {
-    const fromUser = String(c.bootstrap.data?.current_user?.agent_chat_model || '').trim()
-    const fromDefault = String(c.bootstrap.data?.agent_chat_default_model || '').trim()
+    const fromUser = normalizeAgentExecutionModel(c.bootstrap.data?.current_user?.agent_chat_model)
+    const fromDefault = normalizeAgentExecutionModel(c.bootstrap.data?.agent_chat_default_model)
     c.setAgentChatModel(fromUser || fromDefault || '')
   }, [c.bootstrap.data?.current_user?.agent_chat_model, c.bootstrap.data?.agent_chat_default_model, c.setAgentChatModel])
 
   React.useEffect(() => {
-    const fromUser = String(c.bootstrap.data?.current_user?.agent_chat_reasoning_effort || '').trim().toLowerCase()
-    const fromDefault = String(c.bootstrap.data?.agent_chat_default_reasoning_effort || '').trim().toLowerCase()
-    const resolved = ALLOWED_REASONING_EFFORTS.has(fromUser)
-      ? fromUser
-      : ALLOWED_REASONING_EFFORTS.has(fromDefault)
-        ? fromDefault
+    const rawUserValue = String(c.bootstrap.data?.current_user?.agent_chat_reasoning_effort || '').trim()
+    const rawDefaultValue = String(c.bootstrap.data?.agent_chat_default_reasoning_effort || '').trim()
+    const resolved = rawUserValue
+      ? normalizeReasoningEffort(rawUserValue)
+      : rawDefaultValue
+        ? normalizeReasoningEffort(rawDefaultValue)
         : 'medium'
     c.setAgentChatReasoningEffort(resolved)
   }, [

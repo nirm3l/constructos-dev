@@ -23,6 +23,17 @@ def _parse_csv_list_env(name: str) -> list[str]:
     return out
 
 
+def _env_first(name_candidates: tuple[str, ...], default: str = "") -> str:
+    for name in name_candidates:
+        raw = os.getenv(name)
+        if raw is None:
+            continue
+        value = raw.strip()
+        if value:
+            return value
+    return default
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -69,9 +80,15 @@ LEGACY_BOOTSTRAP_PASSWORD = os.getenv("LEGACY_BOOTSTRAP_PASSWORD", "testtest").s
 BOOTSTRAP_WORKSPACE_ID = "10000000-0000-0000-0000-000000000001"
 BOOTSTRAP_PROJECT_ID = "20000000-0000-0000-0000-000000000001"
 BOOTSTRAP_TASK_ID = "30000000-0000-0000-0000-000000000001"
-AGENT_SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000099"
-AGENT_SYSTEM_USERNAME = "codex-bot"
-AGENT_SYSTEM_FULL_NAME = "Codex Bot"
+CODEX_SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000099"
+CODEX_SYSTEM_USERNAME = "codex-bot"
+CODEX_SYSTEM_FULL_NAME = "Codex Bot"
+CLAUDE_SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000098"
+CLAUDE_SYSTEM_USERNAME = "claude-bot"
+CLAUDE_SYSTEM_FULL_NAME = "Claude Bot"
+AGENT_SYSTEM_USER_ID = CODEX_SYSTEM_USER_ID
+AGENT_SYSTEM_USERNAME = CODEX_SYSTEM_USERNAME
+AGENT_SYSTEM_FULL_NAME = CODEX_SYSTEM_FULL_NAME
 AGENT_RUNNER_ENABLED = os.getenv("AGENT_RUNNER_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 AGENT_RUNNER_INTERVAL_SECONDS = 3.0
 AGENT_RUNNER_MAX_CONCURRENCY = max(1, _env_int("AGENT_RUNNER_MAX_CONCURRENCY", 10))
@@ -83,15 +100,28 @@ AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS = os.getenv("AGENT_RUNNER_APPLY_OUTCOME_MUT
 }
 AGENT_EXECUTOR_MODE = os.getenv("AGENT_EXECUTOR_MODE", "command").strip().lower() or "command"
 AGENT_EXECUTOR_TIMEOUT_SECONDS = float(os.getenv("AGENT_EXECUTOR_TIMEOUT_SECONDS", "900"))
+AGENT_DEFAULT_EXECUTION_PROVIDER = os.getenv("AGENT_DEFAULT_EXECUTION_PROVIDER", "codex").strip().lower() or "codex"
 AGENT_CHAT_CONTEXT_LIMIT_TOKENS = _env_int("AGENT_CHAT_CONTEXT_LIMIT_TOKENS", 0)
 AGENT_CHAT_HISTORY_COMPACT_THRESHOLD = _env_int("AGENT_CHAT_HISTORY_COMPACT_THRESHOLD", 24)
 AGENT_CHAT_HISTORY_RECENT_TAIL = _env_int("AGENT_CHAT_HISTORY_RECENT_TAIL", 8)
-AGENT_CODEX_COMMAND = os.getenv("AGENT_CODEX_COMMAND", "").strip()
-AGENT_CODEX_MCP_URL = os.getenv("AGENT_CODEX_MCP_URL", "http://mcp-tools:8091/mcp").strip()
-AGENT_CODEX_WORKDIR = os.getenv("AGENT_CODEX_WORKDIR", "").strip()
-AGENT_CODEX_MODEL = os.getenv("AGENT_CODEX_MODEL", "").strip()
-AGENT_CODEX_AVAILABLE_MODELS = os.getenv("AGENT_CODEX_AVAILABLE_MODELS", "").strip()
-AGENT_CODEX_REASONING_EFFORT = os.getenv("AGENT_CODEX_REASONING_EFFORT", "").strip()
+AGENT_EXECUTION_COMMAND = _env_first(("AGENT_EXECUTION_COMMAND", "AGENT_CODEX_COMMAND"), "")
+AGENT_MCP_URL = _env_first(("AGENT_MCP_URL", "AGENT_CODEX_MCP_URL"), "http://mcp-tools:8091/mcp")
+AGENT_HOME_ROOT = _env_first(("AGENT_HOME_ROOT", "AGENT_CODEX_HOME_ROOT"), "/tmp/agent-home")
+AGENT_WORKDIR = _env_first(("AGENT_WORKDIR", "AGENT_CODEX_WORKDIR"), "")
+AGENT_CODEX_DEFAULT_MODEL = _env_first(("AGENT_CODEX_DEFAULT_MODEL", "AGENT_CODEX_MODEL"), "")
+AGENT_CODEX_DEFAULT_REASONING_EFFORT = _env_first(("AGENT_CODEX_DEFAULT_REASONING_EFFORT", "AGENT_CODEX_REASONING_EFFORT"), "")
+AGENT_CLAUDE_DEFAULT_MODEL = _env_first(("AGENT_CLAUDE_DEFAULT_MODEL", "AGENT_CLAUDE_MODEL"), "sonnet")
+AGENT_CLAUDE_DEFAULT_REASONING_EFFORT = _env_first(
+    ("AGENT_CLAUDE_DEFAULT_REASONING_EFFORT", "AGENT_CLAUDE_REASONING_EFFORT"),
+    "",
+)
+AGENT_CODEX_COMMAND = AGENT_EXECUTION_COMMAND
+AGENT_CODEX_MCP_URL = AGENT_MCP_URL
+AGENT_CODEX_WORKDIR = AGENT_WORKDIR
+AGENT_CODEX_MODEL = AGENT_CODEX_DEFAULT_MODEL
+AGENT_CODEX_REASONING_EFFORT = AGENT_CODEX_DEFAULT_REASONING_EFFORT
+AGENT_CLAUDE_MODEL = AGENT_CLAUDE_DEFAULT_MODEL
+AGENT_CLAUDE_REASONING_EFFORT = AGENT_CLAUDE_DEFAULT_REASONING_EFFORT
 AGENT_ENABLED_PLUGINS = _parse_csv_list_env("AGENT_ENABLED_PLUGINS") or ["team_mode", "git_delivery", "github_delivery"]
 ATTACHMENTS_DIR = os.getenv("ATTACHMENTS_DIR", "/data/uploads").strip() or "/data/uploads"
 AUTH_SESSION_COOKIE_NAME = os.getenv("AUTH_SESSION_COOKIE_NAME", "m4tr1x_session").strip() or "m4tr1x_session"
@@ -136,7 +166,34 @@ EVENT_STORMING_ANALYSIS_BATCH_SIZE = max(1, _env_int("EVENT_STORMING_ANALYSIS_BA
 EVENT_STORMING_ANALYSIS_STALE_AFTER_SECONDS = max(
     60.0, _env_float("EVENT_STORMING_ANALYSIS_STALE_AFTER_SECONDS", 1800.0)
 )
-EVENT_STORMING_CODEX_REASONING_EFFORT = os.getenv("EVENT_STORMING_CODEX_REASONING_EFFORT", "").strip()
+
+
+def _normalize_provider_name(value: object) -> str:
+    return "claude" if str(value or "").strip().lower() == "claude" else "codex"
+
+
+def agent_system_user_id_for_provider(provider: object) -> str:
+    return CLAUDE_SYSTEM_USER_ID if _normalize_provider_name(provider) == "claude" else CODEX_SYSTEM_USER_ID
+
+
+def agent_system_username_for_provider(provider: object) -> str:
+    return CLAUDE_SYSTEM_USERNAME if _normalize_provider_name(provider) == "claude" else CODEX_SYSTEM_USERNAME
+
+
+def agent_system_full_name_for_provider(provider: object) -> str:
+    return CLAUDE_SYSTEM_FULL_NAME if _normalize_provider_name(provider) == "claude" else CODEX_SYSTEM_FULL_NAME
+
+
+def agent_default_model_for_provider(provider: object) -> str:
+    return AGENT_CLAUDE_DEFAULT_MODEL if _normalize_provider_name(provider) == "claude" else AGENT_CODEX_DEFAULT_MODEL
+
+
+def agent_default_reasoning_effort_for_provider(provider: object) -> str:
+    return (
+        AGENT_CLAUDE_DEFAULT_REASONING_EFFORT
+        if _normalize_provider_name(provider) == "claude"
+        else AGENT_CODEX_DEFAULT_REASONING_EFFORT
+    )
 
 PERSISTENT_SUBSCRIPTION_READ_MODEL_GROUP = (
     os.getenv("PERSISTENT_SUBSCRIPTION_READ_MODEL_GROUP", "task-management-read-model").strip()

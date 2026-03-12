@@ -161,7 +161,7 @@ export function useCoreQueries(c: any) {
   const workspaceSkills = useQuery({
     queryKey: ['workspace-skills', c.userId, c.workspaceId],
     queryFn: () => getWorkspaceSkills(c.userId, c.workspaceId),
-    enabled: Boolean(c.workspaceId) && (c.tab === 'projects' || c.tab === 'profile' || c.tab === 'admin'),
+    enabled: Boolean(c.workspaceId) && (c.tab === 'projects' || c.tab === 'settings'),
   })
 
   const projectTemplates = useQuery({

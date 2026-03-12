@@ -7,11 +7,14 @@ import {
   authLogin,
   authLogout,
   authMe,
+  cancelClaudeDeviceAuth,
   cancelCodexDeviceAuth,
   createAdminUser,
+  deleteClaudeAuthOverride,
   deleteCodexAuthOverride,
   getProjectPluginConfig,
   getBootstrap,
+  getClaudeAuthStatus,
   getCodexAuthStatus,
   getLicenseStatus,
   triggerLicenseAutoUpdate,
@@ -19,9 +22,12 @@ import {
   listAdminUsers,
   patchMyPreferences,
   resetAdminUserPassword,
+  startClaudeDeviceAuth,
   startCodexDeviceAuth,
   submitFeedback,
+  submitClaudeDeviceAuthCode,
   updateAdminUserRole,
+  updateAdminUserAgentRuntime,
 } from '../api'
 import { useCoreQueries } from './useCoreQueries'
 import { useAppMutations } from './useAppMutations'
@@ -42,6 +48,7 @@ import { useProjectState } from './useProjectState'
 import { useCodexChatState } from './useCodexChatState'
 import { useTaskEditorState } from './useTaskEditorState'
 import { AppContent } from '../components/layout/AppContent'
+import { normalizeAgentExecutionModel } from '../utils/agentExecution'
 import {
   DEFAULT_PROJECT_STATUSES,
   activityTone,
@@ -78,6 +85,7 @@ const SEMANTIC_FALLBACK_MAX_ITEMS_WITHOUT_TOKEN_MATCH = 2
 
 function normalizeReasoningEffort(value: unknown): 'low' | 'medium' | 'high' | 'xhigh' {
   const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'max' || normalized === 'maximum') return 'xhigh'
   if (normalized === 'low' || normalized === 'high' || normalized === 'xhigh') return normalized
   return 'medium'
 }
@@ -382,9 +390,35 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     queryFn: () => getCodexAuthStatus(userId),
     enabled: Boolean(bootstrap.data),
     retry: 1,
+    refetchOnWindowFocus: false,
     refetchInterval: (query) => {
-      const data = query.state.data as { login_session?: { status?: string | null } } | undefined
-      return data?.login_session?.status === 'pending' ? 2000 : false
+      const data = query.state.data as {
+        configured?: boolean
+        effective_source?: string | null
+        login_session?: { status?: string | null }
+      } | undefined
+      if (data?.configured || String(data?.effective_source || '').trim().toLowerCase() === 'system_override') {
+        return false
+      }
+      return data?.login_session?.status === 'pending' ? 5000 : false
+    },
+  })
+  const claudeAuthStatus = useQuery({
+    queryKey: ['claude-auth-status', userId],
+    queryFn: () => getClaudeAuthStatus(userId),
+    enabled: Boolean(bootstrap.data),
+    retry: 1,
+    refetchOnWindowFocus: false,
+    refetchInterval: (query) => {
+      const data = query.state.data as {
+        configured?: boolean
+        effective_source?: string | null
+        login_session?: { status?: string | null }
+      } | undefined
+      if (data?.configured || String(data?.effective_source || '').trim().toLowerCase() === 'system_override') {
+        return false
+      }
+      return data?.login_session?.status === 'pending' ? 5000 : false
     },
   })
   const activateLicenseMutation = useMutation({
@@ -437,7 +471,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       agent_chat_reasoning_effort: string | null
     }) => patchMyPreferences(userId, payload),
     onSuccess: async (payload) => {
-      setAgentChatModel(String(payload?.agent_chat_model || '').trim())
+      setAgentChatModel(normalizeAgentExecutionModel(payload?.agent_chat_model))
       setAgentChatReasoningEffort(normalizeReasoningEffort(payload?.agent_chat_reasoning_effort))
       setUiError(null)
       await qc.invalidateQueries({ queryKey: ['bootstrap', userId] })
@@ -488,6 +522,47 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       setUiError(toErrorMessage(error, 'Shared Codex authentication could not be removed'))
     },
   })
+  const startClaudeDeviceAuthMutation = useMutation({
+    mutationFn: (loginMethod: 'claudeai' | 'console') =>
+      startClaudeDeviceAuth(userId, { login_method: loginMethod }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['claude-auth-status', userId] })
+      setUiError(null)
+    },
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Claude sign-in could not be started'))
+    },
+  })
+  const cancelClaudeDeviceAuthMutation = useMutation({
+    mutationFn: () => cancelClaudeDeviceAuth(userId),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['claude-auth-status', userId] })
+      setUiError(null)
+    },
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Claude sign-in could not be cancelled'))
+    },
+  })
+  const submitClaudeDeviceAuthCodeMutation = useMutation({
+    mutationFn: (code: string) => submitClaudeDeviceAuthCode(userId, { code }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['claude-auth-status', userId] })
+      setUiError(null)
+    },
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Claude sign-in code could not be submitted'))
+    },
+  })
+  const deleteClaudeAuthOverrideMutation = useMutation({
+    mutationFn: () => deleteClaudeAuthOverride(userId),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['claude-auth-status', userId] })
+      setUiError(null)
+    },
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Shared Claude authentication could not be removed'))
+    },
+  })
   const { frontendVersion, backendVersion, backendBuild, backendDeployedAtUtc } = useAppVersion()
   const workspaceId = bootstrap.data?.workspaces[0]?.id ?? ''
   const userTimezone = bootstrap.data?.current_user?.timezone
@@ -506,11 +581,12 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   const [resetAdminPasswordUserId, setResetAdminPasswordUserId] = React.useState<string | null>(null)
   const [updateAdminRoleUserId, setUpdateAdminRoleUserId] = React.useState<string | null>(null)
   const [deactivateAdminUserId, setDeactivateAdminUserId] = React.useState<string | null>(null)
+  const [updateAdminAgentRuntimeUserId, setUpdateAdminAgentRuntimeUserId] = React.useState<string | null>(null)
 
   const adminUsersQuery = useQuery({
     queryKey: ['admin-users', userId, workspaceId],
     queryFn: () => listAdminUsers(userId, workspaceId),
-    enabled: Boolean(workspaceId && canManageUsers && (tab === 'profile' || tab === 'admin')),
+    enabled: Boolean(workspaceId && canManageUsers && tab === 'settings'),
   })
 
   const createAdminUserMutation = useMutation({
@@ -578,6 +654,32 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       setDeactivateAdminUserId(null)
     },
   })
+  const updateAdminUserAgentRuntimeMutation = useMutation({
+    mutationFn: (payload: {
+      targetUserId: string
+      model?: string | null
+      reasoning_effort?: string | null
+      use_for_background_processing?: boolean | null
+    }) =>
+      updateAdminUserAgentRuntime(userId, payload.targetUserId, {
+        workspace_id: workspaceId,
+        model: payload.model,
+        reasoning_effort: payload.reasoning_effort,
+        use_for_background_processing: payload.use_for_background_processing,
+      }),
+    onMutate: (payload) => {
+      setUpdateAdminAgentRuntimeUserId(payload.targetUserId)
+    },
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['admin-users', userId, workspaceId] })
+    },
+    onError: (err: any) => {
+      setUiError(err?.message || 'Unable to update bot runtime')
+    },
+    onSettled: () => {
+      setUpdateAdminAgentRuntimeUserId(null)
+    },
+  })
   const adminUsers = adminUsersQuery.data?.items ?? []
   const adminUsersError = adminUsersQuery.isError ? toErrorMessage(adminUsersQuery.error, 'Unable to load users') : null
   const onCreateAdminUser = React.useCallback(() => {
@@ -603,6 +705,15 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     if (!workspaceId) return
     deactivateAdminUserMutation.mutate(targetUserId)
   }, [deactivateAdminUserMutation, workspaceId])
+  const onUpdateAdminUserAgentRuntime = React.useCallback((payload: {
+    targetUserId: string
+    model?: string | null
+    reasoning_effort?: string | null
+    use_for_background_processing?: boolean | null
+  }) => {
+    if (!workspaceId) return
+    updateAdminUserAgentRuntimeMutation.mutate(payload)
+  }, [updateAdminUserAgentRuntimeMutation, workspaceId])
 
   useBootstrapSelectionEffects({
     bootstrap,
@@ -2244,6 +2355,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       resetAdminPasswordUserId,
       onUpdateAdminUserRole,
       updateAdminRoleUserId,
+      onUpdateAdminUserAgentRuntime,
+      updateAdminAgentRuntimeUserId,
       onDeactivateAdminUser,
       deactivateAdminUserId,
       logout,
@@ -2594,12 +2707,21 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       backendBuild,
       backendDeployedAtUtc,
       codexAuthStatus,
+      claudeAuthStatus,
       startCodexDeviceAuth: startCodexDeviceAuthMutation.mutateAsync,
       startCodexDeviceAuthPending: startCodexDeviceAuthMutation.isPending,
       cancelCodexDeviceAuth: cancelCodexDeviceAuthMutation.mutateAsync,
       cancelCodexDeviceAuthPending: cancelCodexDeviceAuthMutation.isPending,
       deleteCodexAuthOverride: deleteCodexAuthOverrideMutation.mutateAsync,
       deleteCodexAuthOverridePending: deleteCodexAuthOverrideMutation.isPending,
+      startClaudeDeviceAuth: startClaudeDeviceAuthMutation.mutateAsync,
+      startClaudeDeviceAuthPending: startClaudeDeviceAuthMutation.isPending,
+      cancelClaudeDeviceAuth: cancelClaudeDeviceAuthMutation.mutateAsync,
+      cancelClaudeDeviceAuthPending: cancelClaudeDeviceAuthMutation.isPending,
+      submitClaudeDeviceAuthCode: submitClaudeDeviceAuthCodeMutation.mutateAsync,
+      submitClaudeDeviceAuthCodePending: submitClaudeDeviceAuthCodeMutation.isPending,
+      deleteClaudeAuthOverride: deleteClaudeAuthOverrideMutation.mutateAsync,
+      deleteClaudeAuthOverridePending: deleteClaudeAuthOverrideMutation.isPending,
       showCodexChat,
       codexChatSessions,
       codexChatProjectSessions,

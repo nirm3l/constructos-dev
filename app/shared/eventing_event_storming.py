@@ -10,7 +10,7 @@ from typing import Any
 
 from sqlalchemy import select, text
 
-from features.agents.codex_mcp_adapter import run_structured_codex_prompt_with_usage
+from features.agents.agent_mcp_adapter import run_structured_agent_prompt_with_usage
 from .context_frames import build_project_context_frame
 from features.notes.domain import (
     EVENT_ARCHIVED as NOTE_EVENT_ARCHIVED,
@@ -49,7 +49,6 @@ from .models import (
 )
 from .settings import (
     EVENT_STORMING_ANALYSIS_BATCH_SIZE,
-    EVENT_STORMING_CODEX_REASONING_EFFORT,
     EVENT_STORMING_ANALYSIS_STALE_AFTER_SECONDS,
     EVENT_STORMING_ANALYSIS_POLL_SECONDS,
     EVENT_STORMING_ANALYSIS_WORKER_ENABLED,
@@ -61,8 +60,6 @@ from .settings import (
     PERSISTENT_SUBSCRIPTION_MAX_ACK_DELAY_SECONDS,
     PERSISTENT_SUBSCRIPTION_RETRY_BACKOFF_SECONDS,
     PERSISTENT_SUBSCRIPTION_STOPPING_GRACE_SECONDS,
-    AGENT_CODEX_MODEL,
-    AGENT_CODEX_REASONING_EFFORT,
     logger,
 )
 
@@ -637,9 +634,6 @@ def _extract_with_codex_agent(
     context_frame_mode: str,
     context_frame_markdown: str,
 ) -> dict[str, Any]:
-    model = str(AGENT_CODEX_MODEL or "").strip() or None
-    if not model:
-        raise RuntimeError("Event storming model is not configured")
     prompt = _event_storming_ai_prompt(
         entity_type=entity_type,
         title=title,
@@ -651,19 +645,13 @@ def _extract_with_codex_agent(
         context_frame_markdown=context_frame_markdown,
     )
     schema = _EVENT_STORMING_OUTPUT_SCHEMA
-    # Reuse one Codex session per project so artifact runs share cached context.
+    # Reuse one agent session per project so artifact runs share cached context.
     chat_session_id = f"event-storming-{project_id}"
-    parsed_payload, usage_payload = run_structured_codex_prompt_with_usage(
+    parsed_payload, usage_payload = run_structured_agent_prompt_with_usage(
         prompt=prompt,
         output_schema=schema,
         workspace_id=workspace_id,
         session_key=chat_session_id,
-        model=model,
-        reasoning_effort=(
-            str(EVENT_STORMING_CODEX_REASONING_EFFORT or "").strip()
-            or str(AGENT_CODEX_REASONING_EFFORT or "").strip()
-            or None
-        ),
         mcp_servers=None,
     )
     return {

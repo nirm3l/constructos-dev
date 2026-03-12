@@ -14,29 +14,50 @@ import threading
 import time
 from collections import OrderedDict
 
-from features.agents.codex_auth import resolve_effective_auth_path, resolve_host_config_path
-from features.agents.mcp_registry import build_selected_mcp_config_text, normalize_chat_mcp_servers
+from features.agents.execution_provider import encode_execution_model, parse_execution_model, resolve_execution_provider
+from features.agents.mcp_registry import (
+    build_selected_mcp_config_payload,
+    build_selected_mcp_config_text,
+    normalize_chat_mcp_servers,
+)
+from features.agents.provider_auth import resolve_provider_effective_auth_path
+from features.agents.workspace_runtime import resolve_workspace_background_runtime_with_new_session
 from plugins import runner_policy as plugin_runner_policy
 from shared.settings import (
     AGENT_CHAT_CONTEXT_LIMIT_TOKENS,
-    AGENT_CODEX_MCP_URL,
-    AGENT_CODEX_MODEL,
-    AGENT_CODEX_REASONING_EFFORT,
+    AGENT_DEFAULT_EXECUTION_PROVIDER,
     AGENT_ENABLED_PLUGINS,
     AGENT_EXECUTOR_TIMEOUT_SECONDS,
+    AGENT_HOME_ROOT,
+    AGENT_MCP_URL,
+    AGENT_WORKDIR,
+    agent_default_model_for_provider,
+    agent_default_reasoning_effort_for_provider,
 )
 from shared.json_utils import parse_json_object
 
 EMPTY_ASSISTANT_SUMMARY = "No assistant response content was returned."
-_DEFAULT_CODEX_HOME_ROOT = "/tmp/codex-home"
-_DEFAULT_CODEX_WORKDIR = "/home/app/workspace"
-_DEFAULT_CODEX_HOME_RETENTION_DAYS = 14
-_DEFAULT_CODEX_HOME_CLEANUP_INTERVAL_SECONDS = 3600
+_DEFAULT_AGENT_HOME_ROOT = "/tmp/agent-home"
+_DEFAULT_AGENT_WORKDIR = "/home/app/workspace"
+_DEFAULT_AGENT_HOME_RETENTION_DAYS = 14
+_DEFAULT_AGENT_HOME_CLEANUP_INTERVAL_SECONDS = 3600
 _DEFAULT_STRUCTURED_PROMPT_CACHE_MAX_ENTRIES = 256
+_DEFAULT_CLAUDE_MODEL = "sonnet"
 _PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "shared" / "prompt_templates" / "codex"
 _ALLOWED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 _STRUCTURED_PROMPT_CACHE_LOCK = threading.Lock()
 _STRUCTURED_PROMPT_CACHE: OrderedDict[str, tuple[float, dict[str, object], dict[str, int] | None]] = OrderedDict()
+
+
+def _provider_display_name(provider: str) -> str:
+    return "Claude" if str(provider or "").strip().lower() == "claude" else "Codex"
+
+
+def _resolve_host_config_path(provider: str) -> Path | None:
+    normalized = str(provider or "").strip().lower()
+    if normalized != "codex":
+        return None
+    return Path.home() / ".codex" / "config.toml"
 
 
 def _strip_mcp_server_tables(config_text: str) -> str:
@@ -144,12 +165,12 @@ def _normalize_path_component(value: object, *, fallback: str) -> str:
 
 
 def _resolve_codex_home_root() -> Path:
-    root_raw = str(os.getenv("AGENT_CODEX_HOME_ROOT", _DEFAULT_CODEX_HOME_ROOT)).strip() or _DEFAULT_CODEX_HOME_ROOT
+    root_raw = str(AGENT_HOME_ROOT or os.getenv("AGENT_CODEX_HOME_ROOT", _DEFAULT_AGENT_HOME_ROOT)).strip() or _DEFAULT_AGENT_HOME_ROOT
     return Path(root_raw).expanduser().resolve()
 
 
 def _resolve_codex_workdir() -> Path | None:
-    raw = str(os.getenv("AGENT_CODEX_WORKDIR", _DEFAULT_CODEX_WORKDIR)).strip()
+    raw = str(AGENT_WORKDIR or os.getenv("AGENT_CODEX_WORKDIR", _DEFAULT_AGENT_WORKDIR)).strip()
     if not raw:
         return None
     path = Path(raw).expanduser().resolve()
@@ -284,6 +305,20 @@ def _stable_json_dumps(value: object) -> str:
         return json.dumps(str(value), ensure_ascii=True)
 
 
+def _read_json_file(path: Path) -> dict[str, object] | None:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except Exception:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return {str(key): value for key, value in parsed.items()}
+
+
 def _structured_prompt_cache_max_entries() -> int:
     return _parse_env_int(
         "AGENT_STRUCTURED_PROMPT_CACHE_MAX_ENTRIES",
@@ -383,13 +418,13 @@ def run_codex_home_cleanup_if_due(*, now_unix_seconds: float | None = None) -> d
     now_ts = float(now_unix_seconds if now_unix_seconds is not None else time.time())
     root = _resolve_codex_home_root()
     retention_days = _parse_env_int(
-        "AGENT_CODEX_HOME_RETENTION_DAYS",
-        _DEFAULT_CODEX_HOME_RETENTION_DAYS,
+        "AGENT_HOME_RETENTION_DAYS",
+        _parse_env_int("AGENT_CODEX_HOME_RETENTION_DAYS", _DEFAULT_AGENT_HOME_RETENTION_DAYS, minimum=1),
         minimum=1,
     )
     interval_seconds = _parse_env_int(
-        "AGENT_CODEX_HOME_CLEANUP_INTERVAL_SECONDS",
-        _DEFAULT_CODEX_HOME_CLEANUP_INTERVAL_SECONDS,
+        "AGENT_HOME_CLEANUP_INTERVAL_SECONDS",
+        _parse_env_int("AGENT_CODEX_HOME_CLEANUP_INTERVAL_SECONDS", _DEFAULT_AGENT_HOME_CLEANUP_INTERVAL_SECONDS, minimum=0),
         minimum=0,
     )
     if retention_days <= 0:
@@ -422,29 +457,36 @@ def run_codex_home_cleanup_if_due(*, now_unix_seconds: float | None = None) -> d
 def _prepare_codex_home(
     home_path: Path,
     *,
+    provider: str,
     mcp_config_text: str,
     runtime_config_text: str = "",
     actor_user_id: str | None = None,
 ) -> None:
+    normalized_provider = str(provider or "").strip().lower()
     codex_dir = home_path / ".codex"
+    claude_dir = home_path / ".claude"
     codex_dir.mkdir(parents=True, exist_ok=True)
-    config_path = codex_dir / "config.toml"
-    source_config_path = resolve_host_config_path()
-    source_config_text = ""
-    if source_config_path.exists() and source_config_path.is_file():
-        try:
-            source_config_text = source_config_path.read_text(encoding="utf-8")
-        except Exception:
-            source_config_text = ""
-    base_config_text = _strip_mcp_server_tables(source_config_text)
-    scoped_runtime_text = str(runtime_config_text or "").strip()
-    selected_mcp_text = str(mcp_config_text or "").strip()
-    sections = [text for text in [base_config_text, scoped_runtime_text, selected_mcp_text] if text]
-    merged_config_text = "\n\n".join(sections).strip()
-    config_path.write_text(f"{merged_config_text}\n" if merged_config_text else "", encoding="utf-8")
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    if normalized_provider == "codex":
+        config_path = codex_dir / "config.toml"
+        source_config_path = _resolve_host_config_path("codex")
+        source_config_text = ""
+        if source_config_path is not None and source_config_path.exists() and source_config_path.is_file():
+            try:
+                source_config_text = source_config_path.read_text(encoding="utf-8")
+            except Exception:
+                source_config_text = ""
+        base_config_text = _strip_mcp_server_tables(source_config_text)
+        scoped_runtime_text = str(runtime_config_text or "").strip()
+        selected_mcp_text = str(mcp_config_text or "").strip()
+        sections = [text for text in [base_config_text, scoped_runtime_text, selected_mcp_text] if text]
+        merged_config_text = "\n\n".join(sections).strip()
+        config_path.write_text(f"{merged_config_text}\n" if merged_config_text else "", encoding="utf-8")
 
-    target_auth_path = codex_dir / "auth.json"
-    source_auth_path = resolve_effective_auth_path(actor_user_id)
+    target_auth_path = home_path / ".claude.json"
+    if normalized_provider == "codex":
+        target_auth_path = codex_dir / "auth.json"
+    source_auth_path = resolve_provider_effective_auth_path(normalized_provider, actor_user_id)
     if source_auth_path is None:
         try:
             target_auth_path.unlink()
@@ -453,17 +495,40 @@ def _prepare_codex_home(
         return
     if source_auth_path.exists() and source_auth_path.is_file():
         try:
-            # Keep per-session auth.json in sync with the effective Codex auth source.
-            shutil.copy2(source_auth_path, target_auth_path)
+            if normalized_provider == "codex":
+                shutil.copy2(source_auth_path, target_auth_path)
+                return
+            source_claude_dir = source_auth_path.parent / ".claude"
+            if source_claude_dir.exists() and source_claude_dir.is_dir():
+                shutil.copytree(source_claude_dir, claude_dir, dirs_exist_ok=True)
+            # Keep per-session Claude auth in sync, but preserve session metadata already
+            # written into the persistent session home.
+            if not target_auth_path.exists():
+                shutil.copy2(source_auth_path, target_auth_path)
+                return
+            source_payload = _read_json_file(source_auth_path)
+            if not isinstance(source_payload, dict):
+                shutil.copy2(source_auth_path, target_auth_path)
+                return
+            target_payload = _read_json_file(target_auth_path) or {}
+            merged_payload = dict(target_payload)
+            for key, value in source_payload.items():
+                if key == "projects" and isinstance(target_payload.get("projects"), dict):
+                    continue
+                merged_payload[key] = value
+            if "projects" not in merged_payload and isinstance(source_payload.get("projects"), dict):
+                merged_payload["projects"] = source_payload["projects"]
+            target_auth_path.write_text(json.dumps(merged_payload, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
         except Exception as exc:
             raise RuntimeError(
-                "Failed to prepare Codex auth.json for the session home."
+                f"Failed to prepare {_provider_display_name(normalized_provider)} auth for the session home."
             ) from exc
 
 
 @contextmanager
 def _codex_home_env(
     *,
+    provider: str,
     mcp_config_text: str,
     runtime_config_text: str = "",
     workspace_id: str | None = None,
@@ -481,6 +546,7 @@ def _codex_home_env(
             )
             _prepare_codex_home(
                 persistent_home,
+                provider=provider,
                 mcp_config_text=mcp_config_text,
                 runtime_config_text=runtime_config_text,
                 actor_user_id=actor_user_id,
@@ -498,6 +564,7 @@ def _codex_home_env(
         temp_home_path = Path(temp_home)
         _prepare_codex_home(
             temp_home_path,
+            provider=provider,
             mcp_config_text=mcp_config_text,
             runtime_config_text=runtime_config_text,
             actor_user_id=actor_user_id,
@@ -967,8 +1034,54 @@ def _normalize_reasoning_effort(value: object) -> str | None:
     return canonical
 
 
+def _normalize_claude_model(value: object) -> str | None:
+    model = str(value or "").strip()
+    if not model:
+        return None
+    lowered = model.lower()
+    if lowered in {"sonnet", "opus", "haiku"}:
+        return lowered
+    if lowered.startswith("claude-"):
+        return model
+    return None
+
+
+def _normalize_codex_model(value: object) -> str | None:
+    model = str(value or "").strip()
+    return model or None
+
+
+def _resolve_runtime_provider_and_model(value: object) -> tuple[str, str | None]:
+    provider, parsed_model = parse_execution_model(value)
+    normalized_provider = provider or resolve_execution_provider(
+        None,
+        default_provider=AGENT_DEFAULT_EXECUTION_PROVIDER,
+    )
+    if normalized_provider == "claude":
+        model = (
+            _normalize_claude_model(parsed_model)
+            or _normalize_claude_model(agent_default_model_for_provider("claude"))
+            or _DEFAULT_CLAUDE_MODEL
+        )
+        return "claude", model
+    model = (
+        _normalize_codex_model(parsed_model)
+        or _normalize_codex_model(agent_default_model_for_provider("codex"))
+    )
+    return "codex", model
+
+
+def _resolve_runtime_reasoning_effort(provider: str, value: object) -> str | None:
+    preferred = _normalize_reasoning_effort(value)
+    if preferred:
+        return preferred
+    if str(provider or "").strip().lower() == "claude":
+        return _normalize_reasoning_effort(agent_default_reasoning_effort_for_provider("claude"))
+    return _normalize_reasoning_effort(agent_default_reasoning_effort_for_provider("codex"))
+
+
 def _extract_turn_usage(stdout: str) -> dict[str, int] | None:
-    usage_raw: dict | None = None
+    usage: dict[str, int] | None = None
     for raw_line in (stdout or "").splitlines():
         line = raw_line.strip()
         if not line:
@@ -979,23 +1092,24 @@ def _extract_turn_usage(stdout: str) -> dict[str, int] | None:
             continue
         if not isinstance(event, dict):
             continue
-        if event.get("type") != "turn.completed":
+        event_type = str(event.get("type") or "").strip()
+        if event_type == "turn.completed":
+            maybe_usage = event.get("usage")
+            usage = _normalize_usage_payload(maybe_usage if isinstance(maybe_usage, dict) else None)
             continue
-        maybe_usage = event.get("usage")
-        if isinstance(maybe_usage, dict):
-            usage_raw = maybe_usage
-    if usage_raw is None:
-        return None
-    input_tokens = _safe_non_negative_int(usage_raw.get("input_tokens")) or 0
-    cached_input_tokens = _safe_non_negative_int(usage_raw.get("cached_input_tokens")) or 0
-    output_tokens = _safe_non_negative_int(usage_raw.get("output_tokens")) or 0
-    usage = {
-        "input_tokens": input_tokens,
-        "cached_input_tokens": cached_input_tokens,
-        "output_tokens": output_tokens,
-    }
-    if AGENT_CHAT_CONTEXT_LIMIT_TOKENS > 0:
-        usage["context_limit_tokens"] = int(AGENT_CHAT_CONTEXT_LIMIT_TOKENS)
+        if event_type == "result":
+            usage = _normalize_claude_result_usage(
+                event.get("usage") if isinstance(event.get("usage"), dict) else None,
+                event.get("modelUsage") if isinstance(event.get("modelUsage"), dict) else None,
+            )
+            continue
+        if event_type == "stream_event":
+            event_payload = event.get("event")
+            if not isinstance(event_payload, dict):
+                continue
+            event_usage = event_payload.get("usage")
+            if isinstance(event_usage, dict):
+                usage = _normalize_usage_payload(event_usage)
     return usage
 
 
@@ -1007,7 +1121,11 @@ def _normalize_usage_payload(usage_raw: dict | None) -> dict[str, int] | None:
     if not isinstance(usage_raw, dict):
         return None
     input_tokens = _safe_non_negative_int(usage_raw.get("input_tokens")) or 0
-    cached_input_tokens = _safe_non_negative_int(usage_raw.get("cached_input_tokens")) or 0
+    cached_input_tokens = (
+        _safe_non_negative_int(usage_raw.get("cached_input_tokens"))
+        or _safe_non_negative_int(usage_raw.get("cache_read_input_tokens"))
+        or 0
+    )
     output_tokens = _safe_non_negative_int(usage_raw.get("output_tokens")) or 0
     usage = {
         "input_tokens": input_tokens,
@@ -1039,6 +1157,40 @@ def _normalize_app_server_usage(token_usage_raw: dict | None) -> dict[str, int] 
     elif AGENT_CHAT_CONTEXT_LIMIT_TOKENS > 0:
         usage["context_limit_tokens"] = int(AGENT_CHAT_CONTEXT_LIMIT_TOKENS)
     return usage
+
+
+def _extract_context_limit_tokens(model_usage_raw: object) -> int | None:
+    if not isinstance(model_usage_raw, dict):
+        return None
+    for value in model_usage_raw.values():
+        if not isinstance(value, dict):
+            continue
+        context_limit = _safe_non_negative_int(value.get("contextWindow"))
+        if context_limit and context_limit > 0:
+            return int(context_limit)
+    return None
+
+
+def _normalize_claude_result_usage(
+    usage_raw: dict | None,
+    model_usage_raw: dict | None,
+) -> dict[str, int] | None:
+    usage = _normalize_usage_payload(usage_raw)
+    if usage is None:
+        return None
+    context_limit = _extract_context_limit_tokens(model_usage_raw)
+    if context_limit and context_limit > 0:
+        usage["context_limit_tokens"] = context_limit
+    return usage
+
+
+def _normalize_claude_effort(value: object) -> str | None:
+    normalized = _normalize_reasoning_effort(value)
+    if normalized is None:
+        return None
+    if normalized == "xhigh":
+        return "max"
+    return normalized
 
 
 def _truncate_summary(text: str, *, limit: int = 200) -> str:
@@ -1102,6 +1254,11 @@ def _extract_delta_text(params: dict[str, object]) -> str:
     raw_delta = params.get("delta")
     if isinstance(raw_delta, str):
         return raw_delta
+    if isinstance(raw_delta, dict):
+        for key in ("text", "thinking", "markdown", "value", "output_text"):
+            raw = raw_delta.get(key)
+            if isinstance(raw, str):
+                return raw
     if raw_delta is not None:
         extracted = _extract_message_text(raw_delta)
         if extracted:
@@ -1170,7 +1327,75 @@ def _build_plain_text_result(message_text: str) -> dict[str, object]:
     }
 
 
-def _run_codex_app_server_with_optional_stream(
+def _is_missing_claude_resume_session(message_text: str) -> bool:
+    normalized = str(message_text or "").strip().lower()
+    return "no conversation found with session id:" in normalized
+
+
+def _extract_claude_result_payload(lines: list[str]) -> dict[str, object] | None:
+    if not lines:
+        return None
+    joined = "\n".join(lines).strip()
+    candidates: list[str] = [joined] if joined else []
+    candidates.extend(line.strip() for line in reversed(lines) if str(line or "").strip())
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        parsed_type = str(parsed.get("type") or "").strip().lower()
+        if parsed_type == "result":
+            return parsed
+        if any(key in parsed for key in ("result", "structured_output", "usage", "session_id")):
+            return parsed
+    return None
+
+
+def _build_claude_command(
+    *,
+    prompt: str,
+    stream_events: bool,
+    model: str | None,
+    reasoning_effort: str | None,
+    output_schema: dict | None,
+    preferred_thread_id: str | None,
+    mcp_config_payload: dict[str, object] | None,
+) -> list[str]:
+    cmd = [
+        "claude",
+        "-p",
+        "--permission-mode",
+        "bypassPermissions",
+    ]
+    if stream_events:
+        cmd.extend(["--verbose", "--output-format", "stream-json"])
+        if output_schema is None:
+            cmd.append("--include-partial-messages")
+    else:
+        cmd.extend(["--output-format", "json"])
+    if model:
+        cmd.extend(["--model", model])
+    mapped_effort = _normalize_claude_effort(reasoning_effort)
+    if mapped_effort:
+        cmd.extend(["--effort", mapped_effort])
+    if preferred_thread_id:
+        cmd.extend(["--resume", preferred_thread_id])
+    if output_schema is not None:
+        cmd.extend(["--json-schema", _stable_json_dumps(output_schema)])
+    if isinstance(mcp_config_payload, dict) and mcp_config_payload.get("mcpServers"):
+        cmd.extend(["--strict-mcp-config", "--mcp-config", _stable_json_dumps(mcp_config_payload)])
+    cmd.append("--")
+    cmd.append(prompt)
+    return cmd
+
+
+def _run_claude_cli_with_optional_stream(
     *,
     start_prompt: str,
     resume_prompt: str | None,
@@ -1180,18 +1405,228 @@ def _run_codex_app_server_with_optional_stream(
     reasoning_effort: str | None = None,
     output_schema: dict | None = None,
     preferred_thread_id: str | None = None,
+    mcp_config_payload: dict[str, object] | None = None,
     env: dict[str, str] | None = None,
     run_cwd: Path | None = None,
 ) -> tuple[str, dict[str, int] | None, str | None, bool, bool]:
     effective_run_cwd = run_cwd or _resolve_codex_workdir()
-    cmd = ["codex"]
-    cmd.extend(
-        [
-            "app-server",
-            "--listen",
-            "stdio://",
-        ]
-    )
+    stream_plain_text = output_schema is None
+    resume_thread_id = str(preferred_thread_id or "").strip()
+    resume_attempted = bool(resume_thread_id)
+
+    def _run_once(*, prompt_text: str, resume_session_id: str | None) -> tuple[str, dict[str, int] | None, str | None]:
+        cmd = _build_claude_command(
+            prompt=prompt_text,
+            stream_events=stream_events,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            output_schema=output_schema,
+            preferred_thread_id=resume_session_id,
+            mcp_config_payload=mcp_config_payload,
+        )
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+            cwd=str(effective_run_cwd) if effective_run_cwd is not None else None,
+        )
+        timed_out = False
+        done = threading.Event()
+        timeout_error_message = "claude exec timed out"
+        if timeout_seconds is not None:
+            timeout_error_message = f"claude exec timed out after {timeout_seconds:.1f}s"
+
+        def _timeout_watchdog() -> None:
+            nonlocal timed_out
+            if timeout_seconds is None:
+                return
+            if done.wait(timeout_seconds):
+                return
+            if proc.poll() is None:
+                timed_out = True
+                proc.kill()
+
+        if timeout_seconds is not None:
+            threading.Thread(target=_timeout_watchdog, daemon=True).start()
+
+        if proc.stdout is None:
+            raise RuntimeError("claude exec stdout unavailable")
+
+        lines: list[str] = []
+        final_message = ""
+        usage: dict[str, int] | None = None
+        session_id: str | None = None
+        delta_parts: list[str] = []
+        status_emitted = False
+        drafting_status_emitted = False
+
+        for raw_line in proc.stdout:
+            line = str(raw_line or "").strip()
+            if not line:
+                continue
+            lines.append(line)
+            if not stream_events:
+                continue
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(event, dict):
+                continue
+            event_type = str(event.get("type") or "").strip().lower()
+            if event_type == "system":
+                if not status_emitted:
+                    _emit_stream_event({"type": "status", "message": "Claude is analyzing the request."})
+                    status_emitted = True
+                continue
+            if event_type == "stream_event":
+                event_payload = event.get("event")
+                if not isinstance(event_payload, dict):
+                    continue
+                inner_type = str(event_payload.get("type") or "").strip().lower()
+                if inner_type == "content_block_delta":
+                    delta = _extract_delta_text(event_payload)
+                    if not delta:
+                        continue
+                    delta_parts.append(delta)
+                    if not drafting_status_emitted:
+                        _emit_stream_event({"type": "status", "message": "Claude is drafting a reply."})
+                        drafting_status_emitted = True
+                    if stream_plain_text:
+                        _emit_stream_event({"type": "assistant_text", "delta": delta})
+                    continue
+                if inner_type == "message_delta":
+                    usage_candidate = _normalize_usage_payload(
+                        event_payload.get("usage") if isinstance(event_payload.get("usage"), dict) else None
+                    )
+                    if usage_candidate is not None:
+                        usage = usage_candidate
+                    continue
+                continue
+            if event_type == "assistant":
+                text = _extract_message_text(event.get("message"))
+                if text:
+                    final_message = text
+                    if stream_plain_text and not "".join(delta_parts).strip():
+                        rendered = _render_stream_assistant_text(text)
+                        if rendered:
+                            _emit_stream_event({"type": "assistant_text", "delta": rendered})
+                continue
+            if event_type == "result":
+                usage_candidate = _normalize_claude_result_usage(
+                    event.get("usage") if isinstance(event.get("usage"), dict) else None,
+                    event.get("modelUsage") if isinstance(event.get("modelUsage"), dict) else None,
+                )
+                if usage_candidate is not None:
+                    usage = usage_candidate
+                session_id = str(event.get("session_id") or "").strip() or None
+                structured_output = event.get("structured_output")
+                if isinstance(structured_output, dict):
+                    final_message = json.dumps(structured_output, ensure_ascii=True)
+                else:
+                    result_text = str(event.get("result") or "").strip()
+                    if result_text:
+                        final_message = result_text
+                continue
+
+        done.set()
+        return_code = int(proc.wait())
+        stdout_text = "\n".join(lines).strip()
+        if timed_out:
+            raise TimeoutError(timeout_error_message)
+        if return_code != 0:
+            raise RuntimeError(stdout_text[:1200] or f"claude exec failed (exit={return_code})")
+
+        result_payload = _extract_claude_result_payload(lines)
+        if isinstance(result_payload, dict):
+            usage_candidate = _normalize_claude_result_usage(
+                result_payload.get("usage") if isinstance(result_payload.get("usage"), dict) else None,
+                result_payload.get("modelUsage") if isinstance(result_payload.get("modelUsage"), dict) else None,
+            )
+            if usage_candidate is not None:
+                usage = usage_candidate
+            if session_id is None:
+                session_id = str(result_payload.get("session_id") or "").strip() or None
+            structured_output = result_payload.get("structured_output")
+            if isinstance(structured_output, dict):
+                final_message = json.dumps(structured_output, ensure_ascii=True)
+            elif not final_message:
+                result_text = str(result_payload.get("result") or "").strip()
+                if result_text:
+                    final_message = result_text
+        if not final_message:
+            final_message = "".join(delta_parts).strip()
+        if not final_message and not result_payload:
+            raise RuntimeError("claude exec returned no result payload")
+        return final_message, usage, session_id
+
+    if resume_attempted:
+        try:
+            final_message, usage, session_id = _run_once(
+                prompt_text=resume_prompt if resume_prompt is not None else start_prompt,
+                resume_session_id=resume_thread_id,
+            )
+            resume_succeeded = True
+        except RuntimeError as exc:
+            if not _is_missing_claude_resume_session(str(exc)):
+                raise
+            final_message, usage, session_id = _run_once(
+                prompt_text=start_prompt,
+                resume_session_id=None,
+            )
+            resume_succeeded = False
+    else:
+        final_message, usage, session_id = _run_once(
+            prompt_text=start_prompt,
+            resume_session_id=None,
+        )
+        resume_succeeded = False
+
+    if stream_events and not stream_plain_text and final_message:
+        rendered = _render_stream_assistant_text(final_message)
+        if rendered:
+            _emit_stream_event({"type": "assistant_text", "delta": rendered})
+    if stream_events and usage is not None:
+        _emit_stream_event({"type": "usage", "usage": usage})
+    return final_message, usage, session_id, resume_attempted, resume_succeeded
+
+
+def _run_codex_app_server_with_optional_stream(
+    *,
+    provider: str,
+    start_prompt: str,
+    resume_prompt: str | None,
+    timeout_seconds: float | None,
+    stream_events: bool,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    output_schema: dict | None = None,
+    preferred_thread_id: str | None = None,
+    mcp_config_payload: dict[str, object] | None = None,
+    env: dict[str, str] | None = None,
+    run_cwd: Path | None = None,
+) -> tuple[str, dict[str, int] | None, str | None, bool, bool]:
+    normalized_provider = str(provider or "").strip().lower()
+    if normalized_provider == "claude":
+        return _run_claude_cli_with_optional_stream(
+            start_prompt=start_prompt,
+            resume_prompt=resume_prompt,
+            timeout_seconds=timeout_seconds,
+            stream_events=stream_events,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            output_schema=output_schema,
+            preferred_thread_id=preferred_thread_id,
+            mcp_config_payload=mcp_config_payload,
+            env=env,
+            run_cwd=run_cwd,
+        )
+
+    effective_run_cwd = run_cwd or _resolve_codex_workdir()
+    cmd = ["codex", "app-server", "--listen", "stdio://"]
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
@@ -1219,8 +1654,7 @@ def _run_codex_app_server_with_optional_stream(
             proc.kill()
 
     if timeout_seconds is not None:
-        watchdog = threading.Thread(target=_timeout_watchdog, daemon=True)
-        watchdog.start()
+        threading.Thread(target=_timeout_watchdog, daemon=True).start()
 
     if proc.stdin is None:
         raise RuntimeError("codex app-server stdin unavailable")
@@ -1243,18 +1677,19 @@ def _run_codex_app_server_with_optional_stream(
     resume_thread_id = str(preferred_thread_id or "").strip()
     resume_attempted = bool(resume_thread_id)
     resume_succeeded = False
+    emitted_reasoning_status = False
+    emitted_drafting_status = False
 
     def _send_message(payload: dict[str, object]) -> None:
         proc.stdin.write(json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n")
         proc.stdin.flush()
 
-    def _send_request(method: str, params: dict[str, object]) -> str:
+    def _send_request(method: str, params: dict[str, object]) -> None:
         nonlocal request_seq
         request_seq += 1
         req_id = str(request_seq)
         pending_requests[req_id] = method
         _send_message({"method": method, "id": req_id, "params": params})
-        return req_id
 
     def _thread_request_params() -> dict[str, object]:
         params: dict[str, object] = {
@@ -1346,7 +1781,18 @@ def _run_codex_app_server_with_optional_stream(
 
         if method == "turn/started":
             if stream_events:
-                _emit_stream_event({"type": "status", "message": "Codex started processing the request."})
+                _emit_stream_event({"type": "status", "message": "Agent started processing the request."})
+            continue
+        if method == "item/started":
+            item_payload = params.get("item") if isinstance(params.get("item"), dict) else None
+            item_type = str((item_payload or {}).get("type") if isinstance(item_payload, dict) else "").strip()
+            normalized_item_type = item_type.lower().replace("_", "").replace("-", "")
+            if stream_events and normalized_item_type == "reasoning" and not emitted_reasoning_status:
+                emitted_reasoning_status = True
+                _emit_stream_event({"type": "status", "message": "Codex is reasoning through the request."})
+            if stream_events and _is_assistant_message_item_type(item_type) and not emitted_drafting_status:
+                emitted_drafting_status = True
+                _emit_stream_event({"type": "status", "message": "Codex is drafting a reply."})
             continue
         if _is_message_delta_method(method):
             delta = _extract_delta_text(params)
@@ -1358,6 +1804,9 @@ def _run_codex_app_server_with_optional_stream(
             if not delta:
                 continue
             delta_parts.append(delta)
+            if stream_events and not emitted_drafting_status:
+                emitted_drafting_status = True
+                _emit_stream_event({"type": "status", "message": "Codex is drafting a reply."})
             if stream_events and stream_plain_text:
                 _emit_stream_event({"type": "assistant_text", "delta": delta})
             continue
@@ -1372,6 +1821,9 @@ def _run_codex_app_server_with_optional_stream(
             if not delta:
                 continue
             delta_parts.append(delta)
+            if stream_events and not emitted_drafting_status:
+                emitted_drafting_status = True
+                _emit_stream_event({"type": "status", "message": "Codex is drafting a reply."})
             if stream_events and stream_plain_text:
                 _emit_stream_event({"type": "assistant_text", "delta": delta})
             continue
@@ -1387,11 +1839,11 @@ def _run_codex_app_server_with_optional_stream(
                             rendered = _render_stream_assistant_text(text)
                             if rendered:
                                 _emit_stream_event({"type": "assistant_text", "delta": rendered})
-                elif item_type == "reasoning" and stream_events:
-                    _emit_stream_event({"type": "status", "message": "Reasoning step completed."})
             continue
         if method == "thread/tokenUsage/updated":
-            usage_candidate = _normalize_app_server_usage(params.get("tokenUsage") if isinstance(params, dict) else None)
+            usage_candidate = _normalize_app_server_usage(
+                params.get("tokenUsage") if isinstance(params, dict) else None
+            )
             if usage_candidate is not None:
                 usage = usage_candidate
             continue
@@ -1416,7 +1868,6 @@ def _run_codex_app_server_with_optional_stream(
         raise TimeoutError(timeout_error_message)
 
     if proc.poll() is None:
-        # codex app-server is long-lived; after turn/completed we stop it ourselves.
         forced_shutdown = True
         proc.terminate()
         try:
@@ -1576,7 +2027,7 @@ def _run_codex_json_with_optional_stream(
                 elif item_type == "reasoning":
                     _emit_stream_event({"type": "status", "message": "Reasoning step completed."})
         elif event_type == "turn.started":
-            _emit_stream_event({"type": "status", "message": "Codex started processing the request."})
+            _emit_stream_event({"type": "status", "message": "Agent started processing the request."})
         elif event_type == "turn.completed":
             usage_payload = _normalize_usage_payload(event.get("usage") if isinstance(event, dict) else None)
             if usage_payload is not None:
@@ -1641,16 +2092,29 @@ def run_structured_codex_prompt_with_usage(
     selected_mcp_servers = normalize_chat_mcp_servers(mcp_servers, strict=False)
     mcp_config_text = build_selected_mcp_config_text(
         selected_servers=selected_mcp_servers,
-        task_management_mcp_url=AGENT_CODEX_MCP_URL,
+        task_management_mcp_url=AGENT_MCP_URL,
     )
-    preferred_model = str(model or "").strip() or AGENT_CODEX_MODEL or None
-    preferred_reasoning_effort = _normalize_reasoning_effort(reasoning_effort) or _normalize_reasoning_effort(
-        AGENT_CODEX_REASONING_EFFORT
+    mcp_config_payload = build_selected_mcp_config_payload(
+        selected_servers=selected_mcp_servers,
+        task_management_mcp_url=AGENT_MCP_URL,
     )
+    runtime_model_value = model
+    runtime_reasoning_value = reasoning_effort
+    if normalized_workspace_id and not str(model or "").strip():
+        try:
+            runtime_target = resolve_workspace_background_runtime_with_new_session(normalized_workspace_id)
+        except Exception:
+            runtime_target = None
+        if runtime_target is not None:
+            runtime_model_value = str(runtime_target.model or "").strip() or model
+            if not str(reasoning_effort or "").strip():
+                runtime_reasoning_value = runtime_target.reasoning_effort
+    runtime_provider, preferred_model = _resolve_runtime_provider_and_model(runtime_model_value)
+    preferred_reasoning_effort = _resolve_runtime_reasoning_effort(runtime_provider, runtime_reasoning_value)
     cache_key = _build_structured_prompt_cache_key(
         prompt=prompt,
         output_schema=output_schema,
-        model=preferred_model,
+        model=encode_execution_model(provider=runtime_provider, model=preferred_model),
         reasoning_effort=preferred_reasoning_effort,
         workspace_id=normalized_workspace_id,
         session_key=normalized_session_key,
@@ -1671,6 +2135,7 @@ def run_structured_codex_prompt_with_usage(
         timeout_seconds=runtime_timeout_seconds,
     ):
         with _codex_home_env(
+            provider=runtime_provider,
             mcp_config_text=mcp_config_text,
             runtime_config_text="",
             workspace_id=normalized_workspace_id,
@@ -1678,6 +2143,7 @@ def run_structured_codex_prompt_with_usage(
             actor_user_id=actor_user_id,
         ) as codex_env:
             final_message, usage, _, _, _ = _run_codex_app_server_with_optional_stream(
+                provider=runtime_provider,
                 start_prompt=prompt,
                 resume_prompt=prompt,
                 timeout_seconds=runtime_timeout_seconds,
@@ -1686,6 +2152,7 @@ def run_structured_codex_prompt_with_usage(
                 reasoning_effort=preferred_reasoning_effort,
                 output_schema=output_schema,
                 preferred_thread_id=str(preferred_thread_id or "").strip() or None,
+                mcp_config_payload=mcp_config_payload,
                 env=codex_env,
             )
     try:
@@ -1715,7 +2182,7 @@ def main() -> int:
     chat_session_id = str(ctx.get("chat_session_id") or "").strip() or None
     preferred_codex_session_id = str(ctx.get("codex_session_id") or "").strip() or None
     actor_user_id = str(ctx.get("actor_user_id") or "").strip() or None
-    mcp_url = AGENT_CODEX_MCP_URL
+    mcp_url = AGENT_MCP_URL
     selected_mcp_servers = normalize_chat_mcp_servers(
         ctx.get("mcp_servers"),
         strict=False,
@@ -1724,13 +2191,14 @@ def main() -> int:
         selected_servers=selected_mcp_servers,
         task_management_mcp_url=mcp_url,
     )
+    mcp_config_payload = build_selected_mcp_config_payload(
+        selected_servers=selected_mcp_servers,
+        task_management_mcp_url=mcp_url,
+    )
     stream_events = bool(ctx.get("stream_events"))
     stream_plain_text = bool(ctx.get("stream_plain_text"))
-    preferred_model = str(ctx.get("model") or "").strip() or AGENT_CODEX_MODEL or None
-    preferred_reasoning_effort = (
-        _normalize_reasoning_effort(ctx.get("reasoning_effort"))
-        or _normalize_reasoning_effort(AGENT_CODEX_REASONING_EFFORT)
-    )
+    runtime_provider, preferred_model = _resolve_runtime_provider_and_model(ctx.get("model"))
+    preferred_reasoning_effort = _resolve_runtime_reasoning_effort(runtime_provider, ctx.get("reasoning_effort"))
     runtime_timeout_seconds = _effective_timeout_seconds(
         ctx.get("executor_timeout_seconds"),
         fallback_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
@@ -1795,6 +2263,7 @@ def main() -> int:
         timeout_seconds=runtime_timeout_seconds,
     ):
         with _codex_home_env(
+            provider=runtime_provider,
             mcp_config_text=mcp_config_text,
             workspace_id=workspace_id,
             chat_session_id=chat_session_id,
@@ -1802,6 +2271,7 @@ def main() -> int:
         ) as codex_env:
             if stream_events:
                 run_kwargs = {
+                    "provider": runtime_provider,
                     "start_prompt": start_prompt,
                     "resume_prompt": resume_prompt,
                     "timeout_seconds": runtime_timeout_seconds,
@@ -1810,6 +2280,7 @@ def main() -> int:
                     "reasoning_effort": preferred_reasoning_effort,
                     "output_schema": schema if structured_response else None,
                     "preferred_thread_id": preferred_codex_session_id,
+                    "mcp_config_payload": mcp_config_payload,
                     "env": codex_env,
                 }
                 if task_run_cwd is not None:
@@ -1826,6 +2297,7 @@ def main() -> int:
                     out = _build_plain_text_result(final_message)
             else:
                 run_kwargs = {
+                    "provider": runtime_provider,
                     "start_prompt": start_prompt,
                     "resume_prompt": resume_prompt,
                     "timeout_seconds": runtime_timeout_seconds,
@@ -1834,6 +2306,7 @@ def main() -> int:
                     "reasoning_effort": preferred_reasoning_effort,
                     "output_schema": schema,
                     "preferred_thread_id": preferred_codex_session_id,
+                    "mcp_config_payload": mcp_config_payload,
                     "env": codex_env,
                 }
                 if task_run_cwd is not None:
@@ -1889,6 +2362,18 @@ def main() -> int:
         )
     )
     return 0
+
+
+def run_structured_agent_prompt(*args, **kwargs):
+    return run_structured_codex_prompt(*args, **kwargs)
+
+
+def run_structured_agent_prompt_with_usage(*args, **kwargs):
+    return run_structured_codex_prompt_with_usage(*args, **kwargs)
+
+
+def run_agent_home_cleanup_if_due(*args, **kwargs):
+    return run_codex_home_cleanup_if_due(*args, **kwargs)
 
 
 if __name__ == "__main__":

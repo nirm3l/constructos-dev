@@ -199,8 +199,12 @@ def test_compile_plugin_policy_git_delivery_snapshot_contract() -> None:
             ]
         },
         "available_checks_keys": [
+            "compose_manifest_present",
             "deploy_execution_evidence_present",
+            "deploy_serves_application_root",
             "git_contract_ok",
+            "lead_deploy_decision_evidence_present",
+            "qa_handoff_current_cycle_ok",
             "qa_has_verifiable_artifacts",
             "repo_context_present",
             "runtime_deploy_health_ok",

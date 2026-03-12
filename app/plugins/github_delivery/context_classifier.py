@@ -8,7 +8,7 @@ _PROJECT_CONTEXT_CLASSIFIER_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def run_structured_codex_prompt(**kwargs):
-    from features.agents.codex_mcp_adapter import run_structured_codex_prompt as _run
+    from features.agents.agent_mcp_adapter import run_structured_agent_prompt as _run
 
     return _run(**kwargs)
 

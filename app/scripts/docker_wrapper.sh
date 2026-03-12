@@ -24,6 +24,19 @@ exec_docker_compose() {
   DOCKER_HOST="${DOCKER_PROXY_URL}" exec "${REAL_DOCKER_COMPOSE_BIN}" "$@"
 }
 
+container_belongs_to_project() {
+  container_name="$1"
+  if [ -z "${container_name}" ]; then
+    return 1
+  fi
+  project_label="$(
+    DOCKER_HOST="${DOCKER_PROXY_URL}" "${REAL_DOCKER_BIN}" inspect \
+      --format '{{ index .Config.Labels "com.docker.compose.project" }}' \
+      "${container_name}" 2>/dev/null || true
+  )"
+  [ "${project_label}" = "${project_name}" ]
+}
+
 for arg in "$@"; do
   case "${arg}" in
     -H|--host|--host=*|--context=*|--context)
@@ -72,6 +85,27 @@ case "${command}" in
     ;;
   ps)
     exec_docker ps --filter "label=com.docker.compose.project=${project_name}" "$@"
+    ;;
+  logs)
+    target=""
+    for arg in "$@"; do
+      case "${arg}" in
+        -*)
+          ;;
+        *)
+          target="${arg}"
+          ;;
+      esac
+    done
+    if [ -z "${target}" ]; then
+      echo "Blocked by Docker soft isolation. Use 'docker logs <container>' with a project container." >&2
+      exit 126
+    fi
+    if ! container_belongs_to_project "${target}"; then
+      echo "Blocked by Docker soft isolation. Container must belong to project '${project_name}'." >&2
+      exit 126
+    fi
+    exec_docker logs "$@"
     ;;
   container)
     subcommand="${1:-}"
@@ -134,7 +168,7 @@ case "${command}" in
     exec_docker compose "$@"
     ;;
   *)
-    echo "Blocked by Docker soft isolation. Allowed: compose, ps, container ls, info, version, context." >&2
+    echo "Blocked by Docker soft isolation. Allowed: compose, ps, logs, container ls, info, version, context." >&2
     exit 126
     ;;
 esac

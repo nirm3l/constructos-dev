@@ -18,8 +18,10 @@ MCP_TOOLS_IMAGE="${MCP_TOOLS_IMAGE:-}"
 CODEX_AUTH_FILE="${CODEX_AUTH_FILE:-${HOME}/.codex/auth.json}"
 CODEX_CONFIG_FILE="${CODEX_CONFIG_FILE:-${ROOT_DIR}/codex.config.toml}"
 CODEX_AUTH_PLACEHOLDER_FILE="${ROOT_DIR}/codex.auth.placeholder.json"
+CLAUDE_AUTH_FILE="${CLAUDE_AUTH_FILE:-${HOME}/.claude.json}"
+CLAUDE_AUTH_PLACEHOLDER_FILE="${ROOT_DIR}/claude.auth.placeholder.json"
 OLLAMA_MODELS_MOUNT="${OLLAMA_MODELS_MOUNT:-}"
-AGENT_CODEX_WORKSPACE_MOUNT="${AGENT_CODEX_WORKSPACE_MOUNT:-}"
+AGENT_WORKSPACE_MOUNT="${AGENT_WORKSPACE_MOUNT:-${AGENT_CODEX_WORKSPACE_MOUNT:-}}"
 DEPLOY_SERVICES_OVERRIDE="${DEPLOY_SERVICES_OVERRIDE:-}"
 
 resolve_compose_env_value() {
@@ -42,6 +44,19 @@ resolve_compose_env_value() {
   line="${line#*=}"
   line="${line%$'\r'}"
   printf '%s' "$line"
+}
+
+resolve_first_compose_env_value() {
+  local var_name
+  local value
+  for var_name in "$@"; do
+    value="$(resolve_compose_env_value "$var_name" || true)"
+    if [[ -n "$value" ]]; then
+      printf '%s' "$value"
+      return 0
+    fi
+  done
+  return 1
 }
 
 resolve_deploy_target() {
@@ -83,9 +98,9 @@ resolve_ollama_models_mount() {
   printf '%s' "ollama-data"
 }
 
-resolve_codex_workspace_mount() {
+resolve_agent_workspace_mount() {
   local configured
-  configured="$(resolve_compose_env_value "AGENT_CODEX_WORKSPACE_MOUNT" || true)"
+  configured="$(resolve_first_compose_env_value "AGENT_WORKSPACE_MOUNT" "AGENT_CODEX_WORKSPACE_MOUNT" || true)"
   if [[ -n "$configured" ]]; then
     printf '%s' "$configured"
     return 0
@@ -96,13 +111,13 @@ resolve_codex_workspace_mount() {
 TARGET_RESOLVED="$(resolve_deploy_target)"
 COMPOSE_ARGS=(-f docker-compose.yml)
 OLLAMA_MODELS_MOUNT="$(resolve_ollama_models_mount)"
-AGENT_CODEX_WORKSPACE_MOUNT="$(resolve_codex_workspace_mount)"
+AGENT_WORKSPACE_MOUNT="$(resolve_agent_workspace_mount)"
 
 if [[ "$OLLAMA_MODELS_MOUNT" == "~/"* ]]; then
   OLLAMA_MODELS_MOUNT="${HOME}/${OLLAMA_MODELS_MOUNT#~/}"
 fi
-if [[ "$AGENT_CODEX_WORKSPACE_MOUNT" == "~/"* ]]; then
-  AGENT_CODEX_WORKSPACE_MOUNT="${HOME}/${AGENT_CODEX_WORKSPACE_MOUNT#~/}"
+if [[ "$AGENT_WORKSPACE_MOUNT" == "~/"* ]]; then
+  AGENT_WORKSPACE_MOUNT="${HOME}/${AGENT_WORKSPACE_MOUNT#~/}"
 fi
 
 if [[ "$OLLAMA_MODELS_MOUNT" == /* ]]; then
@@ -111,17 +126,17 @@ else
   OLLAMA_MODELS_MOUNT_MODE="named-volume"
 fi
 
-if [[ "$AGENT_CODEX_WORKSPACE_MOUNT" == /* ]]; then
-  AGENT_CODEX_WORKSPACE_MOUNT_MODE="host-bind"
+if [[ "$AGENT_WORKSPACE_MOUNT" == /* ]]; then
+  AGENT_WORKSPACE_MOUNT_MODE="host-bind"
 else
-  AGENT_CODEX_WORKSPACE_MOUNT_MODE="named-volume"
+  AGENT_WORKSPACE_MOUNT_MODE="named-volume"
 fi
 
-if [[ "$AGENT_CODEX_WORKSPACE_MOUNT_MODE" == "host-bind" ]]; then
-  if [[ -e "$AGENT_CODEX_WORKSPACE_MOUNT" && ! -w "$AGENT_CODEX_WORKSPACE_MOUNT" ]]; then
-    echo "Configured AGENT_CODEX_WORKSPACE_MOUNT is not writable: ${AGENT_CODEX_WORKSPACE_MOUNT}"
-    AGENT_CODEX_WORKSPACE_MOUNT="${ROOT_DIR}/data/workspace"
-    AGENT_CODEX_WORKSPACE_MOUNT_MODE="host-bind"
+if [[ "$AGENT_WORKSPACE_MOUNT_MODE" == "host-bind" ]]; then
+  if [[ -e "$AGENT_WORKSPACE_MOUNT" && ! -w "$AGENT_WORKSPACE_MOUNT" ]]; then
+    echo "Configured AGENT_WORKSPACE_MOUNT is not writable: ${AGENT_WORKSPACE_MOUNT}"
+    AGENT_WORKSPACE_MOUNT="${ROOT_DIR}/data/workspace"
+    AGENT_WORKSPACE_MOUNT_MODE="host-bind"
   fi
 fi
 
@@ -186,25 +201,51 @@ APP_DEPLOYED_AT_UTC=${DEPLOYED_AT_UTC}
 TASK_APP_IMAGE=${TASK_APP_IMAGE}
 MCP_TOOLS_IMAGE=${MCP_TOOLS_IMAGE}
 OLLAMA_MODELS_MOUNT=${OLLAMA_MODELS_MOUNT}
-AGENT_CODEX_WORKSPACE_MOUNT=${AGENT_CODEX_WORKSPACE_MOUNT}
+AGENT_WORKSPACE_MOUNT=${AGENT_WORKSPACE_MOUNT}
+AGENT_CODEX_WORKSPACE_MOUNT=${AGENT_WORKSPACE_MOUNT}
 EOF
 
 if [[ -n "$LICENSE_SERVER_TOKEN_VALUE" ]]; then
   printf 'LICENSE_SERVER_TOKEN=%s\n' "$LICENSE_SERVER_TOKEN_VALUE" >> .deploy.env
 fi
 
-AGENT_CODEX_MODEL_VALUE="$(resolve_compose_env_value "AGENT_CODEX_MODEL" || true)"
-AGENT_CODEX_REASONING_EFFORT_VALUE="$(resolve_compose_env_value "AGENT_CODEX_REASONING_EFFORT" || true)"
+declare -a AGENT_RUNTIME_ENV_KEYS=(
+  AGENT_DEFAULT_EXECUTION_PROVIDER
+  AGENT_CODEX_DEFAULT_MODEL
+  AGENT_CODEX_DEFAULT_REASONING_EFFORT
+  AGENT_CLAUDE_DEFAULT_MODEL
+  AGENT_CLAUDE_DEFAULT_REASONING_EFFORT
+  AGENT_ENABLED_PLUGINS
+)
 
-if [[ -n "$AGENT_CODEX_MODEL_VALUE" ]]; then
-  printf 'AGENT_CODEX_MODEL=%s\n' "$AGENT_CODEX_MODEL_VALUE" >> .deploy.env
-fi
-if [[ -n "$AGENT_CODEX_REASONING_EFFORT_VALUE" ]]; then
-  printf 'AGENT_CODEX_REASONING_EFFORT=%s\n' "$AGENT_CODEX_REASONING_EFFORT_VALUE" >> .deploy.env
-fi
+for env_key in "${AGENT_RUNTIME_ENV_KEYS[@]}"; do
+  case "$env_key" in
+    AGENT_CODEX_DEFAULT_MODEL)
+      env_value="$(resolve_first_compose_env_value "AGENT_CODEX_DEFAULT_MODEL" "AGENT_CODEX_MODEL" || true)"
+      ;;
+    AGENT_CODEX_DEFAULT_REASONING_EFFORT)
+      env_value="$(resolve_first_compose_env_value "AGENT_CODEX_DEFAULT_REASONING_EFFORT" "AGENT_CODEX_REASONING_EFFORT" || true)"
+      ;;
+    AGENT_CLAUDE_DEFAULT_MODEL)
+      env_value="$(resolve_first_compose_env_value "AGENT_CLAUDE_DEFAULT_MODEL" "AGENT_CLAUDE_MODEL" || true)"
+      ;;
+    AGENT_CLAUDE_DEFAULT_REASONING_EFFORT)
+      env_value="$(resolve_first_compose_env_value "AGENT_CLAUDE_DEFAULT_REASONING_EFFORT" "AGENT_CLAUDE_REASONING_EFFORT" || true)"
+      ;;
+    *)
+      env_value="$(resolve_compose_env_value "$env_key" || true)"
+      ;;
+  esac
+  if [[ -n "${env_value:-}" ]]; then
+    printf '%s=%s\n' "$env_key" "$env_value" >> .deploy.env
+  fi
+done
 
 if [[ "$CODEX_AUTH_FILE" != /* ]]; then
   CODEX_AUTH_FILE="${ROOT_DIR}/${CODEX_AUTH_FILE#./}"
+fi
+if [[ "$CLAUDE_AUTH_FILE" != /* ]]; then
+  CLAUDE_AUTH_FILE="${ROOT_DIR}/${CLAUDE_AUTH_FILE#./}"
 fi
 if [[ "$CODEX_CONFIG_FILE" != /* ]]; then
   CODEX_CONFIG_FILE="${ROOT_DIR}/${CODEX_CONFIG_FILE#./}"
@@ -220,6 +261,16 @@ if ! chmod a+r "$CODEX_AUTH_FILE" 2>/dev/null; then
   echo "Codex chat in task-app may fail if the mounted auth file is not readable by container user."
 fi
 
+if [[ ! -f "$CLAUDE_AUTH_FILE" ]]; then
+  echo "Host Claude auth file not found: $CLAUDE_AUTH_FILE"
+  echo "Falling back to placeholder Claude auth mount so Claude can be configured from the UI."
+  CLAUDE_AUTH_FILE="$CLAUDE_AUTH_PLACEHOLDER_FILE"
+fi
+if ! chmod a+r "$CLAUDE_AUTH_FILE" 2>/dev/null; then
+  echo "Warning: unable to adjust read permissions for $CLAUDE_AUTH_FILE"
+  echo "Claude chat in task-app may fail if the mounted auth file is not readable by container user."
+fi
+
 if [[ ! -f "$CODEX_CONFIG_FILE" ]]; then
   echo "Missing Codex config file: $CODEX_CONFIG_FILE"
   echo "Create it first (or set CODEX_CONFIG_FILE) before deploy."
@@ -232,12 +283,13 @@ fi
 
 export CODEX_AUTH_FILE
 export CODEX_CONFIG_FILE
+export CLAUDE_AUTH_FILE
 
-if [[ "$AGENT_CODEX_WORKSPACE_MOUNT" == /* ]]; then
-  mkdir -p "$AGENT_CODEX_WORKSPACE_MOUNT"
-  if ! chmod 0777 "$AGENT_CODEX_WORKSPACE_MOUNT" 2>/dev/null; then
-    if [[ ! -w "$AGENT_CODEX_WORKSPACE_MOUNT" ]]; then
-      echo "Warning: workspace mount remains non-writable: ${AGENT_CODEX_WORKSPACE_MOUNT}"
+if [[ "$AGENT_WORKSPACE_MOUNT" == /* ]]; then
+  mkdir -p "$AGENT_WORKSPACE_MOUNT"
+  if ! chmod 0777 "$AGENT_WORKSPACE_MOUNT" 2>/dev/null; then
+    if [[ ! -w "$AGENT_WORKSPACE_MOUNT" ]]; then
+      echo "Warning: workspace mount remains non-writable: ${AGENT_WORKSPACE_MOUNT}"
       echo "Automation may fall back to /tmp/constructos-workspace if /home/app/workspace is not writable."
     fi
   fi
@@ -250,7 +302,7 @@ echo "Deploy source: ${DEPLOY_SOURCE}"
 echo "task-app image: ${TASK_APP_IMAGE}"
 echo "mcp-tools image: ${MCP_TOOLS_IMAGE}"
 echo "Ollama models mount: ${OLLAMA_MODELS_MOUNT} (${OLLAMA_MODELS_MOUNT_MODE})"
-echo "Codex workspace mount: ${AGENT_CODEX_WORKSPACE_MOUNT} (${AGENT_CODEX_WORKSPACE_MOUNT_MODE})"
+echo "Agent workspace mount: ${AGENT_WORKSPACE_MOUNT} (${AGENT_WORKSPACE_MOUNT_MODE})"
 echo "Compose project: ${APP_COMPOSE_PROJECT_NAME}"
 echo "Compose files: ${COMPOSE_ARGS[*]}"
 echo "Deploy services: ${DEPLOY_SERVICES[*]}"

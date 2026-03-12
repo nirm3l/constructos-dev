@@ -40,6 +40,20 @@ def build_client(tmp_path: Path, installation_id: str | None = TEST_INSTALLATION
     return client
 
 
+def _login_as_user(client: TestClient, *, username: str, password: str) -> None:
+    response = client.post("/api/auth/login", json={"username": username, "password": password})
+    assert response.status_code == 200
+
+
+def _activate_user_password(client: TestClient, *, username: str, temporary_password: str, new_password: str) -> None:
+    _login_as_user(client, username=username, password=temporary_password)
+    changed = client.post(
+        "/api/auth/change-password",
+        json={"current_password": temporary_password, "new_password": new_password},
+    )
+    assert changed.status_code == 200
+
+
 def test_license_status_defaults_to_trial(tmp_path: Path):
     client = build_client(tmp_path)
 
@@ -294,3 +308,53 @@ def test_license_activate_endpoint_surfaces_activation_errors(tmp_path: Path, mo
     res = client.post("/api/license/activate", json={"activation_code": "ACT-TEST-0001-0002-0003"})
     assert res.status_code == 409
     assert "Seat limit exceeded" in res.json()["detail"]
+
+
+def test_license_activate_requires_owner(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+
+    created = client.post(
+        "/api/admin/users",
+        json={"workspace_id": ws_id, "username": "license-admin", "role": "Admin"},
+    )
+    assert created.status_code == 200
+    temp_password = created.json()["temporary_password"]
+
+    client.post("/api/auth/logout")
+    _activate_user_password(
+        client,
+        username="license-admin",
+        temporary_password=temp_password,
+        new_password="license-admin-pass-123",
+    )
+
+    res = client.post("/api/license/activate", json={"activation_code": "ACT-TEST-0001-0002-0003"})
+    assert res.status_code == 403
+    assert res.json()["detail"] == "Only workspace owners can activate a license."
+
+
+def test_license_auto_update_requires_owner(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+
+    created = client.post(
+        "/api/admin/users",
+        json={"workspace_id": ws_id, "username": "auto-update-admin", "role": "Admin"},
+    )
+    assert created.status_code == 200
+    temp_password = created.json()["temporary_password"]
+
+    client.post("/api/auth/logout")
+    _activate_user_password(
+        client,
+        username="auto-update-admin",
+        temporary_password=temp_password,
+        new_password="auto-update-admin-pass-123",
+    )
+
+    res = client.post("/api/license/auto-update")
+    assert res.status_code == 403
+    assert res.json()["detail"] == "Only workspace owners can trigger application auto-update."

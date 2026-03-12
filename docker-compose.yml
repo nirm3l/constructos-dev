@@ -1,15 +1,16 @@
 name: constructos-app
 
-x-codex-config-volume: &codex_config_volume "${CODEX_CONFIG_FILE}:/home/app/.codex/config.toml:ro"
+x-codex-config-volume: &codex_config_volume "${CODEX_CONFIG_FILE:-./codex.config.toml}:/home/app/.codex/config.toml:ro"
 x-codex-auth-volume: &codex_auth_volume "${CODEX_AUTH_FILE:-./codex.auth.placeholder.json}:/home/app/.codex/auth.json:ro"
-x-codex-home-volume: &codex_home_volume "codex-home-data:/home/app/codex-home"
-x-codex-workspace-volume: &codex_workspace_volume "${AGENT_CODEX_WORKSPACE_MOUNT:-./data/workspace}:/home/app/workspace"
+x-claude-auth-volume: &claude_auth_volume "${CLAUDE_AUTH_FILE:-./claude.auth.placeholder.json}:/home/app/.claude.json:ro"
+x-agent-home-volume: &agent_home_volume "agent-home-data:/home/app/agent-home"
+x-agent-workspace-volume: &agent_workspace_volume "${AGENT_WORKSPACE_MOUNT:-./data/workspace}:/home/app/workspace"
 x-agent-common-extra-hosts: &agent_common_extra_hosts
   - "gateway:host-gateway"
 
 x-agent-common-fixed-env: &agent_common_fixed_env
   EVENTSTORE_URI: "esdb://kurrentdb:2113?tls=false"
-  AGENT_CODEX_COMMAND: "python -m features.agents.codex_mcp_adapter"
+  AGENT_EXECUTION_COMMAND: "python -m features.agents.agent_mcp_adapter"
   AGENT_DOCKER_PROXY_URL: "tcp://docker-socket-proxy:2375"
   DOCKER_BUILDKIT: "0"
   COMPOSE_DOCKER_CLI_BUILD: "0"
@@ -28,12 +29,14 @@ x-agent-common-config-env: &agent_common_config_env
   APP_BUILD: "${APP_BUILD:-}"
   APP_DEPLOYED_AT_UTC: "${APP_DEPLOYED_AT_UTC:-}"
   AGENT_CHAT_CONTEXT_LIMIT_TOKENS: "400000"
-  AGENT_CODEX_HOME_ROOT: "/home/app/codex-home"
-  AGENT_CODEX_WORKDIR: "/home/app/workspace"
-  AGENT_CODEX_MODEL: "${AGENT_CODEX_MODEL:-}"
-  AGENT_CODEX_REASONING_EFFORT: "${AGENT_CODEX_REASONING_EFFORT:-}"
+  AGENT_HOME_ROOT: "/home/app/agent-home"
+  AGENT_WORKDIR: "/home/app/workspace"
+  AGENT_DEFAULT_EXECUTION_PROVIDER: "${AGENT_DEFAULT_EXECUTION_PROVIDER:-codex}"
+  AGENT_CODEX_DEFAULT_MODEL: "${AGENT_CODEX_DEFAULT_MODEL:-}"
+  AGENT_CODEX_DEFAULT_REASONING_EFFORT: "${AGENT_CODEX_DEFAULT_REASONING_EFFORT:-medium}"
+  AGENT_CLAUDE_DEFAULT_MODEL: "${AGENT_CLAUDE_DEFAULT_MODEL:-sonnet}"
+  AGENT_CLAUDE_DEFAULT_REASONING_EFFORT: "${AGENT_CLAUDE_DEFAULT_REASONING_EFFORT:-medium}"
   AGENT_ENABLED_PLUGINS: "${AGENT_ENABLED_PLUGINS:-team_mode,git_delivery,github_delivery}"
-  EVENT_STORMING_CODEX_REASONING_EFFORT: "low"
   MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:-dev-mcp-token}"
   GITHUB_PAT: "${GITHUB_PAT:-}"
   AGENT_DOCKER_PROJECT_NAME: "${AGENT_DOCKER_PROJECT_NAME:-constructos-ws-default}"
@@ -119,14 +122,15 @@ services:
       AGENT_RUNNER_ENABLED: "true"
       AGENT_RUNNER_MAX_CONCURRENCY: "3"
       AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS: "true"
-      AGENT_CODEX_MCP_URL: "http://mcp-tools:8091/mcp"
+      AGENT_MCP_URL: "http://mcp-tools:8091/mcp"
       EVENT_STORMING_ANALYSIS_WORKER_ENABLED: "true"
     volumes:
       - ./:/opt/constructos/repo:ro
       - *codex_config_volume
       - *codex_auth_volume
-      - *codex_home_volume
-      - *codex_workspace_volume
+      - *claude_auth_volume
+      - *agent_home_volume
+      - *agent_workspace_volume
     extra_hosts: *agent_common_extra_hosts
     ports:
       - "1102:8000"
@@ -152,8 +156,9 @@ services:
     volumes:
       - *codex_config_volume
       - *codex_auth_volume
-      - *codex_home_volume
-      - *codex_workspace_volume
+      - *claude_auth_volume
+      - *agent_home_volume
+      - *agent_workspace_volume
     extra_hosts: *agent_common_extra_hosts
     security_opt:
       - no-new-privileges:true
@@ -202,5 +207,5 @@ volumes:
     name: task-management_neo4j-data
   ollama-data:
     name: task-management_ollama-data
-  codex-home-data:
+  agent-home-data:
     name: task-management_codex-home-data

@@ -7,6 +7,9 @@ import * as Select from '@radix-ui/react-select'
 import * as ToggleGroup from '@radix-ui/react-toggle-group'
 import * as Tooltip from '@radix-ui/react-tooltip'
 import type { Note } from '../../types'
+import type { ProjectGitRepositoryTarget } from '../../utils/gitRepositoryLinks'
+import { parseProjectGitRepositoryExternalRef } from '../../utils/gitRepositoryLinks'
+import { ProjectGitRepositoryDialog } from '../projects/ProjectGitRepositoryDialog'
 import { AttachmentRefList, ExternalRefEditor, Icon } from '../shared/uiHelpers'
 import { TaskDrawerInsights } from './TaskDrawerInsights'
 
@@ -300,6 +303,7 @@ export function TaskDrawer({ state }: { state: any }) {
   const [openSections, setOpenSections] = React.useState<string[]>([])
   const [confirmDiscardOpen, setConfirmDiscardOpen] = React.useState(false)
   const [externalTaskPickerQuery, setExternalTaskPickerQuery] = React.useState('')
+  const [gitRepositoryDialogTarget, setGitRepositoryDialogTarget] = React.useState<ProjectGitRepositoryTarget | null>(null)
   const pendingPostDiscardActionRef = React.useRef<(() => void) | null>(null)
 
   const forceCloseTaskEditor = React.useCallback(() => {
@@ -341,6 +345,13 @@ export function TaskDrawer({ state }: { state: any }) {
   React.useEffect(() => {
     setExternalTaskPickerQuery('')
   }, [state.selectedTask?.id])
+
+  const openGitRepositoryFromRef = React.useCallback((ref: { url: string; title?: string; source?: string }) => {
+    const target = parseProjectGitRepositoryExternalRef(ref)
+    if (!target) return false
+    setGitRepositoryDialogTarget(target)
+    return true
+  }, [])
 
   if (!state.selectedTask) return null
   const linkedNotes: Note[] = state.taskNotes?.data?.items ?? []
@@ -1256,6 +1267,7 @@ export function TaskDrawer({ state }: { state: any }) {
               <ExternalRefEditor
                 refs={externalRefs}
                 onRemoveIndex={(idx) => state.setEditTaskExternalRefsText((prev: string) => state.removeExternalRefByIndex(prev, idx))}
+                onOpenRef={openGitRepositoryFromRef}
                 onAdd={(ref) => state.setEditTaskExternalRefsText((prev: string) => state.externalRefsToText([...state.parseExternalRefsText(prev), ref]))}
               />
             </Accordion.Content>
@@ -1418,6 +1430,15 @@ export function TaskDrawer({ state }: { state: any }) {
           </AlertDialog.Content>
         </AlertDialog.Portal>
       </AlertDialog.Root>
+      <ProjectGitRepositoryDialog
+        open={gitRepositoryDialogTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setGitRepositoryDialogTarget(null)
+        }}
+        userId={state.userId}
+        projectId={state.selectedTask?.project_id || ''}
+        target={gitRepositoryDialogTarget}
+      />
     </Tooltip.Provider>
   )
 }

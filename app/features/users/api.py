@@ -13,12 +13,16 @@ from shared.core import AuthSession, User, UserPreferencesPatch, WorkspaceMember
 from shared.settings import BOOTSTRAP_PASSWORD, BOOTSTRAP_USERNAME, DEFAULT_USER_ID
 from shared.settings import AUTH_COOKIE_SECURE, AUTH_SESSION_COOKIE_NAME, AUTH_SESSION_TTL_HOURS
 
+from features.agents.provider_auth import resolve_provider_effective_auth_source
+from features.agents.workspace_runtime import list_workspace_runtime_targets, upsert_workspace_runtime_target
+
 from .application import UserApplicationService
 from .gateway import UserOperationGateway
 
 router = APIRouter()
 
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]{3,64}$")
+OWNER_ROLE = "Owner"
 ADMIN_ROLES = {"Owner", "Admin"}
 WORKSPACE_ROLES = {"Owner", "Admin", "Member", "Guest"}
 
@@ -51,6 +55,13 @@ class AdminUpdateUserRolePayload(BaseModel):
 
 class AdminDeactivateUserPayload(BaseModel):
     workspace_id: str
+
+
+class AdminUpdateUserAgentRuntimePayload(BaseModel):
+    workspace_id: str
+    model: str | None = None
+    reasoning_effort: str | None = None
+    use_for_background_processing: bool | None = None
 
 
 def _now_utc() -> datetime:
@@ -223,7 +234,9 @@ def list_workspace_users(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    _require_workspace_admin(db, workspace_id, user.id)
+    actor_membership = _require_workspace_admin(db, workspace_id, user.id)
+    actor_is_owner = actor_membership.role == OWNER_ROLE
+    runtime_targets = list_workspace_runtime_targets(db, workspace_id)
     rows = db.execute(
         select(User, WorkspaceMember)
         .join(WorkspaceMember, WorkspaceMember.user_id == User.id)
@@ -241,12 +254,56 @@ def list_workspace_users(
                 "role": membership.role,
                 "is_active": bool(member_user.is_active),
                 "must_change_password": bool(member_user.must_change_password) if member_user.user_type == "human" else False,
-                "can_reset_password": member_user.user_type == "human",
+                "can_reset_password": (
+                    member_user.user_type == "human"
+                    and (actor_is_owner or membership.role not in ADMIN_ROLES)
+                ),
                 "can_deactivate": (
                     member_user.user_type == "human"
                     and bool(member_user.is_active)
                     and member_user.id != user.id
+                    and (actor_is_owner or membership.role not in ADMIN_ROLES)
                 ),
+                "can_update_role": (
+                    member_user.user_type == "human"
+                    and (actor_is_owner or membership.role not in ADMIN_ROLES)
+                ),
+                "background_agent_model": (
+                    runtime_targets[str(member_user.id)].model
+                    if str(member_user.id) in runtime_targets
+                    else None
+                ),
+                "background_agent_provider": (
+                    runtime_targets[str(member_user.id)].provider
+                    if str(member_user.id) in runtime_targets
+                    else None
+                ),
+                "background_agent_available": (
+                    resolve_provider_effective_auth_source(runtime_targets[str(member_user.id)].provider) != "none"
+                    if str(member_user.id) in runtime_targets
+                    else False
+                ),
+                "background_agent_reasoning_effort": (
+                    runtime_targets[str(member_user.id)].reasoning_effort
+                    if str(member_user.id) in runtime_targets
+                    else None
+                ),
+                "background_agent_model_is_fallback": (
+                    runtime_targets[str(member_user.id)].model_is_fallback
+                    if str(member_user.id) in runtime_targets
+                    else None
+                ),
+                "background_agent_reasoning_is_fallback": (
+                    runtime_targets[str(member_user.id)].reasoning_is_fallback
+                    if str(member_user.id) in runtime_targets
+                    else None
+                ),
+                "is_background_execution_selected": (
+                    runtime_targets[str(member_user.id)].is_background_default
+                    if str(member_user.id) in runtime_targets
+                    else False
+                ),
+                "can_configure_background_execution": str(member_user.id) in runtime_targets,
             }
             for member_user, membership in rows
         ],
@@ -314,6 +371,45 @@ def deactivate_workspace_user(
         workspace_id=payload.workspace_id,
         target_user_id=target_user_id,
     )
+
+
+@router.post("/api/admin/users/{target_user_id}/agent-runtime")
+def update_workspace_user_agent_runtime(
+    target_user_id: str,
+    payload: AdminUpdateUserAgentRuntimePayload,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    _require_workspace_admin(db, payload.workspace_id, user.id)
+    runtime_targets = list_workspace_runtime_targets(db, payload.workspace_id)
+    selected_target = runtime_targets.get(str(target_user_id))
+    if payload.use_for_background_processing and selected_target is not None:
+        if resolve_provider_effective_auth_source(selected_target.provider) == "none":
+            raise HTTPException(
+                status_code=422,
+                detail=f"{selected_target.provider.title()} is not configured for this runtime.",
+            )
+    try:
+        target = upsert_workspace_runtime_target(
+            db=db,
+            workspace_id=payload.workspace_id,
+            target_user_id=target_user_id,
+            model=payload.model,
+            reasoning_effort=payload.reasoning_effort,
+            set_as_background_default=payload.use_for_background_processing,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    db.commit()
+    return {
+        "ok": True,
+        "workspace_id": payload.workspace_id,
+        "user_id": target.user_id,
+        "provider": target.provider,
+        "model": target.model,
+        "reasoning_effort": target.reasoning_effort,
+        "is_background_execution_selected": target.is_background_default,
+    }
 
 
 @router.patch("/api/me/preferences")

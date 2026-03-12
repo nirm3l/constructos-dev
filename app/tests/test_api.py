@@ -48,6 +48,21 @@ def build_anonymous_client(tmp_path: Path):
     return TestClient(main.app)
 
 
+def _login_as_user(client: TestClient, *, username: str, password: str):
+    response = client.post('/api/auth/login', json={'username': username, 'password': password})
+    assert response.status_code == 200
+    return response
+
+
+def _activate_user_password(client: TestClient, *, username: str, temporary_password: str, new_password: str) -> None:
+    _login_as_user(client, username=username, password=temporary_password)
+    changed = client.post(
+        '/api/auth/change-password',
+        json={'current_password': temporary_password, 'new_password': new_password},
+    )
+    assert changed.status_code == 200
+
+
 def trigger_system_notifications_for_user(user_id: str) -> int:
     from shared.core import emit_system_notifications
     from shared.models import SessionLocal, User
@@ -1559,6 +1574,27 @@ def test_user_theme_preferences_persist(tmp_path):
     assert bootstrap.json()['current_user']['theme'] == 'dark'
 
 
+def test_tour_preference_patch_preserves_chat_execution_preferences(tmp_path):
+    client = build_client(tmp_path)
+
+    set_chat = client.patch(
+        '/api/me/preferences',
+        json={'agent_chat_model': 'claude:sonnet', 'agent_chat_reasoning_effort': 'medium'},
+    )
+    assert set_chat.status_code == 200
+    assert set_chat.json()['agent_chat_model'] == 'claude:sonnet'
+
+    updated = client.patch('/api/me/preferences', json={'onboarding_quick_tour_completed': True})
+    assert updated.status_code == 200
+    assert updated.json()['agent_chat_model'] == 'claude:sonnet'
+    assert updated.json()['onboarding_quick_tour_completed'] is True
+
+    bootstrap = client.get('/api/bootstrap')
+    assert bootstrap.status_code == 200
+    assert bootstrap.json()['current_user']['agent_chat_model'] == 'claude:sonnet'
+    assert bootstrap.json()['current_user']['onboarding_quick_tour_completed'] is True
+
+
 def test_admin_create_user_forces_password_change_flow(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -1660,7 +1696,7 @@ def test_blank_password_login_rejected_after_admin_password_change(tmp_path):
     assert blank_login.status_code == 401
 
 
-def test_admin_can_create_user_with_admin_role(tmp_path):
+def test_owner_can_create_user_with_admin_role(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
@@ -1680,7 +1716,7 @@ def test_admin_can_create_user_with_admin_role(tmp_path):
     assert created_row['role'] == 'Admin'
 
 
-def test_admin_can_update_workspace_user_role(tmp_path):
+def test_owner_can_update_workspace_user_role(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
@@ -1707,7 +1743,7 @@ def test_admin_can_update_workspace_user_role(tmp_path):
     assert updated_row['role'] == 'Admin'
 
 
-def test_admin_can_deactivate_workspace_user(tmp_path):
+def test_owner_can_deactivate_workspace_user(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
@@ -1766,6 +1802,105 @@ def test_admin_cannot_deactivate_own_account(tmp_path):
     assert blocked.json()['detail'] == 'You cannot deactivate your own account'
 
 
+def test_admin_can_create_member_user_but_not_admin_role(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    admin_created = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'workspace-admin', 'role': 'Admin'},
+    )
+    assert admin_created.status_code == 200
+    admin_temp_password = admin_created.json()['temporary_password']
+
+    client.post('/api/auth/logout')
+    _activate_user_password(
+        client,
+        username='workspace-admin',
+        temporary_password=admin_temp_password,
+        new_password='workspace-admin-pass-123',
+    )
+
+    member_created = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'member-created-by-admin', 'role': 'Member'},
+    )
+    assert member_created.status_code == 200
+    assert member_created.json()['user']['role'] == 'Member'
+
+    blocked = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'admin-created-by-admin', 'role': 'Admin'},
+    )
+    assert blocked.status_code == 403
+    assert blocked.json()['detail'] == 'Only workspace owners can manage Owner/Admin roles'
+
+
+def test_admin_cannot_manage_admin_tier_users(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    owner_user_id = bootstrap['current_user']['id']
+
+    admin_created = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'workspace-admin', 'role': 'Admin'},
+    )
+    assert admin_created.status_code == 200
+    admin_temp_password = admin_created.json()['temporary_password']
+
+    member_created = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'member-target', 'role': 'Member'},
+    )
+    assert member_created.status_code == 200
+    member_user_id = member_created.json()['user']['id']
+
+    client.post('/api/auth/logout')
+    _activate_user_password(
+        client,
+        username='workspace-admin',
+        temporary_password=admin_temp_password,
+        new_password='workspace-admin-pass-456',
+    )
+
+    promote_blocked = client.post(
+        f'/api/admin/users/{member_user_id}/set-role',
+        json={'workspace_id': ws_id, 'role': 'Admin'},
+    )
+    assert promote_blocked.status_code == 403
+    assert promote_blocked.json()['detail'] == 'Only workspace owners can manage Owner/Admin roles'
+
+    reset_blocked = client.post(
+        f'/api/admin/users/{owner_user_id}/reset-password',
+        json={'workspace_id': ws_id},
+    )
+    assert reset_blocked.status_code == 403
+    assert reset_blocked.json()['detail'] == 'Only workspace owners can manage Owner/Admin roles'
+
+    deactivate_blocked = client.post(
+        f'/api/admin/users/{owner_user_id}/deactivate',
+        json={'workspace_id': ws_id},
+    )
+    assert deactivate_blocked.status_code == 403
+    assert deactivate_blocked.json()['detail'] == 'Only workspace owners can manage Owner/Admin roles'
+
+
+def test_owner_cannot_demote_last_owner(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    owner_user_id = bootstrap['current_user']['id']
+
+    blocked = client.post(
+        f'/api/admin/users/{owner_user_id}/set-role',
+        json={'workspace_id': ws_id, 'role': 'Admin'},
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()['detail'] == 'Workspace must have at least one owner'
+
+
 def test_admin_cannot_reset_password_for_agent_user(tmp_path):
     from shared.settings import AGENT_SYSTEM_USER_ID
 
@@ -1794,6 +1929,64 @@ def test_admin_cannot_reset_password_for_agent_user(tmp_path):
         json={'workspace_id': ws_id},
     )
     assert deactivate.status_code == 422
+
+
+def test_workspace_users_list_includes_background_runtime_for_bot_users(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_DEFAULT_EXECUTION_PROVIDER", "codex")
+    monkeypatch.setenv("AGENT_CODEX_MODEL", "gpt-5-runtime")
+    monkeypatch.setenv("AGENT_CLAUDE_MODEL", "sonnet")
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    users_page = client.get(f'/api/admin/users?workspace_id={ws_id}')
+
+    assert users_page.status_code == 200
+    items = {str(item["username"]): item for item in users_page.json()["items"]}
+    codex_bot = items["codex-bot"]
+    claude_bot = items["claude-bot"]
+    assert codex_bot["can_configure_background_execution"] is True
+    assert codex_bot["is_background_execution_selected"] is True
+    assert codex_bot["background_agent_provider"] == "codex"
+    assert claude_bot["can_configure_background_execution"] is True
+    assert claude_bot["is_background_execution_selected"] is False
+    assert claude_bot["background_agent_provider"] == "claude"
+
+
+def test_admin_can_switch_workspace_background_runtime_to_claude_bot(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_DEFAULT_EXECUTION_PROVIDER", "codex")
+    monkeypatch.setenv("AGENT_CODEX_MODEL", "gpt-5-runtime")
+    monkeypatch.setenv("AGENT_CLAUDE_MODEL", "sonnet")
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    users_page = client.get(f'/api/admin/users?workspace_id={ws_id}')
+    assert users_page.status_code == 200
+    claude_bot = next((item for item in users_page.json()["items"] if item["username"] == "claude-bot"), None)
+    assert claude_bot is not None
+
+    updated = client.post(
+        f'/api/admin/users/{claude_bot["id"]}/agent-runtime',
+        json={
+            'workspace_id': ws_id,
+            'model': 'claude:opus',
+            'use_for_background_processing': True,
+        },
+    )
+
+    assert updated.status_code == 200
+    payload = updated.json()
+    assert payload["provider"] == "claude"
+    assert payload["model"] == "claude:opus"
+    assert payload["is_background_execution_selected"] is True
+
+    users_page = client.get(f'/api/admin/users?workspace_id={ws_id}')
+    assert users_page.status_code == 200
+    items = {str(item["username"]): item for item in users_page.json()["items"]}
+    assert items["claude-bot"]["is_background_execution_selected"] is True
+    assert items["claude-bot"]["background_agent_model"] == "claude:opus"
+    assert items["codex-bot"]["is_background_execution_selected"] is False
 
 
 def test_due_soon_system_notification(tmp_path):
@@ -8197,6 +8390,81 @@ def test_agent_service_create_project_adds_default_human_member_for_bot_actor(tm
         ]
     assert '00000000-0000-0000-0000-000000000099' in member_ids
     assert DEFAULT_USER_ID in member_ids
+
+
+def test_agent_service_create_project_adds_configured_claude_bot_member_when_codex_unavailable(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+    from shared.models import ProjectMember, SessionLocal, User
+    from shared.settings import DEFAULT_USER_ID
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(
+        svc_module,
+        "resolve_provider_effective_auth_source",
+        lambda provider: "system_override" if provider == "claude" else "none",
+    )
+
+    service = AgentTaskService()
+    created = service.create_project(name='MCP Claude Available Project')
+
+    with SessionLocal() as db:
+        member_rows = (
+            db.query(ProjectMember.user_id, User.username)
+            .join(User, User.id == ProjectMember.user_id)
+            .filter(ProjectMember.project_id == created['id'])
+            .order_by(ProjectMember.id.asc())
+            .all()
+        )
+    member_ids = [str(user_id) for user_id, _ in member_rows]
+    member_usernames = [str(username or "") for _, username in member_rows]
+
+    assert 'codex-bot' in member_usernames
+    assert 'claude-bot' in member_usernames
+    assert DEFAULT_USER_ID in member_ids
+
+
+def test_team_mode_task_assignment_reroutes_unavailable_codex_bot_to_claude(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+    import features.tasks.command_handlers as task_handlers
+    from shared.models import SessionLocal
+    from shared.settings import CLAUDE_SYSTEM_USER_ID, CODEX_SYSTEM_USER_ID
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(
+        svc_module,
+        "resolve_provider_effective_auth_source",
+        lambda provider: "system_override" if provider == "claude" else "none",
+    )
+    monkeypatch.setattr(
+        task_handlers,
+        "resolve_provider_effective_auth_source",
+        lambda provider: "system_override" if provider == "claude" else "none",
+    )
+
+    service = AgentTaskService()
+    created = service.create_project(name='MCP Claude Reroute Project')
+
+    with SessionLocal() as db:
+        resolved_assignee = task_handlers._resolve_available_system_bot_assignee_for_project(
+            db,
+            project_id=created['id'],
+            requested_assignee_id=CODEX_SYSTEM_USER_ID,
+            assigned_agent_code='dev-a',
+        )
+
+    assert resolved_assignee == CLAUDE_SYSTEM_USER_ID
 
 
 def test_agent_service_update_project_can_toggle_event_storming(tmp_path, monkeypatch):
@@ -19402,3 +19670,65 @@ def test_project_plugin_config_get_fills_defaults_when_config_is_empty_object(tm
     agents = team.get('agents')
     assert isinstance(agents, list)
     assert len(agents) == 4
+
+
+def test_project_git_delivery_repository_endpoints_return_branch_tree_and_file_preview(tmp_path):
+    import subprocess
+
+    from shared.project_repository import ensure_project_repository_initialized
+
+    os.environ["AGENT_CODEX_WORKDIR"] = str(tmp_path)
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    created = client.post('/api/projects', json={'workspace_id': ws_id, 'name': 'Repository Inspector'})
+    assert created.status_code == 200
+    project = created.json()
+    project_id = project['id']
+    project_name = project['name']
+
+    repo_root = ensure_project_repository_initialized(project_name=project_name, project_id=project_id)
+    (repo_root / 'src').mkdir(parents=True, exist_ok=True)
+    (repo_root / 'README.md').write_text('# Repository Inspector\n', encoding='utf-8')
+    (repo_root / 'src' / 'app.ts').write_text('export const enabled = true\n', encoding='utf-8')
+    subprocess.run(['git', 'add', 'README.md', 'src/app.ts'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    subprocess.run(['git', 'commit', '-m', 'Add repository inspector fixtures'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    subprocess.run(['git', 'checkout', '-b', 'task/demo-branch'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    (repo_root / 'notes.txt').write_text('branch notes\n', encoding='utf-8')
+    subprocess.run(['git', 'add', 'notes.txt'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    subprocess.run(['git', 'commit', '-m', 'Add branch notes'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    subprocess.run(['git', 'checkout', 'main'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+
+    summary = client.get(f'/api/projects/{project_id}/git-delivery/repository')
+    assert summary.status_code == 200
+    summary_payload = summary.json()
+    assert summary_payload['available'] is True
+    assert summary_payload['branch_count'] >= 2
+    assert summary_payload['default_branch'] == 'main'
+
+    branches = client.get(f'/api/projects/{project_id}/git-delivery/repository/branches')
+    assert branches.status_code == 200
+    branch_rows = branches.json()['branches']
+    branch_names = {row['name'] for row in branch_rows}
+    assert 'main' in branch_names
+    assert 'task/demo-branch' in branch_names
+
+    tree_root = client.get(f'/api/projects/{project_id}/git-delivery/repository/tree', params={'ref': 'main'})
+    assert tree_root.status_code == 200
+    root_entries = tree_root.json()['entries']
+    assert any(entry['path'] == 'README.md' and entry['kind'] == 'file' for entry in root_entries)
+    assert any(entry['path'] == 'src' and entry['kind'] == 'directory' for entry in root_entries)
+
+    tree_src = client.get(f'/api/projects/{project_id}/git-delivery/repository/tree', params={'ref': 'main', 'path': 'src'})
+    assert tree_src.status_code == 200
+    assert any(entry['path'] == 'src/app.ts' for entry in tree_src.json()['entries'])
+
+    file_preview = client.get(
+        f'/api/projects/{project_id}/git-delivery/repository/file',
+        params={'ref': 'main', 'path': 'src/app.ts'},
+    )
+    assert file_preview.status_code == 200
+    file_payload = file_preview.json()
+    assert file_payload['previewable'] is True
+    assert file_payload['binary'] is False
+    assert 'export const enabled = true' in file_payload['content']

@@ -1,5 +1,7 @@
 import React from 'react'
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as ToggleGroup from '@radix-ui/react-toggle-group'
+import * as Tooltip from '@radix-ui/react-tooltip'
 import { attachmentDownloadUrl } from '../../api'
 import type { AttachmentRef, ExternalRef } from '../../types'
 
@@ -390,42 +392,99 @@ export function MarkdownModeToggle({
 
 export function ExternalRefList({
   refs,
-  onRemoveIndex
+  onRemoveIndex,
+  onOpenRef,
 }: {
   refs: ExternalRef[] | undefined | null
   onRemoveIndex?: (index: number) => void
+  onOpenRef?: (ref: ExternalRef) => boolean
 }) {
   if (!refs || refs.length === 0) return null
+
+  const openRef = React.useCallback((ref: ExternalRef) => {
+    if (onOpenRef && onOpenRef(ref)) return
+    if (typeof window === 'undefined') return
+    window.open(ref.url, '_blank', 'noopener,noreferrer')
+  }, [onOpenRef])
+
+  const copyRefUrl = React.useCallback(async (ref: ExternalRef) => {
+    if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) return
+    try {
+      await navigator.clipboard.writeText(ref.url)
+    } catch {
+      // Ignore clipboard failures to keep the menu interaction lightweight.
+    }
+  }, [])
+
   return (
-    <div className="resource-ref-list">
+    <Tooltip.Provider delayDuration={180}>
+      <div className="resource-ref-list external-ref-list">
       {refs.map((ref, idx) => {
         const label = ref.title || ref.url
+        const meta = ref.source ? `${label} · ${ref.source}` : label
         return (
-          <span key={`${ref.url}-${idx}`} className="resource-ref-item">
-            <a
-              className="status-chip resource-ref-chip"
-              href={ref.url}
-              target="_blank"
-              rel="noreferrer"
-              title={ref.source ? `${label} (${ref.source})` : label}
-            >
-              {ref.source ? `${label} · ${ref.source}` : label}
-            </a>
+          <span key={`${ref.url}-${idx}`} className="resource-ref-item external-ref-item">
+            <Tooltip.Root>
+              <Tooltip.Trigger asChild>
+                <button
+                  type="button"
+                  className="status-chip resource-ref-chip external-ref-chip"
+                  onClick={() => openRef(ref)}
+                  title={meta}
+                >
+                  <span className="external-ref-chip-icon" aria-hidden="true">
+                    <Icon path="M14 3h7v7m0-7L10 14M5 7v12h12v-5" />
+                  </span>
+                  <span className="external-ref-chip-text">{meta}</span>
+                </button>
+              </Tooltip.Trigger>
+              <Tooltip.Portal>
+                <Tooltip.Content className="quickadd-tooltip-content" sideOffset={6}>
+                  <div className="external-ref-tooltip-body">
+                    <strong>{label}</strong>
+                    {ref.source ? <span>{`Source: ${ref.source}`}</span> : null}
+                    <code>{ref.url}</code>
+                  </div>
+                  <Tooltip.Arrow className="quickadd-tooltip-arrow" />
+                </Tooltip.Content>
+              </Tooltip.Portal>
+            </Tooltip.Root>
             {onRemoveIndex && (
-              <button
-                type="button"
-                className="action-icon danger-ghost"
-                onClick={() => onRemoveIndex(idx)}
-                title="Remove link"
-                aria-label="Remove link"
-              >
-                <Icon path="M6 6l12 12M18 6 6 18" />
-              </button>
+              <DropdownMenu.Root>
+                <DropdownMenu.Trigger asChild>
+                  <button
+                    type="button"
+                    className="action-icon external-ref-menu-trigger"
+                    title="Link actions"
+                    aria-label="Link actions"
+                  >
+                    <Icon path="M12 5.5a1.5 1.5 0 1 0 0 .01V5.5Zm0 5a1.5 1.5 0 1 0 0 .01v-.01Zm0 5a1.5 1.5 0 1 0 0 .01v-.01Z" />
+                  </button>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.Content className="task-group-menu-content external-ref-menu" sideOffset={6} align="end">
+                    <DropdownMenu.Item className="task-group-menu-item" onSelect={() => openRef(ref)}>
+                      <Icon path="M14 3h7v7m0-7L10 14M5 7v12h12v-5" />
+                      <span>Open link</span>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item className="task-group-menu-item" onSelect={() => { void copyRefUrl(ref) }}>
+                      <Icon path="M9 9h10v12H9zM5 3h10v12H5z" />
+                      <span>Copy URL</span>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator className="external-ref-menu-separator" />
+                    <DropdownMenu.Item className="task-group-menu-item task-group-menu-item-danger" onSelect={() => onRemoveIndex(idx)}>
+                      <Icon path="M6 6l12 12M18 6 6 18" />
+                      <span>Remove link</span>
+                    </DropdownMenu.Item>
+                  </DropdownMenu.Content>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Root>
             )}
           </span>
         )}
       )}
-    </div>
+      </div>
+    </Tooltip.Provider>
   )
 }
 
@@ -433,17 +492,19 @@ export function ExternalRefEditor({
   refs,
   onAdd,
   onRemoveIndex,
+  onOpenRef,
 }: {
   refs: ExternalRef[]
   onAdd: (ref: ExternalRef) => void
   onRemoveIndex: (index: number) => void
+  onOpenRef?: (ref: ExternalRef) => boolean
 }) {
   const [url, setUrl] = React.useState('')
   const [title, setTitle] = React.useState('')
   const [source, setSource] = React.useState('')
   return (
     <div style={{ marginTop: 8 }}>
-      <ExternalRefList refs={refs} onRemoveIndex={onRemoveIndex} />
+      <ExternalRefList refs={refs} onRemoveIndex={onRemoveIndex} onOpenRef={onOpenRef} />
       <div className="row wrap" style={{ gap: 8, marginTop: 6 }}>
         <input
           value={url}

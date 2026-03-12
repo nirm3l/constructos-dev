@@ -1,6 +1,7 @@
 import asyncio
 import json
 import subprocess
+from pathlib import Path, PurePosixPath
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -36,6 +37,7 @@ from shared.knowledge_graph import (
     search_project_knowledge,
 )
 from shared.eventing_event_storming import enqueue_event_storming_project_backfill
+from shared.project_repository import branch_is_merged_to_main, resolve_project_repository_path
 from .task_dependency_graph import (
     get_project_task_dependency_event_detail,
     get_project_task_dependency_graph,
@@ -51,6 +53,7 @@ from features.tasks.read_models import get_task_automation_status_read_model
 from shared.models import Task
 
 router = APIRouter()
+_GIT_FILE_PREVIEW_BYTES_LIMIT = 200_000
 
 
 def _parse_docker_compose_ps_payload(payload: str) -> list[dict[str, object]]:
@@ -382,6 +385,222 @@ def _load_project_with_access(db: Session, user, project_id: str) -> Project:
     return project
 
 
+def _load_project_git_repo_root(*, project: Project) -> Path:
+    repo_root = resolve_project_repository_path(project_name=project.name, project_id=project.id)
+    if not repo_root.exists() or not repo_root.is_dir() or not (repo_root / ".git").exists():
+        raise HTTPException(status_code=404, detail="Project repository is not available")
+    return repo_root
+
+
+def _normalize_git_ref(value: str | None) -> str:
+    ref = str(value or "").strip()
+    if not ref:
+        return "HEAD"
+    if any(char.isspace() for char in ref) or ".." in ref or ref.startswith("-") or ":" in ref:
+        raise HTTPException(status_code=400, detail="Invalid git ref")
+    return ref
+
+
+def _normalize_repo_relative_path(value: str | None) -> str:
+    raw = str(value or "").strip().replace("\\", "/")
+    if not raw:
+        return ""
+    try:
+        normalized = PurePosixPath(raw)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid repository path") from exc
+    if normalized.is_absolute() or any(part in {"..", ""} for part in normalized.parts):
+        raise HTTPException(status_code=400, detail="Invalid repository path")
+    return normalized.as_posix()
+
+
+def _run_git_text(*, repo_root: Path, args: list[str]) -> tuple[int, str, str]:
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.returncode, str(proc.stdout or "").strip(), str(proc.stderr or "").strip()
+
+
+def _git_current_branch(*, repo_root: Path) -> str | None:
+    code, out, _err = _run_git_text(repo_root=repo_root, args=["branch", "--show-current"])
+    branch = str(out or "").strip()
+    return branch if code == 0 and branch else None
+
+
+def _git_default_branch(*, repo_root: Path) -> str:
+    current_branch = _git_current_branch(repo_root=repo_root)
+    code, out, _err = _run_git_text(
+        repo_root=repo_root,
+        args=["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    if code == 0:
+        remote_head = str(out or "").strip()
+        if remote_head.startswith("origin/") and remote_head[7:]:
+            return remote_head[7:]
+    for candidate in ("main", "master"):
+        code, _out, _err = _run_git_text(repo_root=repo_root, args=["rev-parse", "--verify", f"refs/heads/{candidate}"])
+        if code == 0:
+            return candidate
+    return current_branch or "HEAD"
+
+
+def _git_branch_rows(*, repo_root: Path, project: Project) -> list[dict[str, object]]:
+    current_branch = _git_current_branch(repo_root=repo_root)
+    default_branch = _git_default_branch(repo_root=repo_root)
+    code, out, err = _run_git_text(
+        repo_root=repo_root,
+        args=[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)\t%(objectname)\t%(committerdate:iso8601)\t%(authorname)\t%(subject)",
+            "refs/heads",
+        ],
+    )
+    if code != 0:
+        raise HTTPException(status_code=500, detail=f"Unable to read git branches: {err or 'unknown error'}")
+    rows: list[dict[str, object]] = []
+    for line in out.splitlines():
+        parts = line.split("\t", 4)
+        if len(parts) < 5:
+            continue
+        name = str(parts[0] or "").strip()
+        if not name:
+            continue
+        rows.append(
+            {
+                "name": name,
+                "commit_sha": str(parts[1] or "").strip() or None,
+                "committed_at": str(parts[2] or "").strip() or None,
+                "author_name": str(parts[3] or "").strip() or None,
+                "subject": str(parts[4] or "").strip() or None,
+                "is_current": name == current_branch,
+                "is_default": name == default_branch,
+                "merged_to_main": branch_is_merged_to_main(
+                    project_name=project.name,
+                    project_id=project.id,
+                    branch_name=name,
+                ),
+            }
+        )
+    return rows
+
+
+def _git_repository_summary(*, project: Project) -> dict[str, object]:
+    repo_root = _load_project_git_repo_root(project=project)
+    branches = _git_branch_rows(repo_root=repo_root, project=project)
+    current_branch = next((str(item.get("name")) for item in branches if item.get("is_current")), None)
+    default_branch = next((str(item.get("name")) for item in branches if item.get("is_default")), None) or _git_default_branch(repo_root=repo_root)
+    return {
+        "available": True,
+        "repo_root": str(repo_root),
+        "current_branch": current_branch,
+        "default_branch": default_branch,
+        "branch_count": len(branches),
+        "branches_preview": branches[:8],
+    }
+
+
+def _git_tree_entries(*, repo_root: Path, ref: str, relative_path: str) -> list[dict[str, object]]:
+    spec = f"{ref}:{relative_path}" if relative_path else ref
+    code, out, err = _run_git_text(repo_root=repo_root, args=["ls-tree", spec])
+    if code != 0:
+        raise HTTPException(status_code=404, detail=f"Repository path not found: {relative_path or '/'}")
+    entries: list[dict[str, object]] = []
+    for line in out.splitlines():
+        meta, sep, name = line.partition("\t")
+        if not sep:
+            continue
+        meta_parts = meta.split()
+        if len(meta_parts) < 3:
+            continue
+        mode, kind, object_id = meta_parts[:3]
+        item_name = str(name or "").strip()
+        if not item_name:
+            continue
+        item_path = f"{relative_path}/{item_name}".strip("/") if relative_path else item_name
+        entries.append(
+            {
+                "name": item_name,
+                "path": item_path,
+                "kind": "directory" if kind == "tree" else "file",
+                "object_id": object_id,
+                "mode": mode,
+            }
+        )
+    entries.sort(key=lambda item: (0 if item.get("kind") == "directory" else 1, str(item.get("name") or "").lower()))
+    return entries
+
+
+def _git_file_preview(*, repo_root: Path, ref: str, relative_path: str) -> dict[str, object]:
+    spec = f"{ref}:{relative_path}"
+    type_proc = subprocess.run(
+        ["git", "cat-file", "-t", spec],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if type_proc.returncode != 0 or str(type_proc.stdout or "").strip() != "blob":
+        raise HTTPException(status_code=404, detail="Repository file not found")
+    size_proc = subprocess.run(
+        ["git", "cat-file", "-s", spec],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    size_text = str(size_proc.stdout or "").strip()
+    try:
+        size_bytes = int(size_text)
+    except Exception:
+        size_bytes = None
+    previewable = size_bytes is None or size_bytes <= _GIT_FILE_PREVIEW_BYTES_LIMIT
+    if not previewable:
+        return {
+            "path": relative_path,
+            "size_bytes": size_bytes,
+            "encoding": "utf-8",
+            "previewable": False,
+            "truncated": False,
+            "binary": False,
+            "content": None,
+        }
+    content_proc = subprocess.run(
+        ["git", "show", spec],
+        cwd=str(repo_root),
+        capture_output=True,
+        check=False,
+    )
+    if content_proc.returncode != 0:
+        raise HTTPException(status_code=404, detail="Repository file not found")
+    payload = bytes(content_proc.stdout or b"")
+    is_binary = b"\x00" in payload
+    if is_binary:
+        return {
+            "path": relative_path,
+            "size_bytes": size_bytes if size_bytes is not None else len(payload),
+            "encoding": "utf-8",
+            "previewable": False,
+            "truncated": False,
+            "binary": True,
+            "content": None,
+        }
+    text = payload.decode("utf-8", errors="replace")
+    return {
+        "path": relative_path,
+        "size_bytes": size_bytes if size_bytes is not None else len(payload),
+        "encoding": "utf-8",
+        "previewable": True,
+        "truncated": False,
+        "binary": False,
+        "content": text,
+    }
+
+
 @router.post("/api/projects")
 def create_project(
     payload: ProjectCreate,
@@ -687,6 +906,77 @@ def project_docker_compose_runtime(
         "project_id": project.id,
         "project_name": project.name,
         **snapshot,
+    }
+
+
+@router.get("/api/projects/{project_id}/git-delivery/repository")
+def project_git_delivery_repository_summary(
+    project_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    project = _load_project_with_access(db, user, project_id)
+    return {
+        "project_id": project.id,
+        "project_name": project.name,
+        **_git_repository_summary(project=project),
+    }
+
+
+@router.get("/api/projects/{project_id}/git-delivery/repository/branches")
+def project_git_delivery_repository_branches(
+    project_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    project = _load_project_with_access(db, user, project_id)
+    repo_root = _load_project_git_repo_root(project=project)
+    branches = _git_branch_rows(repo_root=repo_root, project=project)
+    return {
+        "project_id": project.id,
+        "project_name": project.name,
+        "branches": branches,
+    }
+
+
+@router.get("/api/projects/{project_id}/git-delivery/repository/tree")
+def project_git_delivery_repository_tree(
+    project_id: str,
+    ref: str | None = Query(default=None),
+    path: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    project = _load_project_with_access(db, user, project_id)
+    repo_root = _load_project_git_repo_root(project=project)
+    normalized_ref = _normalize_git_ref(ref)
+    normalized_path = _normalize_repo_relative_path(path)
+    return {
+        "project_id": project.id,
+        "project_name": project.name,
+        "ref": normalized_ref,
+        "path": normalized_path,
+        "entries": _git_tree_entries(repo_root=repo_root, ref=normalized_ref, relative_path=normalized_path),
+    }
+
+
+@router.get("/api/projects/{project_id}/git-delivery/repository/file")
+def project_git_delivery_repository_file(
+    project_id: str,
+    ref: str | None = Query(default=None),
+    path: str = Query(..., min_length=1),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    project = _load_project_with_access(db, user, project_id)
+    repo_root = _load_project_git_repo_root(project=project)
+    normalized_ref = _normalize_git_ref(ref)
+    normalized_path = _normalize_repo_relative_path(path)
+    return {
+        "project_id": project.id,
+        "project_name": project.name,
+        "ref": normalized_ref,
+        **_git_file_preview(repo_root=repo_root, ref=normalized_ref, relative_path=normalized_path),
     }
 
 

@@ -56,13 +56,21 @@ from .mcp_registry import (
     filter_mcp_servers_for_project_plugins as filter_mcp_servers_for_project_plugins_registry,
     normalize_chat_mcp_servers as normalize_chat_mcp_servers_registry,
 )
+from .claude_auth import (
+    cancel_device_auth_session as cancel_claude_device_auth_session,
+    delete_system_override_auth as delete_claude_system_override_auth,
+    get_claude_auth_status,
+    start_device_auth_session as start_claude_device_auth_session,
+    submit_device_auth_code as submit_claude_device_auth_code,
+)
 from .codex_auth import (
     cancel_device_auth_session,
     delete_system_override_auth,
     get_codex_auth_status,
-    resolve_effective_auth_source,
     start_device_auth_session,
 )
+from .execution_provider import encode_execution_model, parse_execution_model, resolve_execution_provider
+from .provider_auth import resolve_provider_effective_auth_source
 from .gateway import build_ui_gateway
 from features.chat.application import ChatApplicationService
 from features.chat.command_handlers import (
@@ -142,11 +150,17 @@ _CHAT_STREAM_CANCEL_EVENTS: dict[str, threading.Event] = {}
 _CHAT_STREAM_CANCEL_BY_KEY: dict[str, tuple[str, threading.Event]] = {}
 _CHAT_STREAM_STOP_REQUESTED_BY_KEY: dict[str, bool] = {}
 _PROJECT_SETUP_STARTER_NEXT_QUESTION = "What should the new project be named?"
-_CODEX_AUTH_REQUIRED_SUMMARY = "Codex authentication is not configured."
-_CODEX_AUTH_REQUIRED_COMMENT = "Open Profile > Security to configure Codex, or ask a workspace admin to do it."
+_AUTH_REQUIRED_COMMENT_TEMPLATE = "Open Settings and use Workspace > Connections to configure {provider}, or ask a workspace admin to do it."
 
 
-def _user_can_manage_codex_auth(db: Session, user_id: str) -> bool:
+def _provider_display_name(provider: str) -> str:
+    normalized = str(provider or "").strip().lower()
+    if normalized == "claude":
+        return "Claude"
+    return "Codex"
+
+
+def _user_can_manage_agent_auth(db: Session, user_id: str) -> bool:
     membership = db.execute(
         select(WorkspaceMember.id).where(
             WorkspaceMember.user_id == user_id,
@@ -156,18 +170,35 @@ def _user_can_manage_codex_auth(db: Session, user_id: str) -> bool:
     return membership is not None
 
 
-def _ensure_codex_auth_manage_allowed(db: Session, user_id: str) -> None:
-    if _user_can_manage_codex_auth(db, user_id):
+def _ensure_agent_auth_manage_allowed(db: Session, user_id: str, *, provider: str) -> None:
+    if _user_can_manage_agent_auth(db, user_id):
         return
-    raise HTTPException(status_code=403, detail="Only workspace owners and admins can configure Codex authentication.")
+    raise HTTPException(
+        status_code=403,
+        detail=f"Only workspace owners and admins can configure {_provider_display_name(provider)} authentication.",
+    )
 
 
-def _build_codex_auth_required_response(*, session_id: str) -> dict[str, object]:
+def _normalize_execution_model_value(value: object) -> str | None:
+    provider, model = parse_execution_model(value)
+    if not model:
+        return None
+    return encode_execution_model(provider=provider, model=model)
+
+
+def _build_auth_required_response(*, session_id: str, provider: str, alternate_provider: str | None = None) -> dict[str, object]:
+    display_name = _provider_display_name(provider)
+    comment = _AUTH_REQUIRED_COMMENT_TEMPLATE.format(provider=display_name)
+    if alternate_provider:
+        comment = (
+            f"{comment} You can also switch Chat execution to {_provider_display_name(alternate_provider)} "
+            f"if that provider is already configured."
+        )
     return {
         "ok": False,
         "action": "comment",
-        "summary": _CODEX_AUTH_REQUIRED_SUMMARY,
-        "comment": _CODEX_AUTH_REQUIRED_COMMENT,
+        "summary": f"{display_name} authentication is not configured.",
+        "comment": comment,
         "session_id": session_id,
         "codex_session_id": None,
         "usage": None,
@@ -311,6 +342,8 @@ def _normalize_reasoning_effort(value: object) -> str | None:
         "very-high": "xhigh",
         "very_high": "xhigh",
         "very high": "xhigh",
+        "max": "xhigh",
+        "maximum": "xhigh",
     }
     canonical = alias_map.get(normalized, normalized)
     if canonical not in _ALLOWED_REASONING_EFFORTS:
@@ -319,8 +352,8 @@ def _normalize_reasoning_effort(value: object) -> str | None:
 
 
 def _resolve_chat_execution_preferences(payload: AgentChatRun, user: User) -> tuple[str | None, str | None]:
-    payload_model = str(payload.model or "").strip()
-    user_model = str(getattr(user, "agent_chat_model", "") or "").strip()
+    payload_model = _normalize_execution_model_value(payload.model)
+    user_model = _normalize_execution_model_value(getattr(user, "agent_chat_model", ""))
     model = payload_model or user_model or None
 
     payload_reasoning = _normalize_reasoning_effort(payload.reasoning_effort)
@@ -330,7 +363,7 @@ def _resolve_chat_execution_preferences(payload: AgentChatRun, user: User) -> tu
 
 
 def _chat_timeout_summary() -> str:
-    return "Codex execution timed out."
+    return "Chat execution timed out."
 
 
 def _normalize_chat_mcp_servers(
@@ -2139,7 +2172,7 @@ def codex_auth_device_start(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    _ensure_codex_auth_manage_allowed(db, user.id)
+    _ensure_agent_auth_manage_allowed(db, user.id, provider="codex")
     try:
         return start_device_auth_session(user.id)
     except Exception as exc:
@@ -2151,7 +2184,7 @@ def codex_auth_device_cancel(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    _ensure_codex_auth_manage_allowed(db, user.id)
+    _ensure_agent_auth_manage_allowed(db, user.id, provider="codex")
     return cancel_device_auth_session(user.id)
 
 
@@ -2160,8 +2193,61 @@ def codex_auth_override_delete(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    _ensure_codex_auth_manage_allowed(db, user.id)
+    _ensure_agent_auth_manage_allowed(db, user.id, provider="codex")
     return delete_system_override_auth(user.id)
+
+
+@router.get("/api/agents/claude-auth")
+def claude_auth_status(
+    user: User = Depends(get_current_user),
+):
+    return get_claude_auth_status(user.id)
+
+
+@router.post("/api/agents/claude-auth/device/start")
+def claude_auth_device_start(
+    payload: dict[str, object] | None = Body(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    _ensure_agent_auth_manage_allowed(db, user.id, provider="claude")
+    try:
+        login_method = str((payload or {}).get("login_method") or "").strip() or None
+        return start_claude_device_auth_session(user.id, login_method=login_method)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Failed to start Claude authentication.") from exc
+
+
+@router.post("/api/agents/claude-auth/device/cancel")
+def claude_auth_device_cancel(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    _ensure_agent_auth_manage_allowed(db, user.id, provider="claude")
+    return cancel_claude_device_auth_session(user.id)
+
+
+@router.post("/api/agents/claude-auth/device/submit")
+def claude_auth_device_submit(
+    payload: dict[str, object] | None = Body(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    _ensure_agent_auth_manage_allowed(db, user.id, provider="claude")
+    try:
+        code = str((payload or {}).get("code") or "").strip()
+        return submit_claude_device_auth_code(code, user.id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Failed to submit Claude authentication code.") from exc
+
+
+@router.delete("/api/agents/claude-auth/override")
+def claude_auth_override_delete(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    _ensure_agent_auth_manage_allowed(db, user.id, provider="claude")
+    return delete_claude_system_override_auth(user.id)
 
 
 @router.post("/api/agents/chat")
@@ -2185,7 +2271,12 @@ def agent_chat(
         payload.mcp_servers,
         project_id=effective_project_id,
     )
-    if resolve_effective_auth_source() == "none":
+    model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
+    execution_provider = resolve_execution_provider(model)
+    if resolve_provider_effective_auth_source(execution_provider) == "none":
+        alternate_provider = "claude" if execution_provider == "codex" else "codex"
+        if resolve_provider_effective_auth_source(alternate_provider) == "none":
+            alternate_provider = None
         attachment_refs = [item.model_dump() for item in payload.attachment_refs or []]
         session_attachment_refs = [item.model_dump() for item in payload.session_attachment_refs or []]
         ChatApplicationService(
@@ -2205,7 +2296,11 @@ def agent_chat(
                 session_attachment_refs=session_attachment_refs,
             )
         )
-        response = _build_codex_auth_required_response(session_id=session_id)
+        response = _build_auth_required_response(
+            session_id=session_id,
+            provider=execution_provider,
+            alternate_provider=alternate_provider,
+        )
         _persist_assistant_message_with_links(
             db=db,
             user=user,
@@ -2222,7 +2317,6 @@ def agent_chat(
             codex_session_id=None,
         )
         return response
-    model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
     existing_codex_session_id, resume_last_succeeded = _load_chat_session_codex_state(
         db=db,
         workspace_id=payload.workspace_id,
@@ -2530,7 +2624,12 @@ def agent_chat_stream(
         "X-Accel-Buffering": "no",
         "Connection": "keep-alive",
     }
-    if resolve_effective_auth_source() == "none":
+    model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
+    execution_provider = resolve_execution_provider(model)
+    if resolve_provider_effective_auth_source(execution_provider) == "none":
+        alternate_provider = "claude" if execution_provider == "codex" else "codex"
+        if resolve_provider_effective_auth_source(alternate_provider) == "none":
+            alternate_provider = None
         attachment_refs = [item.model_dump() for item in payload.attachment_refs or []]
         session_attachment_refs = [item.model_dump() for item in payload.session_attachment_refs or []]
         ChatApplicationService(
@@ -2550,7 +2649,11 @@ def agent_chat_stream(
                 session_attachment_refs=session_attachment_refs,
             )
         )
-        response = _build_codex_auth_required_response(session_id=session_id)
+        response = _build_auth_required_response(
+            session_id=session_id,
+            provider=execution_provider,
+            alternate_provider=alternate_provider,
+        )
         _persist_assistant_message_with_links(
             db=db,
             user=user,
@@ -2571,7 +2674,6 @@ def agent_chat_stream(
             yield json.dumps({"type": "final", "response": response}, ensure_ascii=True) + "\n"
 
         return StreamingResponse(_auth_required_stream(), media_type="application/x-ndjson", headers=stream_headers)
-    model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
     existing_codex_session_id, resume_last_succeeded = _load_chat_session_codex_state(
         db=db,
         workspace_id=payload.workspace_id,
@@ -2755,7 +2857,7 @@ def agent_chat_stream(
         )
         _publish_chat_stream_event(
             stream_key=stream_key,
-            event={"type": "status", "message": "Codex started processing the request."},
+            event={"type": "status", "message": "Agent started processing the request."},
         )
 
         def _on_event(event: dict[str, object]) -> None:
