@@ -59,6 +59,7 @@ Guidance:
 - If Team Mode was requested, include verification outcome only as:
   - `Verification: PASS` when required checks pass, or
   - `Verification: Needs attention` with short plain-language failed requirement descriptions.
+  - Use `In progress` for active execution that has not reached a terminal state yet; reserve `BLOCKED` for true terminal blockers that need external intervention or a non-running missing prerequisite.
 - For setup-only requests, include a final line `Execution state: Not started` plus `Deploy target recorded: <stack>:<port>`.
 - For delivery evidence, use explicit structured references (`external_refs`) instead of free-text claims.
 - Dev completion evidence must include commit + task branch references in `external_refs`.

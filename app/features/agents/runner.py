@@ -77,6 +77,7 @@ from shared.delivery_evidence import (
     derive_deploy_execution_snapshot,
     extract_task_branches_from_refs,
     has_merge_to_main_ref,
+    is_strict_deploy_success_snapshot,
 )
 from shared.settings import (
     AGENT_EXECUTOR_TIMEOUT_SECONDS,
@@ -144,6 +145,7 @@ _AUTOMATION_BLOCKED_MARKER = "BLOCKED"
 _TEAM_MODE_QA_LEAD_HANDOFF_GATED_FRAGMENT = "qa automation is gated until lead handoff is complete"
 _TEAM_MODE_QA_CURRENT_DEPLOY_CYCLE_GATED_FRAGMENT = "qa automation is gated until lead handoff is complete for the current deploy cycle"
 _TEAM_MODE_LEAD_MERGE_READY_GATED_FRAGMENT = "lead automation is gated until merge-ready developer output exists"
+_TEAM_MODE_LEAD_COMMITTED_HANDOFF_GATED_FRAGMENT = "lead automation is gated until the developer handoff is committed on a task branch"
 _MERGE_TO_MAIN_REF_PREFIX = "merge:main:"
 _DEPLOY_STACK_REF_PREFIX = "deploy:stack:"
 _DEPLOY_COMMAND_REF_PREFIX = "deploy:command:"
@@ -1603,14 +1605,18 @@ def _current_nonblocking_gate_key(
                     else {}
                 )
                 executed_at = str(deploy_execution.get("executed_at") or "").strip()
-                if executed_at and (latest_lead_deploy_at is None or executed_at > latest_lead_deploy_at):
+                if executed_at and is_strict_deploy_success_snapshot(deploy_execution) and (latest_lead_deploy_at is None or executed_at > latest_lead_deploy_at):
                     latest_lead_deploy_at = executed_at
         qa_handoff_deploy = (
             qa_state.get("last_lead_handoff_deploy_execution")
             if isinstance(qa_state.get("last_lead_handoff_deploy_execution"), dict)
             else {}
         )
-        qa_handoff_deploy_at = str(qa_handoff_deploy.get("executed_at") or "").strip()
+        qa_handoff_deploy_at = (
+            str(qa_handoff_deploy.get("executed_at") or "").strip()
+            if is_strict_deploy_success_snapshot(qa_handoff_deploy)
+            else ""
+        )
         if latest_lead_deploy_at and qa_handoff_deploy_at != latest_lead_deploy_at:
             return "qa_waiting_current_deploy_cycle"
         return "qa_waiting_lead_handoff"
@@ -1872,6 +1878,68 @@ def _inspect_committed_task_branch_handoff(git_evidence: dict[str, object]) -> d
     return result
 
 
+def _finalize_developer_handoff_commit_if_safe(
+    *,
+    project_name: str | None,
+    project_id: str | None,
+    task_id: str,
+    title: str | None,
+    git_evidence: dict[str, object],
+    require_nontrivial_dev_changes: bool,
+    tests_run: bool,
+    tests_passed: bool,
+) -> tuple[dict[str, object], dict[str, object] | None]:
+    committed_handoff = _inspect_committed_task_branch_handoff(git_evidence)
+    if not bool(committed_handoff.get("branch_exists")):
+        return git_evidence, None
+    if not bool(committed_handoff.get("after_on_task_branch")):
+        return git_evidence, None
+    if not bool(committed_handoff.get("after_is_dirty")):
+        return git_evidence, None
+    if tests_run and not tests_passed:
+        return git_evidence, None
+
+    task_workdir_raw = str(git_evidence.get("task_workdir") or "").strip()
+    task_branch = str(git_evidence.get("task_branch") or committed_handoff.get("branch_name") or "").strip()
+    task_workdir = Path(task_workdir_raw) if task_workdir_raw else None
+    if task_workdir is None or not task_workdir.exists() or not task_workdir.is_dir() or not task_branch:
+        return git_evidence, None
+
+    dirty_files = _derive_files_changed_from_git_evidence(git_evidence)
+    if not dirty_files:
+        return git_evidence, None
+    if require_nontrivial_dev_changes and not any(_is_nontrivial_dev_path(item) for item in dirty_files):
+        return git_evidence, None
+
+    commit_sha = _commit_repo_changes_if_any(
+        cwd=task_workdir,
+        message=f"feat: finalize task {str(task_id or '').strip()[:8]} implementation handoff",
+    )
+    if not commit_sha:
+        return git_evidence, None
+
+    refreshed = _merge_git_evidence(
+        dict(git_evidence),
+        _collect_git_evidence_from_repo_state(
+            project_name=project_name,
+            project_id=project_id,
+            task_id=task_id,
+            title=title,
+        ),
+    )
+    if str(git_evidence.get("before_head_sha") or "").strip():
+        refreshed["before_head_sha"] = str(git_evidence.get("before_head_sha") or "").strip().lower()
+    refreshed["after_is_dirty"] = False
+    refreshed["after_on_task_branch"] = True
+    refreshed["after_head_sha"] = str(commit_sha).strip().lower()
+
+    return refreshed, {
+        "commit_sha": str(commit_sha).strip().lower(),
+        "task_branch": task_branch,
+        "files_changed": dirty_files,
+    }
+
+
 def _is_nontrivial_dev_path(path: str) -> bool:
     normalized = str(path or "").strip().replace("\\", "/").casefold()
     if not normalized:
@@ -2009,13 +2077,34 @@ def _validate_execution_outcome_contract(
             )
 
     if developer_git_delivery_run:
+        dirty_files: list[str] = []
+        if bool(committed_handoff.get("after_is_dirty")):
+            dirty_files = _derive_files_changed_from_git_evidence(git_evidence)
         if not bool(committed_handoff.get("branch_exists")):
             return "Runner error: Developer automation requires a real task branch handoff before Lead review."
         if bool(committed_handoff.get("after_is_dirty")):
-            return "Runner error: Developer handoff is not committed on the task branch yet."
+            if dirty_files:
+                preview = ", ".join(dirty_files[:5])
+                suffix = " ..." if len(dirty_files) > 5 else ""
+                return (
+                    "Runner error: Developer handoff is not committed on the task branch yet. "
+                    f"Branch `{branch or task_branch or 'task/<unknown>'}` is not clean. "
+                    f"Uncommitted files: {preview}{suffix}"
+                )
+            return (
+                "Runner error: Developer handoff is not committed on the task branch yet. "
+                f"Branch `{branch or task_branch or 'task/<unknown>'}` still has uncommitted changes."
+            )
         if not bool(committed_handoff.get("after_on_task_branch")):
             return "Runner error: Developer automation must finalize from the task branch before Lead review."
         if not branch_differs_from_main:
+            main_head_sha = str(committed_handoff.get("main_head_sha") or "").strip().lower()
+            if branch_head_sha and main_head_sha:
+                return (
+                    "Runner error: Developer handoff is not committed on a task branch ahead of main yet. "
+                    f"Branch `{branch or task_branch or 'task/<unknown>'}` is still at `{branch_head_sha[:7]}`, "
+                    f"same as `main`."
+                )
             return "Runner error: Developer handoff is not committed on a task branch ahead of main yet."
         if not files_changed:
             return "Runner error: Developer automation requires files_changed in execution outcome contract."
@@ -2316,11 +2405,17 @@ def _append_lead_deploy_external_refs(
         if not _has_url(runtime_ref):
             normalized.append({"url": runtime_ref, "title": "deploy runtime decision"})
 
-    health_ref = (
+    health_url = (
         str(http_url or "").strip()
         or f"http://gateway:{int(port)}{str(health_path or '/health').strip()}"
         if port is not None
-        else f"{_DEPLOY_HEALTH_REF_PREFIX}{str(health_path or '/health').strip()}"
+        else ""
+    )
+    health_status = int(http_status or 0) if http_status is not None else 0
+    health_ref = (
+        f"{_DEPLOY_HEALTH_REF_PREFIX}{health_url}:http_{health_status}"
+        if health_url
+        else f"{_DEPLOY_HEALTH_REF_PREFIX}{str(health_path or '/health').strip()}:http_{health_status}"
     )
     health_title = "deploy health: pass" if runtime_ok else f"deploy health: fail ({int(http_status or 0)})"
     if not _has_url(health_ref):
@@ -2391,6 +2486,22 @@ def _build_lead_deploy_instruction_contract(
         "5) Only set Blocked when deterministic prerequisites for runner deploy are missing or ambiguous before deploy execution can begin.\n"
         "6) Record full evidence in external_refs: compose manifest path, runtime decision basis, and any concrete deploy prerequisites or blockers you identified.\n"
         "7) QA handoff is runner-controlled after successful deploy health. Do not request QA manually before runner deploy reaches HTTP 200."
+    )
+
+
+def _build_qa_runtime_validation_contract(
+    *,
+    stack: str,
+    port_text: str,
+    health_path: str,
+) -> str:
+    return (
+        "QA runtime validation contract:\n"
+        f"1) Validate the current deployed runtime for this Lead handoff at `http://gateway:{port_text}{health_path}` and application root `/`.\n"
+        f"2) Treat the latest Lead deploy snapshot for stack `{stack}` as authoritative deployment evidence for this cycle.\n"
+        "3) Do NOT run `docker compose` manually from the task environment. Do NOT rebuild, redeploy, restart, or troubleshoot by invoking Compose.\n"
+        "4) If runtime validation fails, record probe evidence and block QA with the observed endpoint failure. Do not convert runtime validation into a manual deployment attempt.\n"
+        "5) If gameplay/acceptance checks pass and runtime probes succeed, record QA artifacts and return the result normally."
     )
 
 
@@ -3181,7 +3292,18 @@ def _is_non_blocking_team_mode_gate_error(error: Exception | str | None) -> bool
         _TEAM_MODE_QA_LEAD_HANDOFF_GATED_FRAGMENT in text
         or _TEAM_MODE_QA_CURRENT_DEPLOY_CYCLE_GATED_FRAGMENT in text
         or _TEAM_MODE_LEAD_MERGE_READY_GATED_FRAGMENT in text
+        or _TEAM_MODE_LEAD_COMMITTED_HANDOFF_GATED_FRAGMENT in text
     )
+
+
+def _is_nonblocking_notification_gate(blocking_gate: str | None) -> bool:
+    normalized_gate = str(blocking_gate or "").strip()
+    return normalized_gate in {
+        "lead_waiting_merge_ready_developer",
+        "lead_waiting_committed_developer_handoff",
+        "qa_waiting_lead_handoff",
+        "qa_waiting_current_deploy_cycle",
+    }
 
 
 def _resolve_project_human_member_user_ids(*, db, workspace_id: str, project_id: str | None) -> list[str]:
@@ -3284,7 +3406,7 @@ def _handoff_failed_task_to_human(
         event_type=TASK_EVENT_UPDATED,
         payload={
             "assignee_id": target_human_id,
-            "assigned_agent_code": None,
+            "assigned_agent_code": current_assigned_agent_code or None,
         },
         metadata={
             "actor_id": actor_user_id,
@@ -3382,6 +3504,8 @@ def _notify_humans_blocked(
 ) -> None:
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
+        return
+    if _is_nonblocking_notification_gate(blocking_gate):
         return
     human_ids = _resolve_notification_human_user_ids(
         db=db,
@@ -3895,6 +4019,24 @@ def _claim_queued_task(task_id: str, *, allow_fresh_kickoff: bool = False) -> Qu
                 has_merge_to_main=has_merge_to_main,
             )
             instruction = f"{str(instruction or '').strip()}\n\n{deploy_steps}".strip()
+    elif (
+        is_qa_role(assignee_role)
+        and str(state.get("status") or "").strip() == "QA"
+        and _project_has_git_delivery_skill(db=db, workspace_id=workspace_id, project_id=project_id)
+    ):
+        stack, port, health_path, runtime_required = _project_runtime_deploy_target(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=project_id,
+        )
+        if runtime_required:
+            port_text = str(port) if port is not None else "UNSET"
+            qa_steps = _build_qa_runtime_validation_contract(
+                stack=stack,
+                port_text=port_text,
+                health_path=health_path,
+            )
+            instruction = f"{str(instruction or '').strip()}\n\n{qa_steps}".strip()
     if not instruction:
         return None
     return QueuedAutomationRun(
@@ -3988,11 +4130,51 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 if isinstance(outcome.execution_outcome_contract, dict)
                 else {}
             )
+            tests_run = bool(contract.get("tests_run")) if isinstance(contract.get("tests_run"), bool) else False
+            tests_passed = bool(contract.get("tests_passed")) if isinstance(contract.get("tests_passed"), bool) else False
             task_branch = str(git_evidence.get("task_branch") or "").strip()
             before_head_sha = str(git_evidence.get("before_head_sha") or "").strip().lower()
             after_head_sha = str(git_evidence.get("after_head_sha") or "").strip().lower()
             after_on_task_branch = bool(git_evidence.get("after_on_task_branch"))
             after_is_dirty = bool(git_evidence.get("after_is_dirty"))
+            committed_handoff = _inspect_committed_task_branch_handoff(git_evidence)
+            branch_head_sha = str(committed_handoff.get("branch_head_sha") or "").strip().lower()
+            branch_differs_from_main = bool(committed_handoff.get("branch_differs_from_main"))
+            git_evidence, auto_commit = _finalize_developer_handoff_commit_if_safe(
+                project_name=project_name,
+                project_id=project_id,
+                task_id=run.task_id,
+                title=str(state.get("title") or run.title or ""),
+                git_evidence=git_evidence,
+                require_nontrivial_dev_changes=require_nontrivial_dev_changes,
+                tests_run=tests_run,
+                tests_passed=tests_passed,
+            )
+            if auto_commit:
+                contract.setdefault("commit_sha", str(auto_commit.get("commit_sha") or "").strip().lower())
+                contract.setdefault("branch", str(auto_commit.get("task_branch") or "").strip())
+                files_changed_list = contract.get("files_changed")
+                if not isinstance(files_changed_list, list) or not any(str(item or "").strip() for item in files_changed_list):
+                    contract["files_changed"] = list(auto_commit.get("files_changed") or [])
+                outcome = AutomationOutcome(
+                    action=outcome.action,
+                    summary=outcome.summary,
+                    comment=outcome.comment,
+                    execution_outcome_contract=contract,
+                    usage=outcome.usage,
+                    codex_session_id=outcome.codex_session_id,
+                    resume_attempted=outcome.resume_attempted,
+                    resume_succeeded=outcome.resume_succeeded,
+                    resume_fallback_used=outcome.resume_fallback_used,
+                )
+            task_branch = str(git_evidence.get("task_branch") or "").strip()
+            before_head_sha = str(git_evidence.get("before_head_sha") or "").strip().lower()
+            after_head_sha = str(git_evidence.get("after_head_sha") or "").strip().lower()
+            after_on_task_branch = bool(git_evidence.get("after_on_task_branch"))
+            after_is_dirty = bool(git_evidence.get("after_is_dirty"))
+            committed_handoff = _inspect_committed_task_branch_handoff(git_evidence)
+            branch_head_sha = str(committed_handoff.get("branch_head_sha") or "").strip().lower()
+            branch_differs_from_main = bool(committed_handoff.get("branch_differs_from_main"))
             evidence_missing = not _task_has_git_delivery_completion_evidence(
                 state=state,
                 summary="",
@@ -4044,7 +4226,16 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 if branch_from_contract and bool(_TASK_BRANCH_RE.fullmatch(branch_from_contract))
                 else task_branch
             )
-            if commit_candidate and branch_candidate:
+            can_promote_candidate = bool(
+                commit_candidate
+                and branch_candidate
+                and bool(committed_handoff.get("branch_exists"))
+                and bool(committed_handoff.get("after_on_task_branch"))
+                and not bool(committed_handoff.get("after_is_dirty"))
+                and branch_differs_from_main
+                and (not branch_head_sha or commit_candidate == branch_head_sha)
+            )
+            if can_promote_candidate:
                 refs = state.get("external_refs")
                 has_commit = commit_candidate in _extract_commit_shas_from_refs(refs)
                 extracted_branch = _extract_task_branch_from_refs(refs)

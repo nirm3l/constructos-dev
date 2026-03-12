@@ -81,6 +81,13 @@ The classification policy in this document also applies to adjacent workflow plu
   - a real `task/...` branch must exist,
   - the handoff `commit_sha` must match the current task-branch `HEAD`,
   - the task branch must differ from `main` at handoff time.
+- Runtime may use a deterministic Developer handoff finalizer only as a narrow bookkeeping repair path when all of the following are true:
+  - execution ran in the correct task worktree on the correct `task/...` branch,
+  - non-trivial implementation files exist as dirty/uncommitted changes,
+  - the branch is not yet ahead of `main`,
+  - there is no failing validation state,
+  - and the only missing step is the final git stage/commit handoff.
+- This finalizer is allowed to create the missing task-branch commit so the handoff becomes real, but it may not manufacture success when implementation is missing, ambiguous, trivial-only, or failing validation.
 - If `git_delivery.execution.require_dev_tests=true`, Developer must return `tests_run=true` and `tests_passed=true`.
 - If tests are reported as run, they may not be failing.
 - On success, task transitions `Dev -> Lead`.
@@ -94,6 +101,7 @@ The classification policy in this document also applies to adjacent workflow plu
 - Runner performs deploy (`docker compose`) against the runtime stack defined by the `docker_compose` plugin config. The default app-managed runtime stack is `constructos-ws-default`, not `constructos-app`.
 - Lead performs runtime health check (`/health` with configured port) against that same runtime stack.
 - Lead writes structured deploy evidence to `external_refs`.
+- `external_refs` may record deploy attempts, manifest paths, runtime decisions, and probe results, but they may not claim successful deploy/health prematurely. A successful deploy cycle requires explicit health success evidence (HTTP 200) consistent with the structured deploy snapshot.
 
 ### 4) Lead -> QA handoff (without status-change dependency)
 - Lead emits explicit handoff signal to QA using:
@@ -106,6 +114,8 @@ The classification policy in this document also applies to adjacent workflow plu
 
 ### 5) QA cycle
 - QA verifies minimum runtime availability (`health=200`) and required acceptance checks from specification/task scope.
+- QA validates the runtime already deployed by the successful Lead cycle for the current handoff.
+- QA must not invoke `docker compose`, rebuild, redeploy, or restart the managed runtime from the QA task environment during normal Team Mode validation.
 - QA writes verifiable artifacts in `external_refs`.
 - QA returns explicit PASS/FAIL.
 
@@ -158,6 +168,7 @@ The classification policy in this document also applies to adjacent workflow plu
 ### G4 Lead deploy gate
 - Lead must record deploy command evidence and health evidence.
 - Runtime health gate (`runtime_deploy_health_ok`) must pass when configured as required.
+- Closeout, QA handoff, and current-cycle validation may not infer successful deploy solely from loose `external_refs` titles or command markers. Structured deploy success requires an explicit deploy snapshot with a real execution timestamp, manifest path, command, target stack, health URL, and HTTP 200 result.
 - Lead runtime paths must use canonical repository-path resolution consistently, regardless of whether code is running inside the app container or executing against the host Docker daemon.
 - Managed Team Mode deploy execution must remain runner-controlled so Docker Compose executes from the canonical host-safe repository context. Prompt guidance may not require the Lead agent to run `docker compose` manually from inside the task container.
 - Lead may prepare deterministic deploy assets and runtime-basis evidence, but may not block solely because runner-controlled deploy/health has not happened yet in the same Lead response cycle. Once prerequisites are ready, the runner owns deploy execution and post-deploy health gating.
@@ -168,6 +179,7 @@ The classification policy in this document also applies to adjacent workflow plu
   - handoff token freshness is valid,
   - `last_lead_handoff_deploy_execution.executed_at` matches the latest Lead deploy execution for the project,
   - Lead deploy evidence for current cycle exists.
+- During a valid QA handoff cycle, the latest Lead deploy snapshot/current-cycle handoff is authoritative deployment context. QA may probe the runtime and record failures, but it may not treat a manual `docker compose` attempt from the QA task environment as valid validation evidence.
 
 ### G6 QA artifact gate
 - QA PASS requires verifiable QA artifacts.
@@ -247,10 +259,13 @@ Changes:
   - `blocked_phase`, `blocking_gate_id`, `task_id`, `next_required_action`
 - Keep dedupe on gate+task+phase.
 - Preserve completion notification (`agents.runner.project_completed`).
+- Human escalation may change the assignee, but it must preserve the task's `assigned_agent_code`
+  so Team Mode role coverage remains intact after a blocked automation handoff.
 
 Acceptance criteria:
 - Every terminal block produces one visible human notification.
 - Completion produces one deduped success notification.
+- Human escalation never destroys Team Mode role coverage by clearing the task's Team Mode slot.
 
 ### Phase 6: Checks and gates cleanup (P1)
 Changes:

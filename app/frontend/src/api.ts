@@ -27,6 +27,7 @@ import type {
   ProjectKnowledgeSearchResult,
   GraphProjectOverview,
   GraphProjectSubgraph,
+  ProjectDockerComposeRuntimeSnapshot,
   ProjectTaskDependencyGraph,
   TaskDependencyGraphEventDetail,
   Notification,
@@ -1143,6 +1144,25 @@ export const getProjectTaskDependencyEventDetail = (
     })}`,
     userId
   )
+
+export const getProjectDockerComposeRuntime = (
+  userId: string,
+  projectId: string
+) =>
+  api<ProjectDockerComposeRuntimeSnapshot>(
+    `/api/projects/${projectId}/docker-compose/runtime`,
+    userId
+  )
+
+export function getProjectDockerComposeRuntimeLogsStreamUrl(
+  projectId: string,
+  params: { container_name: string; tail?: number }
+): string {
+  return `/api/projects/${projectId}/docker-compose/runtime/logs/stream${queryString({
+    container_name: params.container_name,
+    tail: params.tail ?? 200,
+  })}`
+}
 
 export const postProjectGraphAiLayout = (
   userId: string,

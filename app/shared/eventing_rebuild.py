@@ -370,6 +370,7 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
         s_local["automation_pending_requests"] = max(0, pending_requests)
         s_local.setdefault("last_requested_instruction", None)
         s_local.setdefault("last_requested_source", None)
+        s_local.setdefault("last_requested_chat_session_id", None)
         s_local.setdefault("last_requested_trigger_task_id", None)
         s_local.setdefault("last_requested_from_status", None)
         s_local.setdefault("last_requested_to_status", None)
@@ -480,6 +481,7 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "last_agent_comment": None,
             "last_requested_instruction": None,
             "last_requested_source": None,
+            "last_requested_chat_session_id": None,
             "last_requested_trigger_task_id": None,
             "last_requested_from_status": None,
             "last_requested_to_status": None,
@@ -526,6 +528,7 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
         s["last_requested_instruction"] = p.get("instruction")
         s["last_requested_source"] = p.get("source")
         s["last_requested_source_task_id"] = p.get("source_task_id")
+        s["last_requested_chat_session_id"] = p.get("chat_session_id")
         s["last_requested_reason"] = p.get("reason")
         s["last_requested_trigger_link"] = p.get("trigger_link")
         s["last_requested_correlation_id"] = p.get("correlation_id")
@@ -1365,8 +1368,8 @@ def project_event(db: Session, ev: EventEnvelope):
         if role == "assistant":
             if "codex_session_id" in p:
                 session.codex_session_id = p.get("codex_session_id")
-            if "usage" in p:
-                session.usage_json = json.dumps(usage_payload, ensure_ascii=True)
+        if "usage" in p:
+            session.usage_json = json.dumps(usage_payload, ensure_ascii=True)
         session.last_message_at = turn_created_at
         session.last_message_preview = str(p.get("content") or "")[:240]
 
@@ -1382,7 +1385,7 @@ def project_event(db: Session, ev: EventEnvelope):
                     content=str(p.get("content") or ""),
                     order_index=order_index,
                     attachment_refs=json.dumps(attachment_refs, ensure_ascii=True),
-                    usage_json=json.dumps(usage_payload if role == "assistant" else {}, ensure_ascii=True),
+                    usage_json=json.dumps(usage_payload, ensure_ascii=True),
                     is_deleted=False,
                     turn_created_at=turn_created_at,
                 )
@@ -1395,7 +1398,7 @@ def project_event(db: Session, ev: EventEnvelope):
                 message.content = str(p.get("content") or "")
                 message.order_index = order_index
                 message.attachment_refs = json.dumps(attachment_refs, ensure_ascii=True)
-                if role == "assistant":
+                if "usage" in p:
                     message.usage_json = json.dumps(usage_payload, ensure_ascii=True)
                 message.turn_created_at = turn_created_at
                 message.is_deleted = False

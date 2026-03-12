@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -15,7 +16,7 @@ from features.tasks.domain import (
 )
 from plugins.team_mode.task_roles import derive_task_role, normalize_team_agents
 from shared.eventing_rebuild import load_events_after, rebuild_state
-from shared.models import Project, ProjectMember, ProjectPluginConfig, Task
+from shared.models import ChatMessage, ChatSession, Project, ProjectMember, ProjectPluginConfig, Task
 from shared.task_automation import TRIGGER_KIND_STATUS_CHANGE, normalize_execution_triggers
 from shared.task_relationships import normalize_task_relationships
 
@@ -41,6 +42,103 @@ def _build_runtime_event_response_markdown(
             )
         return f"```text\n{normalized_error}\n```"
     return normalized_summary or normalized_error or None
+
+
+def _compact_classifier_payload(value: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    out: dict[str, Any] = {}
+    for key in (
+        "execution_intent",
+        "execution_kickoff_intent",
+        "project_creation_intent",
+        "workflow_scope",
+        "execution_mode",
+        "task_completion_requested",
+        "reason",
+    ):
+        current = value.get(key)
+        if isinstance(current, str):
+            normalized = current.strip()
+            if normalized:
+                out[key] = normalized
+        elif isinstance(current, bool):
+            out[key] = current
+    return out or None
+
+
+def _load_origin_chat_debug(
+    *,
+    db: Session,
+    workspace_id: str,
+    project_id: str,
+    chat_session_id: str | None,
+    requested_at: str | None,
+) -> dict[str, Any]:
+    normalized_session_id = str(chat_session_id or "").strip()
+    if not normalized_session_id:
+        return {}
+    session = db.execute(
+        select(ChatSession).where(
+            ChatSession.workspace_id == workspace_id,
+            ChatSession.project_id == project_id,
+            ChatSession.session_key == normalized_session_id,
+            ChatSession.is_archived == False,  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    if session is None:
+        return {"origin_chat_session_id": normalized_session_id}
+
+    requested_at_text = str(requested_at or "").strip()
+    message_base_query = select(ChatMessage).where(
+        ChatMessage.session_id == session.id,
+        ChatMessage.role == "user",
+        ChatMessage.is_deleted == False,  # noqa: E712
+    )
+    message_query = message_base_query
+    if requested_at_text:
+        requested_dt = _parse_iso_datetime(requested_at_text)
+        if requested_dt is not None:
+            message_query = message_query.where(ChatMessage.turn_created_at <= requested_dt)
+    message = db.execute(
+        message_query.order_by(
+            ChatMessage.turn_created_at.desc(),
+            ChatMessage.order_index.desc(),
+        )
+    ).scalars().first()
+    if message is None and message_query is not message_base_query:
+        message = db.execute(
+            message_base_query.order_by(
+                ChatMessage.turn_created_at.desc(),
+                ChatMessage.order_index.desc(),
+            )
+        ).scalars().first()
+    if message is None:
+        return {"origin_chat_session_id": normalized_session_id}
+    try:
+        usage_payload = json.loads(message.usage_json or "{}")
+    except Exception:
+        usage_payload = {}
+    intent_flags = usage_payload.get("intent_flags") if isinstance(usage_payload, dict) else None
+    return {
+        "origin_chat_session_id": normalized_session_id,
+        "origin_prompt_markdown": str(message.content or "").strip() or None,
+        "origin_classifier": _compact_classifier_payload(intent_flags if isinstance(intent_flags, dict) else None),
+        "origin_prompt_at": message.turn_created_at.isoformat() if message.turn_created_at else None,
+    }
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    text_value = str(value or "").strip()
+    if not text_value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text_value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def get_project_task_dependency_event_detail(
@@ -158,6 +256,30 @@ def get_project_task_dependency_event_detail(
         terminal_error=terminal_error,
     )
     request_markdown = str(request_payload.get("instruction") or "").strip() or None
+    runtime_classifier = _compact_classifier_payload(
+        {
+            "execution_intent": request_payload.get("execution_intent"),
+            "execution_kickoff_intent": request_payload.get("execution_kickoff_intent"),
+            "project_creation_intent": request_payload.get("project_creation_intent"),
+            "workflow_scope": request_payload.get("workflow_scope"),
+            "execution_mode": request_payload.get("execution_mode"),
+            "task_completion_requested": request_payload.get("task_completion_requested"),
+            "reason": request_payload.get("classifier_reason"),
+        }
+    )
+    origin_debug = _load_origin_chat_debug(
+        db=db,
+        workspace_id=str(target_task.workspace_id or ""),
+        project_id=normalized_project_id,
+        chat_session_id=str(request_payload.get("chat_session_id") or "").strip() or None,
+        requested_at=_max_iso_timestamp(
+            [
+                request_payload.get("requested_at"),
+                request_payload.get("triggered_at"),
+                request_payload.get("lead_handoff_at"),
+            ]
+        ),
+    )
     return {
         "project_id": normalized_project_id,
         "target_task_id": normalized_target_task_id,
@@ -176,6 +298,7 @@ def get_project_task_dependency_event_detail(
         "trigger_link": str(request_payload.get("trigger_link") or "").strip() or None,
         "reason": str(request_payload.get("reason") or "").strip() or None,
         "request_markdown": request_markdown,
+        "runtime_classifier": runtime_classifier,
         "response_markdown": response_markdown,
         "response_status": terminal_status,
         "response_at": terminal_at,
@@ -183,6 +306,7 @@ def get_project_task_dependency_event_detail(
         "response_error": terminal_error,
         "response_comment_body": latest_comment_body,
         "response_comment_at": latest_comment_at,
+        **origin_debug,
     }
 
 
@@ -681,6 +805,24 @@ def get_project_task_dependency_event_detail(
         terminal_error=terminal_error,
     )
     request_markdown = str(request_payload.get("instruction") or "").strip() or None
+    runtime_classifier = _compact_classifier_payload(
+        {
+            "execution_intent": request_payload.get("execution_intent"),
+            "execution_kickoff_intent": request_payload.get("execution_kickoff_intent"),
+            "project_creation_intent": request_payload.get("project_creation_intent"),
+            "workflow_scope": request_payload.get("workflow_scope"),
+            "execution_mode": request_payload.get("execution_mode"),
+            "task_completion_requested": request_payload.get("task_completion_requested"),
+            "reason": request_payload.get("classifier_reason"),
+        }
+    )
+    origin_debug = _load_origin_chat_debug(
+        db=db,
+        workspace_id=str(target_task.workspace_id or ""),
+        project_id=project_id,
+        chat_session_id=str(request_payload.get("chat_session_id") or "").strip() or None,
+        requested_at=request_at,
+    )
     return {
         "project_id": project_id,
         "project_name": str(project.name or ""),
@@ -695,6 +837,7 @@ def get_project_task_dependency_event_detail(
         "trigger_link": str(request_payload.get("trigger_link") or "").strip() or None,
         "reason": str(request_payload.get("reason") or "").strip() or None,
         "request_markdown": request_markdown,
+        "runtime_classifier": runtime_classifier,
         "response_markdown": response_markdown,
         "response_status": terminal_status,
         "response_at": terminal_at,
@@ -702,6 +845,7 @@ def get_project_task_dependency_event_detail(
         "response_error": terminal_error,
         "response_comment_body": latest_comment_body,
         "response_comment_at": latest_comment_at,
+        **origin_debug,
     }
 
 

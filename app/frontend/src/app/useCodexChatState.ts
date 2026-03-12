@@ -14,6 +14,7 @@ export type ChatTurn = {
   content: string
   createdAt: number
   attachmentRefs: AttachmentRef[]
+  usage?: Record<string, unknown> | null
   lastStreamChunk?: string
   streamShimmerChunk?: string
 }
@@ -173,6 +174,14 @@ function normalizeUsage(value: unknown): AgentChatUsage | null {
   return normalized
 }
 
+function normalizeTurnUsage(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const out = Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).filter(([key]) => String(key || '').trim())
+  )
+  return Object.keys(out).length > 0 ? out : null
+}
+
 function normalizeMcpServers(value: unknown): ChatMcpServer[] {
   if (!Array.isArray(value)) return []
   const out: ChatMcpServer[] = []
@@ -230,6 +239,7 @@ function normalizeTurns(value: unknown): ChatTurn[] {
       content,
       createdAt: Number.isFinite(createdAtRaw) && createdAtRaw > 0 ? Math.floor(createdAtRaw) : Date.now(),
       attachmentRefs: normalizeAttachmentRefs(turn.attachmentRefs ?? turn.attachment_refs),
+      usage: normalizeTurnUsage(turn.usage),
       lastStreamChunk,
       streamShimmerChunk,
     })

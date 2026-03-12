@@ -703,6 +703,11 @@ export type TaskDependencyGraphEventDetail = {
   correlation_id?: string | null
   trigger_link?: string | null
   reason?: string | null
+  origin_chat_session_id?: string | null
+  origin_prompt_markdown?: string | null
+  origin_prompt_at?: string | null
+  origin_classifier?: Record<string, unknown> | null
+  runtime_classifier?: Record<string, unknown> | null
   request_markdown?: string | null
   response_markdown?: string | null
   response_status?: string | null
@@ -752,6 +757,48 @@ export type ProjectTaskDependencyGraph = {
   runtime_source_counts?: Record<string, number>
   nodes: TaskDependencyGraphNode[]
   edges: TaskDependencyGraphEdge[]
+}
+
+export type ProjectDockerComposeRuntimePublisher = {
+  url?: string | null
+  target_port?: number | null
+  published_port?: number | null
+  protocol?: string | null
+}
+
+export type ProjectDockerComposeRuntimeContainer = {
+  name: string
+  service: string
+  state: string
+  status: string
+  health?: string | null
+  image?: string | null
+  command?: string | null
+  exit_code?: number | null
+  publishers: ProjectDockerComposeRuntimePublisher[]
+}
+
+export type ProjectDockerComposeRuntimeLogEvent = {
+  project_id: string
+  project_name: string
+  container_name: string
+  timestamp?: string | null
+  message: string
+}
+
+export type ProjectDockerComposeRuntimeSnapshot = {
+  project_id: string
+  project_name: string
+  enabled: boolean
+  stack: string
+  port?: number | null
+  health_path?: string | null
+  require_http_200: boolean
+  has_runtime: boolean
+  error?: string | null
+  stderr?: string | null
+  containers: ProjectDockerComposeRuntimeContainer[]
+  health?: Record<string, unknown>
 }
 
 export type GraphLayoutPosition = {
@@ -1182,7 +1229,7 @@ export type ChatMessageRecord = {
   content: string
   order_index: number
   attachment_refs: AttachmentRef[]
-  usage: AgentChatUsage | null
+  usage: Record<string, unknown> | null
   is_deleted: boolean
   created_at: string | null
   updated_at: string | null

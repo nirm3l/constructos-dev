@@ -108,6 +108,11 @@ function normalizeReasoningEffort(value: unknown): 'low' | 'medium' | 'high' | '
   return 'medium'
 }
 
+function buildClassifierMarkdown(value: Record<string, unknown> | null | undefined): string {
+  if (!value || Object.keys(value).length === 0) return '_No classifier data recorded_'
+  return `\`\`\`json\n${JSON.stringify(value, null, 2)}\n\`\`\``
+}
+
 function reasoningEffortLabel(value: 'low' | 'medium' | 'high' | 'xhigh'): string {
   if (value === 'xhigh') return 'Very high'
   return value.charAt(0).toUpperCase() + value.slice(1)
@@ -201,6 +206,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const [projectSetupStarterUsed, setProjectSetupStarterUsed] = React.useState(false)
   const [resumeCommandCopyState, setResumeCommandCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
   const [turnCopyState, setTurnCopyState] = React.useState<TurnCopyState>({ status: 'idle', turnId: null })
+  const [expandedDebugTurns, setExpandedDebugTurns] = React.useState<Record<string, boolean>>({})
   const codexThreadId = String(state.codexChatCodexSessionId || '').trim()
     || extractCodexThreadIdFromTurns(state.codexChatTurns)
     || ''
@@ -262,6 +268,10 @@ export function CodexChatDrawer({ state }: { state: any }) {
 
   React.useEffect(() => {
     setTurnCopyState({ status: 'idle', turnId: null })
+  }, [state.codexChatSessionId])
+
+  React.useEffect(() => {
+    setExpandedDebugTurns({})
   }, [state.codexChatSessionId])
 
   React.useEffect(() => {
@@ -1165,7 +1175,33 @@ export function CodexChatDrawer({ state }: { state: any }) {
                   />
                 )
               ) : (
-                <div>{turn.content}</div>
+                <>
+                  <div>{turn.content}</div>
+                  {turn.usage && typeof turn.usage === 'object' && 'intent_flags' in turn.usage && (
+                    <div className="codex-chat-debug">
+                      <button
+                        type="button"
+                        className="codex-chat-debug-toggle"
+                        onClick={() => {
+                          setExpandedDebugTurns((prev: Record<string, boolean>) => ({
+                            ...prev,
+                            [turn.id]: !Boolean(prev[turn.id]),
+                          }))
+                        }}
+                        aria-expanded={Boolean(expandedDebugTurns[turn.id])}
+                      >
+                        <span>Debug</span>
+                        <Icon path={expandedDebugTurns[turn.id] ? 'M18 15 12 9 6 15' : 'm6 9 6 6 6-6'} />
+                      </button>
+                      {expandedDebugTurns[turn.id] && (
+                        <div className="codex-chat-debug-panel">
+                          <div className="meta">Classifier output</div>
+                          <MarkdownView value={buildClassifierMarkdown((turn.usage.intent_flags as Record<string, unknown> | null | undefined) ?? null)} />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
               )}
               {Array.isArray(turn.attachmentRefs) && turn.attachmentRefs.length > 0 && (
                 <div className="codex-chat-attachments">

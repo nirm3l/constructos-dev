@@ -16,6 +16,7 @@ from shared.delivery_evidence import (
     derive_deploy_execution_snapshot,
     extract_task_branches_from_refs,
     has_merge_to_main_ref,
+    is_strict_deploy_success_snapshot,
 )
 from shared.core import (
     Note,
@@ -427,7 +428,11 @@ def _build_execution_gates(
                         else {}
                     ),
                 )
-        qa_handoff_deploy_at = str(qa_handoff_deploy.get("executed_at") or "").strip()
+        qa_handoff_deploy_at = (
+            str(qa_handoff_deploy.get("executed_at") or "").strip()
+            if is_strict_deploy_success_snapshot(qa_handoff_deploy)
+            else ""
+        )
         lead_rows = db.execute(
             select(Task.id, Task.status).where(
                 Task.workspace_id == workspace_id,
@@ -460,7 +465,7 @@ def _build_execution_gates(
                 ),
             )
             executed_at = str(lead_deploy_execution.get("executed_at") or "").strip()
-            if executed_at and (latest_lead_deploy_at is None or executed_at > latest_lead_deploy_at):
+            if executed_at and is_strict_deploy_success_snapshot(lead_deploy_execution) and (latest_lead_deploy_at is None or executed_at > latest_lead_deploy_at):
                 latest_lead_deploy_at = executed_at
         qa_handoff_current_cycle = bool(
             has_lead_handoff_token
@@ -720,6 +725,7 @@ def get_task_automation_status_read_model(db: Session, user, task_id: str) -> di
         "last_requested_instruction": state.get("last_requested_instruction"),
         "last_requested_source": state.get("last_requested_source"),
         "last_requested_source_task_id": state.get("last_requested_source_task_id"),
+        "last_requested_chat_session_id": state.get("last_requested_chat_session_id"),
         "last_requested_reason": state.get("last_requested_reason"),
         "last_requested_trigger_link": state.get("last_requested_trigger_link"),
         "last_requested_correlation_id": state.get("last_requested_correlation_id"),

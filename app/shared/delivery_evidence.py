@@ -158,6 +158,30 @@ def derive_deploy_execution_snapshot(
     return snapshot
 
 
+def is_strict_deploy_success_snapshot(snapshot: dict[str, Any] | None) -> bool:
+    if not isinstance(snapshot, dict):
+        return False
+    executed_at = str(snapshot.get("executed_at") or "").strip()
+    stack = str(snapshot.get("stack") or "").strip()
+    command = str(snapshot.get("command") or "").strip()
+    manifest_path = str(snapshot.get("manifest_path") or "").strip()
+    http_url = str(snapshot.get("http_url") or "").strip()
+    http_status = snapshot.get("http_status")
+    try:
+        normalized_status = int(http_status) if http_status is not None else None
+    except Exception:
+        normalized_status = None
+    return bool(
+        executed_at
+        and stack
+        and command
+        and manifest_path
+        and http_url
+        and normalized_status == 200
+        and snapshot.get("runtime_ok") is True
+    )
+
+
 def _strip_file_scheme(value: str) -> str:
     if value.startswith("file://"):
         return value[len("file://"):]
@@ -217,11 +241,11 @@ def _parse_health_signal(*, url: str, title: str) -> dict[str, Any] | None:
     if url_lower.startswith(_DEPLOY_HEALTH_REF_PREFIX):
         health_payload = raw_url[len(_DEPLOY_HEALTH_REF_PREFIX):].strip()
         parsed_url, http_status = _split_health_payload(health_payload)
-        runtime_ok = http_status == 200 if http_status is not None else ("pass" in title_lower if raw_title else None)
+        runtime_ok = http_status == 200 if http_status is not None else None
     elif url_lower.startswith("probe:postdeploy:"):
         probe_payload = raw_url[len("probe:postdeploy:"):].strip()
         parsed_url, http_status = _split_health_payload(probe_payload)
-        runtime_ok = http_status == 200 if http_status is not None else ("pass" in title_lower if raw_title else None)
+        runtime_ok = http_status == 200 if http_status is not None else None
     elif url_lower.startswith(_LEGACY_HEALTH_PREFIXES):
         for prefix in _LEGACY_HEALTH_PREFIXES:
             if url_lower.startswith(prefix):
@@ -236,8 +260,6 @@ def _parse_health_signal(*, url: str, title: str) -> dict[str, Any] | None:
         if "deploy health" in title_lower or "post-deploy" in url_lower:
             if http_status is not None:
                 runtime_ok = http_status == 200
-            elif "pass" in title_lower:
-                runtime_ok = True
             elif "fail" in title_lower:
                 runtime_ok = False
 

@@ -1,5 +1,6 @@
 import React from 'react'
 import * as AlertDialog from '@radix-ui/react-alert-dialog'
+import * as Accordion from '@radix-ui/react-accordion'
 import { useQuery } from '@tanstack/react-query'
 import {
   applyNodeChanges,
@@ -261,6 +262,60 @@ function formatEventTimestamp(value: string | null | undefined): string {
   const parsed = new Date(raw)
   if (Number.isNaN(parsed.getTime())) return raw
   return parsed.toLocaleString()
+}
+
+function buildClassifierMarkdown(value: Record<string, unknown> | null | undefined): string {
+  if (!value || Object.keys(value).length === 0) return '_No classifier data recorded_'
+  return `\`\`\`json\n${JSON.stringify(value, null, 2)}\n\`\`\``
+}
+
+function formatClassifierFieldLabel(key: string): string {
+  return String(key || '')
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function formatClassifierFieldValue(value: unknown): string {
+  if (typeof value === 'boolean') return value ? 'True' : 'False'
+  if (typeof value === 'number') return String(value)
+  if (typeof value === 'string') return value || '—'
+  if (value == null) return '—'
+  return JSON.stringify(value)
+}
+
+const CLASSIFIER_PRIORITY_FIELDS = [
+  'workflow_scope',
+  'execution_mode',
+  'execution_intent',
+  'execution_kickoff_intent',
+  'project_creation_intent',
+  'deploy_requested',
+  'docker_compose_requested',
+  'requested_port',
+  'exact_task_count',
+  'task_completion_requested',
+]
+
+function ClassifierDebugSummary(props: { value?: Record<string, unknown> | null }) {
+  const value = props.value && typeof props.value === 'object' ? props.value : null
+  if (!value || Object.keys(value).length === 0) {
+    return <div className="meta">No classifier data recorded.</div>
+  }
+  const preferredKeys = CLASSIFIER_PRIORITY_FIELDS.filter((key) => key in value)
+  const otherKeys = Object.keys(value).filter((key) => !preferredKeys.includes(key)).sort((left, right) => left.localeCompare(right))
+  const orderedKeys = [...preferredKeys, ...otherKeys]
+  return (
+    <div className="task-flow-debug-kv-grid">
+      {orderedKeys.map((key) => (
+        <div key={`classifier-field-${key}`} className="task-flow-debug-kv-card">
+          <span className="meta">{formatClassifierFieldLabel(key)}</span>
+          <strong>{formatClassifierFieldValue(value[key])}</strong>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 function buildEventResponseMarkdown(detail: TaskDependencyGraphEventDetail): string {
@@ -693,6 +748,7 @@ export function ProjectTaskDependencyGraphPanel({
     edge: TaskDependencyGraphEdge
     event: TaskDependencyGraphRuntimeEvent
   } | null>(null)
+  const [debugExpanded, setDebugExpanded] = React.useState(false)
   const [canvasNodes, setCanvasNodes] = React.useState<FlowNode<TaskFlowNodeData>[]>([])
   const flowRef = React.useRef<ReactFlowInstance<FlowNode<TaskFlowNodeData>, FlowEdge> | null>(null)
 
@@ -889,6 +945,15 @@ export function ProjectTaskDependencyGraphPanel({
   })
 
   const selectedEventDetail: TaskDependencyGraphEventDetail | undefined = eventDetailQuery.data
+
+  React.useEffect(() => {
+    setDebugExpanded(false)
+  }, [
+    selectedRuntimeEvent?.edge?.source_entity_id,
+    selectedRuntimeEvent?.edge?.target_entity_id,
+    selectedRuntimeEvent?.event?.source,
+    selectedRuntimeEvent?.event?.at,
+  ])
 
   if (isLoading) {
     return <div className="meta">Loading task flow graph...</div>
@@ -1237,6 +1302,77 @@ export function ProjectTaskDependencyGraphPanel({
             ) : (
               <div className="task-flow-event-detail-layout">
                 <div className="task-flow-event-detail-main">
+                  {(selectedEventDetail.origin_prompt_markdown || selectedEventDetail.origin_classifier || selectedEventDetail.runtime_classifier) ? (
+                    <div className="task-flow-event-detail-card task-flow-event-debug-card">
+                      <button
+                        type="button"
+                        className="task-flow-event-debug-toggle"
+                        onClick={() => setDebugExpanded((previous) => !previous)}
+                        aria-expanded={debugExpanded}
+                      >
+                        <span>Debug</span>
+                        <Icon path={debugExpanded ? 'M18 15 12 9 6 15' : 'm6 9 6 6 6-6'} />
+                      </button>
+                      {debugExpanded ? (
+                        <Accordion.Root type="multiple" className="task-flow-event-debug-accordion">
+                          <Accordion.Item value="origin" className="task-flow-event-debug-item">
+                            <Accordion.Header>
+                              <Accordion.Trigger className="task-flow-event-debug-section-trigger">
+                                <span>Origin request</span>
+                                <span className="meta">
+                                  {selectedEventDetail.origin_prompt_at ? formatEventTimestamp(selectedEventDetail.origin_prompt_at) : 'Chat prompt + classifier'}
+                                </span>
+                                <Icon path="m6 9 6 6 6-6" />
+                              </Accordion.Trigger>
+                            </Accordion.Header>
+                            <Accordion.Content className="task-flow-event-debug-section-content">
+                              <div className="task-flow-event-debug-block">
+                                <div className="task-flow-event-debug-label">Chat prompt</div>
+                                <div className="task-flow-event-markdown md-editor-surface">
+                                  <div className="task-flow-event-scroll-viewport">
+                                    <div className="md-editor-content">
+                                      <MarkdownView value={String(selectedEventDetail.origin_prompt_markdown || '_No linked chat prompt_')} />
+                                    </div>
+                                  </div>
+                                </div>
+                                <div className="task-flow-event-debug-label">Classifier output</div>
+                                <ClassifierDebugSummary value={selectedEventDetail.origin_classifier || undefined} />
+                                <details className="task-flow-event-debug-raw">
+                                  <summary>Raw JSON</summary>
+                                  <pre>{JSON.stringify(selectedEventDetail.origin_classifier || {}, null, 2)}</pre>
+                                </details>
+                              </div>
+                            </Accordion.Content>
+                          </Accordion.Item>
+                          <Accordion.Item value="runtime" className="task-flow-event-debug-item">
+                            <Accordion.Header>
+                              <Accordion.Trigger className="task-flow-event-debug-section-trigger">
+                                <span>Runtime request debug</span>
+                                <span className="meta">
+                                  {selectedEventDetail.requested_at ? formatEventTimestamp(selectedEventDetail.requested_at) : 'Classifier + execution fields'}
+                                </span>
+                                <Icon path="m6 9 6 6 6-6" />
+                              </Accordion.Trigger>
+                            </Accordion.Header>
+                            <Accordion.Content className="task-flow-event-debug-section-content">
+                              <div className="task-flow-event-debug-block">
+                                <div className="task-flow-event-debug-label">Runtime classifier</div>
+                                <ClassifierDebugSummary value={selectedEventDetail.runtime_classifier || undefined} />
+                                <details className="task-flow-event-debug-raw">
+                                  <summary>Raw JSON</summary>
+                                  <pre>{JSON.stringify(selectedEventDetail.runtime_classifier || {}, null, 2)}</pre>
+                                </details>
+                              </div>
+                            </Accordion.Content>
+                          </Accordion.Item>
+                        </Accordion.Root>
+                      ) : (
+                        <div className="task-flow-event-debug-summary">
+                          Expand to inspect the origin prompt and classifier debug data.
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
                   <div className="task-flow-event-detail-card">
                     <div className="task-flow-event-card-head">
                       <div className="meta">Prompt request</div>

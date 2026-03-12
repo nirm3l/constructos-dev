@@ -8060,6 +8060,54 @@ textarea:disabled {
   color: color-mix(in srgb, #7a2a2a, var(--text) 34%);
 }
 
+.codex-chat-debug {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.codex-chat-debug-toggle {
+  justify-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 18%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 28%);
+  color: color-mix(in srgb, var(--muted), var(--text) 16%);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.codex-chat-debug-toggle .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.codex-chat-bubble.user .codex-chat-debug-toggle {
+  background: color-mix(in srgb, var(--surface), white 12%);
+}
+
+.codex-chat-debug-panel {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 14%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 18%);
+}
+
+.codex-chat-debug-panel .markdown {
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+  overflow: visible;
+  max-height: none;
+}
+
 .codex-chat-toolbar {
   margin-top: 8px;
   display: flex;
@@ -12584,6 +12632,275 @@ textarea {
   flex-wrap: nowrap;
 }
 
+.project-docker-runtime-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--line), transparent 8%);
+  background:
+    radial-gradient(circle at top right, color-mix(in srgb, var(--brand), transparent 95%), transparent 28%),
+    color-mix(in srgb, var(--surface), var(--surface-alt) 20%);
+}
+
+.project-docker-runtime-copy {
+  min-width: 0;
+}
+
+.project-docker-runtime-summary {
+  margin-top: 2px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.project-docker-runtime-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.docker-runtime-dialog {
+  width: min(1120px, calc(100vw - 40px));
+  max-width: min(1120px, calc(100vw - 40px));
+  max-height: min(88vh, 920px);
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.docker-runtime-dialog-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.docker-runtime-dialog-close {
+  align-self: flex-start;
+}
+
+.docker-runtime-dialog-body {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+}
+
+.docker-runtime-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.docker-runtime-summary-card,
+.docker-runtime-detail-card,
+.docker-runtime-logs-card,
+.docker-runtime-container-card {
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--line), transparent 10%);
+  background:
+    radial-gradient(circle at top right, color-mix(in srgb, var(--brand), transparent 96%), transparent 30%),
+    color-mix(in srgb, var(--surface), var(--surface-alt) 18%);
+}
+
+.docker-runtime-summary-card {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+}
+
+.docker-runtime-summary-card strong {
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.docker-runtime-health-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.docker-runtime-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  gap: 12px;
+  min-height: 0;
+}
+
+.docker-runtime-container-list {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.docker-runtime-container-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.docker-runtime-container-card.active {
+  border-color: color-mix(in srgb, var(--brand-strong), var(--brand) 32%);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand), transparent 50%);
+}
+
+.docker-runtime-container-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.docker-runtime-container-meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.docker-runtime-detail-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  min-height: 0;
+}
+
+.docker-runtime-detail-card {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.docker-runtime-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.docker-runtime-detail-title {
+  margin-top: 2px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.docker-runtime-selected-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.docker-runtime-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+}
+
+.docker-runtime-detail-grid > div {
+  display: grid;
+  gap: 3px;
+}
+
+.docker-runtime-detail-grid strong {
+  font-size: 13px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.docker-runtime-state-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  border: 1px solid color-mix(in srgb, var(--line), transparent 10%);
+}
+
+.docker-runtime-state-pill.tone-ok {
+  background: color-mix(in srgb, #10b981, var(--surface) 84%);
+  color: color-mix(in srgb, #065f46, var(--text) 18%);
+}
+
+.docker-runtime-state-pill.tone-warn {
+  background: color-mix(in srgb, #f59e0b, var(--surface) 84%);
+  color: color-mix(in srgb, #92400e, var(--text) 18%);
+}
+
+.docker-runtime-state-pill.tone-muted {
+  background: color-mix(in srgb, var(--surface-alt), var(--surface) 30%);
+  color: var(--muted);
+}
+
+.docker-runtime-logs-card {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 420px;
+  overflow: hidden;
+}
+
+.docker-runtime-logs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line), transparent 14%);
+}
+
+.docker-runtime-log-viewport {
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px;
+  background: color-mix(in srgb, var(--surface-alt), black 6%);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.docker-runtime-log-line {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  padding: 2px 0;
+}
+
+.docker-runtime-log-timestamp {
+  color: color-mix(in srgb, var(--muted), var(--surface) 18%);
+  white-space: nowrap;
+}
+
+.docker-runtime-log-message {
+  color: color-mix(in srgb, var(--text), var(--surface) 4%);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 980px) {
+  .docker-runtime-summary-grid,
+  .docker-runtime-layout,
+  .docker-runtime-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .project-docker-runtime-bar,
+  .docker-runtime-detail-head,
+  .docker-runtime-container-card-head,
+  .docker-runtime-logs-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
 .task-flow-canvas,
 .task-flow-inspector {
   border-radius: 12px;
@@ -12985,6 +13302,92 @@ textarea {
   min-height: 0;
 }
 
+.task-flow-event-debug-card {
+  gap: 12px;
+}
+
+.task-flow-event-debug-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 38px;
+  width: 100%;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--line), transparent 10%);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface), white 6%);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+}
+
+.task-flow-event-debug-toggle:hover {
+  border-color: color-mix(in srgb, var(--brand), transparent 38%);
+  background: color-mix(in srgb, var(--surface-alt), white 18%);
+}
+
+.task-flow-event-debug-toggle:active {
+  transform: translateY(1px);
+}
+
+.task-flow-event-debug-toggle .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.task-flow-event-debug-summary {
+  padding: 0 2px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.task-flow-event-debug-accordion {
+  display: grid;
+  gap: 10px;
+}
+
+.task-flow-event-debug-item {
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--line), transparent 10%);
+  background: color-mix(in srgb, var(--surface), white 5%);
+}
+
+.task-flow-event-debug-section-trigger {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 0 14px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.task-flow-event-debug-section-trigger .icon {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.16s ease;
+}
+
+.task-flow-event-debug-item[data-state="open"] .task-flow-event-debug-section-trigger .icon {
+  transform: rotate(180deg);
+}
+
+.task-flow-event-debug-section-content {
+  padding: 0 14px 14px;
+}
+
 .task-flow-event-detail-card {
   display: flex;
   flex-direction: column;
@@ -12997,6 +13400,43 @@ textarea {
     radial-gradient(circle at top right, color-mix(in srgb, var(--brand), transparent 92%), transparent 34%),
     color-mix(in srgb, var(--surface-alt), white 14%);
   box-shadow: 0 10px 28px rgba(15, 23, 42, 0.07);
+}
+
+.task-flow-event-debug-block {
+  display: grid;
+  gap: 8px;
+  min-height: 0;
+}
+
+.task-flow-debug-kv-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.task-flow-debug-kv-card {
+  display: grid;
+  gap: 4px;
+  min-height: 68px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--line), transparent 8%);
+  background: color-mix(in srgb, var(--surface-alt), white 16%);
+}
+
+.task-flow-debug-kv-card strong {
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.task-flow-event-debug-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--muted), var(--text) 22%);
 }
 
 .task-flow-event-card-head {
@@ -13080,6 +13520,32 @@ textarea {
   overflow-x: hidden;
 }
 
+.task-flow-event-debug-raw {
+  display: grid;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.task-flow-event-debug-raw summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  color: color-mix(in srgb, var(--muted), var(--text) 16%);
+}
+
+.task-flow-event-debug-raw pre {
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--line), transparent 8%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 14%);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .task-flow-event-response-meta {
   display: flex;
   flex-wrap: wrap;
@@ -13120,6 +13586,7 @@ textarea {
 }
 
 @media (max-width: 900px) {
+  .task-flow-debug-kv-grid,
   .task-flow-event-detail-main {
     grid-template-columns: minmax(0, 1fr);
   }

@@ -131,6 +131,7 @@ export function useRealtimeEffects(c: any) {
               content: String(message.content || ''),
               createdAt: parseTimestampMs(message.created_at, now),
               attachmentRefs: normalizeAttachmentRefs(message.attachment_refs),
+              usage: message.usage && typeof message.usage === 'object' ? message.usage : null,
             }
           })
           .sort((a, b) => a.createdAt - b.createdAt)

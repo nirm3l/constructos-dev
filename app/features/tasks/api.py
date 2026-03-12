@@ -402,6 +402,7 @@ def request_automation_run(
         instruction=payload.instruction,
         source=payload.source,
         source_task_id=payload.source_task_id,
+        chat_session_id=payload.chat_session_id,
         execution_intent=payload.execution_intent,
         execution_kickoff_intent=payload.execution_kickoff_intent,
         project_creation_intent=payload.project_creation_intent,

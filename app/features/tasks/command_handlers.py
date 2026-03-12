@@ -1880,6 +1880,7 @@ class RequestAutomationRunHandler:
     instruction: str | None = None
     source: str | None = None
     source_task_id: str | None = None
+    chat_session_id: str | None = None
     execution_intent: bool | None = None
     execution_kickoff_intent: bool | None = None
     project_creation_intent: bool | None = None
@@ -2140,6 +2141,7 @@ class RequestAutomationRunHandler:
             instruction=effective_instruction,
             source=requested_source,
             source_task_id=requested_source_task_id,
+            chat_session_id=str(self.chat_session_id or "").strip() or None,
             execution_intent=bool(classification.get("execution_intent")),
             execution_kickoff_intent=bool(classification.get("execution_kickoff_intent")),
             project_creation_intent=bool(classification.get("project_creation_intent")),

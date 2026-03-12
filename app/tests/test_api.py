@@ -3654,7 +3654,116 @@ def test_runner_contract_validation_derives_files_changed_from_dirty_task_worktr
         require_nontrivial_dev_changes=True,
         git_evidence=git_evidence,
     )
-    assert error == "Runner error: Developer handoff is not committed on the task branch yet."
+    assert error is not None
+    assert "Developer handoff is not committed on the task branch yet." in error
+    assert "index.html" in error
+    assert "styles.css" in error
+
+
+def test_runner_finalizes_dirty_developer_handoff_with_commit(tmp_path, monkeypatch):
+    import subprocess
+
+    import features.agents.runner as runner_module
+    from shared.project_repository import (
+        ensure_project_repository_initialized,
+        resolve_task_branch_name,
+        resolve_task_worktree_path,
+    )
+
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path))
+    project_name = "Tetris"
+    project_id = "proj-finalize"
+    task_id = "e2384614-1122-5eb8-a3bb-e8efb14a00c5"
+    title = "Build core gameplay and UI"
+
+    repo = ensure_project_repository_initialized(project_name=project_name, project_id=project_id)
+    branch = resolve_task_branch_name(task_id=task_id, title=title)
+    worktree = resolve_task_worktree_path(project_name=project_name, project_id=project_id, task_id=task_id)
+
+    subprocess.run(["git", "worktree", "add", "-b", branch, str(worktree), "main"], cwd=str(repo), check=True, capture_output=True, text=True)
+    (worktree / "index.html").write_text("<!doctype html><title>Tetris</title>\n", encoding="utf-8")
+    (worktree / "styles.css").write_text("body { background: #111; color: #eee; }\n", encoding="utf-8")
+    (worktree / "app.js").write_text("console.log('tetris');\n", encoding="utf-8")
+
+    initial_git_evidence = runner_module._collect_git_evidence_from_repo_state(
+        project_name=project_name,
+        project_id=project_id,
+        task_id=task_id,
+        title=title,
+    )
+    assert bool(initial_git_evidence.get("after_is_dirty")) is True
+
+    updated_git_evidence, auto_commit = runner_module._finalize_developer_handoff_commit_if_safe(
+        project_name=project_name,
+        project_id=project_id,
+        task_id=task_id,
+        title=title,
+        git_evidence=initial_git_evidence,
+        require_nontrivial_dev_changes=True,
+        tests_run=False,
+        tests_passed=False,
+    )
+
+    assert auto_commit is not None
+    assert str(auto_commit.get("task_branch") or "").strip() == branch
+    assert sorted(auto_commit.get("files_changed") or []) == ["app.js", "index.html", "styles.css"]
+    assert str(auto_commit.get("commit_sha") or "").strip()
+    committed_handoff = runner_module._inspect_committed_task_branch_handoff(updated_git_evidence)
+    assert committed_handoff.get("after_is_dirty") is False
+    assert committed_handoff.get("branch_differs_from_main") is True
+
+
+def test_developer_handoff_reports_uncommitted_files(tmp_path, monkeypatch):
+    import subprocess
+
+    import features.agents.runner as runner_module
+    from features.agents.executor import AutomationOutcome
+    from shared.project_repository import ensure_project_repository_initialized
+    from shared.project_repository import resolve_task_worktree_path
+
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
+    project_name = "Dirty Handoff Demo"
+    task_id = "task-dirty-files"
+    title = "Implement gameplay"
+    branch = "task/task-dir-implement-gameplay"
+    repo_root = ensure_project_repository_initialized(project_name=project_name)
+    worktree = resolve_task_worktree_path(project_name=project_name, task_id=task_id)
+    subprocess.run(["git", "worktree", "add", "-b", branch, str(worktree), "main"], cwd=repo_root, check=True)
+    (worktree / "index.html").write_text("<html></html>\n", encoding="utf-8")
+    (worktree / "styles.css").write_text("body{}\n", encoding="utf-8")
+
+    outcome = AutomationOutcome(
+        action="comment",
+        summary="Implemented the gameplay shell.",
+        comment=None,
+        execution_outcome_contract={
+            "contract_version": 1,
+            "files_changed": [],
+            "tests_run": False,
+            "tests_passed": False,
+            "commit_sha": None,
+            "branch": branch,
+            "artifacts": [],
+        },
+    )
+    git_evidence = runner_module._collect_git_evidence_from_repo_state(
+        project_name=project_name,
+        project_id=None,
+        task_id=task_id,
+        title=title,
+    )
+
+    error = runner_module._validate_execution_outcome_contract(
+        outcome=outcome,
+        assignee_role="Developer",
+        task_status="Dev",
+        git_delivery_enabled=True,
+        require_nontrivial_dev_changes=True,
+        git_evidence=git_evidence,
+    )
+    assert "Developer handoff is not committed on the task branch yet." in str(error)
+    assert "index.html" in str(error)
+    assert "styles.css" in str(error)
 
 
 def test_project_has_merge_to_main_evidence_uses_repo_branch_merge_fallback(tmp_path, monkeypatch):
@@ -4538,6 +4647,127 @@ def test_project_task_dependency_event_detail_prefers_failure_error_markdown(tmp
     assert payload['response_status'] == 'failed'
     assert 'Developer handoff is not committed on the task branch yet.' in str(payload['response_markdown'])
     assert 'Automation runner failed.' in str(payload['response_markdown'])
+
+
+def test_project_task_dependency_event_detail_includes_origin_chat_prompt_and_classifier(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    lead_task = client.post(
+        '/api/tasks',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'title': 'Lead task',
+            'status': 'Lead',
+        },
+    )
+    assert lead_task.status_code == 200
+    lead_task_id = lead_task.json()['id']
+
+    dev_task = client.post(
+        '/api/tasks',
+        json={
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'title': 'Developer task',
+            'status': 'Dev',
+        },
+    )
+    assert dev_task.status_code == 200
+    dev_task_id = dev_task.json()['id']
+
+    from features.chat.application import ChatApplicationService
+    from features.chat.command_handlers import AppendUserMessagePayload
+    from shared.eventing import append_event
+    from shared.models import SessionLocal, User
+    from shared.settings import AGENT_SYSTEM_USER_ID
+
+    with SessionLocal() as db:
+        user = db.execute(select(User).where(User.username == 'admin')).scalar_one()
+        ChatApplicationService(db, user).append_user_message(
+            AppendUserMessagePayload(
+                workspace_id=ws_id,
+                project_id=project_id,
+                session_id='chat-debug-session',
+                message_id=None,
+                content='Create project Tetris and run kickoff after creating three Team Mode tasks.',
+                usage={
+                    'intent_flags': {
+                        'execution_intent': True,
+                        'execution_kickoff_intent': True,
+                        'project_creation_intent': True,
+                        'workflow_scope': 'team_mode',
+                        'execution_mode': 'setup_then_kickoff',
+                        'task_completion_requested': False,
+                        'reason': 'Structured chat classification',
+                    }
+                },
+            )
+        )
+        append_event(
+            db,
+            aggregate_type='Task',
+            aggregate_id=dev_task_id,
+            event_type='TaskAutomationRequested',
+            payload={
+                'requested_at': '2026-03-11T11:00:00Z',
+                'instruction': 'Implement the gameplay loop and commit it.',
+                'source': 'lead_kickoff_dispatch',
+                'source_task_id': lead_task_id,
+                'chat_session_id': 'chat-debug-session',
+                'execution_intent': True,
+                'execution_kickoff_intent': True,
+                'workflow_scope': 'team_mode',
+                'execution_mode': 'kickoff_only',
+                'classifier_reason': 'Propagated from chat request',
+                'reason': 'kickoff',
+                'trigger_link': f'{lead_task_id}->{dev_task_id}:Dev',
+                'correlation_id': 'corr-edge-chat',
+            },
+            metadata={
+                'actor_id': AGENT_SYSTEM_USER_ID,
+                'workspace_id': ws_id,
+                'project_id': project_id,
+                'task_id': dev_task_id,
+            },
+        )
+        append_event(
+            db,
+            aggregate_type='Task',
+            aggregate_id=dev_task_id,
+            event_type='TaskAutomationCompleted',
+            payload={
+                'completed_at': '2026-03-11T11:03:00Z',
+                'summary': 'Developer automation completed successfully.',
+            },
+            metadata={
+                'actor_id': AGENT_SYSTEM_USER_ID,
+                'workspace_id': ws_id,
+                'project_id': project_id,
+                'task_id': dev_task_id,
+            },
+        )
+        db.commit()
+
+    res = client.get(
+        f'/api/projects/{project_id}/task-dependency-graph/event-detail',
+        params={
+            'source_task_id': lead_task_id,
+            'target_task_id': dev_task_id,
+            'source': 'lead_kickoff_dispatch',
+            'at': '2026-03-11T11:00:00Z',
+            'correlation_id': 'corr-edge-chat',
+        },
+    )
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload['origin_chat_session_id'] == 'chat-debug-session'
+    assert 'Create project Tetris' in str(payload['origin_prompt_markdown'])
+    assert payload['origin_classifier']['workflow_scope'] == 'team_mode'
+    assert payload['runtime_classifier']['execution_mode'] == 'kickoff_only'
 
 
 def test_runner_blocks_qa_task_until_lead_handoff_is_complete(tmp_path, monkeypatch):
@@ -6042,8 +6272,55 @@ def test_runner_reassigns_failed_agent_task_to_human(tmp_path, monkeypatch):
     assert refreshed_tasks.status_code == 200
     refreshed = next(item for item in (refreshed_tasks.json().get("items") or []) if item.get("id") == task_id)
     assert refreshed.get("assignee_id") == current_user_id
-    assert refreshed.get("assigned_agent_code") in {None, ""}
+    assert refreshed.get("assigned_agent_code") == "dev-a"
     assert refreshed.get("status") == "Blocked"
+
+
+def test_runner_preflight_reports_role_coverage_and_topology_failures_separately(tmp_path, monkeypatch):
+    from plugins.team_mode.plugin import TeamModePlugin
+    import plugins.team_mode.plugin as plugin_module
+
+    plugin = TeamModePlugin()
+
+    monkeypatch.setattr(plugin_module, "team_mode_project_has_team_mode_enabled", lambda **_: True)
+    monkeypatch.setattr(plugin_module, "policy_required_checks", lambda *_args, **_kwargs: ["role_coverage_present", "required_topology_present"])
+    monkeypatch.setattr(
+        plugin_module,
+        "evaluate_required_checks",
+        lambda _checks, _required: (False, ["role_coverage_present"]),
+    )
+    monkeypatch.setattr(
+        plugin_module,
+        "evaluate_team_mode_gates",
+        lambda **_kwargs: {"checks": {"role_coverage_present": False, "required_topology_present": True}},
+    )
+
+    class _FakeExecuteResult:
+        def first(self):
+            return ("{}", "{}")
+
+        def all(self):
+            return []
+
+        def scalars(self):
+            return self
+
+    class _FakeDb:
+        def execute(self, *_args, **_kwargs):
+            return _FakeExecuteResult()
+
+    role_message = plugin.runner_preflight_error(
+        db=_FakeDb(),
+        workspace_id="ws",
+        project_id="proj",
+        task_status="Lead",
+        assignee_role="Lead",
+        has_git_delivery_skill=False,
+        has_repo_context=False,
+    )
+    assert role_message is not None
+    assert "role coverage is incomplete" in role_message
+    assert "required topology is incomplete" not in role_message
 
 
 def test_runner_blocked_outcome_notifies_humans_with_dedupe(tmp_path, monkeypatch):
@@ -6182,6 +6459,64 @@ def test_blocked_notifications_dedupe_by_task_phase_and_gate_even_when_comment_c
     payload = json.loads(str(notices[0].payload_json or "{}"))
     assert payload.get("blocking_gate") == "lead_runtime_health_failed"
     assert payload.get("phase") == "deploy"
+
+
+def test_nonblocking_team_mode_waiting_gates_do_not_emit_blocked_notifications(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    user_id = bootstrap["current_user"]["id"]
+
+    project = client.post('/api/projects', json={'workspace_id': ws_id, 'name': 'Waiting gate notification project'})
+    assert project.status_code == 200
+    project_id = project.json()['id']
+
+    task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Lead coordination task',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'Lead',
+            'instruction': 'Coordinate delivery.',
+        },
+    )
+    assert task.status_code == 200
+    task_id = task.json()['id']
+
+    from features.agents.runner import _notify_humans_blocked
+    from shared.models import Notification, SessionLocal
+
+    with SessionLocal() as db:
+        _notify_humans_blocked(
+            db=db,
+            workspace_id=ws_id,
+            project_id=project_id,
+            actor_user_id=user_id,
+            task_id=task_id,
+            task_title='Lead coordination task',
+            task_status='Lead',
+            summary='Automation deferred by workflow gate.',
+            comment='Lead is waiting for committed Developer handoff.',
+            blocking_gate='lead_waiting_committed_developer_handoff',
+            phase='triage',
+        )
+        db.commit()
+
+    with SessionLocal() as db:
+        notices = (
+            db.query(Notification)
+            .filter(
+                Notification.workspace_id == ws_id,
+                Notification.project_id == project_id,
+                Notification.task_id == task_id,
+                Notification.user_id == user_id,
+                Notification.source_event == "agents.runner.automation_blocked",
+            )
+            .all()
+        )
+
+    assert notices == []
 
 
 def test_runner_complete_outcome_notifies_humans_when_project_reaches_done(tmp_path, monkeypatch):
@@ -8474,6 +8809,44 @@ def test_team_mode_done_transition_uses_assigned_agent_code_when_member_role_is_
     assert "Lead Done transition blocked" in str(lead_blocked.json().get("detail") or "")
 
 
+def test_team_mode_lead_done_transition_requires_runtime_deploy_health_ok(monkeypatch):
+    from fastapi import HTTPException
+    from plugins.team_mode import service_policy as policy
+
+    class _State:
+        project_id = "project-1"
+        workspace_id = "workspace-1"
+
+    monkeypatch.setattr(policy, "project_has_team_mode_enabled", lambda **_: True)
+    monkeypatch.setattr(policy, "open_developer_tasks", lambda **_: [])
+
+    def _verify_delivery_workflow_fn(**_: object) -> dict[str, object]:
+        return {
+            "checks": {
+                "repo_context_present": True,
+                "git_contract_ok": True,
+                "compose_manifest_present": True,
+                "lead_deploy_decision_evidence_present": True,
+                "qa_handoff_current_cycle_ok": True,
+                "deploy_serves_application_root": True,
+                "qa_has_verifiable_artifacts": True,
+                "deploy_execution_evidence_present": True,
+                "runtime_deploy_health_ok": False,
+            }
+        }
+
+    with pytest.raises(HTTPException) as exc_info:
+        policy.enforce_done_transition(
+            db=None,
+            state=_State(),
+            assignee_role="Lead",
+            verify_delivery_workflow_fn=_verify_delivery_workflow_fn,
+            auth_token=None,
+        )
+
+    assert "runtime_deploy_health_ok" in str(exc_info.value.detail)
+
+
 def test_team_mode_lead_task_done_transition_is_blocked_until_dev_tasks_done(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -9721,6 +10094,44 @@ def test_derive_deploy_execution_snapshot_accepts_current_legacy_lead_refs():
     assert snapshot['http_url'] == 'http://gateway:6768/health'
     assert snapshot['http_status'] == 0
     assert snapshot['runtime_ok'] is False
+
+
+def test_derive_deploy_execution_snapshot_does_not_infer_success_from_pass_title_without_http_200():
+    from shared.delivery_evidence import derive_deploy_execution_snapshot, is_strict_deploy_success_snapshot
+
+    snapshot = derive_deploy_execution_snapshot(
+        refs=[
+            {'url': 'deploy:stack:constructos-ws-default'},
+            {'url': 'deploy:command:docker compose -p constructos-ws-default up -d'},
+            {'url': 'deploy:compose:docker-compose.yml'},
+            {'url': 'http://gateway:6768/health', 'title': 'deploy health: pass'},
+        ],
+        current_snapshot={'executed_at': '2026-03-11T22:47:28Z'},
+    )
+
+    assert snapshot['http_url'] == 'http://gateway:6768/health'
+    assert snapshot.get('http_status') is None
+    assert snapshot.get('runtime_ok') is not True
+    assert is_strict_deploy_success_snapshot(snapshot) is False
+
+
+def test_append_lead_deploy_external_refs_encodes_explicit_health_status():
+    from features.agents.runner import _append_lead_deploy_external_refs
+
+    refs = _append_lead_deploy_external_refs(
+        refs=[],
+        stack='constructos-ws-default',
+        port=6768,
+        health_path='/health',
+        runtime_ok=True,
+        http_url='http://gateway:6768/health',
+        http_status=200,
+        project_name=None,
+        project_id=None,
+    )
+
+    urls = {str(item.get('url') or '') for item in refs}
+    assert 'deploy:health:http://gateway:6768/health:http_200' in urls
 
 
 def test_task_dependency_graph_merges_runtime_sources_from_event_history_and_current_state(tmp_path):
@@ -13760,6 +14171,129 @@ def test_team_mode_developer_completion_dispatches_lead_with_runtime_source(tmp_
     assert any(str(channel.get("source") or "") == "developer_handoff" for channel in (dev_to_lead.get("channels") or []))
 
 
+def test_runner_does_not_promote_unchanged_dev_branch_as_commit_evidence(tmp_path, monkeypatch):
+    import features.agents.runner as runner_module
+    from features.agents.executor import AutomationOutcome
+    from features.agents.runner import QueuedAutomationRun, _record_automation_success
+    from shared.models import SessionLocal
+    from shared.eventing_rebuild import rebuild_state
+
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    team = _enable_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+    lead_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Lead task",
+            "status": "Lead",
+            "priority": "High",
+            "assignee_id": team["lead"],
+            "assigned_agent_code": "lead-a",
+        },
+    )
+    assert lead_task.status_code == 200
+    lead_task_id = lead_task.json()["id"]
+    dev_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Developer task",
+            "status": "Dev",
+            "priority": "High",
+            "assignee_id": team["dev1"],
+            "assigned_agent_code": "dev-a",
+            "instruction": "Implement gameplay on the task branch.",
+            "task_relationships": [
+                {"kind": "delivers_to", "task_ids": [lead_task_id], "statuses": ["Lead"]},
+            ],
+        },
+    )
+    assert dev_task.status_code == 200
+    dev_task_id = dev_task.json()["id"]
+
+    original_inspect_handoff = runner_module._inspect_committed_task_branch_handoff
+    unchanged_sha = "1111111111111111111111111111111111111111"
+
+    def _fake_inspect_handoff(git_evidence):
+        result = original_inspect_handoff(git_evidence)
+        result.update(
+            {
+                "branch_name": "task/dev-gameplay",
+                "branch_exists": True,
+                "branch_head_sha": unchanged_sha,
+                "main_head_sha": unchanged_sha,
+                "branch_differs_from_main": False,
+                "after_head_sha": unchanged_sha,
+                "after_on_task_branch": True,
+                "after_is_dirty": True,
+            }
+        )
+        return result
+
+    runner_module._inspect_committed_task_branch_handoff = _fake_inspect_handoff
+    try:
+        with pytest.raises(RuntimeError, match="Developer handoff is not committed on the task branch yet"):
+            _record_automation_success(
+                QueuedAutomationRun(
+                    task_id=dev_task_id,
+                    workspace_id=ws_id,
+                    project_id=project_id,
+                    title="Developer task",
+                description="",
+                status="Dev",
+                instruction="Implement gameplay on the task branch.",
+                request_source="manual",
+                is_scheduled_run=False,
+                trigger_task_id=None,
+                trigger_from_status=None,
+                trigger_to_status=None,
+                triggered_at=None,
+                actor_user_id=team["dev1"],
+            ),
+            outcome=AutomationOutcome(
+                action="comment",
+                summary="Implemented gameplay files locally.",
+                comment=None,
+                execution_outcome_contract={
+                    "contract_version": 1,
+                    "files_changed": ["index.html", "styles.css", "game.js"],
+                    "tests_run": False,
+                    "tests_passed": False,
+                    "commit_sha": None,
+                    "branch": "task/dev-gameplay",
+                    "artifacts": [],
+                },
+                usage={
+                    "git_evidence": {
+                        "repo_root": str(tmp_path / "repo-placeholder"),
+                        "task_branch": "task/dev-gameplay",
+                        "before": {"head_sha": unchanged_sha},
+                        "after": {"head_sha": unchanged_sha, "on_task_branch": True, "is_dirty": True},
+                    }
+                },
+                ),
+            )
+    finally:
+        runner_module._inspect_committed_task_branch_handoff = original_inspect_handoff
+
+    with SessionLocal() as db:
+        state, _ = rebuild_state(db, "Task", dev_task_id)
+    ref_urls = {
+        str(item.get("url") or "")
+        for item in (state.get("external_refs") or [])
+        if isinstance(item, dict)
+    }
+    assert "commit:1111111111111111111111111111111111111111" not in ref_urls
+    assert "task/dev-gameplay" not in ref_urls
+
+
 def test_team_mode_developer_completion_rearms_blocked_lead_and_dispatches(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -14589,6 +15123,20 @@ def test_lead_deploy_contract_is_runner_controlled_after_merge_evidence():
     assert "runner owns actual deploy execution" in instruction
     assert "Do NOT block this Lead response merely because runner-controlled deploy has not happened yet" in instruction
     assert "Execute deploy for stack" not in instruction
+
+
+def test_qa_runtime_validation_contract_forbids_manual_compose():
+    from features.agents.runner import _build_qa_runtime_validation_contract
+
+    instruction = _build_qa_runtime_validation_contract(
+        stack="constructos-ws-default",
+        port_text="6768",
+        health_path="/health",
+    )
+
+    assert "Do NOT run `docker compose` manually" in instruction
+    assert "Treat the latest Lead deploy snapshot" in instruction
+    assert "http://gateway:6768/health" in instruction
 
 
 def test_translate_compose_manifest_for_host_runtime_rewrites_relative_bind_sources(tmp_path):

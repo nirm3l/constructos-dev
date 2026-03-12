@@ -12,6 +12,7 @@ import {
   createProjectRule,
   deleteProjectRule,
   diffProjectPluginConfig,
+  getProjectDockerComposeRuntime,
   getProjectEventStormingOverview,
   getProjectCapabilities,
   getProjectMembers,
@@ -29,6 +30,7 @@ import type {
   GraphContextPack,
   GraphProjectOverview,
   Project,
+  ProjectDockerComposeRuntimeSnapshot,
   ProjectPolicyChecksVerifyResponse,
   ProjectCapabilities,
   ProjectPluginConfig,
@@ -50,6 +52,7 @@ import {
   MarkdownSplitPane,
 } from '../shared/uiHelpers'
 import { ProjectContextSnapshotPanel } from './ProjectContextSnapshotPanel'
+import { ProjectDockerComposeRuntimeDialog } from './ProjectDockerComposeRuntimeDialog'
 import {
   attachmentRefsToText,
   externalRefsToText,
@@ -570,6 +573,12 @@ export function ProjectsInlineEditor({
     queryFn: () => getProjectPluginConfig(userId, project.id, 'docker_compose'),
     enabled: Boolean(userId && project.id && selectedProject?.id === project.id),
   })
+  const dockerComposeRuntimeQuery = useQuery<ProjectDockerComposeRuntimeSnapshot>({
+    queryKey: ['project-docker-compose-runtime', userId, project.id],
+    queryFn: () => getProjectDockerComposeRuntime(userId, project.id),
+    enabled: Boolean(userId && project.id && selectedProject?.id === project.id && dockerComposePluginQuery.data?.enabled),
+    refetchInterval: dockerComposePluginQuery.data?.enabled ? 15000 : false,
+  })
   const projectCapabilitiesQuery = useQuery<ProjectCapabilities>({
     queryKey: ['project-capabilities', userId, project.id],
     queryFn: () => getProjectCapabilities(userId, project.id),
@@ -594,6 +603,7 @@ export function ProjectsInlineEditor({
     enabled: Boolean(userId && project.id && selectedProject?.id === project.id && shouldShowProjectChecks),
     refetchInterval: 20_000,
   })
+  const [dockerRuntimeDialogOpen, setDockerRuntimeDialogOpen] = React.useState(false)
   const validatePluginConfigMutation = useMutation({
     mutationFn: (params: { pluginKey: ProjectPluginKey; draftConfig: Record<string, unknown> }) =>
       validateProjectPluginConfig(userId, project.id, params.pluginKey, {
@@ -3990,6 +4000,36 @@ export function ProjectsInlineEditor({
             <div className="meta" style={{ marginTop: 6 }}>
               Compose execution defaults plus runtime deploy-health target used by delivery verification.
             </div>
+            {dockerComposePluginQuery.data?.enabled ? (
+              <div className="project-docker-runtime-bar" style={{ marginTop: 10 }}>
+                <div className="project-docker-runtime-copy">
+                  <div className="meta">Managed runtime</div>
+                  <div className="project-docker-runtime-summary">
+                    {dockerComposeRuntimeQuery.isLoading
+                      ? 'Checking runtime state...'
+                      : dockerComposeRuntimeQuery.data?.has_runtime
+                        ? `Stack ${String(dockerComposeRuntimeQuery.data?.stack || 'unknown')} is deployed`
+                        : 'No managed runtime is currently deployed'}
+                  </div>
+                </div>
+                <div className="project-docker-runtime-actions">
+                  {dockerComposeRuntimeQuery.data?.health ? (
+                    <span className="badge">
+                      {Boolean((dockerComposeRuntimeQuery.data.health as Record<string, unknown>).ok) ? 'Healthy' : 'Not healthy'}
+                    </span>
+                  ) : null}
+                  {dockerComposeRuntimeQuery.data?.has_runtime ? (
+                    <button
+                      type="button"
+                      className="status-chip"
+                      onClick={() => setDockerRuntimeDialogOpen(true)}
+                    >
+                      View runtime
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
             <div className="notice plugin-config-shell" style={{ marginTop: 8 }}>
               <div style={{ fontWeight: 600, marginBottom: 6 }}>Quick configuration</div>
               <div className="plugin-config-subsection">
@@ -5114,6 +5154,12 @@ export function ProjectsInlineEditor({
           </button>
         </div>
       ) : null}
+      <ProjectDockerComposeRuntimeDialog
+        open={dockerRuntimeDialogOpen}
+        onOpenChange={setDockerRuntimeDialogOpen}
+        userId={userId}
+        projectId={project.id}
+      />
       <AlertDialog.Root open={removeProjectPromptOpen} onOpenChange={setRemoveProjectPromptOpen}>
         <AlertDialog.Portal>
           <AlertDialog.Overlay className="codex-chat-alert-overlay" />

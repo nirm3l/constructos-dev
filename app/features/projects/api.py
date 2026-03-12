@@ -1,8 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+import asyncio
+import json
+import subprocess
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from features.agents.gates import run_runtime_deploy_health_check
 from features.agents.gates import plugin_check_catalog_by_scope
 from features.agents.gateway import build_ui_gateway
 from shared.core import (
@@ -15,6 +21,7 @@ from shared.core import (
     get_current_user,
     get_db,
 )
+from shared.models import ProjectPluginConfig
 from shared.knowledge_graph import (
     event_storming_set_link_review_status,
     event_storming_get_component_links,
@@ -44,6 +51,143 @@ from features.tasks.read_models import get_task_automation_status_read_model
 from shared.models import Task
 
 router = APIRouter()
+
+
+def _parse_docker_compose_ps_payload(payload: str) -> list[dict[str, object]]:
+    text = str(payload or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict)]
+        if isinstance(parsed, dict):
+            return [parsed]
+    except Exception:
+        pass
+    rows: list[dict[str, object]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed_line = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(parsed_line, dict):
+            rows.append(parsed_line)
+    return rows
+
+
+def _load_docker_compose_runtime_config(db: Session, project_id: str) -> dict[str, object]:
+    row = db.execute(
+        select(ProjectPluginConfig).where(
+            ProjectPluginConfig.project_id == project_id,
+            ProjectPluginConfig.plugin_key == "docker_compose",
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    config: dict[str, object] = {}
+    enabled = False
+    if row is not None:
+        enabled = bool(getattr(row, "enabled", False))
+        try:
+            parsed = json.loads(str(getattr(row, "config_json", "") or "").strip() or "{}")
+            if isinstance(parsed, dict):
+                config = dict(parsed)
+        except Exception:
+            config = {}
+    runtime_cfg = config.get("runtime_deploy_health")
+    runtime = dict(runtime_cfg) if isinstance(runtime_cfg, dict) else {}
+    stack = str(runtime.get("stack") or config.get("compose_project_name") or "constructos-ws-default").strip()
+    port_raw = runtime.get("port")
+    try:
+        port = int(port_raw) if port_raw is not None else None
+    except Exception:
+        port = None
+    health_path = str(runtime.get("health_path") or "/health").strip() or "/health"
+    require_http_200 = bool(runtime.get("require_http_200", True))
+    return {
+        "enabled": enabled,
+        "stack": stack,
+        "port": port,
+        "health_path": health_path,
+        "require_http_200": require_http_200,
+    }
+
+
+def _load_project_runtime_snapshot(*, db: Session, project_id: str) -> dict[str, object]:
+    runtime = _load_docker_compose_runtime_config(db, project_id)
+    stack = str(runtime.get("stack") or "").strip()
+    result: dict[str, object] = {
+        "stack": stack,
+        "port": runtime.get("port"),
+        "health_path": runtime.get("health_path"),
+        "require_http_200": bool(runtime.get("require_http_200")),
+        "enabled": bool(runtime.get("enabled")),
+        "containers": [],
+        "has_runtime": False,
+    }
+    if not stack:
+        return result
+    try:
+        proc = subprocess.run(
+            ["docker", "compose", "-p", stack, "ps", "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except FileNotFoundError:
+        result["error"] = "docker_cli_missing"
+        return result
+    except subprocess.TimeoutExpired:
+        result["error"] = "docker_compose_timeout"
+        return result
+    if proc.returncode != 0:
+        result["error"] = f"docker_compose_ps_failed:{proc.returncode}"
+        result["stderr"] = str(proc.stderr or "").strip()
+        return result
+    rows = _parse_docker_compose_ps_payload(str(proc.stdout or ""))
+    containers: list[dict[str, object]] = []
+    for item in rows:
+        publishers = item.get("Publishers")
+        normalized_publishers: list[dict[str, object]] = []
+        if isinstance(publishers, list):
+            for publisher in publishers:
+                if not isinstance(publisher, dict):
+                    continue
+                normalized_publishers.append(
+                    {
+                        "url": publisher.get("URL"),
+                        "target_port": publisher.get("TargetPort"),
+                        "published_port": publisher.get("PublishedPort"),
+                        "protocol": publisher.get("Protocol"),
+                    }
+                )
+        containers.append(
+            {
+                "name": str(item.get("Name") or "").strip(),
+                "service": str(item.get("Service") or "").strip(),
+                "state": str(item.get("State") or "").strip(),
+                "status": str(item.get("Status") or "").strip(),
+                "health": str(item.get("Health") or "").strip() or None,
+                "image": str(item.get("Image") or "").strip() or None,
+                "command": str(item.get("Command") or "").strip() or None,
+                "exit_code": item.get("ExitCode"),
+                "publishers": normalized_publishers,
+            }
+        )
+    health = run_runtime_deploy_health_check(
+        stack=stack,
+        port=runtime.get("port") if isinstance(runtime.get("port"), int) else None,
+        health_path=str(runtime.get("health_path") or "/health"),
+        require_http_200=bool(runtime.get("require_http_200")),
+    )
+    result["containers"] = containers
+    result["has_runtime"] = bool(containers)
+    result["health"] = health
+    return result
 
 
 def _project_execution_gate_snapshot(*, db: Session, user, project_id: str) -> dict[str, object]:
@@ -529,6 +673,107 @@ def project_task_dependency_graph_event_detail(
     if not bool(payload.get("found")):
         raise HTTPException(status_code=404, detail=str(payload.get("detail") or "Task flow event detail not found"))
     return payload
+
+
+@router.get("/api/projects/{project_id}/docker-compose/runtime")
+def project_docker_compose_runtime(
+    project_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    project = _load_project_with_access(db, user, project_id)
+    snapshot = _load_project_runtime_snapshot(db=db, project_id=project.id)
+    return {
+        "project_id": project.id,
+        "project_name": project.name,
+        **snapshot,
+    }
+
+
+@router.get("/api/projects/{project_id}/docker-compose/runtime/logs/stream")
+async def project_docker_compose_runtime_logs_stream(
+    project_id: str,
+    request: Request,
+    container_name: str = Query(..., min_length=1),
+    tail: int = Query(200, ge=1, le=2000),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    project = _load_project_with_access(db, user, project_id)
+    snapshot = _load_project_runtime_snapshot(db=db, project_id=project.id)
+    containers = snapshot.get("containers")
+    if not isinstance(containers, list):
+        raise HTTPException(status_code=404, detail="Runtime is not available")
+    requested_container = str(container_name or "").strip()
+    allowed = next(
+        (
+            item for item in containers
+            if isinstance(item, dict) and str(item.get("name") or "").strip() == requested_container
+        ),
+        None,
+    )
+    if allowed is None:
+        raise HTTPException(status_code=404, detail="Runtime container not found")
+
+    async def event_generator():
+        process = await asyncio.create_subprocess_exec(
+            "docker",
+            "logs",
+            "--timestamps",
+            "--tail",
+            str(int(tail)),
+            "-f",
+            requested_container,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            assert process.stdout is not None
+            while True:
+                if await request.is_disconnected():
+                    process.terminate()
+                    break
+                try:
+                    line = await asyncio.wait_for(process.stdout.readline(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield "event: ping\ndata: {}\n\n"
+                    continue
+                if not line:
+                    if process.returncode is not None:
+                        break
+                    await asyncio.sleep(0.1)
+                    continue
+                text = line.decode("utf-8", errors="replace").rstrip("\n")
+                timestamp = None
+                message = text
+                if " " in text:
+                    first, remainder = text.split(" ", 1)
+                    if "T" in first:
+                        timestamp = first
+                        message = remainder
+                payload = {
+                    "project_id": project.id,
+                    "project_name": project.name,
+                    "container_name": requested_container,
+                    "timestamp": timestamp,
+                    "message": message,
+                }
+                yield f"event: log\ndata: {json.dumps(payload)}\n\n"
+            return_code = await process.wait()
+            yield f"event: end\ndata: {json.dumps({'container_name': requested_container, 'return_code': return_code})}\n\n"
+        finally:
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=2.0)
+                except Exception:
+                    process.kill()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
 
 
 @router.post("/api/projects/{project_id}/knowledge-graph/layout")

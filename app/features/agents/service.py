@@ -5076,9 +5076,12 @@ class AgentTaskService:
             (not bool(kickoff_after_setup))
             or (bool(kickoff_after_setup) and (not kickoff_dispatched or not developer_dispatch_confirmed))
         )
+        kickoff_in_progress = bool(kickoff_after_setup) and kickoff_dispatched and not developer_dispatch_confirmed
         kickoff_hint = (
             "Kickoff was dispatched and Developer execution started as part of setup."
             if (bool(kickoff_after_setup) and kickoff_dispatched and developer_dispatch_confirmed)
+            else "Lead kickoff was dispatched and is still propagating to Developer execution."
+            if kickoff_in_progress
             else str((kickoff_result or {}).get("comment") or "").strip()
             if (bool(kickoff_after_setup) and kickoff_result is not None)
             else "Start execution only when ready by running kickoff from chat."
@@ -5086,6 +5089,8 @@ class AgentTaskService:
         kickoff_state_message = (
             "Lead-first kickoff is running and Developer execution started; QA waits for explicit Lead handoff."
             if (kickoff_dispatched and developer_dispatch_confirmed)
+            else "Lead kickoff is in progress. Developer execution has not started yet, and QA will wait for the later Lead handoff."
+            if kickoff_in_progress
             else "Lead kickoff was requested, but no Developer task started yet."
             if kickoff_dispatched
             else "Kickoff has not started yet."
@@ -5126,11 +5131,17 @@ class AgentTaskService:
                 "team_mode_ok": bool(team_verification.get("ok")) if requested_team else None,
                 "team_mode_failed_requirements": _failed_checks_with_descriptions(team_verification),
                 "delivery_ok": bool(delivery_verification.get("ok")) if requested_git else None,
-                "delivery_failed_requirements": _failed_checks_with_descriptions(delivery_verification),
+                "delivery_failed_requirements": (
+                    []
+                    if kickoff_in_progress
+                    else _failed_checks_with_descriptions(delivery_verification)
+                ),
             },
             "next_action_hint": (
                 "Setup is complete and kickoff dispatched Developer execution."
                 if (bool(kickoff_after_setup) and kickoff_dispatched and developer_dispatch_confirmed and (not blocking and workflow_ok))
+                else "Setup is complete. Kickoff is running and the first Developer handoff is still pending."
+                if kickoff_in_progress
                 else "Setup is complete, but kickoff did not start Developer execution. Review the kickoff blocker before treating execution as started."
                 if (bool(kickoff_after_setup) and kickoff_dispatched and not developer_dispatch_confirmed)
                 else "Setup is complete. Execution is not started automatically; run kickoff when you want the team to start implementation."
@@ -6987,6 +6998,7 @@ class AgentTaskService:
         instruction: str | None = None,
         source: str | None = None,
         source_task_id: str | None = None,
+        chat_session_id: str | None = None,
         execution_intent: bool | None = None,
         execution_kickoff_intent: bool | None = None,
         project_creation_intent: bool | None = None,
@@ -7026,6 +7038,7 @@ class AgentTaskService:
                 instruction=instruction,
                 source=source,
                 source_task_id=str(source_task_id or "").strip() or None,
+                chat_session_id=str(chat_session_id or "").strip() or None,
                 execution_intent=classification.get("execution_intent"),
                 execution_kickoff_intent=classification.get("execution_kickoff_intent"),
                 project_creation_intent=classification.get("project_creation_intent"),

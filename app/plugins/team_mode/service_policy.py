@@ -88,6 +88,7 @@ def enforce_done_transition(
             "compose_manifest_present",
             "lead_deploy_decision_evidence_present",
             "deploy_execution_evidence_present",
+            "runtime_deploy_health_ok",
             "qa_handoff_current_cycle_ok",
             "deploy_serves_application_root",
             "qa_has_verifiable_artifacts",
@@ -130,6 +131,7 @@ def enforce_done_transition(
             "deploy_serves_application_root",
             "qa_has_verifiable_artifacts",
             "deploy_execution_evidence_present",
+            "runtime_deploy_health_ok",
         ]
         failing = [check for check in required_checks if not bool((delivery.get("checks") or {}).get(check))]
         if failing:

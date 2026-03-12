@@ -79,6 +79,7 @@ class TaskAggregate(Aggregate):
         self.last_automation_error = None
         self.last_requested_instruction = None
         self.last_requested_source = None
+        self.last_requested_chat_session_id = None
         self.last_requested_trigger_task_id = None
         self.last_requested_from_status = None
         self.last_requested_to_status = None
@@ -148,6 +149,7 @@ class TaskAggregate(Aggregate):
         instruction: str | None = None,
         source: str | None = None,
         source_task_id: str | None = None,
+        chat_session_id: str | None = None,
         trigger_task_id: str | None = None,
         from_status: str | None = None,
         to_status: str | None = None,
@@ -165,6 +167,7 @@ class TaskAggregate(Aggregate):
         self.last_requested_instruction = instruction
         self.last_requested_source = source
         self.last_requested_source_task_id = source_task_id
+        self.last_requested_chat_session_id = chat_session_id
         self.last_requested_trigger_task_id = trigger_task_id
         self.last_requested_from_status = from_status
         self.last_requested_to_status = to_status

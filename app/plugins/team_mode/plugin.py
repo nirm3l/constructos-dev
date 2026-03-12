@@ -283,15 +283,28 @@ class TeamModePlugin:
             DEFAULT_REQUIRED_TEAM_MODE_CHECKS,
         )
         _ok, failed = evaluate_required_checks(checks, required)
-        topology_missing = [
-            item for item in failed if str(item or "").strip() in {"role_coverage_present", "required_topology_present"}
-        ]
-        if not topology_missing:
+        role_coverage_missing = "role_coverage_present" in {
+            str(item or "").strip() for item in failed
+        }
+        topology_missing = "required_topology_present" in {
+            str(item or "").strip() for item in failed
+        }
+        if not (role_coverage_missing or topology_missing):
             return None
+        if role_coverage_missing and topology_missing:
+            return (
+                "Team Mode execution cannot continue because role coverage and topology are both incomplete. "
+                "Ensure the project still has at least one Developer, Lead, and QA task assigned to Team Mode slots, "
+                "and keep Dev->Lead->QA plus blocked-work escalation encoded with task_relationships."
+            )
+        if role_coverage_missing:
+            return (
+                "Team Mode execution cannot continue because role coverage is incomplete. "
+                "Ensure the project still has at least one Developer, Lead, and QA task assigned to Team Mode slots."
+            )
         return (
-            "Team Mode topology incomplete: "
-            "missing role coverage and/or required Team Mode topology. "
-            "Add at least one Developer, Lead, and QA task, then encode Dev->Lead->QA plus blocked-work escalation using task_relationships before execution."
+            "Team Mode execution cannot continue because required topology is incomplete. "
+            "Keep Dev->Lead->QA plus blocked-work escalation encoded with task_relationships before execution."
         )
 
     def executor_is_task_scoped_context_enabled(

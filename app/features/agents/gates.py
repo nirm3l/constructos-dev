@@ -18,7 +18,7 @@ from plugins.team_mode.gates import (
     TEAM_MODE_CORE_CHECK_SET,
 )
 from plugins.team_mode.task_roles import normalize_team_agents
-from shared.delivery_evidence import derive_deploy_execution_snapshot
+from shared.delivery_evidence import derive_deploy_execution_snapshot, is_strict_deploy_success_snapshot
 from shared.project_repository import find_project_compose_manifest
 
 COMMIT_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
@@ -649,7 +649,12 @@ def evaluate_delivery_gates(
                     ),
                 )
         handoff_executed_at = str(handoff_snapshot.get("executed_at") or "").strip()
-        return bool(handoff_token and handoff_executed_at and handoff_executed_at == latest_deploy_at)
+        return bool(
+            handoff_token
+            and handoff_executed_at
+            and handoff_executed_at == latest_deploy_at
+            and is_strict_deploy_success_snapshot(handoff_snapshot)
+        )
 
     def _task_has_deploy_artifacts(task: dict[str, Any]) -> bool:
         task_id = str(task.get("id") or "").strip()
@@ -694,6 +699,13 @@ def evaluate_delivery_gates(
             if url.startswith("file:") and url.endswith(compose_manifest_suffixes):
                 has_compose = True
         return bool(has_runtime and has_compose)
+
+    def _task_strict_deploy_execution(task: dict[str, Any]) -> dict[str, Any]:
+        deploy_snapshot = derive_deploy_execution_snapshot(
+            refs=task.get("external_refs"),
+            current_snapshot=task.get("last_deploy_execution") if isinstance(task.get("last_deploy_execution"), dict) else {},
+        )
+        return deploy_snapshot if is_strict_deploy_success_snapshot(deploy_snapshot) else {}
 
     task_commit_shas: dict[str, set[str]] = {}
     for task in dev_tasks:
@@ -765,21 +777,9 @@ def evaluate_delivery_gates(
     serves_application_root_ok = bool((not runtime_required_effective) or runtime_check.get("serves_application_root"))
     latest_lead_deploy_at = max(
         (
-            str(
-                derive_deploy_execution_snapshot(
-                    refs=task.get("external_refs"),
-                    current_snapshot=task.get("last_deploy_execution") if isinstance(task.get("last_deploy_execution"), dict) else {},
-                ).get("executed_at")
-                or ""
-            ).strip()
+            str(_task_strict_deploy_execution(task).get("executed_at") or "").strip()
             for task in lead_deploy_tasks
-            if str(
-                derive_deploy_execution_snapshot(
-                    refs=task.get("external_refs"),
-                    current_snapshot=task.get("last_deploy_execution") if isinstance(task.get("last_deploy_execution"), dict) else {},
-                ).get("executed_at")
-                or ""
-            ).strip()
+            if str(_task_strict_deploy_execution(task).get("executed_at") or "").strip()
         ),
         default="",
     )
