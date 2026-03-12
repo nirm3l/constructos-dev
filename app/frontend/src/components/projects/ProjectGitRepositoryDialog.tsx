@@ -1,5 +1,6 @@
 import React from 'react'
-import * as AlertDialog from '@radix-ui/react-alert-dialog'
+import * as Dialog from '@radix-ui/react-dialog'
+import * as Tabs from '@radix-ui/react-tabs'
 import { useQuery } from '@tanstack/react-query'
 import {
   getProjectGitRepositoryBranches,
@@ -127,6 +128,7 @@ export function ProjectGitRepositoryDialog({
   const [selectedRef, setSelectedRef] = React.useState('')
   const [currentPath, setCurrentPath] = React.useState('')
   const [selectedFilePath, setSelectedFilePath] = React.useState('')
+  const [mobileTab, setMobileTab] = React.useState<'branches' | 'files' | 'preview'>('branches')
 
   const branches = React.useMemo(
     () => (Array.isArray(branchesQuery.data?.branches) ? branchesQuery.data?.branches : []),
@@ -141,6 +143,7 @@ export function ProjectGitRepositoryDialog({
     if (!open) {
       setCurrentPath('')
       setSelectedFilePath('')
+      setMobileTab('branches')
       return
     }
     const preferredRef =
@@ -196,28 +199,134 @@ export function ProjectGitRepositoryDialog({
     if (entry.kind === 'directory') {
       setCurrentPath(entry.path)
       setSelectedFilePath('')
+      setMobileTab('files')
       return
     }
     setSelectedFilePath(entry.path)
+    setMobileTab('preview')
   }
 
+  const renderBranchesPanel = () => (
+    <div className="git-repository-branches-panel">
+      <div className="meta">Branches</div>
+      {branchesQuery.isError ? (
+        <div className="notice notice-error">{toErrorMessage(branchesQuery.error, 'Unable to load branches.')}</div>
+      ) : (
+        <div className="git-repository-branch-list">
+          {branches.map((branch) => (
+            <button
+              key={branch.name}
+              type="button"
+              className={`git-repository-branch-card ${branch.name === selectedRef ? 'active' : ''}`.trim()}
+              onClick={() => {
+                setSelectedRef(branch.name)
+                setCurrentPath('')
+                setSelectedFilePath('')
+                setMobileTab('files')
+              }}
+            >
+              <strong>{branch.name}</strong>
+              <span className="meta">{branchMeta(branch) || 'No metadata available'}</span>
+              {branch.subject ? <span className="meta">{branch.subject}</span> : null}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+
+  const renderFilesPanel = () => (
+    <div className="git-repository-tree-panel">
+      <div className="meta">Files</div>
+      {treeQuery.isLoading ? (
+        <div className="meta">Loading tree...</div>
+      ) : treeQuery.isError ? (
+        <div className="notice notice-error">{toErrorMessage(treeQuery.error, 'Unable to load repository tree.')}</div>
+      ) : (
+        <div className="git-repository-tree-list">
+          {currentPath ? (
+            <button
+              type="button"
+              className="git-repository-tree-entry"
+              onClick={() => {
+                const parent = pathSegments.slice(0, -1).join('/')
+                setCurrentPath(parent)
+                setSelectedFilePath('')
+              }}
+            >
+              <span className="meta">..</span>
+            </button>
+          ) : null}
+          {entries.length === 0 ? (
+            <div className="meta">No entries in this location.</div>
+          ) : (
+            entries.map((entry) => (
+              <button
+                key={entry.path}
+                type="button"
+                className={`git-repository-tree-entry ${entry.path === selectedFilePath ? 'active' : ''}`.trim()}
+                onClick={() => openEntry(entry)}
+              >
+                <span className="git-repository-tree-entry-icon">
+                  <Icon path={entry.kind === 'directory' ? 'M3 7h5l2 2h11v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z' : 'M7 3h7l5 5v13a1 1 0 01-1 1H7a2 2 0 01-2-2V5a2 2 0 012-2z'} />
+                </span>
+                <span>{entry.name}</span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  )
+
+  const renderPreviewPanel = () => (
+    <div className="git-repository-preview-panel">
+      <div className="git-repository-preview-head">
+        <div className="meta">Preview</div>
+        {selectedFilePath ? <code>{selectedFilePath}</code> : selectedRef ? <code>{selectedRef}</code> : null}
+      </div>
+      {fileQuery.isLoading ? (
+        <div className="meta">Loading file preview...</div>
+      ) : fileQuery.isError ? (
+        <div className="notice notice-error">{toErrorMessage(fileQuery.error, 'Unable to load file preview.')}</div>
+      ) : (
+        <>
+          {fileQuery.data?.size_bytes != null ? (
+            <div className="row wrap" style={{ gap: 8, marginBottom: 8 }}>
+              <span className="badge">Size: {fileQuery.data.size_bytes} bytes</span>
+              {fileQuery.data.binary ? <span className="badge">Binary</span> : null}
+              {!fileQuery.data.previewable ? <span className="badge">Preview unavailable</span> : null}
+            </div>
+          ) : null}
+          <div className="git-repository-preview">
+            {fileQuery.data && fileQuery.data.previewable && !fileQuery.data.binary ? (
+              <MarkdownView value={buildHighlightedPreviewMarkdown(fileQuery.data)} disableMermaid />
+            ) : (
+              <pre className="git-repository-preview-fallback">{filePreviewCopy(fileQuery.data)}</pre>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  )
+
   return (
-    <AlertDialog.Root open={open} onOpenChange={onOpenChange}>
-      <AlertDialog.Portal>
-        <AlertDialog.Overlay className="codex-chat-alert-overlay" />
-        <AlertDialog.Content className="codex-chat-alert-content git-repository-dialog">
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="codex-chat-alert-overlay" />
+        <Dialog.Content className="codex-chat-alert-content git-repository-dialog">
           <div className="docker-runtime-dialog-head">
             <div>
-              <AlertDialog.Title className="codex-chat-alert-title">Repository Inspector</AlertDialog.Title>
-              <AlertDialog.Description className="codex-chat-alert-description">
+              <Dialog.Title className="codex-chat-alert-title">Repository Inspector</Dialog.Title>
+              <Dialog.Description className="codex-chat-alert-description">
                 Read-only branch, tree, and file preview for this Git Delivery project repository.
-              </AlertDialog.Description>
+              </Dialog.Description>
             </div>
-            <AlertDialog.Cancel asChild>
+            <Dialog.Close asChild>
               <button type="button" className="action-icon docker-runtime-dialog-close" aria-label="Close repository inspector">
                 <Icon path="M6 6l12 12M18 6L6 18" />
               </button>
-            </AlertDialog.Cancel>
+            </Dialog.Close>
           </div>
 
           {summaryQuery.isLoading ? (
@@ -248,19 +357,6 @@ export function ProjectGitRepositoryDialog({
               </div>
 
               <div className="git-repository-toolbar">
-                <label className="git-repository-branch-picker">
-                  <span className="meta">Branch</span>
-                  <select value={selectedRef} onChange={(event) => setSelectedRef(event.target.value)}>
-                          {branches.map((branch) => (
-                        <option key={branch.name} value={branch.name}>
-                          {branch.name}
-                        </option>
-                      ))}
-                      {selectedRef && !branches.some((branch) => branch.name === selectedRef) ? (
-                        <option value={selectedRef}>{`Detached revision (${selectedRef.slice(0, 12)})`}</option>
-                      ) : null}
-                    </select>
-                  </label>
                 <div className="git-repository-breadcrumbs">
                   <button type="button" className="status-chip" onClick={() => {
                     setCurrentPath('')
@@ -288,103 +384,31 @@ export function ProjectGitRepositoryDialog({
               </div>
 
               <div className="git-repository-layout">
-                <div className="git-repository-branches-panel">
-                  <div className="meta">Branches</div>
-                  {branchesQuery.isError ? (
-                    <div className="notice notice-error">{toErrorMessage(branchesQuery.error, 'Unable to load branches.')}</div>
-                  ) : (
-                    <div className="git-repository-branch-list">
-                    {branches.map((branch) => (
-                        <button
-                          key={branch.name}
-                          type="button"
-                          className={`git-repository-branch-card ${branch.name === selectedRef ? 'active' : ''}`.trim()}
-                          onClick={() => setSelectedRef(branch.name)}
-                        >
-                          <strong>{branch.name}</strong>
-                          <span className="meta">{branchMeta(branch) || 'No metadata available'}</span>
-                          {branch.subject ? <span className="meta">{branch.subject}</span> : null}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                <div className="git-repository-tree-panel">
-                  <div className="meta">Files</div>
-                  {treeQuery.isLoading ? (
-                    <div className="meta">Loading tree...</div>
-                  ) : treeQuery.isError ? (
-                    <div className="notice notice-error">{toErrorMessage(treeQuery.error, 'Unable to load repository tree.')}</div>
-                  ) : (
-                    <div className="git-repository-tree-list">
-                      {currentPath ? (
-                        <button
-                          type="button"
-                          className="git-repository-tree-entry"
-                          onClick={() => {
-                            const parent = pathSegments.slice(0, -1).join('/')
-                            setCurrentPath(parent)
-                            setSelectedFilePath('')
-                          }}
-                        >
-                          <span className="meta">..</span>
-                        </button>
-                      ) : null}
-                      {entries.length === 0 ? (
-                        <div className="meta">No entries in this location.</div>
-                      ) : (
-                        entries.map((entry) => (
-                          <button
-                            key={entry.path}
-                            type="button"
-                            className={`git-repository-tree-entry ${entry.path === selectedFilePath ? 'active' : ''}`.trim()}
-                            onClick={() => openEntry(entry)}
-                          >
-                            <span className="git-repository-tree-entry-icon">
-                              <Icon path={entry.kind === 'directory' ? 'M3 7h5l2 2h11v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z' : 'M7 3h7l5 5v13a1 1 0 01-1 1H7a2 2 0 01-2-2V5a2 2 0 012-2z'} />
-                            </span>
-                            <span>{entry.name}</span>
-                          </button>
-                        ))
-                      )}
-                    </div>
-                  )}
-                </div>
-
-                <div className="git-repository-preview-panel">
-                  <div className="git-repository-preview-head">
-                    <div className="meta">Preview</div>
-                    {selectedFilePath ? <code>{selectedFilePath}</code> : selectedRef ? <code>{selectedRef}</code> : null}
-                  </div>
-                  {fileQuery.isLoading ? (
-                    <div className="meta">Loading file preview...</div>
-                  ) : fileQuery.isError ? (
-                    <div className="notice notice-error">{toErrorMessage(fileQuery.error, 'Unable to load file preview.')}</div>
-                  ) : (
-                    <>
-                      {fileQuery.data?.size_bytes != null ? (
-                        <div className="row wrap" style={{ gap: 8, marginBottom: 8 }}>
-                          <span className="badge">Size: {fileQuery.data.size_bytes} bytes</span>
-                          {fileQuery.data.binary ? <span className="badge">Binary</span> : null}
-                          {!fileQuery.data.previewable ? <span className="badge">Preview unavailable</span> : null}
-                        </div>
-                      ) : null}
-                      <div className="git-repository-preview">
-                        {fileQuery.data && fileQuery.data.previewable && !fileQuery.data.binary ? (
-                          <MarkdownView value={buildHighlightedPreviewMarkdown(fileQuery.data)} disableMermaid />
-                        ) : (
-                          <pre className="git-repository-preview-fallback">{filePreviewCopy(fileQuery.data)}</pre>
-                        )}
-                      </div>
-                    </>
-                  )}
-                </div>
+                {renderBranchesPanel()}
+                {renderFilesPanel()}
+                {renderPreviewPanel()}
               </div>
+
+              <Tabs.Root className="inspector-mobile-tabs" value={mobileTab} onValueChange={(value) => setMobileTab(value as 'branches' | 'files' | 'preview')}>
+                <Tabs.List className="inspector-mobile-tab-list" aria-label="Repository inspector sections">
+                  <Tabs.Trigger className="inspector-mobile-tab-trigger" value="branches">Branches</Tabs.Trigger>
+                  <Tabs.Trigger className="inspector-mobile-tab-trigger" value="files">Files</Tabs.Trigger>
+                  <Tabs.Trigger className="inspector-mobile-tab-trigger" value="preview">Preview</Tabs.Trigger>
+                </Tabs.List>
+                <Tabs.Content className="inspector-mobile-tab-content" value="branches">
+                  {renderBranchesPanel()}
+                </Tabs.Content>
+                <Tabs.Content className="inspector-mobile-tab-content" value="files">
+                  {renderFilesPanel()}
+                </Tabs.Content>
+                <Tabs.Content className="inspector-mobile-tab-content" value="preview">
+                  {renderPreviewPanel()}
+                </Tabs.Content>
+              </Tabs.Root>
             </div>
           )}
-        </AlertDialog.Content>
-      </AlertDialog.Portal>
-    </AlertDialog.Root>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   )
 }

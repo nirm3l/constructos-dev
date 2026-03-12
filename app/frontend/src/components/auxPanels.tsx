@@ -1,6 +1,6 @@
 import React from 'react'
 import * as Accordion from '@radix-ui/react-accordion'
-import * as AlertDialog from '@radix-ui/react-alert-dialog'
+import * as Dialog from '@radix-ui/react-dialog'
 import * as Checkbox from '@radix-ui/react-checkbox'
 import * as Collapsible from '@radix-ui/react-collapsible'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
@@ -2955,18 +2955,18 @@ export function WorkspacePanel({
           </Tabs.Content>
         </Tabs.Root>
 
-        <AlertDialog.Root open={codexAuthDialogOpen} onOpenChange={setCodexAuthDialogOpen}>
-          <AlertDialog.Portal>
-            <AlertDialog.Overlay className="codex-chat-alert-overlay" />
-            <AlertDialog.Content className="codex-chat-alert-content profile-codex-auth-dialog">
-              <AlertDialog.Title className="codex-chat-alert-title">
+        <Dialog.Root open={codexAuthDialogOpen} onOpenChange={setCodexAuthDialogOpen}>
+          <Dialog.Portal>
+            <Dialog.Overlay className="codex-chat-alert-overlay" />
+            <Dialog.Content className="codex-chat-alert-content profile-codex-auth-dialog">
+              <Dialog.Title className="codex-chat-alert-title">
                 {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn ? 'Codex connection' : 'Connect Codex'}
-              </AlertDialog.Title>
-              <AlertDialog.Description className="codex-chat-alert-description">
+              </Dialog.Title>
+              <Dialog.Description className="codex-chat-alert-description">
                 {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn
                   ? 'This shared codex-bot connection is active and overrides the host-mounted auth file inside this runtime.'
                   : 'Finish the browser sign-in and the shared codex-bot connection will be stored inside this runtime only.'}
-              </AlertDialog.Description>
+              </Dialog.Description>
               <div className="profile-codex-auth-dialog-body">
                 {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn ? (
                   <div className="profile-codex-auth-dialog-block">
@@ -3031,28 +3031,28 @@ export function WorkspacePanel({
                     {deleteCodexAuthOverridePending ? 'Removing...' : 'Remove override'}
                   </button>
                 ) : null}
-                <AlertDialog.Cancel asChild>
+                <Dialog.Close asChild>
                   <button type="button" className="button-secondary">Close</button>
-                </AlertDialog.Cancel>
+                </Dialog.Close>
               </div>
-            </AlertDialog.Content>
-          </AlertDialog.Portal>
-        </AlertDialog.Root>
+            </Dialog.Content>
+          </Dialog.Portal>
+        </Dialog.Root>
 
-        <AlertDialog.Root open={claudeAuthDialogOpen} onOpenChange={setClaudeAuthDialogOpen}>
-          <AlertDialog.Portal>
-            <AlertDialog.Overlay className="codex-chat-alert-overlay" />
-            <AlertDialog.Content className="codex-chat-alert-content profile-codex-auth-dialog">
-              <AlertDialog.Title className="codex-chat-alert-title">
+        <Dialog.Root open={claudeAuthDialogOpen} onOpenChange={setClaudeAuthDialogOpen}>
+          <Dialog.Portal>
+            <Dialog.Overlay className="codex-chat-alert-overlay" />
+            <Dialog.Content className="codex-chat-alert-content profile-codex-auth-dialog">
+              <Dialog.Title className="codex-chat-alert-title">
                 {claudeAuthHasSystemOverride && !claudeAuthHasPendingSignIn
                   ? 'Claude connection'
                   : `Connect ${claudeAuthLoginMethodLabel}`}
-              </AlertDialog.Title>
-              <AlertDialog.Description className="codex-chat-alert-description">
+              </Dialog.Title>
+              <Dialog.Description className="codex-chat-alert-description">
                 {claudeAuthHasSystemOverride && !claudeAuthHasPendingSignIn
                   ? 'This shared claude-bot connection is active and overrides the host-mounted auth file inside this runtime.'
                   : `Finish the ${claudeAuthLoginMethodLabel.toLowerCase()} browser sign-in and the shared claude-bot connection will be stored inside this runtime only.`}
-              </AlertDialog.Description>
+              </Dialog.Description>
               <div className="profile-codex-auth-dialog-body">
                 {claudeAuthHasSystemOverride && !claudeAuthHasPendingSignIn ? (
                   <div className="profile-codex-auth-dialog-block">
@@ -3150,13 +3150,13 @@ export function WorkspacePanel({
                     {deleteClaudeAuthOverridePending ? 'Removing...' : 'Remove override'}
                   </button>
                 ) : null}
-                <AlertDialog.Cancel asChild>
+                <Dialog.Close asChild>
                   <button type="button" className="button-secondary">Close</button>
-                </AlertDialog.Cancel>
+                </Dialog.Close>
               </div>
-            </AlertDialog.Content>
-          </AlertDialog.Portal>
-        </AlertDialog.Root>
+            </Dialog.Content>
+          </Dialog.Portal>
+        </Dialog.Root>
       </section>
     </Tooltip.Provider>
   )

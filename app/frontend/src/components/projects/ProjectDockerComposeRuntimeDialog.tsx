@@ -1,5 +1,6 @@
 import React from 'react'
-import * as AlertDialog from '@radix-ui/react-alert-dialog'
+import * as Dialog from '@radix-ui/react-dialog'
+import * as Tabs from '@radix-ui/react-tabs'
 import { useQuery } from '@tanstack/react-query'
 import {
   getProjectDockerComposeRuntime,
@@ -131,23 +132,118 @@ export function ProjectDockerComposeRuntimeDialog({
   const healthOk = Boolean(health?.ok)
   const runtimeButtonTone = healthOk ? 'ok' : (snapshot?.has_runtime ? 'warn' : 'muted')
 
+  const renderContainerList = () => (
+    <div className="docker-runtime-container-list">
+      {containers.map((container) => {
+        const selected = container.name === selectedContainerName
+        return (
+          <button
+            key={container.name}
+            type="button"
+            className={`docker-runtime-container-card ${selected ? 'active' : ''}`.trim()}
+            onClick={() => setSelectedContainerName(container.name)}
+          >
+            <div className="docker-runtime-container-card-head">
+              <strong>{formatContainerTitle(container)}</strong>
+              <span className={`docker-runtime-state-pill tone-${String(container.state || '').toLowerCase() === 'running' ? 'ok' : 'warn'}`.trim()}>
+                {container.state || 'unknown'}
+              </span>
+            </div>
+            <div className="meta">{container.name}</div>
+            <div className="docker-runtime-container-meta">
+              {container.health ? <span className="badge">Health: {container.health}</span> : null}
+              {container.publishers[0]?.published_port ? (
+                <span className="badge">Port {container.publishers[0].published_port}</span>
+              ) : null}
+            </div>
+          </button>
+        )
+      })}
+    </div>
+  )
+
+  const renderSelectedContainerDetail = () => (
+    selectedContainer ? (
+      <div className="docker-runtime-detail-card">
+        <div className="docker-runtime-detail-head">
+          <div>
+            <div className="meta">Selected container</div>
+            <div className="docker-runtime-detail-title">{selectedContainer.name}</div>
+          </div>
+          <div className="docker-runtime-selected-actions">
+            <label className="task-flow-toggle">
+              <input
+                type="checkbox"
+                checked={autoScroll}
+                onChange={(event) => setAutoScroll(event.target.checked)}
+              />
+              <span>Auto-scroll</span>
+            </label>
+            <label className="task-flow-toggle">
+              <input
+                type="checkbox"
+                checked={showTimestamps}
+                onChange={(event) => setShowTimestamps(event.target.checked)}
+              />
+              <span>Timestamps</span>
+            </label>
+          </div>
+        </div>
+        <div className="docker-runtime-detail-grid">
+          <div><span className="meta">Service</span><strong>{selectedContainer.service || 'Unknown'}</strong></div>
+          <div><span className="meta">Image</span><strong>{selectedContainer.image || 'Unknown'}</strong></div>
+          <div><span className="meta">Status</span><strong>{selectedContainer.status || selectedContainer.state || 'Unknown'}</strong></div>
+          <div><span className="meta">Health</span><strong>{selectedContainer.health || 'n/a'}</strong></div>
+        </div>
+      </div>
+    ) : (
+      <div className="notice">Select a runtime container to inspect it.</div>
+    )
+  )
+
+  const renderLogsCard = () => (
+    <div className="docker-runtime-logs-card">
+      <div className="docker-runtime-logs-head">
+        <div>
+          <div className="meta">Live logs</div>
+          <strong>{logConnected ? 'Connected' : 'Waiting for stream'}</strong>
+        </div>
+        {logError ? <span className="badge">{logError}</span> : null}
+      </div>
+      <div ref={logsViewportRef} className="docker-runtime-log-viewport">
+        {logLines.length === 0 ? (
+          <div className="meta">No logs received yet.</div>
+        ) : (
+          logLines.map((line) => (
+            <div key={line.id} className="docker-runtime-log-line">
+              {showTimestamps && line.timestamp ? (
+                <span className="docker-runtime-log-timestamp">{line.timestamp}</span>
+              ) : null}
+              <span className="docker-runtime-log-message">{line.message}</span>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  )
+
   return (
-    <AlertDialog.Root open={open} onOpenChange={onOpenChange}>
-      <AlertDialog.Portal>
-        <AlertDialog.Overlay className="codex-chat-alert-overlay" />
-        <AlertDialog.Content className="codex-chat-alert-content docker-runtime-dialog">
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="codex-chat-alert-overlay" />
+        <Dialog.Content className="codex-chat-alert-content docker-runtime-dialog">
           <div className="docker-runtime-dialog-head">
             <div>
-              <AlertDialog.Title className="codex-chat-alert-title">Runtime Inspector</AlertDialog.Title>
-              <AlertDialog.Description className="codex-chat-alert-description">
+              <Dialog.Title className="codex-chat-alert-title">Runtime Inspector</Dialog.Title>
+              <Dialog.Description className="codex-chat-alert-description">
                 Live Docker Compose runtime state and logs for this project.
-              </AlertDialog.Description>
+              </Dialog.Description>
             </div>
-            <AlertDialog.Cancel asChild>
+            <Dialog.Close asChild>
               <button type="button" className="action-icon docker-runtime-dialog-close" aria-label="Close runtime inspector">
                 <Icon path="M6 6l12 12M18 6L6 18" />
               </button>
-            </AlertDialog.Cancel>
+            </Dialog.Close>
           </div>
 
           {runtimeQuery.isLoading ? (
@@ -193,105 +289,37 @@ export function ProjectDockerComposeRuntimeDialog({
               {!containers.length ? (
                 <div className="notice">No managed runtime containers are currently running for this project.</div>
               ) : (
-                <div className="docker-runtime-layout">
-                  <div className="docker-runtime-container-list">
-                    {containers.map((container) => {
-                      const selected = container.name === selectedContainerName
-                      return (
-                        <button
-                          key={container.name}
-                          type="button"
-                          className={`docker-runtime-container-card ${selected ? 'active' : ''}`.trim()}
-                          onClick={() => setSelectedContainerName(container.name)}
-                        >
-                          <div className="docker-runtime-container-card-head">
-                            <strong>{formatContainerTitle(container)}</strong>
-                            <span className={`docker-runtime-state-pill tone-${String(container.state || '').toLowerCase() === 'running' ? 'ok' : 'warn'}`.trim()}>
-                              {container.state || 'unknown'}
-                            </span>
-                          </div>
-                          <div className="meta">{container.name}</div>
-                          <div className="docker-runtime-container-meta">
-                            {container.health ? <span className="badge">Health: {container.health}</span> : null}
-                            {container.publishers[0]?.published_port ? (
-                              <span className="badge">Port {container.publishers[0].published_port}</span>
-                            ) : null}
-                          </div>
-                        </button>
-                      )
-                    })}
+                <>
+                  <div className="docker-runtime-layout docker-runtime-desktop-layout">
+                    {renderContainerList()}
+                    <div className="docker-runtime-detail-panel">
+                      {renderSelectedContainerDetail()}
+                      {renderLogsCard()}
+                    </div>
                   </div>
 
-                  <div className="docker-runtime-detail-panel">
-                    {selectedContainer ? (
-                      <>
-                        <div className="docker-runtime-detail-card">
-                          <div className="docker-runtime-detail-head">
-                            <div>
-                              <div className="meta">Selected container</div>
-                              <div className="docker-runtime-detail-title">{selectedContainer.name}</div>
-                            </div>
-                            <div className="docker-runtime-selected-actions">
-                              <label className="task-flow-toggle">
-                                <input
-                                  type="checkbox"
-                                  checked={autoScroll}
-                                  onChange={(event) => setAutoScroll(event.target.checked)}
-                                />
-                                <span>Auto-scroll</span>
-                              </label>
-                              <label className="task-flow-toggle">
-                                <input
-                                  type="checkbox"
-                                  checked={showTimestamps}
-                                  onChange={(event) => setShowTimestamps(event.target.checked)}
-                                />
-                                <span>Timestamps</span>
-                              </label>
-                            </div>
-                          </div>
-                          <div className="docker-runtime-detail-grid">
-                            <div><span className="meta">Service</span><strong>{selectedContainer.service || 'Unknown'}</strong></div>
-                            <div><span className="meta">Image</span><strong>{selectedContainer.image || 'Unknown'}</strong></div>
-                            <div><span className="meta">Status</span><strong>{selectedContainer.status || selectedContainer.state || 'Unknown'}</strong></div>
-                            <div><span className="meta">Health</span><strong>{selectedContainer.health || 'n/a'}</strong></div>
-                          </div>
-                        </div>
-
-                        <div className="docker-runtime-logs-card">
-                          <div className="docker-runtime-logs-head">
-                            <div>
-                              <div className="meta">Live logs</div>
-                              <strong>{logConnected ? 'Connected' : 'Waiting for stream'}</strong>
-                            </div>
-                            {logError ? <span className="badge">{logError}</span> : null}
-                          </div>
-                          <div ref={logsViewportRef} className="docker-runtime-log-viewport">
-                            {logLines.length === 0 ? (
-                              <div className="meta">No logs received yet.</div>
-                            ) : (
-                              logLines.map((line) => (
-                                <div key={line.id} className="docker-runtime-log-line">
-                                  {showTimestamps && line.timestamp ? (
-                                    <span className="docker-runtime-log-timestamp">{line.timestamp}</span>
-                                  ) : null}
-                                  <span className="docker-runtime-log-message">{line.message}</span>
-                                </div>
-                              ))
-                            )}
-                          </div>
-                        </div>
-                      </>
-                    ) : (
-                      <div className="meta">Select a runtime container to inspect it.</div>
-                    )}
-                  </div>
-                </div>
+                  <Tabs.Root className="inspector-mobile-tabs" defaultValue="services">
+                    <Tabs.List className="inspector-mobile-tab-list" aria-label="Runtime inspector sections">
+                      <Tabs.Trigger className="inspector-mobile-tab-trigger" value="services">Services</Tabs.Trigger>
+                      <Tabs.Trigger className="inspector-mobile-tab-trigger" value="details">Details</Tabs.Trigger>
+                      <Tabs.Trigger className="inspector-mobile-tab-trigger" value="logs">Logs</Tabs.Trigger>
+                    </Tabs.List>
+                    <Tabs.Content className="inspector-mobile-tab-content" value="services">
+                      {renderContainerList()}
+                    </Tabs.Content>
+                    <Tabs.Content className="inspector-mobile-tab-content" value="details">
+                      {renderSelectedContainerDetail()}
+                    </Tabs.Content>
+                    <Tabs.Content className="inspector-mobile-tab-content" value="logs">
+                      {renderLogsCard()}
+                    </Tabs.Content>
+                  </Tabs.Root>
+                </>
               )}
             </div>
           )}
-        </AlertDialog.Content>
-      </AlertDialog.Portal>
-    </AlertDialog.Root>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   )
 }

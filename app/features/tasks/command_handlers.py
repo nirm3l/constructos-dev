@@ -23,6 +23,7 @@ from plugins.team_mode.task_roles import (
     normalize_team_agents,
 )
 from plugins.team_mode.state_machine import evaluate_team_mode_transition
+from plugins.team_mode.gates import evaluate_team_mode_gates
 from shared.core import (
     AggregateEventRepository,
     BulkAction,
@@ -358,6 +359,86 @@ def _team_mode_project_is_unstarted(
         if isinstance(refs, list) and any(isinstance(item, dict) and str(item.get("url") or "").strip() for item in refs):
             return False
     return True
+
+
+def _verify_team_mode_project_topology(
+    db: Session,
+    *,
+    workspace_id: str,
+    project_id: str,
+) -> dict[str, object] | None:
+    plugin_row = db.execute(
+        select(ProjectPluginConfig.config_json).where(
+            ProjectPluginConfig.workspace_id == str(workspace_id),
+            ProjectPluginConfig.project_id == str(project_id),
+            ProjectPluginConfig.plugin_key == "team_mode",
+            ProjectPluginConfig.enabled == True,  # noqa: E712
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
+        )
+    ).first()
+    if plugin_row is None:
+        return None
+
+    config_obj: dict[str, object] = {}
+    try:
+        parsed_cfg = json.loads(str(plugin_row[0] or "").strip() or "{}")
+        if isinstance(parsed_cfg, dict):
+            config_obj = parsed_cfg
+    except Exception:
+        config_obj = {}
+
+    member_role_by_user_id = {
+        str(user_id): str(role or "").strip()
+        for user_id, role in db.execute(
+            select(ProjectMember.user_id, ProjectMember.role).where(
+                ProjectMember.project_id == str(project_id),
+            )
+        ).all()
+    }
+    task_rows = db.execute(
+        select(
+            Task.id,
+            Task.assignee_id,
+            Task.assigned_agent_code,
+            Task.labels,
+            Task.status,
+            Task.execution_triggers,
+            Task.task_relationships,
+            Task.external_refs,
+        ).where(
+            Task.project_id == str(project_id),
+            Task.is_deleted == False,  # noqa: E712
+            Task.archived == False,  # noqa: E712
+        )
+    ).all()
+    tasks = [
+        {
+            "id": str(task_id or "").strip(),
+            "assignee_id": str(assignee_id or "").strip() or None,
+            "assigned_agent_code": str(assigned_agent_code or "").strip() or None,
+            "labels": labels,
+            "status": str(status or "").strip(),
+            "execution_triggers": execution_triggers,
+            "task_relationships": task_relationships,
+            "external_refs": external_refs,
+        }
+        for task_id, assignee_id, assigned_agent_code, labels, status, execution_triggers, task_relationships, external_refs in task_rows
+    ]
+    project_row = db.get(Project, str(project_id))
+    return evaluate_team_mode_gates(
+        project_id=str(project_id),
+        workspace_id=str(workspace_id),
+        event_storming_enabled=bool(getattr(project_row, "event_storming_enabled", False)),
+        expected_event_storming_enabled=None,
+        plugin_policy=config_obj,
+        plugin_policy_source="project_plugin_config",
+        tasks=tasks,
+        member_role_by_user_id=member_role_by_user_id,
+        notes_by_task={},
+        comments_by_task={},
+        extract_deploy_ports=lambda _value: set(),
+        has_deploy_stack_marker=lambda _value: False,
+    )
 
 
 def _normalize_attachment_refs(values: list[dict] | None) -> list[dict]:
@@ -2156,6 +2237,21 @@ class RequestAutomationRunHandler:
                             "queued with kickoff instruction."
                         ),
                     }
+                topology_verification = _verify_team_mode_project_topology(
+                    self.ctx.db,
+                    workspace_id=str(workspace_id),
+                    project_id=str(project_id),
+                )
+                if topology_verification is not None and not bool(
+                    (topology_verification.get("checks") or {}).get("required_topology_present")
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Team Mode execution cannot continue because required topology is incomplete. "
+                            "Keep Dev->Lead->QA plus blocked-work escalation encoded with task_relationships before execution."
+                        ),
+                    )
                 expected_status_by_role = {
                     "Developer": "Dev",
                     "Lead": "Lead",

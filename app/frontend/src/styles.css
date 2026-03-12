@@ -13184,6 +13184,7 @@ textarea {
   display: grid;
   gap: 12px;
   min-height: 0;
+  overflow: hidden;
 }
 
 .docker-runtime-summary-grid {
@@ -13225,6 +13226,10 @@ textarea {
   grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
   gap: 12px;
   min-height: 0;
+}
+
+.docker-runtime-desktop-layout {
+  display: grid;
 }
 
 .docker-runtime-container-list {
@@ -13392,6 +13397,7 @@ textarea {
   display: grid;
   gap: 12px;
   min-height: 0;
+  overflow: hidden;
 }
 
 .git-repository-toolbar {
@@ -13461,6 +13467,16 @@ textarea {
   background: color-mix(in srgb, var(--surface), var(--surface-alt) 18%);
   text-align: left;
   cursor: pointer;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.git-repository-branch-card > strong,
+.git-repository-branch-card > .meta,
+.git-repository-tree-entry > span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .git-repository-branch-card.active,
@@ -13519,6 +13535,49 @@ textarea {
   word-break: break-word;
 }
 
+.inspector-mobile-tabs {
+  display: none;
+  min-height: 0;
+}
+
+.inspector-mobile-tab-list {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+}
+
+.inspector-mobile-tab-list::-webkit-scrollbar {
+  display: none;
+}
+
+.inspector-mobile-tab-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--line), transparent 10%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 18%);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.inspector-mobile-tab-trigger[data-state='active'] {
+  border-color: color-mix(in srgb, var(--brand-strong), var(--brand) 32%);
+  background: color-mix(in srgb, var(--brand), var(--surface) 90%);
+  color: var(--text);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand), transparent 50%);
+}
+
+.inspector-mobile-tab-content {
+  min-height: 0;
+}
+
 @media (max-width: 980px) {
   .docker-runtime-summary-grid,
   .docker-runtime-layout,
@@ -13560,13 +13619,68 @@ textarea {
 }
 
 @media (max-width: 640px) and (orientation: portrait) {
-  .git-repository-dialog {
+  .docker-runtime-dialog {
     width: calc(100vw - 12px);
-    max-height: 96vh;
+    max-width: calc(100vw - 12px);
+    max-height: calc(100vh - 12px);
   }
 
+  .docker-runtime-dialog-body,
   .git-repository-dialog-body {
     gap: 10px;
+    overflow-y: auto;
+    padding-right: 2px;
+  }
+
+  .docker-runtime-desktop-layout,
+  .git-repository-layout {
+    display: none;
+  }
+
+  .inspector-mobile-tabs {
+    display: grid;
+    gap: 10px;
+  }
+
+  .inspector-mobile-tab-content {
+    display: grid;
+    gap: 8px;
+  }
+
+  .docker-runtime-container-list,
+  .git-repository-branch-list,
+  .git-repository-tree-list {
+    max-height: none;
+    overflow: visible;
+    padding-right: 0;
+  }
+
+  .docker-runtime-detail-panel {
+    grid-template-rows: 1fr;
+  }
+
+  .docker-runtime-detail-card,
+  .docker-runtime-logs-card {
+    padding: 12px;
+  }
+
+  .docker-runtime-logs-card {
+    min-height: 300px;
+  }
+
+  .docker-runtime-log-viewport {
+    max-height: 42vh;
+    padding: 10px 12px;
+  }
+
+  .docker-runtime-log-line {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .git-repository-dialog {
+    width: calc(100vw - 12px);
+    max-height: calc(100vh - 12px);
   }
 
   .docker-runtime-summary-grid {
@@ -13596,11 +13710,30 @@ textarea {
     padding: 9px 10px;
   }
 
+  .git-repository-branch-card {
+    gap: 3px;
+  }
+
+  .git-repository-branch-card > strong {
+    font-size: 13px;
+    line-height: 1.3;
+  }
+
+  .git-repository-branch-card > .meta {
+    font-size: 11px;
+    line-height: 1.35;
+  }
+
   .git-repository-preview {
     min-height: 220px;
-    max-height: 34vh;
+    max-height: 48vh;
     padding: 10px 12px;
     font-size: 11px;
+  }
+
+  .git-repository-preview-head code {
+    max-width: 100%;
+    overflow-wrap: anywhere;
   }
 }
 

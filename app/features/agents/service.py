@@ -4343,6 +4343,186 @@ class AgentTaskService:
             )
 
     @staticmethod
+    def _select_primary_team_mode_lead_task(tasks: list[dict[str, Any]]) -> dict[str, Any] | None:
+        lead_tasks = [task for task in tasks if derive_task_role(task_like=task, allow_status_fallback=True) == "Lead"]
+        if not lead_tasks:
+            return None
+
+        def _has_schedule_trigger(task: dict[str, Any]) -> bool:
+            for trigger in (task.get("execution_triggers") or []):
+                if not isinstance(trigger, dict):
+                    continue
+                if str(trigger.get("kind") or "").strip() == "schedule":
+                    return True
+            return False
+
+        for task in lead_tasks:
+            if not _has_schedule_trigger(task):
+                return task
+        return lead_tasks[0]
+
+    def _maybe_backfill_default_team_mode_topology(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        specification_id: str | None,
+        auth_token: str | None,
+        command_id: str | None,
+    ) -> None:
+        specification_scope = str(specification_id or "").strip()
+        if not specification_scope:
+            return
+        with SessionLocal() as db:
+            if not self._project_has_team_mode_enabled(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            ):
+                return
+
+        items = list(
+            (
+                self.list_tasks(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    specification_id=specification_scope,
+                    archived=False,
+                    limit=50,
+                    offset=0,
+                    auth_token=auth_token,
+                ).get("items")
+                or []
+            )
+        )
+        if len(items) < 4:
+            return
+
+        relationships_by_task_id = {
+            str(item.get("id") or "").strip(): normalize_task_relationships(item.get("task_relationships"))
+            for item in items
+        }
+        if any(not task_id for task_id in relationships_by_task_id):
+            return
+        if any(relationships_by_task_id.values()):
+            return
+
+        developer_tasks = [item for item in items if derive_task_role(task_like=item, allow_status_fallback=True) == "Developer"]
+        qa_tasks = [item for item in items if derive_task_role(task_like=item, allow_status_fallback=True) == "QA"]
+        lead_tasks = [item for item in items if derive_task_role(task_like=item, allow_status_fallback=True) == "Lead"]
+        if not developer_tasks or len(qa_tasks) != 1 or not lead_tasks:
+            return
+
+        primary_lead_task = self._select_primary_team_mode_lead_task(items)
+        if primary_lead_task is None:
+            return
+
+        primary_lead_task_id = str(primary_lead_task.get("id") or "").strip()
+        qa_task_id = str(qa_tasks[0].get("id") or "").strip()
+        developer_task_ids = [str(item.get("id") or "").strip() for item in developer_tasks if str(item.get("id") or "").strip()]
+        if not primary_lead_task_id or not qa_task_id or not developer_task_ids:
+            return
+
+        def _command_id_with_suffix(base: str | None, suffix: str) -> str | None:
+            normalized = str(base or "").strip()
+            if not normalized:
+                return None
+            return f"{normalized}:{suffix}"[:64]
+
+        for developer_task_id in developer_task_ids:
+            self.update_task(
+                task_id=developer_task_id,
+                patch={
+                    "task_relationships": [
+                        {
+                            "kind": "delivers_to",
+                            "task_ids": [primary_lead_task_id],
+                            "match_mode": "all",
+                            "statuses": ["Lead"],
+                        }
+                    ],
+                },
+                auth_token=auth_token,
+                command_id=_command_id_with_suffix(command_id, f"tm-topology-dev-{developer_task_id[:8]}"),
+            )
+
+        self.update_task(
+            task_id=primary_lead_task_id,
+            patch={
+                "task_relationships": [
+                    {
+                        "kind": "depends_on",
+                        "task_ids": developer_task_ids,
+                        "match_mode": "all",
+                        "statuses": ["Lead"],
+                    },
+                    {
+                        "kind": "depends_on",
+                        "task_ids": developer_task_ids + [qa_task_id],
+                        "match_mode": "any",
+                        "statuses": ["Blocked"],
+                    },
+                ],
+            },
+            auth_token=auth_token,
+            command_id=_command_id_with_suffix(command_id, f"tm-topology-lead-{primary_lead_task_id[:8]}"),
+        )
+        self.update_task(
+            task_id=qa_task_id,
+            patch={
+                "task_relationships": [
+                    {
+                        "kind": "hands_off_to",
+                        "task_ids": [primary_lead_task_id],
+                        "match_mode": "all",
+                        "statuses": ["QA"],
+                    },
+                    {
+                        "kind": "escalates_to",
+                        "task_ids": [primary_lead_task_id],
+                        "match_mode": "any",
+                        "statuses": ["Lead", "Blocked"],
+                    },
+                ],
+            },
+            auth_token=auth_token,
+            command_id=_command_id_with_suffix(command_id, f"tm-topology-qa-{qa_task_id[:8]}"),
+        )
+
+        for lead_task in lead_tasks:
+            lead_task_id = str(lead_task.get("id") or "").strip()
+            if not lead_task_id or lead_task_id == primary_lead_task_id:
+                continue
+            execution_triggers = self._normalize_execution_triggers_input(lead_task.get("execution_triggers")) or []
+            normalized_execution_triggers: list[dict[str, Any]] = []
+            changed = False
+            for trigger in execution_triggers:
+                if not isinstance(trigger, dict):
+                    continue
+                trigger_payload = dict(trigger)
+                if str(trigger_payload.get("kind") or "").strip() == "schedule":
+                    run_on_statuses = [
+                        str(item or "").strip()
+                        for item in (trigger_payload.get("run_on_statuses") or [])
+                        if str(item or "").strip()
+                    ]
+                    if run_on_statuses != ["Lead"]:
+                        trigger_payload["run_on_statuses"] = ["Lead"]
+                        changed = True
+                normalized_execution_triggers.append(trigger_payload)
+            if not changed:
+                continue
+            self.update_task(
+                task_id=lead_task_id,
+                patch={
+                    "instruction": str(lead_task.get("instruction") or "").strip() or None,
+                    "execution_triggers": normalized_execution_triggers,
+                },
+                auth_token=auth_token,
+                command_id=_command_id_with_suffix(command_id, f"tm-schedule-{lead_task_id[:8]}"),
+            )
+
+    @staticmethod
     def _slugify_project_name(value: str, *, fallback: str) -> str:
         normalized = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
         return normalized or fallback
@@ -5703,6 +5883,13 @@ class AgentTaskService:
             created = TaskApplicationService(db, user, command_id=effective_command_id).create_task(payload)
 
         self._maybe_backfill_exact_three_task_team_mode_topology(
+            workspace_id=resolved_workspace_id,
+            project_id=resolved_project_id,
+            specification_id=specification_id,
+            auth_token=auth_token,
+            command_id=effective_command_id,
+        )
+        self._maybe_backfill_default_team_mode_topology(
             workspace_id=resolved_workspace_id,
             project_id=resolved_project_id,
             specification_id=specification_id,

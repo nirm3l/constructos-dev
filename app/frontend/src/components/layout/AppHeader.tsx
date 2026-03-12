@@ -1,5 +1,5 @@
 import React from 'react'
-import * as AlertDialog from '@radix-ui/react-alert-dialog'
+import * as Dialog from '@radix-ui/react-dialog'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Popover from '@radix-ui/react-popover'
 import * as Select from '@radix-ui/react-select'
@@ -495,18 +495,18 @@ export function AppHeader({
             </div>
           </div>
         </div>
-        <AlertDialog.Root open={notificationPreviewOpen} onOpenChange={setNotificationPreviewOpen}>
-          <AlertDialog.Portal>
-            <AlertDialog.Overlay className="codex-chat-alert-overlay" />
-            <AlertDialog.Content className="codex-chat-alert-content docker-runtime-dialog notification-preview-dialog">
+        <Dialog.Root open={notificationPreviewOpen} onOpenChange={setNotificationPreviewOpen}>
+          <Dialog.Portal>
+            <Dialog.Overlay className="codex-chat-alert-overlay" />
+            <Dialog.Content className="codex-chat-alert-content docker-runtime-dialog notification-preview-dialog">
               <div className="notification-markdown-header">
                 <div>
-                  <AlertDialog.Title className="codex-chat-alert-title notification-markdown-title">
+                  <Dialog.Title className="codex-chat-alert-title notification-markdown-title">
                     {notificationPreviewTitle}
-                  </AlertDialog.Title>
-                  <AlertDialog.Description className="codex-chat-alert-description">
+                  </Dialog.Title>
+                  <Dialog.Description className="codex-chat-alert-description">
                     Notification details and linked actions.
-                  </AlertDialog.Description>
+                  </Dialog.Description>
                 </div>
                 {notificationPreviewAction ? (
                   <button
@@ -519,7 +519,7 @@ export function AppHeader({
                     {notificationPreviewActionLabel || (notificationPreviewAction === 'auto_update_app_images' ? 'Update app' : 'Run action')}
                   </button>
                 ) : null}
-                <AlertDialog.Cancel asChild>
+                <Dialog.Close asChild>
                   <button
                     type="button"
                     className="action-icon docker-runtime-dialog-close notification-preview-close"
@@ -528,14 +528,14 @@ export function AppHeader({
                   >
                     <Icon path="M6 6l12 12M18 6L6 18" />
                   </button>
-                </AlertDialog.Cancel>
+                </Dialog.Close>
               </div>
               <div className="md-editor-content notification-markdown-content notification-preview-body">
                 <MarkdownView value={notificationPreviewMarkdown} />
               </div>
-            </AlertDialog.Content>
-          </AlertDialog.Portal>
-        </AlertDialog.Root>
+            </Dialog.Content>
+          </Dialog.Portal>
+        </Dialog.Root>
         <div className="header-lower">
           <div className="top-search-wrap" role="search">
             <Icon path="M20 20l-3.5-3.5M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14z" />

@@ -41,7 +41,6 @@ from plugins.team_mode.task_roles import (
 from plugins.team_mode.state_machine import evaluate_team_mode_transition
 from plugins.team_mode.workflow_orchestrator import (
     TEAM_MODE_WORKFLOW_ROLES,
-    plan_next_runnable_tasks,
     plan_team_mode_dispatch,
 )
 from .executor import AutomationOutcome, build_automation_usage_metadata, execute_task_automation_stream
@@ -1908,8 +1907,14 @@ def _finalize_developer_handoff_commit_if_safe(
     dirty_files = _derive_files_changed_from_git_evidence(git_evidence)
     if not dirty_files:
         return git_evidence, None
-    if require_nontrivial_dev_changes and not any(_is_nontrivial_dev_path(item) for item in dirty_files):
-        return git_evidence, None
+    has_nontrivial_dirty_changes = any(_is_nontrivial_dev_path(item) for item in dirty_files)
+    if require_nontrivial_dev_changes and not has_nontrivial_dirty_changes:
+        # Allow a final checkpoint commit for trivial leftover files only when
+        # the task branch already contains a real Developer handoff ahead of main.
+        # This keeps docs-only branches from being promoted as Dev completion,
+        # while preventing noisy reruns caused by minor uncommitted residue such as README edits.
+        if not bool(committed_handoff.get("branch_differs_from_main")):
+            return git_evidence, None
 
     commit_sha = _commit_repo_changes_if_any(
         cwd=task_workdir,
@@ -3460,6 +3465,94 @@ def _is_blocked_outcome(*, summary: str | None, comment: str | None) -> bool:
     return summary_first == _AUTOMATION_BLOCKED_MARKER or comment_first == _AUTOMATION_BLOCKED_MARKER
 
 
+def _team_mode_progress_comment_fingerprint(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+    task_id: str,
+    state: dict[str, object],
+    assignee_role: str | None,
+) -> str | None:
+    normalized_role = str(assignee_role or "").strip()
+    normalized_project_id = str(project_id or "").strip()
+    if normalized_role not in TEAM_MODE_WORKFLOW_ROLES:
+        return None
+    if not workspace_id or not normalized_project_id or not task_id:
+        return None
+
+    gate_key = _current_nonblocking_gate_key(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        assignee_role=normalized_role,
+        task_status=str(state.get("status") or "").strip(),
+        task_state=state,
+    ) or str(state.get("team_mode_blocking_gate") or "").strip()
+
+    related_task_ids: set[str] = set()
+    for relationship in normalize_task_relationships(state.get("task_relationships")):
+        for related_task_id in relationship.get("task_ids") or []:
+            normalized_related_id = str(related_task_id or "").strip()
+            if normalized_related_id:
+                related_task_ids.add(normalized_related_id)
+
+    related_snapshots: list[dict[str, object]] = []
+    for related_task_id in sorted(related_task_ids):
+        related_state, _ = rebuild_state(db, "Task", related_task_id)
+        related_snapshots.append(
+            {
+                "id": related_task_id,
+                "status": str(related_state.get("status") or "").strip(),
+                "automation_state": str(related_state.get("automation_state") or "idle").strip().lower(),
+                "blocking_gate": str(related_state.get("team_mode_blocking_gate") or "").strip() or None,
+                "last_requested_source": str(related_state.get("last_requested_source") or "").strip() or None,
+                "last_lead_handoff_token": str(related_state.get("last_lead_handoff_token") or "").strip() or None,
+            }
+        )
+
+    fingerprint_payload = {
+        "task_id": task_id,
+        "role": normalized_role,
+        "status": str(state.get("status") or "").strip(),
+        "automation_state": str(state.get("automation_state") or "idle").strip().lower(),
+        "phase": str(state.get("team_mode_phase") or "").strip() or None,
+        "blocking_gate": gate_key or None,
+        "last_requested_source": str(state.get("last_requested_source") or "").strip() or None,
+        "last_requested_source_task_id": str(state.get("last_requested_source_task_id") or "").strip() or None,
+        "last_lead_handoff_token": str(state.get("last_lead_handoff_token") or "").strip() or None,
+        "task_relationships": normalize_task_relationships(state.get("task_relationships")),
+        "related_tasks": related_snapshots,
+    }
+    payload_text = json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(payload_text.encode("utf-8")).hexdigest()
+
+
+def _should_persist_team_mode_progress_comment(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+    task_id: str,
+    state: dict[str, object],
+    assignee_role: str | None,
+) -> tuple[bool, str | None]:
+    fingerprint = _team_mode_progress_comment_fingerprint(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        task_id=task_id,
+        state=state,
+        assignee_role=assignee_role,
+    )
+    if not fingerprint:
+        return True, None
+    last_fingerprint = str(state.get("last_progress_comment_fingerprint") or "").strip()
+    if last_fingerprint and last_fingerprint == fingerprint:
+        return False, fingerprint
+    return True, fingerprint
+
+
 def _project_completion_snapshot(*, db, workspace_id: str, project_id: str | None) -> dict[str, object]:
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
@@ -4334,6 +4427,18 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 },
             )
 
+        persist_comment = bool(comment)
+        progress_comment_fingerprint: str | None = None
+        if persist_comment and team_mode_enabled:
+            persist_comment, progress_comment_fingerprint = _should_persist_team_mode_progress_comment(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                task_id=run.task_id,
+                state=state,
+                assignee_role=assignee_role,
+            )
+
         if AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS:
             if action == "complete" and state.get("status") != "Done":
                 append_event(
@@ -4349,13 +4454,30 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                         "task_id": run.task_id,
                     },
                 )
-            if comment:
+            if persist_comment and comment:
                 append_event(
                     db,
                     aggregate_type="Task",
                     aggregate_id=run.task_id,
                     event_type=EVENT_COMMENT_ADDED,
                     payload={"task_id": run.task_id, "user_id": actor_user_id, "body": comment},
+                    metadata={
+                        "actor_id": actor_user_id,
+                        "workspace_id": workspace_id,
+                        "project_id": project_id,
+                        "task_id": run.task_id,
+                    },
+                )
+            if progress_comment_fingerprint:
+                append_event(
+                    db,
+                    aggregate_type="Task",
+                    aggregate_id=run.task_id,
+                    event_type=TASK_EVENT_UPDATED,
+                    payload={
+                        "last_progress_comment_fingerprint": progress_comment_fingerprint,
+                        "last_progress_comment_at": completed_at,
+                    },
                     metadata={
                         "actor_id": actor_user_id,
                         "workspace_id": workspace_id,
@@ -5618,48 +5740,22 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
                 workspace_id=workspace_id,
                 project_id=project_id,
             )
-
-            member_role_by_user_id = {
-                str(user_id): str(role or "").strip()
-                for user_id, role in db.execute(
-                    select(ProjectMember.user_id, ProjectMember.role).where(
-                        ProjectMember.workspace_id == workspace_id,
-                        ProjectMember.project_id == project_id,
-                    )
-                ).all()
-            }
-            rows = db.execute(
-                select(Task)
-                .where(
-                    Task.workspace_id == workspace_id,
-                    Task.project_id == project_id,
-                    Task.is_deleted == False,  # noqa: E712
-                    Task.archived == False,  # noqa: E712
-                    Task.status != "Done",
-                )
-                .order_by(Task.created_at.asc())
-            ).scalars().all()
-            if not rows:
-                continue
-
-            runnable_by_id: dict[str, tuple[Task, dict[str, object], str, str]] = {}
-            orchestrator_rows: list[dict[str, str]] = []
-
-            for task in rows:
-                state, _ = rebuild_state(db, "Task", str(task.id))
-                normalized_role = derive_task_role(
-                    task_like={
-                        "assignee_id": str(task.assignee_id or "").strip(),
-                        "assigned_agent_code": str(task.assigned_agent_code or "").strip(),
-                        "labels": state.get("labels", task.labels),
-                        "status": str(state.get("status") or task.status or "").strip(),
-                    },
-                    member_role_by_user_id=member_role_by_user_id,
-                )
-                normalized_status = str(state.get("status") or task.status or "").strip()
-                if normalized_role not in TEAM_MODE_WORKFLOW_ROLES:
+            parallel_limit = _project_automation_parallel_limit(db=db, project_id=project_id)
+            dispatch_candidates, candidate_map = _build_team_mode_dispatch_candidates(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            eligible_candidates: list[dict[str, object]] = []
+            for candidate in dispatch_candidates:
+                task_id = str(candidate.get("id") or "").strip()
+                normalized_role = str(candidate.get("role") or "").strip()
+                if normalized_role not in {"Developer", "QA"}:
                     continue
-
+                candidate_bundle = candidate_map.get(task_id)
+                if candidate_bundle is None:
+                    continue
+                _task, state, _target_slot = candidate_bundle
                 if not _eligible_for_team_mode_auto_queue(
                     state,
                     db=db,
@@ -5669,42 +5765,24 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
                     now_utc=now_utc,
                 ):
                     continue
-                instruction = (
-                    str(state.get("instruction") or "").strip()
-                    or str(state.get("scheduled_instruction") or "").strip()
-                )
-                if not instruction:
-                    continue
-                task_id = str(task.id or "").strip()
-                if not task_id:
-                    continue
-                runnable_by_id[task_id] = (task, state, normalized_role, normalized_status)
-                orchestrator_rows.append(
-                    {
-                        "id": task_id,
-                        "role": normalized_role,
-                        "status": normalized_status,
-                        "instruction": str(state.get("instruction") or "").strip(),
-                        "scheduled_instruction": str(state.get("scheduled_instruction") or "").strip(),
-                    }
-                )
+                eligible_candidates.append(candidate)
 
-            plan = plan_next_runnable_tasks(orchestrator_rows)
-            to_queue: list[tuple[Task, dict[str, object], str, str]] = [
-                runnable_by_id[task_id]
-                for task_id in list(plan.get("queue_task_ids") or [])
-                if task_id in runnable_by_id
-            ]
+            plan = plan_team_mode_dispatch(
+                eligible_candidates,
+                max_parallel_dispatch=parallel_limit,
+            )
 
             from features.tasks.application import TaskApplicationService
             from shared.core import TaskAutomationRun
 
-            for task, state, normalized_role, _normalized_status in to_queue:
+            for task_id in list(plan.get("queue_task_ids") or []):
                 if queued >= limit:
                     break
-                task_id = str(task.id or "").strip()
-                if not task_id:
+                candidate_bundle = candidate_map.get(str(task_id or "").strip())
+                if candidate_bundle is None:
                     continue
+                task, state, target_slot = candidate_bundle
+                task_id = str(task.id or "").strip()
                 actor_user_id = _resolve_task_actor_user_id(db=db, task_id=task_id, state=state)
                 actor = db.get(UserModel, actor_user_id)
                 if actor is None or not bool(getattr(actor, "is_active", False)):
@@ -5716,6 +5794,15 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
                 if not instruction:
                     continue
                 command_id = f"tm-orch-{project_id[:8]}-{task_id[:8]}-{int(now_utc.timestamp())}"
+                normalized_role = _resolve_assignee_project_role(
+                    db=db,
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    assignee_id=str(state.get("assignee_id") or getattr(task, "assignee_id", "") or ""),
+                    assigned_agent_code=str(state.get("assigned_agent_code") or getattr(task, "assigned_agent_code", "") or ""),
+                    task_labels=state.get("labels") if state.get("labels") is not None else getattr(task, "labels", None),
+                    task_status=str(state.get("status") or getattr(task, "status", "") or ""),
+                )
                 inferred_source_task_id = _infer_team_mode_dispatch_source_task_id(
                     db=db,
                     workspace_id=workspace_id,
@@ -5744,6 +5831,30 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
                     )
                 except Exception:
                     continue
+                append_event(
+                    db,
+                    aggregate_type="Task",
+                    aggregate_id=task_id,
+                    event_type=TASK_EVENT_UPDATED,
+                    payload={
+                        "last_dispatch_decision": {
+                            "source": "runner_orchestrator",
+                            "mode": str(plan.get("mode") or "").strip() or None,
+                            "role": normalized_role,
+                            "priority": str(getattr(task, "priority", "") or "").strip() or None,
+                            "slot": target_slot or None,
+                            "selected_at": to_iso_utc(now_utc),
+                            "available_slots": int((plan.get("counts") or {}).get("available_slots") or 0),
+                            "source_task_id": str(inferred_source_task_id or "").strip() or None,
+                        },
+                    },
+                    metadata={
+                        "actor_id": AGENT_SYSTEM_USER_ID,
+                        "workspace_id": workspace_id,
+                        "project_id": project_id,
+                        "task_id": task_id,
+                    },
+                )
                 queued += 1
             db.commit()
     return queued

@@ -1,5 +1,5 @@
 import React from 'react'
-import * as AlertDialog from '@radix-ui/react-alert-dialog'
+import * as Dialog from '@radix-ui/react-dialog'
 import * as Accordion from '@radix-ui/react-accordion'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -1269,24 +1269,24 @@ export function ProjectTaskDependencyGraphPanel({
         </aside>
       </div>
 
-      <AlertDialog.Root open={Boolean(selectedRuntimeEvent)} onOpenChange={(open) => { if (!open) setSelectedRuntimeEvent(null) }}>
-        <AlertDialog.Portal>
-          <AlertDialog.Overlay className="codex-chat-alert-overlay" />
-          <AlertDialog.Content className="codex-chat-alert-content task-flow-event-dialog">
+      <Dialog.Root open={Boolean(selectedRuntimeEvent)} onOpenChange={(open) => { if (!open) setSelectedRuntimeEvent(null) }}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="codex-chat-alert-overlay" />
+          <Dialog.Content className="codex-chat-alert-content task-flow-event-dialog">
             <div className="task-flow-event-dialog-head">
               <div className="task-flow-event-dialog-heading">
-                <AlertDialog.Title className="codex-chat-alert-title">Runtime Event Detail</AlertDialog.Title>
-                <AlertDialog.Description className="codex-chat-alert-description">
+                <Dialog.Title className="codex-chat-alert-title">Runtime Event Detail</Dialog.Title>
+                <Dialog.Description className="codex-chat-alert-description">
                   {selectedEventDetail?.source_task_title && selectedEventDetail?.target_task_title
                     ? `${selectedEventDetail.source_task_title} -> ${selectedEventDetail.target_task_title}`
                     : 'Task-to-task communication detail'}
-                </AlertDialog.Description>
+                </Dialog.Description>
               </div>
-              <AlertDialog.Cancel asChild>
+              <Dialog.Close asChild>
                 <button className="task-flow-event-dismiss" type="button" aria-label="Close runtime event detail">
                   <Icon path="M18.3 5.71a1 1 0 0 0-1.41 0L12 10.59 7.11 5.7A1 1 0 0 0 5.7 7.11L10.59 12 5.7 16.89a1 1 0 1 0 1.41 1.41L12 13.41l4.89 4.89a1 1 0 0 0 1.41-1.41L13.41 12l4.89-4.89a1 1 0 0 0 0-1.4Z" />
                 </button>
-              </AlertDialog.Cancel>
+              </Dialog.Close>
             </div>
             <div className="task-flow-event-meta-row">
               {selectedRuntimeEvent?.event?.source ? <span className="task-flow-channel-chip runtime">{formatChannelLabel(selectedRuntimeEvent.event.source)}</span> : null}
@@ -1433,9 +1433,9 @@ export function ProjectTaskDependencyGraphPanel({
                 </div>
               </div>
             )}
-          </AlertDialog.Content>
-        </AlertDialog.Portal>
-      </AlertDialog.Root>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     </div>
   )
 }
