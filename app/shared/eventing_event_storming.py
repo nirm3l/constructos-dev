@@ -4,13 +4,16 @@ import hashlib
 import json
 import re
 import threading
+from functools import lru_cache
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from time import perf_counter
 from typing import Any
 
 from sqlalchemy import select, text
 
-from features.agents.agent_mcp_adapter import run_structured_agent_prompt_with_usage
+from features.agents.agent_mcp_adapter import run_structured_agent_prompt, run_structured_agent_prompt_with_usage
+from .classification_cache import ClassificationCache, build_classification_cache_key
 from .context_frames import build_project_context_frame
 from features.notes.domain import (
     EVENT_ARCHIVED as NOTE_EVENT_ARCHIVED,
@@ -72,6 +75,7 @@ _projection_subscription_lock = threading.Lock()
 _analysis_stop_event = threading.Event()
 _analysis_thread: threading.Thread | None = None
 
+_PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parent / "prompt_templates" / "codex"
 _TRACKED_EVENT_TYPES = {
     TASK_EVENT_CREATED,
     TASK_EVENT_UPDATED,
@@ -162,6 +166,22 @@ EVENT_STORMING_PROMPT_CONTEXT_FRAME_MAX_CHARS = 3600
 # Backward-compatible alias used by tests and existing callers.
 EVENT_STORMING_PROMPT_FRAME_MAX_CHARS = EVENT_STORMING_PROMPT_CONTEXT_FRAME_MAX_CHARS
 EVENT_STORMING_PROMPT_ENTITY_CONTEXT_MAX_ITEMS = 16
+EVENT_STORMING_SCOPE_CLASSIFIER_SOURCE_MAX_CHARS = 4200
+_EVENT_STORMING_ARTIFACT_SCOPES = {"product_domain", "delivery_process", "mixed", "unknown"}
+_EVENT_STORMING_SCOPE_CLASSIFIER_VERSION = "event-storming-artifact-scope-v1"
+_EVENT_STORMING_SCOPE_CLASSIFIER_SCHEMA_VERSION = "1"
+_EVENT_STORMING_EXTRACTOR_VERSION = "es-codex-v2"
+_EVENT_STORMING_SCOPE_CLASSIFICATION_CACHE = ClassificationCache(max_entries=256)
+
+
+@lru_cache(maxsize=16)
+def _load_prompt_template(name: str) -> str:
+    return (_PROMPT_TEMPLATES_DIR / name).read_text(encoding="utf-8")
+
+
+def _render_prompt_template(name: str, values: dict[str, object]) -> str:
+    rendered_values = {key: str(value) for key, value in values.items()}
+    return _load_prompt_template(name).format(**rendered_values)
 
 
 def _extract_aggregate_from_stream(stream_name: str) -> tuple[str, str] | None:
@@ -504,6 +524,10 @@ def _load_project_component_snapshot(*, project_id: str, limit_components: int =
         MATCH (c)
         WHERE coalesce(c.project_id, '') = $project_id
           AND any(lbl IN labels(c) WHERE lbl IN $component_labels)
+          AND EXISTS {
+            MATCH (a)-[:RELATES_TO_ES]->(c)
+            WHERE any(lbl IN labels(a) WHERE lbl IN $artifact_labels)
+          }
         RETURN head([lbl IN labels(c) WHERE lbl IN $component_labels]) AS component_type,
                c.id AS component_id,
                coalesce(c.title, c.name, c.id) AS component_title
@@ -513,6 +537,7 @@ def _load_project_component_snapshot(*, project_id: str, limit_components: int =
         {
             "project_id": project_id,
             "component_labels": list(_ES_COMPONENT_LABELS.values()),
+            "artifact_labels": list(_ENTITY_LABELS.values()),
             "limit_components": max(1, int(limit_components)),
         },
     )
@@ -775,14 +800,149 @@ def _normalize_tags(tags: list[str] | None) -> list[str]:
     return sorted({str(tag or "").strip().lower() for tag in (tags or []) if str(tag or "").strip()})
 
 
+def _default_artifact_scope_classification() -> dict[str, Any]:
+    return {
+        "artifact_scope": "unknown",
+        "confidence": 0.0,
+        "reason": "",
+        "domain_text": "",
+    }
+
+
+def _normalize_artifact_scope_classification(values: dict[str, Any] | None) -> dict[str, Any]:
+    parsed = dict(values or {})
+    normalized = _default_artifact_scope_classification()
+    scope = str(parsed.get("artifact_scope") or "").strip().lower()
+    if scope in _EVENT_STORMING_ARTIFACT_SCOPES:
+        normalized["artifact_scope"] = scope
+    try:
+        normalized["confidence"] = max(0.0, min(1.0, float(parsed.get("confidence") or 0.0)))
+    except (TypeError, ValueError):
+        normalized["confidence"] = 0.0
+    normalized["reason"] = str(parsed.get("reason") or "").strip()[:600]
+    normalized["domain_text"] = str(parsed.get("domain_text") or "").strip()[:EVENT_STORMING_PROMPT_SOURCE_MAX_CHARS]
+    return normalized
+
+
+def _classify_event_storming_artifact_scope(
+    *,
+    workspace_id: str | None,
+    project_id: str,
+    entity_type: str,
+    entity_id: str,
+    title: str,
+    tags: list[str],
+    text: str,
+) -> dict[str, Any]:
+    normalized_text = str(text or "").strip()
+    if not normalized_text:
+        return _default_artifact_scope_classification()
+    payload = {
+        "entity_type": str(entity_type or "").strip().lower(),
+        "entity_id": str(entity_id or "").strip(),
+        "title": str(title or "").strip(),
+        "tags": _normalize_tags(tags),
+        "text": normalized_text[:EVENT_STORMING_SCOPE_CLASSIFIER_SOURCE_MAX_CHARS],
+    }
+    cache_key = build_classification_cache_key(
+        cache_name="event_storming_artifact_scope",
+        workspace_id=str(workspace_id or "").strip() or None,
+        project_id=str(project_id or "").strip() or None,
+        classifier_version=_EVENT_STORMING_SCOPE_CLASSIFIER_VERSION,
+        schema_version=_EVENT_STORMING_SCOPE_CLASSIFIER_SCHEMA_VERSION,
+        payload=payload,
+    )
+    cached = _EVENT_STORMING_SCOPE_CLASSIFICATION_CACHE.get(cache_key)
+    if cached is not None:
+        return _normalize_artifact_scope_classification(cached)
+    output_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "artifact_scope": {"type": "string", "enum": sorted(_EVENT_STORMING_ARTIFACT_SCOPES)},
+            "confidence": {"type": "number"},
+            "reason": {"type": "string"},
+            "domain_text": {"type": "string"},
+        },
+        "required": ["artifact_scope", "confidence", "reason", "domain_text"],
+    }
+    prompt = _render_prompt_template(
+        "event_storming_artifact_scope_classifier.md",
+        {"payload_json": json.dumps(payload, ensure_ascii=True)},
+    )
+    prompt_hash = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    try:
+        parsed = run_structured_agent_prompt(
+            prompt=prompt,
+            output_schema=output_schema,
+            workspace_id=str(workspace_id or "").strip() or None,
+            session_key=(
+                f"event-storming-scope:{_EVENT_STORMING_SCOPE_CLASSIFIER_VERSION}:"
+                f"{str(project_id or '').strip()}:{prompt_hash}"
+            ),
+            actor_user_id=None,
+            mcp_servers=[],
+            use_cache=True,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Event storming artifact scope classification failed project_id=%s entity=%s:%s err=%s",
+            project_id,
+            entity_type,
+            entity_id,
+            exc,
+        )
+        parsed = {}
+    normalized = _normalize_artifact_scope_classification(parsed if isinstance(parsed, dict) else {})
+    _EVENT_STORMING_SCOPE_CLASSIFICATION_CACHE.set(cache_key, normalized)
+    return normalized
+
+
+def _prepare_snapshot_for_analysis(
+    *,
+    project_id: str,
+    entity_type: str,
+    entity_id: str,
+    snapshot: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    if snapshot is None:
+        return None, _default_artifact_scope_classification()
+    prepared = dict(snapshot)
+    classification = _classify_event_storming_artifact_scope(
+        workspace_id=str(snapshot.get("workspace_id") or "").strip() or None,
+        project_id=project_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        title=str(snapshot.get("title") or ""),
+        tags=[str(item) for item in (snapshot.get("tags") or [])],
+        text=str(snapshot.get("text") or ""),
+    )
+    prepared["artifact_scope"] = str(classification.get("artifact_scope") or "unknown")
+    prepared["artifact_scope_confidence"] = float(classification.get("confidence") or 0.0)
+    prepared["artifact_scope_reason"] = str(classification.get("reason") or "")
+    effective_text = str(classification.get("domain_text") or "").strip()
+    if prepared["artifact_scope"] in {"product_domain", "mixed"}:
+        if effective_text:
+            prepared["text"] = effective_text
+        prepared["analysis_eligible"] = bool(str(prepared.get("text") or "").strip())
+    else:
+        prepared["text"] = ""
+        prepared["analysis_eligible"] = False
+    return prepared, classification
+
+
 def _build_snapshot_input_hash(*, project_id: str, entity_type: str, entity_id: str, snapshot: dict[str, Any]) -> str:
     payload = {
+        "extractor_version": _EVENT_STORMING_EXTRACTOR_VERSION,
         "project_id": project_id,
         "entity_type": entity_type,
         "entity_id": entity_id,
         "title": str(snapshot.get("title") or "").strip(),
         "text": str(snapshot.get("text") or "").strip(),
         "tags": _normalize_tags([str(item) for item in (snapshot.get("tags") or [])]),
+        "artifact_scope": str(snapshot.get("artifact_scope") or "").strip().lower() or None,
     }
     raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -819,6 +979,27 @@ def _clear_artifact_links(*, project_id: str, entity_type: str, entity_id: str) 
     )
 
 
+def _prune_orphan_components(*, project_id: str) -> None:
+    run_graph_query(
+        """
+        MATCH (c)
+        WHERE coalesce(c.project_id, '') = $project_id
+          AND any(lbl IN labels(c) WHERE lbl IN $component_labels)
+          AND NOT EXISTS {
+            MATCH (a)-[:RELATES_TO_ES]->(c)
+            WHERE any(lbl IN labels(a) WHERE lbl IN $artifact_labels)
+          }
+        DETACH DELETE c
+        """,
+        {
+            "project_id": project_id,
+            "component_labels": list(_ES_COMPONENT_LABELS.values()),
+            "artifact_labels": list(_ENTITY_LABELS.values()),
+        },
+        write=True,
+    )
+
+
 def _sync_graph_for_job(job: EventStormingAnalysisJob, snapshot: dict[str, Any] | None) -> tuple[int, int, dict[str, Any]]:
     project_id = str(job.project_id or "").strip()
     entity_type = str(job.entity_type or "").strip().lower()
@@ -828,7 +1009,22 @@ def _sync_graph_for_job(job: EventStormingAnalysisJob, snapshot: dict[str, Any] 
 
     if snapshot is None or bool(snapshot.get("is_deleted")):
         _clear_artifact_links(project_id=project_id, entity_type=entity_type, entity_id=entity_id)
-        return 0, 0, {"components": [], "relations": []}
+        _prune_orphan_components(project_id=project_id)
+        return 0, 0, {"components": [], "relations": [], "inference_method": "deleted"}
+
+    artifact_scope = str(snapshot.get("artifact_scope") or "").strip().lower() or "unknown"
+    if not bool(snapshot.get("analysis_eligible")) or artifact_scope not in {"product_domain", "mixed"}:
+        _clear_artifact_links(project_id=project_id, entity_type=entity_type, entity_id=entity_id)
+        _prune_orphan_components(project_id=project_id)
+        return 0, 0, {
+            "components": [],
+            "relations": [],
+            "artifact_scope": artifact_scope,
+            "artifact_scope_confidence": float(snapshot.get("artifact_scope_confidence") or 0.0),
+            "artifact_scope_reason": str(snapshot.get("artifact_scope_reason") or ""),
+            "inference_method": "scope_filter",
+            "skipped": "artifact_scope_filtered",
+        }
 
     workspace_id = _as_str(snapshot.get("workspace_id"))
     source_label = _ENTITY_LABELS[entity_type]
@@ -900,6 +1096,7 @@ def _sync_graph_for_job(job: EventStormingAnalysisJob, snapshot: dict[str, Any] 
                 c.name = $component_name,
                 c.title = $component_name,
                 c.component_type = $component_type,
+                c.semantic_scope = 'product_domain',
                 c.updated_at = $updated_at
             """,
             {
@@ -950,6 +1147,7 @@ def _sync_graph_for_job(job: EventStormingAnalysisJob, snapshot: dict[str, Any] 
                 r.updated_at = $updated_at,
                 r.source_entity_type = $source_entity_type,
                 r.source_entity_id = $entity_id,
+                r.artifact_scope = $artifact_scope,
                 r.evidence = $evidence
             """,
             {
@@ -958,6 +1156,7 @@ def _sync_graph_for_job(job: EventStormingAnalysisJob, snapshot: dict[str, Any] 
                 "confidence": float(item["confidence"]),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "source_entity_type": entity_type,
+                "artifact_scope": artifact_scope,
                 "evidence": str(item.get("evidence") or ""),
             },
             write=True,
@@ -980,6 +1179,7 @@ def _sync_graph_for_job(job: EventStormingAnalysisJob, snapshot: dict[str, Any] 
             write=True,
         )
 
+    _prune_orphan_components(project_id=project_id)
     return len(components), len(component_relations), {
         "components": components,
         "relations": component_relations,
@@ -987,6 +1187,10 @@ def _sync_graph_for_job(job: EventStormingAnalysisJob, snapshot: dict[str, Any] 
         "prompt_chars": prompt_chars,
         "context_frame_mode": context_frame_mode,
         "context_frame_revision": context_frame_revision,
+        "artifact_scope": artifact_scope,
+        "artifact_scope_confidence": float(snapshot.get("artifact_scope_confidence") or 0.0),
+        "artifact_scope_reason": str(snapshot.get("artifact_scope_reason") or ""),
+        "inference_method": "ai_agent",
     }
 
 
@@ -1019,7 +1223,7 @@ def _process_analysis_job(job_id: int) -> None:
                         entity_id=job.entity_id,
                         status="done",
                         inference_method="disabled",
-                        extractor_version="es-codex-v1",
+                        extractor_version=_EVENT_STORMING_EXTRACTOR_VERSION,
                         components_count=0,
                         relations_count=0,
                         prompt_chars=0,
@@ -1035,13 +1239,20 @@ def _process_analysis_job(job_id: int) -> None:
                 db.commit()
                 return
             snapshot = _load_entity_snapshot(db, job)
+            prepared_snapshot = snapshot
             input_hash: str | None = None
             if snapshot is not None and not bool(snapshot.get("is_deleted")):
-                input_hash = _build_snapshot_input_hash(
+                prepared_snapshot, _classification = _prepare_snapshot_for_analysis(
                     project_id=str(job.project_id or "").strip(),
                     entity_type=str(job.entity_type or "").strip().lower(),
                     entity_id=str(job.entity_id or "").strip(),
                     snapshot=snapshot,
+                )
+                input_hash = _build_snapshot_input_hash(
+                    project_id=str(job.project_id or "").strip(),
+                    entity_type=str(job.entity_type or "").strip().lower(),
+                    entity_id=str(job.entity_id or "").strip(),
+                    snapshot=prepared_snapshot or snapshot,
                 )
                 previous_hash = _latest_done_input_hash(
                     db,
@@ -1059,7 +1270,7 @@ def _process_analysis_job(job_id: int) -> None:
                             entity_id=job.entity_id,
                             status="done",
                             inference_method="content_hash_skip",
-                            extractor_version="es-codex-v1",
+                            extractor_version=_EVENT_STORMING_EXTRACTOR_VERSION,
                             components_count=0,
                             relations_count=0,
                             prompt_chars=0,
@@ -1074,10 +1285,11 @@ def _process_analysis_job(job_id: int) -> None:
                     job.last_error = None
                     db.commit()
                     return
-            components_count, relations_count, output = _sync_graph_for_job(job, snapshot)
+            components_count, relations_count, output = _sync_graph_for_job(job, prepared_snapshot)
             elapsed_ms = int(max(0.0, (perf_counter() - started) * 1000.0))
             usage_payload = output.get("usage") if isinstance(output, dict) else {}
             prompt_chars = int(output.get("prompt_chars") or 0) if isinstance(output, dict) else 0
+            inference_method = str(output.get("inference_method") or "ai_agent") if isinstance(output, dict) else "ai_agent"
             db.add(
                 EventStormingAnalysisRun(
                     job_id=job.id,
@@ -1085,8 +1297,8 @@ def _process_analysis_job(job_id: int) -> None:
                     entity_type=job.entity_type,
                     entity_id=job.entity_id,
                     status="done",
-                    inference_method="ai_agent",
-                    extractor_version="es-codex-v1",
+                    inference_method=inference_method,
+                    extractor_version=_EVENT_STORMING_EXTRACTOR_VERSION,
                     components_count=components_count,
                     relations_count=relations_count,
                     prompt_chars=prompt_chars,
@@ -1118,7 +1330,7 @@ def _process_analysis_job(job_id: int) -> None:
                     entity_id=job.entity_id,
                     status="failed",
                     inference_method="ai_agent",
-                    extractor_version="es-codex-v1",
+                    extractor_version=_EVENT_STORMING_EXTRACTOR_VERSION,
                     components_count=0,
                     relations_count=0,
                     prompt_chars=0,

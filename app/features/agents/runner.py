@@ -858,6 +858,8 @@ def _build_team_mode_dispatch_candidates(
     now_utc = datetime.now(timezone.utc)
     dispatch_candidates: list[dict[str, object]] = []
     candidate_map: dict[str, tuple[Task, dict[str, object], str]] = {}
+    lead_task_count = 0
+    task_contexts: list[tuple[Task, dict[str, object], str, str, str, str]] = []
     for task in tasks:
         task_id = str(task.id or "").strip()
         if not task_id or task_id in excluded_task_ids:
@@ -883,16 +885,22 @@ def _build_team_mode_dispatch_candidates(
         if not target_slot and developer_slot_ids:
             selected_agent = pick_agent_for_task(
                 agents=team_agents,
-                task_like={
-                    "id": task_id,
-                    "assignee_id": str(state.get("assignee_id") or getattr(task, "assignee_id", "") or ""),
-                    "assigned_agent_code": assigned_slot,
-                    "labels": state.get("labels") if state.get("labels") is not None else getattr(task, "labels", None),
+            task_like={
+                "id": task_id,
+                "assignee_id": str(state.get("assignee_id") or getattr(task, "assignee_id", "") or ""),
+                "assigned_agent_code": assigned_slot,
+                "labels": state.get("labels") if state.get("labels") is not None else getattr(task, "labels", None),
                     "status": status,
                 },
                 member_role_by_user_id=membership_roles,
             )
             target_slot = str((selected_agent or {}).get("id") or "").strip()
+        if is_lead_role(role):
+            lead_task_count += 1
+        task_contexts.append((task, state, status, role, assigned_slot, target_slot))
+
+    for task, state, status, role, assigned_slot, target_slot in task_contexts:
+        task_id = str(task.id or "").strip()
         dependency_ready, dependency_reason = _team_mode_dispatch_dependency_ready(
             db=db,
             workspace_id=workspace_id,
@@ -901,6 +909,7 @@ def _build_team_mode_dispatch_candidates(
             state=state,
         )
         has_lead_handoff = bool(str(state.get("last_lead_handoff_token") or "").strip())
+        recurring_oversight = is_recurring_oversight_task(state)
         qa_handoff_gate = _current_nonblocking_gate_key(
             db=db,
             workspace_id=workspace_id,
@@ -918,7 +927,7 @@ def _build_team_mode_dispatch_candidates(
                 or (
                     is_lead_role(role)
                     and status == "Lead"
-                    and not is_recurring_oversight_task(state)
+                    and (not recurring_oversight or lead_task_count <= 1)
                 )
             )
         )
@@ -1817,7 +1826,7 @@ def _derive_files_changed_from_git_evidence(git_evidence: dict[str, object]) -> 
         code, out = _run_git_command(cwd=task_cwd, args=["diff", "--name-only", "HEAD"])
         if code == 0:
             _append_from_output(out)
-    if (not files) and task_cwd is not None:
+    if task_cwd is not None and (after_is_dirty or not files):
         code, out = _run_git_command(cwd=task_cwd, args=["status", "--porcelain"])
         if code == 0:
             for line in str(out or "").splitlines():
@@ -1974,6 +1983,24 @@ def _is_nontrivial_dev_path(path: str) -> bool:
     return True
 
 
+def _format_dirty_handoff_preview(paths: list[str], *, limit: int = 5) -> str:
+    normalized = [str(item or "").strip() for item in paths if str(item or "").strip()]
+    if not normalized:
+        return ""
+    ordered = sorted(
+        normalized,
+        key=lambda item: (
+            1 if _is_nontrivial_dev_path(item) else 0,
+            item.replace("\\", "/").casefold(),
+        ),
+        reverse=True,
+    )
+    preview = ", ".join(ordered[:limit])
+    if len(ordered) > limit:
+        preview = f"{preview} ..."
+    return preview
+
+
 def _validate_execution_outcome_contract(
     *,
     outcome: AutomationOutcome,
@@ -2099,12 +2126,11 @@ def _validate_execution_outcome_contract(
             return "Runner error: Developer automation requires a real task branch handoff before Lead review."
         if bool(committed_handoff.get("after_is_dirty")):
             if dirty_files:
-                preview = ", ".join(dirty_files[:5])
-                suffix = " ..." if len(dirty_files) > 5 else ""
+                preview = _format_dirty_handoff_preview(dirty_files, limit=5)
                 return (
                     "Runner error: Developer handoff is not committed on the task branch yet. "
                     f"Branch `{branch or task_branch or 'task/<unknown>'}` is not clean. "
-                    f"Uncommitted files: {preview}{suffix}"
+                    f"Uncommitted files: {preview}"
                 )
             return (
                 "Runner error: Developer handoff is not committed on the task branch yet. "

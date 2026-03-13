@@ -1,5 +1,12 @@
 import shared.eventing_event_storming as event_storming_module
-from shared.eventing_event_storming import _event_storming_ai_prompt, _normalize_ai_extraction
+from shared.eventing_event_storming import (
+    _build_snapshot_input_hash,
+    _default_artifact_scope_classification,
+    _event_storming_ai_prompt,
+    _normalize_ai_extraction,
+    _normalize_artifact_scope_classification,
+    _prepare_snapshot_for_analysis,
+)
 
 
 def test_normalize_ai_extraction_builds_components_and_relations():
@@ -82,3 +89,106 @@ def test_event_storming_prompt_applies_text_and_context_caps(monkeypatch):
     assert "X" * 31 not in prompt
     assert "Y" * 21 not in prompt
     assert "Third" not in prompt
+
+
+def test_normalize_artifact_scope_classification_is_conservative():
+    normalized = _normalize_artifact_scope_classification(
+        {
+            "artifact_scope": "DELIVERY_PROCESS",
+            "confidence": 2,
+            "reason": "Workflow-heavy artifact.",
+            "domain_text": "should be kept",
+        }
+    )
+
+    assert normalized["artifact_scope"] == "delivery_process"
+    assert normalized["confidence"] == 1.0
+    assert normalized["reason"] == "Workflow-heavy artifact."
+    assert normalized["domain_text"] == "should be kept"
+
+    fallback = _normalize_artifact_scope_classification({"artifact_scope": "nonsense"})
+    assert fallback == _default_artifact_scope_classification()
+
+
+def test_prepare_snapshot_for_analysis_reuses_domain_text(monkeypatch):
+    monkeypatch.setattr(
+        event_storming_module,
+        "_classify_event_storming_artifact_scope",
+        lambda **_: {
+            "artifact_scope": "mixed",
+            "confidence": 0.91,
+            "reason": "Contains gameplay and delivery content.",
+            "domain_text": "Player tank movement, projectile cooldown, and collision rules.",
+        },
+    )
+
+    prepared, classification = _prepare_snapshot_for_analysis(
+        project_id="project-1",
+        entity_type="task",
+        entity_id="task-1",
+        snapshot={
+            "workspace_id": "workspace-1",
+            "title": "Implement and deploy feature",
+            "text": "Long mixed text.",
+            "tags": ["ddd"],
+        },
+    )
+
+    assert classification["artifact_scope"] == "mixed"
+    assert prepared is not None
+    assert prepared["artifact_scope"] == "mixed"
+    assert prepared["analysis_eligible"] is True
+    assert prepared["text"] == "Player tank movement, projectile cooldown, and collision rules."
+
+
+def test_prepare_snapshot_for_analysis_blocks_delivery_only_artifacts(monkeypatch):
+    monkeypatch.setattr(
+        event_storming_module,
+        "_classify_event_storming_artifact_scope",
+        lambda **_: {
+            "artifact_scope": "delivery_process",
+            "confidence": 0.97,
+            "reason": "Only QA handoff and deploy workflow content.",
+            "domain_text": "",
+        },
+    )
+
+    prepared, _classification = _prepare_snapshot_for_analysis(
+        project_id="project-1",
+        entity_type="task",
+        entity_id="task-2",
+        snapshot={
+            "workspace_id": "workspace-1",
+            "title": "Coordinate release handoff",
+            "text": "Prepare QA handoff and deployment evidence.",
+            "tags": [],
+        },
+    )
+
+    assert prepared is not None
+    assert prepared["artifact_scope"] == "delivery_process"
+    assert prepared["analysis_eligible"] is False
+    assert prepared["text"] == ""
+
+
+def test_build_snapshot_input_hash_includes_scope_and_extractor_version():
+    base = {
+        "title": "Example",
+        "text": "Player tank aggregate and movement rules.",
+        "tags": ["gameplay"],
+        "artifact_scope": "product_domain",
+    }
+    product_hash = _build_snapshot_input_hash(
+        project_id="project-1",
+        entity_type="task",
+        entity_id="task-1",
+        snapshot=base,
+    )
+    delivery_hash = _build_snapshot_input_hash(
+        project_id="project-1",
+        entity_type="task",
+        entity_id="task-1",
+        snapshot={**base, "artifact_scope": "delivery_process", "text": ""},
+    )
+
+    assert product_hash != delivery_hash

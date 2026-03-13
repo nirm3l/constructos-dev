@@ -1434,9 +1434,13 @@ def event_storming_get_project_overview(project_id: str) -> dict[str, Any]:
             f"""
             MATCH (n:{label})
             WHERE coalesce(n.project_id, '') = $project_id
+              AND EXISTS {{
+                MATCH (a)-[:RELATES_TO_ES]->(n)
+                WHERE any(artifact_label IN labels(a) WHERE artifact_label IN $artifact_labels)
+              }}
             RETURN count(n) AS count
             """,
-            {"project_id": project_id},
+            {"project_id": project_id, "artifact_labels": _EVENT_STORMING_ARTIFACT_LABELS},
         )
         component_counts[label] = int((rows[0] if rows else {}).get("count") or 0)
 
@@ -1568,6 +1572,10 @@ def event_storming_get_project_subgraph(
         MATCH (n)
         WHERE any(label IN labels(n) WHERE label IN $component_labels)
           AND coalesce(n.project_id, '') = $project_id
+          AND EXISTS {
+            MATCH (a)-[:RELATES_TO_ES]->(n)
+            WHERE any(artifact_label IN labels(a) WHERE artifact_label IN $artifact_labels)
+          }
         RETURN n.id AS entity_id,
                head([label IN labels(n) WHERE label IN $component_labels]) AS entity_type,
                coalesce(n.title, n.name, n.id) AS title
@@ -1577,6 +1585,7 @@ def event_storming_get_project_subgraph(
         {
             "project_id": project_id,
             "component_labels": _EVENT_STORMING_COMPONENT_LABELS,
+            "artifact_labels": _EVENT_STORMING_ARTIFACT_LABELS,
             "limit": safe_nodes,
         },
     )

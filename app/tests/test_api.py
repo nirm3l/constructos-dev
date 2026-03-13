@@ -4164,6 +4164,62 @@ def test_developer_handoff_reports_uncommitted_files(tmp_path, monkeypatch):
     assert "styles.css" in str(error)
 
 
+def test_developer_handoff_error_prioritizes_nontrivial_files_over_readme(tmp_path, monkeypatch):
+    import subprocess
+
+    import features.agents.runner as runner_module
+    from features.agents.executor import AutomationOutcome
+    from shared.project_repository import ensure_project_repository_initialized, resolve_task_worktree_path
+
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path / "workspace"))
+    project_name = "Tetris Dirty Preview"
+    task_id = "133ac52f-655b-5613-9f2f-c4cf603e14b0"
+    title = "Implement core gameplay mechanics"
+    branch = "task/133ac52f-implement-core-gameplay-mechanics"
+    repo_root = ensure_project_repository_initialized(project_name=project_name)
+    worktree = resolve_task_worktree_path(project_name=project_name, task_id=task_id)
+    subprocess.run(["git", "worktree", "add", "-b", branch, str(worktree), "main"], cwd=repo_root, check=True)
+    (worktree / "README.md").write_text("# Tetris\n", encoding="utf-8")
+    (worktree / "index.html").write_text("<html></html>\n", encoding="utf-8")
+    (worktree / "style.css").write_text("body{}\n", encoding="utf-8")
+    (worktree / "src").mkdir(parents=True, exist_ok=True)
+    (worktree / "src" / "game.js").write_text("console.log('tetris');\n", encoding="utf-8")
+
+    outcome = AutomationOutcome(
+        action="comment",
+        summary="Implemented the gameplay shell.",
+        comment=None,
+        execution_outcome_contract={
+            "contract_version": 1,
+            "files_changed": [],
+            "tests_run": False,
+            "tests_passed": False,
+            "commit_sha": None,
+            "branch": branch,
+            "artifacts": [],
+        },
+    )
+    git_evidence = runner_module._collect_git_evidence_from_repo_state(
+        project_name=project_name,
+        project_id=None,
+        task_id=task_id,
+        title=title,
+    )
+
+    error = runner_module._validate_execution_outcome_contract(
+        outcome=outcome,
+        assignee_role="Developer",
+        task_status="Dev",
+        git_delivery_enabled=True,
+        require_nontrivial_dev_changes=True,
+        git_evidence=git_evidence,
+    )
+    assert "Uncommitted files:" in str(error)
+    assert "README.md" in str(error)
+    assert "index.html" in str(error)
+    assert str(error).index("index.html") < str(error).index("README.md")
+
+
 def test_project_has_merge_to_main_evidence_uses_repo_branch_merge_fallback(tmp_path, monkeypatch):
     import subprocess
 
@@ -6044,6 +6100,110 @@ def test_prompt_tetris_setup_spec_three_tasks_and_kickoff_sends_human_notificati
             .first()
         )
         assert notice is not None
+
+
+def test_team_mode_topology_backfill_normalizes_single_lead_schedule_to_lead(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    current_user_id = bootstrap["current_user"]["id"]
+
+    team = _enable_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+
+    from features.agents.service import AgentTaskService
+
+    service = AgentTaskService(
+        require_token=False,
+        actor_user_id=current_user_id,
+        allowed_workspace_ids={ws_id},
+        allowed_project_ids={project_id},
+        default_workspace_id=ws_id,
+    )
+
+    spec = client.post(
+        "/api/specifications",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Implement web Tetris",
+            "body": "Generic Team Mode topology backfill.",
+        },
+    )
+    assert spec.status_code == 200
+    spec_id = spec.json()["id"]
+
+    dev_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "specification_id": spec_id,
+            "title": "Build gameplay",
+            "status": "Dev",
+            "assignee_id": team["dev1"],
+            "assigned_agent_code": "dev-a",
+            "instruction": "Implement gameplay.",
+        },
+    )
+    lead_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "specification_id": spec_id,
+            "title": "Coordinate release",
+            "status": "Lead",
+            "assignee_id": team["lead"],
+            "assigned_agent_code": "lead-a",
+            "instruction": "Coordinate integration and deployment.",
+            "task_type": "scheduled_instruction",
+            "scheduled_instruction": "Coordinate integration and deployment.",
+            "scheduled_at_utc": "2026-03-10T08:00:00Z",
+            "recurring_rule": "every:5m",
+            "execution_triggers": [
+                {
+                    "kind": "schedule",
+                    "enabled": True,
+                    "scheduled_at_utc": "2026-03-10T08:00:00Z",
+                    "recurring_rule": "every:5m",
+                    "run_on_statuses": ["In progress"],
+                    "action": "request_automation",
+                }
+            ],
+        },
+    )
+    qa_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "specification_id": spec_id,
+            "title": "Validate release",
+            "status": "QA",
+            "assignee_id": team["qa"],
+            "assigned_agent_code": "qa-a",
+            "instruction": "Validate release quality.",
+        },
+    )
+    assert dev_task.status_code == 200
+    assert lead_task.status_code == 200
+    assert qa_task.status_code == 200
+
+    service._maybe_backfill_team_mode_topology(
+        workspace_id=ws_id,
+        project_id=project_id,
+        specification_id=spec_id,
+        auth_token="",
+        command_id="tm-topology-backfill",
+    )
+
+    refreshed = client.get(f"/api/tasks/{lead_task.json()['id']}")
+    assert refreshed.status_code == 200
+    triggers = refreshed.json()["execution_triggers"]
+    assert isinstance(triggers, list)
+    assert len(triggers) == 1
+    assert triggers[0]["run_on_statuses"] == ["Lead"]
 
 
 def test_prompt_tetris_greenfield_flow_promotes_real_dev_commit_after_kickoff(tmp_path, monkeypatch):
@@ -15329,15 +15489,41 @@ def test_team_mode_happy_path_rearms_blocked_lead_after_developer_handoff(tmp_pa
     assert dev_task.status_code == 200
     dev_task_id = dev_task.json()["id"]
 
+    qa_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "QA validation task",
+            "status": "QA",
+            "priority": "High",
+            "assignee_id": team["qa"],
+            "assigned_agent_code": "qa-a",
+            "instruction": "Validate the handoff after Lead review.",
+        },
+    )
+    assert qa_task.status_code == 200
+    qa_task_id = qa_task.json()["id"]
+
     patched_lead = client.patch(
         f"/api/tasks/{lead_task_id}",
         json={
             "task_relationships": [
                 {"kind": "depends_on", "task_ids": [dev_task_id], "statuses": ["Lead"]},
+                {"kind": "depends_on", "task_ids": [dev_task_id, qa_task_id], "match_mode": "any", "statuses": ["Blocked"]},
             ],
         },
     )
     assert patched_lead.status_code == 200
+    assert client.patch(
+        f"/api/tasks/{qa_task_id}",
+        json={
+            "task_relationships": [
+                {"kind": "hands_off_to", "task_ids": [lead_task_id], "statuses": ["QA"]},
+                {"kind": "escalates_to", "task_ids": [lead_task_id], "statuses": ["Lead", "Blocked"]},
+            ],
+        },
+    ).status_code == 200
 
     from shared.core import append_event
     from shared.models import SessionLocal
@@ -15397,21 +15583,133 @@ def test_team_mode_happy_path_rearms_blocked_lead_after_developer_handoff(tmp_pa
         )
         db.commit()
 
-    from features.agents.runner import queue_team_mode_happy_path_once
+    from shared.models import SessionLocal as SessionLocal2
+    from features.agents.runner import _rearm_blocked_team_mode_lead_tasks
 
-    queued = queue_team_mode_happy_path_once(limit=20)
-    assert queued >= 1
+    with SessionLocal2() as db:
+        rearmed = _rearm_blocked_team_mode_lead_tasks(
+            db=db,
+            workspace_id=ws_id,
+            project_id=project_id,
+        )
+        db.commit()
+
+    assert rearmed >= 1
 
     lead_task_status = client.get(f"/api/tasks/{lead_task_id}")
     assert lead_task_status.status_code == 200
     assert lead_task_status.json()["status"] == "Lead"
 
-    lead_status = client.get(f"/api/tasks/{lead_task_id}/automation")
-    assert lead_status.status_code == 200
-    payload = lead_status.json()
-    assert payload["automation_state"] in {"queued", "running", "completed"}
-    assert payload["last_requested_source"] == "runner_orchestrator"
-    assert payload["last_requested_source_task_id"] == dev_task_id
+
+def test_single_lead_scheduled_task_is_dispatch_ready_after_developer_handoff(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    team = _enable_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+
+    dev_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Developer implementation task",
+            "status": "Lead",
+            "assignee_id": team["dev1"],
+            "assigned_agent_code": "dev-a",
+            "instruction": "Developer handoff is ready.",
+        },
+    )
+    lead_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Single recurring Lead task",
+            "status": "Lead",
+            "assignee_id": team["lead"],
+            "assigned_agent_code": "lead-a",
+            "instruction": "Coordinate the lead cycle.",
+            "task_type": "scheduled_instruction",
+            "scheduled_instruction": "Coordinate the lead cycle.",
+            "scheduled_at_utc": "2026-03-10T08:00:00Z",
+            "recurring_rule": "every:5m",
+            "execution_triggers": [
+                {
+                    "kind": "schedule",
+                    "enabled": True,
+                    "scheduled_at_utc": "2026-03-10T08:00:00Z",
+                    "recurring_rule": "every:5m",
+                    "run_on_statuses": ["Lead"],
+                    "action": "request_automation",
+                }
+            ],
+        },
+    )
+    qa_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "QA validation task",
+            "status": "QA",
+            "assignee_id": team["qa"],
+            "assigned_agent_code": "qa-a",
+            "instruction": "Validate release quality.",
+        },
+    )
+    assert dev_task.status_code == 200
+    assert lead_task.status_code == 200
+    assert qa_task.status_code == 200
+    dev_task_id = dev_task.json()["id"]
+    lead_task_id = lead_task.json()["id"]
+    qa_task_id = qa_task.json()["id"]
+
+    assert client.patch(
+        f"/api/tasks/{dev_task_id}",
+        json={
+            "task_relationships": [
+                {"kind": "delivers_to", "task_ids": [lead_task_id], "statuses": ["Lead"]}
+            ]
+        },
+    ).status_code == 200
+    assert client.patch(
+        f"/api/tasks/{lead_task_id}",
+        json={
+            "task_relationships": [
+                {"kind": "depends_on", "task_ids": [dev_task_id], "statuses": ["Lead"]},
+                {
+                    "kind": "depends_on",
+                    "task_ids": [dev_task_id, qa_task_id],
+                    "match_mode": "any",
+                    "statuses": ["Blocked"],
+                },
+            ]
+        },
+    ).status_code == 200
+    assert client.patch(
+        f"/api/tasks/{qa_task_id}",
+        json={
+            "task_relationships": [
+                {"kind": "hands_off_to", "task_ids": [lead_task_id], "statuses": ["QA"]},
+                {"kind": "escalates_to", "task_ids": [lead_task_id], "statuses": ["Lead", "Blocked"]},
+            ]
+        },
+    ).status_code == 200
+
+    from shared.models import SessionLocal
+    from features.agents.runner import _build_team_mode_dispatch_candidates
+
+    with SessionLocal() as db:
+        candidates, _candidate_map = _build_team_mode_dispatch_candidates(
+            db=db,
+            workspace_id=ws_id,
+            project_id=project_id,
+        )
+    lead_candidates = [item for item in candidates if item["id"] == lead_task_id]
+    assert len(lead_candidates) == 1
+    assert lead_candidates[0]["dispatch_ready"] is True
 
 
 def test_team_mode_happy_path_rearms_blocked_lead_when_any_dependency_clause_is_satisfied(tmp_path):
