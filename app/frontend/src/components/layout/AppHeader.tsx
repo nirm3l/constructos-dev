@@ -73,7 +73,7 @@ function notificationDisplayMessage(notification: Notification): string {
       if (title && toStatus) return `${title} moved to ${toStatus}`
       return fallback
     case 'TaskAutomationFailed':
-      return title && error ? `Automation failed on ${title}: ${error}` : fallback
+      return title && error ? `Execution failed on ${title}: ${error}` : fallback
     case 'TaskScheduleFailed':
       return title && error ? `Scheduled run failed on ${title}: ${error}` : fallback
     case 'ProjectMembershipChanged':

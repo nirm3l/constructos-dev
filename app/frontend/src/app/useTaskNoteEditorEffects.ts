@@ -31,7 +31,7 @@ export function useTaskNoteEditorEffects(c: any) {
     }
     c.setTaskEditorHydratedTaskId(null)
     c.setEditTitle(c.selectedTask.title ?? '')
-    c.setEditStatus(c.selectedTask.status ?? 'To do')
+    c.setEditStatus(c.selectedTask.status ?? 'To Do')
     c.setEditDescription(c.selectedTask.description ?? '')
     c.setEditPriority(c.selectedTask.priority ?? 'Med')
     c.setEditDueDate(toLocalDateTimeInput(c.selectedTask.due_date))

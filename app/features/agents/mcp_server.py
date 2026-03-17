@@ -79,7 +79,7 @@ CREATE_PROJECT_TOOL_DESCRIPTION = (
     "Use when required fields are known and template seeding is not requested. "
     "Chat default profile: embedding_enabled=true, chat_index_mode=KG_AND_VECTOR, "
     "chat_attachment_ingestion_mode=METADATA_ONLY. "
-    "custom_statuses must be an array of strings (for example [\"To do\",\"Dev\",\"QA\",\"Lead\",\"Done\",\"Blocked\"]). "
+    "custom_statuses must be an array of strings (for example [\"To Do\",\"In Progress\",\"In Review\",\"Awaiting Decision\",\"Blocked\",\"Completed\"]). "
     "automation_max_parallel_tasks sets per-project concurrent automation cap (default 4)."
 )
 
@@ -142,7 +142,7 @@ ENSURE_TEAM_MODE_PROJECT_TOOL_DESCRIPTION = (
 SETUP_PROJECT_ORCHESTRATION_TOOL_DESCRIPTION = (
     "Run staged project setup in one call with strict backend enforcement: "
     "project create/resolve, plugin toggles, plugin config apply, optional Team Mode task seeding, and workflow verification. "
-    "Set kickoff_after_setup=true to dispatch Team Mode kickoff as part of the same call (Lead-first kickoff dispatch). "
+    "Set kickoff_after_setup=true to dispatch Team Mode kickoff as part of the same call. "
     "Supports Team Mode, Git Delivery, and Docker Compose setup while returning a stable per-step result contract. "
     "For incomplete new-project inputs, this tool returns HTTP 422 with structured `missing_inputs` and `next_question`."
 )

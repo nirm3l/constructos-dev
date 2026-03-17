@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 
 from plugins import executor_policy as plugin_executor_policy
+from plugins.team_mode.semantics import semantic_status_key
 from plugins.team_mode.task_roles import canonicalize_role, derive_task_role, normalize_team_agents
 from shared.context_frames import build_project_context_frame
 from shared.models import Project, ProjectMember, ProjectPluginConfig, ProjectRule, ProjectSkill, SessionLocal, Task
@@ -45,6 +46,15 @@ class AutomationOutcome:
     resume_attempted: bool = False
     resume_succeeded: bool = False
     resume_fallback_used: bool = False
+
+
+def _is_completed_status(status: str | None) -> bool:
+    normalized = str(status or "").strip()
+    if not normalized:
+        return False
+    if normalized.casefold() in {"done", "completed"}:
+        return True
+    return semantic_status_key(status=normalized) == "completed"
 
 
 def _effective_timeout_seconds(value: object) -> float | None:
@@ -328,8 +338,7 @@ def _resolve_task_assignee_project_role(*, task_id: str | None, project_id: str 
             return None
         assignee_id, assigned_agent_code, status, labels = task_row
         normalized_assignee_id = str(assignee_id or "").strip()
-        if not normalized_assignee_id:
-            return None
+        normalized_assigned_agent_code = str(assigned_agent_code or "").strip()
         team_mode_cfg_row = db.execute(
             select(ProjectPluginConfig.config_json).where(
                 ProjectPluginConfig.project_id == normalized_project_id,
@@ -353,7 +362,7 @@ def _resolve_task_assignee_project_role(*, task_id: str | None, project_id: str 
         declared_role = derive_task_role(
             task_like={
                 "assignee_id": normalized_assignee_id,
-                "assigned_agent_code": str(assigned_agent_code or "").strip(),
+                "assigned_agent_code": normalized_assigned_agent_code,
                 "labels": labels,
                 "status": str(status or "").strip(),
             },
@@ -363,6 +372,8 @@ def _resolve_task_assignee_project_role(*, task_id: str | None, project_id: str 
         )
         if declared_role:
             return declared_role
+        if not normalized_assignee_id:
+            return None
         membership = db.execute(
             select(ProjectMember.role).where(
                 ProjectMember.project_id == normalized_project_id,
@@ -387,6 +398,24 @@ def _should_prepare_task_worktree(
         task_status=task_status,
         actor_project_role=actor_project_role,
         assignee_project_role=assignee_project_role,
+    )
+
+
+def _require_task_scoped_git_worktree(
+    *,
+    task_id: str | None,
+    project_team_mode_enabled: bool,
+    git_delivery_enabled: bool,
+    team_mode_enabled: bool,
+) -> None:
+    if not str(task_id or "").strip():
+        return
+    if not project_team_mode_enabled or not git_delivery_enabled:
+        return
+    if team_mode_enabled:
+        return
+    raise RuntimeError(
+        "Executor refused repo-root execution: Team Mode task with Git Delivery requires a task-scoped role and worktree."
     )
 
 
@@ -500,13 +529,57 @@ def _collect_git_snapshot(*, cwd: Path | None, task_branch: str | None) -> dict[
     normalized_branch = str(branch_name or "").strip() if code_branch == 0 else ""
     code_status, status_out, _err_status = _run_git(cwd=cwd, args=["status", "--porcelain"])
     is_dirty = bool(str(status_out or "").strip()) if code_status == 0 else False
+    status_entries = [
+        line
+        for line in str(status_out or "").splitlines()
+        if str(line or "").strip()
+        and not str(line or "").strip().endswith(" .constructos/")
+        and " .constructos/" not in str(line or "").strip()
+    ] if code_status == 0 else []
     normalized_task_branch = str(task_branch or "").strip()
     return {
         "head_sha": str(head_sha or "").strip().lower(),
         "branch": normalized_branch or normalized_task_branch or None,
         "on_task_branch": bool(normalized_task_branch and normalized_branch == normalized_task_branch),
         "is_dirty": bool(is_dirty),
+        "status_entries": status_entries,
     }
+
+
+def _repo_root_changed_outside_task_worktree(
+    *,
+    repo_root_before: dict[str, object] | None,
+    repo_root_after: dict[str, object] | None,
+) -> bool:
+    def _ignored_repo_root_entry(entry: object) -> bool:
+        text = str(entry or "").strip()
+        if not text:
+            return True
+        path = text[3:].strip() if len(text) > 3 else text
+        if not path:
+            return True
+        normalized = path.replace("\\", "/")
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        return (
+            normalized == ".constructos.host.compose.yml"
+            or normalized.startswith(".constructos/")
+            or normalized == ".constructos"
+        )
+
+    before = repo_root_before if isinstance(repo_root_before, dict) else {}
+    after = repo_root_after if isinstance(repo_root_after, dict) else {}
+    before_entries = tuple(
+        str(item or "").strip()
+        for item in (before.get("status_entries") or [])
+        if str(item or "").strip() and not _ignored_repo_root_entry(item)
+    )
+    after_entries = tuple(
+        str(item or "").strip()
+        for item in (after.get("status_entries") or [])
+        if str(item or "").strip() and not _ignored_repo_root_entry(item)
+    )
+    return before_entries != after_entries
 
 
 def _attach_git_evidence_usage(
@@ -610,7 +683,7 @@ def _resolve_project_repo_root_and_branch(
 
 def _placeholder_outcome(*, instruction: str, current_status: str) -> AutomationOutcome:
     should_complete = False
-    if should_complete and current_status != "Done":
+    if should_complete and not _is_completed_status(current_status):
         return AutomationOutcome(
             action="complete",
             summary="Automation runner marked task as completed.",
@@ -1001,7 +1074,7 @@ def execute_task_automation(
     timeout_seconds: float | int | None | object = _TIMEOUT_UNSET,
 ) -> AutomationOutcome:
     should_complete = bool(task_completion_requested)
-    if str(task_id or "").strip() and should_complete and status != "Done" and allow_mutations:
+    if str(task_id or "").strip() and should_complete and not _is_completed_status(status) and allow_mutations:
         return AutomationOutcome(
             action="complete",
             summary="Automation runner marked task as completed.",
@@ -1050,6 +1123,12 @@ def execute_task_automation(
         assignee_project_role=assignee_project_role,
     )
     git_delivery_enabled = bool(project_git_delivery_enabled)
+    _require_task_scoped_git_worktree(
+        task_id=task_id,
+        project_team_mode_enabled=project_team_mode_enabled,
+        git_delivery_enabled=git_delivery_enabled,
+        team_mode_enabled=team_mode_enabled,
+    )
     effective_plugin_policy_required_checks = plugin_policy_required_checks if team_mode_enabled else []
     task_workdir: str | None = None
     task_branch: str | None = None
@@ -1070,14 +1149,6 @@ def execute_task_automation(
         task_workdir = str(workdir_path)
         task_branch = branch_name
         repo_root = str(repo_root_path)
-    elif git_delivery_enabled and not team_mode_enabled:
-        repo_root_path, current_branch = _resolve_project_repo_root_and_branch(
-            project_name=project_name,
-            project_id=project_id,
-        )
-        task_workdir = str(repo_root_path)
-        repo_root = str(repo_root_path)
-        task_branch = current_branch
     context_scope_type = "chat_session" if str(effective_chat_session_id or "").strip() else "task_automation"
     context_scope_id = str(effective_chat_session_id or "").strip() or str(task_id or "").strip() or "general"
     context_frame = build_project_context_frame(
@@ -1144,6 +1215,10 @@ def execute_task_automation(
     def _run_once() -> AutomationOutcome:
         workdir_path = Path(task_workdir) if str(task_workdir or "").strip() else None
         git_before = _collect_git_snapshot(cwd=workdir_path, task_branch=task_branch)
+        repo_root_path = Path(repo_root) if str(repo_root or "").strip() else None
+        repo_root_before = None
+        if repo_root_path is not None and workdir_path is not None and repo_root_path != workdir_path:
+            repo_root_before = _collect_git_snapshot(cwd=repo_root_path, task_branch=None)
         try:
             proc = subprocess.run(
                 command,
@@ -1162,6 +1237,17 @@ def execute_task_automation(
             raise RuntimeError(f"Executor failed (exit={proc.returncode}): {err_text[:2000]}")
         parsed_outcome = _parse_command_outcome(proc.stdout)
         git_after = _collect_git_snapshot(cwd=workdir_path, task_branch=task_branch)
+        repo_root_after = None
+        if repo_root_path is not None and workdir_path is not None and repo_root_path != workdir_path:
+            repo_root_after = _collect_git_snapshot(cwd=repo_root_path, task_branch=None)
+            if _repo_root_changed_outside_task_worktree(
+                repo_root_before=repo_root_before,
+                repo_root_after=repo_root_after,
+            ):
+                raise RuntimeError(
+                    "Executor modified the repository root outside the task worktree. "
+                    "Task automation must only edit files inside the assigned task worktree and task branch."
+                )
         parsed_outcome = _attach_git_evidence_usage(
             parsed_outcome,
             task_workdir=task_workdir,
@@ -1224,7 +1310,7 @@ def execute_task_automation_stream(
     cancel_event: threading.Event | None = None,
 ) -> AutomationOutcome:
     should_complete = bool(task_completion_requested)
-    if str(task_id or "").strip() and should_complete and status != "Done" and allow_mutations:
+    if str(task_id or "").strip() and should_complete and not _is_completed_status(status) and allow_mutations:
         return AutomationOutcome(
             action="complete",
             summary="Automation runner marked task as completed.",
@@ -1273,6 +1359,12 @@ def execute_task_automation_stream(
         assignee_project_role=assignee_project_role,
     )
     git_delivery_enabled = bool(project_git_delivery_enabled)
+    _require_task_scoped_git_worktree(
+        task_id=task_id,
+        project_team_mode_enabled=project_team_mode_enabled,
+        git_delivery_enabled=git_delivery_enabled,
+        team_mode_enabled=team_mode_enabled,
+    )
     effective_plugin_policy_required_checks = plugin_policy_required_checks if team_mode_enabled else []
     task_workdir: str | None = None
     task_branch: str | None = None
@@ -1293,14 +1385,6 @@ def execute_task_automation_stream(
         task_workdir = str(workdir_path)
         task_branch = branch_name
         repo_root = str(repo_root_path)
-    elif git_delivery_enabled and not team_mode_enabled:
-        repo_root_path, current_branch = _resolve_project_repo_root_and_branch(
-            project_name=project_name,
-            project_id=project_id,
-        )
-        task_workdir = str(repo_root_path)
-        repo_root = str(repo_root_path)
-        task_branch = current_branch
     context_scope_type = "chat_session" if str(effective_chat_session_id or "").strip() else "task_automation"
     context_scope_id = str(effective_chat_session_id or "").strip() or str(task_id or "").strip() or "general"
     context_frame = build_project_context_frame(
@@ -1372,6 +1456,10 @@ def execute_task_automation_stream(
     def _run_once() -> AutomationOutcome:
         workdir_path = Path(task_workdir) if str(task_workdir or "").strip() else None
         git_before = _collect_git_snapshot(cwd=workdir_path, task_branch=task_branch)
+        repo_root_path = Path(repo_root) if str(repo_root or "").strip() else None
+        repo_root_before = None
+        if repo_root_path is not None and workdir_path is not None and repo_root_path != workdir_path:
+            repo_root_before = _collect_git_snapshot(cwd=repo_root_path, task_branch=None)
         try:
             stdout = _run_command_streaming(
                 command=command,
@@ -1399,6 +1487,17 @@ def execute_task_automation_stream(
             )
         parsed_outcome = _parse_command_outcome(stdout)
         git_after = _collect_git_snapshot(cwd=workdir_path, task_branch=task_branch)
+        repo_root_after = None
+        if repo_root_path is not None and workdir_path is not None and repo_root_path != workdir_path:
+            repo_root_after = _collect_git_snapshot(cwd=repo_root_path, task_branch=None)
+            if _repo_root_changed_outside_task_worktree(
+                repo_root_before=repo_root_before,
+                repo_root_after=repo_root_after,
+            ):
+                raise RuntimeError(
+                    "Executor modified the repository root outside the task worktree. "
+                    "Task automation must only edit files inside the assigned task worktree and task branch."
+                )
         parsed_outcome = _attach_git_evidence_usage(
             parsed_outcome,
             task_workdir=task_workdir,

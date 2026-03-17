@@ -65,7 +65,6 @@ export function ProjectTaskFlowPage({
   }
 
   const graph = taskDependencyGraphQuery.data
-  const runtimeEdges = Number(graph?.counts?.runtime_edges || 0)
   const structuralEdges = Number(graph?.counts?.structural_edges || 0)
   const runningTasks = Number(graph?.counts?.running_tasks || 0)
 
@@ -96,7 +95,6 @@ export function ProjectTaskFlowPage({
       <div className="graph-insights-meta-row">
         <span className="badge">Nodes: {Number(graph?.node_count || 0)}</span>
         <span className="badge">Edges: {Number(graph?.edge_count || 0)}</span>
-        <span className="badge">Runtime: {runtimeEdges}</span>
         <span className="badge">Structural: {structuralEdges}</span>
         <span className="badge">Running: {runningTasks}</span>
       </div>

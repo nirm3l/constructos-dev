@@ -280,6 +280,19 @@ export function TaskDrawerInsights({ state }: { state: any }) {
     }
     return { pass, fail, waiting, na, blocking, total: executionGates.length }
   }, [executionGates])
+  const deliveryMode = String(state.selectedTask?.delivery_mode || '').trim().toLowerCase()
+  const deliveryModeLabel =
+    deliveryMode === 'merged_increment'
+      ? 'Merged Increment'
+      : deliveryMode === 'deployable_slice'
+        ? 'Deployable Slice'
+        : ''
+  const deliveryModeCopy =
+    deliveryMode === 'merged_increment'
+      ? 'This task completes after committed merge evidence. It does not require its own dedicated deploy and QA runtime cycle.'
+      : deliveryMode === 'deployable_slice'
+        ? 'This task must pass the full Team Mode lifecycle: Developer merge, Lead deploy, and QA validation before completion.'
+        : ''
   const isRecoverableLive = !isLocalLiveRun && (isAutomationRunning || isAutomationQueued)
   const [recoveredLiveText, setRecoveredLiveText] = React.useState('')
   const [recoveredLiveSnapshot, setRecoveredLiveSnapshot] = React.useState('')
@@ -404,14 +417,14 @@ export function TaskDrawerInsights({ state }: { state: any }) {
 
   return (
     <Tooltip.Provider delayDuration={180}>
-      <Tabs.Root className="taskdrawer-insights-tabs" defaultValue="comments">
+      <Tabs.Root className="taskdrawer-insights-tabs" defaultValue="automation">
         <Tabs.List className="taskdrawer-insights-tabs-list" aria-label="Task insights">
+          <Tabs.Trigger className="taskdrawer-insights-tab-trigger" value="automation">
+            Execution
+          </Tabs.Trigger>
           <Tabs.Trigger className="taskdrawer-insights-tab-trigger" value="comments">
             Comments
             <span className="taskdrawer-insights-tab-meta">{state.comments.data?.length ?? 0}</span>
-          </Tabs.Trigger>
-          <Tabs.Trigger className="taskdrawer-insights-tab-trigger" value="automation">
-            Automation
           </Tabs.Trigger>
           <Tabs.Trigger className="taskdrawer-insights-tab-trigger" value="activity">
             Activity
@@ -520,7 +533,7 @@ export function TaskDrawerInsights({ state }: { state: any }) {
         </Tabs.Content>
 
         <Tabs.Content className="taskdrawer-insights-content" value="automation">
-          <h4 style={{ margin: 0 }}>Automation</h4>
+          <h4 style={{ margin: 0 }}>Execution</h4>
           <div className="automation-box">
             <div className="row wrap" style={{ marginBottom: 8 }}>
               <span className={`badge ${state.automationStatus.data?.automation_state === 'completed' ? 'done' : ''}`}>
@@ -613,7 +626,7 @@ export function TaskDrawerInsights({ state }: { state: any }) {
                 </div>
               </div>
             ) : (
-              <div className="meta">No automation responses yet.</div>
+              <div className="meta">No execution responses yet.</div>
             )}
             {state.automationStatus.data?.last_agent_error && <div className="notice notice-error">Runner error: {state.automationStatus.data.last_agent_error}</div>}
             {(state.automationStatus.data?.last_requested_source || state.automationStatus.data?.last_requested_reason) ? (
@@ -680,8 +693,11 @@ export function TaskDrawerInsights({ state }: { state: any }) {
                   {state.automationStatus.data?.team_mode_phase ? (
                     <span className="badge">Phase: {String(state.automationStatus.data.team_mode_phase)}</span>
                   ) : null}
+                  {deliveryModeLabel ? (
+                    <span className="badge">Delivery: {deliveryModeLabel}</span>
+                  ) : null}
                   {state.automationStatus.data?.last_lead_handoff_token ? (
-                    <span className="badge status-done">Lead handoff token</span>
+                    <span className="badge status-done">Lead handoff recorded</span>
                   ) : null}
                   <span className="badge">Total: {executionGateSummary.total}</span>
                   <span className="badge">Blocking: {executionGateSummary.blocking}</span>
@@ -694,6 +710,11 @@ export function TaskDrawerInsights({ state }: { state: any }) {
               <div className="meta" style={{ marginBottom: 8 }}>
                 Deterministic runner gates for this task execution role and status.
               </div>
+              {deliveryModeCopy ? (
+                <div className="meta" style={{ marginBottom: 8 }}>
+                  {deliveryModeCopy}
+                </div>
+              ) : null}
               {executionGates.length > 0 ? (
                 <div className="automation-gates-list">
                   {executionGates.map((gate) => {
@@ -724,7 +745,7 @@ export function TaskDrawerInsights({ state }: { state: any }) {
                 </div>
               ) : (
                 <div className="meta">
-                  No execution gates apply to this task right now. Gates appear for Team Mode/Git Delivery role tasks (Developer/Lead/QA) based on current status.
+                  No execution gates apply to this task right now. Gates appear for Team Mode/Git Delivery tasks when their current role and semantic status activate deterministic checks.
                 </div>
               )}
             </div>

@@ -7,6 +7,7 @@ import {
   deleteTaskGroup,
   patchTaskGroup,
   reorderTaskGroups,
+  reviewTask,
   reopenTask,
   restoreTask,
   runTaskAutomationStream,
@@ -164,6 +165,17 @@ export function useTaskMutations(c: any) {
       await c.invalidateAll()
     },
     onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Complete failed')
+  })
+
+  const reviewTaskMutation = useMutation({
+    mutationFn: ({ taskId, action, comment }: { taskId: string; action: 'approve' | 'request_changes'; comment?: string | null }) =>
+      reviewTask(c.userId, taskId, { action, comment }),
+    onSuccess: async (task) => {
+      c.setUiError(null)
+      if (c.selectedTaskId === task.id) c.setEditStatus(task.status)
+      await c.invalidateAll()
+    },
+    onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Review action failed')
   })
 
   const reopenTaskMutation = useMutation({
@@ -348,6 +360,7 @@ export function useTaskMutations(c: any) {
     saveTaskMutation,
     createTaskMutation,
     completeTaskMutation,
+    reviewTaskMutation,
     reopenTaskMutation,
     archiveTaskMutation,
     restoreTaskMutation,

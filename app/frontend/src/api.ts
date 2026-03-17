@@ -357,6 +357,12 @@ export const createTask = (
 export const completeTask = (userId: string, taskId: string) =>
   api<Task>(`/api/tasks/${taskId}/complete`, userId, { method: 'POST' })
 
+export const reviewTask = (
+  userId: string,
+  taskId: string,
+  payload: { action: 'approve' | 'request_changes'; comment?: string | null }
+) => api<Task>(`/api/tasks/${taskId}/review`, userId, { method: 'POST', body: JSON.stringify(payload) })
+
 export const reopenTask = (userId: string, taskId: string) =>
   api<Task>(`/api/tasks/${taskId}/reopen`, userId, { method: 'POST' })
 

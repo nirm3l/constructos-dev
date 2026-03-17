@@ -45,6 +45,7 @@ class TaskCreate(BaseModel):
     instruction: str | None = None
     execution_triggers: list[dict[str, Any]] = Field(default_factory=list)
     task_relationships: list[dict[str, Any]] = Field(default_factory=list)
+    delivery_mode: str | None = None
     recurring_rule: str | None = None
     task_type: str = "manual"
     scheduled_instruction: str | None = None
@@ -68,6 +69,7 @@ class TaskPatch(BaseModel):
     instruction: str | None = None
     execution_triggers: list[dict[str, Any]] | None = None
     task_relationships: list[dict[str, Any]] | None = None
+    delivery_mode: str | None = None
     archived: bool | None = None
     project_id: str | None = None
     task_group_id: str | None = None
@@ -302,6 +304,7 @@ class TaskDTO:
     instruction: str | None
     execution_triggers: list[dict[str, Any]]
     task_relationships: list[dict[str, Any]]
+    delivery_mode: str | None
     recurring_rule: str | None
     task_type: str
     scheduled_instruction: str | None

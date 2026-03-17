@@ -45,9 +45,9 @@ function formatScheduleState(state: Task['schedule_state'] | null | undefined): 
 
 function formatAutomationState(state: string | null | undefined): string {
   const raw = String(state ?? '').trim()
-  if (!raw) return 'Idle'
-  if (raw === 'completed') return 'Completed'
-  return `${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
+  if (!raw || raw.toLowerCase() === 'idle') return 'Idle'
+  if (raw === 'completed') return 'Execution Completed'
+  return `Execution ${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
 }
 
 function toExecutionChipClassState(state: string | null | undefined): string {
@@ -63,6 +63,11 @@ function resolveEffectiveExecutionState(task: Task): string {
   const schedule = String(task.schedule_state ?? '').trim().toLowerCase()
   if (task.task_type === 'scheduled_instruction' && schedule) return schedule
   return automation || 'idle'
+}
+
+function isCompletedTaskStatus(status: string | null | undefined): boolean {
+  const raw = String(status ?? '').trim().toLowerCase()
+  return raw === 'done' || raw === 'completed'
 }
 
 const BOTTOM_TAB_ITEMS: Array<{ value: Tab; label: string; shortLabel: string; iconPath: string }> = [
@@ -174,7 +179,6 @@ export function TaskListItem({
 }) {
   const descriptionPreviewText = taskDescriptionPreview(task.description)
   const isScheduled = task.task_type === 'scheduled_instruction'
-  const hasAutomationInstruction = Boolean(String(task.instruction || task.scheduled_instruction || '').trim())
   const externalRefCount = Array.isArray(task.external_refs) ? task.external_refs.length : 0
   const attachmentCount = Array.isArray(task.attachment_refs) ? task.attachment_refs.length : 0
   const linkedNoteCount = Number.isFinite(task.linked_note_count as number) ? Number(task.linked_note_count) : 0
@@ -182,6 +186,7 @@ export function TaskListItem({
   const scheduleRepeat = formatRecurringRuleCompact(task.recurring_rule)
   const scheduleState = formatScheduleState(task.schedule_state)
   const effectiveExecutionState = resolveEffectiveExecutionState(task)
+  const hasVisibleAutomationState = effectiveExecutionState !== 'idle'
   const executionStateLabel = formatAutomationState(effectiveExecutionState)
   const executionStateClass = toExecutionChipClassState(effectiveExecutionState)
   const primaryAction = task.archived
@@ -190,7 +195,7 @@ export function TaskListItem({
         iconPath: 'M20 16v5H4v-5M12 3v12M7 8l5-5 5 5',
         onSelect: () => onRestore(task.id),
       }
-    : task.status === 'Done'
+    : isCompletedTaskStatus(task.status)
       ? {
           label: 'Reopen task',
           iconPath: 'M3 12a9 9 0 1 0 3-6.7M3 4v5h5',
@@ -249,7 +254,7 @@ export function TaskListItem({
             </ChipTooltip>
           </div>
         )}
-        {!isScheduled && hasAutomationInstruction && (
+        {!isScheduled && hasVisibleAutomationState && (
           <div className="task-schedule-compact">
             <ChipTooltip label={executionStateLabel}>
               <span className={`task-schedule-chip task-schedule-state task-schedule-state-${executionStateClass}`}>

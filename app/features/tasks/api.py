@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -56,6 +57,11 @@ from .domain import (
 from .read_models import TaskListQuery, list_tasks_read_model
 
 router = APIRouter()
+
+
+class TaskReviewDecisionPayload(BaseModel):
+    action: str
+    comment: str | None = None
 
 _STREAM_BROKER = InMemoryStreamBroker(max_events=1500)
 
@@ -179,6 +185,7 @@ def create_task(
         instruction=payload.instruction if "instruction" in provided_fields else None,
         execution_triggers=payload.execution_triggers if "execution_triggers" in provided_fields else None,
         task_relationships=payload.task_relationships if "task_relationships" in provided_fields else None,
+        delivery_mode=payload.delivery_mode if "delivery_mode" in provided_fields else None,
         recurring_rule=payload.recurring_rule if "recurring_rule" in provided_fields else None,
         specification_id=payload.specification_id,
         task_group_id=payload.task_group_id,
@@ -222,6 +229,21 @@ def complete_task(
 ):
     gateway = build_ui_gateway(actor_user_id=user.id)
     return gateway.complete_task(task_id=task_id, command_id=command_id)
+
+
+@router.post("/api/tasks/{task_id}/review")
+def review_task(
+    task_id: str,
+    payload: TaskReviewDecisionPayload,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    command_id: str | None = Depends(get_command_id),
+):
+    return TaskApplicationService(db, user, command_id=command_id).review_task(
+        task_id,
+        action=payload.action,
+        comment=payload.comment,
+    )
 
 
 @router.post("/api/tasks/{task_id}/reopen")
@@ -466,7 +488,7 @@ def run_automation_stream(
         )
     title = str(state.get("title") or "")
     description = str(state.get("description") or "")
-    status = str(state.get("status") or "To do")
+    status = str(state.get("status") or "To Do")
     instruction = str(payload.instruction or "").strip() or str(state.get("instruction") or state.get("scheduled_instruction") or "").strip()
     if not instruction:
         raise HTTPException(status_code=422, detail="instruction is required")

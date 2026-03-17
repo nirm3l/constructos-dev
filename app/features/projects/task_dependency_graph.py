@@ -14,6 +14,7 @@ from features.tasks.domain import (
     EVENT_AUTOMATION_REQUESTED,
     EVENT_COMMENT_ADDED,
 )
+from plugins.team_mode.semantics import semantic_status_key
 from plugins.team_mode.task_roles import derive_task_role, normalize_team_agents
 from shared.eventing_rebuild import load_events_after, rebuild_state
 from shared.models import ChatMessage, ChatSession, Project, ProjectMember, ProjectPluginConfig, Task
@@ -659,14 +660,15 @@ def get_project_task_dependency_graph(
 
     for task_id, node in nodes_by_task_id.items():
         status = str(node.get("status") or "").strip()
+        semantic_status = semantic_status_key(status=status)
         automation_state = str(node.get("automation_state") or "").strip().lower()
         if automation_state == "running":
             counts["running_tasks"] = int(counts["running_tasks"]) + 1
         elif automation_state == "queued":
             counts["queued_tasks"] = int(counts["queued_tasks"]) + 1
-        if status == "Blocked":
+        if semantic_status == "blocked":
             counts["blocked_tasks"] = int(counts["blocked_tasks"]) + 1
-        if status == "Done":
+        if semantic_status == "completed":
             counts["done_tasks"] = int(counts["done_tasks"]) + 1
 
     nodes = list(nodes_by_task_id.values())

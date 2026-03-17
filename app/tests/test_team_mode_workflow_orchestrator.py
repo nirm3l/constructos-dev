@@ -11,34 +11,32 @@ def _task(task_id: str, role: str, status: str, instruction: str = "do work") ->
     }
 
 
-def test_plan_kickoff_targets_lead_first_with_parallel_limit():
+def test_plan_kickoff_targets_prioritizes_runnable_implementation_work():
     tasks = [
-        _task("lead-1", "Lead", "Lead"),
-        _task("dev-1", "Developer", "Dev"),
-        _task("qa-1", "QA", "QA"),
+        _task("lead-1", "Lead", "In Progress"),
+        _task("dev-1", "Developer", "To do"),
+        _task("qa-1", "QA", "In Progress"),
     ]
 
     plan = plan_kickoff_targets(tasks, max_parallel_dispatch=2)
 
     assert plan["ok"] is True
-    assert plan["kickoff_task_ids"] == ["lead-1"]
-    by_role = plan["kickoff_task_ids_by_role"]
-    assert by_role["Lead"] == ["lead-1"]
-    assert by_role["Developer"] == []
-    assert by_role["QA"] == []
+    assert plan["kickoff_task_ids"] == ["dev-1", "lead-1"]
+    assert plan["kickoff_task_ids_by_role"]["Developer"] == ["dev-1"]
+    assert plan["kickoff_task_ids_by_role"]["Lead"] == ["lead-1"]
 
 
-def test_plan_kickoff_targets_blocks_when_no_runnable_lead():
+def test_plan_kickoff_targets_allows_direct_implementation_start_without_lead_task():
     tasks = [
-        _task("dev-1", "Developer", "Dev"),
-        _task("qa-1", "QA", "QA"),
+        _task("dev-1", "Developer", "To do"),
+        _task("qa-1", "QA", "In Progress"),
     ]
 
     plan = plan_kickoff_targets(tasks, max_parallel_dispatch=3)
 
-    assert plan["ok"] is False
-    assert plan["kickoff_task_ids"] == []
-    assert any("no Team Mode Lead task exists" in reason for reason in plan["blocked_reasons"])
+    assert plan["ok"] is True
+    assert plan["kickoff_task_ids"] == ["dev-1"]
+    assert plan["kickoff_task_ids_by_role"]["Developer"] == ["dev-1"]
 
 
 def test_plan_team_mode_dispatch_prioritizes_high_priority_developers_and_spreads_slots():
@@ -46,7 +44,7 @@ def test_plan_team_mode_dispatch_prioritizes_high_priority_developers_and_spread
         {
             "id": "dev-low-a",
             "role": "Developer",
-            "status": "Dev",
+            "status": "To do",
             "instruction": "implement low",
             "scheduled_instruction": "",
             "priority": "Low",
@@ -57,7 +55,7 @@ def test_plan_team_mode_dispatch_prioritizes_high_priority_developers_and_spread
         {
             "id": "dev-high-a",
             "role": "Developer",
-            "status": "Dev",
+            "status": "In Progress",
             "instruction": "implement high a",
             "scheduled_instruction": "",
             "priority": "High",
@@ -68,7 +66,7 @@ def test_plan_team_mode_dispatch_prioritizes_high_priority_developers_and_spread
         {
             "id": "dev-high-b",
             "role": "Developer",
-            "status": "Dev",
+            "status": "Blocked",
             "instruction": "implement high b",
             "scheduled_instruction": "",
             "priority": "High",
@@ -79,7 +77,7 @@ def test_plan_team_mode_dispatch_prioritizes_high_priority_developers_and_spread
         {
             "id": "dev-running-c",
             "role": "Developer",
-            "status": "Dev",
+            "status": "In Progress",
             "instruction": "already running",
             "scheduled_instruction": "",
             "priority": "High",
@@ -95,17 +93,16 @@ def test_plan_team_mode_dispatch_prioritizes_high_priority_developers_and_spread
     assert plan["mode"] == "developer_dispatch"
     assert plan["queue_task_ids"] == ["dev-high-a", "dev-high-b"]
     assert plan["selected_by_role"]["Developer"] == ["dev-high-a", "dev-high-b"]
-    counts = plan["counts"]
-    assert counts["busy_total"] == 1
-    assert counts["available_slots"] == 2
+    assert plan["counts"]["busy_total"] == 1
+    assert plan["counts"]["available_slots"] == 2
 
 
-def test_plan_team_mode_dispatch_defers_qa_until_developer_capacity_is_filled():
+def test_plan_team_mode_dispatch_allows_qa_after_deploy_cycle_is_active():
     tasks = [
         {
             "id": "dev-med",
             "role": "Developer",
-            "status": "Dev",
+            "status": "To do",
             "instruction": "implement medium",
             "scheduled_instruction": "",
             "priority": "Med",
@@ -116,24 +113,13 @@ def test_plan_team_mode_dispatch_defers_qa_until_developer_capacity_is_filled():
         {
             "id": "qa-ready",
             "role": "QA",
-            "status": "QA",
+            "status": "In Progress",
             "instruction": "validate release",
             "scheduled_instruction": "",
             "priority": "High",
             "automation_state": "idle",
             "assigned_agent_code": "qa-a",
             "dispatch_ready": True,
-        },
-        {
-            "id": "qa-not-ready",
-            "role": "QA",
-            "status": "QA",
-            "instruction": "validate blocked release",
-            "scheduled_instruction": "",
-            "priority": "High",
-            "automation_state": "idle",
-            "assigned_agent_code": "qa-b",
-            "dispatch_ready": False,
         },
     ]
 
@@ -143,3 +129,84 @@ def test_plan_team_mode_dispatch_defers_qa_until_developer_capacity_is_filled():
     assert plan["queue_task_ids"] == ["dev-med", "qa-ready"]
     assert plan["selected_by_role"]["Developer"] == ["dev-med"]
     assert plan["selected_by_role"]["QA"] == ["qa-ready"]
+
+
+def test_plan_kickoff_targets_skips_tasks_with_unsatisfied_dependencies():
+    tasks = [
+        {
+            "id": "foundation",
+            "role": "Developer",
+            "status": "To Do",
+            "instruction": "Build the shared core.",
+            "scheduled_instruction": "",
+            "priority": "High",
+            "task_relationships": [],
+        },
+        {
+            "id": "gameplay",
+            "role": "Developer",
+            "status": "To Do",
+            "instruction": "Build gameplay on top of the shared core.",
+            "scheduled_instruction": "",
+            "priority": "High",
+            "task_relationships": [
+                {"kind": "depends_on", "task_ids": ["foundation"], "statuses": ["merged"]},
+            ],
+        },
+    ]
+
+    plan = plan_kickoff_targets(tasks, max_parallel_dispatch=2)
+
+    assert plan["ok"] is True
+    assert plan["kickoff_task_ids"] == ["foundation"]
+    assert plan["kickoff_task_ids_by_role"]["Developer"] == ["foundation"]
+
+
+def test_plan_team_mode_dispatch_respects_dependency_graph_before_priority():
+    tasks = [
+        {
+            "id": "foundation",
+            "role": "Developer",
+            "status": "To Do",
+            "instruction": "Build the shared Tetris engine.",
+            "scheduled_instruction": "",
+            "priority": "Med",
+            "automation_state": "idle",
+            "assigned_agent_code": "dev-a",
+            "dispatch_ready": True,
+            "task_relationships": [],
+        },
+        {
+            "id": "gameplay",
+            "role": "Developer",
+            "status": "To Do",
+            "instruction": "Build gameplay and scoring on top of the engine.",
+            "scheduled_instruction": "",
+            "priority": "High",
+            "automation_state": "idle",
+            "assigned_agent_code": "dev-b",
+            "dispatch_ready": True,
+            "task_relationships": [
+                {"kind": "depends_on", "task_ids": ["foundation"], "statuses": ["merged"]},
+            ],
+        },
+        {
+            "id": "ui-shell",
+            "role": "Developer",
+            "status": "To Do",
+            "instruction": "Build the independent UI shell.",
+            "scheduled_instruction": "",
+            "priority": "Low",
+            "automation_state": "idle",
+            "assigned_agent_code": "dev-c",
+            "dispatch_ready": True,
+            "task_relationships": [],
+        },
+    ]
+
+    plan = plan_team_mode_dispatch(tasks, max_parallel_dispatch=2)
+
+    assert plan["ok"] is True
+    assert plan["mode"] == "developer_dispatch"
+    assert plan["queue_task_ids"] == ["foundation", "ui-shell"]
+    assert plan["selected_by_role"]["Developer"] == ["foundation", "ui-shell"]

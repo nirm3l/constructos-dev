@@ -325,6 +325,7 @@ export type Task = {
   instruction: string | null
   execution_triggers: TaskExecutionTrigger[]
   task_relationships?: Array<Record<string, unknown>>
+  delivery_mode?: 'deployable_slice' | 'merged_increment' | string | null
   recurring_rule: string | null
   task_type: 'manual' | 'scheduled_instruction'
   scheduled_instruction: string | null
@@ -1394,7 +1395,7 @@ export type Specification = {
   project_id: string
   title: string
   body: string
-  status: 'Draft' | 'Ready' | 'In progress' | 'Implemented' | 'Archived'
+  status: 'Draft' | 'Ready' | 'In Progress' | 'Implemented' | 'Archived'
   tags: string[]
   external_refs: ExternalRef[]
   attachment_refs: AttachmentRef[]

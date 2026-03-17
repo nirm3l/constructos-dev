@@ -112,9 +112,9 @@ function formatBoardScheduleState(state: Task['schedule_state'] | null | undefin
 
 function formatBoardAutomationState(state: string | null | undefined): string {
   const raw = String(state ?? '').trim()
-  if (!raw) return 'Idle'
-  if (raw === 'completed') return 'Completed'
-  return `${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
+  if (!raw || raw.toLowerCase() === 'idle') return 'Idle'
+  if (raw === 'completed') return 'Execution Completed'
+  return `Execution ${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
 }
 
 function toBoardExecutionChipClassState(state: string | null | undefined): string {
@@ -159,8 +159,8 @@ function BoardTaskCard({
 }: BoardTaskCardProps) {
   const descriptionPreviewText = taskDescriptionPreview(task.description)
   const isScheduled = task.task_type === 'scheduled_instruction'
-  const hasAutomationInstruction = Boolean(String(task.instruction || task.scheduled_instruction || '').trim())
   const effectiveExecutionState = resolveBoardEffectiveExecutionState(task)
+  const hasVisibleAutomationState = effectiveExecutionState !== 'idle'
   const executionStateLabel = formatBoardAutomationState(effectiveExecutionState)
   const executionStateClass = toBoardExecutionChipClassState(effectiveExecutionState)
   const availableStatuses = statuses.filter((candidateStatus) => candidateStatus !== status)
@@ -200,7 +200,7 @@ function BoardTaskCard({
           </span>
         </div>
       )}
-      {!isScheduled && hasAutomationInstruction && (
+      {!isScheduled && hasVisibleAutomationState && (
         <div className="kanban-schedule-compact">
           <span className={`task-schedule-chip task-schedule-state task-schedule-state-${executionStateClass}`}>
             {executionStateLabel}
@@ -371,8 +371,6 @@ export function TasksPanel({
   onNewTask,
 }: TasksPanelProps) {
   const getTeamAgentLabel = React.useCallback((task: Task): string => {
-    const assigneeId = String(task.assignee_id || '').trim()
-    if (!assigneeId) return ''
     const slot = String(task.assigned_agent_code || '').trim()
     if (!slot) return ''
     const normalizedSlot = slot.toLowerCase()
@@ -380,9 +378,24 @@ export function TasksPanel({
     if (normalizedSlot === 'dev-b') return 'Developer B'
     if (normalizedSlot === 'qa-a') return 'QA A'
     if (normalizedSlot === 'lead-a') return 'Lead A'
-    return slot
+    const parts = slot
       .split('-')
       .filter(Boolean)
+    if (parts.length === 2) {
+      const role = String(parts[0] || '')
+      const ordinal = String(parts[1] || '')
+      const normalizedRole = role.toLowerCase()
+      const roleLabel =
+        normalizedRole === 'dev'
+          ? 'Developer'
+          : normalizedRole === 'qa'
+            ? 'QA'
+            : normalizedRole === 'lead'
+              ? 'Lead'
+              : `${role.charAt(0).toUpperCase()}${role.slice(1)}`
+      return `${roleLabel} ${ordinal.toUpperCase()}`
+    }
+    return parts
       .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
       .join(' ')
   }, [])
@@ -390,7 +403,7 @@ export function TasksPanel({
     const assigneeId = String(task.assignee_id || '').trim()
     const assignee = assigneeId ? String(actorNames?.[assigneeId] || assigneeId).trim() : ''
     const agent = getTeamAgentLabel(task)
-    if (assignee && agent) return `${assignee} (${agent})`
+    if (agent) return agent
     return assignee
   }, [actorNames, getTeamAgentLabel])
 

@@ -108,7 +108,7 @@ export function formatActivitySummary(
     case 'TaskReopened':
       return {
         title: `${actorName} reopened the task`,
-        detail: `Status: ${String(details.status ?? 'To do')}`,
+        detail: `Status: ${String(details.status ?? 'To Do')}`,
       }
     case 'TaskArchived':
       return { title: `${actorName} archived the task`, detail: 'Task moved to archive' }
@@ -201,7 +201,7 @@ export function parseCommaTags(raw: string): string[] {
   return out
 }
 
-export const DEFAULT_PROJECT_STATUSES: string[] = ['To do', 'In progress', 'Done']
+export const DEFAULT_PROJECT_STATUSES: string[] = ['To Do', 'In Progress', 'Done']
 export const PROJECT_EVIDENCE_TOP_K_MIN = 1
 export const PROJECT_EVIDENCE_TOP_K_MAX = 40
 export const PROJECT_AUTOMATION_MAX_PARALLEL_MIN = 1

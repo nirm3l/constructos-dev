@@ -184,7 +184,7 @@ export function SpecificationsPanel({ state }: { state: any }) {
   const specificationStatuses: Array<Specification['status']> = [
     'Draft',
     'Ready',
-    'In progress',
+    'In Progress',
     'Implemented',
     'Archived',
   ]
@@ -595,10 +595,10 @@ export function SpecificationsPanel({ state }: { state: any }) {
                                 className="status-chip"
                                 type="button"
                                 onClick={() => setShowSpecTagPicker(false)}
-                                title="Done"
-                                aria-label="Done"
+                                title="Close"
+                                aria-label="Close"
                               >
-                                Done
+                                Close
                               </button>
                             </div>
                             <div className="tag-picker-input-row">

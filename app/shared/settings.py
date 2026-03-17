@@ -71,7 +71,7 @@ APP_DEPLOYED_AT_UTC = (
 )
 SNAPSHOT_EVERY = int(os.getenv("SNAPSHOT_EVERY", "20"))
 EVENTSTORE_URI = os.getenv("EVENTSTORE_URI", "").strip()
-DEFAULT_STATUSES = ["To do", "In progress", "Done"]
+DEFAULT_STATUSES = ["To Do", "In Progress", "Done"]
 DEFAULT_USER_ID = "00000000-0000-0000-0000-000000000001"
 BOOTSTRAP_USERNAME = os.getenv("BOOTSTRAP_USERNAME", "admin").strip() or "admin"
 BOOTSTRAP_FULL_NAME = os.getenv("BOOTSTRAP_FULL_NAME", "admin").strip() or "admin"

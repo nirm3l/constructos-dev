@@ -49,8 +49,6 @@ type TaskFlowNodeData = {
   summary: string
 }
 
-type TaskFlowFilterMode = 'all' | 'runtime' | 'structural'
-
 type GroupedRuntimeEvent = {
   key: string
   source: string
@@ -176,6 +174,54 @@ function normalizeAutomationKey(value: string | null | undefined): string {
   return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'idle'
 }
 
+function semanticStatusKey(value: string | null | undefined): string {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) return 'open'
+  if (normalized === 'to do' || normalized === 'todo') return 'todo'
+  if (normalized === 'in progress' || normalized === 'in-progress' || normalized === 'active') return 'active'
+  if (normalized === 'in review' || normalized === 'in-review' || normalized === 'review') return 'in_review'
+  if (normalized === 'awaiting decision' || normalized === 'awaiting-decision') return 'awaiting_decision'
+  if (normalized === 'blocked') return 'blocked'
+  if (normalized === 'completed' || normalized === 'done') return 'completed'
+  return normalized.replace(/[^a-z0-9]+/g, '_')
+}
+
+function workflowLane(phase: string | null | undefined, status: string | null | undefined, role: string | null | undefined): string {
+  const normalizedPhase = String(phase || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_')
+  if (normalizedPhase === 'implementation') return 'Implementation'
+  if (normalizedPhase === 'in_review') return 'In Review'
+  if (normalizedPhase === 'deploy_ready' || normalizedPhase === 'deployment') return 'Deployment'
+  if (normalizedPhase === 'qa_validation') return 'QA Validation'
+  if (normalizedPhase === 'awaiting_decision') return 'Awaiting Decision'
+  if (normalizedPhase === 'blocked') return 'Blocked'
+  if (normalizedPhase === 'completed') return 'Completed'
+
+  const semantic = semanticStatusKey(status)
+  if (semantic === 'todo' || semantic === 'active') return 'Implementation'
+  if (semantic === 'in_review') return 'In Review'
+  if (semantic === 'awaiting_decision') return 'Awaiting Decision'
+  if (semantic === 'blocked') return 'Blocked'
+  if (semantic === 'completed') return 'Completed'
+
+  const normalizedRole = String(role || '').trim().toLowerCase()
+  if (normalizedRole === 'developer') return 'Implementation'
+  if (normalizedRole === 'lead') return 'Deployment'
+  if (normalizedRole === 'qa') return 'QA Validation'
+  return 'Other'
+}
+
+function workflowLaneOrder(phase: string | null | undefined, status: string | null | undefined, role: string | null | undefined): number {
+  const lane = workflowLane(phase, status, role)
+  if (lane === 'Implementation') return 0
+  if (lane === 'In Review') return 1
+  if (lane === 'Deployment') return 2
+  if (lane === 'QA Validation') return 3
+  if (lane === 'Awaiting Decision') return 4
+  if (lane === 'Blocked') return 5
+  if (lane === 'Completed') return 6
+  return 7
+}
+
 function roleLane(value: string): 'Developer' | 'Lead' | 'QA' | 'Other' {
   const normalized = String(value || '').trim().toLowerCase()
   if (normalized === 'developer') return 'Developer'
@@ -193,13 +239,14 @@ function roleLaneOrder(value: string): number {
 }
 
 function statusRank(value: string): number {
-  const normalized = String(value || '').trim().toLowerCase()
-  if (normalized === 'blocked') return 0
-  if (normalized === 'dev') return 1
-  if (normalized === 'lead') return 2
-  if (normalized === 'qa') return 3
-  if (normalized === 'done') return 4
-  return 5
+  const semantic = semanticStatusKey(value)
+  if (semantic === 'blocked') return 0
+  if (semantic === 'todo') return 1
+  if (semantic === 'active') return 2
+  if (semantic === 'in_review') return 3
+  if (semantic === 'awaiting_decision') return 4
+  if (semantic === 'completed') return 5
+  return 6
 }
 
 function TaskFlowNodeCard(props: any) {
@@ -234,11 +281,6 @@ function edgeChannelLabel(edge: TaskDependencyGraphEdge): string {
     parts.push(relationshipKinds.map((item) => String(item || '').replace(/_/g, ' ')).join(' + '))
   }
   if (edge.trigger_dependency) parts.push('status trigger')
-  if (edge.runtime_dependency) {
-    if (Number(edge.lead_handoffs_total || 0) > 0) parts.push(`handoff x${edge.lead_handoffs_total}`)
-    const runtimeTotal = Number(edge.runtime_requests_total || 0)
-    if (runtimeTotal > Number(edge.lead_handoffs_total || 0)) parts.push(`runtime x${runtimeTotal}`)
-  }
   return parts.join(' · ') || 'task dependency'
 }
 
@@ -250,6 +292,7 @@ function formatChannelLabel(value: string): string {
 }
 
 function edgeColor(edge: TaskDependencyGraphEdge): string {
+  if (edge.structural && edge.trigger_dependency) return '#b45309'
   if (edge.active_runtime) return '#059669'
   if (edge.runtime_dependency) return '#2563eb'
   if (edge.trigger_dependency) return '#d97706'
@@ -294,7 +337,7 @@ const CLASSIFIER_PRIORITY_FIELDS = [
   'deploy_requested',
   'docker_compose_requested',
   'requested_port',
-  'exact_task_count',
+  'code_review_required',
   'task_completion_requested',
 ]
 
@@ -377,6 +420,7 @@ function groupedRuntimeEventsForEdge(edge: TaskDependencyGraphEdge): GroupedRunt
 }
 
 function edgeWidth(edge: TaskDependencyGraphEdge): number {
+  if (edge.structural && edge.trigger_dependency) return 2.8
   if (edge.active_runtime) return 4
   if (edge.runtime_dependency) return 3.25
   if (edge.trigger_dependency) return 2.6
@@ -401,21 +445,16 @@ function navigateToTask(projectId: string, taskId: string): void {
 
 function computeVisibleNodeIds(args: {
   graph: ProjectTaskDependencyGraph
-  filterMode: TaskFlowFilterMode
   searchQuery: string
   selectedRole: string
   showOnlyConnected: boolean
 }): Set<string> {
-  const { graph, filterMode, searchQuery, selectedRole, showOnlyConnected } = args
+  const { graph, searchQuery, selectedRole, showOnlyConnected } = args
   const nodeLookup = new Map(graph.nodes.map((node) => [String(node.entity_id || '').trim(), node]))
   const search = String(searchQuery || '').trim().toLowerCase()
   const roleFilter = String(selectedRole || 'all').trim().toLowerCase()
 
-  const matchingEdges = graph.edges.filter((edge) => {
-    if (filterMode === 'runtime') return Boolean(edge.runtime_dependency)
-    if (filterMode === 'structural') return Boolean(edge.structural || edge.trigger_dependency)
-    return true
-  })
+  const matchingEdges = graph.edges.filter((edge) => Boolean(edge.structural || edge.trigger_dependency))
   const connectedNodeIds = new Set<string>()
   for (const edge of matchingEdges) {
     connectedNodeIds.add(String(edge.source_entity_id || '').trim())
@@ -515,13 +554,13 @@ function buildDefaultLayout(args: {
   const laneGroups = new Map<string, TaskDependencyGraphNode[]>()
 
   for (const node of nodes) {
-    const lane = roleLane(node.role)
+    const lane = workflowLane(node.team_mode_phase, node.status, node.role)
     const group = laneGroups.get(lane) ?? []
     group.push(node)
     laneGroups.set(lane, group)
   }
 
-  const laneOrder = ['Developer', 'Lead', 'QA', 'Other']
+  const laneOrder = ['Implementation', 'In Review', 'Deployment', 'QA Validation', 'Awaiting Decision', 'Blocked', 'Completed', 'Other']
   const laneBaseY = new Map<string, number>()
   let nextY = 32
   for (const lane of laneOrder) {
@@ -534,7 +573,9 @@ function buildDefaultLayout(args: {
 
   return [...nodes]
     .sort((left, right) => {
-      const laneDiff = roleLaneOrder(left.role) - roleLaneOrder(right.role)
+      const laneDiff =
+        workflowLaneOrder(left.team_mode_phase, left.status, left.role) -
+        workflowLaneOrder(right.team_mode_phase, right.status, right.role)
       if (laneDiff !== 0) return laneDiff
       const depthDiff =
         Number(depths.get(String(left.entity_id || '')) || 0) -
@@ -545,13 +586,13 @@ function buildDefaultLayout(args: {
       return String(left.title || '').localeCompare(String(right.title || ''))
     })
     .map((node) => {
-      const lane = roleLane(node.role)
+      const lane = workflowLane(node.team_mode_phase, node.status, node.role)
       const nodeId = String(node.entity_id || '').trim()
       const depth = Number(depths.get(nodeId) || 0)
       const laneKey = `${lane}:${depth}`
       const laneIndex = Number(perLaneDepthCount.get(laneKey) || 0)
       perLaneDepthCount.set(laneKey, laneIndex + 1)
-      const summary = `${node.inbound_count} in · ${node.outbound_count} out · runtime ${node.runtime_inbound_count}/${node.runtime_outbound_count}`
+      const summary = `${node.inbound_count} in · ${node.outbound_count} out`
 
       const storedPosition = storedPositions?.get(nodeId)
       return {
@@ -739,7 +780,6 @@ export function ProjectTaskDependencyGraphPanel({
   showHeader?: boolean
   fitSignal?: number
 }) {
-  const [filterMode, setFilterMode] = React.useState<TaskFlowFilterMode>('all')
   const [searchQuery, setSearchQuery] = React.useState('')
   const [selectedRole, setSelectedRole] = React.useState('all')
   const [showOnlyConnected, setShowOnlyConnected] = React.useState(false)
@@ -766,13 +806,12 @@ export function ProjectTaskDependencyGraphPanel({
       graph
         ? computeVisibleNodeIds({
             graph,
-            filterMode,
             searchQuery,
             selectedRole,
             showOnlyConnected,
           })
         : new Set<string>(),
-    [filterMode, graph, searchQuery, selectedRole, showOnlyConnected]
+    [graph, searchQuery, selectedRole, showOnlyConnected]
   )
 
   const visibleNodes = React.useMemo(
@@ -804,11 +843,9 @@ export function ProjectTaskDependencyGraphPanel({
         const source = String(edge.source_entity_id || '').trim()
         const target = String(edge.target_entity_id || '').trim()
         if (!visibleNodeIds.has(source) || !visibleNodeIds.has(target)) return false
-        if (filterMode === 'runtime') return Boolean(edge.runtime_dependency)
-        if (filterMode === 'structural') return Boolean(edge.structural || edge.trigger_dependency)
-        return true
+        return Boolean(edge.structural || edge.trigger_dependency)
       }),
-    [filterMode, graph?.edges, visibleNodeIds]
+    [graph?.edges, visibleNodeIds]
   )
 
   React.useEffect(() => {
@@ -817,8 +854,7 @@ export function ProjectTaskDependencyGraphPanel({
       return
     }
     if (selectedTaskId && visibleNodes.some((node) => String(node.entity_id || '') === selectedTaskId)) return
-    const activeRuntimeTarget = visibleEdges.find((edge) => edge.active_runtime)?.target_entity_id
-    setSelectedTaskId(String(activeRuntimeTarget || visibleNodes[0]?.entity_id || ''))
+    setSelectedTaskId(String(visibleNodes[0]?.entity_id || ''))
   }, [selectedTaskId, visibleEdges, visibleNodes])
 
   const flowNodes = React.useMemo(
@@ -847,7 +883,7 @@ export function ProjectTaskDependencyGraphPanel({
     window.requestAnimationFrame(() => {
       flowRef.current?.fitView(TASK_FLOW_FIT_VIEW_OPTIONS)
     })
-  }, [fitSignal, flowNodes.length])
+  }, [fitSignal, flowNodes.length, layoutStorageKey])
 
   const handleNodeClick = React.useCallback((_event: React.MouseEvent, node: FlowNode<TaskFlowNodeData>) => {
     setSelectedTaskId(String(node.id || ''))
@@ -886,27 +922,15 @@ export function ProjectTaskDependencyGraphPanel({
   }, [graph?.nodes])
 
   const filteredCounts = React.useMemo(() => {
-    const runtimeEdges = visibleEdges.filter((edge) => edge.runtime_dependency).length
     const structuralEdges = visibleEdges.filter((edge) => edge.structural).length
     const triggerEdges = visibleEdges.filter((edge) => edge.trigger_dependency).length
-    const activeRuntimeEdges = visibleEdges.filter((edge) => edge.active_runtime).length
     return {
       tasks: visibleNodes.length,
-      runtimeEdges,
       structuralEdges,
       triggerEdges,
-      activeRuntimeEdges,
       runningTasks: visibleNodes.filter((node) => String(node.automation_state || '').trim().toLowerCase() === 'running').length,
     }
   }, [visibleEdges, visibleNodes])
-
-  const runtimeSourceRows = React.useMemo(
-    () =>
-      Object.entries(graph?.runtime_source_counts ?? {})
-        .sort((left, right) => Number(right[1] || 0) - Number(left[1] || 0) || left[0].localeCompare(right[0]))
-        .slice(0, 6),
-    [graph?.runtime_source_counts]
-  )
 
   const relationshipRows = React.useMemo(
     () =>
@@ -981,10 +1005,10 @@ export function ProjectTaskDependencyGraphPanel({
           <div>
             <div className="meta">Task flow graph</div>
             <div className="task-flow-title">
-              Task-only execution view for {graph.project_name || projectName || 'this project'}
+              Task dependency view for {graph.project_name || projectName || 'this project'}
             </div>
             <div className="task-flow-subtitle">
-              Structural task relationships, status-change triggers, and historical TaskAutomationRequested handoffs are combined into one execution graph.
+              Structural task relationships and status triggers define execution order for this project.
             </div>
           </div>
           <div className="task-flow-head-actions">
@@ -999,10 +1023,6 @@ export function ProjectTaskDependencyGraphPanel({
           <strong>{filteredCounts.tasks}</strong>
         </div>
         <div className="task-flow-metric-card">
-          <span className="meta">Runtime edges</span>
-          <strong>{filteredCounts.runtimeEdges}</strong>
-        </div>
-        <div className="task-flow-metric-card">
           <span className="meta">Structural edges</span>
           <strong>{filteredCounts.structuralEdges}</strong>
         </div>
@@ -1011,41 +1031,12 @@ export function ProjectTaskDependencyGraphPanel({
           <strong>{filteredCounts.triggerEdges}</strong>
         </div>
         <div className="task-flow-metric-card">
-          <span className="meta">Active runtime</span>
-          <strong>{filteredCounts.activeRuntimeEdges}</strong>
-        </div>
-        <div className="task-flow-metric-card">
           <span className="meta">Running tasks</span>
           <strong>{filteredCounts.runningTasks}</strong>
         </div>
       </div>
 
       <div className="task-flow-toolbar">
-        <div className="task-flow-filter-group">
-          <span className="meta">Mode</span>
-          <button
-            type="button"
-            className={`task-flow-filter-btn ${filterMode === 'all' ? 'active' : ''}`.trim()}
-            onClick={() => setFilterMode('all')}
-          >
-            All
-          </button>
-          <button
-            type="button"
-            className={`task-flow-filter-btn ${filterMode === 'runtime' ? 'active' : ''}`.trim()}
-            onClick={() => setFilterMode('runtime')}
-          >
-            Runtime
-          </button>
-          <button
-            type="button"
-            className={`task-flow-filter-btn ${filterMode === 'structural' ? 'active' : ''}`.trim()}
-            onClick={() => setFilterMode('structural')}
-          >
-            Structural
-          </button>
-        </div>
-
         <div className="task-flow-filter-group">
           <span className="meta">Role</span>
           <select value={selectedRole} onChange={(event) => setSelectedRole(event.target.value)}>
@@ -1078,26 +1069,13 @@ export function ProjectTaskDependencyGraphPanel({
       </div>
 
       <div className="task-flow-legend">
-        <span className="task-flow-legend-item"><span className="task-flow-legend-line runtime" /> runtime request</span>
-        <span className="task-flow-legend-item"><span className="task-flow-legend-line active" /> active runtime chain</span>
+        <span className="task-flow-legend-item"><span className="task-flow-legend-line structural-trigger" /> structural dependency + status trigger</span>
         <span className="task-flow-legend-item"><span className="task-flow-legend-line trigger" /> status trigger</span>
         <span className="task-flow-legend-item"><span className="task-flow-legend-line structural" /> structural dependency</span>
       </div>
 
-      {(runtimeSourceRows.length > 0 || relationshipRows.length > 0) ? (
+      {relationshipRows.length > 0 ? (
         <div className="task-flow-channel-band">
-          {runtimeSourceRows.length > 0 ? (
-            <div className="task-flow-channel-group">
-              <span className="meta">Runtime sources</span>
-              <div className="task-flow-channel-chips">
-                {runtimeSourceRows.map(([key, count]) => (
-                  <span key={`runtime-source-${key}`} className="task-flow-channel-chip runtime">
-                    {formatChannelLabel(key)} · {Number(count || 0)}
-                  </span>
-                ))}
-              </div>
-            </div>
-          ) : null}
           {relationshipRows.length > 0 ? (
             <div className="task-flow-channel-group">
               <span className="meta">Structural links</span>
@@ -1214,10 +1192,6 @@ export function ProjectTaskDependencyGraphPanel({
                             </span>
                           </div>
                           <div className="task-flow-edge-desc">{edgeChannelLabel(edge)}</div>
-                          <div className="task-flow-edge-meta">
-                            {edge.latest_runtime_at ? <span>Latest {new Date(edge.latest_runtime_at).toLocaleString()}</span> : <span>No runtime timestamp</span>}
-                          </div>
-                          <EdgeRuntimeTimeline edge={edge} onSelectEvent={(selectedEdge, event) => setSelectedRuntimeEvent({ edge: selectedEdge, event })} />
                         </div>
                       )
                     })}
@@ -1254,10 +1228,6 @@ export function ProjectTaskDependencyGraphPanel({
                             </span>
                           </div>
                           <div className="task-flow-edge-desc">{edgeChannelLabel(edge)}</div>
-                          <div className="task-flow-edge-meta">
-                            {edge.active_runtime ? <span>Active runtime chain</span> : <span>{Number(edge.runtime_requests_total || 0)} runtime requests</span>}
-                          </div>
-                          <EdgeRuntimeTimeline edge={edge} onSelectEvent={(selectedEdge, event) => setSelectedRuntimeEvent({ edge: selectedEdge, event })} />
                         </div>
                       )
                     })}

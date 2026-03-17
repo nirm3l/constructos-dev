@@ -450,7 +450,7 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "specification_id": p.get("specification_id"),
             "title": p["title"],
             "description": p.get("description", ""),
-            "status": p.get("status", "To do"),
+            "status": p.get("status", "To Do"),
             "priority": p.get("priority", "Med"),
             "due_date": p.get("due_date"),
             "assignee_id": p.get("assignee_id"),
@@ -463,6 +463,7 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "instruction": instruction,
             "execution_triggers": execution_triggers,
             "task_relationships": normalize_task_relationships(p.get("task_relationships")),
+            "delivery_mode": p.get("delivery_mode"),
             "recurring_rule": legacy.get("recurring_rule"),
             "task_type": legacy.get("task_type", "manual"),
             "scheduled_instruction": legacy.get("scheduled_instruction"),
@@ -508,10 +509,10 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
     elif event.event_type in {TASK_EVENT_UPDATED, TASK_EVENT_REORDERED}:
         s.update(p)
     elif event.event_type == TASK_EVENT_COMPLETED:
-        s["status"] = "Done"
+        s["status"] = p.get("status", "Done")
         s["completed_at"] = p.get("completed_at")
     elif event.event_type == TASK_EVENT_REOPENED:
-        s["status"] = p.get("status", "To do")
+        s["status"] = p.get("status", "To Do")
         s["completed_at"] = None
     elif event.event_type == TASK_EVENT_ARCHIVED:
         s["archived"] = True
@@ -1237,7 +1238,7 @@ def project_event(db: Session, ev: EventEnvelope):
         task.specification_id = p.get("specification_id")
         task.title = p["title"]
         task.description = p.get("description", "") or ""
-        task.status = p.get("status", "To do")
+        task.status = p.get("status", "To Do")
         task.priority = p.get("priority", "Med")
         task.due_date = datetime.fromisoformat(p["due_date"]) if p.get("due_date") else None
         task.assignee_id = p.get("assignee_id")
@@ -1250,6 +1251,8 @@ def project_event(db: Session, ev: EventEnvelope):
         task.instruction = instruction
         task.execution_triggers = json.dumps(execution_triggers)
         task.task_relationships = json.dumps(task_relationships)
+        if "delivery_mode" in p:
+            setattr(task, "delivery_mode", p.get("delivery_mode"))
         task.recurring_rule = legacy_schedule.get("recurring_rule")
         task.task_type = legacy_schedule.get("task_type", "manual")
         task.scheduled_instruction = legacy_schedule.get("scheduled_instruction")
@@ -1621,10 +1624,10 @@ def project_event(db: Session, ev: EventEnvelope):
                     if p["status"] != "Done":
                         task.completed_at = None
             elif ev.event_type == TASK_EVENT_COMPLETED:
-                task.status = "Done"
+                task.status = p.get("status", "Done")
                 task.completed_at = datetime.fromisoformat(p["completed_at"])
             elif ev.event_type == TASK_EVENT_REOPENED:
-                task.status = p.get("status", "To do")
+                task.status = p.get("status", "To Do")
                 task.completed_at = None
             elif ev.event_type == TASK_EVENT_ARCHIVED:
                 task.archived = True

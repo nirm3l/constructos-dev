@@ -788,10 +788,10 @@ export function NotesPanel({
                         className="status-chip"
                         type="button"
                         onClick={() => state.setShowTagPicker(false)}
-                        title="Done"
-                        aria-label="Done"
+                        title="Close"
+                        aria-label="Close"
                       >
-                        Done
+                        Close
                       </button>
                     </div>
                     <div className="tag-picker-input-row">

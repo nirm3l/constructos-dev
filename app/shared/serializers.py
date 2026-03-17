@@ -43,6 +43,7 @@ from .task_automation import (
     derive_legacy_schedule_fields,
     normalize_execution_triggers,
 )
+from .task_delivery import normalize_delivery_mode
 from .task_relationships import normalize_task_relationships
 from .vector_store import project_embedding_index_snapshot
 
@@ -108,6 +109,27 @@ def load_created_by_map(db: Session, aggregate_type: str, aggregate_ids: list[st
     return out
 
 
+def _sanitize_labels(raw_labels: object) -> list[str]:
+    parsed: list[object]
+    if isinstance(raw_labels, list):
+        parsed = raw_labels
+    else:
+        try:
+            parsed = json.loads(str(raw_labels or "[]"))
+        except Exception:
+            parsed = []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in parsed:
+        label = str(item or "").strip()
+        lowered = label.lower()
+        if not label or lowered.startswith("delivery_mode:") or lowered in seen:
+            continue
+        seen.add(lowered)
+        out.append(label)
+    return out
+
+
 def serialize_task(
     task: Task,
     created_by: str = "",
@@ -117,6 +139,7 @@ def serialize_task(
     instruction = str(task.instruction or task.scheduled_instruction or "").strip() or None
     execution_triggers = normalize_execution_triggers(task.execution_triggers)
     task_relationships = normalize_task_relationships(task.task_relationships)
+    delivery_mode = normalize_delivery_mode(getattr(task, "delivery_mode", None))
     if not execution_triggers:
         legacy_trigger = build_legacy_schedule_trigger(
             scheduled_at_utc=to_iso_utc(task.scheduled_at_utc),
@@ -142,7 +165,7 @@ def serialize_task(
         due_date=to_iso_utc(task.due_date),
         assignee_id=task.assignee_id,
         assigned_agent_code=(str(task.assigned_agent_code or "").strip() or None),
-        labels=json.loads(task.labels or "[]"),
+        labels=_sanitize_labels(task.labels),
         subtasks=json.loads(task.subtasks or "[]"),
         attachments=json.loads(task.attachments or "[]"),
         external_refs=json.loads(task.external_refs or "[]"),
@@ -150,6 +173,7 @@ def serialize_task(
         instruction=instruction,
         execution_triggers=execution_triggers,
         task_relationships=task_relationships,
+        delivery_mode=delivery_mode,
         recurring_rule=legacy_schedule.get("recurring_rule") or task.recurring_rule,
         task_type=str(legacy_schedule.get("task_type") or "manual"),
         scheduled_instruction=legacy_schedule.get("scheduled_instruction"),
@@ -289,6 +313,7 @@ def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
         instruction = str(state.get("instruction") or state.get("scheduled_instruction") or "").strip() or None
         execution_triggers = normalize_execution_triggers(state.get("execution_triggers"))
         task_relationships = normalize_task_relationships(state.get("task_relationships"))
+        delivery_mode = normalize_delivery_mode(state.get("delivery_mode"))
         if not execution_triggers:
             legacy_trigger = build_legacy_schedule_trigger(
                 scheduled_at_utc=state.get("scheduled_at_utc"),
@@ -309,12 +334,12 @@ def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
             "specification_id": state.get("specification_id"),
             "title": state.get("title"),
             "description": state.get("description", ""),
-            "status": state.get("status", "To do"),
+            "status": state.get("status", "To Do"),
             "priority": state.get("priority", "Med"),
             "due_date": state.get("due_date"),
             "assignee_id": state.get("assignee_id"),
             "assigned_agent_code": state.get("assigned_agent_code"),
-            "labels": state.get("labels", []),
+            "labels": _sanitize_labels(state.get("labels", [])),
             "subtasks": state.get("subtasks", []),
             "attachments": state.get("attachments", []),
             "external_refs": state.get("external_refs", []),
@@ -322,6 +347,7 @@ def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
             "instruction": instruction,
             "execution_triggers": execution_triggers,
             "task_relationships": task_relationships,
+            "delivery_mode": delivery_mode,
             "recurring_rule": legacy_schedule.get("recurring_rule") or state.get("recurring_rule"),
             "task_type": str(legacy_schedule.get("task_type") or state.get("task_type") or "manual"),
             "scheduled_instruction": legacy_schedule.get("scheduled_instruction"),
@@ -340,7 +366,18 @@ def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
 
     task = db.get(Task, task_id)
     if task and not task.is_deleted:
-        return serialize_task(task, created_by=load_created_by(db, "Task", task_id))
+        serialized = serialize_task(task, created_by=load_created_by(db, "Task", task_id))
+        try:
+            state, _ = rebuild_state(db, "Task", task_id)
+        except Exception:
+            state = {}
+        if isinstance(state, dict) and state:
+            serialized["delivery_mode"] = normalize_delivery_mode(state.get("delivery_mode"))
+            if state.get("completed_at"):
+                serialized["completed_at"] = state.get("completed_at")
+            if state.get("status"):
+                serialized["status"] = state.get("status")
+        return serialized
     return None
 
 
@@ -404,7 +441,7 @@ def load_task_command_state(db: Session, task_id: str) -> TaskCommandState | Non
         project_id=state.get("project_id"),
         task_group_id=state.get("task_group_id"),
         specification_id=state.get("specification_id"),
-        status=state.get("status", "To do"),
+        status=state.get("status", "To Do"),
         archived=bool(state.get("archived", False)),
         is_deleted=bool(state.get("is_deleted", False)),
     )

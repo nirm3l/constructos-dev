@@ -17,7 +17,7 @@ _PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "shared" / "prompt
 _WORKFLOW_SCOPES = {"team_mode", "single_agent", "unknown"}
 _EXECUTION_MODES = {"setup_only", "setup_then_kickoff", "kickoff_only", "resume_execution", "unknown"}
 _INTENT_CLASSIFIER_VERSION = "instruction-intent-v1"
-_INTENT_CLASSIFIER_SCHEMA_VERSION = "1"
+_INTENT_CLASSIFIER_SCHEMA_VERSION = "2"
 _INTENT_CLASSIFICATION_CACHE = ClassificationCache(max_entries=256)
 _INTENT_CLASSIFIER_STATS = {
     "classify_calls": 0,
@@ -37,7 +37,7 @@ _FULL_INTENT_ENVELOPE_FIELDS = (
     "deploy_requested",
     "docker_compose_requested",
     "requested_port",
-    "exact_task_count",
+    "code_review_required",
     "project_name_provided",
     "task_completion_requested",
     "reason",
@@ -85,16 +85,6 @@ def _normalize_optional_port(value: Any) -> int | None:
     return None
 
 
-def _normalize_optional_task_count(value: Any) -> int | None:
-    try:
-        normalized = int(value)
-    except Exception:
-        return None
-    if normalized <= 0:
-        return None
-    return normalized
-
-
 def _default_intent_envelope() -> dict[str, Any]:
     return {
         "execution_intent": False,
@@ -107,7 +97,7 @@ def _default_intent_envelope() -> dict[str, Any]:
         "deploy_requested": False,
         "docker_compose_requested": False,
         "requested_port": None,
-        "exact_task_count": None,
+        "code_review_required": False,
         "project_name_provided": False,
         "task_completion_requested": False,
         "reason": "",
@@ -127,7 +117,7 @@ def _normalize_intent_envelope(values: dict[str, Any] | None) -> dict[str, Any]:
     normalized["deploy_requested"] = bool(parsed.get("deploy_requested"))
     normalized["docker_compose_requested"] = bool(parsed.get("docker_compose_requested"))
     normalized["requested_port"] = _normalize_optional_port(parsed.get("requested_port"))
-    normalized["exact_task_count"] = _normalize_optional_task_count(parsed.get("exact_task_count"))
+    normalized["code_review_required"] = bool(parsed.get("code_review_required"))
     normalized["project_name_provided"] = bool(parsed.get("project_name_provided"))
     normalized["task_completion_requested"] = bool(parsed.get("task_completion_requested"))
     normalized["reason"] = str(parsed.get("reason") or "").strip()
@@ -159,11 +149,7 @@ def _build_partial_intent_envelope(values: dict[str, Any] | None) -> dict[str, A
             if parsed.get("requested_port") is not None
             else None
         ),
-        "exact_task_count": (
-            _normalize_optional_task_count(parsed.get("exact_task_count"))
-            if parsed.get("exact_task_count") is not None
-            else None
-        ),
+        "code_review_required": parsed.get("code_review_required"),
         "project_name_provided": parsed.get("project_name_provided"),
         "task_completion_requested": parsed.get("task_completion_requested"),
         "reason": str(parsed.get("reason") or "").strip() or None,
@@ -211,7 +197,7 @@ def classify_instruction_intent(
             "deploy_requested": {"type": "boolean"},
             "docker_compose_requested": {"type": "boolean"},
             "requested_port": {"type": ["integer", "null"]},
-            "exact_task_count": {"type": ["integer", "null"]},
+            "code_review_required": {"type": "boolean"},
             "project_name_provided": {"type": "boolean"},
             "task_completion_requested": {"type": "boolean"},
             "reason": {"type": "string"},
@@ -227,7 +213,7 @@ def classify_instruction_intent(
             "deploy_requested",
             "docker_compose_requested",
             "requested_port",
-            "exact_task_count",
+            "code_review_required",
             "project_name_provided",
             "task_completion_requested",
             "reason",

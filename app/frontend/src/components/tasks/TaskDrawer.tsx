@@ -362,7 +362,14 @@ export function TaskDrawer({ state }: { state: any }) {
     : true
   const statusOptions: string[] = (state.taskStatusOptions ?? []).length > 0
     ? state.taskStatusOptions
-    : ['To do', 'In progress', 'Done']
+    : ['To Do', 'In Progress', 'In Review', 'Awaiting Decision', 'Blocked', 'Completed']
+  const completedStatusOption =
+    statusOptions.find((status) => String(status || '').trim().toLowerCase() === 'completed')
+    || statusOptions.find((status) => String(status || '').trim().toLowerCase() === 'done')
+    || 'Completed'
+  const isSelectedTaskInReview = String(state.selectedTask.status || '').trim().toLowerCase() === 'in review'
+  const isSelectedTaskCompleted = String(state.selectedTask.status || '').trim().toLowerCase() === String(completedStatusOption).trim().toLowerCase()
+    || String(state.selectedTask.status || '').trim().toLowerCase() === 'done'
   const localTimezone = detectLocalTimezone()
 
   const statusSelectOptions = (() => {
@@ -457,7 +464,7 @@ export function TaskDrawer({ state }: { state: any }) {
     if (!current) return '__none__'
     return teamAgentOptions.some((option) => option.value === current) ? current : '__none__'
   })()
-  const statusSelectValue = String(state.editStatus || '').trim() || statusSelectOptions[0]?.value || 'To do'
+  const statusSelectValue = String(state.editStatus || '').trim() || statusSelectOptions[0]?.value || 'To Do'
   const prioritySelectValue = (() => {
     const normalized = String(state.editPriority || '').trim()
     if (normalized === 'Low' || normalized === 'Med' || normalized === 'High') return normalized
@@ -475,7 +482,7 @@ export function TaskDrawer({ state }: { state: any }) {
   const scheduleRunOnStatusesValue = (() => {
     const current = normalizeStatusList(Array.isArray(state.editScheduleRunOnStatuses) ? state.editScheduleRunOnStatuses : [])
     if (current.length > 0) return current
-    return ['In progress']
+    return ['In Progress']
   })()
   const scheduleRunStatusOptions = (() => {
     const ordered = [...statusOptions, ...scheduleRunOnStatusesValue].map((item) => String(item || '').trim())
@@ -665,14 +672,32 @@ export function TaskDrawer({ state }: { state: any }) {
               </TaskDrawerTooltip>
               <DropdownMenu.Portal>
                 <DropdownMenu.Content className="taskdrawer-actions-menu-content" sideOffset={8} align="end">
+                  {isSelectedTaskInReview ? (
+                    <>
+                      <DropdownMenu.Item
+                        className="taskdrawer-actions-menu-item"
+                        disabled={Boolean(state.reviewTaskMutation?.isPending) || Boolean(state.taskIsDirty)}
+                        onSelect={() => state.reviewTaskMutation?.mutate({ taskId: state.selectedTask.id, action: 'approve' })}
+                      >
+                        Approve review
+                      </DropdownMenu.Item>
+                      <DropdownMenu.Item
+                        className="taskdrawer-actions-menu-item"
+                        disabled={Boolean(state.reviewTaskMutation?.isPending) || Boolean(state.taskIsDirty)}
+                        onSelect={() => state.reviewTaskMutation?.mutate({ taskId: state.selectedTask.id, action: 'request_changes' })}
+                      >
+                        Request changes
+                      </DropdownMenu.Item>
+                    </>
+                  ) : null}
                   <DropdownMenu.Item
                     className="taskdrawer-actions-menu-item"
                     onSelect={() => {
-                      if (state.selectedTask.status === 'Done') state.reopenTaskMutation.mutate(state.selectedTask.id)
+                      if (isSelectedTaskCompleted) state.reopenTaskMutation.mutate(state.selectedTask.id)
                       else state.completeTaskMutation.mutate(state.selectedTask.id)
                     }}
                   >
-                    {state.selectedTask.status === 'Done' ? 'Reopen task' : 'Complete task'}
+                    {isSelectedTaskCompleted ? 'Reopen task' : 'Complete task'}
                   </DropdownMenu.Item>
                   <DropdownMenu.Item
                     className="taskdrawer-actions-menu-item"
@@ -854,10 +879,10 @@ export function TaskDrawer({ state }: { state: any }) {
                     className="status-chip"
                     type="button"
                     onClick={() => state.setShowTaskTagPicker(false)}
-                    title="Done"
-                    aria-label="Done"
+                    title="Close"
+                    aria-label="Close"
                   >
-                    Done
+                    Close
                   </button>
                 </div>
                 <div className="tag-picker-input-row">
@@ -980,7 +1005,7 @@ export function TaskDrawer({ state }: { state: any }) {
               <input
                 value={state.editStatusTriggerSelfFromStatusesText}
                 onChange={(e) => state.setEditStatusTriggerSelfFromStatusesText(e.target.value)}
-                placeholder="To do, In progress"
+                placeholder="To Do, In Progress"
               />
             </label>
             <label className="field-control">
@@ -988,7 +1013,7 @@ export function TaskDrawer({ state }: { state: any }) {
               <input
                 value={state.editStatusTriggerSelfToStatusesText}
                 onChange={(e) => state.setEditStatusTriggerSelfToStatusesText(e.target.value)}
-                placeholder="Done"
+                placeholder={completedStatusOption}
               />
             </label>
           </div>
@@ -1106,7 +1131,7 @@ export function TaskDrawer({ state }: { state: any }) {
                 <input
                   value={state.editStatusTriggerExternalFromStatusesText}
                   onChange={(e) => state.setEditStatusTriggerExternalFromStatusesText(e.target.value)}
-                  placeholder="To do, In progress"
+                  placeholder="To Do, In Progress"
                 />
               </label>
               <label className="field-control">
@@ -1114,7 +1139,7 @@ export function TaskDrawer({ state }: { state: any }) {
                 <input
                   value={state.editStatusTriggerExternalToStatusesText}
                   onChange={(e) => state.setEditStatusTriggerExternalToStatusesText(e.target.value)}
-                  placeholder="Done"
+                  placeholder={completedStatusOption}
                 />
               </label>
             </div>

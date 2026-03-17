@@ -22,7 +22,7 @@ from shared.core import (
 
 from .domain import SpecificationAggregate
 
-ALLOWED_SPEC_STATUSES = {"Draft", "Ready", "In progress", "Implemented", "Archived"}
+ALLOWED_SPEC_STATUSES = {"Draft", "Ready", "In Progress", "Implemented", "Archived"}
 SPEC_STATUS_ALIASES = {
     "draft": "Draft",
     "todo": "Draft",
@@ -30,9 +30,9 @@ SPEC_STATUS_ALIASES = {
     "planned": "Draft",
     "plan": "Draft",
     "ready": "Ready",
-    "in progress": "In progress",
-    "inprogress": "In progress",
-    "wip": "In progress",
+    "in progress": "In Progress",
+    "inprogress": "In Progress",
+    "wip": "In Progress",
     "implemented": "Implemented",
     "done": "Implemented",
     "complete": "Implemented",

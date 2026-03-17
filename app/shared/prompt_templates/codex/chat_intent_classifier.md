@@ -14,7 +14,7 @@ Return JSON only with fields:
 - deploy_requested: true when the user explicitly wants deployment execution as part of this request.
 - docker_compose_requested: true when the user explicitly asks for Docker Compose setup/deploy.
 - requested_port: integer port when explicitly requested, else null.
-- exact_task_count: integer when the user explicitly asks for an exact number of tasks, else null.
+- code_review_required: true only when the user explicitly asks to require code review before merge, else false.
 - project_name_provided: true when the request explicitly names the project to create/setup, else false.
 - task_completion_requested: true when the request explicitly asks to complete/mark the task done, else false.
 - reason: short rationale.
@@ -25,6 +25,7 @@ Rules:
 - Classification must be language-agnostic: equivalent requests in different languages should yield equivalent outputs.
 - If instruction clearly asks to create/setup a project, set project_creation_intent=true.
 - If the same instruction also explicitly asks to start/kick off execution after setup, set execution_kickoff_intent=true as well.
+- If the instruction explicitly asks to require code review before merge, set code_review_required=true. Otherwise set it to false.
 - If instruction asks only for setup/creation (without explicit start/kickoff), set execution_kickoff_intent=false.
 - If instruction asks to create/setup a project but does not actually provide the project name, set project_name_provided=false.
 - If the instruction explicitly asks to complete the current task, set task_completion_requested=true.
@@ -38,6 +39,6 @@ Rules:
   - workflow_scope=`unknown`,
   - execution_mode=`unknown`,
   - requested_port=null,
-  - exact_task_count=null,
+  - code_review_required=false,
   - project_name_provided=false,
   - task_completion_requested=false.

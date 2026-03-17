@@ -21,6 +21,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from plugins import api_policy as plugin_api_policy
+from plugins.team_mode.semantics import semantic_status_key
 from shared.core import (
     AgentChatRun,
     User,
@@ -2014,6 +2015,8 @@ def _promote_plugin_policy_to_execution_mode_if_needed(
         runtime_cfg["required"] = bool(team_mode_enabled)
     if not str(runtime_cfg.get("stack") or "").strip() and detected_stack:
         runtime_cfg["stack"] = detected_stack
+    if not str(runtime_cfg.get("host") or "").strip():
+        runtime_cfg["host"] = "gateway"
     runtime_port_raw = runtime_cfg.get("port")
     has_valid_port = isinstance(runtime_port_raw, int) and 1 <= int(runtime_port_raw) <= 65535
     if not has_valid_port and detected_port is not None:
@@ -2059,6 +2062,7 @@ def _sync_plugin_runtime_target_if_needed(
 
     runtime_cfg = dict(config.get("runtime_deploy_health")) if isinstance(config.get("runtime_deploy_health"), dict) else {}
     runtime_stack = str(runtime_cfg.get("stack") or "").strip() or None
+    runtime_host = str(runtime_cfg.get("host") or "").strip() or None
     runtime_port_raw = runtime_cfg.get("port")
     runtime_health_path = str(runtime_cfg.get("health_path") or "").strip() or None
     has_valid_port = isinstance(runtime_port_raw, int) and 1 <= int(runtime_port_raw) <= 65535
@@ -2071,6 +2075,9 @@ def _sync_plugin_runtime_target_if_needed(
     changed = False
     if not runtime_stack and detected_stack:
         runtime_cfg["stack"] = detected_stack
+        changed = True
+    if not runtime_host:
+        runtime_cfg["host"] = "gateway"
         changed = True
     if not has_valid_port and detected_port is not None:
         runtime_cfg["port"] = int(detected_port)
@@ -2201,7 +2208,8 @@ def _collect_execution_evidence_violations(
 
     for task_id, payload in latest_by_task.items():
         status = str(payload.get("status") or "").strip()
-        if status not in {"QA", "Lead", "Done"}:
+        semantic_key = semantic_status_key(status=status)
+        if semantic_key not in {"in_review", "awaiting_decision", "completed"}:
             continue
         external_refs = payload.get("external_refs") or []
         has_note_evidence = task_id in note_task_ids
@@ -2274,7 +2282,7 @@ def _compact_history_with_codex(
             workspace_id=workspace_id,
             project_id=project_id,
         ),
-        status="To do",
+        status="To Do",
         instruction=compact_instruction,
         workspace_id=workspace_id,
         project_id=project_id,
@@ -2404,7 +2412,7 @@ def _prepare_chat_instruction(
                 "deploy_requested": False,
                 "docker_compose_requested": False,
                 "requested_port": None,
-                "exact_task_count": None,
+                "code_review_required": False,
                 "project_name_provided": False,
                 "task_completion_requested": False,
             },
@@ -2435,7 +2443,7 @@ def _prepare_chat_instruction(
         "deploy_requested": False,
         "docker_compose_requested": False,
         "requested_port": None,
-        "exact_task_count": None,
+        "code_review_required": False,
         "project_name_provided": False,
         "task_completion_requested": False,
     }
@@ -2850,7 +2858,7 @@ def agent_chat(
             task_id="",
             title="General Codex Chat",
             description=description,
-            status="To do",
+            status="To Do",
             instruction=effective_instruction,
             workspace_id=payload.workspace_id,
             project_id=effective_project_id,
@@ -3256,7 +3264,7 @@ def agent_chat_stream(
                     task_id="",
                     title="General Codex Chat",
                     description=description,
-                    status="To do",
+                    status="To Do",
                     instruction=effective_instruction,
                     workspace_id=payload.workspace_id,
                     project_id=effective_project_id,

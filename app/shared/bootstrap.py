@@ -96,7 +96,7 @@ BOOTSTRAP_NOTE_RELEASE_ID = _bootstrap_entity_id("note", "release-notes")
 BOOTSTRAP_RULE_CONTEXT_ID = _bootstrap_entity_id("project-rule", "context-rule")
 BOOTSTRAP_RULE_DELIVERY_ID = _bootstrap_entity_id("project-rule", "delivery-rule")
 DEMO_PROJECT_NAME = "Demo"
-DEMO_PROJECT_STATUSES = ["To do", "In progress", "Done"]
+DEMO_PROJECT_STATUSES = ["To Do", "In Progress", "Done"]
 BOOTSTRAP_ES_BOUNDED_CONTEXT_ID = _bootstrap_entity_id("event-storming", "bounded-context-general")
 BOOTSTRAP_ES_AGGREGATE_ID = _bootstrap_entity_id("event-storming", "aggregate-general")
 BOOTSTRAP_ES_COMMAND_PLAN_ID = _bootstrap_entity_id("event-storming", "command-plan-work")
@@ -601,6 +601,7 @@ def ensure_task_table_columns(db: Session):
         "instruction": "ALTER TABLE tasks ADD COLUMN instruction TEXT",
         "execution_triggers": "ALTER TABLE tasks ADD COLUMN execution_triggers TEXT DEFAULT '[]'",
         "task_relationships": "ALTER TABLE tasks ADD COLUMN task_relationships TEXT DEFAULT '[]'",
+        "delivery_mode": "ALTER TABLE tasks ADD COLUMN delivery_mode VARCHAR(32) DEFAULT 'deployable_slice'",
         "task_type": "ALTER TABLE tasks ADD COLUMN task_type VARCHAR(32) DEFAULT 'manual'",
         "scheduled_instruction": "ALTER TABLE tasks ADD COLUMN scheduled_instruction TEXT",
         "scheduled_at_utc": "ALTER TABLE tasks ADD COLUMN scheduled_at_utc TIMESTAMP WITH TIME ZONE",
@@ -1407,7 +1408,7 @@ def bootstrap_data():
                     "specification_id": BOOTSTRAP_SPEC_DEMO_ID,
                     "title": "Setup your first task",
                     "description": "Use FAB + to add tasks quickly, then open board view and move this item across statuses.",
-                    "status": "To do",
+                    "status": "To Do",
                     "priority": "Med",
                     "due_date": to_iso_utc(datetime.now(timezone.utc) + timedelta(days=1)),
                     "assignee_id": DEFAULT_USER_ID,
@@ -1442,7 +1443,7 @@ def bootstrap_data():
                     "specification_id": BOOTSTRAP_SPEC_DEMO_ID,
                     "title": "Board demo: move this card to Dev",
                     "description": "Use drag-and-drop to validate board status transitions and ordering.",
-                    "status": "To do",
+                    "status": "To Do",
                     "priority": "Low",
                     "due_date": None,
                     "assignee_id": DEFAULT_USER_ID,
@@ -1477,7 +1478,7 @@ def bootstrap_data():
                     "specification_id": BOOTSTRAP_SPEC_DEMO_ID,
                     "title": "Automation demo: run with an agent",
                     "description": "Open this task and use Run now to see live automation output and execution state.",
-                    "status": "In progress",
+                    "status": "In Progress",
                     "priority": "Med",
                     "due_date": None,
                     "assignee_id": DEFAULT_USER_ID,
@@ -1539,7 +1540,7 @@ def bootstrap_data():
         # Keep bootstrap demo tasks aligned with Demo board statuses.
         automation_demo_task = db.get(Task, BOOTSTRAP_TASK_AUTOMATION_TOUR_ID)
         if automation_demo_task is not None and (automation_demo_task.status or "").strip() == "Dev":
-            automation_demo_task.status = "In progress"
+            automation_demo_task.status = "In Progress"
         knowledge_demo_task = db.get(Task, BOOTSTRAP_TASK_KNOWLEDGE_TOUR_ID)
         if knowledge_demo_task is not None and (knowledge_demo_task.status or "").strip() == "QA":
             knowledge_demo_task.status = "Done"
@@ -1742,7 +1743,7 @@ def _backfill_task_streams_from_read_model(db: Session) -> None:
                 "specification_id": t.specification_id,
                 "title": t.title,
                 "description": t.description or "",
-                "status": t.status or "To do",
+                "status": t.status or "To Do",
                 "priority": t.priority or "Med",
                 "due_date": to_iso_utc(t.due_date),
                 "assignee_id": t.assignee_id,

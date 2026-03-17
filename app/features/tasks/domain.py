@@ -33,6 +33,7 @@ class TaskAggregate(Aggregate):
         instruction: str | None = None,
         execution_triggers: list[dict[str, Any]] | None = None,
         task_relationships: list[dict[str, Any]] | None = None,
+        delivery_mode: str | None = None,
         task_type: str = "manual",
         scheduled_instruction: str | None = None,
         scheduled_at_utc: str | None = None,
@@ -59,6 +60,7 @@ class TaskAggregate(Aggregate):
         self.instruction = instruction
         self.execution_triggers = execution_triggers or []
         self.task_relationships = task_relationships or []
+        self.delivery_mode = delivery_mode
         self.recurring_rule = recurring_rule
         self.task_type = task_type
         self.scheduled_instruction = scheduled_instruction
@@ -104,12 +106,12 @@ class TaskAggregate(Aggregate):
             self.status = status
 
     @event("Completed")
-    def complete(self, completed_at: str) -> None:
-        self.status = "Done"
+    def complete(self, completed_at: str, status: str = "Completed") -> None:
+        self.status = status
         self.completed_at = completed_at
 
     @event("Reopened")
-    def reopen(self, status: str = "To do") -> None:
+    def reopen(self, status: str = "To Do") -> None:
         self.status = status
         self.completed_at = None
 

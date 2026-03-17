@@ -143,7 +143,7 @@ function quickTourSteps(
       element: '[data-tour-id="header-notifications"]',
       popover: {
         title: 'Notifications',
-        description: 'Track assignment and automation updates here.',
+        description: 'Track assignment and execution updates here.',
         side: 'bottom',
         align: 'end',
       },

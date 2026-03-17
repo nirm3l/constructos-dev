@@ -93,15 +93,19 @@ const GITHUB_ISSUES_URL = 'https://github.com/nirm3l/constructos/issues'
 const SEARCH_ANY_VALUE = '__any__'
 
 const SEARCH_TASK_STATUS_OPTIONS = [
-  { value: 'To do', label: 'To do' },
-  { value: 'In progress', label: 'In progress' },
+  { value: 'To Do', label: 'To Do' },
+  { value: 'In Progress', label: 'In Progress' },
+  { value: 'In Review', label: 'In Review' },
+  { value: 'Awaiting Decision', label: 'Awaiting Decision' },
+  { value: 'Blocked', label: 'Blocked' },
+  { value: 'Completed', label: 'Completed' },
   { value: 'Done', label: 'Done' },
 ]
 
 const SEARCH_SPEC_STATUS_OPTIONS = [
   { value: 'Draft', label: 'Draft' },
   { value: 'Ready', label: 'Ready' },
-  { value: 'In progress', label: 'In progress' },
+  { value: 'In Progress', label: 'In Progress' },
   { value: 'Implemented', label: 'Implemented' },
   { value: 'Archived', label: 'Archived' },
 ]

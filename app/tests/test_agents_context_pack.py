@@ -388,7 +388,7 @@ def test_execute_task_automation_sets_task_worktree_context_for_team_mode_develo
         task_id="task-1234-worktree",
         title="Implement feature",
         description="ctx",
-        status="Dev",
+        status="In Progress",
         instruction="Implement in isolated worktree",
         workspace_id=ws_id,
         project_id=project["id"],
@@ -525,7 +525,7 @@ def test_codex_prompt_includes_task_workspace_context():
             "task_id": "task-1",
             "title": "Implement feature",
             "description": "worktree-aware run",
-            "status": "Dev",
+            "status": "In Progress",
             "instruction": "Start implementation",
             "workspace_id": "ws-1",
             "project_id": "pr-1",
@@ -544,8 +544,8 @@ def test_codex_prompt_includes_task_workspace_context():
 
     assert "Task Branch: task/task-1-implement-feature" in prompt
     assert "Task Workdir: /home/app/workspace/alpha/.constructos/worktrees/task-1" in prompt
-    assert "Repository Root: /home/app/workspace/alpha" in prompt
     assert "execute implementation from that workdir and commit only on that branch" in prompt
+    assert "Treat `Task Workdir` as the only valid editing root for task automation." in prompt
 
 
 def test_codex_resume_prompt_is_compact_and_turn_focused():
@@ -655,7 +655,7 @@ def test_codex_resume_prompt_includes_task_workspace_context():
             "task_id": "task-1",
             "title": "Implement feature",
             "description": "worktree-aware run",
-            "status": "Dev",
+            "status": "In Progress",
             "instruction": "Resume implementation",
             "workspace_id": "ws-1",
             "project_id": "pr-1",
@@ -669,7 +669,7 @@ def test_codex_resume_prompt_includes_task_workspace_context():
 
     assert "Task Branch: task/task-1-implement-feature" in prompt
     assert "Task Workdir: /home/app/workspace/alpha/.constructos/worktrees/task-1" in prompt
-    assert "Repository Root: /home/app/workspace/alpha" in prompt
+    assert "Treat `Task Workdir` as the only valid editing root for task automation." in prompt
 
 
 def test_codex_prompt_includes_project_skills_section():
@@ -733,7 +733,7 @@ def test_codex_prompt_includes_interactive_project_creation_guidance():
     assert "returns HTTP 422 with `missing_inputs`" in prompt
     assert "ask only the `next_question`" in prompt
     assert "present a user-friendly completion summary" in prompt
-    assert "Dev -> Lead -> QA -> Done" in prompt
+    assert "To do, In Progress, In Review, Awaiting decision, Blocked, Completed" in prompt
     assert "at least one recurring scheduled Team Lead oversight task" in prompt
     assert "If Team Mode is requested, prefer this setup flow" in prompt
     assert "If the user requests an exact task count, keep that exact count" in prompt

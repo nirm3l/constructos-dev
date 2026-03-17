@@ -33,6 +33,7 @@ from .service_policy import (
     project_has_team_mode_enabled as team_mode_project_has_team_mode_enabled,
 )
 from .api_kickoff import maybe_dispatch_execution_kickoff as maybe_dispatch_team_mode_execution_kickoff
+from .semantics import default_team_mode_config, semantic_status_key
 
 
 def _is_persisted_team_mode_kickoff(task_state: dict | None) -> bool:
@@ -63,7 +64,7 @@ class TeamModePlugin:
         return {
             "required_checks": {"team_mode": list(DEFAULT_REQUIRED_TEAM_MODE_CHECKS)},
             "available_checks": {"team_mode": dict(TEAM_MODE_CHECK_DESCRIPTIONS)},
-            "team_mode": {"lead_recurring_max_minutes": 5},
+            **default_team_mode_config(),
         }
 
     def evaluate_checks(self, ctx: PolicyEvaluationContext, **kwargs: Any) -> dict[str, Any]:
@@ -283,28 +284,23 @@ class TeamModePlugin:
             DEFAULT_REQUIRED_TEAM_MODE_CHECKS,
         )
         _ok, failed = evaluate_required_checks(checks, required)
-        role_coverage_missing = "role_coverage_present" in {
-            str(item or "").strip() for item in failed
-        }
-        topology_missing = "required_topology_present" in {
-            str(item or "").strip() for item in failed
-        }
-        if not (role_coverage_missing or topology_missing):
+        failed_set = {str(item or "").strip() for item in failed}
+        if not failed_set:
             return None
-        if role_coverage_missing and topology_missing:
-            return (
-                "Team Mode execution cannot continue because role coverage and topology are both incomplete. "
-                "Ensure the project still has at least one Developer, Lead, and QA task assigned to Team Mode slots, "
-                "and keep Dev->Lead->QA plus blocked-work escalation encoded with task_relationships."
-            )
-        if role_coverage_missing:
-            return (
-                "Team Mode execution cannot continue because role coverage is incomplete. "
-                "Ensure the project still has at least one Developer, Lead, and QA task assigned to Team Mode slots."
-            )
+        missing_requirements: list[str] = []
+        if "role_coverage_present" in failed_set:
+            missing_requirements.append("Developer, QA, and Lead agent coverage")
+        if "single_lead_present" in failed_set:
+            missing_requirements.append("exactly one Lead agent")
+        if "human_owner_present" in failed_set:
+            missing_requirements.append("a human owner")
+        if "status_semantics_present" in failed_set:
+            missing_requirements.append("required semantic statuses")
+        if not missing_requirements:
+            return None
         return (
-            "Team Mode execution cannot continue because required topology is incomplete. "
-            "Keep Dev->Lead->QA plus blocked-work escalation encoded with task_relationships before execution."
+            "Team Mode execution cannot continue because Team Mode project requirements are incomplete. "
+            f"Configure {', '.join(missing_requirements)} before execution."
         )
 
     def executor_is_task_scoped_context_enabled(
@@ -344,10 +340,10 @@ class TeamModePlugin:
     ) -> bool:
         if not plugin_enabled:
             return False
-        normalized_status = str(task_status or "").strip()
-        if normalized_status == "Dev":
+        semantic_status = semantic_status_key(status=task_status)
+        if semantic_status in {"todo", "active", "in_review"}:
             return False
-        if normalized_status not in {"QA", "Blocked", "Done", "Lead"}:
+        if semantic_status not in {"awaiting_decision", "blocked", "completed"}:
             return False
         return is_team_mode_developer_role(assignee_role)
 

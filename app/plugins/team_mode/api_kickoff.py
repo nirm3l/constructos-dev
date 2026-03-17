@@ -17,6 +17,7 @@ from .task_roles import derive_task_role
 from .task_roles import normalize_team_agents
 from .gates import evaluate_team_mode_gates
 from .workflow_orchestrator import TEAM_MODE_WORKFLOW_ROLES, plan_kickoff_targets
+from .semantics import REQUIRED_SEMANTIC_STATUSES, semantic_status_key
 
 
 def _collect_team_mode_developer_dispatch_state(
@@ -33,7 +34,6 @@ def _collect_team_mode_developer_dispatch_state(
             Task.project_id == project_id,
             Task.is_deleted == False,  # noqa: E712
             Task.archived == False,  # noqa: E712
-            Task.status != "Done",
         )
         .order_by(Task.created_at.asc())
     ).scalars().all()
@@ -56,6 +56,8 @@ def _collect_team_mode_developer_dispatch_state(
             agent_role_by_code=agent_role_by_code,
         )
         if role != "Developer":
+            continue
+        if semantic_status_key(status=task.status) == "completed":
             continue
         developer_task_ids.append(task_id)
         state, _version = rebuild_state(db, "Task", task_id)
@@ -155,7 +157,6 @@ def maybe_dispatch_execution_kickoff(
             Task.project_id == normalized_project_id,
             Task.is_deleted == False,  # noqa: E712
             Task.archived == False,  # noqa: E712
-            Task.status != "Done",
         )
         .order_by(Task.created_at.asc())
     ).scalars().all()
@@ -195,6 +196,9 @@ def maybe_dispatch_execution_kickoff(
         if normalized_role not in TEAM_MODE_WORKFLOW_ROLES:
             continue
         normalized_status = str(task.status or "").strip()
+        normalized_semantic = semantic_status_key(status=normalized_status)
+        if normalized_semantic == "completed":
+            continue
         task_by_id[task_id] = task
         orchestration_rows.append(
             {
@@ -203,11 +207,13 @@ def maybe_dispatch_execution_kickoff(
                 "status": normalized_status,
                 "instruction": str(task.instruction or "").strip(),
                 "scheduled_instruction": str(task.scheduled_instruction or "").strip(),
+                "priority": str(task.priority or "").strip(),
+                "task_relationships": normalize_task_relationships(task.task_relationships),
             }
         )
-        if normalized_role == "Developer" and normalized_status == "Dev" and _task_instruction(task):
+        if normalized_role == "Developer" and normalized_semantic in {"todo", "active", "blocked"} and _task_instruction(task):
             candidates_dev.append((task, normalized_role))
-        elif normalized_role == "QA" and normalized_status in {"QA", "Blocked"} and _task_instruction(task):
+        elif normalized_role == "QA" and normalized_semantic in {"active", "blocked"} and _task_instruction(task):
             candidates_qa.append((task, normalized_role))
 
     active_count = len(active_task_ids_before_dispatch)
@@ -270,7 +276,7 @@ def maybe_dispatch_execution_kickoff(
             "active_count_before_dispatch": active_count,
         }
 
-    # For projects that already have Dev/QA workload, enforce topology completeness before kickoff.
+    # Before kickoff, validate Team Mode configuration readiness only.
     if candidates_dev or candidates_qa:
         topology_tasks: list[dict[str, object]] = []
         for task in tasks:
@@ -296,7 +302,11 @@ def maybe_dispatch_execution_kickoff(
             workspace_id=workspace_id,
             event_storming_enabled=False,
             expected_event_storming_enabled=None,
-            plugin_policy={"team_mode": {"lead_recurring_max_minutes": 5}, "team": {"agents": team_agents}},
+            plugin_policy={
+                "team": {"agents": team_agents},
+                "status_semantics": dict(REQUIRED_SEMANTIC_STATUSES),
+                "oversight": dict(team_mode_config_obj.get("oversight") or {}),
+            },
             plugin_policy_source="team_mode_kickoff_readiness",
             tasks=topology_tasks,
             member_role_by_user_id=member_role_by_user_id,
@@ -306,13 +316,17 @@ def maybe_dispatch_execution_kickoff(
             has_deploy_stack_marker=lambda _text: False,
         )
         topology_checks = dict(team_mode_gate_eval.get("checks") or {})
-        if not bool(topology_checks.get("role_coverage_present")) or not bool(topology_checks.get("required_topology_present")):
+        if not bool(team_mode_gate_eval.get("ok")):
             missing_bits: list[str] = []
             if not bool(topology_checks.get("role_coverage_present")):
-                missing_bits.append("role coverage (need at least one Developer, one Lead, and one QA task)")
-            if not bool(topology_checks.get("required_topology_present")):
-                missing_bits.append("required Team Mode topology (Dev delivers_to Lead, Lead depends_on Dev/Blocked, QA hands_off_to Lead)")
-            summary = "Team Mode kickoff blocked: execution topology is incomplete."
+                missing_bits.append("role coverage (need at least one Developer task assignment, one QA assignment, and one Lead assignment)")
+            if not bool(topology_checks.get("single_lead_present")):
+                missing_bits.append("exactly one Lead agent in Team Mode config")
+            if not bool(topology_checks.get("human_owner_present")):
+                missing_bits.append("oversight.human_owner_user_id")
+            if not bool(topology_checks.get("status_semantics_present")):
+                missing_bits.append("required Team Mode semantic statuses")
+            summary = "Team Mode kickoff blocked: Team Mode configuration is incomplete."
             comment = "Missing: " + "; ".join(missing_bits)
             return {
                 "ok": False,
@@ -345,7 +359,7 @@ def maybe_dispatch_execution_kickoff(
     if active_kickoff_task_ids:
         summary = "Team Mode kickoff already in progress."
         comment = (
-            "Lead kickoff task is already queued/running. "
+            "A kickoff task is already queued/running. "
             "Wait for current kickoff execution to finish before retrying."
         )
         return {
@@ -373,22 +387,41 @@ def maybe_dispatch_execution_kickoff(
         instruction = kickoff_instruction if str(role or "").strip() == "Lead" else _task_instruction(task)
         if not instruction:
             continue
+        normalized_role = str(role or "").strip()
+        is_lead_kickoff_target = normalized_role == "Lead"
         try:
-            TaskApplicationService(db, user, command_id=task_command_id).request_automation_run(
+            request_result = TaskApplicationService(db, user, command_id=task_command_id).request_automation_run(
                 task_id,
                 TaskAutomationRun(
                     instruction=instruction,
+                    source=None if is_lead_kickoff_target else "lead_kickoff_dispatch",
                     execution_intent=bool(flags.get("execution_intent")),
-                    execution_kickoff_intent=bool(flags.get("execution_kickoff_intent")),
+                    execution_kickoff_intent=bool(flags.get("execution_kickoff_intent")) if is_lead_kickoff_target else False,
                     project_creation_intent=bool(flags.get("project_creation_intent")),
                     workflow_scope=str(flags.get("workflow_scope") or "").strip() or "team_mode",
-                    execution_mode=str(flags.get("execution_mode") or "").strip() or "kickoff_only",
-                    classifier_reason=str(flags.get("reason") or "").strip() or None,
+                    execution_mode=(
+                        str(flags.get("execution_mode") or "").strip() or "kickoff_only"
+                        if is_lead_kickoff_target
+                        else "unknown"
+                    ),
+                    classifier_reason=(
+                        str(flags.get("reason") or "").strip() or None
+                        if is_lead_kickoff_target
+                        else "Queued by Team Mode kickoff dispatch."
+                    ),
                 ),
                 wake_runner=False,
             )
+            if bool((request_result or {}).get("skipped")):
+                failed.append(
+                    {
+                        "task_id": task_id,
+                        "error": str((request_result or {}).get("reason") or "Task automation request was skipped.").strip(),
+                    }
+                )
+                continue
             queued_task_ids.append(task_id)
-            queued_by_role[str(role or "").strip()] = int(queued_by_role.get(str(role or "").strip(), 0)) + 1
+            queued_by_role[normalized_role] = int(queued_by_role.get(normalized_role, 0)) + 1
         except HTTPException as exc:
             failed.append({"task_id": task_id, "error": str(exc.detail or "").strip() or f"HTTP {exc.status_code}"})
         except Exception as exc:  # pragma: no cover
@@ -398,39 +431,33 @@ def maybe_dispatch_execution_kickoff(
     queued_dev = int(queued_by_role.get("Developer", 0))
     queued_lead = int(queued_by_role.get("Lead", 0))
     queued_qa = int(queued_by_role.get("QA", 0))
-    if kickoff_ok:
-        message = (
-            f"Team Mode kickoff dispatched for project {normalized_project_id}: "
-            f"{len(queued_task_ids)} task(s) queued "
-            f"(Dev={queued_dev}, Lead={queued_lead}, QA={queued_qa})."
-        )
-    else:
+    if not kickoff_ok:
         message = (
             f"Team Mode kickoff failed for project {normalized_project_id}: "
             f"{len(queued_task_ids)} task(s) queued (Dev={queued_dev}, Lead={queued_lead}, QA={queued_qa}), "
             f"{len(failed)} queue attempt(s) failed."
         )
-    dedupe_key = command_id_with_suffix(command_id, "team-mode-kickoff-notify")
-    append_notification_created_event(
-        db,
-        append_event_fn=append_event,
-        user_id=str(user.id),
-        message=message,
-        actor_id=str(user.id),
-        workspace_id=workspace_id,
-        project_id=normalized_project_id,
-        notification_type="ManualMessage",
-        severity="warning" if not kickoff_ok else "info",
-        dedupe_key=dedupe_key,
-        payload={
-            "kind": "team_mode_kickoff",
-            "queued_task_ids": queued_task_ids,
-            "queued_by_role": queued_by_role,
-            "failed": failed,
-        },
-        source_event="agents.chat.kickoff_dispatch",
-    )
-    db.commit()
+        dedupe_key = command_id_with_suffix(command_id, "team-mode-kickoff-notify")
+        append_notification_created_event(
+            db,
+            append_event_fn=append_event,
+            user_id=str(user.id),
+            message=message,
+            actor_id=str(user.id),
+            workspace_id=workspace_id,
+            project_id=normalized_project_id,
+            notification_type="ManualMessage",
+            severity="warning",
+            dedupe_key=dedupe_key,
+            payload={
+                "kind": "team_mode_kickoff",
+                "queued_task_ids": queued_task_ids,
+                "queued_by_role": queued_by_role,
+                "failed": failed,
+            },
+            source_event="agents.chat.kickoff_dispatch",
+        )
+        db.commit()
 
     developer_dispatch_state = {
         "developer_task_ids": [],
@@ -463,7 +490,7 @@ def maybe_dispatch_execution_kickoff(
         elif not bool(developer_dispatch_state.get("developer_dispatch_confirmed")):
             summary = "Team Mode kickoff queued, but no Developer task started."
             comment = (
-                "Lead kickoff ran, but all Developer tasks remained idle after immediate kickoff processing. "
+                "Kickoff ran, but all Developer tasks remained idle after immediate kickoff processing. "
                 "Kickoff is incomplete."
             )
             kickoff_ok = False

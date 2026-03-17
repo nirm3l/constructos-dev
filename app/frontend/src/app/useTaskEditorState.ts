@@ -1,7 +1,7 @@
 import React from 'react'
 
 export function useTaskEditorState() {
-  const [editStatus, setEditStatus] = React.useState('To do')
+  const [editStatus, setEditStatus] = React.useState('To Do')
   const [editTitle, setEditTitle] = React.useState('')
   const [editDescription, setEditDescription] = React.useState('')
   const [editPriority, setEditPriority] = React.useState('Med')
@@ -18,7 +18,7 @@ export function useTaskEditorState() {
   const [editTaskType, setEditTaskType] = React.useState<'manual' | 'scheduled_instruction'>('manual')
   const [editScheduledAtUtc, setEditScheduledAtUtc] = React.useState('')
   const [editScheduleTimezone, setEditScheduleTimezone] = React.useState('')
-  const [editScheduleRunOnStatuses, setEditScheduleRunOnStatuses] = React.useState<string[]>(['In progress'])
+  const [editScheduleRunOnStatuses, setEditScheduleRunOnStatuses] = React.useState<string[]>(['In Progress'])
   const [editScheduledInstruction, setEditScheduledInstruction] = React.useState('')
   const [editRecurringEvery, setEditRecurringEvery] = React.useState('')
   const [editRecurringUnit, setEditRecurringUnit] = React.useState<'m' | 'h' | 'd'>('h')

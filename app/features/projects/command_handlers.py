@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import uuid
 
 from fastapi import HTTPException
@@ -13,6 +14,7 @@ from shared.core import (
     Note,
     ProjectCreate,
     ProjectMember,
+    ProjectPluginConfig,
     ProjectPatch,
     ProjectRule,
     ProjectSkill,
@@ -40,6 +42,29 @@ from ..rules.domain import ProjectRuleAggregate
 from ..specifications.domain import SpecificationAggregate
 from ..tasks.domain import TaskAggregate
 from .domain import ProjectAggregate
+
+_PROJECT_STATUS_ALIASES: dict[str, str] = {
+    "to do": "To Do",
+    "todo": "To Do",
+    "in progress": "In Progress",
+    "inprogress": "In Progress",
+    "in review": "In Review",
+    "inreview": "In Review",
+    "awaiting decision": "Awaiting Decision",
+    "awaitingdecision": "Awaiting Decision",
+    "blocked": "Blocked",
+    "completed": "Completed",
+    "complete": "Completed",
+    "done": "Done",
+}
+_REQUIRED_TEAM_MODE_PROJECT_STATUSES: tuple[str, ...] = (
+    "To Do",
+    "In Progress",
+    "In Review",
+    "Awaiting Decision",
+    "Blocked",
+    "Completed",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +122,7 @@ def _normalize_project_statuses(values: list[str] | None) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for raw in values or []:
-        status = str(raw or "").strip()
+        status = _canonicalize_project_status(raw)
         if not status:
             continue
         key = status.lower()
@@ -108,9 +133,43 @@ def _normalize_project_statuses(values: list[str] | None) -> list[str]:
     if not out:
         out = list(DEFAULT_STATUSES)
         seen = {status.lower() for status in out}
-    if "done" not in seen:
+    if "done" not in seen and "completed" not in seen:
         out.append("Done")
     return out
+
+
+def _canonicalize_project_status(value: str | None) -> str:
+    status = " ".join(str(value or "").split())
+    if not status:
+        return ""
+    return _PROJECT_STATUS_ALIASES.get(status.casefold(), status)
+
+
+def _is_team_mode_enabled_for_project(db: Session, *, workspace_id: str, project_id: str) -> bool:
+    row = db.execute(
+        select(ProjectPluginConfig.enabled).where(
+            ProjectPluginConfig.workspace_id == str(workspace_id),
+            ProjectPluginConfig.project_id == str(project_id),
+            ProjectPluginConfig.plugin_key == "team_mode",
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    return bool(row)
+
+
+def _require_team_mode_project_statuses(statuses: list[str]) -> None:
+    status_set = {str(status or "").strip() for status in statuses if str(status or "").strip()}
+    missing = [status for status in _REQUIRED_TEAM_MODE_PROJECT_STATUSES if status not in status_set]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Team Mode requires project board statuses: "
+                + ", ".join(_REQUIRED_TEAM_MODE_PROJECT_STATUSES)
+                + ". Missing: "
+                + ", ".join(missing)
+            ),
+        )
 
 
 def _normalize_project_name(value: str) -> str:
@@ -456,6 +515,12 @@ class PatchProjectHandler:
             event_payload["description"] = str(data["description"])
         if "custom_statuses" in data and data["custom_statuses"] is not None:
             event_payload["custom_statuses"] = _normalize_project_statuses(data["custom_statuses"])
+            if _is_team_mode_enabled_for_project(
+                self.ctx.db,
+                workspace_id=project_state.workspace_id,
+                project_id=self.project_id,
+            ):
+                _require_team_mode_project_statuses(event_payload["custom_statuses"])
         if "external_refs" in data and data["external_refs"] is not None:
             event_payload["external_refs"] = _normalize_external_refs(data["external_refs"])
         if "attachment_refs" in data and data["attachment_refs"] is not None:

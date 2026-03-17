@@ -5,7 +5,7 @@ import type {
   TaskExecutionTriggerStatusChange,
 } from '../types'
 
-const DEFAULT_SCHEDULE_RUN_ON_STATUSES = ['In progress']
+const DEFAULT_SCHEDULE_RUN_ON_STATUSES = ['In Progress']
 
 function normalizeString(value: unknown): string {
   return String(value ?? '').trim()

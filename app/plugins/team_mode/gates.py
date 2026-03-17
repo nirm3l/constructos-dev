@@ -4,24 +4,27 @@ from typing import Any, Callable
 
 from .task_roles import derive_task_role
 from .task_roles import normalize_team_agents
-from shared.task_relationships import normalize_task_relationships
+from .semantics import REQUIRED_SEMANTIC_STATUSES, is_terminal_status, normalize_oversight, normalize_status_semantics
 
 DEFAULT_REQUIRED_TEAM_MODE_CHECKS: list[str] = [
     "role_coverage_present",
-    "required_topology_present",
-    "lead_oversight_not_done_before_delivery_complete",
+    "single_lead_present",
+    "human_owner_present",
+    "status_semantics_present",
 ]
 TEAM_MODE_CORE_CHECK_IDS: list[str] = [
     "role_coverage_present",
-    "required_topology_present",
-    "lead_oversight_not_done_before_delivery_complete",
+    "single_lead_present",
+    "human_owner_present",
+    "status_semantics_present",
 ]
 TEAM_MODE_CORE_CHECK_SET: set[str] = set(TEAM_MODE_CORE_CHECK_IDS)
 
 TEAM_MODE_CHECK_DESCRIPTIONS: dict[str, str] = {
     "role_coverage_present": "Project has Developer, QA, and Team Lead role coverage.",
-    "lead_oversight_not_done_before_delivery_complete": "Lead oversight recurring task is not marked Done before delivery handoff completes.",
-    "required_topology_present": "Core Team Mode topology is fully present.",
+    "single_lead_present": "Project has exactly one Team Lead agent in Team Mode config.",
+    "human_owner_present": "Team Mode oversight has a human owner for escalation and completion notifications.",
+    "status_semantics_present": "Team Mode config defines the required semantic statuses.",
 }
 TEAM_MODE_CORE_CHECK_DESCRIPTIONS: dict[str, str] = {
     check_id: TEAM_MODE_CHECK_DESCRIPTIONS[check_id]
@@ -35,15 +38,9 @@ TEAM_MODE_DIAGNOSTIC_CHECK_IDS: list[str] = [
 
 TEAM_MODE_CHECK_EVALUATORS: dict[str, Callable[[dict[str, Any]], bool]] = {
     "role_coverage_present": lambda f: bool(f["role_coverage_ok"]),
-    "lead_oversight_not_done_before_delivery_complete": lambda f: bool(f["lead_oversight_not_done_ok"]),
-    "required_topology_present": lambda f: bool(
-        f["dev_self_ok"]
-        and f["lead_external_from_dev_ok"]
-        and f["qa_external_from_lead_ok"]
-        and f["lead_external_from_blocked_work_ok"]
-        and (f["deploy_external_from_lead_ok"] if f["deploy_external_required"] else True)
-        and f["handoff_direction_clean"]
-    ),
+    "single_lead_present": lambda f: bool(f["single_lead_ok"]),
+    "human_owner_present": lambda f: bool(f["human_owner_ok"]),
+    "status_semantics_present": lambda f: bool(f["status_semantics_ok"]),
 }
 
 
@@ -99,37 +96,6 @@ def evaluate_team_mode_gates(
         for agent in team_agents
         if str(agent.get("id") or "").strip()
     }
-    def _has_status_trigger(trigger: dict[str, Any], *, scope: str, to_status: str) -> bool:
-        if str(trigger.get("kind") or "").strip() != "status_change":
-            return False
-        if str(trigger.get("scope") or "").strip() != scope:
-            return False
-        to_statuses = [str(item or "").strip() for item in (trigger.get("to_statuses") or [])]
-        return to_status in to_statuses
-
-    def _task_relationships(task: dict[str, Any]) -> list[dict[str, Any]]:
-        return normalize_task_relationships(task.get("task_relationships"))
-
-    def _has_relationship(
-        task: dict[str, Any],
-        *,
-        kind: str,
-        source_ids_subset: set[str],
-        statuses_subset: set[str] | None = None,
-    ) -> bool:
-        for relationship in _task_relationships(task):
-            if str(relationship.get("kind") or "").strip().lower() != kind:
-                continue
-            task_ids = {str(item or "").strip() for item in (relationship.get("task_ids") or []) if str(item or "").strip()}
-            if source_ids_subset and not source_ids_subset.issubset(task_ids):
-                continue
-            if statuses_subset:
-                statuses = {str(item or "").strip() for item in (relationship.get("statuses") or []) if str(item or "").strip()}
-                if not statuses_subset.issubset(statuses):
-                    continue
-            return True
-        return False
-
     dev_tasks = [
         t
         for t in tasks
@@ -160,131 +126,27 @@ def evaluate_team_mode_gates(
         )
         == "Lead"
     ]
-
-    def _task_has_explicit_deploy_signal(task: dict[str, Any]) -> bool:
-        deploy_snapshot = task.get("last_deploy_execution") if isinstance(task.get("last_deploy_execution"), dict) else {}
-        if str(deploy_snapshot.get("executed_at") or "").strip():
-            return True
-        refs = task.get("external_refs")
-        if not isinstance(refs, list):
-            return False
-        for item in refs:
-            if not isinstance(item, dict):
-                continue
-            url = str(item.get("url") or "").strip().casefold()
-            if url.startswith("deploy:stack:") or url.startswith("deploy:command:") or url.startswith("deploy:health:"):
-                return True
-            if url.startswith("deploy:compose:") or url.startswith("deploy:runtime:"):
-                return True
-        return False
-
-    deploy_tasks = [task for task in lead_tasks if _task_has_explicit_deploy_signal(task)]
-
-    dev_ids = {str(t.get("id")) for t in dev_tasks}
-    qa_ids = {str(t.get("id")) for t in qa_tasks}
-    lead_ids = {str(t.get("id")) for t in lead_tasks}
-    dev_self_ok = bool(dev_tasks) and all(
-        any(
-            _has_relationship(task, kind="delivers_to", source_ids_subset={lead_id}, statuses_subset={"Lead"})
-            for lead_id in lead_ids
-        )
-        for task in dev_tasks
-    )
-    lead_external_from_dev_ok = any(
-        _has_relationship(task, kind="depends_on", source_ids_subset=dev_ids, statuses_subset={"Lead"})
-        for task in lead_tasks
-    )
-    qa_external_from_lead_ok = any(
-        any(
-            _has_relationship(task, kind="hands_off_to", source_ids_subset={lead_id}, statuses_subset={"QA"})
-            for lead_id in lead_ids
-        )
-        for task in qa_tasks
-    )
-    blocked_source_task_ids: set[str] = set()
-    for task in lead_tasks:
-        for relationship in _task_relationships(task):
-            if str(relationship.get("kind") or "").strip().lower() != "depends_on":
-                continue
-            statuses = {
-                str(item or "").strip()
-                for item in (relationship.get("statuses") or [])
-                if str(item or "").strip()
-            }
-            if "Blocked" not in statuses:
-                continue
-            blocked_source_task_ids.update(
-                {
-                    str(task_id or "").strip()
-                    for task_id in (relationship.get("task_ids") or [])
-                    if str(task_id or "").strip()
-                }
-            )
-    blocked_work_ids = dev_ids.union(qa_ids)
-    lead_external_from_blocked_work_ok = bool(blocked_work_ids) and blocked_work_ids.issubset(blocked_source_task_ids)
-    deploy_external_from_lead_ok = any(
-        any(
-            _has_status_trigger(trigger, scope="external", to_status="Done")
-            and bool(
-                (lead_ids - {str(task.get("id") or "")}).intersection(
-                    {str(task_id) for task_id in ((trigger.get("selector") or {}).get("task_ids") or [])}
-                )
-            )
-            for trigger in (task.get("execution_triggers") or [])
-            if isinstance(trigger, dict)
-        )
-        for task in deploy_tasks
-    )
-    deploy_external_required = bool(deploy_tasks) and len(lead_tasks) > 1
-    recurring_lead_tasks = [
-        task
-        for task in lead_tasks
-        if any(
-            str(trigger.get("kind") or "").strip() == "schedule"
-            and "Lead" in [str(item or "").strip() for item in (trigger.get("run_on_statuses") or [])]
-            for trigger in (task.get("execution_triggers") or [])
-            if isinstance(trigger, dict)
-        )
-    ]
-    non_recurring_or_non_lead_tasks = [task for task in tasks if str(task.get("id") or "") not in {str(t.get("id") or "") for t in recurring_lead_tasks}]
-    non_recurring_work_done = bool(non_recurring_or_non_lead_tasks) and all(
-        str(task.get("status") or "").strip() == "Done" for task in non_recurring_or_non_lead_tasks
-    )
-    lead_oversight_not_done_ok = all(
-        str(task.get("status") or "").strip() != "Done" or non_recurring_work_done
-        for task in recurring_lead_tasks
-    )
-    dev_external_to_qa_conflict = any(_has_relationship(task, kind="hands_off_to", source_ids_subset=qa_ids, statuses_subset={"QA"}) for task in dev_tasks) or any(
-        any(
-            _has_status_trigger(trigger, scope="external", to_status="QA")
-            for trigger in (task.get("execution_triggers") or [])
-            if isinstance(trigger, dict)
-        )
-        for task in dev_tasks
-    )
-    qa_external_to_done_conflict = any(_has_relationship(task, kind="depends_on", source_ids_subset=lead_ids, statuses_subset={"Done"}) for task in qa_tasks) or any(
-        any(
-            _has_status_trigger(trigger, scope="external", to_status="Done")
-            for trigger in (task.get("execution_triggers") or [])
-            if isinstance(trigger, dict)
-        )
-        for task in qa_tasks
-    )
-    handoff_direction_clean = not dev_external_to_qa_conflict and not qa_external_to_done_conflict
-    role_coverage_ok = bool(dev_tasks) and bool(qa_tasks) and bool(lead_tasks)
+    oversight = normalize_oversight(plugin_policy.get("oversight"))
+    status_semantics = normalize_status_semantics(plugin_policy.get("status_semantics"))
+    configured_roles = {
+        str(agent.get("authority_role") or "").strip()
+        for agent in team_agents
+        if str(agent.get("authority_role") or "").strip()
+    }
+    role_coverage_ok = {"Developer", "QA", "Lead"}.issubset(configured_roles)
+    single_lead_ok = sum(
+        1 for agent in team_agents if str(agent.get("authority_role") or "").strip() == "Lead"
+    ) == 1
+    human_owner_ok = bool(oversight.get("human_owner_user_id"))
+    status_semantics_ok = status_semantics == REQUIRED_SEMANTIC_STATUSES
 
     _unused = (extract_deploy_ports, has_deploy_stack_marker, event_storming_enabled, expected_event_storming_enabled)
     _ = _unused
     facts = {
         "role_coverage_ok": role_coverage_ok,
-        "dev_self_ok": dev_self_ok,
-        "lead_external_from_dev_ok": lead_external_from_dev_ok,
-        "qa_external_from_lead_ok": qa_external_from_lead_ok,
-        "lead_external_from_blocked_work_ok": lead_external_from_blocked_work_ok,
-        "deploy_external_from_lead_ok": deploy_external_from_lead_ok,
-        "deploy_external_required": deploy_external_required,
-        "lead_oversight_not_done_ok": lead_oversight_not_done_ok,
-        "handoff_direction_clean": handoff_direction_clean,
+        "single_lead_ok": single_lead_ok,
+        "human_owner_ok": human_owner_ok,
+        "status_semantics_ok": status_semantics_ok,
     }
     checks = evaluate_check_registry(registry=TEAM_MODE_CHECK_EVALUATORS, facts=facts)
     required_checks = policy_required_checks(plugin_policy, "team_mode", DEFAULT_REQUIRED_TEAM_MODE_CHECKS)
@@ -306,7 +168,7 @@ def evaluate_team_mode_gates(
             "developer_tasks": len(dev_tasks),
             "qa_tasks": len(qa_tasks),
             "lead_tasks": len(lead_tasks),
-            "deploy_tasks": len(deploy_tasks),
+            "terminal_tasks": sum(1 for task in tasks if is_terminal_status(status=task.get("status"), status_semantics=status_semantics)),
         },
         "event_storming_enabled": bool(event_storming_enabled),
         "expected_event_storming_enabled": expected_event_storming_enabled,

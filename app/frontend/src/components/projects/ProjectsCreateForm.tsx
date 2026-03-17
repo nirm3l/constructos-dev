@@ -634,7 +634,7 @@ export function ProjectsCreateForm({
               <input
                 value={projectCustomStatusesText}
                 onChange={(e) => setProjectCustomStatusesText(e.target.value)}
-                placeholder="To do, In progress, Blocked, Ready for QA, Done"
+                placeholder="To Do, In Progress, In Review, Awaiting Decision, Blocked, Completed"
               />
             </label>
           </Accordion.Content>

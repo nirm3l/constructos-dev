@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from shared.models import ProjectMember, ProjectPluginConfig, Task
 from .task_roles import canonicalize_role, derive_task_role
+from .semantics import is_active_status
 
 
 def project_has_team_mode_enabled(*, db: Any, workspace_id: str, project_id: str) -> bool:
@@ -38,7 +39,6 @@ def open_developer_tasks(*, db: Any, project_id: str) -> list[dict[str, str]]:
         )
         .order_by(Task.created_at.asc())
     ).all()
-    blocking_statuses = {"Dev", "Blocked", "To do"}
     return [
         {
             "task_id": str(task_id or "").strip(),
@@ -55,7 +55,7 @@ def open_developer_tasks(*, db: Any, project_id: str) -> list[dict[str, str]]:
             member_role_by_user_id=member_role_by_user_id,
         )
         == "Developer"
-        if str(task_id or "").strip() and str(status or "").strip() in blocking_statuses
+        if str(task_id or "").strip() and is_active_status(status=status)
     ]
 
 
@@ -95,12 +95,12 @@ def enforce_done_transition(
         ]
         failing = [check for check in required_checks if not bool((delivery.get("checks") or {}).get(check))]
         if open_dev:
-            failing.append("dev_tasks_all_done")
+            failing.append("dev_tasks_all_completed")
         if failing:
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "QA Done transition blocked by Team Mode closeout guards. "
+                    "QA Completed transition blocked by Team Mode closeout guards. "
                     f"failed_checks={failing}; "
                     f"open_dev_tasks={[item['task_id'] for item in open_dev]}"
                 ),
@@ -112,7 +112,7 @@ def enforce_done_transition(
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "Lead Done transition blocked: open Dev tasks remain. "
+                    "Lead Completed transition blocked: open implementation tasks remain. "
                     f"open_dev_tasks={[item['task_id'] for item in open_dev]}"
                 ),
             )
@@ -138,7 +138,7 @@ def enforce_done_transition(
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "Lead Done transition blocked by Team Mode delivery closeout guards. "
+                    "Lead Completed transition blocked by Team Mode delivery closeout guards. "
                     f"failed_checks={failing}"
                 ),
             )

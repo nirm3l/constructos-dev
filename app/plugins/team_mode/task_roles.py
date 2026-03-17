@@ -14,13 +14,6 @@ _LEGACY_ROLE_ALIASES = {
     "qa": "QA",
     "lead": "Lead",
 }
-_STATUS_ROLE_FALLBACK = {
-    "dev": "Developer",
-    "qa": "QA",
-    "lead": "Lead",
-}
-
-
 def parse_labels(raw_labels: Any) -> list[str]:
     if isinstance(raw_labels, list):
         return [str(item or "").strip() for item in raw_labels if str(item or "").strip()]
@@ -63,7 +56,7 @@ def derive_task_role(
     task_like: dict[str, Any],
     member_role_by_user_id: dict[str, str] | None = None,
     agent_role_by_code: dict[str, str] | None = None,
-    allow_status_fallback: bool = True,
+    allow_status_fallback: bool = False,
 ) -> str:
     assigned_agent_code = str(task_like.get("assigned_agent_code") or "").strip()
     if assigned_agent_code and isinstance(agent_role_by_code, dict):
@@ -80,9 +73,6 @@ def derive_task_role(
         member_role_canonical = _LEGACY_ROLE_ALIASES.get(member_role.casefold()) or member_role
         if member_role_canonical in TEAM_MODE_ROLES:
             return member_role_canonical
-    if allow_status_fallback:
-        status_key = str(task_like.get("status") or "").strip().casefold()
-        return _STATUS_ROLE_FALLBACK.get(status_key, "")
     return ""
 
 
@@ -99,9 +89,7 @@ def ensure_team_mode_labels(
         if not label.casefold().startswith(TEAM_MODE_ROLE_LABEL_PREFIX)
         and not label.casefold().startswith("tm.agent:")
     ]
-    normalized_role = str(role or "").strip()
-    if normalized_role in TEAM_MODE_ROLES:
-        stripped.append(f"{TEAM_MODE_ROLE_LABEL_PREFIX}{normalized_role}")
+    _ = role
     _ = agent_slot
     out: list[str] = []
     seen: set[str] = set()
@@ -155,11 +143,7 @@ def pick_agent_for_task(
         for agent in agents:
             if str(agent.get("id") or "").strip() == explicit_code:
                 return agent
-    role = derive_task_role(
-        task_like=task_like,
-        member_role_by_user_id=member_role_by_user_id,
-        allow_status_fallback=True,
-    )
+    role = derive_task_role(task_like=task_like, member_role_by_user_id=member_role_by_user_id, allow_status_fallback=False)
     if not role:
         return None
     candidates = [agent for agent in agents if str(agent.get("authority_role") or "").strip() == role]

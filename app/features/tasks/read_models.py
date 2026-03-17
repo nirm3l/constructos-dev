@@ -10,14 +10,14 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from features.agents.gates import run_runtime_deploy_health_check
+from plugins.team_mode.semantics import semantic_status_key
 from plugins.team_mode.task_roles import derive_task_role, normalize_team_agents
 from plugins.context_policy import classify_project_delivery_context
 from shared.delivery_evidence import (
     derive_deploy_execution_snapshot,
-    extract_task_branches_from_refs,
-    has_merge_to_main_ref,
     is_strict_deploy_success_snapshot,
 )
+from shared.execution_gates import build_execution_gate, execution_gate_catalog
 from shared.core import (
     Note,
     Task,
@@ -30,13 +30,16 @@ from shared.core import (
     serialize_task,
 )
 from shared.serializers import load_created_by_map
-from shared.project_repository import branch_is_merged_to_main, find_project_compose_manifest
+from shared.project_repository import find_project_compose_manifest
 from shared.models import Project, ProjectMember, ProjectPluginConfig, ProjectRule
 from shared.task_automation import (
     build_legacy_schedule_trigger,
     derive_legacy_schedule_fields,
     normalize_execution_triggers,
 )
+from shared.task_delivery import normalize_delivery_mode
+from shared.task_relationships import normalize_task_relationships
+from shared.team_mode_lifecycle import task_has_merge_evidence, task_lifecycle_milestones
 
 _COMMIT_SHA_EXPLICIT_RE = re.compile(
     r"(?i)(?:\\b(?:commit|sha|changeset|hash)\\s*[:=#]?\\s*|/commit/)([0-9a-f]{7,40})\\b"
@@ -243,6 +246,7 @@ def _build_execution_gates(
     except Exception:
         runtime_port = None
     runtime_health_path = str((runtime_cfg or {}).get("health_path") or "/health")
+    runtime_host = str((runtime_cfg or {}).get("host") or "gateway").strip() or "gateway"
     runtime_require_http_200 = bool((runtime_cfg or {}).get("require_http_200", True))
     execution_cfg = git_compiled.get("execution")
     if not isinstance(execution_cfg, dict):
@@ -253,7 +257,18 @@ def _build_execution_gates(
     last_error = str(state.get("last_agent_error") or "").strip()
     gates: list[dict[str, object]] = []
 
-    if git_enabled and role == "Developer" and status == "Dev":
+    delivery_mode = normalize_delivery_mode(state.get("delivery_mode", getattr(task_row, "delivery_mode", None)))
+    requires_deploy = delivery_mode == "deployable_slice"
+    lifecycle_milestones = task_lifecycle_milestones(
+        {
+            "status": status,
+            "external_refs": external_refs,
+            "last_deploy_execution": state.get("last_deploy_execution"),
+            "last_merged_commit_sha": state.get("last_merged_commit_sha"),
+        }
+    )
+
+    if git_enabled and role == "Developer" and semantic_status_key(status=status) in {"todo", "active", "blocked"}:
         project_rules = db.execute(
             select(ProjectRule).where(
                 ProjectRule.workspace_id == workspace_id,
@@ -271,33 +286,27 @@ def _build_execution_gates(
             ).get("has_repo_context")
         )
         gates.append(
-            {
-                "id": "repo_context",
-                "label": "Repository context",
-                "status": "pass" if has_repo_context else "fail",
-                "blocking": True,
-                "message": "Project repository context is linked." if has_repo_context else "Link project repository context before Developer execution.",
-            }
+            build_execution_gate(
+                "repo_context",
+                status="pass" if has_repo_context else "fail",
+                message="Project repository context is linked." if has_repo_context else "Link project repository context before Developer execution.",
+            )
         )
         has_commit = bool(_extract_commit_shas_from_refs(external_refs))
         gates.append(
-            {
-                "id": "dev_commit_evidence",
-                "label": "Commit evidence",
-                "status": "pass" if has_commit else "waiting",
-                "blocking": True,
-                "message": "Commit evidence exists in external refs." if has_commit else "Expected external ref like commit:<sha> after implementation run.",
-            }
+            build_execution_gate(
+                "dev_commit_evidence",
+                status="pass" if has_commit else "waiting",
+                message="Commit evidence exists in external refs." if has_commit else "Expected external ref like commit:<sha> after implementation run.",
+            )
         )
         has_branch = _has_task_branch_evidence(refs=external_refs, task_id=task_id)
         gates.append(
-            {
-                "id": "dev_task_branch_evidence",
-                "label": "Task branch evidence",
-                "status": "pass" if has_branch else "waiting",
-                "blocking": True,
-                "message": "Task branch evidence is present." if has_branch else "Expected external ref with task/<task-id-prefix>-... evidence.",
-            }
+            build_execution_gate(
+                "dev_task_branch_evidence",
+                status="pass" if has_branch else "waiting",
+                message="Task branch evidence is present." if has_branch else "Expected external ref with task/<task-id-prefix>-... evidence.",
+            )
         )
         if require_dev_tests:
             tests_gate_status = "waiting"
@@ -309,66 +318,56 @@ def _build_execution_gates(
                 tests_gate_status = "pass"
                 tests_gate_message = "Runner did not report test requirement failure."
             gates.append(
-                {
-                    "id": "dev_tests_required",
-                    "label": "Developer tests",
-                    "status": tests_gate_status,
-                    "blocking": True,
-                    "message": tests_gate_message,
-                }
+                build_execution_gate(
+                    "dev_tests_required",
+                    status=tests_gate_status,
+                    message=tests_gate_message,
+                )
             )
         else:
             gates.append(
-                {
-                    "id": "dev_tests_required",
-                    "label": "Developer tests",
-                    "status": "not_applicable",
-                    "blocking": False,
-                    "message": "Tests are optional for this project (git_delivery.execution.require_dev_tests=false).",
-                }
-            )
-
-    if role == "Lead" and status == "Lead" and docker_enabled and runtime_required:
-        has_merge_to_main = False
-        project_task_ids = [
-            str(item or "").strip()
-            for item in db.execute(
-                select(Task.id).where(
-                    Task.workspace_id == workspace_id,
-                    Task.project_id == normalized_project_id,
-                    Task.is_deleted == False,  # noqa: E712
-                    Task.archived == False,  # noqa: E712
+                build_execution_gate(
+                    "dev_tests_required",
+                    status="not_applicable",
+                    blocking=False,
+                    message="Tests are optional for this project (git_delivery.execution.require_dev_tests=false).",
                 )
-            ).scalars().all()
-            if str(item or "").strip()
-        ]
-        for project_task_id in project_task_ids:
-            project_task_state, _ = rebuild_state(db, "Task", project_task_id)
-            if has_merge_to_main_ref(project_task_state.get("external_refs")):
-                has_merge_to_main = True
-                break
-            for branch_name in extract_task_branches_from_refs(project_task_state.get("external_refs")):
-                if branch_is_merged_to_main(
-                    project_name=str(getattr(project, "name", "") or ""),
-                    project_id=normalized_project_id,
-                    branch_name=branch_name,
-                ):
-                    has_merge_to_main = True
-                    break
-            if has_merge_to_main:
-                break
+        )
+
+    if (
+        role == "Lead"
+        and semantic_status_key(status=status) in {"todo", "active", "blocked", "awaiting_decision"}
+        and docker_enabled
+        and runtime_required
+        and requires_deploy
+    ):
+        has_merge_to_main = task_has_merge_evidence(
+            {
+                "external_refs": external_refs,
+                "last_merged_commit_sha": state.get("last_merged_commit_sha"),
+            }
+        )
+        gates.append(
+            build_execution_gate(
+                "lead_merge_to_main",
+                status="pass" if has_merge_to_main else "waiting",
+                message=(
+                    "Current task merge-to-main evidence is present."
+                    if has_merge_to_main
+                    else "Lead deploy work is waiting for merge-to-main evidence on the current task."
+                ),
+            )
+        )
         manifest = find_project_compose_manifest(
             project_name=str(getattr(project, "name", "") or ""),
             project_id=normalized_project_id,
         )
         has_manifest = manifest is not None
         gates.append(
-            {
-                "id": "compose_manifest",
-                "label": "Compose manifest",
-                "status": "pass" if has_manifest else ("waiting" if not has_merge_to_main else "fail"),
-                "blocking": True,
-                "message": (
+            build_execution_gate(
+                "compose_manifest",
+                status="pass" if has_manifest else ("waiting" if not has_merge_to_main else "fail"),
+                message=(
                     str(manifest)
                     if has_manifest
                     else (
@@ -377,7 +376,7 @@ def _build_execution_gates(
                         else "Project repository is missing docker-compose.yml/compose.yml."
                     )
                 ),
-            }
+            )
         )
         if has_manifest:
             runtime = run_runtime_deploy_health_check(
@@ -385,23 +384,34 @@ def _build_execution_gates(
                 port=runtime_port,
                 health_path=runtime_health_path,
                 require_http_200=runtime_require_http_200,
-                host=None,
+                host=runtime_host,
             )
             gates.append(
-                {
-                    "id": "runtime_deploy_health",
-                    "label": "Runtime deploy health",
-                    "status": "pass" if bool(runtime.get("ok")) else "fail",
-                    "blocking": True,
-                    "message": (
-                        f"Health check passed at {str(runtime.get('http_url') or f'http://gateway:{runtime_port}{runtime_health_path}')}"
+                build_execution_gate(
+                    "runtime_deploy_health",
+                    status="pass" if bool(runtime.get("ok")) else "fail",
+                    message=(
+                        f"Health check passed at {str(runtime.get('http_url') or f'http://{runtime_host}:{runtime_port}{runtime_health_path}')}"
                         if bool(runtime.get("ok"))
                         else str(runtime.get("http_error") or "Deploy stack is not running/healthy.")
                     ),
-                }
+                )
             )
+    elif role == "Lead" and semantic_status_key(status=status) in {"todo", "active", "blocked", "awaiting_decision"} and not requires_deploy:
+        gates.append(
+            build_execution_gate(
+                "lead_merge_to_main",
+                status="not_applicable" if "merged" in lifecycle_milestones else "waiting",
+                blocking=False,
+                message=(
+                    "This task is a merged increment and does not require a dedicated deploy cycle."
+                    if "merged" in lifecycle_milestones
+                    else "This merged-increment task must still be merged before completion."
+                ),
+            )
+        )
 
-    if role == "QA" and status == "QA":
+    if role == "QA" and semantic_status_key(status=status) in {"active", "blocked", "completed"} and requires_deploy:
         structured_lead_handoff = bool(
             str(state.get("last_requested_workflow_scope") or "").strip() == "team_mode"
             and str(state.get("last_requested_source_task_id") or "").strip()
@@ -454,7 +464,7 @@ def _build_execution_gates(
                 labels=lead_state.get("labels"),
                 status=str(lead_status or ""),
             )
-            if lead_role == "Lead" and str(lead_status or "").strip() == "Lead":
+            if lead_role == "Lead" and semantic_status_key(status=lead_status) in {"todo", "active", "blocked", "awaiting_decision"}:
                 lead_in_progress = True
             lead_deploy_execution = derive_deploy_execution_snapshot(
                 refs=lead_state.get("external_refs"),
@@ -475,12 +485,11 @@ def _build_execution_gates(
             )
         )
         gates.append(
-            {
-                "id": "qa_handoff_ready",
-                "label": "Lead handoff",
-                "status": "waiting" if ((lead_in_progress and not has_lead_handoff_token) or (has_lead_handoff_token and latest_lead_deploy_at and not qa_handoff_current_cycle)) else "pass",
-                "blocking": bool((lead_in_progress and not has_lead_handoff_token) or (has_lead_handoff_token and latest_lead_deploy_at and not qa_handoff_current_cycle)),
-                "message": (
+            build_execution_gate(
+                "qa_handoff_ready",
+                status="waiting" if ((lead_in_progress and not has_lead_handoff_token) or (has_lead_handoff_token and latest_lead_deploy_at and not qa_handoff_current_cycle)) else "pass",
+                blocking=bool((lead_in_progress and not has_lead_handoff_token) or (has_lead_handoff_token and latest_lead_deploy_at and not qa_handoff_current_cycle)),
+                message=(
                     "Waiting for Lead handoff to QA."
                     if (lead_in_progress and not has_lead_handoff_token)
                     else (
@@ -489,18 +498,35 @@ def _build_execution_gates(
                         else "Lead handoff is complete; QA can execute."
                     )
                 ),
-            }
+            )
         )
         has_qa_artifacts = _task_has_http_artifact(refs=external_refs, notes=task_notes)
         qa_status = "pass" if has_qa_artifacts else ("fail" if automation_state == "completed" else "waiting")
         gates.append(
-            {
-                "id": "qa_verifiable_artifacts",
-                "label": "QA artifacts",
-                "status": qa_status,
-                "blocking": False,
-                "message": "QA artifacts are present in external refs/linked notes." if has_qa_artifacts else "Add verifiable QA artifacts (links/logs) after QA validation.",
-            }
+            build_execution_gate(
+                "qa_verifiable_artifacts",
+                status=qa_status,
+                blocking=False,
+                message="QA artifacts are present in external refs/linked notes." if has_qa_artifacts else "Add verifiable QA artifacts (links/logs) after QA validation.",
+            )
+        )
+    elif role == "QA" and semantic_status_key(status=status) in {"active", "blocked", "completed"} and not requires_deploy:
+        gates.append(
+            build_execution_gate(
+                "qa_handoff_ready",
+                status="not_applicable",
+                blocking=False,
+                message="This task is a merged increment and does not require a dedicated QA deploy-validation cycle.",
+            )
+        )
+    current_blocking_gate = str(state.get("team_mode_blocking_gate") or "").strip()
+    if current_blocking_gate and not any(str(item.get("id") or "").strip() == current_blocking_gate for item in gates):
+        gates.append(
+            build_execution_gate(
+                current_blocking_gate,
+                status="fail",
+                message=str(state.get("team_mode_blocked_reason") or state.get("last_agent_error") or "Current workflow blocker."),
+            )
         )
     return gates
 
@@ -590,17 +616,30 @@ def list_tasks_read_model(db: Session, user, query: TaskListQuery) -> dict:
     task_ids = [t.id for t in tasks]
     automation_state_by_task_id: dict[str, str] = {}
     for task in tasks:
-        has_automation = bool(
-            str(task.instruction or task.scheduled_instruction or "").strip()
-            or normalize_execution_triggers(task.execution_triggers)
-        )
-        if not has_automation:
-            continue
+        state: dict[str, object] = {}
         try:
-            state, _ = rebuild_state(db, "Task", task.id)
-            automation_state_by_task_id[task.id] = str(state.get("automation_state") or "idle")
+            rebuilt_state, _ = rebuild_state(db, "Task", task.id)
+            if isinstance(rebuilt_state, dict):
+                state = rebuilt_state
         except Exception:
-            automation_state_by_task_id[task.id] = "idle"
+            state = {}
+        automation_state_by_task_id[task.id] = str(state.get("automation_state") or "idle")
+        if not state:
+            continue
+        if state.get("status"):
+            task.status = str(state.get("status") or task.status)
+        task.assignee_id = str(state.get("assignee_id") or "").strip() or None
+        task.assigned_agent_code = str(state.get("assigned_agent_code") or "").strip() or None
+        completed_at_raw = str(state.get("completed_at") or "").strip()
+        if completed_at_raw:
+            try:
+                task.completed_at = datetime.fromisoformat(completed_at_raw)
+            except ValueError:
+                pass
+        task.task_relationships = json.dumps(normalize_task_relationships(state.get("task_relationships")))
+        task.external_refs = json.dumps(state.get("external_refs") or [])
+        task.execution_triggers = json.dumps(normalize_execution_triggers(state.get("execution_triggers")))
+        task.delivery_mode = normalize_delivery_mode(state.get("delivery_mode"))
     linked_note_count_by_task_id: dict[str, int] = {}
     if task_ids:
         note_counts = db.execute(
@@ -768,4 +807,5 @@ def get_task_automation_status_read_model(db: Session, user, task_id: str) -> di
         "last_schedule_run_at": state.get("last_schedule_run_at"),
         "last_schedule_error": state.get("last_schedule_error"),
         "execution_gates": execution_gates,
+        "execution_gate_catalog": execution_gate_catalog(),
     }

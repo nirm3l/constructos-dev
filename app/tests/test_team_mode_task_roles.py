@@ -43,20 +43,20 @@ def test_pick_agent_for_task_selects_matching_slot() -> None:
     )
     selected = pick_agent_for_task(
         agents=agents,
-        task_like={"id": "t1", "assigned_agent_code": "qa-a", "status": "QA", "assignee_id": "u-any"},
+        task_like={"id": "t1", "assigned_agent_code": "qa-a", "status": "In Progress", "assignee_id": "u-any"},
         member_role_by_user_id={},
     )
     assert selected is not None
     assert selected["id"] == "qa-a"
 
 
-def test_ensure_team_mode_labels_replaces_old_role_and_strips_slot_labels() -> None:
+def test_ensure_team_mode_labels_strips_internal_team_mode_labels_without_readding_them() -> None:
     labels = ensure_team_mode_labels(
         labels=["bug", "tm.role:qaagent", "tm.agent:qa-a"],
         role="Developer",
         agent_slot="dev-a",
     )
     assert "bug" in labels
-    assert "tm.role:Developer" in labels
+    assert all(not str(label).startswith("tm.role:") for label in labels)
     assert all(not str(label).startswith("tm.agent:") for label in labels)
     assert all(label != "tm.role:qaagent" for label in labels)

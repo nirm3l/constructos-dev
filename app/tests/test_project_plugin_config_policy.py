@@ -7,6 +7,14 @@ from features.agents.service import _compile_plugin_policy, _validate_team_mode_
 
 def test_validate_team_mode_config_accepts_valid_payload() -> None:
     config = {
+        "required_checks": {
+            "team_mode": [
+                "role_coverage_present",
+                "single_lead_present",
+                "human_owner_present",
+                "status_semantics_present",
+            ]
+        },
         "team": {
             "agents": [
                 {"id": "dev-a", "name": "Developer A", "authority_role": "Developer"},
@@ -15,19 +23,31 @@ def test_validate_team_mode_config_accepts_valid_payload() -> None:
                 {"id": "lead-a", "name": "Lead A", "authority_role": "Lead"},
             ]
         },
-        "workflow": {
-            "statuses": ["To do", "Dev", "QA", "Lead", "Done", "Blocked"],
-            "transitions": [
-                {"from": "Dev", "to": "QA", "allowed_roles": ["Developer"]},
-                {"from": "QA", "to": "Lead", "allowed_roles": ["QA"]},
-                {"from": "Lead", "to": "Done", "allowed_roles": ["Lead"]},
-            ],
+        "status_semantics": {
+            "todo": "To Do",
+            "active": "In Progress",
+            "in_review": "In Review",
+            "blocked": "Blocked",
+            "awaiting_decision": "Awaiting Decision",
+            "completed": "Completed",
         },
-        "governance": {
-            "merge_authority_roles": ["Lead"],
-            "task_move_authority_roles": ["Lead", "Developer"],
+        "routing": {
+            "developer_assignment": "least_active_then_stable_order",
+            "qa_assignment": "least_active_then_stable_order",
         },
-        "automation": {"lead_recurring_max_minutes": 5},
+        "oversight": {
+            "reconciliation_interval_seconds": 5,
+            "human_owner_user_id": "11111111-1111-1111-1111-111111111111",
+        },
+        "review_policy": {
+            "require_code_review": True,
+        },
+        "labels": {
+            "merged": "merged",
+            "deploy_ready": "deploy-ready",
+            "deployed": "deployed",
+            "tested": "tested",
+        },
     }
 
     errors, warnings = _validate_team_mode_config(config)
@@ -36,34 +56,77 @@ def test_validate_team_mode_config_accepts_valid_payload() -> None:
     assert isinstance(warnings, list)
 
 
-def test_validate_team_mode_config_rejects_unknown_transition_status() -> None:
+def test_validate_team_mode_config_rejects_missing_human_owner() -> None:
     config = {
         "team": {"agents": [{"id": "lead-a", "name": "Lead A", "authority_role": "Lead"}]},
-        "workflow": {
-            "statuses": ["Dev", "QA", "Lead"],
-            "transitions": [{"from": "Dev", "to": "Done", "allowed_roles": ["Developer"]}],
+        "status_semantics": {
+            "todo": "To Do",
+            "active": "In Progress",
+            "in_review": "In Review",
+            "blocked": "Blocked",
+            "awaiting_decision": "Awaiting Decision",
+            "completed": "Completed",
         },
-        "governance": {"merge_authority_roles": ["Lead"]},
-        "automation": {"lead_recurring_max_minutes": 5},
+        "routing": {
+            "developer_assignment": "least_active_then_stable_order",
+            "qa_assignment": "least_active_then_stable_order",
+        },
+        "oversight": {"reconciliation_interval_seconds": 5, "human_owner_user_id": ""},
+        "labels": {
+            "merged": "merged",
+            "deploy_ready": "deploy-ready",
+            "deployed": "deployed",
+            "tested": "tested",
+        },
     }
 
     errors, _warnings = _validate_team_mode_config(config)
 
-    assert any(err.get("path") == "workflow.transitions[0].to" and err.get("code") == "unknown_status" for err in errors)
+    assert any(err.get("path") == "oversight.human_owner_user_id" and err.get("code") == "required" for err in errors)
 
 
-def test_compile_plugin_policy_uses_team_mode_recurring_minutes() -> None:
+def test_compile_plugin_policy_uses_team_mode_contract() -> None:
     policy = _compile_plugin_policy(
         "team_mode",
         {
-            "team": {"agents": []},
-            "workflow": {"statuses": ["To do"], "transitions": []},
-            "governance": {"merge_authority_roles": []},
-            "automation": {"lead_recurring_max_minutes": 11},
+            "team": {
+                "agents": [
+                    {"id": "dev-a", "name": "Developer A", "authority_role": "Developer"},
+                    {"id": "qa-a", "name": "QA A", "authority_role": "QA"},
+                    {"id": "lead-a", "name": "Lead A", "authority_role": "Lead"},
+                ]
+            },
+            "status_semantics": {
+                "todo": "To Do",
+                "active": "In Progress",
+                "in_review": "In Review",
+                "blocked": "Blocked",
+                "awaiting_decision": "Awaiting Decision",
+                "completed": "Completed",
+            },
+            "routing": {
+                "developer_assignment": "least_active_then_stable_order",
+                "qa_assignment": "least_active_then_stable_order",
+            },
+            "oversight": {
+                "reconciliation_interval_seconds": 11,
+                "human_owner_user_id": "11111111-1111-1111-1111-111111111111",
+            },
+            "review_policy": {
+                "require_code_review": True,
+            },
+            "labels": {
+                "merged": "merged",
+                "deploy_ready": "deploy-ready",
+                "deployed": "deployed",
+                "tested": "tested",
+            },
         },
     )
 
-    assert policy["team_mode"]["lead_recurring_max_minutes"] == 11
+    assert policy["version"] == 2
+    assert policy["oversight"]["reconciliation_interval_seconds"] == 11
+    assert policy["review_policy"]["require_code_review"] is True
     assert "required_checks" in policy
 
 
@@ -134,14 +197,34 @@ def test_compile_plugin_policy_team_mode_snapshot_contract() -> None:
                     {"id": "lead-a", "name": "Lead A", "authority_role": "Lead"},
                 ]
             },
-            "workflow": {"statuses": ["To do", "Dev", "Lead", "QA", "Done", "Blocked"], "transitions": []},
-            "governance": {"merge_authority_roles": ["Lead"], "task_move_authority_roles": ["Lead"]},
-            "automation": {"lead_recurring_max_minutes": 7},
+            "status_semantics": {
+                "todo": "To Do",
+                "active": "In Progress",
+                "in_review": "In Review",
+                "blocked": "Blocked",
+                "awaiting_decision": "Awaiting Decision",
+                "completed": "Completed",
+            },
+            "routing": {
+                "developer_assignment": "least_active_then_stable_order",
+                "qa_assignment": "least_active_then_stable_order",
+            },
+            "oversight": {
+                "reconciliation_interval_seconds": 7,
+                "human_owner_user_id": "11111111-1111-1111-1111-111111111111",
+            },
+            "labels": {
+                "merged": "merged",
+                "deploy_ready": "deploy-ready",
+                "deployed": "deployed",
+                "tested": "tested",
+            },
             "required_checks": {
                 "team_mode": [
                     "role_coverage_present",
-                    "required_topology_present",
-                    "lead_oversight_not_done_before_delivery_complete",
+                    "single_lead_present",
+                    "human_owner_present",
+                    "status_semantics_present",
                 ]
             },
         },
@@ -150,24 +233,38 @@ def test_compile_plugin_policy_team_mode_snapshot_contract() -> None:
         "version": policy.get("version"),
         "required_checks": policy.get("required_checks"),
         "available_checks_keys": sorted(list(((policy.get("available_checks") or {}).get("team_mode") or {}).keys())),
-        "team_mode": policy.get("team_mode"),
+        "oversight": policy.get("oversight"),
+        "status_semantics": policy.get("status_semantics"),
         "authority_role_counts": ((policy.get("team") or {}).get("authority_role_counts") or {}),
     }
     expected = {
-        "version": 1,
+        "version": 2,
         "required_checks": {
             "team_mode": [
                 "role_coverage_present",
-                "required_topology_present",
-                "lead_oversight_not_done_before_delivery_complete",
+                "single_lead_present",
+                "human_owner_present",
+                "status_semantics_present",
             ]
         },
         "available_checks_keys": [
-            "lead_oversight_not_done_before_delivery_complete",
-            "required_topology_present",
+            "human_owner_present",
             "role_coverage_present",
+            "single_lead_present",
+            "status_semantics_present",
         ],
-        "team_mode": {"lead_recurring_max_minutes": 7},
+        "oversight": {
+            "reconciliation_interval_seconds": 7,
+            "human_owner_user_id": "11111111-1111-1111-1111-111111111111",
+        },
+        "status_semantics": {
+            "todo": "To Do",
+            "active": "In Progress",
+            "in_review": "In Review",
+            "blocked": "Blocked",
+            "awaiting_decision": "Awaiting Decision",
+            "completed": "Completed",
+        },
         "authority_role_counts": {"Developer": 1, "Lead": 1, "QA": 1},
     }
     assert json.dumps(snapshot, sort_keys=True) == json.dumps(expected, sort_keys=True)

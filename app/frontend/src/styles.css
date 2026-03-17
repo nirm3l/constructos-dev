@@ -7978,13 +7978,13 @@ textarea:disabled {
   background: color-mix(in srgb, var(--surface), var(--surface-alt) 24%);
   min-width: 0;
   max-width: 100%;
+  max-height: none;
+  overflow: visible;
 }
 
 .automation-history {
   display: grid;
   gap: 8px;
-  max-height: 280px;
-  overflow: auto;
   margin-bottom: 8px;
   min-width: 0;
   max-width: 100%;
@@ -13036,6 +13036,10 @@ textarea {
   border-top-style: dashed;
 }
 .task-flow-legend-line.structural { border-top-color: #64748b; }
+.task-flow-legend-line.structural-trigger {
+  border-top-color: #b45309;
+  border-top-style: dashed;
+}
 
 .task-flow-layout {
   display: grid;

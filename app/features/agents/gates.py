@@ -322,16 +322,7 @@ def run_runtime_deploy_health_check(
             if result["port_mapped"]:
                 break
 
-    def _resolve_runtime_host(value: str | None) -> str:
-        raw = str(value or "").strip()
-        if raw and raw.lower() != "gateway":
-            try:
-                ip_address(raw)
-                return raw
-            except Exception:
-                return raw
-        if not os.path.exists("/.dockerenv"):
-            return "127.0.0.1"
+    def _default_gateway_ip() -> str | None:
         try:
             with open("/proc/net/route", "r", encoding="utf-8") as handle:
                 for line in handle.read().splitlines()[1:]:
@@ -349,45 +340,111 @@ def run_runtime_deploy_health_check(
                     gateway_bytes = bytes.fromhex(gateway_hex)
                     return ".".join(str(part) for part in gateway_bytes[::-1])
         except Exception:
-            pass
-        return "172.17.0.1"
+            return None
+        return None
+
+    def _runtime_host_candidates(value: str | None) -> list[str]:
+        raw = str(value or "").strip()
+        candidates: list[str] = []
+        if raw:
+            if raw.lower() == "gateway":
+                candidates.append("gateway")
+                gateway_ip = _default_gateway_ip()
+                if gateway_ip:
+                    candidates.append(gateway_ip)
+            else:
+                try:
+                    ip_address(raw)
+                    candidates.append(raw)
+                except Exception:
+                    candidates.append(raw)
+        elif os.path.exists("/.dockerenv"):
+            candidates.append("gateway")
+            gateway_ip = _default_gateway_ip()
+            if gateway_ip:
+                candidates.append(gateway_ip)
+            candidates.append("host.docker.internal")
+        else:
+            candidates.append("127.0.0.1")
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            normalized = str(item or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(normalized)
+        return deduped
+
+    def _probe_http_url(url: str) -> tuple[int | None, str | None]:
+        try:
+            import urllib.request
+
+            with urllib.request.urlopen(url, timeout=3) as response:
+                return int(getattr(response, "status", 0) or 0), None
+        except Exception as exc:  # pragma: no cover - platform/network dependent
+            return None, str(exc)
+
+    def _probe_root_url(url: str) -> tuple[int | None, bool, str | None]:
+        try:
+            import urllib.request
+
+            with urllib.request.urlopen(url, timeout=3) as response:
+                root_status = int(getattr(response, "status", 0) or 0)
+                root_body = str(response.read(4096).decode("utf-8", errors="ignore") or "")
+            is_directory_listing = "directory listing for /" in root_body.casefold()
+            return root_status, bool(root_status == 200 and not is_directory_listing), None
+        except Exception as exc:  # pragma: no cover - platform/network dependent
+            return None, False, str(exc)
 
     if require_http_200:
         if result["port_mapped"]:
-            selected_host = _resolve_runtime_host(host)
-            try:
-                import urllib.request
-
+            http_errors: list[str] = []
+            for selected_host in _runtime_host_candidates(host):
                 url = f"http://{selected_host}:{int(port)}{health_path}"
                 result["http_url"] = url
-                try:
-                    with urllib.request.urlopen(url, timeout=3) as response:
-                        result["http_status"] = int(getattr(response, "status", 0) or 0)
-                        result["http_200"] = result["http_status"] == 200
-                except Exception as exc:  # pragma: no cover - platform/network dependent
-                    result["http_error"] = str(exc)
-            except Exception as exc:  # pragma: no cover - platform/network dependent
-                result["http_error"] = str(exc)
+                http_status, http_error = _probe_http_url(url)
+                if http_status is not None:
+                    result["http_status"] = http_status
+                    result["http_200"] = http_status == 200
+                    if result["http_200"]:
+                        break
+                if http_error:
+                    http_errors.append(f"{selected_host}: {http_error}")
+            if not result["http_200"] and http_errors:
+                result["http_error"] = " | ".join(http_errors)
     else:
         result["http_200"] = True
 
     if result["port_mapped"]:
-        selected_host = _resolve_runtime_host(host)
-        try:
-            import urllib.request
-
+        root_errors: list[str] = []
+        selected_root_hosts = _runtime_host_candidates(host)
+        if result.get("http_url"):
+            preferred_host = str(result["http_url"]).split("://", 1)[-1].split(":", 1)[0].strip()
+            selected_root_hosts = [preferred_host, *selected_root_hosts]
+        deduped_root_hosts: list[str] = []
+        seen_root_hosts: set[str] = set()
+        for candidate in selected_root_hosts:
+            normalized = str(candidate or "").strip()
+            if not normalized or normalized in seen_root_hosts:
+                continue
+            seen_root_hosts.add(normalized)
+            deduped_root_hosts.append(normalized)
+        for selected_host in deduped_root_hosts:
             root_url = f"http://{selected_host}:{int(port)}/"
             result["root_url"] = root_url
-            with urllib.request.urlopen(root_url, timeout=3) as response:
-                root_status = int(getattr(response, "status", 0) or 0)
-                root_body = str(response.read(4096).decode("utf-8", errors="ignore") or "")
-            is_directory_listing = "directory listing for /" in root_body.casefold()
-            result["root_status"] = root_status
-            result["root_directory_listing"] = bool(is_directory_listing)
-            result["serves_application_root"] = bool(root_status == 200 and not is_directory_listing)
-        except Exception as exc:  # pragma: no cover - platform/network dependent
-            result["root_error"] = str(exc)
-            result["serves_application_root"] = False
+            root_status, serves_root, root_error = _probe_root_url(root_url)
+            if root_status is not None:
+                result["root_status"] = root_status
+                result["serves_application_root"] = serves_root
+                result["root_directory_listing"] = bool(root_status == 200 and not serves_root)
+                if serves_root:
+                    break
+            if root_error:
+                root_errors.append(f"{selected_host}: {root_error}")
+        if not result["serves_application_root"] and root_errors:
+            result["root_error"] = " | ".join(root_errors)
 
     result["ok"] = bool(result["stack_running"] and result["port_mapped"] and result["http_200"])
     return result

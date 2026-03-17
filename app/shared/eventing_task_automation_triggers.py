@@ -114,7 +114,7 @@ def _status_transition_for_event(env: EventEnvelope) -> tuple[str | None, str | 
     if env.event_type == TASK_EVENT_COMPLETED:
         to_status = to_status or "Done"
     elif env.event_type == TASK_EVENT_REOPENED:
-        to_status = to_status or _normalize_status(payload.get("status")) or "To do"
+        to_status = to_status or _normalize_status(payload.get("status")) or "To Do"
     elif env.event_type in {TASK_EVENT_UPDATED, TASK_EVENT_REORDERED}:
         to_status = to_status or _normalize_status(payload.get("status"))
 

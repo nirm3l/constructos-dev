@@ -81,7 +81,7 @@ _DDD_TEMPLATE = ProjectTemplateDefinition(
         "Template for event-driven product development using bounded contexts, "
         "aggregates, commands, events, and projection-oriented delivery."
     ),
-    default_custom_statuses=("To do", "In progress", "Review", "Done"),
+    default_custom_statuses=("To Do", "In Progress", "In Review", "Completed"),
     default_embedding_enabled=True,
     default_context_pack_evidence_top_k=14,
     specifications=(
@@ -266,7 +266,7 @@ _MOBILE_BROWSER_GAME_TEMPLATE = ProjectTemplateDefinition(
         "Template for building and shipping touch-first browser games optimized "
         "for mobile devices, with performance guardrails and repeatable release flow."
     ),
-    default_custom_statuses=("Backlog", "In progress", "QA on devices", "Ready to deploy", "Done"),
+    default_custom_statuses=("Backlog", "In Progress", "QA on devices", "Ready to deploy", "Completed"),
     default_embedding_enabled=True,
     default_context_pack_evidence_top_k=15,
     specifications=(

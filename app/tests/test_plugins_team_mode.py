@@ -28,7 +28,7 @@ def test_default_plugin_policy_and_catalog_include_team_mode_plugin_scope() -> N
 
     catalog = gates_module.plugin_check_catalog_by_scope()
     assert "team_mode" in catalog
-    assert any(item["id"] == "required_topology_present" for item in catalog["team_mode"])
+    assert any(item["id"] == "single_lead_present" for item in catalog["team_mode"])
     _clear_plugin_registry_cache()
 
 
@@ -62,7 +62,7 @@ def test_executor_policy_dispatches_team_mode_worktree_rules() -> None:
         plugin_executor_policy.should_prepare_task_worktree(
             plugin_enabled=True,
             git_delivery_enabled=True,
-            task_status="Dev",
+            task_status="In Progress",
             actor_project_role="DeveloperAgent",
             assignee_project_role="DeveloperAgent",
         )
@@ -72,7 +72,7 @@ def test_executor_policy_dispatches_team_mode_worktree_rules() -> None:
         plugin_executor_policy.should_prepare_task_worktree(
             plugin_enabled=True,
             git_delivery_enabled=True,
-            task_status="QA",
+            task_status="In Review",
             actor_project_role="DeveloperAgent",
             assignee_project_role="DeveloperAgent",
         )
@@ -86,7 +86,7 @@ def test_task_policy_dispatches_team_mode_cleanup_rules() -> None:
     assert (
         plugin_task_policy.should_cleanup_task_worktree(
             plugin_enabled=True,
-            task_status="QA",
+            task_status="Completed",
             assignee_role="DeveloperAgent",
         )
         is True
@@ -94,7 +94,7 @@ def test_task_policy_dispatches_team_mode_cleanup_rules() -> None:
     assert (
         plugin_task_policy.should_cleanup_task_worktree(
             plugin_enabled=True,
-            task_status="Dev",
+            task_status="In Progress",
             assignee_role="DeveloperAgent",
         )
         is False

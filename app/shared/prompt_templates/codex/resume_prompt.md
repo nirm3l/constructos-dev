@@ -13,7 +13,6 @@ Project Name: {project_name}
 Instruction: {instruction}
 Task Branch: {task_branch}
 Task Workdir: {task_workdir}
-Repository Root: {repo_root}
 Status Change Trigger Context:
 {status_change_trigger_context}
 
@@ -59,7 +58,7 @@ Guidance:
 - If Team Mode was requested, include verification outcome only as:
   - `Verification: PASS` when required checks pass, or
   - `Verification: Needs attention` with short plain-language failed requirement descriptions.
-  - Use `In progress` for active execution that has not reached a terminal state yet; reserve `BLOCKED` for true terminal blockers that need external intervention or a non-running missing prerequisite.
+  - Use `In Progress` for active execution that has not reached a terminal state yet; reserve `BLOCKED` for true terminal blockers that need external intervention or a non-running missing prerequisite.
 - For setup-only requests, include a final line `Execution state: Not started` plus `Deploy target recorded: <stack>:<port>`.
 - For delivery evidence, use explicit structured references (`external_refs`) instead of free-text claims.
 - Dev completion evidence must include commit + task branch references in `external_refs`.
@@ -67,5 +66,8 @@ Guidance:
 - If repository remote is missing (`git remote -v` empty), do not require push/PR URLs; local commit + task-branch evidence is sufficient.
 - QA completion evidence must include verifiable artifact references (URLs) in `external_refs`.
 - Lead/deploy evidence must include deploy verification references in `external_refs` when deploy checks are required.
+- Treat `Task Workdir` as the only valid editing root for task automation.
+- Never inspect, edit, or commit from the repository root or any parent/sibling directory of `Task Workdir`.
+- Never tell yourself to "check the parent repo" or "implement in the real codebase" outside `Task Workdir`.
 {mutation_policy}
 {response_tail}

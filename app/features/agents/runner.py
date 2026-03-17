@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 import re
 import tomllib
@@ -43,9 +44,17 @@ from plugins.team_mode.workflow_orchestrator import (
     TEAM_MODE_WORKFLOW_ROLES,
     plan_team_mode_dispatch,
 )
+from plugins.team_mode.semantics import (
+    REQUIRED_SEMANTIC_STATUSES,
+    derive_phase_from_status_and_role,
+    normalize_review_policy,
+    semantic_status_key,
+)
 from .executor import AutomationOutcome, build_automation_usage_metadata, execute_task_automation_stream
 from .service import AgentTaskService
 from .gates import run_runtime_deploy_health_check
+from features.notes.domain import EVENT_CREATED as NOTE_EVENT_CREATED
+from features.projects.domain import EVENT_UPDATED as PROJECT_EVENT_UPDATED
 from features.tasks.domain import (
     EVENT_UPDATED as TASK_EVENT_UPDATED,
     EVENT_COMPLETED as TASK_EVENT_COMPLETED,
@@ -89,6 +98,7 @@ from shared.settings import (
     MCP_AUTH_TOKEN,
     logger,
 )
+from shared.core import TaskAutomationRun, TaskCreate
 from shared.task_automation import (
     STATUS_MATCH_ALL,
     STATUS_SCOPE_EXTERNAL,
@@ -101,6 +111,17 @@ from shared.task_automation import (
     schedule_trigger_matches_status,
 )
 from shared.task_relationships import normalize_task_relationships
+from shared.task_delivery import (
+    DELIVERY_MODE_MERGED_INCREMENT,
+    normalize_delivery_mode,
+    task_matches_dependency_requirement,
+    task_requires_deploy,
+)
+from shared.team_mode_lifecycle import (
+    developer_success_transition,
+    lead_deploy_success_transition,
+    qa_success_transition,
+)
 
 _runner_stop_event = threading.Event()
 _runner_wakeup_event = threading.Event()
@@ -119,6 +140,9 @@ _MAX_RECOVERABLE_RETRIES = 3
 _KICKOFF_EXECUTION_HOLDOFF_SECONDS = 20
 _AUTOMATION_STREAM_PROGRESS_MAX_CHARS = 24000
 _AUTOMATION_STREAM_FLUSH_INTERVAL_SECONDS = 0.35
+_PROJECT_DEPLOY_LOCK_LEASE_SECONDS = 600
+_POST_DEPLOY_HEALTH_RETRY_ATTEMPTS = 8
+_POST_DEPLOY_HEALTH_RETRY_DELAY_SECONDS = 2.0
 _AUTOMATION_STREAM_NOISY_STATUS_MESSAGES = {
     "Agent started processing the request.",
     "Reasoning step completed.",
@@ -151,6 +175,38 @@ _DEPLOY_COMMAND_REF_PREFIX = "deploy:command:"
 _DEPLOY_HEALTH_REF_PREFIX = "deploy:health:"
 _DEPLOY_COMPOSE_REF_PREFIX = "deploy:compose:"
 _DEPLOY_RUNTIME_REF_PREFIX = "deploy:runtime:"
+_PATCH_MARKER_LINES = {
+    "*** Begin Patch",
+    "*** End Patch",
+    "*** End of File",
+}
+
+
+def _probe_runtime_health_with_retry(
+    *,
+    stack: str,
+    port: int | None,
+    health_path: str,
+    require_http_200: bool,
+    host: str | None,
+    attempts: int = _POST_DEPLOY_HEALTH_RETRY_ATTEMPTS,
+    delay_seconds: float = _POST_DEPLOY_HEALTH_RETRY_DELAY_SECONDS,
+) -> dict[str, object]:
+    last_result: dict[str, object] = {}
+    total_attempts = max(1, int(attempts or 1))
+    for attempt in range(total_attempts):
+        last_result = run_runtime_deploy_health_check(
+            stack=stack,
+            port=port,
+            health_path=health_path,
+            require_http_200=require_http_200,
+            host=host,
+        )
+        if bool(last_result.get("ok")) and bool(last_result.get("serves_application_root")):
+            return last_result
+        if attempt < (total_attempts - 1):
+            time.sleep(max(0.0, float(delay_seconds or 0.0)))
+    return last_result
 
 
 def execute_task_automation(**kwargs):
@@ -391,15 +447,31 @@ def _project_requires_runtime_deploy_health(*, db, workspace_id: str, project_id
     return bool(runtime_cfg.get("required"))
 
 
+def _project_has_docker_compose_skill(*, db, workspace_id: str, project_id: str | None) -> bool:
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_project_id:
+        return False
+    row = db.execute(
+        select(ProjectPluginConfig.id).where(
+            ProjectPluginConfig.workspace_id == workspace_id,
+            ProjectPluginConfig.project_id == normalized_project_id,
+            ProjectPluginConfig.plugin_key == "docker_compose",
+            ProjectPluginConfig.enabled == True,  # noqa: E712
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    return row is not None
+
+
 def _project_runtime_deploy_target(
     *,
     db,
     workspace_id: str,
     project_id: str | None,
-) -> tuple[str, int | None, str, bool]:
+) -> tuple[str, str, int | None, str, bool]:
     normalized_project_id = str(project_id or "").strip()
     if not normalized_project_id:
-        return "constructos-ws-default", None, "/health", False
+        return "constructos-ws-default", "gateway", None, "/health", False
     row = db.execute(
         select(ProjectPluginConfig.compiled_policy_json, ProjectPluginConfig.config_json).where(
             ProjectPluginConfig.workspace_id == workspace_id,
@@ -410,7 +482,7 @@ def _project_runtime_deploy_target(
         )
     ).first()
     if row is None:
-        return "constructos-ws-default", None, "/health", False
+        return "constructos-ws-default", "gateway", None, "/health", False
     compiled_raw = str(row[0] or "").strip()
     config_raw = str(row[1] or "").strip()
     try:
@@ -427,6 +499,7 @@ def _project_runtime_deploy_target(
     elif isinstance(config, dict) and isinstance(config.get("runtime_deploy_health"), dict):
         runtime_cfg = dict(config.get("runtime_deploy_health") or {})
     stack = str(runtime_cfg.get("stack") or "constructos-ws-default").strip() or "constructos-ws-default"
+    host = str(runtime_cfg.get("host") or "gateway").strip() or "gateway"
     port_raw = runtime_cfg.get("port")
     try:
         port = int(port_raw) if port_raw is not None else None
@@ -436,7 +509,31 @@ def _project_runtime_deploy_target(
     if not health_path.startswith("/"):
         health_path = f"/{health_path}"
     required = bool(runtime_cfg.get("required"))
-    return stack, port, health_path, required
+    return stack, host, port, health_path, required
+
+
+def _effective_runtime_deploy_target_for_task(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+    delivery_mode: str | None,
+) -> tuple[str, str, int | None, str, bool]:
+    stack, host, port, health_path, runtime_required = _project_runtime_deploy_target(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
+    if (
+        task_requires_deploy(delivery_mode)
+        and _project_has_docker_compose_skill(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=project_id,
+        )
+    ):
+        runtime_required = True
+    return stack, host, port, health_path, runtime_required
 
 
 def _project_has_compose_manifest(*, project_name: str | None, project_id: str | None) -> bool:
@@ -592,7 +689,7 @@ def _resolve_assignee_project_role(
     normalized_project_id = str(project_id or "").strip()
     normalized_assignee_id = str(assignee_id or "").strip()
     normalized_assigned_agent_code = str(assigned_agent_code or "").strip().lower()
-    if not workspace_id or not normalized_project_id or not normalized_assignee_id:
+    if not workspace_id or not normalized_project_id:
         return ""
     if normalized_assigned_agent_code:
         plugin_row = db.execute(
@@ -629,9 +726,11 @@ def _resolve_assignee_project_role(
         },
         member_role_by_user_id={},
         allow_status_fallback=False,
-    )
+        )
     if declared:
         return declared
+    if not normalized_assignee_id:
+        return ""
     role = db.execute(
         select(ProjectMember.role).where(
             ProjectMember.workspace_id == workspace_id,
@@ -640,6 +739,65 @@ def _resolve_assignee_project_role(
         )
     ).scalar_one_or_none()
     return canonicalize_role(role)
+
+
+def _resolve_team_agent_assignment_by_role(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+    authority_role: str,
+) -> tuple[str | None, str | None]:
+    normalized_project_id = str(project_id or "").strip()
+    normalized_role = canonicalize_role(authority_role)
+    if not workspace_id or not normalized_project_id or not normalized_role:
+        return None, None
+    plugin_row = db.execute(
+        select(ProjectPluginConfig.config_json).where(
+            ProjectPluginConfig.workspace_id == workspace_id,
+            ProjectPluginConfig.project_id == normalized_project_id,
+            ProjectPluginConfig.plugin_key == "team_mode",
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    config_obj: dict[str, object] = {}
+    if isinstance(plugin_row, str) and plugin_row.strip():
+        try:
+            parsed = json.loads(plugin_row)
+        except Exception:
+            parsed = {}
+        if isinstance(parsed, dict):
+            config_obj = parsed
+    team_agents = normalize_team_agents(config_obj.get("team"))
+    matching_agent = next(
+        (
+            agent
+            for agent in team_agents
+            if canonicalize_role(agent.get("authority_role")) == normalized_role
+        ),
+        None,
+    )
+    if matching_agent is None:
+        return None, None
+    assigned_agent_code = str(matching_agent.get("id") or "").strip() or None
+    assignee_id = str(matching_agent.get("executor_user_id") or "").strip() or None
+    if assignee_id:
+        return assignee_id, assigned_agent_code
+    member_row = db.execute(
+        select(ProjectMember.user_id)
+        .join(UserModel, UserModel.id == ProjectMember.user_id)
+        .where(
+            ProjectMember.workspace_id == workspace_id,
+            ProjectMember.project_id == normalized_project_id,
+            ProjectMember.role == normalized_role,
+            UserModel.user_type == "agent",
+            UserModel.is_active == True,  # noqa: E712
+        )
+        .order_by(ProjectMember.id.asc())
+    ).first()
+    if member_row is None:
+        return None, assigned_agent_code
+    return str(member_row[0] or "").strip() or None, assigned_agent_code
 
 
 def _resolve_member_project_role(
@@ -859,7 +1017,7 @@ def _build_team_mode_dispatch_candidates(
     dispatch_candidates: list[dict[str, object]] = []
     candidate_map: dict[str, tuple[Task, dict[str, object], str]] = {}
     lead_task_count = 0
-    task_contexts: list[tuple[Task, dict[str, object], str, str, str, str]] = []
+    task_contexts: list[tuple[Task, dict[str, object], str, str, str, str, str, str]] = []
     for task in tasks:
         task_id = str(task.id or "").strip()
         if not task_id or task_id in excluded_task_ids:
@@ -897,9 +1055,9 @@ def _build_team_mode_dispatch_candidates(
             target_slot = str((selected_agent or {}).get("id") or "").strip()
         if is_lead_role(role):
             lead_task_count += 1
-        task_contexts.append((task, state, status, role, assigned_slot, target_slot))
+        task_contexts.append((task, state, status, role, assigned_slot, target_slot, instruction, automation_state))
 
-    for task, state, status, role, assigned_slot, target_slot in task_contexts:
+    for task, state, status, role, assigned_slot, target_slot, instruction, automation_state in task_contexts:
         task_id = str(task.id or "").strip()
         dependency_ready, dependency_reason = _team_mode_dispatch_dependency_ready(
             db=db,
@@ -918,15 +1076,16 @@ def _build_team_mode_dispatch_candidates(
             task_status=status,
             task_state=state,
         )
+        semantic_status = semantic_status_key(status=status)
         dispatch_ready = bool(
             instruction
             and dependency_ready
             and (
-                (is_developer_role(role) and status == "Dev")
-                or (is_qa_role(role) and status == "QA" and has_lead_handoff and not qa_handoff_gate)
+                (is_developer_role(role) and semantic_status in {"todo", "active", "blocked"})
+                or (is_qa_role(role) and semantic_status in {"active", "blocked"} and has_lead_handoff and not qa_handoff_gate)
                 or (
                     is_lead_role(role)
-                    and status == "Lead"
+                    and semantic_status in {"todo", "active", "blocked", "awaiting_decision"}
                     and (not recurring_oversight or lead_task_count <= 1)
                 )
             )
@@ -1115,7 +1274,6 @@ def _rearm_blocked_team_mode_lead_tasks(
             Task.project_id == normalized_project_id,
             Task.is_deleted == False,  # noqa: E712
             Task.archived == False,  # noqa: E712
-            Task.status == "Blocked",
         )
     ).scalars().all()
 
@@ -1126,7 +1284,7 @@ def _rearm_blocked_team_mode_lead_tasks(
             continue
         task_state, _ = rebuild_state(db, "Task", task_id)
         task_status = str(task_state.get("status") or getattr(task, "status", "") or "").strip()
-        if task_status != "Blocked":
+        if semantic_status_key(status=task_status) != "blocked":
             continue
         task_role = _resolve_assignee_project_role(
             db=db,
@@ -1169,8 +1327,8 @@ def _rearm_blocked_team_mode_lead_tasks(
             project_id=normalized_project_id,
             actor_user_id=actor_user_id,
             actor_role="Lead",
-            from_status="Blocked",
-            to_status="Lead",
+            from_status=task_status,
+            to_status=REQUIRED_SEMANTIC_STATUSES["awaiting_decision"],
         )
         if not transitioned:
             continue
@@ -1234,8 +1392,7 @@ def _team_mode_dispatch_dependency_ready(
                 if str(source_state.get("project_id") or "").strip() != project_id:
                     continue
                 total_sources += 1
-                source_status = str(source_state.get("status") or "").strip()
-                if source_status in statuses:
+                if any(task_matches_dependency_requirement(source_state, required) for required in statuses):
                     matched_sources += 1
             if total_sources <= 0:
                 continue
@@ -1409,26 +1566,27 @@ def _infer_team_mode_dispatch_source_task_id(
             task_status=candidate_status,
         )
         candidate_automation_state = str(candidate_state.get("automation_state") or "idle").strip().lower()
+        candidate_semantic_status = semantic_status_key(status=candidate_status)
         candidate_rank: int | None = None
         if normalized_role == "Developer":
-            if is_lead_role(candidate_role) and candidate_status == "Lead":
+            if is_lead_role(candidate_role) and candidate_semantic_status in {"todo", "active", "blocked", "awaiting_decision"}:
                 candidate_rank = 0
         elif normalized_role == "Lead":
             candidate_has_merge_evidence = has_merge_to_main_ref(candidate_state.get("external_refs"))
             if (
                 is_developer_role(candidate_role)
-                and candidate_status in {"Lead", "Done"}
+                and candidate_semantic_status in {"active", "completed"}
                 and (candidate_automation_state == "completed" or candidate_has_merge_evidence)
             ):
                 candidate_rank = 0
-            elif is_developer_role(candidate_role) and candidate_status == "Blocked":
+            elif is_developer_role(candidate_role) and candidate_semantic_status == "blocked":
                 candidate_rank = 1
-            elif is_qa_role(candidate_role) and candidate_status == "Blocked":
+            elif is_qa_role(candidate_role) and candidate_semantic_status == "blocked":
                 candidate_rank = 2
         elif normalized_role == "QA":
             if is_lead_role(candidate_role) and str(candidate_state.get("last_lead_handoff_token") or "").strip():
                 candidate_rank = 0
-            elif is_lead_role(candidate_role) and candidate_status == "Lead":
+            elif is_lead_role(candidate_role) and candidate_semantic_status in {"todo", "active", "blocked", "awaiting_decision"}:
                 candidate_rank = 1
         if candidate_rank is None:
             continue
@@ -1462,12 +1620,11 @@ def _project_has_lead_task_in_lead_status(
             Task.project_id == normalized_project_id,
             Task.is_deleted == False,  # noqa: E712
             Task.archived == False,  # noqa: E712
-            Task.status != "Done",
         )
     ).all()
     for task_id, assignee_id, assigned_agent_code, labels, status in rows:
         normalized_status = str(status or "").strip()
-        if normalized_status != "Lead":
+        if semantic_status_key(status=normalized_status) == "completed":
             continue
         role = derive_task_role(
             task_like={
@@ -1522,6 +1679,309 @@ def _project_has_merge_to_main_evidence(
     return False
 
 
+def _task_state_has_merge_to_main_evidence(
+    *,
+    project_name: str | None,
+    project_id: str | None,
+    state: dict[str, object] | None,
+) -> bool:
+    refs = state.get("external_refs") if isinstance(state, dict) else None
+    if has_merge_to_main_ref(refs):
+        return True
+    normalized_project_id = str(project_id or "").strip()
+    for branch_name in extract_task_branches_from_refs(refs):
+        if branch_is_merged_to_main(
+            project_name=str(project_name or "").strip(),
+            project_id=normalized_project_id or None,
+            branch_name=branch_name,
+        ):
+            return True
+    return False
+
+
+def _prepare_repo_root_for_main_integration(*, repo_root: Path) -> tuple[bool, str | None]:
+    code_reset, _out_reset, err_reset = _run_git_command_with_error(cwd=repo_root, args=["reset", "--hard", "HEAD"])
+    if code_reset != 0:
+        return False, f"Runner error: failed to reset integration repository: {err_reset[:220]}"
+    code_clean, _out_clean, err_clean = _run_git_command_with_error(
+        cwd=repo_root,
+        args=["clean", "-fd", "-e", ".constructos/"],
+    )
+    if code_clean != 0:
+        return False, f"Runner error: failed to clean integration repository: {err_clean[:220]}"
+    code_checkout, _out_checkout, err_checkout = _run_git_command_with_error(cwd=repo_root, args=["checkout", "main"])
+    if code_checkout != 0:
+        return False, f"Runner error: failed to checkout main for integration: {err_checkout[:220]}"
+    return True, None
+
+
+def _parse_iso_utc_datetime(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _project_active_deploy_lock(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+    now_utc: datetime | None = None,
+) -> dict[str, object] | None:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return None
+    reference_now = now_utc or datetime.now(timezone.utc)
+    candidate_ids = [
+        str(item or "").strip()
+        for item in db.execute(
+            select(Task.id).where(
+                Task.workspace_id == workspace_id,
+                Task.project_id == normalized_project_id,
+                Task.is_deleted == False,  # noqa: E712
+                Task.archived == False,  # noqa: E712
+            )
+        ).scalars().all()
+        if str(item or "").strip()
+    ]
+    active_lock: dict[str, object] | None = None
+    for task_id in candidate_ids:
+        state, _ = rebuild_state(db, "Task", task_id)
+        lock_id = str(state.get("deploy_lock_id") or "").strip()
+        acquired_at = _parse_iso_utc_datetime(state.get("deploy_lock_acquired_at"))
+        released_at = _parse_iso_utc_datetime(state.get("deploy_lock_released_at"))
+        if not lock_id or acquired_at is None or released_at is not None:
+            continue
+        if (reference_now - acquired_at).total_seconds() > _PROJECT_DEPLOY_LOCK_LEASE_SECONDS:
+            continue
+        snapshot = {
+            "task_id": task_id,
+            "lock_id": lock_id,
+            "deploy_cycle_id": str(state.get("last_deploy_cycle_id") or "").strip() or None,
+            "acquired_at": acquired_at.isoformat(),
+        }
+        if active_lock is None or str(snapshot["acquired_at"]) > str(active_lock.get("acquired_at") or ""):
+            active_lock = snapshot
+    return active_lock
+
+
+def _acquire_project_deploy_lock(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+    task_id: str,
+    actor_user_id: str,
+    acquired_at_iso: str,
+) -> dict[str, object]:
+    active_lock = _project_active_deploy_lock(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        now_utc=_parse_iso_utc_datetime(acquired_at_iso) or datetime.now(timezone.utc),
+    )
+    if active_lock and str(active_lock.get("task_id") or "").strip() != task_id:
+        return {
+            "ok": False,
+            "error": (
+                "Runner error: deployment is in progress for this project. "
+                f"Active deploy lock `{str(active_lock.get('lock_id') or '').strip()}` "
+                f"is held by task `{str(active_lock.get('task_id') or '').strip()}`."
+            ),
+        }
+    if active_lock and str(active_lock.get("task_id") or "").strip() == task_id:
+        return {
+            "ok": True,
+            "lock_id": str(active_lock.get("lock_id") or "").strip(),
+            "deploy_cycle_id": str(active_lock.get("deploy_cycle_id") or "").strip() or None,
+            "reused": True,
+        }
+    lock_id = f"deploy-lock:{uuid.uuid4()}"
+    deploy_cycle_id = f"deploy-cycle:{task_id[:8]}:{uuid.uuid4().hex[:10]}"
+    append_event(
+        db,
+        aggregate_type="Task",
+        aggregate_id=task_id,
+        event_type=TASK_EVENT_UPDATED,
+        payload={
+            "deploy_lock_id": lock_id,
+            "deploy_lock_acquired_at": acquired_at_iso,
+            "deploy_lock_released_at": None,
+            "last_deploy_cycle_id": deploy_cycle_id,
+        },
+        metadata={
+            "actor_id": actor_user_id,
+            "workspace_id": workspace_id,
+            "project_id": str(project_id or "").strip() or None,
+            "task_id": task_id,
+        },
+    )
+    return {
+        "ok": True,
+        "lock_id": lock_id,
+        "deploy_cycle_id": deploy_cycle_id,
+        "reused": False,
+    }
+
+
+def _release_project_deploy_lock(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+    task_id: str,
+    actor_user_id: str,
+    released_at_iso: str,
+    lock_id: str | None,
+) -> None:
+    normalized_lock_id = str(lock_id or "").strip()
+    if not normalized_lock_id:
+        return
+    append_event(
+        db,
+        aggregate_type="Task",
+        aggregate_id=task_id,
+        event_type=TASK_EVENT_UPDATED,
+        payload={
+            "deploy_lock_id": normalized_lock_id,
+            "deploy_lock_released_at": released_at_iso,
+        },
+        metadata={
+            "actor_id": actor_user_id,
+            "workspace_id": workspace_id,
+            "project_id": str(project_id or "").strip() or None,
+            "task_id": task_id,
+        },
+    )
+
+
+def _merge_current_task_branch_to_main(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str,
+    task_id: str,
+    actor_user_id: str,
+) -> dict[str, object]:
+    active_lock = _project_active_deploy_lock(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
+    if active_lock and str(active_lock.get("task_id") or "").strip() != task_id:
+        return {
+            "ok": False,
+            "error": (
+                "Runner error: deployment in progress; merge to main is temporarily frozen for this project. "
+                f"Active deploy lock `{str(active_lock.get('lock_id') or '').strip()}` "
+                f"is held by task `{str(active_lock.get('task_id') or '').strip()}`."
+            ),
+        }
+    project_row = db.get(Project, project_id)
+    if project_row is None:
+        return {"ok": False, "error": "Runner error: project is missing during Developer merge handoff."}
+    project_name = str(getattr(project_row, "name", "") or "").strip() or None
+    repo_root = resolve_project_repository_path(project_name=project_name, project_id=project_id)
+    if not repo_root.exists():
+        return {"ok": False, "error": "Runner error: project repository path is missing during Developer merge handoff."}
+    task_state, _ = rebuild_state(db, "Task", task_id)
+    refs = task_state.get("external_refs")
+    branch_name = _extract_task_branch_from_refs(refs)
+    if not branch_name:
+        return {"ok": False, "error": "Runner error: task branch evidence is missing during Developer merge handoff."}
+
+    ok, prep_error = _prepare_repo_root_for_main_integration(repo_root=repo_root)
+    if not ok:
+        return {"ok": False, "error": prep_error or "Runner error: failed to prepare integration repository."}
+
+    code_branch, _out_branch, err_branch = _run_git_command_with_error(
+        cwd=repo_root,
+        args=["rev-parse", "--verify", f"refs/heads/{branch_name}"],
+    )
+    if code_branch != 0:
+        return {"ok": False, "error": f"Runner error: task branch {branch_name} does not exist for merge: {err_branch[:220]}"}
+
+    patch_marker_error = _detect_patch_markers_on_task_branch(
+        repo_root=repo_root,
+        branch_name=branch_name,
+    )
+    if patch_marker_error:
+        return {"ok": False, "error": patch_marker_error}
+
+    code_ancestor, _out_ancestor, _err_ancestor = _run_git_command_with_error(
+        cwd=repo_root,
+        args=["merge-base", "--is-ancestor", branch_name, "main"],
+    )
+    if code_ancestor != 0:
+        code_merge, _out_merge, err_merge = _run_git_command_with_error(
+            cwd=repo_root,
+            args=["merge", "--no-ff", "--no-edit", branch_name],
+        )
+        if code_merge != 0:
+            _run_git_command_with_error(cwd=repo_root, args=["merge", "--abort"])
+            return {"ok": False, "error": f"Runner error: Developer merge to main failed for {branch_name}: {err_merge[:240]}"}
+
+    code_main_sha, out_main_sha, err_main_sha = _run_git_command_with_error(cwd=repo_root, args=["rev-parse", "HEAD"])
+    if code_main_sha != 0 or not out_main_sha:
+        return {"ok": False, "error": f"Runner error: merged {branch_name} but could not resolve main HEAD: {err_main_sha[:220]}"}
+
+    merged_at = to_iso_utc(datetime.now(timezone.utc))
+    merged_refs = _append_merge_to_main_ref(refs=refs, merge_sha=out_main_sha)
+    append_event(
+        db,
+        aggregate_type="Task",
+        aggregate_id=task_id,
+        event_type=TASK_EVENT_UPDATED,
+        payload={
+            "external_refs": merged_refs,
+            "last_merged_at": merged_at,
+            "last_merged_commit_sha": out_main_sha,
+            **_team_mode_progress_payload(phase="deploy_ready"),
+        },
+        metadata={
+            "actor_id": actor_user_id,
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "task_id": task_id,
+        },
+    )
+    return {
+        "ok": True,
+        "merge_sha": str(out_main_sha).strip().lower(),
+        "merged_at": merged_at,
+        "external_refs": merged_refs,
+    }
+
+
+def _detect_patch_markers_on_task_branch(*, repo_root: Path, branch_name: str) -> str | None:
+    code_diff, out_diff, err_diff = _run_git_command_with_error(
+        cwd=repo_root,
+        args=["diff", "--name-only", f"main...{branch_name}"],
+    )
+    if code_diff != 0:
+        return f"Runner error: could not inspect changed files for {branch_name}: {err_diff[:220]}"
+    changed_files = [str(item or "").strip() for item in str(out_diff or "").splitlines() if str(item or "").strip()]
+    for rel_path in changed_files:
+        code_show, out_show, _err_show = _run_git_command_with_error(
+            cwd=repo_root,
+            args=["show", f"{branch_name}:{rel_path}"],
+        )
+        if code_show != 0:
+            continue
+        for line in str(out_show or "").splitlines():
+            if line.strip() in _PATCH_MARKER_LINES:
+                return (
+                    "Runner error: Developer handoff contains literal patch markers in "
+                    f"`{rel_path}`. Remove patch markers like `*** End Patch` from task-branch files "
+                    "before merge to main."
+                )
+    return None
+
+
 def _current_nonblocking_gate_key(
     *,
     db,
@@ -1532,22 +1992,27 @@ def _current_nonblocking_gate_key(
     task_state: dict[str, object] | None = None,
 ) -> str | None:
     normalized_status = str(task_status or "").strip()
+    normalized_semantic = semantic_status_key(status=normalized_status)
+    normalized_project_id = str(project_id or "").strip()
+    project_name = None
+    if workspace_id and normalized_project_id:
+        project_row = db.get(Project, normalized_project_id)
+        project_name = str(getattr(project_row, "name", "") or "").strip() or None
     if (
         is_lead_role(assignee_role)
-        and normalized_status == "Lead"
+        and normalized_semantic in {"todo", "active", "blocked", "awaiting_decision"}
         and _project_has_git_delivery_skill(
             db=db,
             workspace_id=workspace_id,
             project_id=project_id,
         )
-        and not _project_has_merge_to_main_evidence(
-            db=db,
-            workspace_id=workspace_id,
-            project_id=project_id,
-        )
     ):
-        normalized_project_id = str(project_id or "").strip()
-        if workspace_id and normalized_project_id:
+        has_current_merge_evidence = _task_state_has_merge_to_main_evidence(
+            project_name=project_name,
+            project_id=normalized_project_id,
+            state=task_state if isinstance(task_state, dict) else None,
+        )
+        if not has_current_merge_evidence and workspace_id and normalized_project_id:
             rows = db.execute(
                 select(Task.id, Task.status).where(
                     Task.workspace_id == workspace_id,
@@ -1569,20 +2034,23 @@ def _current_nonblocking_gate_key(
                 )
                 if not is_developer_role(role):
                     continue
-                if str(developer_status or "").strip() == "Dev":
+                if semantic_status_key(status=developer_status) in {"todo", "active", "blocked"}:
                     return "lead_waiting_merge_ready_developer"
                 if str(developer_state.get("automation_state") or "").strip().lower() in {"queued", "running"}:
                     return "lead_waiting_merge_ready_developer"
+            if not _project_has_merge_to_main_evidence(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            ):
+                return "lead_waiting_committed_developer_handoff"
     if (
         is_qa_role(assignee_role)
-        and normalized_status == "QA"
-        and _project_has_lead_task_in_lead_status(
-            db=db,
-            workspace_id=workspace_id,
-            project_id=project_id,
-        )
+        and normalized_semantic in {"active", "blocked"}
     ):
         qa_state = dict(task_state or {})
+        if not str(qa_state.get("last_lead_handoff_token") or "").strip():
+            return "qa_waiting_lead_handoff"
         latest_lead_deploy_at = None
         normalized_project_id = str(project_id or "").strip()
         if workspace_id and normalized_project_id:
@@ -1627,7 +2095,6 @@ def _current_nonblocking_gate_key(
         )
         if latest_lead_deploy_at and qa_handoff_deploy_at != latest_lead_deploy_at:
             return "qa_waiting_current_deploy_cycle"
-        return "qa_waiting_lead_handoff"
     return None
 
 
@@ -1655,6 +2122,7 @@ def _task_has_git_delivery_completion_evidence(
     state: dict | None,
     summary: str,
     comment: str | None,
+    assignee_role: str | None = None,
 ) -> bool:
     source = dict(state or {})
     title = str(source.get("title") or "").strip()
@@ -1687,7 +2155,10 @@ def _task_has_git_delivery_completion_evidence(
     has_branch_evidence = bool(_TASK_BRANCH_RE.search(corpus))
     if not (has_commit_evidence and has_branch_evidence):
         return False
-    is_deploy_task = "deploy" in title.lower() or "docker compose" in title.lower()
+    normalized_role = canonicalize_role(assignee_role)
+    is_deploy_task = normalized_role == "Lead" and (
+        "deploy" in title.lower() or "docker compose" in title.lower()
+    )
     if not is_deploy_task:
         return True
     deploy_markers = ("docker compose", "/health", "http 200", "up (healthy)", "healthcheck")
@@ -1770,7 +2241,7 @@ def _merge_git_evidence(primary: dict[str, object], fallback: dict[str, object])
         "after_is_dirty",
     }
     for key, value in dict(primary or {}).items():
-        if key in repo_authoritative_keys and key in merged and merged.get(key) not in (None, "", False):
+        if key in repo_authoritative_keys and key in merged and merged.get(key) not in (None, ""):
             continue
         if value not in (None, "", False):
             merged[key] = value
@@ -2014,7 +2485,7 @@ def _validate_execution_outcome_contract(
     developer_git_delivery_run = (
         git_delivery_enabled
         and is_developer_role(assignee_role)
-        and str(task_status or "").strip() == "Dev"
+        and semantic_status_key(status=task_status) in {"todo", "active", "blocked"}
     )
     contract = (
         dict(outcome.execution_outcome_contract)
@@ -2198,16 +2669,44 @@ def _runner_can_apply_team_mode_transition(
         config = json.loads(str(row[0] or "").strip() or "{}")
     except Exception:
         config = {}
-    workflow = config.get("workflow") if isinstance(config, dict) else {}
-    if not isinstance(workflow, dict):
-        workflow = {}
+    status_semantics = config.get("status_semantics") if isinstance(config, dict) else {}
+    if not isinstance(status_semantics, dict):
+        status_semantics = dict(REQUIRED_SEMANTIC_STATUSES)
     allowed, _reason = evaluate_team_mode_transition(
-        workflow=workflow,
+        status_semantics=status_semantics,
         from_status=str(from_status or "").strip(),
         to_status=str(to_status or "").strip(),
         actor_role=str(actor_role or "").strip() or None,
     )
     return bool(allowed)
+
+
+def _team_mode_review_required_for_project(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+) -> bool:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return False
+    row = db.execute(
+        select(ProjectPluginConfig.config_json).where(
+            ProjectPluginConfig.workspace_id == str(workspace_id),
+            ProjectPluginConfig.project_id == normalized_project_id,
+            ProjectPluginConfig.plugin_key == "team_mode",
+            ProjectPluginConfig.enabled == True,  # noqa: E712
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
+        )
+    ).first()
+    if row is None:
+        return False
+    try:
+        config = json.loads(str(row[0] or "").strip() or "{}")
+    except Exception:
+        config = {}
+    review_policy = normalize_review_policy(config.get("review_policy") if isinstance(config, dict) else {})
+    return bool(review_policy.get("require_code_review"))
 
 
 def _append_task_status_transition_if_allowed(
@@ -2353,22 +2852,43 @@ def _append_merge_to_main_ref(*, refs: object, merge_sha: str) -> list[dict[str,
 
 
 def _derive_team_mode_phase(*, assignee_role: str | None, status: str | None) -> str:
-    normalized_role = canonicalize_role(assignee_role)
-    normalized_status = str(status or "").strip()
-    if normalized_status == "Done":
-        return "done"
-    if normalized_status == "Blocked":
-        return "blocked"
-    if normalized_role == "Developer":
-        if normalized_status == "Dev":
-            return "dev_execution"
-        if normalized_status == "Lead":
-            return "ready_for_merge"
-    if normalized_role == "Lead" and normalized_status == "Lead":
-        return "triage"
-    if normalized_role == "QA" and normalized_status == "QA":
-        return "qa_validation"
-    return "active"
+    return derive_phase_from_status_and_role(status=status, assignee_role=assignee_role)
+
+
+def _effective_blocked_status_for_project(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+) -> str:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return "Blocked"
+    row = db.execute(
+        select(ProjectPluginConfig.config_json).where(
+            ProjectPluginConfig.workspace_id == workspace_id,
+            ProjectPluginConfig.project_id == normalized_project_id,
+            ProjectPluginConfig.plugin_key == "team_mode",
+            ProjectPluginConfig.enabled == True,  # noqa: E712
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
+        )
+    ).first()
+    if row is None:
+        return "Blocked"
+    try:
+        config = json.loads(str(row[0] or "").strip() or "{}")
+    except Exception:
+        config = {}
+    status_semantics = config.get("status_semantics") if isinstance(config, dict) else {}
+    if not isinstance(status_semantics, dict):
+        status_semantics = dict(REQUIRED_SEMANTIC_STATUSES)
+    return str(status_semantics.get("blocked") or REQUIRED_SEMANTIC_STATUSES["blocked"]).strip() or "Blocked"
+
+
+def _should_resume_team_mode_agent_task_as_active(*, assignee_role: str | None, status: str | None) -> bool:
+    if canonicalize_role(assignee_role) not in {"Developer", "Lead", "QA"}:
+        return False
+    return semantic_status_key(status=status) in {"todo", "awaiting_decision"}
 
 
 def _team_mode_progress_payload(
@@ -2393,6 +2913,7 @@ def _append_lead_deploy_external_refs(
     *,
     refs: object,
     stack: str,
+    build_required: bool,
     port: int | None,
     health_path: str,
     runtime_ok: bool,
@@ -2427,7 +2948,8 @@ def _append_lead_deploy_external_refs(
         return any(str(item.get("url") or "").strip().casefold() == needle for item in normalized)
 
     stack_ref = f"{_DEPLOY_STACK_REF_PREFIX}{str(stack or '').strip()}"
-    command_ref = f"{_DEPLOY_COMMAND_REF_PREFIX}docker compose -p {str(stack or '').strip()} up -d"
+    command_suffix = "docker compose -p {stack} up -d --build" if build_required else "docker compose -p {stack} up -d"
+    command_ref = f"{_DEPLOY_COMMAND_REF_PREFIX}{command_suffix.format(stack=str(stack or '').strip())}"
     if not _has_url(stack_ref):
         normalized.append({"url": stack_ref, "title": "deploy stack"})
     if not _has_url(command_ref):
@@ -2683,6 +3205,33 @@ def _build_static_compose_manifest(*, port: int) -> str:
     )
 
 
+def _repo_has_application_source_files(*, repo_root: Path) -> bool:
+    patterns = [
+        "src/**/*.js",
+        "src/**/*.jsx",
+        "src/**/*.ts",
+        "src/**/*.tsx",
+        "src/**/*.py",
+        "src/**/*.html",
+        "src/**/*.css",
+        "*.js",
+        "*.jsx",
+        "*.ts",
+        "*.tsx",
+        "*.py",
+        "*.html",
+        "*.css",
+    ]
+    for pattern in patterns:
+        for candidate in repo_root.glob(pattern):
+            if not candidate.is_file():
+                continue
+            if any(part.startswith(".constructos") for part in candidate.parts):
+                continue
+            return True
+    return False
+
+
 def _looks_like_managed_static_compose_manifest(content: str) -> bool:
     normalized = str(content or "").strip().lower().replace(" ", "")
     if "image:nginx:1.27-alpine" not in normalized:
@@ -2711,82 +3260,43 @@ def _synthesize_runtime_deploy_assets(
     index_html = repo_root / "index.html"
     manifest_path = find_project_compose_manifest(project_name=project_name, project_id=project_id)
     if manifest_path is not None:
-        created_files: list[str] = []
-        commit_sha: str | None = None
         runtime_type = _derive_runtime_deploy_markers(project_name=project_name, project_id=project_id)[0]
-        try:
-            manifest_content = manifest_path.read_text(encoding="utf-8")
-        except Exception:
-            manifest_content = ""
-        if index_html.exists() and _looks_like_managed_static_compose_manifest(manifest_content):
-            nginx_conf = repo_root / "nginx.constructos.conf"
-            if _write_file_if_changed(path=nginx_conf, content=_build_static_nginx_conf(health_path=health_path)):
-                created_files.append("nginx.constructos.conf")
-            if _write_file_if_changed(path=manifest_path, content=_build_static_compose_manifest(port=port)):
-                created_files.append(Path(manifest_path).name)
-            if _remove_path_if_exists(path=repo_root / "nginx-conf"):
-                created_files.append("nginx-conf (removed)")
-            if _remove_path_if_exists(path=repo_root / "health"):
-                created_files.append("health (removed)")
-            commit_sha = _commit_repo_changes_if_any(
-                cwd=repo_root,
-                message="chore: repair static deploy assets",
-            )
-            runtime_type = "static_web"
         return {
             "ok": True,
             "manifest_path": str(manifest_path),
-            "created_files": created_files,
-            "commit_sha": commit_sha,
+            "created_files": [],
+            "commit_sha": None,
             "runtime_type": runtime_type,
         }
-
-    created_files: list[str] = []
 
     try:
         if dockerfile.exists():
             runtime_type = "dockerfile_build"
-            compose_content = _build_compose_manifest_for_build_runtime(port=port)
         elif package_json.exists():
             package_data = json.loads(package_json.read_text(encoding="utf-8"))
             scripts = package_data.get("scripts") if isinstance(package_data, dict) else {}
             start_script = str((scripts or {}).get("start") or "").strip() if isinstance(scripts, dict) else ""
-            if not start_script:
+            if start_script:
+                runtime_type = "node_web"
+            elif index_html.exists():
+                runtime_type = "static_web"
+            else:
                 return {"ok": False, "error": "unsupported Node runtime: package.json is missing a non-empty scripts.start entry"}
-            runtime_type = "node_web"
-            if _write_file_if_changed(path=dockerfile, content=_build_node_dockerfile(port=port)):
-                created_files.append("Dockerfile")
-            compose_content = _build_compose_manifest_for_build_runtime(port=port)
         elif pyproject.exists() or requirements.exists():
             command = _python_runtime_entrypoint(repo_root=repo_root)
             if not command:
                 return {"ok": False, "error": "unsupported Python runtime: expected main.py or app.py in repository root"}
             runtime_type = "python_web"
-            if _write_file_if_changed(path=dockerfile, content=_build_python_dockerfile(port=port, command=command)):
-                created_files.append("Dockerfile")
-            compose_content = _build_compose_manifest_for_build_runtime(port=port)
         elif index_html.exists():
             runtime_type = "static_web"
-            nginx_conf = repo_root / "nginx.constructos.conf"
-            if _write_file_if_changed(path=nginx_conf, content=_build_static_nginx_conf(health_path=health_path)):
-                created_files.append("nginx.constructos.conf")
-            compose_content = _build_static_compose_manifest(port=port)
         else:
             return {"ok": False, "error": "unsupported runtime: repository does not contain Dockerfile, package.json, pyproject.toml, requirements.txt, or index.html"}
-
-        manifest_path = repo_root / "docker-compose.yml"
-        if _write_file_if_changed(path=manifest_path, content=compose_content):
-            created_files.append("docker-compose.yml")
-        commit_sha = _commit_repo_changes_if_any(
-            cwd=repo_root,
-            message="chore: synthesize deploy assets",
-        )
         return {
-            "ok": True,
-            "manifest_path": str(manifest_path),
-            "created_files": created_files,
-            "commit_sha": commit_sha,
-            "runtime_type": runtime_type,
+            "ok": False,
+            "error": (
+                "deploy scaffolding is missing for a recognizable "
+                f"{runtime_type} runtime; create the missing deployment files on a task branch instead of modifying main directly"
+            ),
         }
     except json.JSONDecodeError as exc:
         return {"ok": False, "error": f"failed to parse package.json for deterministic deploy synthesis: {exc}"}
@@ -2794,6 +3304,585 @@ def _synthesize_runtime_deploy_assets(
         return {"ok": False, "error": f"failed to parse pyproject.toml for deterministic deploy synthesis: {exc}"}
     except RuntimeError as exc:
         return {"ok": False, "error": str(exc)}
+
+
+def _ensure_team_mode_lead_assignment(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+    task_id: str,
+    state: dict[str, object],
+    actor_user_id: str,
+) -> None:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return
+    current_agent_code = str(state.get("assigned_agent_code") or "").strip()
+    current_assignee_id = str(state.get("assignee_id") or "").strip()
+    if current_agent_code:
+        return
+    lead_assignee_id, lead_agent_code = _resolve_team_agent_assignment_by_role(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        authority_role="Lead",
+    )
+    if not str(lead_agent_code or "").strip():
+        return
+    append_event(
+        db,
+        aggregate_type="Task",
+        aggregate_id=task_id,
+        event_type=TASK_EVENT_UPDATED,
+        payload={
+            "assignee_id": lead_assignee_id or current_assignee_id or None,
+            "assigned_agent_code": lead_agent_code,
+        },
+        metadata={
+            "actor_id": actor_user_id,
+            "workspace_id": workspace_id,
+            "project_id": normalized_project_id,
+            "task_id": task_id,
+        },
+    )
+
+
+def _create_lead_deploy_scaffolding_followup(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+    state: dict[str, object],
+    actor_user_id: str,
+    port: int | None,
+    health_path: str | None,
+) -> str | None:
+    normalized_project_id = str(project_id or "").strip()
+    source_task_id = str(state.get("id") or "").strip()
+    if not workspace_id or not normalized_project_id or not source_task_id:
+        return None
+    marker_ref = f"evidence://lead/{source_task_id}/deploy-scaffolding-followup"
+    existing_tasks = db.execute(
+        select(Task).where(
+            Task.workspace_id == workspace_id,
+            Task.project_id == normalized_project_id,
+            Task.is_deleted == False,  # noqa: E712
+            Task.archived == False,  # noqa: E712
+        )
+    ).scalars().all()
+    for task in existing_tasks:
+        refs = getattr(task, "external_refs", None)
+        if isinstance(refs, list):
+            for item in refs:
+                if isinstance(item, dict) and str(item.get("url") or "").strip() == marker_ref:
+                    return str(task.id or "").strip() or None
+
+    project_name = str(state.get("project_name") or "").strip()
+    if not project_name:
+        project_row = db.get(Project, normalized_project_id)
+        project_name = str(getattr(project_row, "name", "") or "").strip()
+    repo_root = resolve_project_repository_path(
+        project_name=project_name or None,
+        project_id=normalized_project_id,
+    )
+    if not _repo_has_application_source_files(repo_root=repo_root):
+        return None
+
+    dev_assignee_id, dev_agent_code = _resolve_team_agent_assignment_by_role(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        authority_role="Developer",
+    )
+    if not str(dev_agent_code or "").strip():
+        return None
+
+    port_text = str(int(port)) if port is not None else "the configured runtime port"
+    normalized_health_path = str(health_path or "/health").strip() or "/health"
+    source_title = str(state.get("title") or source_task_id).strip()
+    instruction = (
+        "Analyze the merged repository state and add only the missing deployment scaffolding required for managed Docker Compose deploy. "
+        "Work only on the task branch, never on main directly. "
+        f"Target runtime health endpoint `http://gateway:{port_text}{normalized_health_path}`. "
+        "Add only deploy/runtime artifacts justified by the existing repository shape (for example Dockerfile, compose manifest, nginx config, or package/runtime wiring). "
+        "Do not invent placeholder application files or fake product shells."
+    )
+
+    from features.tasks.application import TaskApplicationService
+
+    actor = db.get(UserModel, actor_user_id) or db.get(UserModel, AGENT_SYSTEM_USER_ID)
+    if actor is None:
+        return None
+    command_id = f"lead-deploy-followup-{source_task_id[:8]}"
+    created = TaskApplicationService(db, actor, command_id=command_id).create_task(
+        TaskCreate(
+            workspace_id=workspace_id,
+            project_id=normalized_project_id,
+            specification_id=str(state.get("specification_id") or "").strip() or None,
+            title=f"Add deployment scaffolding for {source_title}",
+            description=(
+                f"Add the missing deployment/runtime scaffolding needed to unblock Lead deploy for `{source_title}`."
+            ),
+            status=REQUIRED_SEMANTIC_STATUSES["todo"],
+            priority="High",
+            assignee_id=dev_assignee_id,
+            assigned_agent_code=dev_agent_code,
+            instruction=instruction,
+            delivery_mode=DELIVERY_MODE_MERGED_INCREMENT,
+            external_refs=[
+                {"url": marker_ref, "title": "Lead-created deploy scaffolding follow-up"},
+            ],
+            task_relationships=[
+                {
+                    "kind": "depends_on",
+                    "task_ids": [source_task_id],
+                    "match_mode": "all",
+                    "statuses": ["merged"],
+                }
+            ],
+        )
+    )
+    followup_task_id = str((created or {}).get("id") or "").strip()
+    if not followup_task_id:
+        return None
+    TaskApplicationService(db, actor, command_id=f"{command_id}:run").request_automation_run(
+        followup_task_id,
+        TaskAutomationRun(
+            instruction=instruction,
+            source="runner_orchestrator",
+            source_task_id=source_task_id,
+        ),
+        wake_runner=False,
+    )
+    _ensure_source_task_resumes_after_followup(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        task_id=source_task_id,
+        state=state,
+        actor_user_id=actor_user_id,
+        followup_task_id=followup_task_id,
+        instruction=(
+            "Resume Lead deploy after the linked deployment scaffolding task completes. "
+            "Use the current merged repository state, run the managed Docker Compose deploy, verify "
+            f"`http://gateway:{port_text}{normalized_health_path}` returns HTTP 200, and confirm `/` serves application content before handing off to QA."
+        ),
+    )
+    return followup_task_id
+
+
+def _ensure_source_task_resumes_after_followup(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str,
+    task_id: str,
+    state: dict[str, object],
+    actor_user_id: str,
+    followup_task_id: str,
+    instruction: str,
+) -> None:
+    from features.tasks.command_handlers import _effective_completed_status_for_project
+
+    completed_status = _effective_completed_status_for_project(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
+    current_triggers = normalize_execution_triggers(state.get("execution_triggers"))
+    for trigger in current_triggers:
+        if str(trigger.get("kind") or "").strip().lower() != TRIGGER_KIND_STATUS_CHANGE:
+            continue
+        if str(trigger.get("scope") or "").strip().lower() != STATUS_SCOPE_EXTERNAL:
+            continue
+        selector = trigger.get("selector")
+        task_ids = selector.get("task_ids") if isinstance(selector, dict) else None
+        if isinstance(task_ids, list) and str(followup_task_id) in {str(item or "").strip() for item in task_ids}:
+            return
+    updated_triggers = [
+        *current_triggers,
+        {
+            "kind": TRIGGER_KIND_STATUS_CHANGE,
+            "enabled": True,
+            "scope": STATUS_SCOPE_EXTERNAL,
+            "match_mode": STATUS_MATCH_ALL,
+            "selector": {"task_ids": [followup_task_id]},
+            "to_statuses": [completed_status],
+            "action": "run_automation",
+        },
+    ]
+    append_event(
+        db,
+        aggregate_type="Task",
+        aggregate_id=task_id,
+        event_type=TASK_EVENT_UPDATED,
+        payload={
+            "execution_triggers": updated_triggers,
+            "instruction": instruction,
+        },
+        metadata={
+            "actor_id": actor_user_id,
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "task_id": task_id,
+        },
+    )
+
+
+def _create_lead_runtime_health_followup(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+    state: dict[str, object],
+    actor_user_id: str,
+    port: int | None,
+    health_path: str | None,
+) -> str | None:
+    normalized_project_id = str(project_id or "").strip()
+    source_task_id = str(state.get("id") or "").strip()
+    if not workspace_id or not normalized_project_id or not source_task_id:
+        return None
+    marker_ref = f"evidence://lead/{source_task_id}/runtime-health-followup"
+    existing_tasks = db.execute(
+        select(Task).where(
+            Task.workspace_id == workspace_id,
+            Task.project_id == normalized_project_id,
+            Task.is_deleted == False,  # noqa: E712
+            Task.archived == False,  # noqa: E712
+        )
+    ).scalars().all()
+    for task in existing_tasks:
+        refs = getattr(task, "external_refs", None)
+        if isinstance(refs, list):
+            for item in refs:
+                if isinstance(item, dict) and str(item.get("url") or "").strip() == marker_ref:
+                    return str(task.id or "").strip() or None
+
+    project_name = str(state.get("project_name") or "").strip()
+    if not project_name:
+        project_row = db.get(Project, normalized_project_id)
+        project_name = str(getattr(project_row, "name", "") or "").strip()
+    repo_root = resolve_project_repository_path(
+        project_name=project_name or None,
+        project_id=normalized_project_id,
+    )
+    if not _repo_has_application_source_files(repo_root=repo_root):
+        return None
+
+    dev_assignee_id, dev_agent_code = _resolve_team_agent_assignment_by_role(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        authority_role="Developer",
+    )
+    if not str(dev_agent_code or "").strip():
+        return None
+
+    port_text = str(int(port)) if port is not None else "the configured runtime port"
+    normalized_health_path = str(health_path or "/health").strip() or "/health"
+    source_title = str(state.get("title") or source_task_id).strip()
+    instruction = (
+        "Analyze the merged repository state and fix only the runtime/deployment issues needed for managed Docker Compose health verification. "
+        "Work only on the task branch, never on main directly. "
+        f"Target runtime health endpoint `http://gateway:{port_text}{normalized_health_path}` and ensure the app also serves useful content at `/`. "
+        "Use the existing repository shape to correct runtime wiring, startup command, health endpoint behavior, compose settings, or container configuration. "
+        "Do not invent placeholder application files or fake product shells."
+    )
+
+    from features.tasks.application import TaskApplicationService
+
+    actor = db.get(UserModel, actor_user_id) or db.get(UserModel, AGENT_SYSTEM_USER_ID)
+    if actor is None:
+        return None
+    command_id = f"lead-runtime-followup-{source_task_id[:8]}"
+    created = TaskApplicationService(db, actor, command_id=command_id).create_task(
+        TaskCreate(
+            workspace_id=workspace_id,
+            project_id=normalized_project_id,
+            specification_id=str(state.get("specification_id") or "").strip() or None,
+            title=f"Fix deployment runtime health for {source_title}",
+            description=(
+                f"Fix the runtime/deployment issues needed to unblock Lead deploy verification for `{source_title}`."
+            ),
+            status=REQUIRED_SEMANTIC_STATUSES["todo"],
+            priority="High",
+            assignee_id=dev_assignee_id,
+            assigned_agent_code=dev_agent_code,
+            instruction=instruction,
+            delivery_mode=DELIVERY_MODE_MERGED_INCREMENT,
+            external_refs=[
+                {"url": marker_ref, "title": "Lead-created runtime health follow-up"},
+            ],
+            task_relationships=[
+                {
+                    "kind": "depends_on",
+                    "task_ids": [source_task_id],
+                    "match_mode": "all",
+                    "statuses": ["merged"],
+                }
+            ],
+        )
+    )
+    followup_task_id = str((created or {}).get("id") or "").strip()
+    if not followup_task_id:
+        return None
+    TaskApplicationService(db, actor, command_id=f"{command_id}:run").request_automation_run(
+        followup_task_id,
+        TaskAutomationRun(
+            instruction=instruction,
+            source="runner_orchestrator",
+            source_task_id=source_task_id,
+        ),
+        wake_runner=False,
+    )
+    _ensure_source_task_resumes_after_followup(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        task_id=source_task_id,
+        state=state,
+        actor_user_id=actor_user_id,
+        followup_task_id=followup_task_id,
+        instruction=(
+            "Resume Lead deploy after the linked runtime remediation task completes. "
+            "Use the current merged repository state, run the managed Docker Compose deploy, verify "
+            f"`http://gateway:{port_text}{normalized_health_path}` returns HTTP 200, and confirm `/` serves application content before handing off to QA."
+        ),
+    )
+    return followup_task_id
+
+
+def _is_developer_main_reconciliation_error(error: str | None) -> bool:
+    normalized_error = str(error or "").strip().lower()
+    if not normalized_error:
+        return False
+    return (
+        "developer merge to main failed" in normalized_error
+        or "deterministic merge to main failed" in normalized_error
+        or "automatic merge failed" in normalized_error
+        or "merge conflict" in normalized_error
+        or "conflict (" in normalized_error
+    )
+
+
+def _requeue_developer_main_reconciliation(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+    task_id: str,
+    state: dict[str, object],
+    actor_user_id: str,
+    failed_at_iso: str,
+    failure_reason: str,
+) -> bool:
+    from features.tasks.application import TaskApplicationService
+
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return False
+    developer_agent_code = str(state.get("assigned_agent_code") or "").strip()
+    developer_assignee_id = str(state.get("assignee_id") or "").strip() or None
+    if canonicalize_role(
+        _resolve_assignee_project_role(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=normalized_project_id,
+            assignee_id=developer_assignee_id or "",
+            assigned_agent_code=developer_agent_code,
+            task_labels=state.get("labels"),
+            task_status=str(state.get("status") or ""),
+        )
+    ) != "Developer":
+        return False
+    actor = db.get(UserModel, actor_user_id) or db.get(UserModel, AGENT_SYSTEM_USER_ID)
+    if actor is None or not bool(getattr(actor, "is_active", False)):
+        return False
+    branch_name = _extract_task_branch_from_refs(state.get("external_refs"))
+    branch_hint = f" on `{branch_name}`" if str(branch_name or "").strip() else ""
+    instruction = (
+        "Reconcile the latest `main` into your task branch without editing `main` directly.\n"
+        f"Work only{branch_hint} inside the assigned task worktree.\n"
+        "1) Bring the latest `main` changes into the task branch.\n"
+        "2) Resolve all merge conflicts on the task branch.\n"
+        "3) Keep the intended task behavior and preserve valid deployment/runtime files already introduced on `main` unless this task deliberately replaces them.\n"
+        "4) Run the relevant tests/checks again.\n"
+        "5) Commit the reconciliation on the task branch and leave the task merge-ready.\n"
+        "Do not commit directly to `main`."
+    )
+    append_event(
+        db,
+        aggregate_type="Task",
+        aggregate_id=task_id,
+        event_type=TASK_EVENT_UPDATED,
+        payload={
+            "assignee_id": developer_assignee_id,
+            "assigned_agent_code": developer_agent_code or None,
+            "status": REQUIRED_SEMANTIC_STATUSES["active"],
+            **_team_mode_progress_payload(
+                phase="implementation",
+                blocking_gate="developer_main_reconciliation_required",
+                blocked_reason=str(failure_reason or "").strip() or None,
+                blocked_at=failed_at_iso,
+            ),
+        },
+        metadata={
+            "actor_id": actor_user_id,
+            "workspace_id": workspace_id,
+            "project_id": normalized_project_id,
+            "task_id": task_id,
+        },
+    )
+    TaskApplicationService(db, actor, command_id=f"tm-dev-sync-{task_id[:8]}").request_automation_run(
+        task_id,
+        TaskAutomationRun(
+            instruction=instruction,
+            source="main_reconcile",
+            source_task_id=task_id,
+            workflow_scope="team_mode",
+            execution_mode="resume_execution",
+        ),
+        wake_runner=False,
+    )
+    return True
+
+
+def _requeue_developer_committed_handoff(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+    task_id: str,
+    state: dict[str, object],
+    actor_user_id: str,
+    failed_at_iso: str,
+    failure_reason: str,
+) -> bool:
+    from features.tasks.application import TaskApplicationService
+
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return False
+    developer_agent_code = str(state.get("assigned_agent_code") or "").strip()
+    developer_assignee_id = str(state.get("assignee_id") or "").strip() or None
+    if canonicalize_role(
+        _resolve_assignee_project_role(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=normalized_project_id,
+            assignee_id=developer_assignee_id or "",
+            assigned_agent_code=developer_agent_code,
+            task_labels=state.get("labels"),
+            task_status=str(state.get("status") or ""),
+        )
+    ) != "Developer":
+        return False
+    actor = db.get(UserModel, actor_user_id) or db.get(UserModel, AGENT_SYSTEM_USER_ID)
+    if actor is None or not bool(getattr(actor, "is_active", False)):
+        return False
+    branch_name = _extract_task_branch_from_refs(state.get("external_refs"))
+    branch_hint = f" on `{branch_name}`" if str(branch_name or "").strip() else ""
+    instruction = (
+        "Continue the implementation on the assigned task branch and leave a real committed Developer handoff.\n"
+        f"Work only{branch_hint} inside the assigned task worktree.\n"
+        "1) Make the remaining code/content changes needed for this task.\n"
+        "2) Commit the work on the task branch.\n"
+        "3) Ensure the branch is ahead of `main` with a clean working tree.\n"
+        "4) Run the relevant tests/checks again.\n"
+        "5) Record commit + task branch evidence and leave the task merge-ready.\n"
+        "Do not commit directly to `main`."
+    )
+    append_event(
+        db,
+        aggregate_type="Task",
+        aggregate_id=task_id,
+        event_type=TASK_EVENT_UPDATED,
+        payload={
+            "assignee_id": developer_assignee_id,
+            "assigned_agent_code": developer_agent_code or None,
+            "status": REQUIRED_SEMANTIC_STATUSES["active"],
+            **_team_mode_progress_payload(
+                phase="implementation",
+                blocking_gate="developer_handoff_not_committed",
+                blocked_reason=str(failure_reason or "").strip() or None,
+                blocked_at=failed_at_iso,
+            ),
+        },
+        metadata={
+            "actor_id": actor_user_id,
+            "workspace_id": workspace_id,
+            "project_id": normalized_project_id,
+            "task_id": task_id,
+        },
+    )
+    TaskApplicationService(db, actor, command_id=f"tm-dev-handoff-{task_id[:8]}").request_automation_run(
+        task_id,
+        TaskAutomationRun(
+            instruction=instruction,
+            source="developer_handoff_recovery",
+            source_task_id=task_id,
+            workflow_scope="team_mode",
+            execution_mode="resume_execution",
+        ),
+        wake_runner=False,
+    )
+    return True
+
+
+def _requeue_developer_after_deploy_lock(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+    task_id: str,
+    state: dict[str, object],
+    actor_user_id: str,
+    failed_at_iso: str,
+    failure_reason: str,
+) -> bool:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return False
+    developer_agent_code = str(state.get("assigned_agent_code") or "").strip()
+    developer_assignee_id = str(state.get("assignee_id") or "").strip() or None
+    if canonicalize_role(
+        _resolve_assignee_project_role(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=normalized_project_id,
+            assignee_id=developer_assignee_id or "",
+            assigned_agent_code=developer_agent_code,
+            task_labels=state.get("labels"),
+            task_status=str(state.get("status") or ""),
+        )
+    ) != "Developer":
+        return False
+    append_event(
+        db,
+        aggregate_type="Task",
+        aggregate_id=task_id,
+        event_type=TASK_EVENT_UPDATED,
+        payload={
+            "assignee_id": developer_assignee_id,
+            "assigned_agent_code": developer_agent_code or None,
+            "status": REQUIRED_SEMANTIC_STATUSES["active"],
+            **_team_mode_progress_payload(
+                phase="implementation",
+                blocking_gate="developer_deploy_lock_waiting",
+                blocked_reason=str(failure_reason or "").strip() or None,
+                blocked_at=failed_at_iso,
+            ),
+        },
+        metadata={
+            "actor_id": actor_user_id,
+            "workspace_id": workspace_id,
+            "project_id": normalized_project_id,
+            "task_id": task_id,
+        },
+    )
+    return True
 
 
 def _translate_compose_manifest_for_host_runtime(
@@ -2838,7 +3927,16 @@ def _run_docker_compose_up_with_error(*, cwd: Path, stack: str, manifest_path: P
     args = ["sh", str(wrapper), "compose", "-p", str(stack or "").strip()]
     if manifest_path is not None:
         args.extend(["-f", str(manifest_path)])
-    args.extend(["up", "-d"])
+    manifest_text = ""
+    if manifest_path is not None and manifest_path.exists():
+        try:
+            manifest_text = manifest_path.read_text(encoding="utf-8")
+        except Exception:
+            manifest_text = ""
+    if re.search(r"(?m)^\s*build\s*:", manifest_text):
+        args.extend(["up", "-d", "--build"])
+    else:
+        args.extend(["up", "-d"])
     proc = subprocess.run(
         args,
         cwd=str(cwd),
@@ -2894,125 +3992,180 @@ def _queue_qa_handoff_requests(
     if not workspace_id or not normalized_project_id:
         return 0
     lead_state, _ = rebuild_state(db, "Task", lead_task_id)
-    member_role_by_user_id = {
-        str(user_id): str(role or "").strip()
-        for user_id, role in db.execute(
-            select(ProjectMember.user_id, ProjectMember.role).where(
-                ProjectMember.workspace_id == workspace_id,
-                ProjectMember.project_id == normalized_project_id,
-            )
-        ).all()
-    }
-    team_mode_row = db.execute(
-        select(ProjectPluginConfig.config_json).where(
-            ProjectPluginConfig.workspace_id == workspace_id,
-            ProjectPluginConfig.project_id == normalized_project_id,
-            ProjectPluginConfig.plugin_key == "team_mode",
-            ProjectPluginConfig.enabled == True,  # noqa: E712
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).first()
-    config_obj: dict[str, object] = {}
-    if team_mode_row is not None:
-        try:
-            parsed_cfg = json.loads(str(team_mode_row[0] or "").strip() or "{}")
-            if isinstance(parsed_cfg, dict):
-                config_obj = parsed_cfg
-        except Exception:
-            config_obj = {}
-    team_agents = normalize_team_agents(config_obj.get("team"))
-    agent_role_by_code = {
-        str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
-        for agent in team_agents
-        if str(agent.get("id") or "").strip()
-    }
+    qa_assignee_id, qa_agent_code = _resolve_team_agent_assignment_by_role(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        authority_role="QA",
+    )
+    if not qa_agent_code:
+        return 0
+    current_automation_state = str(lead_state.get("automation_state") or "").strip().lower()
+    active_same_request = (
+        current_automation_state in {"queued", "running"}
+        and str(lead_state.get("last_requested_source") or "").strip() == "lead_handoff"
+        and str(lead_state.get("last_requested_correlation_id") or "").strip() == lead_handoff_token
+        and str(lead_state.get("last_requested_source_task_id") or "").strip() == str(lead_task_id or "").strip()
+    )
+    if active_same_request:
+        return 0
+    if (
+        str(lead_state.get("last_requested_source") or "").strip() == "lead_handoff"
+        and str(lead_state.get("last_requested_correlation_id") or "").strip() == lead_handoff_token
+        and current_automation_state == "completed"
+    ):
+        return 0
+    instruction = (
+        str(lead_state.get("instruction") or "").strip()
+        or str(lead_state.get("scheduled_instruction") or "").strip()
+    )
+    lead_deploy_execution = (
+        lead_state.get("last_deploy_execution")
+        if isinstance(lead_state.get("last_deploy_execution"), dict)
+        else None
+    )
+    if not is_strict_deploy_success_snapshot(lead_deploy_execution):
+        return 0
 
-    tasks = db.execute(
-        select(Task).where(
-            Task.workspace_id == workspace_id,
-            Task.project_id == normalized_project_id,
-            Task.is_deleted == False,  # noqa: E712
-            Task.archived == False,  # noqa: E712
-            Task.status == "QA",
+    def _queue_handoff_for_task(*, qa_task_id: str, qa_state: dict[str, Any], same_task: bool) -> bool:
+        qa_instruction = (
+            str(qa_state.get("instruction") or "").strip()
+            or str(qa_state.get("scheduled_instruction") or "").strip()
+            or instruction
         )
-        .order_by(Task.created_at.asc())
-    ).scalars().all()
-
-    queued = 0
-    for task in tasks:
-        task_state, _ = rebuild_state(db, "Task", task.id)
-        task_role = derive_task_role(
-            task_like={
-                "assignee_id": str(task.assignee_id or "").strip(),
-                "assigned_agent_code": str(task.assigned_agent_code or "").strip(),
-                "labels": task.labels,
-                "status": str(task.status or "").strip(),
-            },
-            member_role_by_user_id=member_role_by_user_id,
-            agent_role_by_code=agent_role_by_code,
+        if not qa_instruction:
+            return False
+        qa_automation_state = str(qa_state.get("automation_state") or "").strip().lower()
+        active_same_qa_request = (
+            qa_automation_state in {"queued", "running"}
+            and str(qa_state.get("last_requested_source") or "").strip() == "lead_handoff"
+            and str(qa_state.get("last_requested_correlation_id") or "").strip() == lead_handoff_token
+            and str(qa_state.get("last_requested_source_task_id") or "").strip() == str(lead_task_id or "").strip()
         )
-        if task_role != "QA":
-            continue
-        current_automation_state = str(task_state.get("automation_state") or "").strip().lower()
-        active_same_request = (
-            current_automation_state in {"queued", "running"}
-            and str(task_state.get("last_requested_source") or "").strip() == "lead_handoff"
-            and str(task_state.get("last_requested_correlation_id") or "").strip() == lead_handoff_token
-            and str(task_state.get("last_requested_source_task_id") or "").strip() == str(lead_task_id or "").strip()
-        )
-        if active_same_request:
-            continue
+        if active_same_qa_request:
+            return False
         if (
-            str(task_state.get("last_requested_source") or "").strip() == "lead_handoff"
-            and str(task_state.get("last_requested_correlation_id") or "").strip() == lead_handoff_token
-            and current_automation_state == "completed"
+            str(qa_state.get("last_requested_source") or "").strip() == "lead_handoff"
+            and str(qa_state.get("last_requested_correlation_id") or "").strip() == lead_handoff_token
+            and qa_automation_state == "completed"
         ):
-            continue
-        instruction = (
-            str(task_state.get("instruction") or "").strip()
-            or str(task_state.get("scheduled_instruction") or "").strip()
-        )
-        if not instruction:
-            continue
+            return False
+        update_payload: dict[str, Any] = {
+            "status": REQUIRED_SEMANTIC_STATUSES["awaiting_decision"],
+            **_team_mode_progress_payload(phase="qa_validation"),
+            "last_lead_handoff_token": lead_handoff_token,
+            "last_lead_handoff_at": lead_handoff_at,
+            "last_lead_handoff_refs_json": lead_handoff_refs,
+            "last_lead_handoff_deploy_execution": lead_deploy_execution,
+        }
+        if same_task:
+            update_payload["assignee_id"] = qa_assignee_id
+            update_payload["assigned_agent_code"] = qa_agent_code
         append_event(
             db,
             aggregate_type="Task",
-            aggregate_id=str(task.id),
+            aggregate_id=qa_task_id,
+            event_type=TASK_EVENT_UPDATED,
+            payload=update_payload,
+            metadata={
+                "actor_id": actor_user_id,
+                "workspace_id": workspace_id,
+                "project_id": normalized_project_id,
+                "task_id": qa_task_id,
+            },
+        )
+        append_event(
+            db,
+            aggregate_type="Task",
+            aggregate_id=qa_task_id,
             event_type=EVENT_AUTOMATION_REQUESTED,
             payload={
                 "requested_at": lead_handoff_at,
-                "instruction": instruction,
+                "instruction": qa_instruction,
                 "source": "lead_handoff",
                 "source_task_id": lead_task_id,
                 "reason": "lead_handoff",
-                "trigger_link": f"{lead_task_id}->{str(task.id)}:QA",
+                "trigger_link": f"{lead_task_id}->{qa_task_id}:QA",
                 "correlation_id": lead_handoff_token,
                 "trigger_task_id": lead_task_id,
-                "from_status": "Lead",
-                "to_status": "QA",
+                "from_status": REQUIRED_SEMANTIC_STATUSES["awaiting_decision"],
+                "to_status": REQUIRED_SEMANTIC_STATUSES["awaiting_decision"],
                 "triggered_at": lead_handoff_at,
                 "lead_handoff_token": lead_handoff_token,
                 "lead_handoff_at": lead_handoff_at,
                 "lead_handoff_refs": lead_handoff_refs,
-                "lead_handoff_deploy_execution": (
-                    lead_state.get("last_deploy_execution")
-                    if isinstance(lead_state.get("last_deploy_execution"), dict)
-                    else None
-                ),
+                "lead_handoff_deploy_execution": lead_deploy_execution,
             },
             metadata={
                 "actor_id": actor_user_id,
                 "workspace_id": workspace_id,
                 "project_id": normalized_project_id,
-                "task_id": str(task.id),
+                "task_id": qa_task_id,
                 "trigger_task_id": lead_task_id,
-                "trigger_from_status": "Lead",
-                "trigger_to_status": "QA",
+                "trigger_from_status": REQUIRED_SEMANTIC_STATUSES["active"],
+                "trigger_to_status": REQUIRED_SEMANTIC_STATUSES["active"],
                 "triggered_at": lead_handoff_at,
             },
         )
-        queued += 1
-    return queued
+        return True
+
+    queued = 0
+    rows = db.execute(
+        select(Task.id, Task.status).where(
+            Task.workspace_id == workspace_id,
+            Task.project_id == normalized_project_id,
+            Task.is_deleted == False,  # noqa: E712
+            Task.archived == False,  # noqa: E712
+        )
+    ).all()
+    for qa_task_id_value, qa_status in rows:
+        qa_task_id = str(qa_task_id_value or "").strip()
+        if not qa_task_id or qa_task_id == str(lead_task_id or "").strip():
+            continue
+        qa_state, _ = rebuild_state(db, "Task", qa_task_id)
+        qa_role = _resolve_assignee_project_role(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=normalized_project_id,
+            assignee_id=str(qa_state.get("assignee_id") or ""),
+            assigned_agent_code=str(qa_state.get("assigned_agent_code") or ""),
+            task_labels=qa_state.get("labels"),
+            task_status=str(qa_status or ""),
+        )
+        if not is_qa_role(qa_role):
+            continue
+        relationships = qa_state.get("task_relationships")
+        if not isinstance(relationships, list):
+            continue
+        matches_lead_handoff = False
+        for relationship in relationships:
+            if not isinstance(relationship, dict):
+                continue
+            if str(relationship.get("kind") or "").strip().lower() != "hands_off_to":
+                continue
+            related_ids = {
+                str(item or "").strip()
+                for item in (relationship.get("task_ids") or [])
+                if str(item or "").strip()
+            }
+            if str(lead_task_id or "").strip() in related_ids:
+                matches_lead_handoff = True
+                break
+        if not matches_lead_handoff:
+            continue
+        if _queue_handoff_for_task(qa_task_id=qa_task_id, qa_state=qa_state, same_task=False):
+            queued += 1
+
+    if queued > 0:
+        return queued
+
+    if _queue_handoff_for_task(
+        qa_task_id=str(lead_task_id),
+        qa_state=lead_state,
+        same_task=True,
+    ):
+        return 1
+    return 0
 
 
 def _run_git_command_with_error(*, cwd: Path, args: list[str]) -> tuple[int, str, str]:
@@ -3097,7 +4250,7 @@ def _merge_ready_developer_branches_to_main(
             Task.project_id == project_id,
             Task.is_deleted == False,  # noqa: E712
             Task.archived == False,  # noqa: E712
-            Task.status == "Lead",
+            Task.status != REQUIRED_SEMANTIC_STATUSES["completed"],
         )
     ).all()
 
@@ -3117,7 +4270,8 @@ def _merge_ready_developer_branches_to_main(
             member_role_by_user_id=member_role_by_user_id,
             agent_role_by_code=agent_role_by_code,
         )
-        if role != "Developer":
+        phase = str((rebuild_state(db, "Task", task_id_text)[0] or {}).get("team_mode_phase") or "").strip()
+        if role != "Lead" and phase != "deploy_ready":
             continue
         refs = task_state.get("external_refs")
         if _task_has_main_merge_marker(refs):
@@ -3142,33 +4296,12 @@ def _merge_ready_developer_branches_to_main(
                     aggregate_type="Task",
                     aggregate_id=task_id_text,
                     event_type=TASK_EVENT_UPDATED,
-                    payload={"external_refs": merged_refs, **_team_mode_progress_payload(phase="merge")},
-                    metadata={
-                        "actor_id": actor_user_id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": task_id_text,
+                    payload={
+                        "external_refs": merged_refs,
+                        "last_merged_at": merged_at,
+                        "last_merged_commit_sha": out_main_sha,
+                        **_team_mode_progress_payload(phase="deploy_ready"),
                     },
-                )
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=task_id_text,
-                    event_type=TASK_EVENT_COMPLETED,
-                    payload={"completed_at": merged_at},
-                    metadata={
-                        "actor_id": actor_user_id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": task_id_text,
-                    },
-                )
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=task_id_text,
-                    event_type=TASK_EVENT_UPDATED,
-                    payload=_team_mode_progress_payload(phase="done"),
                     metadata={
                         "actor_id": actor_user_id,
                         "workspace_id": workspace_id,
@@ -3196,33 +4329,12 @@ def _merge_ready_developer_branches_to_main(
             aggregate_type="Task",
             aggregate_id=task_id_text,
             event_type=TASK_EVENT_UPDATED,
-            payload={"external_refs": merged_refs, **_team_mode_progress_payload(phase="merge")},
-            metadata={
-                "actor_id": actor_user_id,
-                "workspace_id": workspace_id,
-                "project_id": project_id,
-                "task_id": task_id_text,
+            payload={
+                "external_refs": merged_refs,
+                "last_merged_at": merged_at,
+                "last_merged_commit_sha": out_main_sha,
+                **_team_mode_progress_payload(phase="deploy_ready"),
             },
-        )
-        append_event(
-            db,
-            aggregate_type="Task",
-            aggregate_id=task_id_text,
-            event_type=TASK_EVENT_COMPLETED,
-            payload={"completed_at": merged_at},
-            metadata={
-                "actor_id": actor_user_id,
-                "workspace_id": workspace_id,
-                "project_id": project_id,
-                "task_id": task_id_text,
-            },
-        )
-        append_event(
-            db,
-            aggregate_type="Task",
-            aggregate_id=task_id_text,
-            event_type=TASK_EVENT_UPDATED,
-            payload=_team_mode_progress_payload(phase="done"),
             metadata={
                 "actor_id": actor_user_id,
                 "workspace_id": workspace_id,
@@ -3374,6 +4486,30 @@ def _resolve_project_human_member_user_ids(*, db, workspace_id: str, project_id:
     return out
 
 
+def _resolve_team_mode_human_owner_user_id(*, db, workspace_id: str, project_id: str | None) -> str | None:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return None
+    row = db.execute(
+        select(ProjectPluginConfig.config_json).where(
+            ProjectPluginConfig.workspace_id == str(workspace_id),
+            ProjectPluginConfig.project_id == normalized_project_id,
+            ProjectPluginConfig.plugin_key == "team_mode",
+            ProjectPluginConfig.enabled == True,  # noqa: E712
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
+        )
+    ).first()
+    if row is None:
+        return None
+    try:
+        config = json.loads(str(row[0] or "").strip() or "{}")
+    except Exception:
+        config = {}
+    oversight = config.get("oversight") if isinstance(config, dict) and isinstance(config.get("oversight"), dict) else {}
+    user_id = str(oversight.get("human_owner_user_id") or "").strip()
+    return user_id or None
+
+
 def _resolve_notification_human_user_ids(*, db, workspace_id: str, project_id: str | None) -> list[str]:
     project_humans = _resolve_project_human_member_user_ids(
         db=db,
@@ -3493,6 +4629,58 @@ def _handoff_failed_task_to_human(
     return target_human_id
 
 
+def _handoff_failed_team_mode_task_to_lead(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+    task_id: str,
+    state: dict[str, object] | None,
+    actor_user_id: str,
+    failed_at_iso: str,
+    failure_reason: str,
+    failed_role: str | None,
+) -> str | None:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return None
+    lead_assignee_id, lead_agent_code = _resolve_team_agent_assignment_by_role(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        authority_role="Lead",
+    )
+    if not str(lead_agent_code or "").strip():
+        return None
+    append_event(
+        db,
+        aggregate_type="Task",
+        aggregate_id=task_id,
+        event_type=TASK_EVENT_UPDATED,
+        payload={
+            "assignee_id": lead_assignee_id,
+            "assigned_agent_code": lead_agent_code,
+            "status": REQUIRED_SEMANTIC_STATUSES["awaiting_decision"],
+            **_team_mode_progress_payload(
+                phase="lead_triage",
+                blocking_gate=_classify_team_mode_failure_gate(
+                    assignee_role=failed_role,
+                    error=failure_reason,
+                ),
+                blocked_reason=str(failure_reason or "").strip() or None,
+                blocked_at=failed_at_iso,
+            ),
+        },
+        metadata={
+            "actor_id": actor_user_id,
+            "workspace_id": workspace_id,
+            "project_id": normalized_project_id,
+            "task_id": task_id,
+        },
+    )
+    return str(lead_agent_code or "").strip() or None
+
+
 def _is_blocked_outcome(*, summary: str | None, comment: str | None) -> bool:
     summary_head = str(summary or "").strip().splitlines()[0:1]
     comment_head = str(comment or "").strip().splitlines()[0:1]
@@ -3608,7 +4796,9 @@ def _project_completion_snapshot(*, db, workspace_id: str, project_id: str | Non
     done = 0
     for task_id in task_ids:
         state, _ = rebuild_state(db, "Task", task_id)
-        if str(state.get("status") or "").strip() == "Done":
+        status_text = str(state.get("status") or "").strip()
+        completed_at = str(state.get("completed_at") or "").strip()
+        if semantic_status_key(status=status_text) == "completed" or status_text.casefold() == "done" or completed_at:
             done += 1
     total = len(task_ids)
     return {
@@ -3617,6 +4807,231 @@ def _project_completion_snapshot(*, db, workspace_id: str, project_id: str | Non
         "done": done,
         "task_ids": sorted(task_ids),
     }
+
+
+def _parse_json_list_value(raw: object) -> list[dict[str, object]]:
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [item for item in parsed if isinstance(item, dict)]
+
+
+def _project_completion_task_snapshots(*, db, workspace_id: str, project_id: str) -> dict[str, object]:
+    project = db.get(Project, project_id)
+    project_name = str(getattr(project, "name", "") or "").strip() or project_id
+    task_rows = db.execute(
+        select(Task.id, Task.title, Task.external_refs).where(
+            Task.workspace_id == workspace_id,
+            Task.project_id == project_id,
+            Task.is_deleted == False,  # noqa: E712
+            Task.archived == False,  # noqa: E712
+        )
+    ).all()
+    tasks: list[dict[str, object]] = []
+    for task_id, title, external_refs_raw in task_rows:
+        normalized_task_id = str(task_id or "").strip()
+        if not normalized_task_id:
+            continue
+        state, _ = rebuild_state(db, "Task", normalized_task_id)
+        refs = state.get("external_refs")
+        if not isinstance(refs, list):
+            refs = _parse_json_list_value(external_refs_raw)
+        tasks.append(
+            {
+                "id": normalized_task_id,
+                "title": str(state.get("title") or title or normalized_task_id).strip(),
+                "status": str(state.get("status") or "").strip(),
+                "completed_at": str(state.get("completed_at") or "").strip() or None,
+                "project_completion_finalized_at": str(state.get("project_completion_finalized_at") or "").strip()
+                or None,
+                "last_merged_commit_sha": str(state.get("last_merged_commit_sha") or "").strip() or None,
+                "last_deploy_cycle_id": str(state.get("last_deploy_cycle_id") or "").strip() or None,
+                "last_deploy_execution": state.get("last_deploy_execution")
+                if isinstance(state.get("last_deploy_execution"), dict)
+                else {},
+                "last_tested_at": str(state.get("last_tested_at") or "").strip() or None,
+                "last_human_escalated_at": str(state.get("last_human_escalated_at") or "").strip() or None,
+                "external_refs": refs,
+            }
+        )
+    return {
+        "project_name": project_name,
+        "project_external_refs": _parse_json_list_value(getattr(project, "external_refs", "[]") if project else "[]"),
+        "tasks": sorted(tasks, key=lambda item: str(item.get("id") or "")),
+    }
+
+
+def _project_completion_cycle_digest(*, task_snapshots: list[dict[str, object]]) -> str:
+    payload = [
+        {
+            "id": str(item.get("id") or "").strip(),
+            "status": str(item.get("status") or "").strip(),
+            "completed_at": str(item.get("completed_at") or "").strip() or None,
+            "last_merged_commit_sha": str(item.get("last_merged_commit_sha") or "").strip() or None,
+            "last_deploy_cycle_id": str(item.get("last_deploy_cycle_id") or "").strip() or None,
+        }
+        for item in task_snapshots
+    ]
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(serialized.encode("utf-8")).hexdigest()[:12]
+
+
+def _derive_authoritative_completion_url(*, task_snapshots: list[dict[str, object]]) -> str | None:
+    preferred_urls: list[str] = []
+    generic_urls: list[str] = []
+    health_urls: list[str] = []
+    for task_snapshot in task_snapshots:
+        refs = task_snapshot.get("external_refs")
+        deploy_snapshot = derive_deploy_execution_snapshot(
+            refs=refs,
+            current_snapshot=task_snapshot.get("last_deploy_execution") if isinstance(task_snapshot, dict) else None,
+        )
+        if is_strict_deploy_success_snapshot(deploy_snapshot):
+            health_url = str(deploy_snapshot.get("http_url") or "").strip()
+            if health_url:
+                health_urls.append(health_url)
+        for item in _parse_json_list_value(refs):
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+            lowered_url = url.casefold()
+            if not (lowered_url.startswith("http://") or lowered_url.startswith("https://")):
+                continue
+            title = str(item.get("title") or "").strip().casefold()
+            if any(marker in title for marker in ("live deployment", "deployment url", "release url", "production url")):
+                preferred_urls.append(url)
+                continue
+            if "health" in title or lowered_url.endswith("/health"):
+                health_urls.append(url)
+                continue
+            generic_urls.append(url)
+    for collection in (preferred_urls, generic_urls, health_urls):
+        for url in collection:
+            if url:
+                return url
+    return None
+
+
+def _note_title_key(value: str) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _project_completion_note_id(*, project_id: str, title: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"note:{project_id}:{_note_title_key(title)}"))
+
+
+def _merge_completion_external_ref(
+    *,
+    existing_refs: list[dict[str, object]],
+    deployment_url: str | None,
+) -> list[dict[str, object]]:
+    merged: list[dict[str, object]] = []
+    seen_urls: set[str] = set()
+    for item in existing_refs:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        normalized_item = {"url": url}
+        title = str(item.get("title") or "").strip()
+        source = str(item.get("source") or "").strip()
+        if title:
+            normalized_item["title"] = title
+        if source:
+            normalized_item["source"] = source
+        merged.append(normalized_item)
+    normalized_deployment_url = str(deployment_url or "").strip()
+    if normalized_deployment_url and normalized_deployment_url not in seen_urls:
+        merged.append(
+            {
+                "url": normalized_deployment_url,
+                "title": "Live deployment URL",
+                "source": "team_mode_completion",
+            }
+        )
+    return merged
+
+
+def _build_project_completion_report(
+    *,
+    project_name: str,
+    finalized_at: str,
+    completion_digest: str,
+    task_snapshots: list[dict[str, object]],
+    deployment_url: str | None,
+) -> str:
+    completed_tasks: list[str] = []
+    merged_commits: list[str] = []
+    deploy_cycle_ids: list[str] = []
+    qa_evidence: list[str] = []
+    escalations: list[str] = []
+    seen_commits: set[str] = set()
+    seen_cycles: set[str] = set()
+    for task_snapshot in task_snapshots:
+        title = str(task_snapshot.get("title") or task_snapshot.get("id") or "").strip()
+        task_id = str(task_snapshot.get("id") or "").strip()
+        completed_tasks.append(f"- {title} (`{task_id}`)")
+        commit_sha = str(task_snapshot.get("last_merged_commit_sha") or "").strip().lower()
+        if commit_sha and commit_sha not in seen_commits:
+            seen_commits.add(commit_sha)
+            merged_commits.append(f"- `{commit_sha}`")
+        refs = task_snapshot.get("external_refs")
+        for commit in sorted(_extract_commit_shas_from_refs(refs)):
+            normalized_commit = str(commit or "").strip().lower()
+            if not normalized_commit or normalized_commit in seen_commits:
+                continue
+            seen_commits.add(normalized_commit)
+            merged_commits.append(f"- `{normalized_commit}`")
+        deploy_cycle_id = str(task_snapshot.get("last_deploy_cycle_id") or "").strip()
+        if deploy_cycle_id and deploy_cycle_id not in seen_cycles:
+            seen_cycles.add(deploy_cycle_id)
+            deploy_cycle_ids.append(f"- `{deploy_cycle_id}`")
+        tested_at = str(task_snapshot.get("last_tested_at") or "").strip()
+        if tested_at:
+            qa_evidence.append(f"- {title}: tested at `{tested_at}`")
+        escalated_at = str(task_snapshot.get("last_human_escalated_at") or "").strip()
+        if escalated_at:
+            escalations.append(f"- {title}: escalated at `{escalated_at}`")
+
+    lines = [
+        "# Project Completion Report",
+        "",
+        f"- Project: **{project_name}**",
+        f"- Completion timestamp: `{finalized_at}`",
+        f"- Completion cycle: `{completion_digest}`",
+    ]
+    if deployment_url:
+        lines.append(f"- Deployment URL: {deployment_url}")
+    lines.extend(
+        [
+            "",
+            "## Completed Tasks",
+            *(completed_tasks or ["- None"]),
+            "",
+            "## Merged Commits",
+            *(merged_commits or ["- None"]),
+            "",
+            "## Deploy Cycles",
+            *(deploy_cycle_ids or ["- None"]),
+            "",
+            "## QA Evidence Summary",
+            *(qa_evidence or ["- None recorded"]),
+            "",
+            "## Blocker And Escalation Summary",
+            *(escalations or ["- No human escalations were recorded"]),
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _notify_humans_blocked(
@@ -3675,21 +5090,154 @@ def _notify_humans_blocked(
         )
 
 
-def _notify_humans_project_completed(
+def _notify_humans_team_mode_triage_needed(
     *,
     db,
     workspace_id: str,
     project_id: str | None,
     actor_user_id: str,
+    gate: str | None,
+    task_id: str,
+    task_title: str,
 ) -> None:
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return
+    normalized_gate = str(gate or "").strip() or "unspecified"
+    human_ids = _resolve_notification_human_user_ids(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    if not human_ids:
+        return
+    message = (
+        "One or more Team Mode tasks require Lead triage before automation can continue.\n\n"
+        f"Latest task: **{task_title or task_id}**\n"
+        f"Gate: `{normalized_gate}`"
+    )
+    for human_id in human_ids:
+        append_notification_created_event(
+            db,
+            append_event_fn=append_event,
+            user_id=human_id,
+            message=message,
+            actor_id=actor_user_id,
+            workspace_id=workspace_id,
+            project_id=normalized_project_id,
+            notification_type="ManualMessage",
+            severity="warning",
+            dedupe_key=f"team-mode-triage:{normalized_project_id}:{normalized_gate}",
+            payload={
+                "kind": "team_mode_triage_required",
+                "project_id": normalized_project_id,
+                "task_id": task_id,
+                "gate": normalized_gate,
+            },
+            source_event="agents.runner.team_mode_triage_required",
+        )
+
+
+def _finalize_project_completion(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+    actor_user_id: str,
+) -> bool:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return False
     snapshot = _project_completion_snapshot(db=db, workspace_id=workspace_id, project_id=normalized_project_id)
     if not bool(snapshot.get("all_done")):
-        return
-    task_ids = list(snapshot.get("task_ids") or [])
-    digest = hashlib.sha1(",".join(task_ids).encode("utf-8")).hexdigest()[:12] if task_ids else "none"
+        return False
+    detail_snapshot = _project_completion_task_snapshots(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    task_snapshots = list(detail_snapshot.get("tasks") or [])
+    if not task_snapshots:
+        return False
+    completion_digest = _project_completion_cycle_digest(task_snapshots=task_snapshots)
+    note_title = f"Project Completion Report ({completion_digest})"
+    note_id = _project_completion_note_id(project_id=normalized_project_id, title=note_title)
+    existing_note = db.get(Note, note_id)
+    if existing_note is not None and not bool(existing_note.is_deleted):
+        return False
+    finalized_at = to_iso_utc(datetime.now(timezone.utc))
+    deployment_url = _derive_authoritative_completion_url(task_snapshots=task_snapshots)
+    report_body = _build_project_completion_report(
+        project_name=str(detail_snapshot.get("project_name") or normalized_project_id),
+        finalized_at=finalized_at,
+        completion_digest=completion_digest,
+        task_snapshots=task_snapshots,
+        deployment_url=deployment_url,
+    )
+    existing_project_refs = list(detail_snapshot.get("project_external_refs") or [])
+    merged_project_refs = _merge_completion_external_ref(
+        existing_refs=existing_project_refs,
+        deployment_url=deployment_url,
+    )
+    if merged_project_refs != existing_project_refs:
+        append_event(
+            db,
+            aggregate_type="Project",
+            aggregate_id=normalized_project_id,
+            event_type=PROJECT_EVENT_UPDATED,
+            payload={
+                "external_refs": merged_project_refs,
+                "updated_fields": ["external_refs"],
+            },
+            metadata={
+                "actor_id": actor_user_id,
+                "workspace_id": workspace_id,
+                "project_id": normalized_project_id,
+            },
+        )
+    for task_snapshot in task_snapshots:
+        append_event(
+            db,
+            aggregate_type="Task",
+            aggregate_id=str(task_snapshot.get("id") or "").strip(),
+            event_type=TASK_EVENT_UPDATED,
+            payload={"project_completion_finalized_at": finalized_at},
+            metadata={
+                "actor_id": actor_user_id,
+                "workspace_id": workspace_id,
+                "project_id": normalized_project_id,
+                "task_id": str(task_snapshot.get("id") or "").strip(),
+            },
+        )
+    append_event(
+        db,
+        aggregate_type="Note",
+        aggregate_id=note_id,
+        event_type=NOTE_EVENT_CREATED,
+        payload={
+            "workspace_id": workspace_id,
+            "project_id": normalized_project_id,
+            "note_group_id": None,
+            "task_id": None,
+            "specification_id": None,
+            "title": note_title,
+            "body": report_body,
+            "tags": ["completion-report", "team-mode"],
+            "external_refs": _merge_completion_external_ref(existing_refs=[], deployment_url=deployment_url),
+            "attachment_refs": [],
+            "pinned": False,
+            "archived": False,
+            "created_by": actor_user_id,
+            "updated_by": actor_user_id,
+            "created_at": finalized_at,
+        },
+        metadata={
+            "actor_id": actor_user_id,
+            "workspace_id": workspace_id,
+            "project_id": normalized_project_id,
+            "note_id": note_id,
+        },
+    )
     human_ids = _resolve_notification_human_user_ids(
         db=db,
         workspace_id=workspace_id,
@@ -3700,24 +5248,32 @@ def _notify_humans_project_completed(
             db,
             append_event_fn=append_event,
             user_id=human_id,
-            message="Project workflow reached completion: all active tasks are now **Done**.",
+            message=(
+                "Project workflow reached completion and a final report note was created."
+                + (f"\n\nDeployment URL: {deployment_url}" if deployment_url else "")
+            ),
             actor_id=actor_user_id,
             workspace_id=workspace_id,
             project_id=normalized_project_id,
             notification_type="ManualMessage",
             severity="info",
-            dedupe_key=f"project-completed:{normalized_project_id}:{digest}",
+            dedupe_key=f"project-completed:{normalized_project_id}:{completion_digest}",
             payload={
                 "kind": "project_completed",
                 "project_id": normalized_project_id,
                 "done_tasks": int(snapshot.get("done") or 0),
                 "total_tasks": int(snapshot.get("total") or 0),
+                "completion_cycle_id": completion_digest,
+                "project_completion_finalized_at": finalized_at,
+                "note_id": note_id,
+                "deployment_url": deployment_url,
             },
             source_event="agents.runner.project_completed",
         )
+    return True
 
 
-def _notify_humans_project_completed_post_commit(
+def _finalize_project_completion_post_commit(
     *,
     workspace_id: str,
     project_id: str | None,
@@ -3727,7 +5283,7 @@ def _notify_humans_project_completed_post_commit(
     if not workspace_id or not normalized_project_id:
         return
     with SessionLocal() as db:
-        _notify_humans_project_completed(
+        _finalize_project_completion(
             db=db,
             workspace_id=workspace_id,
             project_id=normalized_project_id,
@@ -3750,6 +5306,11 @@ def _enqueue_team_lead_blocker_escalation(
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return 0
+    effective_blocked_status = _effective_blocked_status_for_project(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
     lead_role = lead_role_for_escalation(db=db, workspace_id=workspace_id, project_id=normalized_project_id)
     if not str(lead_role or "").strip():
         return 0
@@ -3768,10 +5329,14 @@ def _enqueue_team_lead_blocker_escalation(
             Task.project_id == normalized_project_id,
             Task.is_deleted == False,  # noqa: E712
             Task.archived == False,  # noqa: E712
-            Task.status != "Done",
         )
         .order_by(Task.created_at.asc())
     ).scalars().all()
+    all_tasks = [
+        task
+        for task in all_tasks
+        if semantic_status_key(status=getattr(task, "status", None)) != "completed"
+    ]
     lead_tasks = [
         task
         for task in all_tasks
@@ -3814,7 +5379,7 @@ def _enqueue_team_lead_blocker_escalation(
                 "source": "blocker_escalation",
                 "source_task_id": blocked_task_id,
                 "trigger_task_id": blocked_task_id,
-                "to_status": blocked_status or "Blocked",
+                "to_status": blocked_status or effective_blocked_status,
                 "from_status": None,
                 "triggered_at": requested_at,
             },
@@ -3841,7 +5406,7 @@ def _enqueue_team_lead_blocker_escalation(
                     "available_slots": None,
                     "source_task_id": blocked_task_id,
                     "blocked_task_id": blocked_task_id,
-                    "blocked_status": blocked_status or "Blocked",
+                    "blocked_status": blocked_status or effective_blocked_status,
                 },
             },
             metadata={
@@ -3877,7 +5442,7 @@ def _enqueue_team_lead_blocker_escalation(
         )
         message = str(notification_cfg.get("message") or "").strip() or (
             f"Workflow blocker detected: {blocked_title or blocked_task_id} "
-            f"({blocked_role or 'agent'}, status={blocked_status or 'Blocked'}). "
+            f"({blocked_role or 'agent'}, status={blocked_status or effective_blocked_status}). "
             "Lead escalation run was queued."
         )
         kind = str(notification_cfg.get("kind") or "").strip() or "workflow_blocker_escalation"
@@ -3894,7 +5459,7 @@ def _enqueue_team_lead_blocker_escalation(
             task_id=blocked_task_id,
             notification_type="ManualMessage",
             severity="warning",
-            dedupe_key=f"{dedupe_prefix}:{blocked_task_id}:{blocked_status or 'Blocked'}:{blocked_gate or 'unspecified'}",
+            dedupe_key=f"{dedupe_prefix}:{blocked_task_id}:{blocked_status or effective_blocked_status}:{blocked_gate or 'unspecified'}",
             payload={
                 "kind": kind,
                 "blocked_task_id": blocked_task_id,
@@ -4067,6 +5632,7 @@ def _claim_queued_task(task_id: str, *, allow_fresh_kickoff: bool = False) -> Qu
             status=str(state.get("status") or ""),
         )
         now_iso = to_iso_utc(datetime.now(timezone.utc))
+        resumed_status: str | None = None
         try:
             append_event(
                 db,
@@ -4087,7 +5653,7 @@ def _claim_queued_task(task_id: str, *, allow_fresh_kickoff: bool = False) -> Qu
                     "task_id": task_id,
                 },
                 expected_version=version,
-            )
+                )
             if is_scheduled_run and schedule_state in {"queued", "idle"}:
                 append_event(
                     db,
@@ -4102,10 +5668,43 @@ def _claim_queued_task(task_id: str, *, allow_fresh_kickoff: bool = False) -> Qu
                         "task_id": task_id,
                     },
                 )
+            if _should_resume_team_mode_agent_task_as_active(
+                assignee_role=claim_assignee_role,
+                status=str(state.get("status") or ""),
+            ):
+                resumed_status = REQUIRED_SEMANTIC_STATUSES["active"]
+                append_event(
+                    db,
+                    aggregate_type="Task",
+                    aggregate_id=task_id,
+                    event_type=TASK_EVENT_UPDATED,
+                    payload={
+                        "status": resumed_status,
+                        **_team_mode_progress_payload(
+                            phase=_derive_team_mode_phase(
+                                assignee_role=claim_assignee_role,
+                                status=resumed_status,
+                            )
+                        ),
+                    },
+                    metadata={
+                        "actor_id": actor_user_id,
+                        "workspace_id": workspace_id,
+                        "project_id": project_id,
+                        "task_id": task_id,
+                    },
+                )
             db.commit()
         except ConcurrencyConflictError:
             db.rollback()
             return None
+    if resumed_status:
+        state = dict(state)
+        state["status"] = resumed_status
+        state["team_mode_phase"] = _derive_team_mode_phase(
+            assignee_role=claim_assignee_role,
+            status=resumed_status,
+        )
     requested_instruction = str(state.get("last_requested_instruction") or "").strip()
     task_instruction = (
         str(state.get("instruction") or "").strip()
@@ -4128,13 +5727,14 @@ def _claim_queued_task(task_id: str, *, allow_fresh_kickoff: bool = False) -> Qu
         instruction = requested_instruction or task_instruction
     if (
         is_lead_role(assignee_role)
-        and str(state.get("status") or "").strip() == "Lead"
+        and semantic_status_key(status=state.get("status")) in {"todo", "active", "blocked"}
         and _project_has_git_delivery_skill(db=db, workspace_id=workspace_id, project_id=project_id)
     ):
-        stack, port, health_path, runtime_required = _project_runtime_deploy_target(
+        stack, host, port, health_path, runtime_required = _effective_runtime_deploy_target_for_task(
             db=db,
             workspace_id=workspace_id,
             project_id=project_id,
+            delivery_mode=state.get("delivery_mode"),
         )
         if runtime_required:
             port_text = str(port) if port is not None else "UNSET"
@@ -4152,13 +5752,14 @@ def _claim_queued_task(task_id: str, *, allow_fresh_kickoff: bool = False) -> Qu
             instruction = f"{str(instruction or '').strip()}\n\n{deploy_steps}".strip()
     elif (
         is_qa_role(assignee_role)
-        and str(state.get("status") or "").strip() == "QA"
+        and semantic_status_key(status=state.get("status")) in {"active", "blocked"}
         and _project_has_git_delivery_skill(db=db, workspace_id=workspace_id, project_id=project_id)
     ):
-        stack, port, health_path, runtime_required = _project_runtime_deploy_target(
+        stack, host, port, health_path, runtime_required = _effective_runtime_deploy_target_for_task(
             db=db,
             workspace_id=workspace_id,
             project_id=project_id,
+            delivery_mode=state.get("delivery_mode"),
         )
         if runtime_required:
             port_text = str(port) if port is not None else "UNSET"
@@ -4176,7 +5777,7 @@ def _claim_queued_task(task_id: str, *, allow_fresh_kickoff: bool = False) -> Qu
         project_id=project_id,
         title=str(state.get("title") or ""),
         description=str(state.get("description") or ""),
-        status=str(state.get("status") or "To do"),
+        status=str(state.get("status") or "To Do"),
         instruction=instruction,
         request_source=request_source,
         is_scheduled_run=is_scheduled_run,
@@ -4245,7 +5846,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
         if (
             git_delivery_enabled
             and is_developer_role(assignee_role)
-            and str(state.get("status") or "").strip() == "Dev"
+            and semantic_status_key(status=state.get("status")) in {"todo", "active", "blocked"}
         ):
             git_evidence = _merge_git_evidence(
                 _collect_git_evidence_from_outcome(outcome),
@@ -4310,6 +5911,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 state=state,
                 summary="",
                 comment=None,
+                assignee_role=assignee_role,
             )
             # Deterministic evidence promotion:
             # only promote when executor confirms a new commit on the expected task branch.
@@ -4431,6 +6033,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
         queued_blocker_escalations = 0
         queued_qa_handoffs = 0
         queued_initial_developer_dispatches = 0
+        merge_result: dict[str, object] = {}
         action, summary, comment = normalize_success_outcome(
             action=action,
             summary=summary,
@@ -4439,12 +6042,20 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
             assignee_role=assignee_role,
             task_state=state,
         )
+        normalized_assignee_role = canonicalize_role(assignee_role)
+        if team_mode_enabled and normalized_assignee_role in {"Developer", "QA"} and action == "complete":
+            action = "comment"
         if (
             action != "complete"
             and git_delivery_enabled
             and not team_mode_enabled
-            and str(state.get("status") or "").strip() != "Done"
-            and _task_has_git_delivery_completion_evidence(state=state, summary=summary, comment=comment)
+            and semantic_status_key(status=state.get("status")) != "completed"
+            and _task_has_git_delivery_completion_evidence(
+                state=state,
+                summary=summary,
+                comment=comment,
+                assignee_role=assignee_role,
+            )
         ):
             action = "complete"
 
@@ -4476,7 +6087,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
             )
 
         if AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS:
-            if action == "complete" and state.get("status") != "Done":
+            if action == "complete" and semantic_status_key(status=state.get("status")) != "completed":
                 append_event(
                     db,
                     aggregate_type="Task",
@@ -4602,10 +6213,10 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
             and action == "comment"
             and not _is_noop_ack_comment(comment)
             and (
-                (is_developer_role(assignee_role) and current_status == "Dev" and not commit_shas)
+                (is_developer_role(assignee_role) and semantic_status_key(status=current_status) in {"todo", "active", "blocked"} and not commit_shas)
                 or (
                     is_qa_role(assignee_role)
-                    and current_status == "QA"
+                    and semantic_status_key(status=current_status) in {"active", "blocked"}
                     and not bool(state.get("external_refs"))
                 )
             )
@@ -4645,22 +6256,202 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
         if (
             team_mode_enabled
             and is_developer_role(assignee_role)
-            and str(state.get("status") or "").strip() == "Dev"
-            and _task_has_git_delivery_completion_evidence(state=state, summary=summary, comment=comment)
+            and semantic_status_key(status=state.get("status")) in {"todo", "active", "blocked"}
+            and _task_has_git_delivery_completion_evidence(
+                state=state,
+                summary=summary,
+                comment=comment,
+                assignee_role=assignee_role,
+            )
         ):
-            transitioned = _append_task_status_transition_if_allowed(
+            review_required = _team_mode_review_required_for_project(
                 db=db,
-                task_id=run.task_id,
                 workspace_id=workspace_id,
                 project_id=project_id,
-                actor_user_id=actor_user_id,
-                actor_role=assignee_role,
-                from_status="Dev",
-                to_status="Lead",
             )
-            if transitioned:
+            review_requested_at = completed_at
+            developer_assignee_id = str(state.get("assignee_id") or "").strip() or None
+            developer_agent_code = str(state.get("assigned_agent_code") or "").strip() or None
+            delivery_mode = normalize_delivery_mode(state.get("delivery_mode"))
+            requires_deploy = task_requires_deploy(delivery_mode)
+            from features.tasks.command_handlers import _effective_completed_status_for_project
+
+            completed_status = _effective_completed_status_for_project(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            transition = developer_success_transition(
+                review_required=review_required,
+                requires_deploy=requires_deploy,
+                completed_status=completed_status,
+            )
+            lead_assignee_id, lead_agent_code = _resolve_team_agent_assignment_by_role(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                authority_role="Lead",
+            )
+            if not review_required:
+                merge_result = _merge_current_task_branch_to_main(
+                    db=db,
+                    workspace_id=workspace_id,
+                    project_id=str(project_id or "").strip(),
+                    task_id=run.task_id,
+                    actor_user_id=actor_user_id,
+                )
+                if not bool((merge_result or {}).get("ok")):
+                    raise RuntimeError(str((merge_result or {}).get("error") or "Runner error: Developer merge to main failed."))
                 state = dict(state)
-                state["status"] = "Lead"
+                state["external_refs"] = list((merge_result or {}).get("external_refs") or state.get("external_refs") or [])
+                state["last_merged_commit_sha"] = str((merge_result or {}).get("merge_sha") or "").strip() or None
+                state["last_merged_at"] = str((merge_result or {}).get("merged_at") or "").strip() or completed_at
+            if review_required:
+                human_owner_user_id = _resolve_team_mode_human_owner_user_id(
+                    db=db,
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                ) or DEFAULT_USER_ID
+                append_event(
+                    db,
+                    aggregate_type="Task",
+                    aggregate_id=run.task_id,
+                    event_type=TASK_EVENT_UPDATED,
+                    payload={
+                        "assignee_id": human_owner_user_id,
+                        "assigned_agent_code": None,
+                        "status": REQUIRED_SEMANTIC_STATUSES["in_review"],
+                        "review_required": True,
+                        "review_status": "pending",
+                        "review_requested_at": review_requested_at,
+                        "review_source_assignee_id": developer_assignee_id,
+                        "review_source_assigned_agent_code": developer_agent_code,
+                        "review_next_lead_assignee_id": lead_assignee_id,
+                        "review_next_lead_assigned_agent_code": lead_agent_code,
+                        **_team_mode_progress_payload(phase="in_review"),
+                    },
+                    metadata={
+                        "actor_id": actor_user_id,
+                        "workspace_id": workspace_id,
+                        "project_id": project_id,
+                        "task_id": run.task_id,
+                    },
+                )
+                state = dict(state)
+                state["assignee_id"] = human_owner_user_id
+                state["assigned_agent_code"] = None
+                state["status"] = REQUIRED_SEMANTIC_STATUSES["in_review"]
+                state["review_required"] = True
+                state["review_status"] = "pending"
+                state["review_requested_at"] = review_requested_at
+                state["review_source_assignee_id"] = developer_assignee_id
+                state["review_source_assigned_agent_code"] = developer_agent_code
+                state["review_next_lead_assignee_id"] = lead_assignee_id
+                state["review_next_lead_assigned_agent_code"] = lead_agent_code
+                state["team_mode_phase"] = "in_review"
+            elif bool(transition.get("terminal")):
+                append_event(
+                    db,
+                    aggregate_type="Task",
+                    aggregate_id=run.task_id,
+                    event_type=TASK_EVENT_UPDATED,
+                    payload={
+                        "last_merged_at": str((merge_result or {}).get("merged_at") or "").strip() or completed_at,
+                        "last_merged_commit_sha": str((merge_result or {}).get("merge_sha") or "").strip() or None,
+                        **_team_mode_progress_payload(phase="completed"),
+                    },
+                    metadata={
+                        "actor_id": actor_user_id,
+                        "workspace_id": workspace_id,
+                        "project_id": project_id,
+                        "task_id": run.task_id,
+                    },
+                )
+                append_event(
+                    db,
+                    aggregate_type="Task",
+                    aggregate_id=run.task_id,
+                    event_type=TASK_EVENT_COMPLETED,
+                    payload={
+                        "completed_at": completed_at,
+                        "status": str(transition.get("status") or completed_status),
+                    },
+                    metadata={
+                        "actor_id": actor_user_id,
+                        "workspace_id": workspace_id,
+                        "project_id": project_id,
+                        "task_id": run.task_id,
+                    },
+                )
+                state = dict(state)
+                state["status"] = str(transition.get("status") or completed_status)
+                state["completed_at"] = completed_at
+                state["last_merged_at"] = str((merge_result or {}).get("merged_at") or "").strip() or completed_at
+                state["last_merged_commit_sha"] = str((merge_result or {}).get("merge_sha") or "").strip() or None
+                state["team_mode_phase"] = str(transition.get("phase") or "completed")
+                queued_followup_developer_dispatches = _queue_team_mode_dispatches(
+                    db=db,
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    source="runner_orchestrator",
+                    source_task_id=run.task_id,
+                    exclude_task_ids={run.task_id},
+                    allowed_roles={"Developer"},
+                )
+            elif lead_agent_code:
+                append_event(
+                    db,
+                    aggregate_type="Task",
+                    aggregate_id=run.task_id,
+                    event_type=TASK_EVENT_UPDATED,
+                    payload={
+                        "assignee_id": lead_assignee_id,
+                        "assigned_agent_code": lead_agent_code,
+                        "status": str(transition.get("status") or REQUIRED_SEMANTIC_STATUSES["awaiting_decision"]),
+                        "last_merged_at": str((merge_result or {}).get("merged_at") or "").strip() or completed_at,
+                        "last_merged_commit_sha": str((merge_result or {}).get("merge_sha") or "").strip() or None,
+                        **_team_mode_progress_payload(phase=str(transition.get("phase") or "deploy_ready")),
+                    },
+                    metadata={
+                        "actor_id": actor_user_id,
+                        "workspace_id": workspace_id,
+                        "project_id": project_id,
+                        "task_id": run.task_id,
+                    },
+                )
+                state = dict(state)
+                state["assignee_id"] = lead_assignee_id
+                state["assigned_agent_code"] = lead_agent_code
+                state["status"] = str(transition.get("status") or REQUIRED_SEMANTIC_STATUSES["awaiting_decision"])
+                state["last_merged_at"] = str((merge_result or {}).get("merged_at") or "").strip() or completed_at
+                state["last_merged_commit_sha"] = str((merge_result or {}).get("merge_sha") or "").strip() or None
+                state["team_mode_phase"] = str(transition.get("phase") or "deploy_ready")
+                instruction = (
+                    str(run.instruction or "").strip()
+                    or str(state.get("instruction") or "").strip()
+                    or str(state.get("scheduled_instruction") or "").strip()
+                )
+                if instruction:
+                    append_event(
+                        db,
+                        aggregate_type="Task",
+                        aggregate_id=run.task_id,
+                        event_type=EVENT_AUTOMATION_REQUESTED,
+                        payload={
+                            "requested_at": completed_at,
+                            "instruction": instruction,
+                            "source": "developer_handoff",
+                            "source_task_id": run.task_id,
+                        },
+                        metadata={
+                            "actor_id": actor_user_id,
+                            "workspace_id": workspace_id,
+                            "project_id": project_id,
+                            "task_id": run.task_id,
+                        },
+                    )
+                    state["last_requested_source"] = "developer_handoff"
+                    state["last_requested_source_task_id"] = run.task_id
                 _rearm_blocked_team_mode_lead_tasks(
                     db=db,
                     workspace_id=workspace_id,
@@ -4688,91 +6479,175 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
             team_mode_enabled
             and git_delivery_enabled
             and canonicalize_role(assignee_role) == "Lead"
-            and str(state.get("status") or "").strip() == "Lead"
+            and semantic_status_key(status=state.get("status")) in {"todo", "active", "blocked"}
             and not is_team_mode_kickoff_run
         ):
-            merge_result = _merge_ready_developer_branches_to_main(
-                db=db,
-                workspace_id=workspace_id,
-                project_id=str(project_id or "").strip(),
-                actor_user_id=actor_user_id,
-            )
-            if not bool(merge_result.get("ok")):
-                raise RuntimeError(str(merge_result.get("error") or "Runner error: deterministic merge to main failed."))
-            if not _project_has_merge_to_main_evidence(
-                db=db,
-                workspace_id=workspace_id,
-                project_id=project_id,
-            ):
-                raise RuntimeError(
-                    "Lead handoff is blocked: merge-to-main evidence is missing after deterministic merge cycle."
-                )
-            stack, port, health_path, runtime_required = _project_runtime_deploy_target(
-                db=db,
-                workspace_id=workspace_id,
-                project_id=project_id,
-            )
-            runtime_check_ok = True
-            if runtime_required and port is None:
-                raise RuntimeError(
-                    "Lead deploy gate failed: runtime_deploy_health.port is required but missing."
-                )
-            manifest_path = find_project_compose_manifest(
+            if not _task_state_has_merge_to_main_evidence(
                 project_name=project_name,
                 project_id=str(project_id or "").strip() or None,
+                state=state,
+            ):
+                raise RuntimeError(
+                    "Lead handoff is blocked: merge-to-main evidence is missing for the current task."
+                )
+            lock_info = _acquire_project_deploy_lock(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                task_id=run.task_id,
+                actor_user_id=actor_user_id,
+                acquired_at_iso=completed_at,
             )
-            if runtime_required:
-                synthesis = _synthesize_runtime_deploy_assets(
+            if not bool(lock_info.get("ok")):
+                raise RuntimeError(str(lock_info.get("error") or "Runner error: failed to acquire project deploy lock."))
+            deploy_lock_id = str(lock_info.get("lock_id") or "").strip() or None
+            deploy_cycle_id = str(lock_info.get("deploy_cycle_id") or "").strip() or None
+            stack, host, port, health_path, runtime_required = _effective_runtime_deploy_target_for_task(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                delivery_mode=state.get("delivery_mode"),
+            )
+            runtime_check_ok = True
+            try:
+                if runtime_required and port is None:
+                    raise RuntimeError(
+                        "Lead deploy gate failed: runtime_deploy_health.port is required but missing."
+                    )
+                manifest_path = find_project_compose_manifest(
                     project_name=project_name,
                     project_id=str(project_id or "").strip() or None,
-                    port=int(port),
-                    health_path=health_path,
                 )
-                if not bool(synthesis.get("ok")):
-                    raise RuntimeError(
-                        "Lead deploy gate failed: compose manifest is missing and deterministic synthesis failed. "
-                        + str(synthesis.get("error") or "").strip()
+                if runtime_required:
+                    synthesis = _synthesize_runtime_deploy_assets(
+                        project_name=project_name,
+                        project_id=str(project_id or "").strip() or None,
+                        port=int(port),
+                        health_path=health_path,
                     )
-                manifest_path_raw = str(synthesis.get("manifest_path") or "").strip()
-                if not manifest_path_raw:
-                    raise RuntimeError(
-                        "Lead deploy gate failed: deterministic synthesis did not return a compose manifest path."
+                    if not bool(synthesis.get("ok")):
+                        raise RuntimeError(
+                            "Lead deploy gate failed: compose manifest is missing and deterministic synthesis failed. "
+                            + str(synthesis.get("error") or "").strip()
+                        )
+                    manifest_path_raw = str(synthesis.get("manifest_path") or "").strip()
+                    if not manifest_path_raw:
+                        raise RuntimeError(
+                            "Lead deploy gate failed: deterministic synthesis did not return a compose manifest path."
+                        )
+                    manifest_path = Path(manifest_path_raw)
+                    state = dict(state)
+                    deploy_snapshot = derive_deploy_execution_snapshot(
+                        refs=state.get("external_refs"),
+                        current_snapshot=state.get("last_deploy_execution") if isinstance(state.get("last_deploy_execution"), dict) else {},
                     )
-                manifest_path = Path(manifest_path_raw)
-                state = dict(state)
-                deploy_snapshot = derive_deploy_execution_snapshot(
-                    refs=state.get("external_refs"),
-                    current_snapshot=state.get("last_deploy_execution") if isinstance(state.get("last_deploy_execution"), dict) else {},
-                )
-                deploy_snapshot.update(
-                    {
-                        "manifest_path": manifest_path_raw,
-                        "runtime_type": str(synthesis.get("runtime_type") or "").strip() or None,
-                        "synthesized": bool(list(synthesis.get("created_files") or [])),
-                        "synthesized_files": list(synthesis.get("created_files") or []),
-                        "synthesis_commit_sha": str(synthesis.get("commit_sha") or "").strip() or None,
-                    }
-                )
-                state["last_deploy_execution"] = deploy_snapshot
-            if runtime_required and manifest_path is not None:
-                repo_root = resolve_project_repository_path(
-                    project_name=str(project_name or "").strip() or None,
-                    project_id=str(project_id or "").strip() or None,
-                )
-                repo_root_host = resolve_project_repository_host_path(
-                    project_name=str(project_name or "").strip() or None,
-                    project_id=str(project_id or "").strip() or None,
-                )
-                translated_manifest_path = _translate_compose_manifest_for_host_runtime(
-                    manifest_path=Path(manifest_path),
-                    repo_root_host=repo_root_host,
-                )
-                code_deploy, _out_deploy, err_deploy = _run_docker_compose_up_with_error(
-                    cwd=repo_root,
-                    stack=stack,
-                    manifest_path=translated_manifest_path,
-                )
-                if code_deploy != 0:
+                    deploy_snapshot.update(
+                        {
+                            "manifest_path": manifest_path_raw,
+                            "runtime_type": str(synthesis.get("runtime_type") or "").strip() or None,
+                            "synthesized": bool(list(synthesis.get("created_files") or [])),
+                            "synthesized_files": list(synthesis.get("created_files") or []),
+                            "synthesis_commit_sha": str(synthesis.get("commit_sha") or "").strip() or None,
+                            "deploy_cycle_id": deploy_cycle_id,
+                            "deploy_lock_id": deploy_lock_id,
+                            "deploy_lock_acquired_at": completed_at,
+                        }
+                    )
+                    state["last_deploy_execution"] = deploy_snapshot
+                if runtime_required and manifest_path is not None:
+                    repo_root = resolve_project_repository_path(
+                        project_name=str(project_name or "").strip() or None,
+                        project_id=str(project_id or "").strip() or None,
+                    )
+                    repo_root_host = resolve_project_repository_host_path(
+                        project_name=str(project_name or "").strip() or None,
+                        project_id=str(project_id or "").strip() or None,
+                    )
+                    translated_manifest_path = _translate_compose_manifest_for_host_runtime(
+                        manifest_path=Path(manifest_path),
+                        repo_root_host=repo_root_host,
+                    )
+                    compose_requires_build = False
+                    try:
+                        compose_requires_build = bool(
+                            re.search(r"(?m)^\s*build\s*:", translated_manifest_path.read_text(encoding="utf-8"))
+                        )
+                    except Exception:
+                        compose_requires_build = False
+                    compose_up_command = (
+                        f"docker compose -f {translated_manifest_path} -p {stack} up -d --build"
+                        if compose_requires_build
+                        else f"docker compose -f {translated_manifest_path} -p {stack} up -d"
+                    )
+                    code_deploy, _out_deploy, err_deploy = _run_docker_compose_up_with_error(
+                        cwd=repo_root,
+                        stack=stack,
+                        manifest_path=translated_manifest_path,
+                    )
+                    if code_deploy != 0:
+                        deploy_snapshot = derive_deploy_execution_snapshot(
+                            refs=state.get("external_refs"),
+                            current_snapshot=state.get("last_deploy_execution") if isinstance(state.get("last_deploy_execution"), dict) else {},
+                        )
+                        deploy_snapshot.update(
+                            {
+                                "executed_at": completed_at,
+                                "stack": stack,
+                                "port": int(port) if port is not None else None,
+                                "health_path": health_path,
+                                "command": compose_up_command,
+                                "manifest_path": str(manifest_path),
+                                "runtime_type": deploy_snapshot.get("runtime_type")
+                                or _derive_runtime_deploy_markers(
+                                    project_name=str(project_name or "").strip() or None,
+                                    project_id=str(project_id or "").strip() or None,
+                                )[0],
+                                "runtime_ok": False,
+                                "error": str(err_deploy or "").strip()[:500] or None,
+                                "deploy_cycle_id": deploy_cycle_id,
+                                "deploy_lock_id": deploy_lock_id,
+                                "deploy_lock_acquired_at": completed_at,
+                            }
+                        )
+                        append_event(
+                            db,
+                            aggregate_type="Task",
+                            aggregate_id=run.task_id,
+                            event_type=TASK_EVENT_UPDATED,
+                            payload={"last_deploy_execution": deploy_snapshot},
+                            metadata={
+                                "actor_id": actor_user_id,
+                                "workspace_id": workspace_id,
+                                "project_id": project_id,
+                                "task_id": run.task_id,
+                            },
+                        )
+                        state = dict(state)
+                        state["last_deploy_execution"] = deploy_snapshot
+                        raise RuntimeError(
+                            "Lead deploy execution failed: docker compose up -d did not succeed. "
+                            + str(err_deploy or "")[:240]
+                        )
+                if runtime_required and port is not None:
+                    runtime_check = _probe_runtime_health_with_retry(
+                        stack=stack,
+                        port=port,
+                        health_path=health_path,
+                        require_http_200=True,
+                        host=host,
+                    )
+                    deploy_refs = _append_lead_deploy_external_refs(
+                        refs=state.get("external_refs"),
+                        stack=stack,
+                        build_required=compose_requires_build,
+                        port=port,
+                        health_path=health_path,
+                        runtime_ok=bool(runtime_check.get("ok")),
+                        http_url=str(runtime_check.get("http_url") or "").strip() or None,
+                        http_status=int(runtime_check.get("http_status") or 0) if runtime_check.get("http_status") is not None else None,
+                        project_name=str(project_name or "").strip() or None,
+                        project_id=str(project_id or "").strip() or None,
+                    )
                     deploy_snapshot = derive_deploy_execution_snapshot(
                         refs=state.get("external_refs"),
                         current_snapshot=state.get("last_deploy_execution") if isinstance(state.get("last_deploy_execution"), dict) else {},
@@ -4781,17 +6656,24 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                         {
                             "executed_at": completed_at,
                             "stack": stack,
-                            "port": int(port) if port is not None else None,
+                            "port": int(port),
                             "health_path": health_path,
-                            "command": f"docker compose -f {translated_manifest_path} -p {stack} up -d",
+                            "command": compose_up_command,
                             "manifest_path": str(manifest_path),
                             "runtime_type": deploy_snapshot.get("runtime_type")
                             or _derive_runtime_deploy_markers(
                                 project_name=str(project_name or "").strip() or None,
                                 project_id=str(project_id or "").strip() or None,
                             )[0],
-                            "runtime_ok": False,
-                            "error": str(err_deploy or "").strip()[:500] or None,
+                            "runtime_ok": bool(runtime_check.get("ok")),
+                            "http_url": str(runtime_check.get("http_url") or "").strip() or None,
+                            "http_status": int(runtime_check.get("http_status") or 0) if runtime_check.get("http_status") is not None else None,
+                            "synthesized": bool(deploy_snapshot.get("synthesized")),
+                            "synthesized_files": list(deploy_snapshot.get("synthesized_files") or []),
+                            "synthesis_commit_sha": str(deploy_snapshot.get("synthesis_commit_sha") or "").strip() or None,
+                            "deploy_cycle_id": deploy_cycle_id,
+                            "deploy_lock_id": deploy_lock_id,
+                            "deploy_lock_acquired_at": completed_at,
                         }
                     )
                     append_event(
@@ -4799,7 +6681,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                         aggregate_type="Task",
                         aggregate_id=run.task_id,
                         event_type=TASK_EVENT_UPDATED,
-                        payload={"last_deploy_execution": deploy_snapshot},
+                        payload={"external_refs": deploy_refs, "last_deploy_execution": deploy_snapshot},
                         metadata={
                             "actor_id": actor_user_id,
                             "workspace_id": workspace_id,
@@ -4808,80 +6690,28 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                         },
                     )
                     state = dict(state)
+                    state["external_refs"] = deploy_refs
                     state["last_deploy_execution"] = deploy_snapshot
-                    raise RuntimeError(
-                        "Lead deploy execution failed: docker compose up -d did not succeed. "
-                        + str(err_deploy or "")[:240]
-                    )
-            if runtime_required and port is not None:
-                runtime_check = run_runtime_deploy_health_check(
-                    stack=stack,
-                    port=port,
-                    health_path=health_path,
-                    require_http_200=True,
-                    host=None,
+                    state["team_mode_phase"] = "deployment"
+                    runtime_check_ok = bool(runtime_check.get("ok"))
+                    if not runtime_check_ok:
+                        runtime_error = str(runtime_check.get("error") or "").strip()
+                        raise RuntimeError(
+                            "Lead deploy gate failed: runtime health check did not pass "
+                            f"(stack={stack}, port={int(port)}, path={health_path})"
+                            + (f"; error={runtime_error}" if runtime_error else "")
+                        )
+            except Exception:
+                _release_project_deploy_lock(
+                    db=db,
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    task_id=run.task_id,
+                    actor_user_id=actor_user_id,
+                    released_at_iso=completed_at,
+                    lock_id=deploy_lock_id,
                 )
-                deploy_refs = _append_lead_deploy_external_refs(
-                    refs=state.get("external_refs"),
-                    stack=stack,
-                    port=port,
-                    health_path=health_path,
-                    runtime_ok=bool(runtime_check.get("ok")),
-                    http_url=str(runtime_check.get("http_url") or "").strip() or None,
-                    http_status=int(runtime_check.get("http_status") or 0) if runtime_check.get("http_status") is not None else None,
-                    project_name=str(project_name or "").strip() or None,
-                    project_id=str(project_id or "").strip() or None,
-                )
-                deploy_snapshot = derive_deploy_execution_snapshot(
-                    refs=state.get("external_refs"),
-                    current_snapshot=state.get("last_deploy_execution") if isinstance(state.get("last_deploy_execution"), dict) else {},
-                )
-                deploy_snapshot.update(
-                    {
-                        "executed_at": completed_at,
-                        "stack": stack,
-                        "port": int(port),
-                        "health_path": health_path,
-                        "command": f"docker compose -p {stack} up -d",
-                        "manifest_path": str(manifest_path),
-                        "runtime_type": deploy_snapshot.get("runtime_type")
-                        or _derive_runtime_deploy_markers(
-                            project_name=str(project_name or "").strip() or None,
-                            project_id=str(project_id or "").strip() or None,
-                        )[0],
-                        "runtime_ok": bool(runtime_check.get("ok")),
-                        "http_url": str(runtime_check.get("http_url") or "").strip() or None,
-                        "http_status": int(runtime_check.get("http_status") or 0) if runtime_check.get("http_status") is not None else None,
-                        "synthesized": bool(deploy_snapshot.get("synthesized")),
-                        "synthesized_files": list(deploy_snapshot.get("synthesized_files") or []),
-                        "synthesis_commit_sha": str(deploy_snapshot.get("synthesis_commit_sha") or "").strip() or None,
-                    }
-                )
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=run.task_id,
-                    event_type=TASK_EVENT_UPDATED,
-                    payload={"external_refs": deploy_refs, "last_deploy_execution": deploy_snapshot},
-                    metadata={
-                        "actor_id": actor_user_id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": run.task_id,
-                    },
-                )
-                state = dict(state)
-                state["external_refs"] = deploy_refs
-                state["last_deploy_execution"] = deploy_snapshot
-                state["team_mode_phase"] = "deploy"
-                runtime_check_ok = bool(runtime_check.get("ok"))
-                if not runtime_check_ok:
-                    runtime_error = str(runtime_check.get("error") or "").strip()
-                    raise RuntimeError(
-                        "Lead deploy gate failed: runtime health check did not pass "
-                        f"(stack={stack}, port={int(port)}, path={health_path})"
-                        + (f"; error={runtime_error}" if runtime_error else "")
-                    )
+                raise
 
             lead_handoff_at = completed_at
             lead_handoff_token = f"lead:{run.task_id}:{lead_handoff_at}"
@@ -4889,6 +6719,13 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 db=db,
                 task_ids=[run.task_id, *[str(item or "").strip() for item in (merge_result.get("merged_task_ids") or [])]],
             )
+            if task_requires_deploy(normalize_delivery_mode(state.get("delivery_mode"))) and not is_strict_deploy_success_snapshot(
+                state.get("last_deploy_execution") if isinstance(state.get("last_deploy_execution"), dict) else {}
+            ):
+                raise RuntimeError(
+                    "Lead handoff failed: strict deploy evidence is missing for the current deployable slice."
+                )
+
             queued_qa_handoffs = _queue_qa_handoff_requests(
                 db=db,
                 workspace_id=workspace_id,
@@ -4903,14 +6740,19 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 raise RuntimeError(
                     "Lead handoff failed: no runnable QA task was queued after merge/deploy cycle."
                 )
+            lead_transition = lead_deploy_success_transition()
             append_event(
                 db,
                 aggregate_type="Task",
                 aggregate_id=run.task_id,
                 event_type=TASK_EVENT_UPDATED,
                 payload={
-                    **_team_mode_progress_payload(phase="handoff_qa"),
+                    **_team_mode_progress_payload(phase=str(lead_transition.get("phase") or "qa_validation")),
                     "last_deploy_execution": state.get("last_deploy_execution"),
+                    "last_deploy_cycle_id": deploy_cycle_id,
+                    "deploy_lock_id": deploy_lock_id,
+                    "deploy_lock_acquired_at": completed_at,
+                    "deploy_lock_released_at": completed_at,
                     "last_lead_handoff_token": lead_handoff_token,
                     "last_lead_handoff_at": lead_handoff_at,
                     "last_lead_handoff_refs_json": handoff_refs,
@@ -4924,15 +6766,103 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 },
             )
             state = dict(state)
-            state["team_mode_phase"] = "handoff_qa"
+            state["team_mode_phase"] = str(lead_transition.get("phase") or "qa_validation")
+            state["last_deploy_cycle_id"] = deploy_cycle_id
+            state["deploy_lock_id"] = deploy_lock_id
+            state["deploy_lock_acquired_at"] = completed_at
+            state["deploy_lock_released_at"] = completed_at
             state["last_lead_handoff_token"] = lead_handoff_token
             state["last_lead_handoff_at"] = lead_handoff_at
             state["last_lead_handoff_refs_json"] = handoff_refs
             state["last_lead_handoff_deploy_execution"] = state.get("last_deploy_execution")
+            _release_project_deploy_lock(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                task_id=run.task_id,
+                actor_user_id=actor_user_id,
+                released_at_iso=completed_at,
+                lock_id=deploy_lock_id,
+            )
 
+        if (
+            team_mode_enabled
+            and is_qa_role(assignee_role)
+            and semantic_status_key(status=state.get("status")) in {"todo", "active", "blocked"}
+            and str(state.get("last_lead_handoff_token") or "").strip()
+            and task_requires_deploy(normalize_delivery_mode(state.get("delivery_mode")))
+        ):
+            if not is_strict_deploy_success_snapshot(
+                state.get("last_lead_handoff_deploy_execution")
+                if isinstance(state.get("last_lead_handoff_deploy_execution"), dict)
+                else state.get("last_deploy_execution")
+                if isinstance(state.get("last_deploy_execution"), dict)
+                else {}
+            ):
+                raise RuntimeError(
+                    "QA completion is blocked: strict deploy evidence is missing for the current deployable slice."
+                )
+            from features.tasks.command_handlers import _effective_completed_status_for_project
+
+            completed_status = _effective_completed_status_for_project(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            qa_transition = qa_success_transition(completed_status=completed_status)
+            append_event(
+                db,
+                aggregate_type="Task",
+                aggregate_id=run.task_id,
+                event_type=TASK_EVENT_UPDATED,
+                payload={
+                    **_team_mode_progress_payload(phase=str(qa_transition.get("phase") or "completed")),
+                },
+                metadata={
+                    "actor_id": actor_user_id,
+                    "workspace_id": workspace_id,
+                    "project_id": project_id,
+                    "task_id": run.task_id,
+                },
+            )
+            append_event(
+                db,
+                    aggregate_type="Task",
+                    aggregate_id=run.task_id,
+                    event_type=TASK_EVENT_COMPLETED,
+                    payload={
+                        "completed_at": completed_at,
+                        "status": str(qa_transition.get("status") or completed_status),
+                    },
+                metadata={
+                    "actor_id": actor_user_id,
+                    "workspace_id": workspace_id,
+                    "project_id": project_id,
+                    "task_id": run.task_id,
+                },
+            )
+            state = dict(state)
+            state["status"] = str(qa_transition.get("status") or completed_status)
+            state["completed_at"] = completed_at
+            state["team_mode_phase"] = str(qa_transition.get("phase") or "completed")
+            queued_followup_developer_dispatches = _queue_team_mode_dispatches(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                source="runner_orchestrator",
+                source_task_id=run.task_id,
+                exclude_task_ids={run.task_id},
+                allowed_roles={"Developer"},
+            )
+
+        effective_blocked_status = _effective_blocked_status_for_project(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=project_id,
+        )
         if is_blocker_source_role(assignee_role) and str(
             state.get("status") or ""
-        ).strip() == "Blocked":
+        ).strip() == effective_blocked_status:
             queued_blocker_escalations = _enqueue_team_lead_blocker_escalation(
                 db=db,
                 workspace_id=workspace_id,
@@ -4940,7 +6870,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 blocked_task_id=run.task_id,
                 blocked_title=str(state.get("title") or ""),
                 blocked_role=assignee_role,
-                blocked_status="Blocked",
+                blocked_status=effective_blocked_status,
                 blocked_error=str(comment or summary or "").strip() or None,
             )
         _requeue_pending_status_change_request(
@@ -4978,7 +6908,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
         completion_check_workspace_id
         and completion_check_actor_user_id
     ):
-        _notify_humans_project_completed_post_commit(
+        _finalize_project_completion_post_commit(
             workspace_id=completion_check_workspace_id,
             project_id=completion_check_project_id,
             actor_user_id=completion_check_actor_user_id,
@@ -4997,12 +6927,23 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
     now_utc = datetime.now(timezone.utc)
     transient_interruption = _is_transient_runner_interruption(error)
     recoverable_failure = _is_recoverable_failure(error)
+    developer_main_reconciliation_queued = False
     with SessionLocal() as db:
         state, _ = rebuild_state(db, "Task", run.task_id)
         workspace_id = str(state.get("workspace_id") or run.workspace_id or "").strip()
         if not workspace_id:
             return
         project_id = str(state.get("project_id") or run.project_id or "").strip() or None
+        team_mode_enabled = _project_has_team_mode_skill(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=project_id,
+        )
+        effective_blocked_status = _effective_blocked_status_for_project(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=project_id,
+        )
         actor_user_id = _resolve_task_actor_user_id(
             db=db,
             task_id=run.task_id,
@@ -5018,6 +6959,30 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             task_labels=state.get("labels"),
             task_status=str(state.get("status") or ""),
         )
+        effective_assignee_role = assignee_role
+        if (
+            team_mode_enabled
+            and str(state.get("team_mode_phase") or "").strip() in {"deploy_ready", "deployment", "qa_validation", "lead_triage"}
+            and not str(state.get("assigned_agent_code") or "").strip()
+        ):
+            _ensure_team_mode_lead_assignment(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                task_id=run.task_id,
+                state=state,
+                actor_user_id=actor_user_id,
+            )
+            state, _ = rebuild_state(db, "Task", run.task_id)
+            effective_assignee_role = _resolve_assignee_project_role(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                assignee_id=str(state.get("assignee_id") or ""),
+                assigned_agent_code=str(state.get("assigned_agent_code") or ""),
+                task_labels=state.get("labels"),
+                task_status=str(state.get("status") or ""),
+            )
         retry_count = _normalize_nonnegative_int(state.get("runner_recover_retry_count"))
         should_retry = transient_interruption or (recoverable_failure and retry_count < _MAX_RECOVERABLE_RETRIES)
         non_blocking_gate_failure = _is_non_blocking_team_mode_gate_error(error)
@@ -5071,10 +7036,11 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             db.commit()
             return
         handoff_assignee_id: str | None = None
+        lead_triage_handoff = False
         if (
             AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS
             and is_blocker_source_role(assignee_role)
-            and str(state.get("status") or "").strip() != "Blocked"
+            and str(state.get("status") or "").strip() != effective_blocked_status
             and not should_retry
             and not non_blocking_gate_failure
         ):
@@ -5086,16 +7052,108 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 actor_user_id=actor_user_id,
                 actor_role=assignee_role,
                 from_status=str(state.get("status") or "").strip(),
-                to_status="Blocked",
+                to_status=effective_blocked_status,
             )
             if transitioned:
                 state = dict(state)
-                state["status"] = "Blocked"
+                state["status"] = effective_blocked_status
         queued_blocker_escalations = 0
         failure_gate = _classify_team_mode_failure_gate(
-            assignee_role=assignee_role,
+            assignee_role=effective_assignee_role,
             error=str(error),
         )
+        lead_scaffolding_followup_task_id: str | None = None
+        developer_main_reconciliation_queued = False
+        developer_handoff_recovery_queued = False
+        developer_deploy_lock_waiting = False
+        if (
+            team_mode_enabled
+            and canonicalize_role(effective_assignee_role) == "Developer"
+            and _is_developer_main_reconciliation_error(str(error))
+        ):
+            developer_main_reconciliation_queued = _requeue_developer_main_reconciliation(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                task_id=run.task_id,
+                state=state,
+                actor_user_id=actor_user_id,
+                failed_at_iso=failed_at,
+                failure_reason=str(error),
+            )
+        if (
+            team_mode_enabled
+            and canonicalize_role(effective_assignee_role) == "Developer"
+            and failure_gate == "developer_handoff_not_committed"
+        ):
+            developer_handoff_recovery_queued = _requeue_developer_committed_handoff(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                task_id=run.task_id,
+                state=state,
+                actor_user_id=actor_user_id,
+                failed_at_iso=failed_at,
+                failure_reason=str(error),
+            )
+        if (
+            team_mode_enabled
+            and canonicalize_role(effective_assignee_role) == "Developer"
+            and failure_gate == "developer_deploy_lock_waiting"
+        ):
+            developer_deploy_lock_waiting = _requeue_developer_after_deploy_lock(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                task_id=run.task_id,
+                state=state,
+                actor_user_id=actor_user_id,
+                failed_at_iso=failed_at,
+                failure_reason=str(error),
+            )
+        if (
+            team_mode_enabled
+            and canonicalize_role(effective_assignee_role) == "Lead"
+            and "compose manifest is missing and deterministic synthesis failed" in str(error).lower()
+        ):
+            _stack, _host, runtime_port, runtime_health_path, _required = _project_runtime_deploy_target(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            lead_scaffolding_followup_task_id = _create_lead_deploy_scaffolding_followup(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                state=state,
+                actor_user_id=actor_user_id,
+                port=runtime_port,
+                health_path=runtime_health_path,
+            )
+            if lead_scaffolding_followup_task_id:
+                failure_gate = "lead_deploy_scaffolding"
+        if (
+            team_mode_enabled
+            and canonicalize_role(effective_assignee_role) == "Lead"
+            and "runtime health check did not pass" in str(error).lower()
+            and not lead_scaffolding_followup_task_id
+        ):
+            _stack, _host, runtime_port, runtime_health_path, _required = _project_runtime_deploy_target(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            lead_scaffolding_followup_task_id = _create_lead_runtime_health_followup(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                state=state,
+                actor_user_id=actor_user_id,
+                port=runtime_port,
+                health_path=runtime_health_path,
+            )
+            if lead_scaffolding_followup_task_id:
+                failure_gate = "lead_runtime_health_failed"
         append_event(
             db,
             aggregate_type="Task",
@@ -5120,11 +7178,15 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 **_team_mode_progress_payload(
                     phase=str(state.get("team_mode_phase") or "").strip()
                     or _derive_team_mode_phase(
-                        assignee_role=assignee_role,
+                        assignee_role=effective_assignee_role,
                         status=str(state.get("status") or run.status or ""),
                     ),
                     blocking_gate=failure_gate,
-                    blocked_reason=str(error),
+                    blocked_reason=(
+                        f"{str(error)} Follow-up task queued: {lead_scaffolding_followup_task_id}."
+                        if lead_scaffolding_followup_task_id
+                        else str(error)
+                    ),
                     blocked_at=failed_at,
                 ),
             },
@@ -5203,18 +7265,35 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
         if (
             not should_retry
             and not non_blocking_gate_failure
-            and is_blocker_source_role(assignee_role)
+            and not developer_main_reconciliation_queued
+            and not developer_handoff_recovery_queued
+            and not developer_deploy_lock_waiting
+            and is_blocker_source_role(effective_assignee_role)
         ):
-            handoff_assignee_id = _handoff_failed_task_to_human(
-                db=db,
-                workspace_id=workspace_id,
-                project_id=project_id,
-                task_id=run.task_id,
-                state=state,
-                actor_user_id=actor_user_id,
-                failed_at_iso=failed_at,
-                failure_reason=str(error),
-            )
+            if team_mode_enabled and canonicalize_role(effective_assignee_role) in {"Developer", "QA"}:
+                handoff_assignee_id = _handoff_failed_team_mode_task_to_lead(
+                    db=db,
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    task_id=run.task_id,
+                    state=state,
+                    actor_user_id=actor_user_id,
+                    failed_at_iso=failed_at,
+                    failure_reason=str(error),
+                    failed_role=effective_assignee_role,
+                )
+                lead_triage_handoff = bool(handoff_assignee_id)
+            if not handoff_assignee_id:
+                handoff_assignee_id = _handoff_failed_task_to_human(
+                    db=db,
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    task_id=run.task_id,
+                    state=state,
+                    actor_user_id=actor_user_id,
+                    failed_at_iso=failed_at,
+                    failure_reason=str(error),
+                )
         _requeue_pending_status_change_request(
             db=db,
             run=run,
@@ -5224,19 +7303,36 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             actor_user_id=actor_user_id,
             requested_at_iso=failed_at,
         )
-        if is_blocker_source_role(assignee_role) and not non_blocking_gate_failure:
-            if not should_retry:
+        if is_blocker_source_role(effective_assignee_role) and not non_blocking_gate_failure:
+            if (
+                not should_retry
+                and not lead_triage_handoff
+                and not lead_scaffolding_followup_task_id
+                and not developer_main_reconciliation_queued
+                and not developer_handoff_recovery_queued
+                and not developer_deploy_lock_waiting
+            ):
                 queued_blocker_escalations = _enqueue_team_lead_blocker_escalation(
                     db=db,
                     workspace_id=workspace_id,
                     project_id=project_id,
                     blocked_task_id=run.task_id,
                     blocked_title=str(state.get("title") or ""),
-                    blocked_role=assignee_role,
-                    blocked_status=str(state.get("status") or "").strip() or "Blocked",
+                    blocked_role=effective_assignee_role,
+                    blocked_status=str(state.get("status") or "").strip() or effective_blocked_status,
                     blocked_error=str(error),
                 )
-        if not should_retry and not non_blocking_gate_failure:
+        if lead_triage_handoff:
+            _notify_humans_team_mode_triage_needed(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                actor_user_id=actor_user_id,
+                gate=failure_gate,
+                task_id=run.task_id,
+                task_title=str(state.get("title") or run.title or ""),
+            )
+        elif not should_retry and not non_blocking_gate_failure and not lead_scaffolding_followup_task_id and not developer_main_reconciliation_queued:
             handoff_suffix = (
                 f"\nHuman handoff assigned to: {handoff_assignee_id}."
                 if str(handoff_assignee_id or "").strip()
@@ -5255,12 +7351,12 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 blocking_gate=failure_gate,
                 phase=str(state.get("team_mode_phase") or "").strip()
                 or _derive_team_mode_phase(
-                    assignee_role=assignee_role,
+                    assignee_role=effective_assignee_role,
                     status=str(state.get("status") or run.status or ""),
                 ),
             )
         db.commit()
-    if queued_blocker_escalations > 0:
+    if queued_blocker_escalations > 0 or developer_main_reconciliation_queued:
         wake_automation_runner()
 
 
@@ -5283,8 +7379,24 @@ def _preflight_automation_error(run: QueuedAutomationRun) -> str | None:
             task_status=str(state.get("status") or ""),
         )
         if (
+            _project_has_team_mode_skill(db=db, workspace_id=workspace_id, project_id=project_id)
+            and canonicalize_role(assignee_role) in {"Developer", "Lead", "QA"}
+        ):
+            dependency_ready, dependency_reason = _team_mode_dispatch_dependency_ready(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                task_id=run.task_id,
+                state=state,
+            )
+            if not dependency_ready:
+                return (
+                    "Team Mode execution is gated by structural dependencies: "
+                    + str(dependency_reason or "dependency requirements are not satisfied.")
+                )
+        if (
             is_qa_role(assignee_role)
-            and str(state.get("status") or "").strip() == "QA"
+            and semantic_status_key(status=state.get("status")) in {"active", "blocked"}
         ):
             gate_key = _current_nonblocking_gate_key(
                 db=db,
@@ -5302,11 +7414,11 @@ def _preflight_automation_error(run: QueuedAutomationRun) -> str | None:
             if gate_key == "qa_waiting_lead_handoff":
                 return (
                     "QA automation is gated until Lead handoff is complete; "
-                    "at least one Lead task is still in Lead status."
+                    "the task has not received a valid Lead handoff yet."
                 )
         if (
             is_lead_role(assignee_role)
-            and str(state.get("status") or "").strip() == "Lead"
+            and semantic_status_key(status=state.get("status")) in {"todo", "active", "blocked", "awaiting_decision"}
         ):
             gate_key = _current_nonblocking_gate_key(
                 db=db,
@@ -5323,14 +7435,14 @@ def _preflight_automation_error(run: QueuedAutomationRun) -> str | None:
                 )
         if (
             is_lead_role(assignee_role)
-            and str(state.get("status") or "").strip() == "Lead"
+            and semantic_status_key(status=state.get("status")) in {"todo", "active", "blocked", "awaiting_decision"}
             and _project_requires_runtime_deploy_health(
                 db=db,
                 workspace_id=workspace_id,
                 project_id=project_id,
             )
         ):
-            _stack, runtime_port, _health_path, _required = _project_runtime_deploy_target(
+            _stack, _host, runtime_port, _health_path, _required = _project_runtime_deploy_target(
                 db=db,
                 workspace_id=workspace_id,
                 project_id=project_id,
@@ -5360,6 +7472,8 @@ def _classify_team_mode_failure_gate(
     normalized_error = str(error or "").strip().lower()
     if not normalized_error:
         return None
+    if "team mode execution is gated by structural dependencies" in normalized_error:
+        return "team_mode_dependency_waiting"
     if normalized_role == "Lead":
         if (
             "developer handoff is not committed on the task branch yet" in normalized_error
@@ -5381,6 +7495,10 @@ def _classify_team_mode_failure_gate(
         or "real task branch handoff before lead review" in normalized_error
     ):
         return "developer_handoff_not_committed"
+    if normalized_role == "Developer" and "deployment in progress; merge to main is temporarily frozen" in normalized_error:
+        return "developer_deploy_lock_waiting"
+    if normalized_role == "Developer" and _is_developer_main_reconciliation_error(normalized_error):
+        return "developer_main_reconciliation_required"
     return None
 
 
@@ -5953,7 +8071,6 @@ def closeout_team_mode_tasks_once(limit: int = 20) -> int:
                     Task.project_id == project_id,
                     Task.is_deleted == False,  # noqa: E712
                     Task.archived == False,  # noqa: E712
-                    Task.status != "Done",
                 )
                 .order_by(Task.created_at.asc())
             ).scalars().all()
@@ -5975,6 +8092,8 @@ def closeout_team_mode_tasks_once(limit: int = 20) -> int:
                     member_role_by_user_id=member_role_by_user_id,
                 )
                 if normalized_role not in TEAM_MODE_WORKFLOW_ROLES:
+                    continue
+                if semantic_status_key(status=state.get("status") or task.status) == "completed":
                     continue
                 if normalized_role == "Lead":
                     lead_rows_count += 1

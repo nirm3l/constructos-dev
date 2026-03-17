@@ -294,7 +294,7 @@ export function useEditorGuards(c: any) {
     const original = {
       title: baselineTask.title?.trim() || 'Untitled',
       description: baselineTask.description ?? '',
-      status: baselineTask.status ?? 'To do',
+      status: baselineTask.status ?? 'To Do',
       priority: baselineTask.priority ?? 'Med',
       project_id: String(baselineTask.project_id || ''),
       task_group_id: baselineTask.task_group_id ?? null,

@@ -161,32 +161,22 @@ function resolveProjectEditorTabFromUrl(): ProjectEditorTab | null {
 
 function buildTeamModeStarterConfig(args: {
   statuses: string[]
+  humanOwnerUserId: string
 }): Record<string, unknown> {
-  const statuses = args.statuses.length ? args.statuses : ['To do', 'Dev', 'QA', 'Lead', 'Done', 'Blocked']
-  const statusSet = new Set(statuses)
-  const hasCanonicalFlow = ['To do', 'Dev', 'Lead', 'QA', 'Done', 'Blocked'].every((status) => statusSet.has(status))
-  const transitions = hasCanonicalFlow
-    ? [
-        { from: 'To do', to: 'Dev', allowed_roles: ['Developer', 'Lead'] },
-        { from: 'Dev', to: 'Lead', allowed_roles: ['Developer'] },
-        { from: 'Lead', to: 'QA', allowed_roles: ['Lead'] },
-        { from: 'QA', to: 'Done', allowed_roles: ['QA'] },
-        { from: 'To do', to: 'Blocked', allowed_roles: ['Developer', 'QA', 'Lead'] },
-        { from: 'Dev', to: 'Blocked', allowed_roles: ['Developer', 'Lead'] },
-        { from: 'Lead', to: 'Blocked', allowed_roles: ['Lead'] },
-        { from: 'QA', to: 'Blocked', allowed_roles: ['QA', 'Lead'] },
-        { from: 'Blocked', to: 'Dev', allowed_roles: ['Developer', 'Lead'] },
-        { from: 'Blocked', to: 'Lead', allowed_roles: ['Lead'] },
-        { from: 'Blocked', to: 'QA', allowed_roles: ['QA', 'Lead'] },
-      ]
-    : [
-        statuses.length >= 2 ? { from: statuses[0], to: statuses[1], allowed_roles: ['Developer'] } : null,
-        statuses.length >= 3 ? { from: statuses[1], to: statuses[2], allowed_roles: ['Lead'] } : null,
-        statuses.length >= 4 ? { from: statuses[2], to: statuses[3], allowed_roles: ['QA'] } : null,
-      ].filter(Boolean)
+  const statuses = args.statuses.length
+    ? args.statuses
+    : ['To Do', 'In Progress', 'In Review', 'Awaiting Decision', 'Blocked', 'Completed']
   return {
     required_checks: {
-      team_mode: ['role_coverage_present', 'required_topology_present', 'lead_oversight_not_done_before_delivery_complete'],
+      team_mode: ['role_coverage_present', 'single_lead_present', 'human_owner_present', 'status_semantics_present'],
+    },
+    status_semantics: {
+      todo: 'To Do',
+      active: 'In Progress',
+      in_review: 'In Review',
+      awaiting_decision: 'Awaiting Decision',
+      blocked: 'Blocked',
+      completed: 'Completed',
     },
     team: {
       agents: [
@@ -196,16 +186,12 @@ function buildTeamModeStarterConfig(args: {
         { id: 'lead-a', name: 'Lead A', authority_role: 'Lead' },
       ],
     },
-    workflow: {
-      statuses,
-      transitions,
+    oversight: {
+      reconciliation_interval_seconds: 300,
+      human_owner_user_id: String(args.humanOwnerUserId || '').trim(),
     },
-    governance: {
-      merge_authority_roles: ['Lead'],
-      task_move_authority_roles: ['Developer', 'QA', 'Lead'],
-    },
-    automation: {
-      lead_recurring_max_minutes: 5,
+    review_policy: {
+      require_code_review: false,
     },
   }
 }
@@ -216,19 +202,13 @@ function isTeamModeMinimalDefaultConfig(config: unknown): boolean {
   const team = root.team && typeof root.team === 'object' && !Array.isArray(root.team)
     ? (root.team as Record<string, unknown>)
     : {}
-  const workflow = root.workflow && typeof root.workflow === 'object' && !Array.isArray(root.workflow)
-    ? (root.workflow as Record<string, unknown>)
-    : {}
   const members = Array.isArray(team.members)
     ? team.members.filter((item) => item && typeof item === 'object')
     : []
   const agents = Array.isArray(team.agents)
     ? team.agents.filter((item) => item && typeof item === 'object')
     : []
-  const transitions = Array.isArray(workflow.transitions)
-    ? workflow.transitions.filter((item) => item && typeof item === 'object')
-    : []
-  return members.length === 0 && agents.length === 0 && transitions.length === 0
+  return members.length === 0 && agents.length === 0
 }
 
 const GIT_DELIVERY_STARTER_CONFIG: Record<string, unknown> = {
@@ -918,10 +898,6 @@ export function ProjectsInlineEditor({
     () => gateConfigScopes.find((scope) => scope.scopeKey === 'team_mode'),
     [gateConfigScopes]
   )
-  const deliveryVerificationScope = React.useMemo(
-    () => gateConfigScopes.find((scope) => scope.scopeKey === 'delivery'),
-    [gateConfigScopes]
-  )
   const deliveryKickoffRequired = Boolean(projectChecksSnapshot?.delivery?.kickoff_required)
   const deliveryKickoffHint = String(projectChecksSnapshot?.delivery?.kickoff_hint || '').trim()
   const deliveryRuntimeDeployHealth = React.useMemo(() => {
@@ -955,9 +931,9 @@ export function ProjectsInlineEditor({
   }, [projectChecksSnapshot?.delivery?.runtime_deploy_health])
   const deliveryKickoffSummaryLine = React.useMemo(() => {
     if (deliveryKickoffRequired) {
-      return `Kickoff state: waiting (Lead-first kickoff has not been requested yet).`
+      return `Kickoff state: waiting (implementation kickoff has not been requested yet).`
     }
-    return 'Kickoff state: started (Lead-first orchestration active; QA runs after explicit Lead handoff).'
+    return 'Kickoff state: started (implementation kickoff active; QA runs after explicit Lead handoff).'
   }, [deliveryKickoffRequired])
   const executionGateSnapshot = React.useMemo(() => {
     const raw = projectChecksSnapshot?.execution_gates
@@ -1196,8 +1172,9 @@ export function ProjectsInlineEditor({
     () =>
       buildTeamModeStarterConfig({
         statuses: csvToList(editProjectCustomStatusesText),
+        humanOwnerUserId: userId,
       }),
-    [editProjectCustomStatusesText]
+    [editProjectCustomStatusesText, userId]
   )
 
   React.useEffect(() => {
@@ -1361,31 +1338,25 @@ export function ProjectsInlineEditor({
 
   const teamModeQuick = React.useMemo(() => {
     const team = (teamModeDraft?.team as Record<string, unknown> | undefined) || {}
-    const workflow = (teamModeDraft?.workflow as Record<string, unknown> | undefined) || {}
-    const governance = (teamModeDraft?.governance as Record<string, unknown> | undefined) || {}
-    const automation = (teamModeDraft?.automation as Record<string, unknown> | undefined) || {}
-    const leadRecurringRaw = automation.lead_recurring_max_minutes
-    const leadRecurring = Number.isFinite(Number(leadRecurringRaw)) ? Number(leadRecurringRaw) : 5
-    const transitions = Array.isArray(workflow.transitions)
-      ? workflow.transitions
-          .filter((item) => item && typeof item === 'object')
-          .map((item) => item as Record<string, unknown>)
-      : []
-    const mergeRoles = Array.isArray(governance.merge_authority_roles)
-      ? governance.merge_authority_roles.map((item) => String(item || '').trim()).filter(Boolean)
-      : []
+    const statusSemantics = (teamModeDraft?.status_semantics as Record<string, unknown> | undefined) || {}
     const agents = Array.isArray(team.agents)
       ? team.agents
           .filter((item) => item && typeof item === 'object')
           .map((item) => item as Record<string, unknown>)
       : []
     return {
-      statusesCsv: listToCsv(workflow.statuses),
-      leadRecurring,
-      transitions,
-      mergeRoles,
+      statusesCsv: listToCsv([
+        String(statusSemantics.todo || 'To Do').trim(),
+        String(statusSemantics.active || 'In Progress').trim(),
+        String(statusSemantics.in_review || 'In Review').trim(),
+        String(statusSemantics.awaiting_decision || 'Awaiting Decision').trim(),
+        String(statusSemantics.blocked || 'Blocked').trim(),
+        String(statusSemantics.completed || 'Completed').trim(),
+      ].filter(Boolean)),
       agents,
-      teamRoles: [...TEAM_MODE_ROLES],
+      requireCodeReview: Boolean(
+        (teamModeDraft?.review_policy as Record<string, unknown> | undefined)?.require_code_review
+      ),
     }
   }, [teamModeDraft])
 
@@ -1430,14 +1401,9 @@ export function ProjectsInlineEditor({
           .filter((item) => Boolean(item.id))
           .sort((a, b) => a.id.localeCompare(b.id))
       : []
-    const automation = (compiled.team_mode as Record<string, unknown> | undefined) || {}
-    const recurring = Number.isFinite(Number(automation.lead_recurring_max_minutes))
-      ? Number(automation.lead_recurring_max_minutes)
-      : null
     return {
       teamModeRequired,
       teamModeAvailable,
-      recurring,
       raw: compiled,
     }
   }, [teamModePluginQuery.data?.compiled_policy])
@@ -1661,74 +1627,6 @@ export function ProjectsInlineEditor({
     },
     [patchTeamModeDraft]
   )
-
-  const upsertTransition = React.useCallback(
-    (index: number, patch: Record<string, unknown>) => {
-      patchTeamModeDraft((draft) => {
-        const workflow = ((draft.workflow as Record<string, unknown> | undefined) || {}) as Record<string, unknown>
-        const transitions = Array.isArray(workflow.transitions)
-          ? workflow.transitions
-              .filter((item) => item && typeof item === 'object')
-              .map((item) => ({ ...(item as Record<string, unknown>) }))
-          : []
-        const target = (transitions[index] || {}) as Record<string, unknown>
-        transitions[index] = { ...target, ...patch }
-        return {
-          ...draft,
-          workflow: {
-            ...workflow,
-            transitions,
-          },
-        }
-      })
-    },
-    [patchTeamModeDraft]
-  )
-
-  const removeTransition = React.useCallback(
-    (index: number) => {
-      patchTeamModeDraft((draft) => {
-        const workflow = ((draft.workflow as Record<string, unknown> | undefined) || {}) as Record<string, unknown>
-        const transitions = Array.isArray(workflow.transitions)
-          ? workflow.transitions
-              .filter((item) => item && typeof item === 'object')
-              .map((item) => ({ ...(item as Record<string, unknown>) }))
-          : []
-        transitions.splice(index, 1)
-        return {
-          ...draft,
-          workflow: {
-            ...workflow,
-            transitions,
-          },
-        }
-      })
-    },
-    [patchTeamModeDraft]
-  )
-
-  const addTransition = React.useCallback(() => {
-    patchTeamModeDraft((draft) => {
-      const workflow = ((draft.workflow as Record<string, unknown> | undefined) || {}) as Record<string, unknown>
-      const transitions = Array.isArray(workflow.transitions) ? [...workflow.transitions] : []
-      const statuses = Array.isArray(workflow.statuses)
-        ? workflow.statuses.map((item) => String(item || '').trim()).filter(Boolean)
-        : []
-      const fallback = statuses[0] || 'Dev'
-      transitions.push({
-        from: fallback,
-        to: fallback,
-        allowed_roles: ['Developer'],
-      })
-      return {
-        ...draft,
-        workflow: {
-          ...workflow,
-          transitions,
-        },
-      }
-    })
-  }, [patchTeamModeDraft])
 
   const runValidatePluginConfig = React.useCallback(
     async (pluginKey: ProjectPluginKey, rawText: string) => {
@@ -2657,16 +2555,8 @@ export function ProjectsInlineEditor({
           onChange={(e) => {
             const next = e.target.value
             setEditProjectCustomStatusesText(next)
-            if (!teamModeDraft) return
-            patchTeamModeDraft((draft) => ({
-              ...draft,
-              workflow: {
-                ...((draft.workflow as Record<string, unknown> | undefined) || {}),
-                statuses: csvToList(next),
-              },
-            }))
           }}
-          placeholder="To do, In progress, Blocked, Ready for QA, Done"
+          placeholder="To Do, In Progress, In Review, Awaiting Decision, Blocked, Completed"
         />
       </label>
       <div className="field-control" style={{ marginBottom: 10 }}>
@@ -3123,7 +3013,7 @@ export function ProjectsInlineEditor({
                 <div className="notice">No verification payload.</div>
               )}
               <div className="meta" style={{ marginTop: 4 }}>
-                These are project-level verification checks derived from enabled plugins (`team_mode`, `git_delivery`, `docker_compose`). Hard runner execution gates are shown per-task in the Automation tab.
+                These are project-level verification checks derived from enabled plugins (`team_mode`, `git_delivery`, `docker_compose`). Hard runner execution gates are shown per-task in the Execution tab.
               </div>
             </div>
           </Tabs.Content>
@@ -3145,7 +3035,7 @@ export function ProjectsInlineEditor({
               </label>
             </div>
             <div className="meta" style={{ marginTop: 6 }}>
-              Structured source of truth for team agents, role governance, and allowed task status transitions.
+              Structured source of truth for team agents, required checks, and semantic lifecycle status requirements.
             </div>
             <div className="notice plugin-config-shell" style={{ marginTop: 8 }}>
               <div style={{ fontWeight: 600, marginBottom: 6 }}>Execution gates overview</div>
@@ -3179,7 +3069,7 @@ export function ProjectsInlineEditor({
                 <div className="meta">No Team Mode execution checks are currently active.</div>
               )}
               <div className="meta" style={{ marginTop: 6 }}>
-                Task-level deterministic execution gates are visible in each task Automation tab.
+                Task-level deterministic execution gates are visible in each task Execution tab.
               </div>
               <div className="meta" style={{ marginTop: 6 }}>{deliveryKickoffSummaryLine}</div>
               {deliveryRuntimeDeployHealth ? (
@@ -3367,29 +3257,6 @@ export function ProjectsInlineEditor({
               <div className="meta" style={{ marginTop: 6 }}>
                 Project members define access. Team agents define workflow identities.
               </div>
-              <div className="row wrap plugin-compact-inline">
-                <label className="row" style={{ gap: 6, alignItems: 'center' }}>
-                  <span className="meta">Lead recurring (minutes)</span>
-                  <InfoTip text="Maximum interval for recurring lead oversight checks." />
-                  <input
-                    type="number"
-                    min={1}
-                    max={120}
-                    value={String(teamModeQuick.leadRecurring)}
-                    onChange={(e) => {
-                      const next = Math.max(1, Number(e.target.value || 1))
-                      patchTeamModeDraft((draft) => ({
-                        ...draft,
-                        automation: {
-                          ...((draft.automation as Record<string, unknown> | undefined) || {}),
-                          lead_recurring_max_minutes: next,
-                        },
-                      }))
-                    }}
-                    style={{ width: 100 }}
-                  />
-                </label>
-              </div>
               <div className="plugin-config-subsection">
                 <div className="row wrap" style={{ alignItems: 'center', gap: 8, marginBottom: 6 }}>
                   <span className="meta">Required checks</span>
@@ -3462,158 +3329,45 @@ export function ProjectsInlineEditor({
                 </div>
               </div>
               <label className="plugin-wide-field">
-                <span className="meta">Workflow statuses (comma-separated)</span>
-                <InfoTip text="Statuses available to transitions in Team Mode orchestration." />
+                <span className="meta">Canonical Team Mode statuses</span>
+                <InfoTip text="When Team Mode is enabled, the project board must include these exact statuses. Extra board statuses are allowed, but these names are mandatory." />
                 <input
                   className="plugin-wide-input"
                   value={teamModeQuick.statusesCsv}
+                  readOnly
+                  placeholder="To Do, In Progress, In Review, Awaiting Decision, Blocked, Completed"
+                />
+              </label>
+              <label className="project-plugin-enabled-row" style={{ marginTop: 8 }}>
+                <input
+                  type="checkbox"
+                  className="project-plugin-enabled-native-checkbox"
+                  checked={Boolean(teamModeQuick.requireCodeReview)}
                   onChange={(e) => {
-                    const next = e.target.value
-                    setEditProjectCustomStatusesText(next)
                     patchTeamModeDraft((draft) => ({
                       ...draft,
-                      workflow: {
-                        ...((draft.workflow as Record<string, unknown> | undefined) || {}),
-                        statuses: csvToList(next),
+                      review_policy: {
+                        ...(((draft.review_policy as Record<string, unknown> | undefined) || {}) as Record<string, unknown>),
+                        require_code_review: Boolean(e.target.checked),
                       },
                     }))
                   }}
-                  placeholder="To do, Dev, QA, Lead, Done, Blocked"
                 />
+                <span className="project-plugin-enabled-label">Require code review before merge</span>
               </label>
-              <div className="plugin-config-subsection">
-                <div className="row wrap" style={{ alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                  <span className="meta">Allowed transitions</span>
-                  <InfoTip text="Define allowed status flows and which roles can execute each transition." />
-                </div>
-                <div className="plugin-config-grid">
-                  {teamModeQuick.transitions.map((transition, idx) => {
-                    const transitionFrom = String(transition.from || '').trim()
-                    const transitionTo = String(transition.to || '').trim()
-                    const transitionStatusOptions = Array.from(
-                      new Set(
-                        [
-                          ...csvToList(teamModeQuick.statusesCsv),
-                          transitionFrom,
-                          transitionTo,
-                        ].filter(Boolean)
-                      )
-                    )
-                    const allowedRoles = Array.isArray(transition.allowed_roles)
-                      ? transition.allowed_roles.map((item) => String(item || '').trim()).filter(Boolean)
-                      : []
-                    return (
-                      <div key={`team-transition-${idx}`} className="row wrap plugin-config-row plugin-transition-row">
-                        <Select.Root value={transitionFrom || '__none__'} onValueChange={(value) => upsertTransition(idx, { from: value === '__none__' ? '' : value })}>
-                          <Select.Trigger
-                            className="quickadd-project-trigger taskdrawer-select-trigger project-inline-select-trigger plugin-compact-select"
-                            aria-label={`Transition ${idx + 1} from`}
-                          >
-                            <Select.Value placeholder="From" />
-                            <Select.Icon asChild>
-                              <Icon path="M6 9l6 6 6-6" />
-                            </Select.Icon>
-                          </Select.Trigger>
-                          <Select.Portal>
-                            <Select.Content className="quickadd-project-content" position="popper" sideOffset={6}>
-                              <Select.Viewport className="quickadd-project-viewport">
-                                <Select.Item value="__none__" className="quickadd-project-item">
-                                  <Select.ItemText>No status</Select.ItemText>
-                                </Select.Item>
-                                {transitionStatusOptions.map((status) => (
-                                  <Select.Item key={`transition-from-${idx}-${status}`} value={status} className="quickadd-project-item">
-                                    <Select.ItemText>{status}</Select.ItemText>
-                                  </Select.Item>
-                                ))}
-                              </Select.Viewport>
-                            </Select.Content>
-                          </Select.Portal>
-                        </Select.Root>
-                        <span className="meta">to</span>
-                        <Select.Root value={transitionTo || '__none__'} onValueChange={(value) => upsertTransition(idx, { to: value === '__none__' ? '' : value })}>
-                          <Select.Trigger
-                            className="quickadd-project-trigger taskdrawer-select-trigger project-inline-select-trigger plugin-compact-select"
-                            aria-label={`Transition ${idx + 1} to`}
-                          >
-                            <Select.Value placeholder="To" />
-                            <Select.Icon asChild>
-                              <Icon path="M6 9l6 6 6-6" />
-                            </Select.Icon>
-                          </Select.Trigger>
-                          <Select.Portal>
-                            <Select.Content className="quickadd-project-content" position="popper" sideOffset={6}>
-                              <Select.Viewport className="quickadd-project-viewport">
-                                <Select.Item value="__none__" className="quickadd-project-item">
-                                  <Select.ItemText>No status</Select.ItemText>
-                                </Select.Item>
-                                {transitionStatusOptions.map((status) => (
-                                  <Select.Item key={`transition-to-${idx}-${status}`} value={status} className="quickadd-project-item">
-                                    <Select.ItemText>{status}</Select.ItemText>
-                                  </Select.Item>
-                                ))}
-                              </Select.Viewport>
-                            </Select.Content>
-                          </Select.Portal>
-                        </Select.Root>
-                        <input
-                          className="plugin-transition-roles-input"
-                          value={allowedRoles.join(', ')}
-                          onChange={(e) =>
-                            upsertTransition(idx, {
-                              allowed_roles: csvToList(e.target.value),
-                            })
-                          }
-                          placeholder="Allowed roles (comma-separated)"
-                        />
-                        <button className="status-chip" type="button" onClick={() => removeTransition(idx)}>
-                          Remove
-                        </button>
-                      </div>
-                    )
-                  })}
-                  <div>
-                    <button className="status-chip" type="button" onClick={() => addTransition()}>
-                      Add transition
-                    </button>
-                  </div>
-                </div>
+              <div className="meta" style={{ marginTop: 4 }}>
+                When disabled, Developer handoff continues automatically. When enabled, tasks enter <code>In Review</code> and wait for an explicit approval or request-changes decision.
               </div>
               <div className="plugin-config-subsection">
                 <div className="row wrap" style={{ alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                  <span className="meta">Merge authority roles</span>
-                  <InfoTip text="Roles allowed to finalize merge/close operations for Team Mode." />
+                  <span className="meta">Lifecycle summary</span>
+                  <InfoTip text="Team Mode runtime enforces role-based lifecycle rules. This page no longer edits manual transition or merge policy tables." />
                 </div>
-                <div className="row wrap" style={{ gap: 10 }}>
-                  {teamModeQuick.teamRoles.map((role) => {
-                    const checked = teamModeQuick.mergeRoles.includes(role)
-                    return (
-                      <label key={`merge-role-${role}`} className="row" style={{ gap: 6, alignItems: 'center' }}>
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={(e) =>
-                            patchTeamModeDraft((draft) => {
-                              const governance = ((draft.governance as Record<string, unknown> | undefined) || {}) as Record<string, unknown>
-                              const mergeRoles = Array.isArray(governance.merge_authority_roles)
-                                ? governance.merge_authority_roles.map((item) => String(item || '').trim()).filter(Boolean)
-                                : []
-                              const next = e.target.checked
-                                ? Array.from(new Set([...mergeRoles, role]))
-                                : mergeRoles.filter((candidate) => candidate !== role)
-                              return {
-                                ...draft,
-                                governance: {
-                                  ...governance,
-                                  merge_authority_roles: next,
-                                },
-                              }
-                            })
-                          }
-                        />
-                        <span className="meta">{roleLabel(role)}</span>
-                      </label>
-                    )
-                  })}
+                <div className="meta">
+                  Team Mode tasks use the shared lifecycle <code>To Do</code>, <code>In Progress</code>, <code>In Review</code>, <code>Awaiting Decision</code>, <code>Blocked</code>, and <code>Completed</code>. <code>In Review</code> is only a required stop when code review is enabled.
+                </div>
+                <div className="meta" style={{ marginTop: 6 }}>
+                  Runtime decides valid movement by task role and semantic state. If Team Mode is enabled, the board must contain those exact statuses even when you add extra project-specific statuses.
                 </div>
               </div>
             </div>
@@ -3683,9 +3437,6 @@ export function ProjectsInlineEditor({
                 <div className="row wrap plugin-policy-badges">
                   <span className="badge">Required checks: {teamModePolicySummary.teamModeRequired.length}</span>
                   <span className="badge">Available checks: {teamModePolicySummary.teamModeAvailable.length}</span>
-                  <span className="badge">
-                    Lead recurring: {teamModePolicySummary.recurring == null ? 'default' : `${teamModePolicySummary.recurring} min`}
-                  </span>
                 </div>
                 <div className="meta">
                   Required: {teamModePolicySummary.teamModeRequired.join(', ') || '(none)'}
@@ -3749,38 +3500,10 @@ export function ProjectsInlineEditor({
               </div>
             ) : null}
             <div className="notice plugin-config-shell" style={{ marginTop: 8 }}>
-              <div style={{ fontWeight: 600, marginBottom: 6 }}>Execution gates overview</div>
-              {deliveryVerificationScope?.requiredChecks?.length ? (
-                <div className="gates-check-list">
-                  {deliveryVerificationScope.requiredChecks.map((checkId) => {
-                    const runtimeFailed = deliveryVerificationScope.runtimeScope?.failedChecks ?? []
-                    const failed = runtimeFailed.includes(checkId)
-                    const description = String(
-                      deliveryVerificationScope.runtimeScope?.checkDescriptions?.[checkId] ||
-                        deliveryVerificationScope.availableDescriptions?.[checkId] ||
-                        ''
-                    ).trim()
-                    const hasRuntimeResult = Boolean(deliveryVerificationScope.runtimeScope)
-                    return (
-                      <div key={`gd-overview-check-${checkId}`} className="gates-check-row">
-                        <div className="gates-check-copy">
-                          <code>{checkId}</code>
-                          {description ? <span className="meta">{description}</span> : null}
-                        </div>
-                        {hasRuntimeResult ? (
-                          <span className={`badge ${failed ? 'status-blocked' : 'status-done'}`}>{failed ? 'FAIL' : 'PASS'}</span>
-                        ) : (
-                          <span className="badge">N/A</span>
-                        )}
-                      </div>
-                    )
-                  })}
-                </div>
-              ) : (
-                <div className="meta">No Git Delivery execution checks are currently active.</div>
-              )}
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>Workflow summary</div>
               <div className="meta" style={{ marginTop: 6 }}>
-                Detailed task-level deterministic gates are shown in each task Automation tab.
+                Git Delivery enforcement is evaluated from repository state, deploy health, and task-level execution gates.
+                Use each task Execution tab for the authoritative blockers on Developer, Lead, and QA work.
               </div>
               <div className="meta" style={{ marginTop: 6 }}>{deliveryKickoffSummaryLine}</div>
               {deliveryRuntimeDeployHealth ? (

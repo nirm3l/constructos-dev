@@ -24,6 +24,7 @@ from plugins.team_mode.task_roles import (
 )
 from plugins.team_mode.state_machine import evaluate_team_mode_transition
 from plugins.team_mode.gates import evaluate_team_mode_gates
+from plugins.team_mode.semantics import REQUIRED_SEMANTIC_STATUSES, normalize_review_policy, normalize_status_semantics, semantic_status_key
 from shared.core import (
     AggregateEventRepository,
     BulkAction,
@@ -57,7 +58,9 @@ from shared.core import (
     rebuild_state,
     to_iso_utc,
 )
+from shared.delivery_evidence import has_merge_to_main_ref
 from shared.settings import AGENT_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID, CODEX_SYSTEM_USER_ID
+from shared.team_mode_lifecycle import review_resolution_transition
 from shared.task_automation import (
     TRIGGER_KIND_SCHEDULE,
     TRIGGER_KIND_STATUS_CHANGE,
@@ -70,6 +73,11 @@ from shared.task_automation import (
     first_enabled_schedule_trigger,
     has_enabled_schedule_trigger,
     normalize_execution_triggers,
+)
+from shared.task_delivery import (
+    DELIVERY_MODE_DEPLOYABLE_SLICE,
+    normalize_delivery_mode,
+    task_matches_dependency_requirement,
 )
 from shared.task_relationships import normalize_task_relationships
 from shared.project_repository import resolve_project_repository_path
@@ -210,6 +218,8 @@ def _normalize_tags(values: list[str] | None) -> list[str]:
     out: list[str] = []
     for raw in values:
         tag = str(raw).strip().lower()
+        if tag.startswith("delivery_mode:"):
+            continue
         if not tag or tag in seen:
             continue
         seen.add(tag)
@@ -244,6 +254,62 @@ def _load_team_mode_agents_for_project(
     if not isinstance(config_obj, dict):
         return []
     return normalize_team_agents(config_obj.get("team"))
+
+
+def _load_team_mode_status_semantics_for_project(
+    db: Session,
+    *,
+    workspace_id: str,
+    project_id: str | None,
+) -> dict[str, str] | None:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return None
+    config_row = db.execute(
+        select(ProjectPluginConfig.config_json).where(
+            ProjectPluginConfig.workspace_id == workspace_id,
+            ProjectPluginConfig.project_id == normalized_project_id,
+            ProjectPluginConfig.plugin_key == "team_mode",
+            ProjectPluginConfig.enabled == True,  # noqa: E712
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    if not config_row:
+        return None
+    try:
+        config_obj = json.loads(str(config_row or "").strip() or "{}")
+    except Exception:
+        return dict(REQUIRED_SEMANTIC_STATUSES)
+    if not isinstance(config_obj, dict):
+        return dict(REQUIRED_SEMANTIC_STATUSES)
+    return normalize_status_semantics(config_obj.get("status_semantics"))
+
+
+def _effective_completed_status_for_project(
+    db: Session,
+    *,
+    workspace_id: str,
+    project_id: str | None,
+) -> str:
+    semantics = _load_team_mode_status_semantics_for_project(
+        db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
+    if isinstance(semantics, dict):
+        return str(semantics.get("completed") or "").strip() or REQUIRED_SEMANTIC_STATUSES["completed"]
+    return "Done"
+
+
+def _is_completed_status(status: str | None, *, completed_status: str | None) -> bool:
+    normalized = str(status or "").strip()
+    if not normalized:
+        return False
+    if normalized.casefold() == "done":
+        return True
+    if str(completed_status or "").strip() and normalized.casefold() == str(completed_status or "").strip().casefold():
+        return True
+    return semantic_status_key(status=normalized) == "completed"
 
 
 def _normalize_assigned_agent_code_for_project(
@@ -292,20 +358,194 @@ def _apply_team_mode_agent_labels(
         return ensure_team_mode_labels(labels=list(labels or []), role=None, agent_slot=None), None
     normalized_assignee_id = str(assignee_id or "").strip()
     normalized_assigned_agent_code = str(assigned_agent_code or "").strip()
-    if not normalized_assignee_id:
-        return ensure_team_mode_labels(labels=list(labels or []), role=None, agent_slot=None), None
     if not normalized_assigned_agent_code:
         return ensure_team_mode_labels(labels=list(labels or []), role=None, agent_slot=None), None
-    valid_codes = {str(item.get("id") or "").strip() for item in agents if str(item.get("id") or "").strip()}
-    selected_slot = normalized_assigned_agent_code if normalized_assigned_agent_code in valid_codes else None
+    matching_agent = next(
+        (
+            agent
+            for agent in agents
+            if str(agent.get("id") or "").strip() == normalized_assigned_agent_code
+        ),
+        None,
+    )
+    selected_slot = normalized_assigned_agent_code if matching_agent is not None else None
+    selected_role = str(matching_agent.get("authority_role") or "").strip() or None if matching_agent is not None else None
     return (
         ensure_team_mode_labels(
             labels=list(labels or []),
-            role=None,
-            agent_slot=None,
+            role=selected_role if (selected_slot or normalized_assignee_id) else None,
+            agent_slot=selected_slot,
         ),
         selected_slot,
     )
+
+
+def _team_mode_enabled_for_project(
+    db: Session,
+    *,
+    workspace_id: str,
+    project_id: str | None,
+) -> bool:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return False
+    return (
+        db.execute(
+            select(ProjectPluginConfig.id).where(
+                ProjectPluginConfig.workspace_id == str(workspace_id),
+                ProjectPluginConfig.project_id == normalized_project_id,
+                ProjectPluginConfig.plugin_key == "team_mode",
+                ProjectPluginConfig.enabled == True,  # noqa: E712
+                ProjectPluginConfig.is_deleted == False,  # noqa: E712
+            )
+        ).scalar_one_or_none()
+        is not None
+    )
+
+
+def _should_default_new_task_to_team_mode_developer(
+    *,
+    specification_id: str | None,
+    task_type: str | None,
+    execution_triggers: list[dict[str, object]] | None,
+    initial_status: str | None,
+) -> bool:
+    if not str(specification_id or "").strip():
+        return False
+    normalized_task_type = str(task_type or "").strip().lower()
+    if normalized_task_type == "scheduled_instruction":
+        return False
+    if has_enabled_schedule_trigger(execution_triggers):
+        return False
+    semantic = semantic_status_key(status=initial_status)
+    if semantic in {"in_review", "awaiting_decision", "completed"}:
+        return False
+    return True
+
+
+def _backfill_team_mode_structural_dependencies(
+    db: Session,
+    *,
+    workspace_id: str,
+    project_id: str,
+    specification_id: str | None,
+    actor_user_id: str,
+) -> None:
+    normalized_specification_id = str(specification_id or "").strip()
+    if not normalized_specification_id:
+        return
+    if not _team_mode_enabled_for_project(
+        db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    ):
+        return
+    team_agents = _load_team_mode_agents_for_project(
+        db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
+    agent_role_by_code = {
+        str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
+        for agent in team_agents
+        if str(agent.get("id") or "").strip()
+    }
+    task_rows = db.execute(
+        select(
+            Task.id,
+            Task.title,
+            Task.status,
+            Task.priority,
+            Task.assignee_id,
+            Task.assigned_agent_code,
+            Task.labels,
+            Task.task_relationships,
+        ).where(
+            Task.workspace_id == str(workspace_id),
+            Task.project_id == str(project_id),
+            Task.specification_id == normalized_specification_id,
+            Task.is_deleted == False,  # noqa: E712
+        )
+        .order_by(Task.created_at.asc(), Task.id.asc())
+    ).all()
+    developer_tasks: list[dict[str, object]] = []
+    for task_id, title, status, priority, assignee_id, assigned_agent_code, labels, task_relationships in task_rows:
+        task_like = {
+            "id": str(task_id or "").strip(),
+            "title": str(title or "").strip(),
+            "status": str(status or "").strip(),
+            "priority": str(priority or "").strip(),
+            "assignee_id": str(assignee_id or "").strip(),
+            "assigned_agent_code": str(assigned_agent_code or "").strip(),
+            "labels": labels,
+            "task_relationships": normalize_task_relationships(task_relationships),
+        }
+        if derive_task_role(
+            task_like=task_like,
+            member_role_by_user_id={},
+            agent_role_by_code=agent_role_by_code,
+            allow_status_fallback=False,
+        ) != "Developer":
+            continue
+        developer_tasks.append(task_like)
+    if len(developer_tasks) < 2:
+        return
+
+    def _priority_rank(value: object) -> int:
+        normalized = str(value or "").strip().casefold()
+        if normalized == "high":
+            return 0
+        if normalized in {"med", "medium"}:
+            return 1
+        if normalized == "low":
+            return 2
+        return 3
+
+    developer_tasks.sort(
+        key=lambda task: (
+            _priority_rank(task.get("priority")),
+            str(task.get("id") or "").strip(),
+        )
+    )
+    repo = AggregateEventRepository(db)
+    for task in developer_tasks:
+        task_id = str(task.get("id") or "").strip()
+        if not task_id:
+            continue
+        existing_relationships = normalize_task_relationships(task.get("task_relationships"))
+        if existing_relationships:
+            continue
+        task_rank = _priority_rank(task.get("priority"))
+        dependency_ids = [
+            str(candidate.get("id") or "").strip()
+            for candidate in developer_tasks
+            if str(candidate.get("id") or "").strip()
+            and str(candidate.get("id") or "").strip() != task_id
+            and _priority_rank(candidate.get("priority")) < task_rank
+        ]
+        if not dependency_ids:
+            continue
+        aggregate = _load_task_aggregate(repo, task_id)
+        aggregate.update(
+            changes={
+                "task_relationships": [
+                    {
+                        "kind": "depends_on",
+                        "task_ids": dependency_ids,
+                        "match_mode": "all",
+                        "statuses": ["merged"],
+                    }
+                ]
+            }
+        )
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=actor_user_id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=task_id,
+        )
 
 
 def _normalize_external_refs(values: list[dict] | None) -> list[dict]:
@@ -523,14 +763,22 @@ def _resolve_available_system_bot_assignee_for_project(
     normalized_project_id = str(project_id or "").strip()
     normalized_requested_assignee_id = str(requested_assignee_id or "").strip()
     normalized_assigned_agent_code = str(assigned_agent_code or "").strip()
-    if not normalized_project_id or not normalized_requested_assignee_id or not normalized_assigned_agent_code:
+    if not normalized_project_id or not normalized_assigned_agent_code:
         return normalized_requested_assignee_id or None
-    if normalized_requested_assignee_id not in {CODEX_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID}:
-        return normalized_requested_assignee_id
 
-    requested_provider = "codex" if normalized_requested_assignee_id == CODEX_SYSTEM_USER_ID else "claude"
-    if resolve_provider_effective_auth_source(requested_provider) != "none":
-        return normalized_requested_assignee_id
+    requested_provider: str | None = None
+    if normalized_requested_assignee_id and normalized_requested_assignee_id not in {CODEX_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID}:
+        requested_user = db.get(User, normalized_requested_assignee_id)
+        if requested_user is not None and str(requested_user.user_type or "").strip().lower() == "agent":
+            return normalized_requested_assignee_id
+        normalized_requested_assignee_id = ""
+    elif normalized_requested_assignee_id == CODEX_SYSTEM_USER_ID:
+        requested_provider = "codex"
+    elif normalized_requested_assignee_id == CLAUDE_SYSTEM_USER_ID:
+        requested_provider = "claude"
+
+    if requested_provider and resolve_provider_effective_auth_source(requested_provider) != "none":
+        return normalized_requested_assignee_id or None
 
     project_bot_rows = db.execute(
         select(ProjectMember.user_id, User.username)
@@ -561,7 +809,62 @@ def _resolve_available_system_bot_assignee_for_project(
         fallback_user_id = str(available_project_bot_ids_by_provider.get(provider) or "").strip()
         if fallback_user_id:
             return fallback_user_id
-    return normalized_requested_assignee_id
+    if normalized_requested_assignee_id:
+        return normalized_requested_assignee_id
+
+    for provider in ("codex", "claude"):
+        if resolve_provider_effective_auth_source(provider) == "none":
+            continue
+        fallback_user_id = str(available_project_bot_ids_by_provider.get(provider) or "").strip()
+        if fallback_user_id:
+            return fallback_user_id
+        if provider == "codex":
+            return CODEX_SYSTEM_USER_ID
+        if provider == "claude":
+            return CLAUDE_SYSTEM_USER_ID
+    return None
+
+
+def _normalize_team_mode_routed_assignee(
+    db: Session,
+    *,
+    workspace_id: str,
+    project_id: str | None,
+    assignee_id: str | None,
+    assigned_agent_code: str | None,
+) -> str | None:
+    normalized_project_id = str(project_id or "").strip()
+    normalized_assignee_id = str(assignee_id or "").strip()
+    normalized_assigned_agent_code = str(assigned_agent_code or "").strip()
+    if not workspace_id or not normalized_project_id or not normalized_assigned_agent_code:
+        return normalized_assignee_id or None
+    if not normalized_assignee_id:
+        return None
+
+    team_agents = _load_team_mode_agents_for_project(
+        db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    matching_agent = next(
+        (
+            agent
+            for agent in team_agents
+            if str(agent.get("id") or "").strip() == normalized_assigned_agent_code
+        ),
+        None,
+    )
+    if matching_agent is not None:
+        executor_user_id = str(matching_agent.get("executor_user_id") or "").strip()
+        if executor_user_id and executor_user_id == normalized_assignee_id:
+            return normalized_assignee_id
+
+    assignee = db.get(User, normalized_assignee_id)
+    if assignee is None:
+        return normalized_assignee_id
+    if str(assignee.user_type or "").strip().lower() == "agent":
+        return normalized_assignee_id
+    return None
 
 
 def _task_title_key(value: str) -> str:
@@ -678,9 +981,9 @@ def _enforce_team_mode_transition_policy(
         config = {}
     if not isinstance(config, dict):
         config = {}
-    workflow = config.get("workflow")
-    if not isinstance(workflow, dict):
-        workflow = {}
+    status_semantics = config.get("status_semantics")
+    if not isinstance(status_semantics, dict):
+        status_semantics = dict(REQUIRED_SEMANTIC_STATUSES)
     member_role_by_user_id = {
         str(user_id): str(role or "").strip()
         for user_id, role in db.execute(
@@ -734,7 +1037,7 @@ def _enforce_team_mode_transition_policy(
                     ),
                 )
     allowed, reason_code = evaluate_team_mode_transition(
-        workflow=workflow,
+        status_semantics=status_semantics,
         from_status=str(from_status or "").strip(),
         to_status=str(to_status or "").strip(),
         actor_role=normalized_actor_role or None,
@@ -751,6 +1054,99 @@ def _enforce_team_mode_transition_policy(
             f"actor_role={normalized_actor_role or 'unknown'}"
         ),
     )
+
+
+def _load_enabled_team_mode_config(
+    db: Session,
+    *,
+    workspace_id: str,
+    project_id: str | None,
+) -> dict[str, Any] | None:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return None
+    row = db.execute(
+        select(ProjectPluginConfig.config_json).where(
+            ProjectPluginConfig.workspace_id == str(workspace_id),
+            ProjectPluginConfig.project_id == normalized_project_id,
+            ProjectPluginConfig.plugin_key == "team_mode",
+            ProjectPluginConfig.enabled == True,  # noqa: E712
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    try:
+        parsed = json.loads(str(row or "").strip() or "{}")
+    except Exception:
+        parsed = {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _resolve_team_mode_human_owner_user_id(
+    db: Session,
+    *,
+    workspace_id: str,
+    project_id: str | None,
+    team_mode_config: dict[str, Any] | None = None,
+) -> str | None:
+    config = team_mode_config if isinstance(team_mode_config, dict) else _load_enabled_team_mode_config(
+        db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
+    if not isinstance(config, dict):
+        return None
+    oversight = config.get("oversight") if isinstance(config.get("oversight"), dict) else {}
+    user_id = str(oversight.get("human_owner_user_id") or "").strip()
+    return user_id or None
+
+
+def _resolve_team_agent_assignment_by_role(
+    db: Session,
+    *,
+    workspace_id: str,
+    project_id: str | None,
+    authority_role: str,
+) -> tuple[str | None, str | None]:
+    normalized_project_id = str(project_id or "").strip()
+    normalized_role = str(authority_role or "").strip()
+    if not workspace_id or not normalized_project_id or not normalized_role:
+        return None, None
+    team_agents = _load_team_mode_agents_for_project(
+        db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    matching_agent = next(
+        (
+            agent
+            for agent in team_agents
+            if str(agent.get("authority_role") or "").strip() == normalized_role
+        ),
+        None,
+    )
+    if matching_agent is None:
+        return None, None
+    assigned_agent_code = str(matching_agent.get("id") or "").strip() or None
+    assignee_id = str(matching_agent.get("executor_user_id") or "").strip() or None
+    if assignee_id:
+        return assignee_id, assigned_agent_code
+    member_row = db.execute(
+        select(ProjectMember.user_id)
+        .join(User, User.id == ProjectMember.user_id)
+        .where(
+            ProjectMember.workspace_id == str(workspace_id),
+            ProjectMember.project_id == normalized_project_id,
+            ProjectMember.role == normalized_role,
+            User.user_type == "agent",
+            User.is_active == True,  # noqa: E712
+        )
+        .order_by(ProjectMember.id.asc())
+    ).first()
+    if member_row is None:
+        return None, assigned_agent_code
+    return str(member_row[0] or "").strip() or None, assigned_agent_code
 
 
 def _require_task_group_scope(db: Session, *, workspace_id: str, project_id: str, task_group_id: str) -> TaskGroup:
@@ -841,6 +1237,8 @@ def _infer_team_mode_request_origin(
     )
     if workflow_role not in {"Developer", "Lead", "QA"}:
         return None, None
+    if workflow_role == "QA" and str(state_snapshot.get("last_lead_handoff_token") or "").strip():
+        return "lead_handoff", None
 
     def _candidate_timestamp(source_state: dict[str, object], created_at: object) -> float:
         for value in (
@@ -884,23 +1282,31 @@ def _infer_team_mode_request_origin(
             agent_role_by_code=agent_role_by_code,
         )
         source_automation_state = str(source_state.get("automation_state") or "idle").strip().lower()
+        source_semantic_status = semantic_status_key(status=source_status)
         candidate_source: str | None = None
         candidate_rank: int | None = None
         if workflow_role == "Developer":
             source_execution_mode = str(source_state.get("last_requested_execution_mode") or "").strip().lower()
             if (
                 source_role == "Lead"
-                and source_status == "Lead"
+                and source_semantic_status in {"todo", "active", "blocked"}
                 and bool(source_state.get("last_requested_execution_kickoff_intent"))
                 and source_execution_mode in {"kickoff_only", "setup_then_kickoff"}
             ):
                 candidate_source = "lead_kickoff_dispatch"
                 candidate_rank = 0
         elif workflow_role == "Lead":
-            if source_role == "Developer" and source_status == "Lead" and source_automation_state == "completed":
+            if (
+                source_role == "Developer"
+                and source_semantic_status in {"active", "completed"}
+                and (
+                    source_automation_state == "completed"
+                    or has_merge_to_main_ref(source_state.get("external_refs"))
+                )
+            ):
                 candidate_source = "developer_handoff"
                 candidate_rank = 0
-            elif source_role in {"Developer", "QA"} and source_status == "Blocked":
+            elif source_role in {"Developer", "QA"} and source_semantic_status == "blocked":
                 candidate_source = "blocker_escalation"
                 candidate_rank = 1
         elif workflow_role == "QA":
@@ -1088,6 +1494,60 @@ def _validate_automation_fields(
                 )
 
 
+def _team_mode_task_dependency_ready(
+    *,
+    db: Session,
+    workspace_id: str,
+    project_id: str,
+    task_id: str,
+    state: dict[str, object],
+) -> tuple[bool, str | None]:
+    task_relationships = normalize_task_relationships(state.get("task_relationships"))
+    if not task_relationships:
+        return True, None
+    dependency_reasons: list[str] = []
+    for relationship in task_relationships:
+        if str(relationship.get("kind") or "").strip().lower() != "depends_on":
+            continue
+        source_task_ids = [
+            str(item or "").strip()
+            for item in (relationship.get("task_ids") or [])
+            if str(item or "").strip() and str(item or "").strip() != task_id
+        ]
+        statuses = {
+            str(item or "").strip()
+            for item in (relationship.get("statuses") or [])
+            if str(item or "").strip()
+        }
+        if not source_task_ids or not statuses:
+            continue
+        match_mode = str(relationship.get("match_mode") or STATUS_MATCH_ALL).strip().lower()
+        matched_sources = 0
+        total_sources = 0
+        for source_task_id in source_task_ids:
+            source_state, _ = rebuild_state(db, "Task", source_task_id)
+            if str(source_state.get("workspace_id") or "").strip() != workspace_id:
+                continue
+            if str(source_state.get("project_id") or "").strip() != project_id:
+                continue
+            total_sources += 1
+            if any(task_matches_dependency_requirement(source_state, required) for required in statuses):
+                matched_sources += 1
+        if total_sources <= 0:
+            continue
+        if match_mode == STATUS_MATCH_ALL:
+            if matched_sources == total_sources:
+                continue
+        elif matched_sources > 0:
+            continue
+        dependency_reasons.append(
+            f"waiting for dependency: {matched_sources}/{total_sources} source tasks reached {sorted(statuses)}"
+        )
+    if dependency_reasons:
+        return False, dependency_reasons[0]
+    return True, None
+
+
 def require_task_command_state(db: Session, user: User, task_id: str, *, allowed: set[str]) -> tuple[str, str | None, str, bool]:
     state = load_task_command_state(db, task_id)
     if not state or state.is_deleted:
@@ -1152,7 +1612,7 @@ def _task_view_from_aggregate(*, task_id: str, aggregate: TaskAggregate, created
         "specification_id": getattr(aggregate, "specification_id", None),
         "title": getattr(aggregate, "title", ""),
         "description": getattr(aggregate, "description", ""),
-        "status": getattr(aggregate, "status", "To do"),
+        "status": getattr(aggregate, "status", "To Do"),
         "priority": getattr(aggregate, "priority", "Med"),
         "due_date": getattr(aggregate, "due_date", None),
         "assignee_id": getattr(aggregate, "assignee_id", None),
@@ -1164,6 +1624,8 @@ def _task_view_from_aggregate(*, task_id: str, aggregate: TaskAggregate, created
         "attachment_refs": getattr(aggregate, "attachment_refs", getattr(aggregate, "attachments", [])) or [],
         "instruction": instruction,
         "execution_triggers": execution_triggers,
+        "task_relationships": normalize_task_relationships(getattr(aggregate, "task_relationships", []) or []),
+        "delivery_mode": normalize_delivery_mode(getattr(aggregate, "delivery_mode", None)),
         "recurring_rule": legacy_schedule.get("recurring_rule") or getattr(aggregate, "recurring_rule", None),
         "task_type": str(legacy_schedule.get("task_type") or getattr(aggregate, "task_type", "manual") or "manual"),
         "scheduled_instruction": legacy_schedule.get("scheduled_instruction"),
@@ -1227,14 +1689,41 @@ class CreateTaskHandler:
             project_id=self.payload.project_id,
             assigned_agent_code=self.payload.assigned_agent_code,
         )
+        requested_status = str(self.payload.status or "").strip()
+        normalized_requested_triggers = normalize_execution_triggers(self.payload.execution_triggers)
+        if (
+            not assigned_agent_code
+            and _team_mode_enabled_for_project(
+                self.ctx.db,
+                workspace_id=self.payload.workspace_id,
+                project_id=self.payload.project_id,
+            )
+            and _should_default_new_task_to_team_mode_developer(
+                specification_id=specification_id,
+                task_type=self.payload.task_type,
+                execution_triggers=normalized_requested_triggers,
+                initial_status=requested_status or None,
+            )
+        ):
+            assignee_id, assigned_agent_code = _resolve_team_agent_assignment_by_role(
+                self.ctx.db,
+                workspace_id=self.payload.workspace_id,
+                project_id=self.payload.project_id,
+                authority_role="Developer",
+            )
         assignee_id = _resolve_available_system_bot_assignee_for_project(
             self.ctx.db,
             project_id=self.payload.project_id,
             requested_assignee_id=assignee_id,
             assigned_agent_code=assigned_agent_code,
         )
-        if assigned_agent_code and not assignee_id:
-            raise HTTPException(status_code=422, detail="assigned_agent_code requires assignee_id")
+        assignee_id = _normalize_team_mode_routed_assignee(
+            self.ctx.db,
+            workspace_id=self.payload.workspace_id,
+            project_id=self.payload.project_id,
+            assignee_id=assignee_id,
+            assigned_agent_code=assigned_agent_code,
+        )
 
         if specification_id:
             _require_specification_scope(
@@ -1252,7 +1741,6 @@ class CreateTaskHandler:
             )
         statuses = list(project.custom_statuses or [])
         initial_status = (statuses[0] if statuses else DEFAULT_STATUSES[0]) or DEFAULT_STATUSES[0]
-        requested_status = str(self.payload.status or "").strip()
         if requested_status:
             initial_status = requested_status
         payload_data = self.payload.model_dump(exclude_unset=True)
@@ -1279,7 +1767,7 @@ class CreateTaskHandler:
             )
         normalized_instruction, normalized_triggers = _with_legacy_schedule_overrides(
             instruction=requested_instruction,
-            execution_triggers=self.payload.execution_triggers,
+            execution_triggers=normalized_requested_triggers,
             task_type=legacy_task_type,
             scheduled_instruction=payload_data.get("scheduled_instruction", _UNSET),
             scheduled_at_utc=to_iso_utc(scheduled_at) if "scheduled_at_utc" in payload_data else _UNSET,
@@ -1330,6 +1818,7 @@ class CreateTaskHandler:
             instruction=normalized_instruction,
             execution_triggers=normalized_triggers,
             task_relationships=normalize_task_relationships(self.payload.task_relationships),
+            delivery_mode=normalize_delivery_mode(self.payload.delivery_mode),
             recurring_rule=legacy_schedule.get("recurring_rule"),
             task_type=str(legacy_schedule.get("task_type") or "manual"),
             scheduled_instruction=legacy_schedule.get("scheduled_instruction"),
@@ -1354,6 +1843,14 @@ class CreateTaskHandler:
             message = str(exc).lower()
             if "unique constraint failed" not in message or "tasks.id" not in message:
                 raise
+        _backfill_team_mode_structural_dependencies(
+            self.ctx.db,
+            workspace_id=self.payload.workspace_id,
+            project_id=self.payload.project_id,
+            specification_id=specification_id,
+            actor_user_id=str(self.ctx.user.id),
+        )
+        self.ctx.db.commit()
         task_view = load_task_view(self.ctx.db, tid)
         if task_view is not None:
             return task_view
@@ -1413,55 +1910,64 @@ class PatchTaskHandler:
             data["attachment_refs"] = data["attachments"]
         current_row = self.ctx.db.get(Task, self.task_id)
         current_state = None
-        if current_row is None and get_kurrent_client() is not None:
+        if get_kurrent_client() is not None:
             current_state, _ = rebuild_state(self.ctx.db, "Task", self.task_id)
         if current_row is None and not current_state:
             raise HTTPException(status_code=404, detail="Task not found")
         current_assigned_agent_code = str(
             (
-                current_row.assigned_agent_code
-                if current_row is not None
-                else (current_state.get("assigned_agent_code") if current_state else "")
+                current_state.get("assigned_agent_code")
+                if current_state
+                else (current_row.assigned_agent_code if current_row is not None else "")
             )
             or ""
         ).strip() or None
 
         current_task_type = (
-            (current_row.task_type if current_row is not None else None)
-            or (str(current_state.get("task_type")) if current_state else None)
+            (str(current_state.get("task_type")) if current_state else None)
+            or (current_row.task_type if current_row is not None else None)
             or "manual"
         )
         current_status = (
-            str(current_row.status or "").strip()
-            if current_row is not None
-            else str((current_state or {}).get("status") or "").strip()
+            str((current_state or {}).get("status") or "").strip()
+            or (str(current_row.status or "").strip() if current_row is not None else "")
         )
         current_instruction = _normalize_instruction(
-            (current_row.instruction if current_row is not None else (current_state.get("instruction") if current_state else None))
-            or (current_row.scheduled_instruction if current_row is not None else (current_state.get("scheduled_instruction") if current_state else None))
+            (current_state.get("instruction") if current_state else None)
+            or (current_state.get("scheduled_instruction") if current_state else None)
+            or (current_row.instruction if current_row is not None else None)
+            or (current_row.scheduled_instruction if current_row is not None else None)
         )
         current_scheduled_instruction = (
-            current_row.scheduled_instruction if current_row is not None else (current_state.get("scheduled_instruction") if current_state else None)
+            (current_state.get("scheduled_instruction") if current_state else None)
+            or (current_row.scheduled_instruction if current_row is not None else None)
         )
         current_scheduled_at_utc = (
-            to_iso_utc(current_row.scheduled_at_utc)
-            if current_row is not None
-            else (current_state.get("scheduled_at_utc") if current_state else None)
+            (current_state.get("scheduled_at_utc") if current_state else None)
+            or (to_iso_utc(current_row.scheduled_at_utc) if current_row is not None else None)
         )
         current_schedule_timezone = (
-            current_row.schedule_timezone if current_row is not None else (current_state.get("schedule_timezone") if current_state else None)
+            (current_state.get("schedule_timezone") if current_state else None)
+            or (current_row.schedule_timezone if current_row is not None else None)
         )
         current_recurring_rule = (
-            current_row.recurring_rule if current_row is not None else (current_state.get("recurring_rule") if current_state else None)
+            (current_state.get("recurring_rule") if current_state else None)
+            or (current_row.recurring_rule if current_row is not None else None)
         )
         current_schedule_state = (
-            current_row.schedule_state if current_row is not None else (current_state.get("schedule_state") if current_state else "idle")
+            (current_state.get("schedule_state") if current_state else None)
+            or (current_row.schedule_state if current_row is not None else None)
+            or "idle"
         )
         current_execution_triggers = normalize_execution_triggers(
-            current_row.execution_triggers if current_row is not None else (current_state.get("execution_triggers") if current_state else [])
+            current_state.get("execution_triggers") if current_state else (
+                current_row.execution_triggers if current_row is not None else []
+            )
         )
         current_task_relationships = normalize_task_relationships(
-            current_row.task_relationships if current_row is not None else (current_state.get("task_relationships") if current_state else [])
+            current_state.get("task_relationships") if current_state else (
+                current_row.task_relationships if current_row is not None else []
+            )
         )
         if str(current_task_type).strip().lower() == "manual":
             current_execution_triggers = [
@@ -1478,10 +1984,12 @@ class PatchTaskHandler:
             if legacy_trigger is not None:
                 current_execution_triggers = [legacy_trigger]
         current_specification_id = (
-            current_row.specification_id if current_row is not None else (current_state.get("specification_id") if current_state else None)
+            (current_state.get("specification_id") if current_state else None)
+            or (current_row.specification_id if current_row is not None else None)
         )
         current_task_group_id = (
-            current_row.task_group_id if current_row is not None else (current_state.get("task_group_id") if current_state else None)
+            (current_state.get("task_group_id") if current_state else None)
+            or (current_row.task_group_id if current_row is not None else None)
         )
         effective_project_id = str(data.get("project_id", project_id) or "")
         if not effective_project_id:
@@ -1531,7 +2039,9 @@ class PatchTaskHandler:
         event_payload = dict(data)
         existing_labels: list[str] = []
         raw_existing_labels = (
-            current_row.labels if current_row is not None else (current_state.get("labels") if current_state else [])
+            current_state.get("labels") if current_state is not None else (
+                current_row.labels if current_row is not None else []
+            )
         )
         if isinstance(raw_existing_labels, list):
             existing_labels = _normalize_tags([str(item or "") for item in raw_existing_labels])
@@ -1545,19 +2055,27 @@ class PatchTaskHandler:
         effective_assignee_id = str(
             event_payload.get("assignee_id")
             if "assignee_id" in event_payload
-            else (current_row.assignee_id if current_row is not None else (current_state.get("assignee_id") if current_state else ""))
+            else ((current_state.get("assignee_id") if current_state else None) or (current_row.assignee_id if current_row is not None else ""))
             or ""
         ).strip() or None
         effective_assigned_agent_code = str(
             event_payload.get("assigned_agent_code")
             if "assigned_agent_code" in event_payload
             else (
-                current_row.assigned_agent_code
-                if current_row is not None
-                else (current_state.get("assigned_agent_code") if current_state else "")
+                (current_state.get("assigned_agent_code") if current_state else None)
+                or (current_row.assigned_agent_code if current_row is not None else "")
             )
             or ""
         ).strip() or None
+        effective_assignee_id = _normalize_team_mode_routed_assignee(
+            self.ctx.db,
+            workspace_id=workspace_id,
+            project_id=effective_project_id,
+            assignee_id=effective_assignee_id,
+            assigned_agent_code=effective_assigned_agent_code,
+        )
+        if effective_assignee_id is None and effective_assigned_agent_code:
+            event_payload["assignee_id"] = None
         effective_status_for_labels = str(event_payload.get("status") or current_status or "").strip()
         incoming_labels = (
             _normalize_tags(event_payload.get("labels"))
@@ -1596,6 +2114,12 @@ class PatchTaskHandler:
             if "task_relationships" in event_payload
             else current_task_relationships
         )
+        if "delivery_mode" in event_payload:
+            event_payload["delivery_mode"] = normalize_delivery_mode(event_payload.get("delivery_mode"))
+        elif current_state:
+            event_payload["delivery_mode"] = normalize_delivery_mode(current_state.get("delivery_mode"))
+        else:
+            event_payload["delivery_mode"] = DELIVERY_MODE_DEPLOYABLE_SLICE
         normalized_instruction, normalized_triggers = _with_legacy_schedule_overrides(
             instruction=requested_instruction,
             execution_triggers=requested_triggers,
@@ -1687,14 +2211,31 @@ class CompleteTaskHandler:
 
     def __call__(self) -> dict:
         workspace_id, project_id, status, _ = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member"})
-        if status == "Done":
+        completed_status = _effective_completed_status_for_project(
+            self.ctx.db,
+            workspace_id=workspace_id,
+            project_id=project_id,
+        )
+        if _is_completed_status(status, completed_status=completed_status):
             task_view = load_task_view(self.ctx.db, self.task_id)
             if task_view is None:
                 raise HTTPException(status_code=404, detail="Task not found")
             return task_view
+        _enforce_team_mode_transition_policy(
+            db=self.ctx.db,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            actor_user_id=str(self.ctx.user.id),
+            from_status=str(status or "").strip(),
+            to_status=completed_status,
+            task_id=self.task_id,
+        )
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, self.task_id)
-        aggregate.complete(completed_at=to_iso_utc(datetime.now(timezone.utc)))
+        aggregate.complete(
+            completed_at=to_iso_utc(datetime.now(timezone.utc)),
+            status=completed_status,
+        )
         _persist_task_aggregate(
             repo,
             aggregate,
@@ -1718,18 +2259,157 @@ class CompleteTaskHandler:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewTaskHandler:
+    ctx: CommandContext
+    task_id: str
+    action: str
+    comment: str | None = None
+
+    def __call__(self) -> dict:
+        workspace_id, project_id, status, _ = require_task_command_state(
+            self.ctx.db,
+            self.ctx.user,
+            self.task_id,
+            allowed={"Owner", "Admin", "Member"},
+        )
+        normalized_project_id = str(project_id or "").strip()
+        if not normalized_project_id:
+            raise HTTPException(status_code=409, detail="Review actions require a project task.")
+        team_mode_config = _load_enabled_team_mode_config(
+            self.ctx.db,
+            workspace_id=workspace_id,
+            project_id=normalized_project_id,
+        )
+        if not isinstance(team_mode_config, dict):
+            raise HTTPException(status_code=409, detail="Review actions require Team Mode to be enabled.")
+        status_semantics = normalize_status_semantics(team_mode_config.get("status_semantics"))
+        if semantic_status_key(status=status, status_semantics=status_semantics) != "in_review":
+            raise HTTPException(status_code=409, detail="Review action is only allowed when the task is In Review.")
+
+        normalized_action = str(self.action or "").strip().lower()
+        if normalized_action not in {"approve", "request_changes"}:
+            raise HTTPException(status_code=422, detail='action must be "approve" or "request_changes"')
+
+        state_snapshot, _ = rebuild_state(self.ctx.db, "Task", self.task_id)
+        review_source_assignee_id = str(state_snapshot.get("review_source_assignee_id") or "").strip() or None
+        review_source_assigned_agent_code = str(state_snapshot.get("review_source_assigned_agent_code") or "").strip() or None
+        review_next_lead_assignee_id = str(state_snapshot.get("review_next_lead_assignee_id") or "").strip() or None
+        review_next_lead_assigned_agent_code = str(state_snapshot.get("review_next_lead_assigned_agent_code") or "").strip() or None
+
+        if normalized_action == "approve":
+            transition = review_resolution_transition(action="approve")
+            target_assignee_id = review_source_assignee_id
+            target_assigned_agent_code = review_source_assigned_agent_code
+            if not target_assigned_agent_code:
+                target_assignee_id, target_assigned_agent_code = _resolve_team_agent_assignment_by_role(
+                    self.ctx.db,
+                    workspace_id=workspace_id,
+                    project_id=normalized_project_id,
+                    authority_role="Developer",
+                )
+            if not target_assigned_agent_code:
+                raise HTTPException(status_code=409, detail="Review approval requires a configured Developer agent.")
+            target_status = str(transition.get("status") or status_semantics["active"])
+            target_phase = str(transition.get("phase") or "implementation")
+            request_source = "review_approved"
+            default_comment = "Code review approved. Returning task to Developer to complete merge handoff."
+        else:
+            transition = review_resolution_transition(action="request_changes")
+            target_assignee_id = review_source_assignee_id
+            target_assigned_agent_code = review_source_assigned_agent_code
+            if not target_assigned_agent_code:
+                target_assignee_id, target_assigned_agent_code = _resolve_team_agent_assignment_by_role(
+                    self.ctx.db,
+                    workspace_id=workspace_id,
+                    project_id=normalized_project_id,
+                    authority_role="Developer",
+                )
+            if not target_assigned_agent_code:
+                raise HTTPException(status_code=409, detail="Requesting changes requires a configured Developer agent.")
+            target_status = str(transition.get("status") or status_semantics["active"])
+            target_phase = str(transition.get("phase") or "implementation")
+            request_source = "review_changes_requested"
+            default_comment = "Code review requested changes. Returning task to implementation."
+
+        effective_comment = _normalize_instruction(self.comment) or default_comment
+        requested_at = to_iso_utc(datetime.now(timezone.utc))
+        instruction = _normalize_instruction(
+            str(state_snapshot.get("instruction") or "").strip()
+            or str(state_snapshot.get("scheduled_instruction") or "").strip()
+        )
+
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.update(
+            changes={
+                "status": target_status,
+                "assignee_id": target_assignee_id,
+                "assigned_agent_code": target_assigned_agent_code,
+                "review_required": normalized_action != "approve",
+                "review_status": str(transition.get("review_status") or ("approved" if normalized_action == "approve" else "changes_requested")),
+                "reviewed_by_user_id": str(self.ctx.user.id),
+                "reviewed_at": requested_at,
+                "team_mode_phase": target_phase,
+                "team_mode_blocking_gate": None,
+                "team_mode_blocked_reason": None,
+                "team_mode_blocked_at": None,
+            }
+        )
+        aggregate.add_comment(task_id=self.task_id, user_id=self.ctx.user.id, body=effective_comment)
+        if instruction:
+            aggregate.request_automation(
+                requested_at=requested_at,
+                instruction=instruction,
+                source=request_source,
+                execution_intent=True,
+                execution_kickoff_intent=False,
+                project_creation_intent=False,
+                workflow_scope="team_mode",
+                execution_mode="resume_execution",
+                task_completion_requested=False,
+                classifier_reason="Explicit code review decision.",
+            )
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=normalized_project_id,
+            task_id=self.task_id,
+        )
+        self.ctx.db.commit()
+        if instruction:
+            try:
+                from features.agents.runner import start_automation_runner, wake_automation_runner
+
+                start_automation_runner()
+                wake_automation_runner()
+            except Exception:
+                pass
+        task_view = load_task_view(self.ctx.db, self.task_id)
+        if task_view is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return task_view
+
+
+@dataclass(frozen=True, slots=True)
 class ReopenTaskHandler:
     ctx: CommandContext
     task_id: str
 
     def __call__(self) -> dict:
         workspace_id, project_id, status, _ = require_task_command_state(self.ctx.db, self.ctx.user, self.task_id, allowed={"Owner", "Admin", "Member"})
-        if status != "Done":
+        completed_status = _effective_completed_status_for_project(
+            self.ctx.db,
+            workspace_id=workspace_id,
+            project_id=project_id,
+        )
+        if not _is_completed_status(status, completed_status=completed_status):
             task_view = load_task_view(self.ctx.db, self.task_id)
             if task_view is None:
                 raise HTTPException(status_code=404, detail="Task not found")
             return task_view
-        reopen_status = "To do"
+        reopen_status = "To Do"
         if project_id:
             project = load_project_command_state(self.ctx.db, project_id)
             if project is not None and not project.is_deleted:
@@ -1810,8 +2490,13 @@ class BulkTaskActionHandler:
         workspace_id, project_id, status, archived = require_task_command_state(self.ctx.db, self.ctx.user, task_id, allowed={"Owner", "Admin", "Member"})
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, task_id)
+        completed_status = _effective_completed_status_for_project(
+            self.ctx.db,
+            workspace_id=workspace_id,
+            project_id=project_id,
+        )
         if self.payload.action == "complete":
-            if status == "Done":
+            if _is_completed_status(status, completed_status=completed_status):
                 return False
             _enforce_team_mode_transition_policy(
                 db=self.ctx.db,
@@ -1819,10 +2504,13 @@ class BulkTaskActionHandler:
                 project_id=project_id,
                 actor_user_id=str(self.ctx.user.id),
                 from_status=str(status or "").strip(),
-                to_status="Done",
+                to_status=completed_status,
                 task_id=task_id,
             )
-            aggregate.complete(completed_at=to_iso_utc(datetime.now(timezone.utc)))
+            aggregate.complete(
+                completed_at=to_iso_utc(datetime.now(timezone.utc)),
+                status=completed_status,
+            )
         elif self.payload.action == "archive":
             if archived:
                 return False
@@ -1842,9 +2530,9 @@ class BulkTaskActionHandler:
             )
             aggregate.update(changes={"status": target_status})
         elif self.payload.action == "reopen":
-            if status != "Done":
+            if not _is_completed_status(status, completed_status=completed_status):
                 return False
-            reopen_status = str(self.payload.payload.get("status", "To do") or "").strip() or "To do"
+            reopen_status = str(self.payload.payload.get("status", "To Do") or "").strip() or "To Do"
             _enforce_team_mode_transition_policy(
                 db=self.ctx.db,
                 workspace_id=workspace_id,
@@ -2118,14 +2806,14 @@ class RequestAutomationRunHandler:
             )
         )
         should_default_to_team_mode_kickoff = False
+        default_kickoff_workflow_role = None
         if (
             requested_source in {"manual", "manual_stream"}
             and project_id
-            and str(state_snapshot.get("status") or "").strip() == "Lead"
             and not explicit_execution_classification
         ):
-            team_mode_enabled = self.ctx.db.execute(
-                select(ProjectPluginConfig.id).where(
+            team_mode_row = self.ctx.db.execute(
+                select(ProjectPluginConfig.config_json).where(
                     ProjectPluginConfig.workspace_id == str(workspace_id),
                     ProjectPluginConfig.project_id == str(project_id),
                     ProjectPluginConfig.plugin_key == "team_mode",
@@ -2133,7 +2821,40 @@ class RequestAutomationRunHandler:
                     ProjectPluginConfig.is_deleted == False,  # noqa: E712
                 )
             ).first()
-            if team_mode_enabled and _team_mode_project_is_unstarted(
+            if team_mode_row is not None:
+                config_obj: dict[str, object] = {}
+                try:
+                    parsed_cfg = json.loads(str(team_mode_row[0] or "").strip() or "{}")
+                    if isinstance(parsed_cfg, dict):
+                        config_obj = parsed_cfg
+                except Exception:
+                    config_obj = {}
+                member_role_by_user_id = {
+                    str(user_id): str(role or "").strip()
+                    for user_id, role in self.ctx.db.execute(
+                        select(ProjectMember.user_id, ProjectMember.role).where(
+                            ProjectMember.workspace_id == str(workspace_id),
+                            ProjectMember.project_id == str(project_id),
+                        )
+                    ).all()
+                }
+                team_agents = normalize_team_agents(config_obj.get("team"))
+                agent_role_by_code = {
+                    str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
+                    for agent in team_agents
+                    if str(agent.get("id") or "").strip()
+                }
+                default_kickoff_workflow_role = derive_task_role(
+                    task_like={
+                        "assignee_id": str(state_snapshot.get("assignee_id") or (task_view or {}).get("assignee_id") or "").strip(),
+                        "assigned_agent_code": str(state_snapshot.get("assigned_agent_code") or (task_view or {}).get("assigned_agent_code") or "").strip(),
+                        "labels": state_snapshot.get("labels") if state_snapshot.get("labels") is not None else (task_view or {}).get("labels"),
+                        "status": str(state_snapshot.get("status") or (task_view or {}).get("status") or "").strip(),
+                    },
+                    member_role_by_user_id=member_role_by_user_id,
+                    agent_role_by_code=agent_role_by_code,
+                )
+            if str(default_kickoff_workflow_role or "").strip() == "Lead" and _team_mode_project_is_unstarted(
                 self.ctx.db,
                 project_id=str(project_id),
                 exclude_task_id=self.task_id,
@@ -2149,18 +2870,19 @@ class RequestAutomationRunHandler:
             "execution_intent": self.execution_intent,
             "execution_kickoff_intent": self.execution_kickoff_intent,
             "project_creation_intent": self.project_creation_intent,
+            "project_knowledge_lookup_intent": False,
+            "grounded_answer_required": False,
             "workflow_scope": str(self.workflow_scope or "").strip().lower() or None,
             "execution_mode": str(self.execution_mode or "").strip().lower() or None,
             "deploy_requested": None,
             "docker_compose_requested": None,
             "requested_port": None,
-            "exact_task_count": None,
             "project_name_provided": None,
             "task_completion_requested": self.task_completion_requested,
             "reason": str(self.classifier_reason or "").strip(),
         }
 
-        if requested_source in {"manual", "manual_stream"}:
+        if requested_source in {"manual", "manual_stream"} and not should_default_to_team_mode_kickoff:
             classification = resolve_instruction_intent(
                 instruction=effective_instruction,
                 workspace_id=workspace_id,
@@ -2215,14 +2937,23 @@ class RequestAutomationRunHandler:
                 }
                 workflow_role = derive_task_role(
                     task_like={
-                        "assignee_id": str(state_snapshot.get("assignee_id") or "").strip(),
-                        "assigned_agent_code": str(state_snapshot.get("assigned_agent_code") or "").strip(),
-                        "labels": state_snapshot.get("labels"),
-                        "status": str(state_snapshot.get("status") or "").strip(),
+                        "assignee_id": str(state_snapshot.get("assignee_id") or (task_view or {}).get("assignee_id") or "").strip(),
+                        "assigned_agent_code": str(state_snapshot.get("assigned_agent_code") or (task_view or {}).get("assigned_agent_code") or "").strip(),
+                        "labels": state_snapshot.get("labels") if state_snapshot.get("labels") is not None else (task_view or {}).get("labels"),
+                        "status": str(state_snapshot.get("status") or (task_view or {}).get("status") or "").strip(),
                     },
                     member_role_by_user_id=member_role_by_user_id,
                     agent_role_by_code=agent_role_by_code,
                 )
+                if (
+                    str(workflow_role or "").strip() in {"Developer", "QA"}
+                    and requested_source in {"manual", "manual_stream"}
+                ):
+                    classification["execution_intent"] = True
+                    classification["execution_kickoff_intent"] = False
+                    classification["workflow_scope"] = "team_mode"
+                    classification["execution_mode"] = "resume_execution"
+                    requested_source = "runner_orchestrator"
                 # Team Mode kickoff is Lead-only dispatch.
                 # Non-Lead tasks can be queued by explicit Lead handoff/events, but never by kickoff instruction.
                 if is_team_mode_kickoff_classification(classification) and str(workflow_role or "").strip() != "Lead":
@@ -2242,41 +2973,21 @@ class RequestAutomationRunHandler:
                     workspace_id=str(workspace_id),
                     project_id=str(project_id),
                 )
-                if topology_verification is not None and not bool(
-                    (topology_verification.get("checks") or {}).get("required_topology_present")
-                ):
+                if topology_verification is not None and not bool((topology_verification.get("ok") or False)):
                     raise HTTPException(
                         status_code=409,
                         detail=(
-                            "Team Mode execution cannot continue because required topology is incomplete. "
-                            "Keep Dev->Lead->QA plus blocked-work escalation encoded with task_relationships before execution."
+                            "Team Mode execution cannot continue because Team Mode project requirements are incomplete. "
+                            "Ensure exactly one Lead, required semantic statuses, and a human owner are configured."
                         ),
                     )
-                expected_status_by_role = {
-                    "Developer": "Dev",
-                    "Lead": "Lead",
-                    "QA": "QA",
-                }
-                expected_status = expected_status_by_role.get(str(workflow_role or "").strip())
-                current_status = str(state_snapshot.get("status") or "").strip()
-                if actor_is_agent and expected_status and current_status and current_status != expected_status:
-                    return {
-                        "ok": True,
-                        "task_id": self.task_id,
-                        "automation_state": current_automation_state or "idle",
-                        "requested_at": requested_at,
-                        "skipped": True,
-                        "reason": (
-                            "Task automation request skipped because task status does not match "
-                            f"assigned Team Mode role ({workflow_role} expects {expected_status}, got {current_status})."
-                        ),
-                    }
                 if str(workflow_role or "").strip() == "QA":
+                    existing_lead_handoff = bool(str(state_snapshot.get("last_lead_handoff_token") or "").strip())
                     valid_lead_handoff = (
                         requested_source == "lead_handoff"
                         and bool(str(requested_source_task_id or "").strip())
                     )
-                    if not valid_lead_handoff:
+                    if not valid_lead_handoff and not existing_lead_handoff:
                         return {
                             "ok": True,
                             "task_id": self.task_id,
@@ -2285,7 +2996,35 @@ class RequestAutomationRunHandler:
                             "skipped": True,
                             "reason": (
                                 "Team Mode QA automation requires an explicit Lead handoff with source_task_id. "
-                                "Manual or orchestrator QA queueing is not allowed."
+                            "Manual or orchestrator QA queueing is not allowed."
+                        ),
+                    }
+                    if existing_lead_handoff and requested_source in {"manual", "manual_stream"}:
+                        requested_source = "lead_handoff"
+                if (
+                    str(workflow_role or "").strip() in {"Developer", "Lead", "QA"}
+                    and not is_team_mode_kickoff_classification(classification)
+                ):
+                    classification["workflow_scope"] = "team_mode"
+                    if not str(classification.get("execution_mode") or "").strip():
+                        classification["execution_mode"] = "resume_execution"
+                    dependency_ready, dependency_reason = _team_mode_task_dependency_ready(
+                        db=self.ctx.db,
+                        workspace_id=str(workspace_id),
+                        project_id=str(project_id),
+                        task_id=self.task_id,
+                        state=state_snapshot,
+                    )
+                    if not dependency_ready:
+                        return {
+                            "ok": True,
+                            "task_id": self.task_id,
+                            "automation_state": current_automation_state or "idle",
+                            "requested_at": requested_at,
+                            "skipped": True,
+                            "reason": (
+                                "Team Mode execution is waiting for structural dependencies. "
+                                + str(dependency_reason or "Dependency requirements are not satisfied.")
                             ),
                         }
         repo = AggregateEventRepository(self.ctx.db)

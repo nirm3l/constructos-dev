@@ -18,6 +18,7 @@ from .command_handlers import (
     PatchTaskHandler,
     ReopenTaskHandler,
     ReorderTasksHandler,
+    ReviewTaskHandler,
     RequestAutomationRunHandler,
     RestoreTaskHandler,
     ToggleWatchHandler,
@@ -56,6 +57,15 @@ class TaskApplicationService:
             user_id=self.user.id,
             command_id=self.command_id,
             handler=CompleteTaskHandler(self.ctx, task_id),
+        )
+
+    def review_task(self, task_id: str, *, action: str, comment: str | None = None) -> dict:
+        return execute_command(
+            self.db,
+            command_name="Task.ReviewDecision",
+            user_id=self.user.id,
+            command_id=self.command_id,
+            handler=ReviewTaskHandler(self.ctx, task_id, action, comment),
         )
 
     def reopen_task(self, task_id: str) -> dict:

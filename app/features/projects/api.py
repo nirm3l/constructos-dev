@@ -112,9 +112,11 @@ def _load_docker_compose_runtime_config(db: Session, project_id: str) -> dict[st
         port = None
     health_path = str(runtime.get("health_path") or "/health").strip() or "/health"
     require_http_200 = bool(runtime.get("require_http_200", True))
+    host = str(runtime.get("host") or "gateway").strip() or "gateway"
     return {
         "enabled": enabled,
         "stack": stack,
+        "host": host,
         "port": port,
         "health_path": health_path,
         "require_http_200": require_http_200,
@@ -188,6 +190,7 @@ def _load_project_runtime_snapshot(*, db: Session, project_id: str) -> dict[str,
         port=runtime.get("port") if isinstance(runtime.get("port"), int) else None,
         health_path=str(runtime.get("health_path") or "/health"),
         require_http_200=bool(runtime.get("require_http_200")),
+        host=str(runtime.get("host") or "gateway").strip() or "gateway",
     )
     result["containers"] = containers
     result["has_runtime"] = bool(containers)

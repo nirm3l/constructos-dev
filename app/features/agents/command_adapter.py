@@ -4,6 +4,11 @@ import json
 import sys
 
 
+def _is_completed_status(status: str | None) -> bool:
+    normalized = str(status or "").strip().lower()
+    return normalized in {"done", "completed"}
+
+
 def main() -> int:
     raw = sys.stdin.read().strip()
     if not raw:
@@ -12,10 +17,10 @@ def main() -> int:
 
     ctx = json.loads(raw)
     instruction = str(ctx.get("instruction") or "")
-    status = str(ctx.get("status") or "To do")
+    status = str(ctx.get("status") or "To Do")
 
     should_complete = bool(ctx.get("task_completion_requested"))
-    if should_complete and status != "Done":
+    if should_complete and not _is_completed_status(status):
         print(json.dumps({"action": "complete", "summary": "Command adapter marked task as completed."}))
         return 0
 

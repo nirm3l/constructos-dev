@@ -863,7 +863,7 @@ def _task_props_from_event(ev: EventEnvelope) -> dict[str, Any]:
         props["status"] = "Done"
         props["completed_at"] = p.get("completed_at")
     elif ev.event_type == TASK_EVENT_REOPENED:
-        props["status"] = p.get("status", "To do")
+        props["status"] = p.get("status", "To Do")
         props["completed_at"] = None
     elif ev.event_type == TASK_EVENT_ARCHIVED:
         props["archived"] = True
