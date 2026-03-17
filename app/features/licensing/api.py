@@ -202,6 +202,7 @@ def _run_auto_update_background(*, run_id: str) -> None:
                 f"CLAUDE_AUTH_FILE={claude_auth_file}",
                 "-e",
                 f"AGENT_WORKSPACE_MOUNT={workspace_mount}",
+                "-e",
                 f"AGENT_CODEX_WORKSPACE_MOUNT={workspace_mount}",
                 "-e",
                 f"TASK_APP_IMAGE={task_app_image}",

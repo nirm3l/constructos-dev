@@ -28,11 +28,8 @@ jobs:
       - name: Build COS package artifacts
         run: ./tools/cos/scripts/build.sh
 
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: cos-cli-dist
-          path: tools/cos/dist/*
+      - name: List built package artifacts
+        run: ls -lah tools/cos/dist
 
       - name: Publish GitHub release assets
         if: startsWith(github.ref, 'refs/tags/')
@@ -42,4 +39,3 @@ jobs:
         with:
           repository: ${{ env.PUBLIC_RELEASE_REPO }}
           files: tools/cos/dist/*
-          generate_release_notes: true
