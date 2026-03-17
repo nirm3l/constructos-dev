@@ -74,6 +74,12 @@ def _sanitize_license_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
+def _public_license_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    cleaned = _sanitize_license_metadata(metadata)
+    cleaned.pop("control_plane_notifications", None)
+    return cleaned
+
+
 def _normalize_version_token(value: Any) -> str:
     token = str(value or "").strip()
     if not token:
@@ -137,9 +143,38 @@ def _license_notifications_read_model(
                             "action": "auto_update_app_images",
                             "action_label": "Update app",
                             "description": "Pull latest task-app and mcp-tools images and restart those services.",
+                            "target_image_tag": target_version,
                         },
                     }
                 )
+
+    control_plane_notifications = metadata.get("control_plane_notifications")
+    if isinstance(control_plane_notifications, list):
+        for item in control_plane_notifications:
+            if not isinstance(item, dict):
+                continue
+            notification_id = str(item.get("id") or "").strip()
+            if not notification_id or notification_id in seen_ids:
+                continue
+            dedupe_key = str(item.get("dedupe_key") or notification_id).strip() or notification_id
+            if dedupe_key in seen_dedupe:
+                continue
+            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            notifications.append(
+                {
+                    "id": notification_id,
+                    "message": str(item.get("message") or "").strip() or "Notification",
+                    "is_read": bool(item.get("is_read")),
+                    "created_at": str(item.get("created_at") or "").strip() or None,
+                    "notification_type": str(item.get("notification_type") or "ControlPlaneMessage").strip() or "ControlPlaneMessage",
+                    "severity": str(item.get("severity") or "info").strip() or "info",
+                    "dedupe_key": dedupe_key,
+                    "source_event": str(item.get("source_event") or "control-plane.notification").strip() or "control-plane.notification",
+                    "payload": payload,
+                }
+            )
+            seen_ids.add(notification_id)
+            seen_dedupe.add(dedupe_key)
     return notifications
 
 
@@ -208,6 +243,7 @@ def license_status_read_model(db: Session) -> dict[str, Any]:
     enforcement_enabled = bool(LICENSE_ENFORCEMENT_ENABLED)
     write_access = (not enforcement_enabled) or (status in WRITE_ALLOWED_STATUSES)
     metadata = _sanitize_license_metadata(_coerce_metadata(installation.metadata_json))
+    public_metadata = _public_license_metadata(metadata)
 
     payload = {
         "installation_id": installation.installation_id,
@@ -219,7 +255,7 @@ def license_status_read_model(db: Session) -> dict[str, Any]:
         "grace_ends_at": grace_ends_at.isoformat() if grace_ends_at else None,
         "last_validated_at": _ensure_aware(installation.last_validated_at).isoformat() if installation.last_validated_at else None,
         "token_expires_at": _ensure_aware(installation.token_expires_at).isoformat() if installation.token_expires_at else None,
-        "metadata": metadata,
+        "metadata": public_metadata,
         "app_version": APP_VERSION,
         "app_build": APP_BUILD,
     }

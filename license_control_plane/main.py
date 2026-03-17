@@ -105,11 +105,8 @@ LCP_ONBOARDING_INSTALL_SCRIPT_URL = (
     or "https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh"
 )
 LCP_ONBOARDING_SUPPORT_EMAIL = os.getenv("LCP_ONBOARDING_SUPPORT_EMAIL", "support@constructos.dev").strip() or "support@constructos.dev"
-LCP_BETA_PLAN_VALID_UNTIL = (
-    _env_datetime_utc("LCP_BETA_PLAN_VALID_UNTIL")
-    or _env_datetime_utc("LCP_PUBLIC_BETA_FREE_UNTIL")
-    or datetime(2026, 3, 31, 23, 59, 59, tzinfo=timezone.utc)
-)
+# Beta plan is indefinite. Keep the legacy health fields, but without an expiry cutoff.
+LCP_BETA_PLAN_VALID_UNTIL: datetime | None = None
 LCP_ADMIN_SSE_POLL_SECONDS = max(0.5, _env_float("LCP_ADMIN_SSE_POLL_SECONDS", 1.0))
 LCP_ADMIN_SSE_HEARTBEAT_SECONDS = max(5.0, _env_float("LCP_ADMIN_SSE_HEARTBEAT_SECONDS", 15.0))
 LCP_CORS_ORIGINS = [
@@ -135,6 +132,8 @@ PUBLIC_REQUEST_TYPES = {"demo", "onboarding", "plan_details", "feedback"}
 SUPPORT_FEEDBACK_TYPES = {"general", "feature_request", "question", "other"}
 BUG_REPORT_SEVERITIES = {"low", "medium", "high", "critical"}
 BUG_REPORT_STATUSES = {"new", "triaged", "in_progress", "resolved", "closed", "rejected"}
+APP_NOTIFICATION_SEVERITIES = {"info", "warning", "critical"}
+APP_NOTIFICATION_AUDIENCE_KINDS = {"all", "customer_ref", "customer_email", "installation_id"}
 LEAD_STATUS_PENDING = "pending"
 LEAD_STATUS_ONBOARDING_SENT = "onboarding_sent"
 LEAD_STATUS_CONVERTED = "converted"
@@ -249,6 +248,29 @@ class ContactRequest(Base):
     source: Mapped[str] = mapped_column(String(64), default="marketing-site", index=True)
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
     metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class AppNotificationCampaign(Base):
+    __tablename__ = "app_notification_campaigns"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    notification_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    title: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    message: Mapped[str] = mapped_column(Text)
+    severity: Mapped[str] = mapped_column(String(16), default="info", index=True)
+    notification_type: Mapped[str] = mapped_column(String(64), default="ControlPlaneMessage", index=True)
+    audience_kind: Mapped[str] = mapped_column(String(32), default="all", index=True)
+    audience_values_json: Mapped[str] = mapped_column(Text, default="[]")
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    active_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    active_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -388,6 +410,19 @@ class ContactRequestCreateRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class AdminAppNotificationCreateRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=160)
+    message: str = Field(min_length=1, max_length=10000)
+    severity: str = Field(default="info", min_length=2, max_length=16)
+    notification_type: str = Field(default="ControlPlaneMessage", min_length=2, max_length=64)
+    audience_kind: str = Field(default="all", min_length=2, max_length=32)
+    audience_values: list[str] = Field(default_factory=list)
+    active_from: str | None = None
+    active_until: str | None = None
+    is_active: bool = True
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 class SupportFeedbackCreateRequest(BaseModel):
     installation_id: str = Field(min_length=3, max_length=128)
     workspace_id: str | None = Field(default=None, max_length=64)
@@ -478,6 +513,73 @@ def _normalize_email_body(value: str | None) -> str:
         raise HTTPException(status_code=400, detail="text_body is required")
     if len(normalized) > 20000:
         raise HTTPException(status_code=400, detail="text_body is too long")
+    return normalized
+
+
+def _normalize_notification_message(value: str | None) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="message is required")
+    if len(normalized) > 10000:
+        raise HTTPException(status_code=400, detail="message is too long")
+    return normalized
+
+
+def _normalize_notification_title(value: str | None) -> str | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    if len(normalized) > 160:
+        raise HTTPException(status_code=400, detail="title is too long")
+    return normalized
+
+
+def _normalize_notification_type(value: str | None) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return "ControlPlaneMessage"
+    if len(normalized) > 64:
+        raise HTTPException(status_code=400, detail="notification_type is too long")
+    return normalized
+
+
+def _normalize_notification_severity(value: str | None) -> str:
+    normalized = str(value or "").strip().lower() or "info"
+    if normalized not in APP_NOTIFICATION_SEVERITIES:
+        raise HTTPException(status_code=400, detail="Unsupported notification severity")
+    return normalized
+
+
+def _normalize_notification_audience_kind(value: str | None) -> str:
+    normalized = str(value or "").strip().lower() or "all"
+    if normalized not in APP_NOTIFICATION_AUDIENCE_KINDS:
+        raise HTTPException(status_code=400, detail="Unsupported notification audience_kind")
+    return normalized
+
+
+def _normalize_notification_audience_values(kind: str, values: list[str] | None) -> list[str]:
+    raw_values = values if isinstance(values, list) else []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in raw_values:
+        candidate = str(item or "").strip()
+        if not candidate:
+            continue
+        if kind == "customer_email":
+            candidate = _normalize_email(candidate)
+        elif kind == "customer_ref":
+            candidate = _normalize_customer_ref(candidate)
+        elif kind == "installation_id":
+            if len(candidate) < 3 or len(candidate) > 128:
+                raise HTTPException(status_code=400, detail="installation_id audience value is invalid")
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        normalized.append(candidate)
+    if kind != "all" and not normalized:
+        raise HTTPException(status_code=400, detail="audience_values is required for selected audience_kind")
+    if kind == "all" and normalized:
+        raise HTTPException(status_code=400, detail="audience_values must be empty when audience_kind is 'all'")
     return normalized
 
 
@@ -1000,6 +1102,8 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
 
 def _is_beta_plan_active(now: datetime | None = None) -> bool:
     current = now or _now_utc()
+    if LCP_BETA_PLAN_VALID_UNTIL is None:
+        return True
     return current < LCP_BETA_PLAN_VALID_UNTIL
 
 
@@ -1082,7 +1186,7 @@ def _resolve_subscription_valid_until(
         return resolved
     if status_value == "beta":
         parsed = _parse_iso_datetime(requested_valid_until)
-        resolved = parsed or normalized_existing_valid_until or LCP_BETA_PLAN_VALID_UNTIL
+        resolved = parsed or normalized_existing_valid_until
         if resolved and resolved <= _now_utc():
             raise HTTPException(status_code=400, detail="valid_until must be in the future")
         return resolved
@@ -1154,6 +1258,26 @@ def _load_metadata(raw: str | None) -> dict[str, Any]:
     if isinstance(parsed, dict):
         return parsed
     return {}
+
+
+def _load_json_string_list(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in parsed:
+        candidate = str(item or "").strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        result.append(candidate)
+    return result
 
 
 def _dump_metadata(payload: dict[str, Any]) -> str:
@@ -1266,6 +1390,24 @@ def _serialize_contact_request(record: ContactRequest) -> dict[str, Any]:
     }
 
 
+def _serialize_app_notification_campaign(record: AppNotificationCampaign) -> dict[str, Any]:
+    return {
+        "id": record.notification_id,
+        "title": str(record.title or "").strip() or None,
+        "message": record.message,
+        "severity": record.severity,
+        "notification_type": record.notification_type,
+        "audience_kind": record.audience_kind,
+        "audience_values": _load_json_string_list(record.audience_values_json),
+        "is_active": bool(record.is_active),
+        "active_from": record.active_from.isoformat() if record.active_from else None,
+        "active_until": record.active_until.isoformat() if record.active_until else None,
+        "payload": _load_metadata(record.payload_json),
+        "created_at": record.created_at.isoformat(),
+        "updated_at": record.updated_at.isoformat(),
+    }
+
+
 def _serialize_bug_report(record: BugReport) -> dict[str, Any]:
     return {
         "id": record.id,
@@ -1306,6 +1448,83 @@ def _feedback_identity_to_pseudo_email(*, identity: str | None, fallback: str) -
     if not local_part:
         local_part = re.sub(r"[^a-z0-9._-]+", "-", str(fallback or "").strip().lower()).strip(".-_") or "feedback"
     return f"{local_part[:64]}@feedback.local"
+
+
+def _app_notification_matches_installation(
+    *,
+    campaign: AppNotificationCampaign,
+    installation: Installation,
+    customer_email: str | None,
+    now: datetime,
+) -> bool:
+    if not bool(campaign.is_active):
+        return False
+    if campaign.active_from is not None:
+        active_from = campaign.active_from
+        if active_from.tzinfo is None:
+            active_from = active_from.replace(tzinfo=timezone.utc)
+        if active_from.astimezone(timezone.utc) > now:
+            return False
+    if campaign.active_until is not None:
+        active_until = campaign.active_until
+        if active_until.tzinfo is None:
+            active_until = active_until.replace(tzinfo=timezone.utc)
+        if active_until.astimezone(timezone.utc) <= now:
+            return False
+
+    audience_kind = str(campaign.audience_kind or "").strip().lower() or "all"
+    if audience_kind == "all":
+        return True
+
+    audience_values = set(_load_json_string_list(campaign.audience_values_json))
+    if not audience_values:
+        return False
+
+    if audience_kind == "installation_id":
+        return str(installation.installation_id or "").strip() in audience_values
+    if audience_kind == "customer_ref":
+        return str(installation.customer_ref or "").strip() in audience_values
+    if audience_kind == "customer_email":
+        return str(customer_email or "").strip().lower() in audience_values
+    return False
+
+
+def _build_installation_notifications(db: Session, installation: Installation) -> list[dict[str, Any]]:
+    now = _now_utc()
+    customer_email = _resolve_customer_email_for_installation(db, installation)
+    campaigns = db.execute(
+        select(AppNotificationCampaign)
+        .where(AppNotificationCampaign.is_active == True)  # noqa: E712
+        .order_by(AppNotificationCampaign.created_at.desc(), AppNotificationCampaign.id.desc())
+    ).scalars().all()
+
+    notifications: list[dict[str, Any]] = []
+    for campaign in campaigns:
+        if not _app_notification_matches_installation(
+            campaign=campaign,
+            installation=installation,
+            customer_email=customer_email,
+            now=now,
+        ):
+            continue
+        payload = _load_metadata(campaign.payload_json)
+        title = str(campaign.title or "").strip()
+        if title:
+            payload = {"title": title, **payload}
+        notifications.append(
+            {
+                "id": campaign.notification_id,
+                "message": campaign.message,
+                "is_read": False,
+                "created_at": campaign.created_at.isoformat() if campaign.created_at else None,
+                "notification_type": campaign.notification_type,
+                "severity": campaign.severity,
+                "dedupe_key": campaign.notification_id,
+                "source_event": "control-plane.notification",
+                "payload": payload,
+            }
+        )
+    return notifications
 
 
 def _active_customer_installations(db: Session, customer_ref: str) -> list[Installation]:
@@ -1415,9 +1634,7 @@ def _compute_entitlement(installation: Installation) -> dict[str, Any]:
         entitlement_reason = "subscription_lifetime"
     elif subscription_status == "beta":
         plan_code = plan_code or "beta"
-        if effective_valid_until is None:
-            effective_valid_until = LCP_BETA_PLAN_VALID_UNTIL
-        if effective_valid_until and effective_valid_until > now:
+        if effective_valid_until is None or effective_valid_until > now:
             status = "active"
             entitlement_reason = "subscription_beta"
         else:
@@ -1953,9 +2170,9 @@ def health() -> dict[str, Any]:
         "trial_days": LCP_TRIAL_DAYS,
         "default_max_installations": LCP_DEFAULT_MAX_INSTALLATIONS,
         # Backward-compatible fields kept for existing UI clients.
-        "public_beta_free_until": LCP_BETA_PLAN_VALID_UNTIL.isoformat(),
+        "public_beta_free_until": LCP_BETA_PLAN_VALID_UNTIL.isoformat() if LCP_BETA_PLAN_VALID_UNTIL else None,
         "public_beta_active": _is_beta_plan_active(),
-        "beta_plan_valid_until": LCP_BETA_PLAN_VALID_UNTIL.isoformat(),
+        "beta_plan_valid_until": LCP_BETA_PLAN_VALID_UNTIL.isoformat() if LCP_BETA_PLAN_VALID_UNTIL else None,
         "beta_plan_active": _is_beta_plan_active(),
     }
 
@@ -2370,6 +2587,7 @@ def register_installation(
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
     serialized_installation = _serialize_installation(installation)
+    notifications = _build_installation_notifications(db, installation)
     _publish_admin_event(
         "installations",
         "registered",
@@ -2389,6 +2607,7 @@ def register_installation(
         },
         "entitlement": entitlement,
         "entitlement_token": entitlement_token,
+        "notifications": notifications,
         "lead_status_updates": lead_status_updates,
     }
 
@@ -2508,6 +2727,7 @@ def heartbeat_installation(
     )
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
+    notifications = _build_installation_notifications(db, installation)
     _publish_admin_event(
         "installations",
         "heartbeat",
@@ -2517,6 +2737,7 @@ def heartbeat_installation(
         "ok": True,
         "entitlement": entitlement,
         "entitlement_token": entitlement_token,
+        "notifications": notifications,
         "lead_status_updates": lead_status_updates,
     }
 
@@ -2651,6 +2872,7 @@ def activate_installation(
     entitlement = _compute_entitlement(installation)
     entitlement, entitlement_token = _build_entitlement_bundle(entitlement)
     db.commit()
+    notifications = _build_installation_notifications(db, installation)
     _publish_admin_event(
         "installations",
         "activated",
@@ -2668,6 +2890,7 @@ def activate_installation(
         "installation": _serialize_installation(installation),
         "entitlement": entitlement,
         "entitlement_token": entitlement_token,
+        "notifications": notifications,
         "seat_usage": {
             "active_installations": refreshed_active_count,
             "max_installations": int(activation_code.max_installations),
@@ -2692,7 +2915,7 @@ def admin_create_activation_code(
         valid_until = None
     else:
         if plan_code.lower() == "beta" and not str(payload.valid_until or "").strip():
-            valid_until = LCP_BETA_PLAN_VALID_UNTIL
+            valid_until = None
         else:
             try:
                 valid_until = _parse_iso_datetime(payload.valid_until)
@@ -2941,7 +3164,7 @@ def admin_provision_onboarding(
         valid_until = None
     else:
         if plan_code.lower() == "beta" and not str(payload.valid_until or "").strip():
-            valid_until = LCP_BETA_PLAN_VALID_UNTIL
+            valid_until = None
         else:
             try:
                 valid_until = _parse_iso_datetime(payload.valid_until)
@@ -3105,6 +3328,127 @@ def admin_deactivate_client_token(
         {"token_id": record.id, "customer_ref": record.customer_ref},
     )
     return {"ok": True, "client_token_record": _serialize_client_token(record)}
+
+
+@app.get("/v1/admin/app-notifications")
+def admin_list_app_notifications(
+    audience_kind: str | None = Query(default=None),
+    active_only: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    _auth: None = Depends(_require_admin_token),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    filters = []
+    audience_filter = str(audience_kind or "").strip().lower()
+    if audience_filter:
+        filters.append(AppNotificationCampaign.audience_kind == _normalize_notification_audience_kind(audience_filter))
+    if active_only:
+        now = _now_utc()
+        filters.append(AppNotificationCampaign.is_active == True)  # noqa: E712
+        filters.append(
+            or_(
+                AppNotificationCampaign.active_from.is_(None),
+                AppNotificationCampaign.active_from <= now,
+            )
+        )
+        filters.append(
+            or_(
+                AppNotificationCampaign.active_until.is_(None),
+                AppNotificationCampaign.active_until > now,
+            )
+        )
+
+    total_stmt = select(func.count()).select_from(AppNotificationCampaign)
+    rows_stmt = select(AppNotificationCampaign)
+    for clause in filters:
+        total_stmt = total_stmt.where(clause)
+        rows_stmt = rows_stmt.where(clause)
+
+    total = int(db.execute(total_stmt).scalar_one())
+    rows = db.execute(
+        rows_stmt.order_by(AppNotificationCampaign.created_at.desc(), AppNotificationCampaign.id.desc()).offset(offset).limit(limit)
+    ).scalars().all()
+    return {
+        "ok": True,
+        "items": [_serialize_app_notification_campaign(row) for row in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.post("/v1/admin/app-notifications")
+def admin_create_app_notification(
+    payload: AdminAppNotificationCreateRequest,
+    _auth: None = Depends(_require_admin_token),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    message = _normalize_notification_message(payload.message)
+    title = _normalize_notification_title(payload.title)
+    severity = _normalize_notification_severity(payload.severity)
+    notification_type = _normalize_notification_type(payload.notification_type)
+    audience_kind = _normalize_notification_audience_kind(payload.audience_kind)
+    audience_values = _normalize_notification_audience_values(audience_kind, payload.audience_values)
+    try:
+        active_from = _parse_iso_datetime(payload.active_from)
+        active_until = _parse_iso_datetime(payload.active_until)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid notification schedule value: {exc}") from exc
+    if active_from and active_until and active_until <= active_from:
+        raise HTTPException(status_code=400, detail="active_until must be later than active_from")
+    if not isinstance(payload.payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be a JSON object")
+
+    record = AppNotificationCampaign(
+        notification_id=f"cpn-{uuid.uuid4().hex}",
+        title=title,
+        message=message,
+        severity=severity,
+        notification_type=notification_type,
+        audience_kind=audience_kind,
+        audience_values_json=json.dumps(audience_values, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+        payload_json=_dump_metadata(payload.payload),
+        is_active=bool(payload.is_active),
+        active_from=active_from,
+        active_until=active_until,
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    _publish_admin_event(
+        "app_notifications",
+        "created",
+        {"notification_id": record.notification_id, "audience_kind": record.audience_kind},
+    )
+    return {"ok": True, "notification": _serialize_app_notification_campaign(record)}
+
+
+@app.post("/v1/admin/app-notifications/{notification_id}/deactivate")
+def admin_deactivate_app_notification(
+    notification_id: str,
+    _auth: None = Depends(_require_admin_token),
+    db: Session = Depends(_get_db),
+) -> dict[str, Any]:
+    normalized_notification_id = str(notification_id or "").strip()
+    if not normalized_notification_id:
+        raise HTTPException(status_code=400, detail="notification_id is required")
+
+    record = db.execute(
+        select(AppNotificationCampaign).where(AppNotificationCampaign.notification_id == normalized_notification_id)
+    ).scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail="App notification not found")
+
+    record.is_active = False
+    db.commit()
+    db.refresh(record)
+    _publish_admin_event(
+        "app_notifications",
+        "deactivated",
+        {"notification_id": record.notification_id},
+    )
+    return {"ok": True, "notification": _serialize_app_notification_campaign(record)}
 
 
 @app.get("/v1/admin/waitlist")

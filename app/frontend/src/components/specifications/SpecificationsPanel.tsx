@@ -1,6 +1,7 @@
 import React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import * as Accordion from '@radix-ui/react-accordion'
+import * as Dialog from '@radix-ui/react-dialog'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Popover from '@radix-ui/react-popover'
 import * as Select from '@radix-ui/react-select'
@@ -21,15 +22,6 @@ import {
 } from '../shared/uiHelpers'
 
 export function SpecificationsPanel({ state }: { state: any }) {
-  const hiddenPreviewMountStyle: React.CSSProperties = {
-    position: 'absolute',
-    width: 1,
-    height: 1,
-    overflow: 'hidden',
-    clipPath: 'inset(50%)',
-    opacity: 0,
-    pointerEvents: 'none',
-  }
   const items: Specification[] = state.specifications.data?.items ?? []
   const linkedTasks: Task[] = state.specTasks.data?.items ?? []
   const linkedNotes: Note[] = state.specNotes.data?.items ?? []
@@ -45,7 +37,7 @@ export function SpecificationsPanel({ state }: { state: any }) {
   const [showSpecTagPicker, setShowSpecTagPicker] = React.useState(false)
   const [specTagQuery, setSpecTagQuery] = React.useState('')
   const [specResourceSections, setSpecResourceSections] = React.useState<string[]>(['external-links', 'file-attachments'])
-  const [previewOnlySpecificationId, setPreviewOnlySpecificationId] = React.useState<string | null>(null)
+  const [specificationPreviewDialog, setSpecificationPreviewDialog] = React.useState<{ title: string, body: string } | null>(null)
   const [gitRepositoryDialogState, setGitRepositoryDialogState] = React.useState<{
     projectId: string
     target: ProjectGitRepositoryTarget | null
@@ -64,10 +56,6 @@ export function SpecificationsPanel({ state }: { state: any }) {
     setSpecTagQuery('')
     setSpecResourceSections(['external-links', 'file-attachments'])
   }, [selectedSpecificationId])
-  React.useEffect(() => {
-    if (!selectedSpecificationId) setPreviewOnlySpecificationId(null)
-  }, [selectedSpecificationId])
-
   const openGitRepositoryFromRef = React.useCallback((projectId: string, ref: Specification['external_refs'][number]) => {
     const target = parseProjectGitRepositoryExternalRef(ref)
     const normalizedProjectId = String(projectId || '').trim()
@@ -231,31 +219,13 @@ export function SpecificationsPanel({ state }: { state: any }) {
     setSpecResourceSections((prev) => (prev.includes(value) ? prev : [...prev, value]))
   }, [])
 
-  const openSpecificationPreviewFullscreen = React.useCallback((specificationId: string) => {
-    const alreadyOpen = String(state.selectedSpecificationId || '').trim() === String(specificationId || '').trim()
-    if (!alreadyOpen) {
-      const changed = state.toggleSpecificationEditor(specificationId)
-      if (!changed) return
-    }
-    setPreviewOnlySpecificationId(specificationId)
-    state.setSpecificationEditorView('preview')
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        const row = document.getElementById(`spec-row-${specificationId}`)
-        const surface = row?.querySelector('.md-editor-surface') as HTMLElement | null
-        if (!surface) return
-        const doc = document as Document & { webkitFullscreenElement?: Element | null }
-        const isFullscreen = surface.classList.contains('md-editor-fullscreen')
-          || document.fullscreenElement === surface
-          || doc.webkitFullscreenElement === surface
-        if (isFullscreen) return
-        surface.setAttribute('data-md-fullscreen-mode', 'readonly')
-        const fullscreenButton = surface.querySelector('.md-mode-toggle .md-fullscreen-btn') as HTMLButtonElement | null
-        fullscreenButton?.click()
-        window.setTimeout(() => {
-          surface.removeAttribute('data-md-fullscreen-mode')
-        }, 0)
-      })
+  const openSpecificationPreviewDialog = React.useCallback((specification: Specification) => {
+    const isSelected = String(state.selectedSpecificationId || '').trim() === String(specification.id || '').trim()
+    setSpecificationPreviewDialog({
+      title: isSelected
+        ? String(state.editSpecificationTitle || '').trim() || 'Untitled spec'
+        : String(specification.title || '').trim() || 'Untitled spec',
+      body: isSelected ? String(state.editSpecificationBody || '') : String(specification.body || ''),
     })
   }, [state])
 
@@ -354,10 +324,8 @@ export function SpecificationsPanel({ state }: { state: any }) {
                 const editorAttachmentsMeta = editorAttachmentRefs.length > 0
                   ? `${editorAttachmentRefs.length} files attached`
                   : 'No attachments'
-                const isPreviewOnly = previewOnlySpecificationId === specification.id
                 const openSpecificationFromMenu = () => {
                   if (isOpen) return
-                  setPreviewOnlySpecificationId(null)
                   state.toggleSpecificationEditor(specification.id)
                 }
                 const toggleArchiveFromMenu = () => {
@@ -371,9 +339,8 @@ export function SpecificationsPanel({ state }: { state: any }) {
                   <div
                     key={specification.id}
                     id={`spec-row-${specification.id}`}
-                    className={`note-row ${isOpen && !isPreviewOnly ? 'open selected' : ''}`}
+                    className={`note-row ${isOpen ? 'open selected' : ''}`}
                     onClick={() => {
-                      setPreviewOnlySpecificationId(null)
                       state.toggleSpecificationEditor(specification.id)
                     }}
                     role="button"
@@ -408,12 +375,12 @@ export function SpecificationsPanel({ state }: { state: any }) {
                     <button
                       className="action-icon note-row-actions-trigger"
                       type="button"
-                      title="Open preview fullscreen"
-                      aria-label="Open preview fullscreen"
+                      title="Open preview popup"
+                      aria-label="Open preview popup"
                       onPointerDown={(event) => event.stopPropagation()}
                       onClick={(event) => {
                         event.stopPropagation()
-                        openSpecificationPreviewFullscreen(specification.id)
+                        openSpecificationPreviewDialog(specification)
                       }}
                     >
                       <Icon path="M8 3H5a2 2 0 0 0-2 2v3m16 0V5a2 2 0 0 0-2-2h-3M8 21H5a2 2 0 0 1-2-2v-3m16 0v3a2 2 0 0 1-2 2h-3" />
@@ -448,11 +415,11 @@ export function SpecificationsPanel({ state }: { state: any }) {
                             onSelect={(event) => {
                               event.preventDefault()
                               event.stopPropagation()
-                              openSpecificationPreviewFullscreen(specification.id)
+                              openSpecificationPreviewDialog(specification)
                             }}
                           >
                             <Icon path="M8 3H5a2 2 0 0 0-2 2v3m16 0V5a2 2 0 0 0-2-2h-3M8 21H5a2 2 0 0 1-2-2v-3m16 0v3a2 2 0 0 1-2 2h-3" />
-                            <span>Preview fullscreen</span>
+                            <span>Preview popup</span>
                           </DropdownMenu.Item>
                           <DropdownMenu.Separator className="task-group-menu-separator" />
                           <DropdownMenu.Item className="task-group-menu-item" onSelect={toggleArchiveFromMenu}>
@@ -525,7 +492,6 @@ export function SpecificationsPanel({ state }: { state: any }) {
                     onClick={(e) => e.stopPropagation()}
                     role="region"
                     aria-label="Specification editor"
-                    style={isPreviewOnly ? hiddenPreviewMountStyle : undefined}
                   >
                     <div className="note-editor-head">
                       <input
@@ -661,15 +627,6 @@ export function SpecificationsPanel({ state }: { state: any }) {
                         view={state.specificationEditorView}
                         onChange={state.setSpecificationEditorView}
                         ariaLabel="Specification editor view"
-                        previewOnlyWhenFullscreen={isPreviewOnly}
-                        onFullscreenTriggerMode={(mode, nextFullscreen) => {
-                          if (!nextFullscreen || mode === 'regular') {
-                            if (!nextFullscreen && isPreviewOnly && String(state.selectedSpecificationId || '') === String(specification.id)) {
-                              state.toggleSpecificationEditor(specification.id)
-                            }
-                            setPreviewOnlySpecificationId(null)
-                          }
-                        }}
                       />
                       <div className="md-editor-content">
                         {state.specificationEditorView === 'write' ? (
@@ -1053,6 +1010,39 @@ export function SpecificationsPanel({ state }: { state: any }) {
           )}
         </div>
       </div>
+
+      <Dialog.Root open={specificationPreviewDialog !== null} onOpenChange={(open) => {
+        if (!open) setSpecificationPreviewDialog(null)
+      }}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="codex-chat-alert-overlay" />
+          <Dialog.Content className="codex-chat-alert-content docker-runtime-dialog markdown-preview-dialog">
+            <div className="notification-markdown-header">
+              <div>
+                <Dialog.Title className="codex-chat-alert-title notification-markdown-title">
+                  {specificationPreviewDialog?.title || 'Untitled spec'}
+                </Dialog.Title>
+                <Dialog.Description className="codex-chat-alert-description">
+                  Specification preview.
+                </Dialog.Description>
+              </div>
+              <Dialog.Close asChild>
+                <button
+                  type="button"
+                  className="action-icon docker-runtime-dialog-close notification-preview-close"
+                  aria-label="Close specification preview"
+                  title="Close"
+                >
+                  <Icon path="M6 6l12 12M18 6L6 18" />
+                </button>
+              </Dialog.Close>
+            </div>
+            <div className="md-editor-content notification-markdown-content markdown-preview-body">
+              <MarkdownView value={specificationPreviewDialog?.body || ''} />
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
 
       {taskLinkOpen && (
         <div className="drawer open" onClick={() => setTaskLinkOpen(false)}>

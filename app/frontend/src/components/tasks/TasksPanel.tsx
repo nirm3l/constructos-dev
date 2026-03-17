@@ -7,7 +7,7 @@ import type { ProjectBoard, Task, TaskGroup } from '../../types'
 import { priorityTone, tagHue } from '../../utils/ui'
 import { Icon } from '../shared/uiHelpers'
 import { PopularTagFilters } from '../shared/PopularTagFilters'
-import { taskDescriptionPreview, TaskListItem } from './taskViews'
+import { ChipTooltip, taskDescriptionPreview, TaskListItem } from './taskViews'
 
 type TaskSection = {
   key: string
@@ -159,6 +159,7 @@ function BoardTaskCard({
 }: BoardTaskCardProps) {
   const descriptionPreviewText = taskDescriptionPreview(task.description)
   const isScheduled = task.task_type === 'scheduled_instruction'
+  const externalRefCount = Array.isArray(task.external_refs) ? task.external_refs.length : 0
   const effectiveExecutionState = resolveBoardEffectiveExecutionState(task)
   const hasVisibleAutomationState = effectiveExecutionState !== 'idle'
   const executionStateLabel = formatBoardAutomationState(effectiveExecutionState)
@@ -181,9 +182,78 @@ function BoardTaskCard({
     >
       <div className="kanban-title">
         <strong>{task.title}</strong>
-        <span className={`prio prio-${priorityTone(task.priority)}`} title={`Priority: ${task.priority}`}>
-          {task.priority}
-        </span>
+        <div
+          className="kanban-title-controls"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <span className={`prio prio-${priorityTone(task.priority)}`} title={`Priority: ${task.priority}`}>
+            {task.priority}
+          </span>
+          {availableStatuses.length > 0 ? (
+            <DropdownMenu.Root>
+              <DropdownMenu.Trigger asChild>
+                <button
+                  className="status-chip kanban-move-trigger"
+                  type="button"
+                  onClick={(event) => event.stopPropagation()}
+                  aria-label="Move task to another status"
+                  title="Move task to another status"
+                >
+                  <span>Move</span>
+                  <Icon path="M6 9l6 6 6-6" />
+                </button>
+              </DropdownMenu.Trigger>
+              <DropdownMenu.Portal>
+                <DropdownMenu.Content className="task-group-menu-content kanban-move-menu-content" sideOffset={6} align="end">
+                  {nextStatus && (
+                    <>
+                      <DropdownMenu.Item
+                        className="task-group-menu-item"
+                        onSelect={() => onMoveTaskStatus(task.id, nextStatus, targetGroupId)}
+                      >
+                        <Icon path="M13 5l7 7-7 7M5 12h14" />
+                        <span>{`Move to next (${nextStatus})`}</span>
+                      </DropdownMenu.Item>
+                      <DropdownMenu.Separator className="task-group-menu-separator" />
+                    </>
+                  )}
+                  <DropdownMenu.RadioGroup
+                    value={status}
+                    onValueChange={(value) => {
+                      if (value !== status) onMoveTaskStatus(task.id, value, targetGroupId)
+                    }}
+                  >
+                    {statuses.map((candidateStatus) => (
+                      <DropdownMenu.RadioItem
+                        key={candidateStatus}
+                        value={candidateStatus}
+                        className="task-group-menu-item kanban-move-menu-item"
+                        disabled={candidateStatus === status}
+                      >
+                        <span className="kanban-move-menu-label">{candidateStatus}</span>
+                        {candidateStatus === status && <span className="meta kanban-move-menu-meta">Current</span>}
+                        <DropdownMenu.ItemIndicator className="kanban-move-menu-indicator">
+                          <Icon path="M5 13l4 4L19 7" />
+                        </DropdownMenu.ItemIndicator>
+                      </DropdownMenu.RadioItem>
+                    ))}
+                  </DropdownMenu.RadioGroup>
+                </DropdownMenu.Content>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Root>
+          ) : (
+            <button
+              className="status-chip kanban-move-trigger"
+              type="button"
+              disabled
+              aria-label="No available status transitions"
+              title="No available status transitions"
+            >
+              <span>Move</span>
+              <Icon path="M6 9l6 6 6-6" />
+            </button>
+          )}
+        </div>
       </div>
       {descriptionPreviewText && (
         <p className="kanban-desc-preview" title={descriptionPreviewText}>
@@ -200,17 +270,31 @@ function BoardTaskCard({
           </span>
         </div>
       )}
-      {!isScheduled && hasVisibleAutomationState && (
-        <div className="kanban-schedule-compact">
-          <span className={`task-schedule-chip task-schedule-state task-schedule-state-${executionStateClass}`}>
-            {executionStateLabel}
-          </span>
-        </div>
-      )}
-      {assigneeLabel && (
-        <div className="task-assignee-compact" title={`Assigned to ${assigneeLabel}`}>
-          <Icon path="M20 21a8 8 0 0 0-16 0M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8" />
-          <span>{assigneeLabel}</span>
+      {(assigneeLabel || externalRefCount > 0) && (
+        <div className="kanban-meta-compact">
+          <div className="kanban-meta-left">
+            {assigneeLabel && (
+              <div className="task-assignee-compact" title={`Assigned to ${assigneeLabel}`}>
+                <Icon path="M20 21a8 8 0 0 0-16 0M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8" />
+                <span>{assigneeLabel}</span>
+              </div>
+            )}
+          </div>
+          <div className="kanban-meta-right">
+            {!isScheduled && hasVisibleAutomationState && (
+              <span className={`task-schedule-chip task-schedule-state task-schedule-state-${executionStateClass}`}>
+                {executionStateLabel}
+              </span>
+            )}
+            {externalRefCount > 0 && (
+              <ChipTooltip label={`${externalRefCount} external link${externalRefCount === 1 ? '' : 's'}`}>
+                <span className="task-resource-chip">
+                  <Icon path="M14 3h7v7m0-7L10 14M5 7v12h12v-5" />
+                  <span>{externalRefCount}</span>
+                </span>
+              </ChipTooltip>
+            )}
+          </div>
         </div>
       )}
       {(task.labels ?? []).length > 0 && (
@@ -236,75 +320,6 @@ function BoardTaskCard({
           ))}
         </div>
       )}
-      <div
-        className="kanban-actions"
-        onClick={(event) => event.stopPropagation()}
-      >
-        {availableStatuses.length > 0 ? (
-          <DropdownMenu.Root>
-            <DropdownMenu.Trigger asChild>
-              <button
-                className="status-chip kanban-move-trigger"
-                type="button"
-                onClick={(event) => event.stopPropagation()}
-                aria-label="Move task to another status"
-                title="Move task to another status"
-              >
-                <span>Move to</span>
-                <Icon path="M6 9l6 6 6-6" />
-              </button>
-            </DropdownMenu.Trigger>
-            <DropdownMenu.Portal>
-              <DropdownMenu.Content className="task-group-menu-content kanban-move-menu-content" sideOffset={6} align="start">
-                {nextStatus && (
-                  <>
-                    <DropdownMenu.Item
-                      className="task-group-menu-item"
-                      onSelect={() => onMoveTaskStatus(task.id, nextStatus, targetGroupId)}
-                    >
-                      <Icon path="M13 5l7 7-7 7M5 12h14" />
-                      <span>{`Move to next (${nextStatus})`}</span>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator className="task-group-menu-separator" />
-                  </>
-                )}
-                <DropdownMenu.RadioGroup
-                  value={status}
-                  onValueChange={(value) => {
-                    if (value !== status) onMoveTaskStatus(task.id, value, targetGroupId)
-                  }}
-                >
-                  {statuses.map((candidateStatus) => (
-                    <DropdownMenu.RadioItem
-                      key={candidateStatus}
-                      value={candidateStatus}
-                      className="task-group-menu-item kanban-move-menu-item"
-                      disabled={candidateStatus === status}
-                    >
-                      <span className="kanban-move-menu-label">{candidateStatus}</span>
-                      {candidateStatus === status && <span className="meta kanban-move-menu-meta">Current</span>}
-                      <DropdownMenu.ItemIndicator className="kanban-move-menu-indicator">
-                        <Icon path="M5 13l4 4L19 7" />
-                      </DropdownMenu.ItemIndicator>
-                    </DropdownMenu.RadioItem>
-                  ))}
-                </DropdownMenu.RadioGroup>
-              </DropdownMenu.Content>
-            </DropdownMenu.Portal>
-          </DropdownMenu.Root>
-        ) : (
-          <button
-            className="status-chip kanban-move-trigger"
-            type="button"
-            disabled
-            aria-label="No available status transitions"
-            title="No available status transitions"
-          >
-            <span>Move to</span>
-            <Icon path="M6 9l6 6 6-6" />
-          </button>
-        )}
-      </div>
     </div>
   )
 }
@@ -991,12 +1006,10 @@ export function TasksPanel({
                       task={task}
                       assigneeLabel={getAssigneeLabel(task)}
                       onOpen={onOpenTaskEditor}
-                      onOpenSpecification={onOpenSpecification}
                       onTagClick={toggleSearchTag}
                       onRestore={onRestoreTask}
                       onReopen={onReopenTask}
                       onComplete={onCompleteTask}
-                      specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
                     />
                   </div>
                 ))}
@@ -1010,12 +1023,10 @@ export function TasksPanel({
                     task={task}
                     assigneeLabel={getAssigneeLabel(task)}
                     onOpen={onOpenTaskEditor}
-                    onOpenSpecification={onOpenSpecification}
                     onTagClick={toggleSearchTag}
                     onRestore={onRestoreTask}
                     onReopen={onReopenTask}
                     onComplete={onCompleteTask}
-                    specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
                   />
                 ))}
               </div>
@@ -1117,12 +1128,10 @@ export function TasksPanel({
                                 task={task}
                                 assigneeLabel={getAssigneeLabel(task)}
                                 onOpen={onOpenTaskEditor}
-                                onOpenSpecification={onOpenSpecification}
                                 onTagClick={toggleSearchTag}
                                 onRestore={onRestoreTask}
                                 onReopen={onReopenTask}
                                 onComplete={onCompleteTask}
-                                specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
                               />
                             </div>
                           ))}

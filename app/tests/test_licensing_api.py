@@ -214,6 +214,42 @@ def test_license_status_includes_update_notification_with_stable_id_and_type(tmp
     assert item["payload"].get("target_image_tag") == "v9.9.9"
 
 
+def test_license_status_includes_control_plane_notifications_from_metadata(tmp_path: Path):
+    client = build_client(tmp_path)
+    from shared.models import LicenseInstallation, SessionLocal
+
+    with SessionLocal() as db:
+        installation = db.execute(
+            select(LicenseInstallation).where(LicenseInstallation.installation_id == TEST_INSTALLATION_ID)
+        ).scalar_one()
+        installation.metadata_json = json.dumps(
+            {
+                "control_plane_notifications": [
+                    {
+                        "id": "cpn-release-001",
+                        "message": "ConstructOS v0.1.1660 is available.",
+                        "created_at": "2026-03-01T12:00:00+00:00",
+                        "notification_type": "AppUpdateAvailable",
+                        "severity": "info",
+                        "dedupe_key": "cpn-release-001",
+                        "source_event": "control-plane.notification",
+                        "payload": {"action": "auto_update_app_images"},
+                    }
+                ]
+            }
+        )
+        db.commit()
+
+    res = client.get("/api/license/status")
+    assert res.status_code == 200
+    payload = res.json()["license"]
+    assert "control_plane_notifications" not in (payload.get("metadata") or {})
+    notifications = payload["notifications"]
+    item = next(note for note in notifications if note["id"] == "cpn-release-001")
+    assert item["notification_type"] == "AppUpdateAvailable"
+    assert item["payload"]["action"] == "auto_update_app_images"
+
+
 def test_auto_update_endpoint_rejects_invalid_image_tag(tmp_path: Path):
     client = build_client(tmp_path)
 

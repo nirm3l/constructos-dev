@@ -21,6 +21,7 @@ from features.rules.domain import EVENT_CREATED as PROJECT_RULE_EVENT_CREATED
 from features.notes.domain import EVENT_CREATED as NOTE_EVENT_CREATED
 from features.specifications.domain import EVENT_CREATED as SPECIFICATION_EVENT_CREATED
 from features.tasks.domain import EVENT_CREATED as TASK_EVENT_CREATED
+from features.tasks.domain import EVENT_UPDATED as TASK_EVENT_UPDATED
 from features.task_groups.domain import EVENT_CREATED as TASK_GROUP_EVENT_CREATED
 from features.note_groups.domain import EVENT_CREATED as NOTE_GROUP_EVENT_CREATED
 from .auth import generate_temporary_password, hash_password, verify_password
@@ -144,6 +145,31 @@ def _seed_demo_event_storming_scaffold() -> None:
         {"project_id": BOOTSTRAP_PROJECT_ID, "project_name": DEMO_PROJECT_NAME},
         write=True,
     )
+
+
+def _demo_task_relationships_for(task_id: str) -> list[dict[str, Any]]:
+    if task_id == BOOTSTRAP_TASK_BOARD_TOUR_ID:
+        return [{
+            "kind": "depends_on",
+            "task_ids": [BOOTSTRAP_TASK_ID],
+            "match_mode": "all",
+            "statuses": ["Completed"],
+        }]
+    if task_id == BOOTSTRAP_TASK_AUTOMATION_TOUR_ID:
+        return [{
+            "kind": "depends_on",
+            "task_ids": [BOOTSTRAP_TASK_BOARD_TOUR_ID],
+            "match_mode": "all",
+            "statuses": ["Completed"],
+        }]
+    if task_id == BOOTSTRAP_TASK_KNOWLEDGE_TOUR_ID:
+        return [{
+            "kind": "depends_on",
+            "task_ids": [BOOTSTRAP_TASK_AUTOMATION_TOUR_ID],
+            "match_mode": "all",
+            "statuses": ["Completed"],
+        }]
+    return []
 
     now_iso = datetime.now(timezone.utc).isoformat()
     nodes = [
@@ -1415,6 +1441,7 @@ def bootstrap_data():
                     "assigned_agent_code": None,
                     "labels": ["welcome", "demo", "board"],
                     "subtasks": [],
+                    "task_relationships": _demo_task_relationships_for(BOOTSTRAP_TASK_ID),
                     "attachments": [],
                     "external_refs": [],
                     "attachment_refs": [],
@@ -1450,6 +1477,7 @@ def bootstrap_data():
                     "assigned_agent_code": None,
                     "labels": ["demo", "board", "kanban"],
                     "subtasks": [],
+                    "task_relationships": _demo_task_relationships_for(BOOTSTRAP_TASK_BOARD_TOUR_ID),
                     "attachments": [],
                     "external_refs": [],
                     "attachment_refs": [],
@@ -1485,6 +1513,7 @@ def bootstrap_data():
                     "assigned_agent_code": None,
                     "labels": ["demo", "automation", "agent"],
                     "subtasks": [],
+                    "task_relationships": _demo_task_relationships_for(BOOTSTRAP_TASK_AUTOMATION_TOUR_ID),
                     "attachments": [],
                     "external_refs": [
                         {"url": "https://platform.openai.com/docs", "title": "OpenAI API docs"},
@@ -1522,6 +1551,7 @@ def bootstrap_data():
                     "assigned_agent_code": None,
                     "labels": ["demo", "knowledge-graph", "context"],
                     "subtasks": [],
+                    "task_relationships": _demo_task_relationships_for(BOOTSTRAP_TASK_KNOWLEDGE_TOUR_ID),
                     "attachments": [],
                     "external_refs": [],
                     "attachment_refs": [],
@@ -1544,6 +1574,39 @@ def bootstrap_data():
         knowledge_demo_task = db.get(Task, BOOTSTRAP_TASK_KNOWLEDGE_TOUR_ID)
         if knowledge_demo_task is not None and (knowledge_demo_task.status or "").strip() == "QA":
             knowledge_demo_task.status = "Done"
+        for demo_task_id in (
+            BOOTSTRAP_TASK_ID,
+            BOOTSTRAP_TASK_BOARD_TOUR_ID,
+            BOOTSTRAP_TASK_AUTOMATION_TOUR_ID,
+            BOOTSTRAP_TASK_KNOWLEDGE_TOUR_ID,
+        ):
+            expected_relationships = _demo_task_relationships_for(demo_task_id)
+            task_row = db.get(Task, demo_task_id)
+            if task_row is None:
+                continue
+            try:
+                current_relationships = json.loads(str(task_row.task_relationships or "[]"))
+            except Exception:
+                current_relationships = []
+            if current_relationships == expected_relationships:
+                continue
+            version = current_version(db, "Task", demo_task_id)
+            if version <= 0:
+                continue
+            append_event(
+                db,
+                aggregate_type="Task",
+                aggregate_id=demo_task_id,
+                event_type=TASK_EVENT_UPDATED,
+                payload={"task_relationships": expected_relationships},
+                metadata={
+                    "actor_id": DEFAULT_USER_ID,
+                    "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                    "project_id": BOOTSTRAP_PROJECT_ID,
+                    "task_id": demo_task_id,
+                },
+                expected_version=version,
+            )
         _seed_demo_event_storming_scaffold()
         db.commit()
 

@@ -1,6 +1,7 @@
 import React from 'react'
 import * as AlertDialog from '@radix-ui/react-alert-dialog'
 import * as Accordion from '@radix-ui/react-accordion'
+import * as Dialog from '@radix-ui/react-dialog'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Popover from '@radix-ui/react-popover'
 import * as Select from '@radix-ui/react-select'
@@ -95,15 +96,6 @@ export function NotesPanel({
   state: any
   actions: any
 }) {
-  const hiddenPreviewMountStyle: React.CSSProperties = {
-    position: 'absolute',
-    width: 1,
-    height: 1,
-    overflow: 'hidden',
-    clipPath: 'inset(50%)',
-    opacity: 0,
-    pointerEvents: 'none',
-  }
   const noteGroups: NoteGroup[] = state.noteGroups?.data?.items ?? []
   const noteItems: Note[] = state.notes.data?.items ?? []
 
@@ -132,7 +124,7 @@ export function NotesPanel({
   const [dropTargetKey, setDropTargetKey] = React.useState<string | null>(null)
   const [openSectionKeys, setOpenSectionKeys] = React.useState<string[]>([])
   const [noteEditorOpenSections, setNoteEditorOpenSections] = React.useState<string[]>([])
-  const [previewOnlyNoteId, setPreviewOnlyNoteId] = React.useState<string | null>(null)
+  const [notePreviewDialog, setNotePreviewDialog] = React.useState<{ title: string, body: string } | null>(null)
   const [gitRepositoryDialogState, setGitRepositoryDialogState] = React.useState<{
     projectId: string
     target: ProjectGitRepositoryTarget | null
@@ -152,10 +144,6 @@ export function NotesPanel({
   React.useEffect(() => {
     setNoteEditorOpenSections([])
   }, [state.selectedNote?.id])
-  React.useEffect(() => {
-    if (!state.selectedNoteId) setPreviewOnlyNoteId(null)
-  }, [state.selectedNoteId])
-
   const openGitRepositoryFromRef = React.useCallback((projectId: string, ref: Note['external_refs'][number]) => {
     const target = parseProjectGitRepositoryExternalRef(ref)
     const normalizedProjectId = String(projectId || '').trim()
@@ -287,33 +275,11 @@ export function NotesPanel({
     })
   }, [state.createNoteMutation])
 
-  const openNotePreviewFullscreen = React.useCallback((noteId: string) => {
-    const alreadyOpen = String(state.selectedNoteId || '').trim() === String(noteId || '').trim()
-    if (!alreadyOpen) {
-      const changed = state.toggleNoteEditor(noteId)
-      if (!changed) return
-    }
-    setPreviewOnlyNoteId(noteId)
-    state.setShowTagPicker(false)
-    state.setTagPickerQuery('')
-    state.setNoteEditorView('preview')
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        const row = document.getElementById(`note-row-${noteId}`)
-        const surface = row?.querySelector('.md-editor-surface') as HTMLElement | null
-        if (!surface) return
-        const doc = document as Document & { webkitFullscreenElement?: Element | null }
-        const isFullscreen = surface.classList.contains('md-editor-fullscreen')
-          || document.fullscreenElement === surface
-          || doc.webkitFullscreenElement === surface
-        if (isFullscreen) return
-        surface.setAttribute('data-md-fullscreen-mode', 'readonly')
-        const fullscreenButton = surface.querySelector('.md-mode-toggle .md-fullscreen-btn') as HTMLButtonElement | null
-        fullscreenButton?.click()
-        window.setTimeout(() => {
-          surface.removeAttribute('data-md-fullscreen-mode')
-        }, 0)
-      })
+  const openNotePreviewDialog = React.useCallback((note: Note) => {
+    const isSelected = String(state.selectedNoteId || '').trim() === String(note.id || '').trim()
+    setNotePreviewDialog({
+      title: isSelected ? String(state.editNoteTitle || '').trim() || 'Untitled' : String(note.title || '').trim() || 'Untitled',
+      body: isSelected ? String(state.editNoteBody || '') : String(note.body || ''),
     })
   }, [state])
 
@@ -422,7 +388,6 @@ export function NotesPanel({
     const hasResources = externalRefCount > 0 || attachmentRefCount > 0
     const openNoteFromMenu = () => {
       if (isOpen) return
-      setPreviewOnlyNoteId(null)
       const changed = state.toggleNoteEditor(n.id)
       if (!changed) return
       state.setShowTagPicker(false)
@@ -450,7 +415,6 @@ export function NotesPanel({
     }
     const editorExternalRefs = state.parseExternalRefsText(state.editNoteExternalRefsText)
     const editorAttachmentRefs = state.parseAttachmentRefsText(state.editNoteAttachmentRefsText)
-    const isPreviewOnly = previewOnlyNoteId === n.id
     const editorExternalLinksMeta = editorExternalRefs.length > 0
       ? `${editorExternalRefs.length} linked`
       : 'No links added'
@@ -462,9 +426,8 @@ export function NotesPanel({
       <div
         key={n.id}
         id={`note-row-${n.id}`}
-        className={`note-row note-draggable ${isOpen && !isPreviewOnly ? 'open selected' : ''}`}
+        className={`note-row note-draggable ${isOpen ? 'open selected' : ''}`}
         onClick={() => {
-          setPreviewOnlyNoteId(null)
           const changed = state.toggleNoteEditor(n.id)
           if (!changed) return
           state.setShowTagPicker(false)
@@ -507,12 +470,12 @@ export function NotesPanel({
             <button
               className="action-icon note-row-actions-trigger"
               type="button"
-              title="Open preview fullscreen"
-              aria-label="Open preview fullscreen"
+              title="Open preview popup"
+              aria-label="Open preview popup"
               onPointerDown={(event) => event.stopPropagation()}
               onClick={(event) => {
                 event.stopPropagation()
-                openNotePreviewFullscreen(n.id)
+                openNotePreviewDialog(n)
               }}
             >
               <Icon path="M8 3H5a2 2 0 0 0-2 2v3m16 0V5a2 2 0 0 0-2-2h-3M8 21H5a2 2 0 0 1-2-2v-3m16 0v3a2 2 0 0 1-2 2h-3" />
@@ -547,11 +510,11 @@ export function NotesPanel({
                     onSelect={(event) => {
                       event.preventDefault()
                       event.stopPropagation()
-                      openNotePreviewFullscreen(n.id)
+                      openNotePreviewDialog(n)
                     }}
                   >
                     <Icon path="M8 3H5a2 2 0 0 0-2 2v3m16 0V5a2 2 0 0 0-2-2h-3M8 21H5a2 2 0 0 1-2-2v-3m16 0v3a2 2 0 0 1-2 2h-3" />
-                    <span>Preview fullscreen</span>
+                    <span>Preview popup</span>
                   </DropdownMenu.Item>
                   <DropdownMenu.Separator className="task-group-menu-separator" />
                   <DropdownMenu.Item className="task-group-menu-item" onSelect={togglePinFromMenu}>
@@ -655,7 +618,6 @@ export function NotesPanel({
             onClick={(e) => e.stopPropagation()}
             role="region"
             aria-label="Note editor"
-            style={isPreviewOnly ? hiddenPreviewMountStyle : undefined}
           >
             <div className="note-editor-head">
               <input
@@ -720,15 +682,6 @@ export function NotesPanel({
                 view={state.noteEditorView}
                 onChange={state.setNoteEditorView}
                 ariaLabel="Note editor view"
-                previewOnlyWhenFullscreen={isPreviewOnly}
-                onFullscreenTriggerMode={(mode, nextFullscreen) => {
-                  if (!nextFullscreen || mode === 'regular') {
-                    if (!nextFullscreen && isPreviewOnly && String(state.selectedNoteId || '') === String(n.id)) {
-                      state.toggleNoteEditor(n.id)
-                    }
-                    setPreviewOnlyNoteId(null)
-                  }
-                }}
               />
               <div className="md-editor-content">
                 {state.noteEditorView === 'write' ? (
@@ -1219,6 +1172,39 @@ export function NotesPanel({
           )}
         </div>
       </div>
+
+      <Dialog.Root open={notePreviewDialog !== null} onOpenChange={(open) => {
+        if (!open) setNotePreviewDialog(null)
+      }}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="codex-chat-alert-overlay" />
+          <Dialog.Content className="codex-chat-alert-content docker-runtime-dialog markdown-preview-dialog">
+            <div className="notification-markdown-header">
+              <div>
+                <Dialog.Title className="codex-chat-alert-title notification-markdown-title">
+                  {notePreviewDialog?.title || 'Untitled'}
+                </Dialog.Title>
+                <Dialog.Description className="codex-chat-alert-description">
+                  Note preview.
+                </Dialog.Description>
+              </div>
+              <Dialog.Close asChild>
+                <button
+                  type="button"
+                  className="action-icon docker-runtime-dialog-close notification-preview-close"
+                  aria-label="Close note preview"
+                  title="Close"
+                >
+                  <Icon path="M6 6l12 12M18 6L6 18" />
+                </button>
+              </Dialog.Close>
+            </div>
+            <div className="md-editor-content notification-markdown-content markdown-preview-body">
+              <MarkdownView value={notePreviewDialog?.body || ''} />
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
 
       <AlertDialog.Root
         open={noteGroupDialogOpen}

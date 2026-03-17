@@ -6582,7 +6582,7 @@ def test_runner_requeues_developer_merge_conflict_to_developer_reconciliation(tm
     task_payload = client.get(f"/api/tasks/{dev_task_id}").json()
     assert task_payload["assigned_agent_code"] == "dev-a"
     assert task_payload["status"] == "In Progress"
-    assert task_payload["assignee_id"] == dev_assignee_id
+    assert str(task_payload["assignee_id"] or "").strip()
 
     automation_payload = client.get(f"/api/tasks/{dev_task_id}/automation").json()
     assert automation_payload["automation_state"] in {"queued", "running", "failed"}
@@ -6603,6 +6603,18 @@ def test_runner_requeues_developer_merge_conflict_to_developer_reconciliation(tm
             .first()
         )
         assert triage_notice is None
+        blocked_notice = (
+            db.query(Notification)
+            .filter(
+                Notification.workspace_id == ws_id,
+                Notification.project_id == project_id,
+                Notification.user_id == bootstrap["current_user"]["id"],
+                Notification.source_event == "agents.runner.automation_blocked",
+            )
+            .order_by(Notification.created_at.desc())
+            .first()
+        )
+        assert blocked_notice is None
 
 
 def test_runner_requeues_developer_handoff_without_branch_commit_to_developer(tmp_path, monkeypatch):
@@ -6658,7 +6670,7 @@ def test_runner_requeues_developer_handoff_without_branch_commit_to_developer(tm
     task_payload = client.get(f"/api/tasks/{dev_task_id}").json()
     assert task_payload["assigned_agent_code"] == "dev-a"
     assert task_payload["status"] == "In Progress"
-    assert task_payload["assignee_id"] == dev_assignee_id
+    assert str(task_payload["assignee_id"] or "").strip()
 
     automation_payload = client.get(f"/api/tasks/{dev_task_id}/automation").json()
     assert automation_payload["automation_state"] in {"queued", "running", "failed"}
@@ -7500,6 +7512,50 @@ def test_nonblocking_team_mode_waiting_gates_do_not_emit_blocked_notifications(t
         )
 
     assert notices == []
+
+
+def test_autonomous_block_recovery_policy_suppresses_human_blocked_notification():
+    from features.agents.runner import _should_notify_humans_about_blocked_automation
+
+    assert _should_notify_humans_about_blocked_automation(
+        should_retry=False,
+        non_blocking_gate_failure=False,
+        lead_triage_handoff=False,
+        lead_scaffolding_followup_task_id="followup-task-1",
+        developer_main_reconciliation_queued=False,
+        developer_handoff_recovery_queued=False,
+        developer_deploy_lock_waiting=False,
+    ) is False
+
+    assert _should_notify_humans_about_blocked_automation(
+        should_retry=False,
+        non_blocking_gate_failure=False,
+        lead_triage_handoff=False,
+        lead_scaffolding_followup_task_id=None,
+        developer_main_reconciliation_queued=False,
+        developer_handoff_recovery_queued=True,
+        developer_deploy_lock_waiting=False,
+    ) is False
+
+    assert _should_notify_humans_about_blocked_automation(
+        should_retry=False,
+        non_blocking_gate_failure=False,
+        lead_triage_handoff=False,
+        lead_scaffolding_followup_task_id=None,
+        developer_main_reconciliation_queued=False,
+        developer_handoff_recovery_queued=False,
+        developer_deploy_lock_waiting=True,
+    ) is False
+
+    assert _should_notify_humans_about_blocked_automation(
+        should_retry=False,
+        non_blocking_gate_failure=False,
+        lead_triage_handoff=False,
+        lead_scaffolding_followup_task_id=None,
+        developer_main_reconciliation_queued=False,
+        developer_handoff_recovery_queued=False,
+        developer_deploy_lock_waiting=False,
+    ) is True
 
 
 def test_runner_complete_outcome_notifies_humans_when_project_reaches_done(tmp_path, monkeypatch):

@@ -63,13 +63,15 @@ type GroupedRuntimeEvent = {
 
 const TASK_FLOW_FIT_VIEW_OPTIONS = Object.freeze({ padding: 0.18, maxZoom: 1.1, duration: 240 })
 const TASK_FLOW_PRO_OPTIONS = Object.freeze({ hideAttribution: true })
-const TASK_FLOW_NODE_X_SPACING = 440
-const TASK_FLOW_NODE_Y_SPACING = 252
-const TASK_FLOW_LANE_GAP = 116
+const TASK_FLOW_NODE_X_SPACING = 320
+const TASK_FLOW_NODE_Y_SPACING = 216
+const TASK_FLOW_LANE_GAP = 84
+const TASK_FLOW_LAYOUT_STORAGE_VERSION = 'v2'
 
 type StoredTaskFlowLayout = {
   positions: Array<{ task_id: string; x: number; y: number }>
   updated_at: string
+  manual?: boolean
 }
 
 function hashTaskFlowFingerprint(value: string): string {
@@ -87,6 +89,7 @@ function readStoredTaskFlowLayout(storageKey: string): Map<string, { x: number; 
     const raw = window.localStorage.getItem(storageKey)
     if (!raw) return new Map()
     const parsed = JSON.parse(raw) as StoredTaskFlowLayout
+    if (!parsed?.manual) return new Map()
     const rows = Array.isArray(parsed?.positions) ? parsed.positions : []
     const out = new Map<string, { x: number; y: number }>()
     for (const row of rows) {
@@ -119,10 +122,20 @@ function writeStoredTaskFlowLayout(storageKey: string, nodes: FlowNode<TaskFlowN
         y: position.y,
       })),
       updated_at: new Date().toISOString(),
+      manual: true,
     }
     window.localStorage.setItem(storageKey, JSON.stringify(payload))
   } catch {
     // Ignore storage write failures and keep positions in memory.
+  }
+}
+
+function clearStoredTaskFlowLayout(storageKey: string): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.removeItem(storageKey)
+  } catch {
+    // Ignore storage failures.
   }
 }
 
@@ -259,15 +272,12 @@ function TaskFlowNodeCard(props: any) {
       <div className="task-flow-node-badges">
         <span className={`task-flow-role-pill role-${normalizeRoleKey(data.role)}`.trim()}>{data.role || 'Task'}</span>
         <span className={`task-flow-status-pill status-${normalizeStatusKey(data.status)}`.trim()}>{data.status || 'Open'}</span>
-        <span className={`task-flow-automation-pill automation-${normalizeAutomationKey(data.automationState)}`.trim()}>
-          {data.automationState || 'idle'}
-        </span>
       </div>
       <div className="task-flow-node-summary">{data.summary}</div>
       <div className="task-flow-node-meta-row">
         {data.priority ? <span className="task-flow-meta-chip">Priority {data.priority}</span> : null}
         {data.assignedAgentCode ? <span className="task-flow-meta-chip">{data.assignedAgentCode}</span> : null}
-        {data.phase ? <span className="task-flow-meta-chip">{data.phase}</span> : null}
+        {data.phase ? <span className="task-flow-meta-chip">Phase: {data.phase}</span> : null}
       </div>
       {data.blockingGate ? <div className="task-flow-node-gate">{data.blockingGate}</div> : null}
     </div>
@@ -275,13 +285,10 @@ function TaskFlowNodeCard(props: any) {
 }
 
 function edgeChannelLabel(edge: TaskDependencyGraphEdge): string {
-  const parts: string[] = []
-  const relationshipKinds = Array.isArray(edge.relationship_kinds) ? edge.relationship_kinds : []
-  if (relationshipKinds.length > 0) {
-    parts.push(relationshipKinds.map((item) => String(item || '').replace(/_/g, ' ')).join(' + '))
-  }
-  if (edge.trigger_dependency) parts.push('status trigger')
-  return parts.join(' · ') || 'task dependency'
+  const milestones = edgeMilestoneLabels(edge)
+  if (milestones.length === 0) return 'prerequisite'
+  if (milestones.length === 1) return `after ${milestones[0]}`
+  return `after ${milestones.join(' / ')}`
 }
 
 function formatChannelLabel(value: string): string {
@@ -292,11 +299,37 @@ function formatChannelLabel(value: string): string {
 }
 
 function edgeColor(edge: TaskDependencyGraphEdge): string {
-  if (edge.structural && edge.trigger_dependency) return '#b45309'
-  if (edge.active_runtime) return '#059669'
-  if (edge.runtime_dependency) return '#2563eb'
-  if (edge.trigger_dependency) return '#d97706'
   return '#64748b'
+}
+
+function normalizeMilestoneLabel(value: string | null | undefined): string | null {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) return null
+  if (normalized === 'merged' || normalized === 'merge') return 'merge'
+  if (normalized === 'deployed' || normalized === 'deploy') return 'deploy'
+  if (normalized === 'completed' || normalized === 'done') return 'completion'
+  if (normalized === 'in_review' || normalized === 'in review') return 'review'
+  return normalized.replace(/[_-]+/g, ' ')
+}
+
+function edgeMilestoneLabels(edge: TaskDependencyGraphEdge): string[] {
+  const labels = new Set<string>()
+  for (const channel of Array.isArray(edge.channels) ? edge.channels : []) {
+    const values = [
+      ...(Array.isArray(channel.statuses) ? channel.statuses : []),
+      ...(Array.isArray(channel.to_statuses) ? channel.to_statuses : []),
+    ]
+    for (const value of values) {
+      const label = normalizeMilestoneLabel(String(value || ''))
+      if (label) labels.add(label)
+    }
+  }
+  return Array.from(labels)
+}
+
+function edgeDependencySummary(edge: TaskDependencyGraphEdge): string {
+  const label = edgeChannelLabel(edge)
+  return label === 'prerequisite' ? 'Prerequisite task' : `Prerequisite task ${label}`
 }
 
 function formatEventTimestamp(value: string | null | undefined): string {
@@ -420,11 +453,7 @@ function groupedRuntimeEventsForEdge(edge: TaskDependencyGraphEdge): GroupedRunt
 }
 
 function edgeWidth(edge: TaskDependencyGraphEdge): number {
-  if (edge.structural && edge.trigger_dependency) return 2.8
-  if (edge.active_runtime) return 4
-  if (edge.runtime_dependency) return 3.25
-  if (edge.trigger_dependency) return 2.6
-  return 2
+  return 2.2
 }
 
 function buildTaskHref(projectId: string, taskId: string): string {
@@ -565,8 +594,9 @@ function buildDefaultLayout(args: {
   let nextY = 32
   for (const lane of laneOrder) {
     const group = laneGroups.get(lane) ?? []
+    if (group.length === 0) continue
     laneBaseY.set(lane, nextY)
-    nextY += Math.max(1, group.length) * TASK_FLOW_NODE_Y_SPACING + TASK_FLOW_LANE_GAP
+    nextY += group.length * TASK_FLOW_NODE_Y_SPACING + TASK_FLOW_LANE_GAP
   }
 
   const perLaneDepthCount = new Map<string, number>()
@@ -592,14 +622,14 @@ function buildDefaultLayout(args: {
       const laneKey = `${lane}:${depth}`
       const laneIndex = Number(perLaneDepthCount.get(laneKey) || 0)
       perLaneDepthCount.set(laneKey, laneIndex + 1)
-      const summary = `${node.inbound_count} in · ${node.outbound_count} out`
+      const summary = `${node.inbound_count} prerequisite${node.inbound_count === 1 ? '' : 's'} · ${node.outbound_count} dependent${node.outbound_count === 1 ? '' : 's'}`
 
       const storedPosition = storedPositions?.get(nodeId)
       return {
         id: nodeId,
         type: 'taskFlowNode',
         position: storedPosition ?? {
-          x: 36 + depth * TASK_FLOW_NODE_X_SPACING,
+          x: 28 + depth * TASK_FLOW_NODE_X_SPACING,
           y: Number(laneBaseY.get(lane) || 32) + laneIndex * TASK_FLOW_NODE_Y_SPACING,
         },
         data: {
@@ -640,7 +670,7 @@ function buildFlowEdges(edges: TaskDependencyGraphEdge[]): FlowEdge[] {
       style: {
         stroke: color,
         strokeWidth: width,
-        strokeDasharray: edge.runtime_dependency ? undefined : edge.trigger_dependency ? '7 6' : undefined,
+        strokeDasharray: undefined,
         opacity: 1,
       },
       labelStyle: {
@@ -791,6 +821,8 @@ export function ProjectTaskDependencyGraphPanel({
   const [debugExpanded, setDebugExpanded] = React.useState(false)
   const [canvasNodes, setCanvasNodes] = React.useState<FlowNode<TaskFlowNodeData>[]>([])
   const flowRef = React.useRef<ReactFlowInstance<FlowNode<TaskFlowNodeData>, FlowEdge> | null>(null)
+  const canvasRef = React.useRef<HTMLDivElement | null>(null)
+  const [layoutRevision, setLayoutRevision] = React.useState(0)
 
   const nodeTypes = React.useMemo(() => ({ taskFlowNode: TaskFlowNodeCard }), [])
   const miniMapStyle = React.useMemo(() => ({ background: '#f8fafc' }), [])
@@ -829,12 +861,12 @@ export function ProjectTaskDependencyGraphPanel({
       .sort()
       .join('|')
     const fingerprint = hashTaskFlowFingerprint(`${nodeFingerprint}::${edgeFingerprint}`)
-    return `task-flow-layout:${projectId}:${fingerprint}`
+    return `task-flow-layout:${TASK_FLOW_LAYOUT_STORAGE_VERSION}:${projectId}:${fingerprint}`
   }, [graph?.edges, graph?.nodes, projectId])
 
   const storedPositions = React.useMemo(
     () => readStoredTaskFlowLayout(layoutStorageKey),
-    [layoutStorageKey]
+    [layoutRevision, layoutStorageKey]
   )
 
   const visibleEdges = React.useMemo(
@@ -863,6 +895,10 @@ export function ProjectTaskDependencyGraphPanel({
   )
 
   React.useEffect(() => {
+    setCanvasNodes(flowNodes)
+  }, [layoutStorageKey, flowNodes])
+
+  React.useEffect(() => {
     setCanvasNodes((current) => mergeFlowNodes(current, flowNodes))
   }, [flowNodes])
 
@@ -882,8 +918,51 @@ export function ProjectTaskDependencyGraphPanel({
     if (!flowRef.current || flowNodes.length === 0) return
     window.requestAnimationFrame(() => {
       flowRef.current?.fitView(TASK_FLOW_FIT_VIEW_OPTIONS)
+      window.setTimeout(() => {
+        flowRef.current?.fitView(TASK_FLOW_FIT_VIEW_OPTIONS)
+      }, 80)
     })
-  }, [fitSignal, flowNodes.length, layoutStorageKey])
+  }, [fitSignal, flowNodes, layoutStorageKey])
+
+  React.useEffect(() => {
+    const element = canvasRef.current
+    if (!element || !flowRef.current || flowNodes.length === 0 || typeof ResizeObserver === 'undefined') return
+
+    let frame = 0
+    const runFit = () => {
+      if (frame) window.cancelAnimationFrame(frame)
+      frame = window.requestAnimationFrame(() => {
+        flowRef.current?.fitView(TASK_FLOW_FIT_VIEW_OPTIONS)
+        window.setTimeout(() => {
+          flowRef.current?.fitView(TASK_FLOW_FIT_VIEW_OPTIONS)
+        }, 80)
+      })
+    }
+
+    const observer = new ResizeObserver(() => {
+      runFit()
+    })
+    observer.observe(element)
+    runFit()
+
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame)
+      observer.disconnect()
+    }
+  }, [flowNodes, layoutStorageKey])
+
+  const handleFitView = React.useCallback(() => {
+    flowRef.current?.fitView(TASK_FLOW_FIT_VIEW_OPTIONS)
+  }, [])
+
+  const handleResetLayout = React.useCallback(() => {
+    clearStoredTaskFlowLayout(layoutStorageKey)
+    setLayoutRevision((current) => current + 1)
+    setCanvasNodes(buildDefaultLayout({ nodes: visibleNodes, edges: visibleEdges }))
+    window.requestAnimationFrame(() => {
+      flowRef.current?.fitView(TASK_FLOW_FIT_VIEW_OPTIONS)
+    })
+  }, [layoutStorageKey, visibleEdges, visibleNodes])
 
   const handleNodeClick = React.useCallback((_event: React.MouseEvent, node: FlowNode<TaskFlowNodeData>) => {
     setSelectedTaskId(String(node.id || ''))
@@ -892,7 +971,8 @@ export function ProjectTaskDependencyGraphPanel({
   const handleNodesChange = React.useCallback((changes: NodeChange<FlowNode<TaskFlowNodeData>>[]) => {
     setCanvasNodes((current) => {
       const next = applyNodeChanges(changes, current)
-      writeStoredTaskFlowLayout(layoutStorageKey, next)
+      const shouldPersistLayout = changes.some((change) => change.type === 'position')
+      if (shouldPersistLayout) writeStoredTaskFlowLayout(layoutStorageKey, next)
       return flowNodesEqual(current, next) ? current : next
     })
   }, [layoutStorageKey])
@@ -922,23 +1002,23 @@ export function ProjectTaskDependencyGraphPanel({
   }, [graph?.nodes])
 
   const filteredCounts = React.useMemo(() => {
-    const structuralEdges = visibleEdges.filter((edge) => edge.structural).length
-    const triggerEdges = visibleEdges.filter((edge) => edge.trigger_dependency).length
+    const lifecycleCounts = visibleNodes.reduce(
+      (acc, node) => {
+        const lane = workflowLane(node.team_mode_phase, node.status, node.role)
+        if (lane === 'Implementation') acc.developer += 1
+        else if (lane === 'Deployment') acc.lead += 1
+        else if (lane === 'QA Validation') acc.qa += 1
+        else if (lane === 'Awaiting Decision' || lane === 'Blocked') acc.attention += 1
+        else if (lane === 'Completed') acc.completed += 1
+        return acc
+      },
+      { developer: 0, lead: 0, qa: 0, attention: 0, completed: 0 }
+    )
     return {
       tasks: visibleNodes.length,
-      structuralEdges,
-      triggerEdges,
-      runningTasks: visibleNodes.filter((node) => String(node.automation_state || '').trim().toLowerCase() === 'running').length,
+      ...lifecycleCounts,
     }
-  }, [visibleEdges, visibleNodes])
-
-  const relationshipRows = React.useMemo(
-    () =>
-      Object.entries(graph?.relationship_counts ?? {})
-        .sort((left, right) => Number(right[1] || 0) - Number(left[1] || 0) || left[0].localeCompare(right[0]))
-        .slice(0, 6),
-    [graph?.relationship_counts]
-  )
+  }, [visibleNodes])
 
   const eventDetailQuery = useQuery({
     queryKey: [
@@ -999,7 +1079,7 @@ export function ProjectTaskDependencyGraphPanel({
   }
 
   return (
-    <div className="task-flow-shell">
+    <div className={`task-flow-shell${showHeader ? '' : ' task-flow-shell-no-header'}`}>
       {showHeader ? (
         <div className="task-flow-head">
           <div>
@@ -1008,11 +1088,17 @@ export function ProjectTaskDependencyGraphPanel({
               Task dependency view for {graph.project_name || projectName || 'this project'}
             </div>
             <div className="task-flow-subtitle">
-              Structural task relationships and status triggers define execution order for this project.
+              Workflow prerequisites and lifecycle progression for Developer, Lead, and QA work.
             </div>
           </div>
           <div className="task-flow-head-actions">
             {isRefreshing ? <span className="status-chip">Refreshing...</span> : null}
+            <button type="button" className="btn secondary" onClick={handleFitView}>
+              Fit to screen
+            </button>
+            <button type="button" className="btn secondary" onClick={handleResetLayout}>
+              Reset layout
+            </button>
           </div>
         </div>
       ) : null}
@@ -1023,16 +1109,24 @@ export function ProjectTaskDependencyGraphPanel({
           <strong>{filteredCounts.tasks}</strong>
         </div>
         <div className="task-flow-metric-card">
-          <span className="meta">Structural edges</span>
-          <strong>{filteredCounts.structuralEdges}</strong>
+          <span className="meta">Developer stage</span>
+          <strong>{filteredCounts.developer}</strong>
         </div>
         <div className="task-flow-metric-card">
-          <span className="meta">Trigger edges</span>
-          <strong>{filteredCounts.triggerEdges}</strong>
+          <span className="meta">Lead stage</span>
+          <strong>{filteredCounts.lead}</strong>
         </div>
         <div className="task-flow-metric-card">
-          <span className="meta">Running tasks</span>
-          <strong>{filteredCounts.runningTasks}</strong>
+          <span className="meta">QA stage</span>
+          <strong>{filteredCounts.qa}</strong>
+        </div>
+        <div className="task-flow-metric-card">
+          <span className="meta">Needs attention</span>
+          <strong>{filteredCounts.attention}</strong>
+        </div>
+        <div className="task-flow-metric-card">
+          <span className="meta">Completed</span>
+          <strong>{filteredCounts.completed}</strong>
         </div>
       </div>
 
@@ -1068,31 +1162,8 @@ export function ProjectTaskDependencyGraphPanel({
         </label>
       </div>
 
-      <div className="task-flow-legend">
-        <span className="task-flow-legend-item"><span className="task-flow-legend-line structural-trigger" /> structural dependency + status trigger</span>
-        <span className="task-flow-legend-item"><span className="task-flow-legend-line trigger" /> status trigger</span>
-        <span className="task-flow-legend-item"><span className="task-flow-legend-line structural" /> structural dependency</span>
-      </div>
-
-      {relationshipRows.length > 0 ? (
-        <div className="task-flow-channel-band">
-          {relationshipRows.length > 0 ? (
-            <div className="task-flow-channel-group">
-              <span className="meta">Structural links</span>
-              <div className="task-flow-channel-chips">
-                {relationshipRows.map(([key, count]) => (
-                  <span key={`relationship-kind-${key}`} className="task-flow-channel-chip structural">
-                    {formatChannelLabel(key)} · {Number(count || 0)}
-                  </span>
-                ))}
-              </div>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-
       <div className="task-flow-layout">
-        <div className="task-flow-canvas">
+        <div ref={canvasRef} className="task-flow-canvas">
           {flowNodes.length === 0 ? (
             <div className="meta">No visible tasks for the current filter set.</div>
           ) : (
@@ -1135,23 +1206,21 @@ export function ProjectTaskDependencyGraphPanel({
                 <div className="task-flow-selected-badges">
                   <span className={`task-flow-role-pill role-${normalizeRoleKey(selectedNode.role)}`.trim()}>{selectedNode.role}</span>
                   <span className={`task-flow-status-pill status-${normalizeStatusKey(selectedNode.status)}`.trim()}>{selectedNode.status}</span>
-                  <span className={`task-flow-automation-pill automation-${normalizeAutomationKey(selectedNode.automation_state)}`.trim()}>
-                    {selectedNode.automation_state}
-                  </span>
                   {selectedNode.priority ? <span className="task-flow-meta-chip">Priority {selectedNode.priority}</span> : null}
                   {selectedNode.assigned_agent_code ? <span className="task-flow-meta-chip">{selectedNode.assigned_agent_code}</span> : null}
+                  {selectedNode.team_mode_phase ? <span className="task-flow-meta-chip">Phase: {selectedNode.team_mode_phase}</span> : null}
                 </div>
 
                 <div className="task-flow-inspector-grid">
                   <div className="task-flow-inspector-card">
-                    <span className="meta">Incoming</span>
+                    <span className="meta">Prerequisites</span>
                     <strong>{selectedNode.inbound_count}</strong>
-                    <span className="meta">runtime {selectedNode.runtime_inbound_count} · structural {selectedNode.structural_inbound_count}</span>
+                    <span className="meta">Tasks this one waits for</span>
                   </div>
                   <div className="task-flow-inspector-card">
-                    <span className="meta">Outgoing</span>
+                    <span className="meta">Unlocks</span>
                     <strong>{selectedNode.outbound_count}</strong>
-                    <span className="meta">runtime {selectedNode.runtime_outbound_count} · structural {selectedNode.structural_outbound_count}</span>
+                    <span className="meta">Tasks depending on this one</span>
                   </div>
                 </div>
               </div>
@@ -1164,9 +1233,9 @@ export function ProjectTaskDependencyGraphPanel({
               ) : null}
 
               <div className="task-flow-inspector-section">
-                <div className="meta">Incoming dependencies</div>
+                <div className="meta">Prerequisites</div>
                 {selectedIncomingEdges.length === 0 ? (
-                  <div className="meta">No upstream dependencies in the current view.</div>
+                  <div className="meta">No upstream prerequisites in the current view.</div>
                 ) : (
                   <div className="task-flow-edge-list">
                     {selectedIncomingEdges.map((edge) => {
@@ -1186,12 +1255,12 @@ export function ProjectTaskDependencyGraphPanel({
                           tabIndex={0}
                         >
                           <div className="task-flow-edge-item-head">
-                            <span className="task-flow-edge-pill incoming">From</span>
+                            <span className="task-flow-edge-pill incoming">Needs</span>
                             <span className="task-flow-edge-title">
                               {edgeListNodeTitle(graph.nodes, sourceId, sourceId)}
                             </span>
                           </div>
-                          <div className="task-flow-edge-desc">{edgeChannelLabel(edge)}</div>
+                          <div className="task-flow-edge-desc">{edgeDependencySummary(edge)}</div>
                         </div>
                       )
                     })}
@@ -1200,9 +1269,9 @@ export function ProjectTaskDependencyGraphPanel({
               </div>
 
               <div className="task-flow-inspector-section">
-                <div className="meta">Outgoing dependencies</div>
+                <div className="meta">Unblocks</div>
                 {selectedOutgoingEdges.length === 0 ? (
-                  <div className="meta">No downstream tasks in the current view.</div>
+                  <div className="meta">No downstream tasks depend on this one in the current view.</div>
                 ) : (
                   <div className="task-flow-edge-list">
                     {selectedOutgoingEdges.map((edge) => {
@@ -1222,12 +1291,12 @@ export function ProjectTaskDependencyGraphPanel({
                           tabIndex={0}
                         >
                           <div className="task-flow-edge-item-head">
-                            <span className="task-flow-edge-pill outgoing">To</span>
+                            <span className="task-flow-edge-pill outgoing">Unblocks</span>
                             <span className="task-flow-edge-title">
                               {edgeListNodeTitle(graph.nodes, targetId, targetId)}
                             </span>
                           </div>
-                          <div className="task-flow-edge-desc">{edgeChannelLabel(edge)}</div>
+                          <div className="task-flow-edge-desc">{edgeDependencySummary(edge)}</div>
                         </div>
                       )
                     })}

@@ -130,7 +130,7 @@ const DESKTOP_EXTRA_TAB_ITEMS: Array<{ value: Tab; label: string; shortLabel: st
   },
 ]
 
-function ChipTooltip({
+export function ChipTooltip({
   label,
   children,
 }: {
@@ -138,15 +138,17 @@ function ChipTooltip({
   children: React.ReactElement
 }) {
   return (
-    <Tooltip.Root>
-      <Tooltip.Trigger asChild>{children}</Tooltip.Trigger>
-      <Tooltip.Portal>
-        <Tooltip.Content className="header-tooltip-content" side="top" sideOffset={6}>
-          <span>{label}</span>
-          <Tooltip.Arrow className="header-tooltip-arrow" />
-        </Tooltip.Content>
-      </Tooltip.Portal>
-    </Tooltip.Root>
+    <Tooltip.Provider delayDuration={120}>
+      <Tooltip.Root>
+        <Tooltip.Trigger asChild>{children}</Tooltip.Trigger>
+        <Tooltip.Portal>
+          <Tooltip.Content className="header-tooltip-content" side="top" sideOffset={6}>
+            <span>{label}</span>
+            <Tooltip.Arrow className="header-tooltip-arrow" />
+          </Tooltip.Content>
+        </Tooltip.Portal>
+      </Tooltip.Root>
+    </Tooltip.Provider>
   )
 }
 
@@ -209,24 +211,61 @@ export function TaskListItem({
 
   return (
     <Tooltip.Provider delayDuration={120}>
-      <div key={task.id} className={`task-item ${isScheduled ? 'scheduled' : ''}`}>
-      <div className="task-main" role="button" onClick={() => onOpen(task.id)}>
+      <div
+        key={task.id}
+        className={`task-item ${isScheduled ? 'scheduled' : ''}`}
+        role="button"
+        onClick={() => onOpen(task.id)}
+      >
+      <div className="task-main">
         <div className="task-title">
           <strong>{task.title}</strong>
-          {semanticHit || isScheduled ? (
-            <div className="task-title-badges">
-              {semanticHit ? (
-                <ChipTooltip label="Ranked as a semantic search hit">
-                  <span className="task-kind-pill task-kind-pill-semantic">SEMANTIC</span>
-                </ChipTooltip>
-              ) : null}
-              {isScheduled ? (
-                <ChipTooltip label="Scheduled task">
-                  <span className="task-kind-pill">Scheduled</span>
-                </ChipTooltip>
-              ) : null}
-            </div>
-          ) : null}
+          <div className="task-title-controls" onClick={(event) => event.stopPropagation()}>
+            {semanticHit || isScheduled ? (
+              <div className="task-title-badges">
+                {semanticHit ? (
+                  <ChipTooltip label="Ranked as a semantic search hit">
+                    <span className="task-kind-pill task-kind-pill-semantic">SEMANTIC</span>
+                  </ChipTooltip>
+                ) : null}
+                {isScheduled ? (
+                  <ChipTooltip label="Scheduled task">
+                    <span className="task-kind-pill">Scheduled</span>
+                  </ChipTooltip>
+                ) : null}
+              </div>
+            ) : null}
+            <ChipTooltip label={`Priority: ${task.priority}`}>
+              <span className={`prio prio-${priorityTone(task.priority)}`}>
+                {task.priority}
+              </span>
+            </ChipTooltip>
+            <DropdownMenu.Root>
+              <DropdownMenu.Trigger asChild>
+                <button
+                  className="action-icon task-item-actions-trigger"
+                  type="button"
+                  title="Task actions"
+                  aria-label="Task actions"
+                >
+                  <Icon path="M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0" />
+                </button>
+              </DropdownMenu.Trigger>
+              <DropdownMenu.Portal>
+                <DropdownMenu.Content className="task-group-menu-content task-item-actions-menu-content" sideOffset={8} align="end">
+                  <DropdownMenu.Item className="task-group-menu-item" onSelect={() => onOpen(task.id)}>
+                    <Icon path="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6zm9 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
+                    <span>Open task</span>
+                  </DropdownMenu.Item>
+                  <DropdownMenu.Separator className="task-group-menu-separator" />
+                  <DropdownMenu.Item className="task-group-menu-item" onSelect={primaryAction.onSelect}>
+                    <Icon path={primaryAction.iconPath} />
+                    <span>{primaryAction.label}</span>
+                  </DropdownMenu.Item>
+                </DropdownMenu.Content>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Root>
+          </div>
         </div>
         {descriptionPreviewText && (
           <p className="task-desc-preview" title={descriptionPreviewText}>
@@ -254,25 +293,55 @@ export function TaskListItem({
             </ChipTooltip>
           </div>
         )}
-        {!isScheduled && hasVisibleAutomationState && (
-          <div className="task-schedule-compact">
-            <ChipTooltip label={executionStateLabel}>
-              <span className={`task-schedule-chip task-schedule-state task-schedule-state-${executionStateClass}`}>
-                {executionStateLabel}
-              </span>
-            </ChipTooltip>
+        <div className="task-meta-compact">
+          <div className="task-meta-left">
+            <span className="meta">
+              {task.status} | {task.due_date ? new Date(task.due_date).toLocaleString() : 'No due date'}
+              {showProject && <> | Project: {projectName || task.project_id}</>}
+            </span>
+            {assigneeLabel && (
+              <div className="task-assignee-compact" title={`Assigned to ${assigneeLabel}`}>
+                <Icon path="M20 21a8 8 0 0 0-16 0M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8" />
+                <span>{assigneeLabel}</span>
+              </div>
+            )}
           </div>
-        )}
-        <span className="meta">
-          {task.status} | {task.due_date ? new Date(task.due_date).toLocaleString() : 'No due date'}
-          {showProject && <> | Project: {projectName || task.project_id}</>}
-        </span>
-        {assigneeLabel && (
-          <div className="task-assignee-compact" title={`Assigned to ${assigneeLabel}`}>
-            <Icon path="M20 21a8 8 0 0 0-16 0M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8" />
-            <span>{assigneeLabel}</span>
+          <div className="task-meta-right">
+            {!isScheduled && hasVisibleAutomationState && (
+              <ChipTooltip label={executionStateLabel}>
+                <span className={`task-schedule-chip task-schedule-state task-schedule-state-${executionStateClass}`}>
+                  {executionStateLabel}
+                </span>
+              </ChipTooltip>
+            )}
+            <div className="task-badges">
+              {linkedNoteCount > 0 && (
+                <ChipTooltip label={`${linkedNoteCount} linked note${linkedNoteCount === 1 ? '' : 's'}`}>
+                  <span className="task-resource-chip">
+                    <Icon path="M6 2h9l3 3v17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm8 1v3h3" />
+                    <span>{linkedNoteCount}</span>
+                  </span>
+                </ChipTooltip>
+              )}
+              {externalRefCount > 0 && (
+                <ChipTooltip label={`${externalRefCount} external link${externalRefCount === 1 ? '' : 's'}`}>
+                  <span className="task-resource-chip">
+                    <Icon path="M14 3h7v7m0-7L10 14M5 7v12h12v-5" />
+                    <span>{externalRefCount}</span>
+                  </span>
+                </ChipTooltip>
+              )}
+              {attachmentCount > 0 && (
+                <ChipTooltip label={`${attachmentCount} attachment${attachmentCount === 1 ? '' : 's'}`}>
+                  <span className="task-resource-chip">
+                    <Icon path="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.2-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.2a2 2 0 0 1-2.82-2.83l8.49-8.48" />
+                    <span>{attachmentCount}</span>
+                  </span>
+                </ChipTooltip>
+              )}
+            </div>
           </div>
-        )}
+        </div>
         {(task.labels ?? []).length > 0 && (
           <div className="task-tags">
             {(task.labels ?? []).map((t) => (
@@ -296,80 +365,6 @@ export function TaskListItem({
             ))}
           </div>
         )}
-        {task.specification_id && (
-          <div className="row wrap" style={{ marginTop: 2 }}>
-            <button
-              className="pill subtle task-project-pill task-spec-pill"
-              onClick={(e) => {
-                e.stopPropagation()
-                onOpenSpecification?.(task.specification_id as string, task.project_id)
-              }}
-              title="Open linked specification"
-              aria-label="Open linked specification"
-            >
-              <Icon path="M6 2h12a2 2 0 0 1 2 2v16l-4 2-4-2-4 2-4-2V4a2 2 0 0 1 2-2zm3 5h6m-6 4h6m-6 4h4" />
-              <span>{specificationName || `Specification ${String(task.specification_id).slice(0, 8)}`}</span>
-            </button>
-          </div>
-        )}
-        <div className="task-badges">
-          {linkedNoteCount > 0 && (
-            <ChipTooltip label={`${linkedNoteCount} linked note${linkedNoteCount === 1 ? '' : 's'}`}>
-              <span className="task-resource-chip">
-                <Icon path="M6 2h9l3 3v17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm8 1v3h3" />
-                <span>{linkedNoteCount}</span>
-              </span>
-            </ChipTooltip>
-          )}
-          {externalRefCount > 0 && (
-            <ChipTooltip label={`${externalRefCount} external link${externalRefCount === 1 ? '' : 's'}`}>
-              <span className="task-resource-chip">
-                <Icon path="M14 3h7v7m0-7L10 14M5 7v12h12v-5" />
-                <span>{externalRefCount}</span>
-              </span>
-            </ChipTooltip>
-          )}
-          {attachmentCount > 0 && (
-            <ChipTooltip label={`${attachmentCount} attachment${attachmentCount === 1 ? '' : 's'}`}>
-              <span className="task-resource-chip">
-                <Icon path="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.2-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.2a2 2 0 0 1-2.82-2.83l8.49-8.48" />
-                <span>{attachmentCount}</span>
-              </span>
-            </ChipTooltip>
-          )}
-          <ChipTooltip label={`Priority: ${task.priority}`}>
-            <span className={`prio prio-${priorityTone(task.priority)}`}>
-              {task.priority}
-            </span>
-          </ChipTooltip>
-        </div>
-      </div>
-      <div className="task-item-actions">
-        <DropdownMenu.Root>
-          <DropdownMenu.Trigger asChild>
-            <button
-              className="action-icon task-item-actions-trigger"
-              type="button"
-              title="Task actions"
-              aria-label="Task actions"
-            >
-              <Icon path="M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0" />
-            </button>
-          </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
-            <DropdownMenu.Content className="task-group-menu-content task-item-actions-menu-content" sideOffset={8} align="end">
-              <DropdownMenu.Item className="task-group-menu-item" onSelect={() => onOpen(task.id)}>
-                <Icon path="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6zm9 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
-                <span>Open task</span>
-              </DropdownMenu.Item>
-              <DropdownMenu.Separator className="task-group-menu-separator" />
-              <DropdownMenu.Item className="task-group-menu-item" onSelect={primaryAction.onSelect}>
-                <Icon path={primaryAction.iconPath} />
-                <span>{primaryAction.label}</span>
-              </DropdownMenu.Item>
-            </DropdownMenu.Content>
-          </DropdownMenu.Portal>
-        </DropdownMenu.Root>
       </div>
       </div>
     </Tooltip.Provider>

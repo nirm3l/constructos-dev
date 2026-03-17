@@ -120,17 +120,19 @@ a {
 }
 
 .header-inner {
-  min-height: 74px;
-  display: flex;
+  min-height: 86px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 0.9rem;
+  padding: 0.8rem 0 0.9rem;
 }
 
 .brand {
   display: inline-flex;
   align-items: center;
   gap: 0.68rem;
+  min-width: 0;
 }
 
 .brand-mark {
@@ -151,6 +153,7 @@ a {
 .brand-lockup {
   display: grid;
   gap: 1px;
+  min-width: 0;
 }
 
 .brand-name {
@@ -231,24 +234,34 @@ a {
 }
 
 .site-nav {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 1.1rem;
+  justify-content: center;
+  flex-wrap: nowrap;
+  gap: 0.2rem;
+  min-width: 0;
+  justify-self: center;
+  padding: 0.18rem;
   font-family: "JetBrains Mono", "Fira Code", "SFMono-Regular", Menlo, monospace;
-  font-size: 0.85rem;
+  font-size: 0.74rem;
   color: var(--muted);
 }
 
 .site-nav a {
   border: 1px solid transparent;
   border-radius: 999px;
-  padding: 0.32rem 0.58rem;
+  padding: 0.38rem 0.5rem;
+  white-space: nowrap;
 }
 
 .site-nav a:hover {
   color: var(--text);
   border-color: rgba(91, 222, 142, 0.3);
   background: rgba(62, 155, 97, 0.12);
+}
+
+.header-actions {
+  justify-self: end;
 }
 
 .btn {
@@ -305,10 +318,11 @@ main {
 .hero-panel,
 .card,
 .step-card,
-.price-card,
+.module-card,
 .faq-item,
 .final-cta,
 .architecture-card {
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   background:
@@ -336,7 +350,7 @@ main {
 }
 
 .beta-banner {
-  margin: 0.48rem 0 0;
+  margin: 0;
   width: fit-content;
   border: 1px solid rgba(128, 255, 182, 0.48);
   border-radius: 999px;
@@ -379,14 +393,54 @@ h1 {
   gap: 0.6rem;
 }
 
+.hero-status {
+  margin-top: 0.85rem;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.hero-shortcut {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  border: 1px solid rgba(91, 222, 142, 0.32);
+  border-radius: 999px;
+  padding: 0 0.74rem;
+  font-family: "JetBrains Mono", "Fira Code", "SFMono-Regular", Menlo, monospace;
+  font-size: 0.69rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  color: #caffda;
+  background: rgba(18, 43, 30, 0.72);
+}
+
+.hero-shortcut:hover {
+  color: #ebffef;
+  border-color: rgba(119, 255, 177, 0.52);
+  background: rgba(25, 57, 39, 0.9);
+}
+
 .proof-list,
 .terminal-tags {
   margin: 1rem 0 0;
   padding: 0;
   list-style: none;
-  display: flex;
-  flex-wrap: wrap;
+}
+
+.proof-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, max-content));
   gap: 0.48rem;
+}
+
+.terminal-tags {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.48rem;
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
 
 .proof-list li,
@@ -398,6 +452,7 @@ h1 {
   font-size: 0.73rem;
   color: #bfffd4;
   background: rgba(39, 94, 62, 0.24);
+  width: fit-content;
 }
 
 .panel-title {
@@ -410,12 +465,12 @@ h1 {
 }
 
 .terminal-window {
-  margin-top: 0.65rem;
+  margin-top: 0.75rem;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-md);
   overflow: hidden;
   background: var(--surface-strong);
-  box-shadow: inset 0 0 0 1px rgba(118, 255, 173, 0.08), 0 0 20px rgba(57, 175, 102, 0.24);
+  box-shadow: inset 0 0 0 1px rgba(118, 255, 173, 0.08), 0 0 20px rgba(57, 175, 102, 0.18);
 }
 
 .terminal-top {
@@ -465,6 +520,26 @@ h1 {
   color: #52f08b;
 }
 
+.snapshot-focus {
+  margin-top: 0.85rem;
+  border-top: 1px solid rgba(91, 222, 142, 0.18);
+  padding-top: 0.85rem;
+}
+
+.snapshot-kicker {
+  font-family: "JetBrains Mono", "Fira Code", "SFMono-Regular", Menlo, monospace;
+  font-size: 0.69rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: #8cfab3;
+}
+
+.snapshot-copy {
+  margin-top: 0.45rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
 .section {
   margin-top: 3.7rem;
 }
@@ -486,6 +561,7 @@ h1 {
   margin-top: 0.8rem;
   display: grid;
   gap: 0.55rem;
+  align-content: start;
 }
 
 .waitlist-label {
@@ -551,8 +627,8 @@ h2 {
 }
 
 .feature-grid,
+.module-grid,
 .workflow-grid,
-.pricing-grid,
 .faq-list,
 .architecture-grid,
 .contact-grid {
@@ -561,28 +637,46 @@ h2 {
 }
 
 .feature-grid,
-.pricing-grid {
+.module-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .workflow-grid,
 .architecture-grid,
-.contact-grid,
 .faq-list {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.workflow-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.contact-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+}
+
 .card,
 .step-card,
-.price-card,
+.module-card,
 .faq-item,
 .architecture-card {
   padding: 1.02rem;
 }
 
+#contact .card {
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  align-content: start;
+}
+
+#contact .contact-grid {
+  grid-template-columns: 1fr;
+}
+
 .card h3,
 .step-card h3,
-.price-card h3,
+.module-card h3,
 .faq-item h3,
 .architecture-card h3 {
   font-size: 0.98rem;
@@ -596,6 +690,12 @@ h2 {
   margin-top: 0.5rem;
   font-size: 0.88rem;
   color: var(--muted);
+}
+
+.step-head {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
 }
 
 .step-number {
@@ -612,6 +712,7 @@ h2 {
 
 .arch-code {
   margin: 0.72rem 0 0;
+  max-width: 100%;
   border: 1px solid rgba(89, 220, 141, 0.3);
   border-radius: var(--radius-sm);
   padding: 0.72rem;
@@ -623,66 +724,42 @@ h2 {
   overflow-x: auto;
 }
 
-.plan-badge {
+.module-kicker {
   margin: 0;
-  width: fit-content;
-  border-radius: 999px;
-  padding: 0.26rem 0.54rem;
   font-family: "JetBrains Mono", "Fira Code", "SFMono-Regular", Menlo, monospace;
-  font-size: 0.66rem;
-  font-weight: 900;
-  letter-spacing: 0.1em;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: #05120b;
-  background: linear-gradient(150deg, #79ffaf, #3ecf74);
+  color: #8cfab3;
 }
 
-.price-card {
+.module-card {
   display: grid;
-  gap: 0.65rem;
+  gap: 0.72rem;
 }
 
-.price-card.featured {
-  border-color: rgba(113, 255, 169, 0.62);
-  box-shadow: 0 18px 34px rgba(48, 174, 101, 0.22), inset 0 0 0 1px rgba(137, 255, 184, 0.14);
-}
-
-.price-card.beta-card {
-  margin-bottom: 0.72rem;
-  border-color: rgba(132, 255, 184, 0.66);
-  box-shadow: 0 18px 34px rgba(57, 187, 111, 0.24), inset 0 0 0 1px rgba(149, 255, 194, 0.16);
-}
-
-.beta-plan-badge {
-  background: linear-gradient(150deg, #b7ffd4, #63f6a0);
-}
-
-.plan-name {
-  font-size: 1rem;
-  font-weight: 900;
-  color: #e8fff0;
-  font-family: "JetBrains Mono", "Fira Code", "SFMono-Regular", Menlo, monospace;
-}
-
-.plan-price {
-  font-size: 1.4rem;
-  line-height: 1.1;
-  font-weight: 900;
-}
-
-.plan-price span {
-  font-size: 0.82rem;
+.module-card p {
+  font-size: 0.88rem;
   color: var(--muted);
-  font-weight: 700;
 }
 
-.price-card ul {
+.module-card-featured {
+  border-color: rgba(113, 255, 169, 0.62);
+  background: linear-gradient(180deg, rgba(16, 35, 25, 0.95), rgba(9, 20, 14, 0.98));
+  box-shadow:
+    0 22px 38px rgba(48, 174, 101, 0.16),
+    inset 0 0 0 1px rgba(137, 255, 184, 0.16),
+    0 0 0 1px rgba(113, 255, 169, 0.12);
+}
+
+.module-points {
   margin: 0;
   padding-left: 1rem;
   color: #b6f4cc;
   font-size: 0.88rem;
   display: grid;
-  gap: 0.26rem;
+  gap: 0.28rem;
 }
 
 .final-cta {
@@ -762,12 +839,15 @@ h2 {
   }
 
   .feature-grid,
-  .pricing-grid,
-  .workflow-grid,
+  .module-grid,
   .architecture-grid,
   .contact-grid,
   .faq-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .workflow-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
@@ -780,22 +860,82 @@ h2 {
     min-height: auto;
     padding: 0.72rem 0;
     display: grid;
-    justify-items: start;
-    gap: 0.54rem;
+    grid-template-columns: 1fr;
+    justify-items: stretch;
+    gap: 0.72rem;
   }
 
   .site-nav {
-    flex-wrap: wrap;
-    gap: 0.5rem;
+    justify-self: stretch;
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.4rem;
+    padding: 0.34rem;
+    border: 1px solid rgba(91, 222, 142, 0.22);
+    border-radius: 16px;
+    background: rgba(8, 20, 14, 0.78);
+    overflow: visible;
+  }
+
+  .site-nav a {
+    text-align: center;
+    padding: 0.48rem 0.56rem;
+  }
+
+  .brand {
+    width: 100%;
+  }
+
+  .brand-lockup {
+    min-width: 0;
+  }
+
+  .brand-sub-stack {
+    display: none;
+  }
+
+  .header-actions {
+    width: 100%;
+  }
+
+  .header-actions .btn {
+    width: 100%;
   }
 
   .feature-grid,
-  .pricing-grid,
+  .module-grid,
   .workflow-grid,
   .architecture-grid,
   .contact-grid,
   .faq-list {
     grid-template-columns: 1fr;
+  }
+
+  .proof-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.36rem;
+  }
+
+  .terminal-tags {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 0.36rem;
+  }
+
+  .proof-list li,
+  .terminal-tags li {
+    width: 100%;
+    padding: 0.28rem 0.5rem;
+    font-size: 0.67rem;
+    text-align: center;
+  }
+
+  .arch-code,
+  .arch-code code {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
 
   .waitlist-row {
@@ -807,7 +947,7 @@ h2 {
   .hero-panel,
   .card,
   .step-card,
-  .price-card,
+  .module-card,
   .faq-item,
   .architecture-card,
   .final-cta {
@@ -823,5 +963,19 @@ h2 {
     align-items: flex-start;
     justify-content: center;
     flex-direction: column;
+  }
+}
+
+@media (max-width: 480px) {
+  .proof-list,
+  .terminal-tags {
+    gap: 0.28rem;
+  }
+
+  .proof-list li,
+  .terminal-tags li {
+    padding: 0.22rem 0.36rem;
+    font-size: 0.61rem;
+    line-height: 1.2;
   }
 }

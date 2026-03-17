@@ -1,10 +1,14 @@
 import type {
+  AdminAppNotificationCreateRequest,
+  AdminAppNotificationCreateResponse,
+  AdminAppNotificationDeactivateResponse,
   AdminProvisionOnboardingRequest,
   AdminProvisionOnboardingResponse,
   AdminSendOnboardingEmailRequest,
   AdminSendOnboardingEmailResponse,
   AdminSendEmailRequest,
   AdminSendEmailResponse,
+  AppNotificationsListResponse,
   ActivationCodeCreateRequest,
   ActivationCodeCreateResponse,
   ClientTokenCreateRequest,
@@ -194,6 +198,41 @@ export function listContactRequests(
   if (params.limit != null) search.set('limit', String(params.limit))
   if (params.offset != null) search.set('offset', String(params.offset))
   return api<ContactRequestsListResponse>(`/v1/admin/contact-requests?${search.toString()}`, token)
+}
+
+export function listAppNotifications(
+  token: string,
+  params: { audience_kind?: string; active_only?: boolean; limit?: number; offset?: number }
+): Promise<AppNotificationsListResponse> {
+  const search = new URLSearchParams()
+  if (params.audience_kind) search.set('audience_kind', params.audience_kind)
+  if (params.active_only) search.set('active_only', 'true')
+  if (params.limit != null) search.set('limit', String(params.limit))
+  if (params.offset != null) search.set('offset', String(params.offset))
+  return api<AppNotificationsListResponse>(`/v1/admin/app-notifications?${search.toString()}`, token)
+}
+
+export function createAppNotification(
+  token: string,
+  payload: AdminAppNotificationCreateRequest
+): Promise<AdminAppNotificationCreateResponse> {
+  return api<AdminAppNotificationCreateResponse>('/v1/admin/app-notifications', token, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function deactivateAppNotification(
+  token: string,
+  notificationId: string
+): Promise<AdminAppNotificationDeactivateResponse> {
+  return api<AdminAppNotificationDeactivateResponse>(
+    `/v1/admin/app-notifications/${encodeURIComponent(notificationId)}/deactivate`,
+    token,
+    {
+      method: 'POST',
+    }
+  )
 }
 
 export function openAdminEvents(token: string | null): EventSource {

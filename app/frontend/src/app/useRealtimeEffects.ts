@@ -450,6 +450,7 @@ export function useRealtimeEffects(c: any) {
 
     const onLicenseEvent = () => {
       qc.invalidateQueries({ queryKey: ['license-status', userId] })
+      qc.invalidateQueries({ queryKey: ['notifications', userId] })
     }
 
     es.addEventListener('notification', onNotification as EventListener)

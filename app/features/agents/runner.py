@@ -5090,6 +5090,29 @@ def _notify_humans_blocked(
         )
 
 
+def _should_notify_humans_about_blocked_automation(
+    *,
+    should_retry: bool,
+    non_blocking_gate_failure: bool,
+    lead_triage_handoff: bool,
+    lead_scaffolding_followup_task_id: str | None,
+    developer_main_reconciliation_queued: bool,
+    developer_handoff_recovery_queued: bool,
+    developer_deploy_lock_waiting: bool,
+) -> bool:
+    if should_retry or non_blocking_gate_failure or lead_triage_handoff:
+        return False
+    if str(lead_scaffolding_followup_task_id or "").strip():
+        return False
+    if developer_main_reconciliation_queued:
+        return False
+    if developer_handoff_recovery_queued:
+        return False
+    if developer_deploy_lock_waiting:
+        return False
+    return True
+
+
 def _notify_humans_team_mode_triage_needed(
     *,
     db,
@@ -7332,7 +7355,15 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 task_id=run.task_id,
                 task_title=str(state.get("title") or run.title or ""),
             )
-        elif not should_retry and not non_blocking_gate_failure and not lead_scaffolding_followup_task_id and not developer_main_reconciliation_queued:
+        elif _should_notify_humans_about_blocked_automation(
+            should_retry=should_retry,
+            non_blocking_gate_failure=non_blocking_gate_failure,
+            lead_triage_handoff=lead_triage_handoff,
+            lead_scaffolding_followup_task_id=lead_scaffolding_followup_task_id,
+            developer_main_reconciliation_queued=developer_main_reconciliation_queued,
+            developer_handoff_recovery_queued=developer_handoff_recovery_queued,
+            developer_deploy_lock_waiting=developer_deploy_lock_waiting,
+        ):
             handoff_suffix = (
                 f"\nHuman handoff assigned to: {handoff_assignee_id}."
                 if str(handoff_assignee_id or "").strip()

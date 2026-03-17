@@ -811,36 +811,9 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     projectsMode,
   })
 
-  const [licenseNotificationReadById, setLicenseNotificationReadById] = React.useState<Record<string, boolean>>({})
-  const licenseStatusNotifications = React.useMemo(() => {
-    const raw = licenseStatus.data?.license?.notifications
-    if (!Array.isArray(raw)) return []
-    return raw
-      .map((item: any) => {
-        if (!item || typeof item !== 'object') return null
-        const id = String(item.id || '').trim()
-        if (!id) return null
-        const isReadOverride = licenseNotificationReadById[id]
-        return {
-          ...item,
-          id,
-          notification_type: String(item.notification_type || 'LicenseInfo'),
-          is_read: typeof isReadOverride === 'boolean' ? isReadOverride : Boolean(item.is_read),
-        }
-      })
-      .filter(Boolean)
-  }, [licenseNotificationReadById, licenseStatus.data?.license?.notifications])
-
   const mergedNotifications = React.useMemo(() => {
-    const out: any[] = []
-    const seen = new Set<string>()
-    for (const item of [...(notifications.data ?? []), ...licenseStatusNotifications]) {
-      const id = String(item?.id || '').trim()
-      if (!id || seen.has(id)) continue
-      seen.add(id)
-      out.push(item)
-    }
-    return out.sort((a: any, b: any) => {
+    const items = Array.isArray(notifications.data) ? [...notifications.data] : []
+    return items.sort((a: any, b: any) => {
       const at = Date.parse(String(a?.created_at || ''))
       const bt = Date.parse(String(b?.created_at || ''))
       if (Number.isFinite(at) && Number.isFinite(bt)) return bt - at
@@ -848,7 +821,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       if (Number.isFinite(at)) return -1
       return String(b?.id || '').localeCompare(String(a?.id || ''))
     })
-  }, [licenseStatusNotifications, notifications.data])
+  }, [notifications.data])
 
   const autoUpdateEventSourceRef = React.useRef<EventSource | null>(null)
   const autoUpdateRecoveryActiveRef = React.useRef(false)
@@ -2040,22 +2013,14 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   const handleMarkNotificationRead = React.useCallback((notificationId: string) => {
     const id = String(notificationId || '').trim()
     if (!id) return
-    if (licenseStatusNotifications.some((item: any) => String(item?.id || '') === id)) {
-      setLicenseNotificationReadById((prev) => ({ ...prev, [id]: true }))
-      return
-    }
     markReadMutation.mutate(id)
-  }, [licenseStatusNotifications, markReadMutation])
+  }, [markReadMutation])
 
   const handleMarkNotificationUnread = React.useCallback((notificationId: string) => {
     const id = String(notificationId || '').trim()
     if (!id) return
-    if (licenseStatusNotifications.some((item: any) => String(item?.id || '') === id)) {
-      setLicenseNotificationReadById((prev) => ({ ...prev, [id]: false }))
-      return
-    }
     markUnreadMutation.mutate(id)
-  }, [licenseStatusNotifications, markUnreadMutation])
+  }, [markUnreadMutation])
 
   const handleNotificationAction = React.useCallback((notificationId: string, action: string) => {
     const normalizedAction = String(action || '').trim()
