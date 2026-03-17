@@ -232,6 +232,7 @@ OLLAMA_EMBED_GPU_ENABLED = _env_bool("OLLAMA_EMBED_GPU_ENABLED", True)
 
 LICENSE_ENFORCEMENT_ENABLED = _env_bool("LICENSE_ENFORCEMENT_ENABLED", True)
 LICENSE_INSTALLATION_ID = os.getenv("LICENSE_INSTALLATION_ID", "").strip()
+HOST_OPERATING_SYSTEM = os.getenv("HOST_OPERATING_SYSTEM", "").strip()
 # License server endpoint is intentionally fixed in runtime and not configurable
 # via customer-side environment variables.
 LICENSE_SERVER_URL = "https://licence.constructos.dev"
