@@ -16,17 +16,21 @@ DEFAULT_APP_MCP_URL = "http://localhost:8091/mcp"
 DEFAULT_SYSTEM_PROMPT_FILE = "~/.cos/system.md"
 DEFAULT_APP_MCP_BEARER_ENV = ""
 DEFAULT_TERMINAL_THEME = "green"
+DEFAULT_PROVIDER = "codex"
 DEFAULT_CODEX_BACKEND = "docker"
 DEFAULT_DOCKER_CONTAINER = "task-app"
 DEFAULT_DOCKER_WORKDIR = "/app"
 DEFAULT_DOCKER_CODEX_BINARY = "codex"
+DEFAULT_DOCKER_CLAUDE_BINARY = "claude"
 DEFAULT_DOCKER_APP_MCP_URL = "http://mcp-tools:8091/mcp"
-DEFAULT_DOCKER_CODEX_HOME_ROOT = "/home/app/codex-home/workspace"
+DEFAULT_DOCKER_CODEX_HOME_ROOT = "/home/app/agent-home/workspace"
+DEFAULT_DOCKER_CLAUDE_HOME_ROOT = "/home/app/agent-home/workspace"
 
 VALID_SANDBOX = {"read-only", "workspace-write", "danger-full-access"}
 VALID_APPROVAL = {"untrusted", "on-request", "never"}
 VALID_TERMINAL_THEME = {"default", "green"}
 VALID_CODEX_BACKEND = {"local", "docker"}
+VALID_PROVIDER = {"codex", "claude"}
 
 DEFAULTS: dict[str, Any] = {
     "repo": "",
@@ -34,12 +38,15 @@ DEFAULTS: dict[str, Any] = {
     "sandbox": "workspace-write",
     "approval": "on-request",
     "terminal_theme": DEFAULT_TERMINAL_THEME,
+    "provider": DEFAULT_PROVIDER,
     "codex_backend": DEFAULT_CODEX_BACKEND,
     "docker_container": DEFAULT_DOCKER_CONTAINER,
     "docker_workdir": DEFAULT_DOCKER_WORKDIR,
     "docker_codex_binary": DEFAULT_DOCKER_CODEX_BINARY,
+    "docker_claude_binary": DEFAULT_DOCKER_CLAUDE_BINARY,
     "docker_app_mcp_url": DEFAULT_DOCKER_APP_MCP_URL,
     "docker_codex_home_root": DEFAULT_DOCKER_CODEX_HOME_ROOT,
+    "docker_claude_home_root": DEFAULT_DOCKER_CLAUDE_HOME_ROOT,
     "app_mcp_name": DEFAULT_APP_MCP_NAME,
     "app_mcp_url": DEFAULT_APP_MCP_URL,
     "app_mcp_bearer_env": DEFAULT_APP_MCP_BEARER_ENV,
@@ -52,12 +59,15 @@ ENV_VAR_MAP: dict[str, str] = {
     "sandbox": "COS_SANDBOX",
     "approval": "COS_APPROVAL",
     "terminal_theme": "COS_TERMINAL_THEME",
+    "provider": "COS_PROVIDER",
     "codex_backend": "COS_CODEX_BACKEND",
     "docker_container": "COS_DOCKER_CONTAINER",
     "docker_workdir": "COS_DOCKER_WORKDIR",
     "docker_codex_binary": "COS_DOCKER_CODEX_BINARY",
+    "docker_claude_binary": "COS_DOCKER_CLAUDE_BINARY",
     "docker_app_mcp_url": "COS_DOCKER_APP_MCP_URL",
     "docker_codex_home_root": "COS_DOCKER_CODEX_HOME_ROOT",
+    "docker_claude_home_root": "COS_DOCKER_CLAUDE_HOME_ROOT",
     "app_mcp_name": "COS_APP_MCP_NAME",
     "app_mcp_url": "COS_APP_MCP_URL",
     "app_mcp_bearer_env": "COS_APP_MCP_BEARER_ENV",
@@ -97,6 +107,9 @@ def _validate_value(key: str, value: Any, source: str) -> Any:
         raise ConfigError(f"{source}: invalid value for '{key}' ({text_value!r}). Allowed: {allowed}.")
     if key == "terminal_theme" and text_value not in VALID_TERMINAL_THEME:
         allowed = ", ".join(sorted(VALID_TERMINAL_THEME))
+        raise ConfigError(f"{source}: invalid value for '{key}' ({text_value!r}). Allowed: {allowed}.")
+    if key == "provider" and text_value not in VALID_PROVIDER:
+        allowed = ", ".join(sorted(VALID_PROVIDER))
         raise ConfigError(f"{source}: invalid value for '{key}' ({text_value!r}). Allowed: {allowed}.")
     if key == "codex_backend" and text_value not in VALID_CODEX_BACKEND:
         allowed = ", ".join(sorted(VALID_CODEX_BACKEND))

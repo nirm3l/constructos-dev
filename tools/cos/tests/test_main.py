@@ -27,6 +27,7 @@ ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 def _args_stub(**overrides):
     class Stub:
         command = "chat"
+        provider = "codex"
         repo = ""
         model = ""
         sandbox = "workspace-write"
@@ -36,7 +37,9 @@ def _args_stub(**overrides):
         docker_container = "task-app"
         docker_workdir = "/app"
         docker_codex_binary = "codex"
-        docker_codex_home_root = "/home/app/codex-home/workspace"
+        docker_claude_binary = "claude"
+        docker_codex_home_root = "/home/app/agent-home/workspace"
+        docker_claude_home_root = "/home/app/agent-home/workspace"
         docker_home = ""
         interactive_tty = True
         dangerous = False
@@ -159,11 +162,50 @@ def test_build_codex_command_docker_resume_sets_home_override():
         command="resume",
         codex_backend="docker",
         resume_session_id="abc-123",
-        docker_home="/home/app/codex-home/workspace/ws/chat/chat-1",
+        docker_home="/home/app/agent-home/workspace/ws/chat/chat-1",
     )
     cmd = build_codex_command(args, "", [])
     assert "-e" in cmd
-    assert "HOME=/home/app/codex-home/workspace/ws/chat/chat-1" in cmd
+    assert "HOME=/home/app/agent-home/workspace/ws/chat/chat-1" in cmd
+
+
+def test_build_codex_command_claude_exec_uses_print_and_json():
+    args = _args_stub(
+        provider="claude",
+        command="exec",
+        json=True,
+    )
+    cmd = build_codex_command(args, "wrapped prompt", [])
+    assert cmd[:4] == ["claude", "--print", "--output-format", "json"]
+    assert "--permission-mode" in cmd
+    assert cmd[-2:] == ["--", "wrapped prompt"]
+
+
+def test_build_codex_command_claude_docker_exec_uses_repo_as_workdir():
+    args = _args_stub(
+        provider="claude",
+        command="exec",
+        codex_backend="docker",
+        repo="/app/subdir",
+    )
+    cmd = build_codex_command(args, "wrapped prompt", [])
+    assert cmd[:6] == ["docker", "exec", "-i", "-w", "/app/subdir", "task-app"]
+    assert cmd[6:8] == ["claude", "--print"]
+
+
+def test_build_codex_command_claude_resume_last_uses_continue():
+    args = _args_stub(provider="claude", command="resume", resume_last=True)
+    cmd = build_codex_command(args, "", [])
+    assert cmd[:2] == ["claude", "--continue"]
+
+
+def test_build_codex_command_claude_injects_mcp_config():
+    args = _args_stub(provider="claude", command="exec")
+    cmd = build_codex_command(args, "wrapped prompt", [])
+    assert "--strict-mcp-config" in cmd
+    payload = cmd[cmd.index("--mcp-config") + 1]
+    parsed = json.loads(payload)
+    assert parsed["mcpServers"]["task-management-tools"]["url"] == "http://localhost:8091/mcp"
 
 
 def test_resolve_mcp_endpoint_parses_default_http_port():

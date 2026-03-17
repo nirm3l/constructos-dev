@@ -53,13 +53,29 @@ def _trim_process_detail(proc: subprocess.CompletedProcess[str]) -> str:
     return f"exit={proc.returncode}"
 
 
-def _collect_local_codex_checks(checks: list[dict[str, str]]) -> None:
-    codex_path = shutil.which("codex")
-    if codex_path:
-        checks.append({"name": "codex_path", "status": "ok", "message": f"Found at {codex_path}"})
+def _provider_name(args: argparse.Namespace) -> str:
+    return str(getattr(args, "provider", "codex") or "").strip().lower() or "codex"
+
+
+def _provider_binary_name(provider: str) -> str:
+    return "claude" if provider == "claude" else "codex"
+
+
+def _provider_docker_binary(args: argparse.Namespace) -> str:
+    provider = _provider_name(args)
+    if provider == "claude":
+        return str(getattr(args, "docker_claude_binary", "claude") or "").strip() or "claude"
+    return str(getattr(args, "docker_codex_binary", "codex") or "").strip() or "codex"
+
+
+def _collect_local_provider_checks(checks: list[dict[str, str]], provider: str) -> None:
+    binary_name = _provider_binary_name(provider)
+    provider_path = shutil.which(binary_name)
+    if provider_path:
+        checks.append({"name": "provider_path", "status": "ok", "message": f"Found {binary_name} at {provider_path}"})
         try:
             proc = subprocess.run(
-                ["codex", "--version"],
+                [binary_name, "--version"],
                 text=True,
                 capture_output=True,
                 timeout=5,
@@ -67,23 +83,23 @@ def _collect_local_codex_checks(checks: list[dict[str, str]]) -> None:
             )
             if proc.returncode == 0:
                 version_text = (proc.stdout or proc.stderr or "").strip().splitlines()
-                version_line = version_text[0] if version_text else "codex --version ok"
-                checks.append({"name": "codex_version", "status": "ok", "message": version_line})
+                version_line = version_text[0] if version_text else f"{binary_name} --version ok"
+                checks.append({"name": "provider_version", "status": "ok", "message": version_line})
             else:
                 checks.append(
                     {
-                        "name": "codex_version",
+                        "name": "provider_version",
                         "status": "fail",
-                        "message": f"codex --version failed: {_trim_process_detail(proc)}",
+                        "message": f"{binary_name} --version failed: {_trim_process_detail(proc)}",
                     }
                 )
         except Exception as exc:
-            checks.append({"name": "codex_version", "status": "fail", "message": f"codex --version error: {exc}"})
+            checks.append({"name": "provider_version", "status": "fail", "message": f"{binary_name} --version error: {exc}"})
     else:
-        checks.append({"name": "codex_path", "status": "fail", "message": "codex binary not found in PATH"})
+        checks.append({"name": "provider_path", "status": "fail", "message": f"{binary_name} binary not found in PATH"})
 
 
-def _collect_docker_codex_checks(checks: list[dict[str, str]], args: argparse.Namespace) -> None:
+def _collect_docker_provider_checks(checks: list[dict[str, str]], args: argparse.Namespace) -> None:
     docker_path = shutil.which("docker")
     if not docker_path:
         checks.append({"name": "docker_path", "status": "fail", "message": "docker binary not found in PATH"})
@@ -122,26 +138,27 @@ def _collect_docker_codex_checks(checks: list[dict[str, str]], args: argparse.Na
         return
     checks.append({"name": "docker_container", "status": "ok", "message": f"Container {container!r} is running."})
 
-    codex_binary = str(args.docker_codex_binary or "codex").strip() or "codex"
-    codex_proc = subprocess.run(
-        ["docker", "exec", container, codex_binary, "--version"],
+    provider = _provider_name(args)
+    provider_binary = _provider_docker_binary(args)
+    provider_proc = subprocess.run(
+        ["docker", "exec", container, provider_binary, "--version"],
         text=True,
         capture_output=True,
         timeout=10,
         check=False,
     )
-    if codex_proc.returncode == 0:
-        version_text = (codex_proc.stdout or codex_proc.stderr or "").strip().splitlines()
-        version_line = version_text[0] if version_text else f"{codex_binary} --version ok"
-        checks.append({"name": "codex_in_docker", "status": "ok", "message": version_line})
+    if provider_proc.returncode == 0:
+        version_text = (provider_proc.stdout or provider_proc.stderr or "").strip().splitlines()
+        version_line = version_text[0] if version_text else f"{provider_binary} --version ok"
+        checks.append({"name": "provider_in_docker", "status": "ok", "message": version_line})
     else:
         checks.append(
             {
-                "name": "codex_in_docker",
+                "name": "provider_in_docker",
                 "status": "fail",
                 "message": (
-                    f"Failed to run {codex_binary!r} in container {container!r}: "
-                    f"{_trim_process_detail(codex_proc)}"
+                    f"Failed to run {provider_binary!r} for provider {provider!r} in container {container!r}: "
+                    f"{_trim_process_detail(provider_proc)}"
                 ),
             }
         )
@@ -365,9 +382,9 @@ def collect_doctor_checks(args: argparse.Namespace) -> list[dict[str, str]]:
     else:
         checks.append({"name": "codex_backend", "status": "ok", "message": f"Using backend {backend!r}."})
         if backend == "docker":
-            _collect_docker_codex_checks(checks, args)
+            _collect_docker_provider_checks(checks, args)
         else:
-            _collect_local_codex_checks(checks)
+            _collect_local_provider_checks(checks, _provider_name(args))
 
     mcp_url = str(args.app_mcp_url or "").strip()
     try:
