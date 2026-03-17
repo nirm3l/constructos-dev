@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 
+from shared.realtime import realtime_hub
 from shared.settings import (
     AGENT_HOME_ROOT,
     CLAUDE_SYSTEM_FULL_NAME,
@@ -44,6 +45,8 @@ _DEVICE_AUTH_LOCK = threading.RLock()
 _CLAUDE_LOGIN_METHODS = ("claudeai", "console")
 _DEVICE_AUTH_START_WAIT_SECONDS = 1.5
 _DEVICE_AUTH_START_WAIT_STEP_SECONDS = 0.05
+_AUTH_REALTIME_CHANNEL = "agent-auth"
+_AUTH_REALTIME_REASON_PREFIX = "agent-auth:"
 
 
 @dataclass(frozen=True)
@@ -149,6 +152,19 @@ def _provider_spec(provider: str) -> AuthProviderSpec:
     if spec is None:
         raise ValueError(f"Unsupported auth provider: {provider}")
     return spec
+
+
+def _publish_auth_realtime_signal(provider: str) -> None:
+    normalized_provider = str(provider or "").strip().lower()
+    if not normalized_provider:
+        return
+    try:
+        realtime_hub.publish(
+            _AUTH_REALTIME_CHANNEL,
+            reason=f"{_AUTH_REALTIME_REASON_PREFIX}{normalized_provider}",
+        )
+    except Exception:
+        pass
 
 
 def _normalize_claude_login_method(value: object | None) -> str | None:
@@ -429,10 +445,27 @@ def _refresh_verification_uri_from_output(session: DeviceAuthSessionState) -> No
             return
 
 
-def _append_output_line(session: DeviceAuthSessionState, line: str) -> None:
-    text = _strip_ansi(line).strip()
+def _append_output_line(
+    provider_or_session: str | DeviceAuthSessionState,
+    session_or_line: DeviceAuthSessionState | str,
+    line: str | None = None,
+) -> None:
+    if isinstance(provider_or_session, DeviceAuthSessionState):
+        provider = ""
+        session = provider_or_session
+        text_input = str(session_or_line or "")
+    else:
+        provider = str(provider_or_session or "").strip().lower()
+        session = session_or_line if isinstance(session_or_line, DeviceAuthSessionState) else None
+        text_input = str(line or "")
+    if session is None:
+        return
+    text = _strip_ansi(text_input).strip()
     if not text:
         return
+    previous_verification_uri = str(session.verification_uri or "").strip()
+    previous_user_code = str(session.user_code or "").strip()
+    previous_error = str(session.error or "").strip()
     session.output_excerpt.append(text[:600])
     if len(session.output_excerpt) > _DEVICE_AUTH_OUTPUT_LIMIT:
         session.output_excerpt = session.output_excerpt[-_DEVICE_AUTH_OUTPUT_LIMIT :]
@@ -448,6 +481,13 @@ def _append_output_line(session: DeviceAuthSessionState, line: str) -> None:
         code_match = _DEVICE_CODE_RE.search(text)
         if code_match:
             session.user_code = code_match.group(0)
+    if (
+        str(session.verification_uri or "").strip() != previous_verification_uri
+        or str(session.user_code or "").strip() != previous_user_code
+        or str(session.error or "").strip() != previous_error
+    ):
+        if provider:
+            _publish_auth_realtime_signal(provider)
 
 
 def _serialize_device_auth_session(session: DeviceAuthSessionState | None) -> dict[str, object] | None:
@@ -535,6 +575,7 @@ def _finalize_device_auth_session(*, provider: str, session_id: str, returncode:
             session.error = detail
         else:
             session.error = f"{spec.display_name} login exited with status {returncode}."
+    _publish_auth_realtime_signal(provider)
 
 
 def _handle_interactive_device_auth_output(
@@ -558,7 +599,7 @@ def _handle_interactive_device_auth_output(
         if session is None or session.session_id != session_id:
             return
         for line in lines:
-            _append_output_line(session, line)
+            _append_output_line(provider, session, line)
         if (
             not session.theme_prompt_confirmed
             and (
@@ -704,12 +745,28 @@ def _monitor_device_auth_session(*, provider: str, session_id: str, process: sub
         return
     assert process.stdout is not None
     for raw_line in process.stdout:
+        should_terminate = False
         with _DEVICE_AUTH_LOCK:
             session = _DEVICE_AUTH_SESSIONS.get(provider)
             if session is None or session.session_id != session_id:
                 continue
-            _append_output_line(session, raw_line)
+            _append_output_line(provider, session, raw_line)
             session.updated_at = _utcnow_iso()
+            if provider != "claude" and _provider_auth_home_ready(provider, resolve_provider_system_override_home(provider)):
+                session.status = "succeeded"
+                session.error = None
+                should_terminate = True
+        if should_terminate:
+            _publish_auth_realtime_signal(provider)
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except Exception:
+                    try:
+                        process.terminate()
+                    except Exception:
+                        pass
+            break
     returncode = int(process.wait())
     _finalize_device_auth_session(provider=provider, session_id=session_id, returncode=returncode)
 
@@ -757,6 +814,7 @@ def start_provider_device_auth_session(
             daemon=True,
         )
         watcher.start()
+    _publish_auth_realtime_signal(spec.provider)
     deadline = time.monotonic() + _DEVICE_AUTH_START_WAIT_SECONDS
     while time.monotonic() < deadline:
         with _DEVICE_AUTH_LOCK:
@@ -785,6 +843,7 @@ def cancel_provider_device_auth_session(provider: str, _requested_by_user_id: st
         session.status = "cancelled"
         session.error = None
         session.updated_at = _utcnow_iso()
+    _publish_auth_realtime_signal(spec.provider)
     if process is not None and process.poll() is None:
         try:
             os.killpg(process.pid, signal.SIGTERM)
@@ -830,4 +889,6 @@ def delete_provider_system_override_auth(provider: str, _requested_by_user_id: s
         pass
     with _DEVICE_AUTH_LOCK:
         _DEVICE_AUTH_SESSIONS[spec.provider] = None
-        return _build_provider_auth_status(spec.provider)
+        payload = _build_provider_auth_status(spec.provider)
+    _publish_auth_realtime_signal(spec.provider)
+    return payload
