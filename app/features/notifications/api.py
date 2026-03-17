@@ -31,6 +31,8 @@ from .read_models import (
 )
 
 router = APIRouter()
+_AGENT_AUTH_REALTIME_REASON_PREFIX = "agent-auth:"
+_AGENT_AUTH_REALTIME_CHANNEL = "agent-auth"
 
 
 def _load_user_state_cursor(db: Session, user_id: str) -> str:
@@ -131,6 +133,7 @@ async def notifications_stream(
     channels = {f"user:{user.id}"}
     if workspace_id:
         channels.add(f"workspace:{workspace_id}")
+    channels.add(_AGENT_AUTH_REALTIME_CHANNEL)
     subscription = realtime_hub.subscribe(channels=channels)
 
     async def event_generator():
@@ -144,9 +147,11 @@ async def notifications_stream(
                 if await request.is_disconnected():
                     break
 
+                signal_reason = ""
                 if not flush_now:
                     try:
-                        await _wait_for_signal(subscription, timeout_seconds=30.0)
+                        signal = await subscription.get()
+                        signal_reason = str((signal or {}).get("reason") or "").strip().lower()
                         signal_received = True
                         timed_out = False
                     except asyncio.TimeoutError:
@@ -196,6 +201,11 @@ async def notifications_stream(
 
                 if not emitted:
                     if signal_received:
+                        if signal_reason.startswith(_AGENT_AUTH_REALTIME_REASON_PREFIX):
+                            provider = signal_reason.removeprefix(_AGENT_AUTH_REALTIME_REASON_PREFIX).strip()
+                            payload = {"provider": provider} if provider else {}
+                            yield f"event: auth_event\ndata: {json.dumps(payload)}\n\n"
+                            continue
                         # Forward a lightweight refresh event even when no new rows are
                         # visible in current notification/activity cursors.
                         yield "event: task_event\ndata: {}\n\n"

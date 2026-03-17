@@ -453,14 +453,36 @@ export function useRealtimeEffects(c: any) {
       qc.invalidateQueries({ queryKey: ['notifications', userId] })
     }
 
+    const onAuthEvent = (evt: MessageEvent) => {
+      let provider = ''
+      try {
+        const payload = JSON.parse(evt.data) as { provider?: string }
+        provider = String(payload?.provider || '').trim().toLowerCase()
+      } catch {
+        provider = ''
+      }
+      if (provider === 'codex') {
+        qc.invalidateQueries({ queryKey: ['codex-auth-status', userId] })
+        return
+      }
+      if (provider === 'claude') {
+        qc.invalidateQueries({ queryKey: ['claude-auth-status', userId] })
+        return
+      }
+      qc.invalidateQueries({ queryKey: ['codex-auth-status', userId] })
+      qc.invalidateQueries({ queryKey: ['claude-auth-status', userId] })
+    }
+
     es.addEventListener('notification', onNotification as EventListener)
     es.addEventListener('task_event', onTaskEvent as EventListener)
     es.addEventListener('license_event', onLicenseEvent as EventListener)
+    es.addEventListener('auth_event', onAuthEvent as EventListener)
 
     return () => {
       es.removeEventListener('notification', onNotification as EventListener)
       es.removeEventListener('task_event', onTaskEvent as EventListener)
       es.removeEventListener('license_event', onLicenseEvent as EventListener)
+      es.removeEventListener('auth_event', onAuthEvent as EventListener)
       es.close()
     }
   }, [qc, scheduleRealtimeRefresh, selectedProjectId, setCodexChatLastTaskEventAt, showCodexChat, tab, userId, workspaceId])
