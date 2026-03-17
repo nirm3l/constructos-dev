@@ -146,6 +146,90 @@ def test_sync_license_once_updates_local_entitlement(tmp_path: Path, monkeypatch
         assert validation.result == "active"
 
 
+def test_sync_license_once_prefers_host_operating_system_env(tmp_path: Path, monkeypatch):
+    db_file = tmp_path / "host-os.db"
+    os.environ["DATABASE_URL"] = f"sqlite:///{db_file}"
+    os.environ["ATTACHMENTS_DIR"] = str(tmp_path / "uploads")
+    os.environ.pop("DB_PATH", None)
+    os.environ["EVENTSTORE_URI"] = ""
+    os.environ["LICENSE_ENFORCEMENT_ENABLED"] = "true"
+    os.environ["LICENSE_INSTALLATION_ID"] = "sync-host-os-installation"
+    os.environ["LICENSE_SERVER_TOKEN"] = "dev-license-token"
+    os.environ["LICENSE_TRIAL_DAYS"] = "7"
+    os.environ["HOST_OPERATING_SYSTEM"] = "macos"
+    os.environ.pop("LICENSE_PUBLIC_KEY", None)
+
+    import shared.models as shared_models
+    import shared.licensing as shared_licensing
+    import shared.settings as shared_settings
+    import features.licensing.read_models as licensing_read_models
+
+    reload(shared_settings)
+    reload(shared_models)
+    reload(shared_licensing)
+    reload(licensing_read_models)
+    shared_licensing.reset_license_installation_id_cache()
+
+    import main
+
+    main = reload(main)
+    main.bootstrap_data()
+
+    from features.licensing import sync
+
+    sync = reload(sync)
+    captured_payloads: dict[str, dict] = {}
+
+    class _MockResponse:
+        def __init__(self, payload: dict):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class _MockClient:
+        def __init__(self, timeout: float):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url: str, headers: dict, json: dict):
+            if url.endswith("/v1/installations/register"):
+                captured_payloads["register"] = dict(json)
+                return _MockResponse({"ok": True})
+            if url.endswith("/v1/installations/heartbeat"):
+                captured_payloads["heartbeat"] = dict(json)
+                return _MockResponse(
+                    {
+                        "ok": True,
+                        "entitlement": {
+                            "status": "active",
+                            "plan_code": "lifetime",
+                            "valid_from": "2026-02-21T00:00:00Z",
+                            "valid_until": None,
+                            "trial_ends_at": "2026-02-28T00:00:00Z",
+                            "token_expires_at": "2026-02-21T01:00:00Z",
+                            "metadata": {},
+                        },
+                    }
+                )
+            raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(sync.httpx, "Client", _MockClient)
+
+    ok = sync.sync_license_once()
+    assert ok is True
+    assert captured_payloads["register"]["operating_system"] == "macos"
+    assert captured_payloads["heartbeat"]["operating_system"] == "macos"
+
+
 def test_sync_license_once_persists_control_plane_notifications(tmp_path: Path, monkeypatch):
     db_file = tmp_path / "notifications.db"
     os.environ["DATABASE_URL"] = f"sqlite:///{db_file}"

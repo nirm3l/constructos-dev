@@ -14,6 +14,7 @@ from shared.realtime import realtime_hub
 from shared.licensing import resolve_license_installation_id
 from shared.settings import (
     APP_VERSION,
+    HOST_OPERATING_SYSTEM,
     LICENSE_HEARTBEAT_SECONDS,
     LICENSE_GRACE_HOURS,
     LICENSE_PUBLIC_KEY,
@@ -98,6 +99,9 @@ def _server_headers() -> dict[str, str]:
 
 
 def _resolve_local_operating_system() -> str:
+    override = str(HOST_OPERATING_SYSTEM or "").strip().lower()
+    if override:
+        return override[:64]
     raw = str(platform.system() or "").strip().lower()
     aliases = {
         "darwin": "macos",
