@@ -39,4 +39,3 @@ jobs:
         with:
           repository: ${{ env.PUBLIC_RELEASE_REPO }}
           files: tools/cos/dist/*
-          generate_release_notes: true
